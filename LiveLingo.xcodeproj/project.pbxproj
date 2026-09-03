@@ -1,0 +1,280 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* LiveLingoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* LiveLingoApp.swift */; };
+		A10000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* ContentView.swift */; };
+		A10000000000000000000003 /* FloatingSubtitleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* FloatingSubtitleView.swift */; };
+		A10000000000000000000004 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* AppModel.swift */; };
+		A10000000000000000000005 /* SpeechPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* SpeechPipeline.swift */; };
+		A10000000000000000000006 /* TranscriptSegment.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* TranscriptSegment.swift */; };
+		A10000000000000000000007 /* SessionExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* SessionExporter.swift */; };
+		A10000000000000000000008 /* SessionExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* SessionExporterTests.swift */; };
+		A10000000000000000000009 /* QwenRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* QwenRuntime.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A30000000000000000000001 = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A40000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A50000000000000000000001;
+			remoteInfo = LiveLingo;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000001 /* LiveLingoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveLingoApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* FloatingSubtitleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingSubtitleView.swift; sourceTree = "<group>"; };
+		A20000000000000000000004 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		A20000000000000000000005 /* SpeechPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPipeline.swift; sourceTree = "<group>"; };
+		A20000000000000000000006 /* TranscriptSegment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptSegment.swift; sourceTree = "<group>"; };
+		A20000000000000000000007 /* SessionExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionExporter.swift; sourceTree = "<group>"; };
+		A20000000000000000000008 /* SessionExporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionExporterTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A2000000000000000000000A /* LiveLingo.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LiveLingo.entitlements; sourceTree = "<group>"; };
+		A2000000000000000000000B /* LiveLingo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LiveLingo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000C /* LiveLingoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LiveLingoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000D /* QwenRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRuntime.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A60000000000000000000001 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A60000000000000000000002 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A70000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A70000000000000000000002 /* LiveLingo */,
+				A70000000000000000000005 /* LiveLingoTests */,
+				A70000000000000000000006 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A70000000000000000000002 /* LiveLingo */ = {
+			isa = PBXGroup;
+			children = (
+				A70000000000000000000003 /* Sources */,
+				A70000000000000000000004 /* Resources */,
+			);
+			path = LiveLingo;
+			sourceTree = "<group>";
+		};
+		A70000000000000000000003 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000001 /* LiveLingoApp.swift */,
+				A20000000000000000000002 /* ContentView.swift */,
+				A20000000000000000000003 /* FloatingSubtitleView.swift */,
+				A20000000000000000000004 /* AppModel.swift */,
+				A20000000000000000000005 /* SpeechPipeline.swift */,
+				A20000000000000000000006 /* TranscriptSegment.swift */,
+				A20000000000000000000007 /* SessionExporter.swift */,
+				A2000000000000000000000D /* QwenRuntime.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		A70000000000000000000004 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000009 /* Info.plist */,
+				A2000000000000000000000A /* LiveLingo.entitlements */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		A70000000000000000000005 /* LiveLingoTests */ = {
+			isa = PBXGroup;
+			children = (A20000000000000000000008 /* SessionExporterTests.swift */,);
+			path = LiveLingoTests;
+			sourceTree = "<group>";
+		};
+		A70000000000000000000006 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A2000000000000000000000B /* LiveLingo.app */,
+				A2000000000000000000000C /* LiveLingoTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* LiveLingo */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000002;
+			buildPhases = (
+				A90000000000000000000001 /* Sources */,
+				A60000000000000000000001 /* Frameworks */,
+				AA0000000000000000000001 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = LiveLingo;
+			productName = LiveLingo;
+			productReference = A2000000000000000000000B /* LiveLingo.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A50000000000000000000002 /* LiveLingoTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000003;
+			buildPhases = (
+				A90000000000000000000002 /* Sources */,
+				A60000000000000000000002 /* Frameworks */,
+				AA0000000000000000000002 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = (AB0000000000000000000001 /* PBXTargetDependency */,);
+			name = LiveLingoTests;
+			productName = LiveLingoTests;
+			productReference = A2000000000000000000000C /* LiveLingoTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A40000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					A50000000000000000000001 = {CreatedOnToolsVersion = 27.0;};
+					A50000000000000000000002 = {CreatedOnToolsVersion = 27.0; TestTargetID = A50000000000000000000001;};
+				};
+			};
+			buildConfigurationList = A80000000000000000000001;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = A70000000000000000000001;
+			productRefGroup = A70000000000000000000006;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A50000000000000000000001 /* LiveLingo */, A50000000000000000000002 /* LiveLingoTests */);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		AA0000000000000000000001 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		AA0000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A90000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* LiveLingoApp.swift in Sources */,
+				A10000000000000000000002 /* ContentView.swift in Sources */,
+				A10000000000000000000003 /* FloatingSubtitleView.swift in Sources */,
+				A10000000000000000000004 /* AppModel.swift in Sources */,
+				A10000000000000000000005 /* SpeechPipeline.swift in Sources */,
+				A10000000000000000000006 /* TranscriptSegment.swift in Sources */,
+				A10000000000000000000007 /* SessionExporter.swift in Sources */,
+				A10000000000000000000009 /* QwenRuntime.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A90000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (A10000000000000000000008 /* SessionExporterTests.swift in Sources */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		AB0000000000000000000001 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A50000000000000000000001 /* LiveLingo */; targetProxy = A30000000000000000000001; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		AC0000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 27.0; SDKROOT = macosx; SWIFT_VERSION = 6.0;}; name = Debug;};
+		AC0000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 27.0; SDKROOT = macosx; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_VERSION = 6.0;}; name = Release;};
+		AC0000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = LiveLingo/Resources/LiveLingo.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LiveLingo/Resources/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jianhongli.LiveLingo;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AC0000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_COVERAGE_MAPPING = NO;
+				CLANG_ENABLE_CODE_COVERAGE = NO;
+				CODE_SIGN_ENTITLEMENTS = LiveLingo/Resources/LiveLingo.entitlements;
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_CODE_COVERAGE = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LiveLingo/Resources/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jianhongli.LiveLingo;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		AC0000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jianhongli.LiveLingoTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LiveLingo.app/Contents/MacOS/LiveLingo";
+			};
+			name = Debug;
+		};
+		AC0000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jianhongli.LiveLingoTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LiveLingo.app/Contents/MacOS/LiveLingo";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A80000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (AC0000000000000000000001, AC0000000000000000000002); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		A80000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (AC0000000000000000000003, AC0000000000000000000004); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		A80000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (AC0000000000000000000005, AC0000000000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+/* End XCConfigurationList section */
+	};
+	rootObject = A40000000000000000000001 /* Project object */;
+}
