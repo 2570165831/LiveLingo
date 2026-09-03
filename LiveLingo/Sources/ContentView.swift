@@ -177,6 +177,17 @@ struct ContentView: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
 
+            if model.isLiveOnly && model.hasActiveSession {
+                Button {
+                    model.convertCurrentSessionToRecording()
+                } label: {
+                    Label("转为录音", systemImage: "folder.badge.plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .help("选择目录；当前录音会继续，结束后再移动到所选目录")
+            }
+
             Button {
                 model.isPaused ? model.resume() : model.pause()
             } label: {
@@ -447,16 +458,6 @@ struct ContentView: View {
                 Label("实时暂存 · 停止后删除并清空", systemImage: "lock.shield.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-
-                if model.hasActiveSession {
-                    Button {
-                        model.convertCurrentSessionToRecording()
-                    } label: {
-                        Label("转为录音", systemImage: "folder.badge.plus")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("选择目录；当前录音会继续，结束后再移动到所选目录")
-                }
             } else {
                 Button {
                     model.chooseOutputDirectory()

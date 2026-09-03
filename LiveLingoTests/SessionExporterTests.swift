@@ -329,6 +329,20 @@ struct SessionExporterTests {
         #expect(QwenModelProfile.highQuality.translationModel == "qwen/qwen3.5-9b")
     }
 
+    @Test func downloadedTranslationModelIsReadyBeforeJITLoading() throws {
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "models": [
+                [
+                    "key": "qwen3.5-4b-mlx",
+                    "loaded_instances": [],
+                ],
+            ],
+        ])
+
+        #expect(try QwenTranslationClient.modelIsAvailable("qwen3.5-4b-mlx", in: payload))
+        #expect(!(try QwenTranslationClient.modelIsAvailable("qwen/qwen3.5-9b", in: payload)))
+    }
+
     @Test func asrQualityGateKeepsNormalAcademicEnglish() {
         let text = "The atomic radius decreases from left to right across a period."
 

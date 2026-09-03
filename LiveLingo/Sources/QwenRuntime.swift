@@ -72,7 +72,7 @@ enum QwenRuntimeError: LocalizedError {
         case .lmStudioUnavailable:
             return "无法连接 LM Studio 本机服务（127.0.0.1:1234）。"
         case .modelUnavailable(let name):
-            return "LM Studio 尚未加载模型：\(name)"
+            return "LM Studio 未找到模型：\(name)"
         case .invalidResponse:
             return "本机模型返回了无法识别的数据。"
         case .requestFailed(let message):
@@ -490,16 +490,16 @@ enum QwenTranslationClient {
         } catch {
             throw QwenRuntimeError.lmStudioUnavailable
         }
+        guard try modelIsAvailable(modelName, in: data) else {
+            throw QwenRuntimeError.modelUnavailable(modelName)
+        }
+    }
+
+    static func modelIsAvailable(_ modelName: String, in data: Data) throws -> Bool {
         guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let models = payload["models"] as? [[String: Any]]
         else { throw QwenRuntimeError.invalidResponse }
-        let isLoaded = models.contains { model in
-            guard model["key"] as? String == modelName,
-                  let instances = model["loaded_instances"] as? [[String: Any]]
-            else { return false }
-            return !instances.isEmpty
-        }
-        guard isLoaded else { throw QwenRuntimeError.modelUnavailable(modelName) }
+        return models.contains { $0["key"] as? String == modelName }
     }
 
     static func translate(
