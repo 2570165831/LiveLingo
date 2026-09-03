@@ -170,6 +170,8 @@ final class AppModel: ObservableObject {
 
     func stop() {
         guard hasActiveSession else { return }
+        resetElapsedClock()
+        phase = .stopping
         Task { await stopSession() }
     }
 
@@ -307,8 +309,6 @@ final class AppModel: ObservableObject {
     }
 
     private func stopSession() async {
-        stopElapsedClock()
-        phase = .stopping
         await pipeline.stop()
 
         if activeStorageMode?.clearsHistoryWhenStopped == true {
@@ -705,6 +705,7 @@ final class AppModel: ObservableObject {
 
     private func failActiveSession(_ message: String) async {
         stopElapsedClock()
+        resetElapsedClock()
         cancelSummaryTask()
         if phase == .recording || phase == .paused || phase == .preparing {
             await pipeline.cancel()

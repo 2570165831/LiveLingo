@@ -62,7 +62,7 @@ Release 必须保留以下沙盒 entitlement：
 
 ## 首次运行
 
-1. 在 LM Studio 中加载 `qwen3.5-4b-mlx` 和 `qwen/qwen3.5-9b`，并启动本机服务（端口 `1234`）。
+1. 在 LM Studio 中确认已下载 `qwen3.5-4b-mlx` 和 `qwen/qwen3.5-9b`，并启动本机服务（端口 `1234`）。LiveLingo 会按所选模式请求模型，LM Studio 可在首次请求时即时加载，无需让两个模型同时常驻内存。
 2. 确认以下 ASR 模型目录存在：
    - `~/.lmstudio/models/mlx-community/parakeet-tdt-0.6b-v2`
    - `~/.lmstudio/models/mlx-community/Qwen3-ASR-1.7B-4bit`
@@ -118,6 +118,8 @@ LIVELINGO_KEYCHAIN_PATH="/absolute/path/to/login.keychain-db" \
 ```
 
 脚本先构建未签名 Release，再验证公开证书的有效期与 SHA-1 是否和钥匙串中的身份一致，随后使用 hardened runtime、可信时间戳和项目 entitlement 签名。最后执行严格签名校验，并确认四项必要 entitlement 存在且 `get-task-allow` 不存在。脚本不会安装或替换 `/Applications` 中的 App。
+
+完整离线迁移包使用 `Scripts/build-offline-dmg.sh` 构建。它会纳入已签名 App、两个 ASR 模型、两个翻译模型、便携 MLX/Python 运行环境和官方未改动的 LM Studio 安装镜像；生成前后都会校验签名、模型文件和全包 SHA-256 清单。该产物面向本人 Apple Silicon Mac 之间迁移，不作为公开再分发包。
 
 ## 签名、公证与开源状态
 
