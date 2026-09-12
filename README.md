@@ -1,132 +1,101 @@
-# LiveLingo
+# LiveLingo 0.1.0
 
-LiveLingo 是一个原生 macOS SwiftUI 应用：从麦克风或系统播放音频接收英语，使用本机 Parakeet 分段转写，在输出明显异常或主模型失败时回退到 Qwen3-ASR 1.7B，再调用 LM Studio 中的 Qwen3.5 将完整语段翻译为简体中文。
+面向英语课堂的本机转写、中文翻译和学习笔记工具，使用 SwiftUI 构建，支持 Apple 芯片 Mac，最低部署目标为 **macOS 14**。
 
-## 当前能力
+## 能做什么
 
-- 英语先由 macOS 设备端流式识别逐词预览；每约 10 秒再由本机 Parakeet 完成稳定转写，并按原始顺序加入翻译队列。翻译只处理稳定语段，不阻塞逐词英文预览。
-- 转写统一使用 Parakeet TDT 0.6B v2；检测到空结果、乱码、异常短句、重复循环、文本失控，或 Parakeet 请求失败时，自动用 Qwen3-ASR 1.7B 重转当前语段；非英文的回退结果会被拦截，不进入翻译。
-- Parakeet 正常结果始终使用原始音频；只有空结果或异常结果的 Qwen 1.7B 回退会启用英语语音频段增强：保留原始波形，只额外提升约 120–7200 Hz，按该频段的活跃帧电平自适应增益，最多提升 12 dB，并在 −1 dBFS 限幅；静音不会被强行增益。
-- 自动模式会在供电状态改变后切换下一语段使用的翻译模型，不中断当前录音：
-  - 电池：Parakeet（异常回退 Qwen3-ASR 1.7B）→ Qwen3.5 4B（省电）
-  - 接电：Parakeet（异常回退 Qwen3-ASR 1.7B）→ Qwen3.5 9B、关闭思考（高质量）
-- 也可以在界面中锁定“省电”或“高质量”模式。
-- “音频来源”可选择“麦克风”或“系统音频（内录）”。内录模式直接读取课程、会议或视频的系统播放声，不改变系统音量，并排除 LiveLingo 自身音频以避免回灌。
-- “记录方式”可选择“录音”或“实时”。两种模式都会连续写入完整无损 PCM 录音；实时模式写入 LiveLingo 专属临时目录，不要求选择保存位置，运行时按最新在上、旧内容向下的顺序保留本次双语历史供回看。暂停/继续不会清空；停止时删除临时录音并清空历史。
-- 实时录制期间可随时选择“转为录音”，随后选择保存目录。采集不会中断，停止且文件关闭后再将当前临时录音安全迁移到所选目录；同名会话不会被覆盖，迁移失败时保留临时源文件。
-- 翻译提示词针对数学、物理、生物、计算机、经济与化学课堂调优；自动保护公式、变量、算法名、化学式、离子、电荷、实验单位和常见学术缩写，并把偶发的繁体结果统一为简体中文。高质量 9B 模式还会接收经过时间对齐和严格白名单过滤的系统转写 token 提示，仅用于公式、单位和学术缩写纠错；4B 模式不使用这组辅助提示。
-- 录音期间写入无损 PCM `recording.wav`。
-- 停止后在用户选择的目录中建立独立会话文件夹并导出：
-  - `recording.wav`
-  - `transcript-en.txt`
-  - `transcript-zh-Hans.txt`
-  - `bilingual.jsonl`
-  - `bilingual.srt`
-  - `summary-zh-Hans.md`（已有足够课堂内容时）
-  - `manifest.json`
-- 提供独立的浮动置顶字幕窗口。
-- 双语历史按最新在上、旧内容向下排列，并提供暂停/继续按钮。
-- 显示当前音频来源、当前供电状态、ASR 与翻译模型状态。
+- 从麦克风或系统音频（内录）接收英语，显示英文转写与中文翻译。
+- 提供悬浮字幕、录音暂停和继续、双语历史及录音导出。
+- 增量生成学习笔记，分别显示最近更新与整课内容。
+- 录音结束后使用 9B 模型开启思考复查，保留笔记正文，单独显示意见；支持暂停和恢复。
+- 模型在本机运行。应用管理 MLX / MLX-LM 和转写进程，不需要 LM Studio。
 
-## 系统与硬件要求
+转写使用 Parakeet TDT 0.6B v2，异常结果可回退到 Qwen3-ASR 1.7B；翻译与笔记使用 Qwen3.5 4B / 9B。最终 JSON 使用 Outlines 约束，明确的计算可由 Pint、SymPy 和 ChemPy 辅助检查。模型仍可能漏译、误译或给出错误知识；格式约束与计算检查不能保证内容正确。
 
-- macOS 27.0 或更高版本。
-- Xcode 27.0 或更高版本用于构建；当前本地验证使用 Xcode 27.0 Beta 4。
-- 麦克风模式需要可用的麦克风输入设备；内录模式不需要麦克风。
-- 当前只在 Apple 芯片 Mac 上验证；尚未验证 Intel 或 Universal 构建。
-- LM Studio 本机服务，端口为 `127.0.0.1:1234`。
-- Parakeet TDT 0.6B v2、Qwen3-ASR 1.7B MLX 模型与可运行 `mlx-audio` 的 Python 环境。
+## 安装与源码的区别
 
-## 本机处理边界
+**源码仓库不包含模型权重、便携 Python 或已构建的 App。** 仅编译 Swift 源码不会得到完整的离线应用。
 
-应用只连接两个固定的回环地址：本机 ASR 服务 `127.0.0.1:18765` 和 LM Studio `127.0.0.1:1234`。仓库代码没有云 API、遥测或上传录音/转写的逻辑；录音和导出文件写入用户选择的本地目录。
+含模型的离线 DMG 将运行库和模型放在 App 内，可拖入“应用程序”后打开，不需要配置 Python、安装 LM Studio 或首次下载模型。首次使用相应功能时，按 macOS 提示授予麦克风、系统音频录制和保存目录权限。未配置系统设备端英语识别资源时，逐词预览可能不可用，稳定转写仍由内置模型处理。
 
-模型下载与 LM Studio 自身的行为不属于上述应用代码边界。下载完模型后，LiveLingo 的转写与翻译链路可以完全在本机运行。
+本次 `v0.1.0` 首先发布源码，安装包另行提供。此前日期命名的 DMG 已通过苹果公证并装订，但它的内嵌版本尚未改成 `0.1.0`，不作为本标签的二进制附件。
 
-## 权限
+## 验证情况与限制
 
-首次开始对应音频来源时，macOS 会请求：
+发布前的功能版本已通过 97 项 Swift 测试、6 项 Python 测试、主机音频回放，以及 macOS 14.6.1 虚拟机断网下的转写、翻译、停止保存与进程恢复检查。此次开源整理主要修改文档、脚本配置和版本标识，未改变应用的转写、翻译及摘要实现。
 
-- 麦克风权限，用于麦克风模式。
-- 屏幕与系统音频录制权限，用于系统音频内录模式；应用只消费音频样本，不保存画面。
-- 用户所选文件夹的读写权限，用于保存会话文件。
+虚拟机并非全新安装环境，尚不能据此声称完成干净机器的端到端图形界面验收。虚拟机耗时也不代表基础芯片性能。当前面向 Apple 芯片；Intel 与 Universal 构建未验证。
 
-Release 必须保留以下沙盒 entitlement：
+便携运行库还不能从本仓库一条命令重建。依赖版本与许可清单已保留，但仍需开发者准备匹配的环境及兼容 macOS 14 的原生依赖。
 
-- `com.apple.security.app-sandbox`
-- `com.apple.security.device.audio-input`
-- `com.apple.security.files.user-selected.read-write`
-- `com.apple.security.network.client`（仅用于访问两个本机服务）
+## 开发构建
 
-正式分发产物不得包含 `com.apple.security.get-task-allow`。不要对已经构建的 App 进行省略 entitlement 的临时重签；这会让系统麦克风权限看似已开启但应用仍无法使用。
-
-## 首次运行
-
-1. 在 LM Studio 中确认已下载 `qwen3.5-4b-mlx` 和 `qwen/qwen3.5-9b`，并启动本机服务（端口 `1234`）。LiveLingo 会按所选模式请求模型，LM Studio 可在首次请求时即时加载，无需让两个模型同时常驻内存。
-2. 确认以下 ASR 模型目录存在：
-   - `~/.lmstudio/models/mlx-community/parakeet-tdt-0.6b-v2`
-   - `~/.lmstudio/models/mlx-community/Qwen3-ASR-1.7B-4bit`
-3. 启动本机 ASR 服务：
-
-   ```sh
-   ./Scripts/run-qwen-service.sh
-   ```
-
-   如 Python 环境不在脚本默认位置，通过 `LIVELINGO_QWEN_PYTHON=/absolute/path/to/python` 指定。
-   日常使用建议改为安装当前用户的自恢复服务；它只监听 `127.0.0.1:18765`，登录时启动，异常退出后由 `launchd` 自动重启：
-
-   ```sh
-   ./Scripts/install-qwen-service.sh
-   ```
-
-4. 用 Xcode 打开 `LiveLingo.xcodeproj`，选择 `LiveLingo` scheme 与 `My Mac` 后运行。
-5. 选择“录音”后，首次开始会要求选择保存目录；选择“实时”则无需目录，停止时删除临时录音并清空历史。实时录制期间也可点“转为录音”选择目录并保留当前录音。选择“麦克风”或“系统音频（内录）”后首次开始，并允许对应权限。
-
-## 构建与测试
-
-不签名的 Debug 构建与测试：
+当前开发工具为 Xcode 27.0。目标应用的最低系统版本与构建工具自身的系统要求是两回事。
 
 ```sh
-xcodebuild -project LiveLingo.xcodeproj \
-  -scheme LiveLingo \
-  -configuration Debug \
-  -derivedDataPath work/DerivedData \
-  CODE_SIGNING_ALLOWED=NO build
+git clone https://github.com/2570165831/LiveLingo.git
+cd LiveLingo
+xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath work/DerivedData CODE_SIGNING_ALLOWED=NO build
 
-xcodebuild -project LiveLingo.xcodeproj \
-  -scheme LiveLingo \
-  -configuration Debug \
-  -derivedDataPath work/DerivedData \
-  CODE_SIGNING_ALLOWED=NO test
+xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath work/DerivedData CODE_SIGNING_ALLOWED=NO test
 ```
 
-可重复的 Release 构建：
+未签名 Release 可使用 `./Scripts/build-release.sh`。需要完整功能时，继续准备并组装运行库和模型。
+
+### 运行库与模型
+
+- 语言运行库版本见 [MLXRuntime.lock.json](Packaging/MLXRuntime.lock.json)，ASR 环境见 [ASRRuntime.lock.json](Packaging/ASRRuntime.lock.json)。这些文件不是完整的自动安装配方。
+- `Scripts/prepare-mlx-runtime.py` 从已准备好的环境组装语言运行库并核对版本；不会创建环境或下载依赖。参数见其 `--help`。
+- ASR 需要完整便携 CPython 树，不能直接用 venv 代替。
+- 模型名称、来源与许可见 [第三方声明](Packaging/THIRD_PARTY_NOTICES.md) 及 [模型说明](Packaging/ModelNotices/)。模型目录结构须与 `Scripts/bundle-mlx-app.py` 的映射一致。
+- MLX、Outlines Core 等原生依赖须使用兼容 macOS 14 的构建。打包脚本检查最低系统版本；安装最新依赖不能替代兼容性验证。
 
 ```sh
 ./Scripts/build-release.sh
+./Scripts/bundle-mlx-app.py \
+  --app work/ReleaseDerivedData/Build/Products/Release/LiveLingo.app \
+  --runtime /absolute/path/to/LanguageRuntime \
+  --models /absolute/path/to/language-models \
+  --asr-models /absolute/path/to/asr-models \
+  --asr-python /absolute/path/to/portable-python \
+  --output work/OfflineCandidate/LiveLingo.app
 ```
 
-默认只生成未签名产物：`work/ReleaseDerivedData/Build/Products/Release/LiveLingo.app`。
+输出目录必须不存在。组装后的 App 包含运行库和模型，排除测试 CLI、XCTest 与虚拟音频播放器。开发 CLI 的说明见 [Scripts/CLI-README.md](Scripts/CLI-README.md)，它只供开发测试，不随 App 或 DMG 交付。
 
-需要 Developer ID 签名时，显式提供签名身份、与之匹配的公开证书文件和包含匹配私钥的钥匙串：
+### 签名与 DMG
+
+签名材料和公证凭据不存入仓库。发布者必须显式提供自己的 Developer ID 身份、证书及钥匙串路径。
 
 ```sh
-LIVELINGO_SIGN_IDENTITY="Developer ID Application: Example Name (TEAMID)" \
-LIVELINGO_CERTIFICATE_PATH="/absolute/path/to/developer-id.cer" \
-LIVELINGO_KEYCHAIN_PATH="/absolute/path/to/login.keychain-db" \
-./Scripts/build-release.sh
+./Scripts/sign-offline-app.py --app work/OfflineCandidate/LiveLingo.app \
+  --identity 'Developer ID Application: Example Name (TEAMID)' \
+  --certificate /absolute/path/to/developer-id.cer \
+  --keychain /absolute/path/to/login.keychain-db
+
+./Scripts/build-offline-dmg.sh --app work/OfflineCandidate/LiveLingo.app \
+  --identity 'Developer ID Application: Example Name (TEAMID)' \
+  --keychain /absolute/path/to/login.keychain-db
 ```
 
-脚本先构建未签名 Release，再验证公开证书的有效期与 SHA-1 是否和钥匙串中的身份一致，随后使用 hardened runtime、可信时间戳和项目 entitlement 签名。最后执行严格签名校验，并确认四项必要 entitlement 存在且 `get-task-allow` 不存在。脚本不会安装或替换 `/Applications` 中的 App。
+DMG 顶层包含 App、“应用程序”快捷方式和使用说明。分发前还需使用自己的 `notarytool` 配置提交苹果公证，成功后执行 `stapler staple` 与 `stapler validate`；签名通过不等于公证通过。
 
-完整离线迁移包使用 `Scripts/build-offline-dmg.sh` 构建。它会纳入已签名 App、两个 ASR 模型、两个翻译模型、便携 MLX/Python 运行环境和官方未改动的 LM Studio 安装镜像；生成前后都会校验签名、模型文件和全包 SHA-256 清单。该产物面向本人 Apple Silicon Mac 之间迁移，不作为公开再分发包。
+`Scripts/run-qwen-service.sh`、`Scripts/install-qwen-service.sh` 和 `Packaging/*.command` 是历史服务与旧安装布局的辅助脚本，不属于当前安装步骤。
 
-## 签名、公证与开源状态
+## 数据与隐私
 
-- Developer ID 本地签名流程已纳入脚本；签名材料不属于仓库内容。
-- Apple 公证尚未配置。未经公证的 Developer ID 构建在其他 Mac 上可能被 Gatekeeper 拒绝。
-- 项目尚未选择开源许可证。没有许可证时，源码默认不授予他人复制、修改或再分发权利；公开发布前必须先补充许可证并复核仓库名、可见性和个人信息。
+应用在本机处理音频、转写、翻译和笔记。录音模式在用户选择的位置保存录音、双语文本、字幕与学习笔记；实时模式使用临时录音，也可转为录音保存。代码不包含云端推理或上传录音的功能。
 
-## 系统实时字幕的边界
+请勿向 Issues 或 Pull Request 提交私人录音、完整课堂转写、笔记、凭据或签名材料。反馈与贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-macOS 自带“实时字幕”可以处理应用音频或麦克风，但通用麦克风模式不提供本项目的录音、英中语段配对以及双语 JSONL/SRT 导出工作流。
+## 许可证
+
+除另有注明的第三方内容外，自有代码采用 **GPL-3.0-only**，完整条款见 [LICENSE](LICENSE)。允许商业使用和收费；分发程序或修改版本时须遵守相应源码提供等许可证要求。软件按现状提供，不提供担保。
+
+第三方依赖、模型及对应源码继续适用各自许可证，不因本项目开源而改变。声明见 [Packaging/THIRD_PARTY_NOTICES.md](Packaging/THIRD_PARTY_NOTICES.md)，离线许可与必要的对应源码保留在 [Packaging/MLXLicenses](Packaging/MLXLicenses/)。
+
+官方版本计划免费提供，这是项目的发行安排，并非对其他分发者附加的收费限制。

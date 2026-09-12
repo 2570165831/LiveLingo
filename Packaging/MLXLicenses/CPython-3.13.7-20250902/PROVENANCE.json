@@ -1,0 +1,83 @@
+{
+  "source": "https://github.com/astral-sh/python-build-standalone/releases/tag/20250902",
+  "archiveSha256": "7d1e37ecd60542f7e26b776872d81de578dbcc1ec1ee1136bca77e8e5b81fa56",
+  "binaryEvidence": "Python executable and libpython: all file-backed Mach-O section hashes and UUIDs match; entire file differs (not claimed byte-identical).",
+  "licenses": [
+    {
+      "path": "python/licenses/LICENSE.bdb.txt",
+      "sha256": "3bdff06e69991c94664f2ef5c5f8096f60b7dbec071756ea6cc26b445e06ec5b"
+    },
+    {
+      "path": "python/licenses/LICENSE.bzip2.txt",
+      "sha256": "1f38bbc7caacafd65169276d759c0d88c991b753b643ce35d0e45ea1971dd441"
+    },
+    {
+      "path": "python/licenses/LICENSE.cpython.txt",
+      "sha256": "86e61415828a8b5b06ec8d024e6f086ce155a8b85fd0c419c0ba4dc004e74fdd"
+    },
+    {
+      "path": "python/licenses/LICENSE.expat.txt",
+      "sha256": "122f2c27000472a201d337b9b31f7eb2b52d091b02857061a8880371612d9534"
+    },
+    {
+      "path": "python/licenses/LICENSE.libX11.txt",
+      "sha256": "2daec087a88e7c9b8082557cdeebad5bbb8155a4137472f0b22e269cd99d0c1e"
+    },
+    {
+      "path": "python/licenses/LICENSE.libXau.txt",
+      "sha256": "56abe29bb1d9806a9e04fa9f80fed2c0f18027594df3f098148d814aef6bddfa"
+    },
+    {
+      "path": "python/licenses/LICENSE.libedit.txt",
+      "sha256": "29cea33c32bbc9785142386377915612a2fa786482c46843383384aded2e09b1"
+    },
+    {
+      "path": "python/licenses/LICENSE.libffi.txt",
+      "sha256": "deaf3a42effb551a5b140fa9afefed183a27f1341c6d1bf430d106a5e6931fc0"
+    },
+    {
+      "path": "python/licenses/LICENSE.liblzma.txt",
+      "sha256": "828d5b508798d6a95c1c08ce5eee517a84ed1bda14eac58c440b6bce2c5cf1ca"
+    },
+    {
+      "path": "python/licenses/LICENSE.libuuid.txt",
+      "sha256": "122ee1f7e258f2c3c0e538a75c037684f420454bf3850ddc74ce750bbf5fe86b"
+    },
+    {
+      "path": "python/licenses/LICENSE.libxcb.txt",
+      "sha256": "c5ffbfeaa501071ceeb97b7de2c0d703fdaa35de01c0fb6cbac1c28453a3e9fd"
+    },
+    {
+      "path": "python/licenses/LICENSE.mpdecimal.txt",
+      "sha256": "669512af7219f58be03a398766d7c9da11a3b3df9d3f05cb74c5ceca25c8da3b"
+    },
+    {
+      "path": "python/licenses/LICENSE.ncurses.txt",
+      "sha256": "87a4c4442337b8968ef956031c406b74f9cb7149b7ba87311bdaba534816201c"
+    },
+    {
+      "path": "python/licenses/LICENSE.openssl-1.1.txt",
+      "sha256": "9c04cce50c4989d5601dd8b07f6ab922c40388b66ac736c9007cb1ed9d9dd560"
+    },
+    {
+      "path": "python/licenses/LICENSE.openssl-3.txt",
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+    },
+    {
+      "path": "python/licenses/LICENSE.sqlite.txt",
+      "sha256": "38bef3d28b24f145ea293bd3b6eb4b20396982abc8303128fb493986ea5bc719"
+    },
+    {
+      "path": "python/licenses/LICENSE.tcl.txt",
+      "sha256": "c0a69a2bfd757361ec7e6143973b103c90409316b49e9c88db26ad6388e79f16"
+    },
+    {
+      "path": "python/licenses/LICENSE.tix.txt",
+      "sha256": "3ac5cdd0bef6c43ce34c6a7ced452081d9e5a0bf94082b9f9147d23ec9e214f5"
+    },
+    {
+      "path": "python/licenses/LICENSE.zlib.txt",
+      "sha256": "818922b2620f12801a12bf78e399644a30990e66824abd8ca8ec24d451d6f92c"
+    }
+  ]
+}

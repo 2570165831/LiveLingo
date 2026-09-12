@@ -1,0 +1,12 @@
+{
+  "status": "collected-and-hash-verified",
+  "nativePythonSourceReleases": 15,
+  "cargoLockPackages": 752,
+  "cargoNoticeTextsVerified": 1411,
+  "audioSourceArchivesVerified": 7,
+  "scope": "Exact release source notices and union of Cargo.lock packages; includes build, optional and platform dependencies, not a linked-only inventory. This is an evidence inventory, not a blanket legal certification.",
+  "limitations": [
+    "GCC 13.4.0 source selected from packaged SciPy compiler metadata; byte-identical rebuild not demonstrated.",
+    "Physical sleep, final notarization and clean-machine release installation are separate acceptance checks."
+  ]
+}

@@ -1,7 +1,10 @@
 #!/bin/zsh
+# LEGACY installer for the historical `Payload/` transfer layout. The current
+# pipeline produces a self-contained DMG instead (see README.md); this script is
+# retained for reference and for validating or installing an older package.
 set -euo pipefail
 
-script_dir="${0:A:h}"
+script_dir="${LIVELINGO_PACKAGE_ROOT:-${0:A:h}}"
 payload_dir="${script_dir}/Payload"
 verify_script="${script_dir}/验证安装包.command"
 [[ -x "${verify_script}" ]] || verify_script="${script_dir}/verify.command"
@@ -39,7 +42,7 @@ machine="$(/usr/bin/uname -m)"
 [[ "${machine}" == "arm64" ]] || fail "本安装包只支持 Apple Silicon Mac。"
 os_major="$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f1)"
 [[ "${os_major}" == <-> ]] || fail "无法识别 macOS 版本。"
-(( os_major >= 27 )) || fail "需要 macOS 27.0 或更高版本。"
+(( os_major >= 14 )) || fail "需要 macOS 14.0 或更高版本。"
 
 current_user="$(/usr/bin/id -un)"
 current_uid="$(/usr/bin/id -u)"
@@ -62,27 +65,21 @@ if (( available_kb < 20 * 1024 * 1024 )); then
 fi
 
 print "先执行完整离线包校验。"
-LIVELINGO_NONINTERACTIVE=1 "${verify_script}"
+LIVELINGO_NONINTERACTIVE=1 /bin/zsh "${verify_script}"
 
 app_source="${payload_dir}/LiveLingo.app"
 app_target="${applications_dir}/LiveLingo.app"
-lm_target="${applications_dir}/LM Studio.app"
-lm_dmg="${payload_dir}/LMStudio/LM-Studio-0.4.23-1-arm64.dmg"
 service_source="${payload_dir}/ASRService"
 service_target="${user_home}/Library/Application Support/LiveLingo/ASRService"
 launch_agents_dir="${user_home}/Library/LaunchAgents"
 logs_dir="${user_home}/Library/Logs/LiveLingo"
 launch_agent="${launch_agents_dir}/com.jianhongli.LiveLingoASR.plist"
 models_source="${payload_dir}/Models"
-models_target="${user_home}/.lmstudio/models"
-hub_source="${payload_dir}/LMStudioHub/qwen/qwen3.5-9b"
-hub_target="${user_home}/.lmstudio/hub/models/qwen/qwen3.5-9b"
+models_target="${user_home}/Library/Application Support/LiveLingo/Models"
 
 model_relatives=(
   "mlx-community/parakeet-tdt-0.6b-v2"
   "mlx-community/Qwen3-ASR-1.7B-4bit"
-  "mlx-community/Qwen3.5-4B-MLX-8bit"
-  "lmstudio-community/Qwen3.5-9B-MLX-4bit"
 )
 
 print "预检同名模型和现有应用…"
@@ -94,15 +91,6 @@ for relative in "${model_relatives[@]}"; do
     fail "已有同名模型内容不同，未覆盖：${target_path}"
   fi
 done
-
-if [[ -e "${hub_target}" ]] && ! same_tree "${hub_source}" "${hub_target}"; then
-  fail "已有 Qwen3.5 9B 的 LM Studio 索引不同，未覆盖：${hub_target}"
-fi
-
-if [[ -e "${lm_target}" ]]; then
-  /usr/bin/codesign --verify --deep --strict "${lm_target}" \
-    || fail "现有 LM Studio 签名无效，未覆盖：${lm_target}"
-fi
 
 if [[ "${LIVELINGO_DRY_RUN:-0}" == "1" ]]; then
   print "预检通过（dry run）；没有改动本机。"
@@ -135,7 +123,7 @@ print "安装 LiveLingo 和便携 ASR 运行环境…"
 /usr/bin/ditto "${service_source}" "${service_target}"
 /usr/bin/codesign --verify --deep --strict "${app_target}"
 
-print "安装四个本机模型；已有且完全相同的模型会跳过…"
+print "安装两个转写模型；4B 与 9B 已内置在应用中…"
 for relative in "${model_relatives[@]}"; do
   source_path="${models_source}/${relative}"
   target_path="${models_target}/${relative}"
@@ -147,23 +135,6 @@ for relative in "${model_relatives[@]}"; do
   /usr/bin/ditto "${source_path}" "${target_path}"
 done
 
-if [[ ! -e "${hub_target}" ]]; then
-  /bin/mkdir -p "${hub_target:h}"
-  /usr/bin/ditto "${hub_source}" "${hub_target}"
-fi
-
-if [[ ! -e "${lm_target}" && "${LIVELINGO_SKIP_LM_STUDIO:-0}" != "1" ]]; then
-  print "安装官方 LM Studio…"
-  mount_dir="$(/usr/bin/mktemp -d /private/tmp/livelingo-lm.XXXXXX)"
-  /usr/bin/hdiutil attach -readonly -nobrowse -mountpoint "${mount_dir}" "${lm_dmg}" >/dev/null
-  lm_source="${mount_dir}/LM Studio.app"
-  /usr/bin/codesign --verify --deep --strict "${lm_source}"
-  /usr/bin/ditto --rsrc --extattr "${lm_source}" "${lm_target}"
-  /usr/bin/hdiutil detach "${mount_dir}" >/dev/null
-  /bin/rmdir "${mount_dir}"
-  /usr/bin/codesign --verify --deep --strict "${lm_target}"
-fi
-
 print "安装并启动当前用户的 ASR 服务…"
 temporary_plist="$(/usr/bin/mktemp -t livelingo-asr-plist)"
 /usr/bin/plutil -create xml1 "${temporary_plist}"
@@ -171,15 +142,17 @@ temporary_plist="$(/usr/bin/mktemp -t livelingo-asr-plist)"
 /usr/bin/plutil -insert ProgramArguments -json \
   "[\"${service_target}/python/bin/python3\",\"${service_target}/qwen_asr_service.py\",\"--host\",\"127.0.0.1\",\"--port\",\"18765\"]" \
   "${temporary_plist}"
+/usr/bin/plutil -insert EnvironmentVariables -json "{}" "${temporary_plist}"
+/usr/bin/plutil -insert EnvironmentVariables.LIVELINGO_ASR_MODELS -string "${models_target}" "${temporary_plist}"
 /usr/bin/plutil -insert RunAtLoad -bool true "${temporary_plist}"
 /usr/bin/plutil -insert KeepAlive -bool true "${temporary_plist}"
 /usr/bin/plutil -insert ThrottleInterval -integer 5 "${temporary_plist}"
-/usr/bin/plutil -insert ProcessType -string Background "${temporary_plist}"
+/usr/bin/plutil -insert ProcessType -string Interactive "${temporary_plist}"
 /usr/bin/plutil -insert StandardOutPath -string "${logs_dir}/asr.log" "${temporary_plist}"
 /usr/bin/plutil -insert StandardErrorPath -string "${logs_dir}/asr-error.log" "${temporary_plist}"
 /usr/bin/plutil -lint "${temporary_plist}" >/dev/null
 /usr/bin/install -m 0644 "${temporary_plist}" "${launch_agent}"
-/bin/rm -f -- "${temporary_plist}"
+/bin/mv "${temporary_plist}" "${backup_root}/generated-asr-plist.xml"
 
 if [[ "${LIVELINGO_SKIP_LAUNCHCTL:-0}" != "1" ]]; then
   /bin/launchctl bootstrap "${service_domain}" "${launch_agent}"
@@ -193,15 +166,6 @@ if [[ "${LIVELINGO_SKIP_LAUNCHCTL:-0}" != "1" ]]; then
     /bin/sleep 1
   done
   (( ready == 1 )) || fail "ASR 服务未在 30 秒内就绪；请查看 ${logs_dir}/asr-error.log"
-fi
-
-if [[ "${LIVELINGO_SKIP_LM_STUDIO:-0}" != "1" ]]; then
-  print "启动 LM Studio 本机服务（仅监听 127.0.0.1:1234）…"
-  /usr/bin/open -ga "${lm_target}"
-  /bin/sleep 2
-  lms_path="${lm_target}/Contents/Resources/app/.webpack/lms"
-  [[ -x "${lms_path}" ]] || fail "LM Studio CLI 缺失：${lms_path}"
-  "${lms_path}" server start --port 1234 --bind 127.0.0.1
 fi
 
 print "安装成功。备份位于：${backup_root}"

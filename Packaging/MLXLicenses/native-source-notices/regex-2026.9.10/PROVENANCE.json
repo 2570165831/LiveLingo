@@ -1,0 +1,13 @@
+{
+  "name": "regex",
+  "version": "2026.9.10",
+  "sourceURL": "https://files.pythonhosted.org/packages/b9/5c/f403115361de25809e8f785686ec7096e30fef73be9ae35aa51da4e80abb/regex-2026.9.10.tar.gz",
+  "sourceSHA256": "1e321e2c84f0e52c457f5ea5944f796d6e8e09cb99738ea98dcc1bfe402a128d",
+  "noticeFiles": [
+    {
+      "path": "LICENSE.txt",
+      "sha256": "bff55ef4cdcc8c14ce259f8e8ab60e264418440d6335f4dc138273fbd506144d"
+    }
+  ],
+  "cargoManifests": []
+}

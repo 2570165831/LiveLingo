@@ -43,6 +43,56 @@ struct SessionExporterTests {
         #expect(AppPhase.paused.isBusy)
     }
 
+    @Test func physicsTermsUseContextWithoutChangingOrdinaryWords() {
+  let context = "Use the equations for initial velocity and acceleration to resolve components with trigonometry."
+  let cases: [(String,String,String)] = [
+   ("Alright, 30 signs 60.", context, "Alright, 30 times sine 60."),
+   ("Sine or cause. So it's thirty times sine sixty.",context,"sine or cosine. So it's thirty times sine sixty."),
+   ("Generation.",context,"Equation."),
+   ("S equals ut plus half at squared, and we are looking at the y direction.",context,"s = ut + ½at², and we are looking at the y direction."),
+   ("Generation.","Solar panels produce power.","Generation."),
+   ("The next generation shows signs of progress.",context,"The next generation shows signs of progress."),
+   ("There are 30 signs 60 metres apart.","Road safety.","There are 30 signs 60 metres apart."),
+   ("The cause is unknown. Meet at half past four.",context,"The cause is unknown. Meet at half past four."),
+   ("Does this cause two collisions?",context,"Does this cause two collisions?"),
+   ("There are 30 signs 60 metres apart.",context,"There are 30 signs 60 metres apart."),
+   ("s = ut + 0.5at²",context,"s = ut + 0.5at²")
+  ]
+  for (source, recent, expected) in cases {
+   #expect(AcademicInputNormalizer.normalize(source, recentContext: recent) == expected)
+  }
+    }
+
+    @Test func lecturerRepetitionDoesNotDropFollowingSentences() {
+        let opening = "Equals, equals, equals, equals. And of course, we have time, t, which is shared for both. Tell me, what do we know? What is the first thing we know?"
+        #expect(ASRQualityGate.fallbackReason(for: opening, audioDuration: 10.1) == nil)
+        #expect(SpeechPipeline.preferredTranscript(primary: opening, fallback: opening, audioDuration: 10.1) == opening)
+        let repeatedPhrase = "We know we know we know the initial velocity and can resolve its horizontal and vertical components."
+        #expect(ASRQualityGate.fallbackReason(for: repeatedPhrase, audioDuration: 10) == nil)
+        let loop = "We know we know we know we know we know we know the velocity."
+        #expect(ASRQualityGate.fallbackReason(for: loop, audioDuration: 10) == .repeatedLoop)
+    }
+
+    @Test func repeatedFallbackCannotReachTranslationOrReviveBadPrimary() {
+        let loop = "Suppose, I went, " + String(repeating: "a pilot, ", count: 60)
+        let normal = "A pilot controls the aircraft using these instruments."
+        #expect(SpeechPipeline.preferredTranscript(primary: nil, fallback: loop).isEmpty)
+        #expect(SpeechPipeline.preferredTranscript(primary: loop, fallback: loop).isEmpty)
+        #expect(SpeechPipeline.preferredTranscript(primary: loop, fallback: "是。我也想要。").isEmpty)
+        #expect(SpeechPipeline.preferredTranscript(primary: normal, fallback: loop) == normal)
+        #expect(SpeechPipeline.preferredTranscript(primary: loop, fallback: normal) == normal)
+        #expect(SpeechPipeline.preferredTranscript(primary: "damaged \u{FFFD} text", fallback: "").isEmpty)
+    }
+
+    @Test func finalTranscriptGateUsesChunkDurationWithoutRemovingNormalEmphasis() {
+        let fast = (0..<45).map { "word\($0)" }.joined(separator: " ")
+        #expect(SpeechPipeline.preferredTranscript(primary: nil, fallback: fast, audioDuration: 2).isEmpty)
+        #expect(SpeechPipeline.preferredTranscript(primary: nil, fallback: fast, audioDuration: 10) == fast)
+        let emphasis = "No, no, a pilot controls the aircraft."
+        #expect(SpeechPipeline.preferredTranscript(primary: emphasis, fallback: "") == emphasis)
+        #expect(SpeechPipeline.preferredTranscript(primary: nil, fallback: "Okay.") == "Okay.")
+    }
+
     @Test func liveOnlyModeUsesTemporaryRecordingAndClearsOnlyWhenStopped() {
         #expect(SessionStorageMode.saveSession.persistsSession)
         #expect(!SessionStorageMode.saveSession.clearsHistoryWhenStopped)
@@ -421,5 +471,145 @@ struct SessionExporterTests {
             AcademicInputNormalizer.normalize(source)
                 == "Le Chatelier's principle predicts how an equilibrium responds to stress. Faraday's law says magnetic flux induces an electromotive force."
         )
+    }
+}
+
+private final class ASREventCollector: @unchecked Sendable {
+    let lock = NSLock()
+    private var values: [SpeechPipeline.Event] = []
+    func append(_ event: SpeechPipeline.Event) { lock.withLock { values.append(event) } }
+    var events: [SpeechPipeline.Event] { lock.withLock { values } }
+}
+
+struct ASRRecoveryTests {
+    @Test func numericAndShortRepeatedCaptionsSurviveButRunawayDoesNot() {
+        for text in ["123", "2 + 2 = 4", "No, no, no, that's wrong.", "Vector equation vector, vector, vector."] {
+            #expect(SpeechPipeline.preferredTranscript(primary: text, fallback: "", audioDuration: 8) == text)
+        }
+        #expect(ASRQualityGate.isShortRepetition("Vector equation vector, vector, vector."))
+        #expect(!ASRQualityGate.isShortRepetition("The vector points upwards."))
+        #expect(SpeechPipeline.preferredTranscript(primary: "", fallback: String(repeating: "oh ", count: 100), audioDuration: 10).isEmpty)
+        #expect(SpeechPipeline.preferredTranscript(primary: "", fallback: "这是中文", audioDuration: 8).isEmpty)
+    }
+
+    private func audio(in directory: URL, name: String, seconds: Double = 1) throws -> URL {
+        let url = directory.appendingPathComponent(name)
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        let frames = AVAudioFrameCount(seconds * 16_000)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+        buffer.frameLength = frames
+        for i in 0..<Int(frames) { buffer.floatChannelData![0][i] = Float(sin(Double(i) * 0.1)) * 0.1 }
+        try autoreleasepool {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+            if #available(macOS 15, *) { file.close() }
+        }
+        return url
+    }
+
+    @Test func failedChunkKeepsNextCaptionAndWritesFailurePosition() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let recording = try audio(in: dir, name: "recording.wav")
+        let bad = try audio(in: dir, name: "bad.wav")
+        let good = try audio(in: dir, name: "good.wav")
+        let queue = SpeechPipeline.TranscriptionQueue { url, _, _ in
+            if url.lastPathComponent == "bad.wav" { throw URLError(.timedOut) }
+            return "The next sentence is still available."
+        }
+        let collector = ASREventCollector()
+        for (index, url) in [bad, good].enumerated() {
+            await queue.submit(.init(audioURL: url, modelKey: "primary", fallbackModelKey: "fallback",
+                start: Double(index), end: Double(index + 1), appleEvidence: "", recordingURL: recording), handler: collector.append)
+        }
+        await queue.finish()
+        #expect(!collector.events.contains { if case .failure = $0 { return true }; return false })
+        #expect(collector.events.contains { if case .transcriptionIssue(start: 0, end: 1, message: _) = $0 { return true }; return false })
+        #expect(collector.events.contains { if case .final(text: "The next sentence is still available.", start: _, end: _, hints: _) = $0 { return true }; return false })
+        let journal = try String(contentsOf: dir.appendingPathComponent("transcription-issues.jsonl"), encoding: .utf8)
+        #expect(journal.contains("transcription_missing"))
+        #expect(FileManager.default.fileExists(atPath: recording.path))
+    }
+
+    @Test func languageMismatchActuallyRequestsFallback() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = try audio(in: dir, name: "chunk.wav")
+        let queue = SpeechPipeline.TranscriptionQueue { _, model, _ in
+            model == "primary" ? "这是中文" : "This is an English caption."
+        }
+        let collector = ASREventCollector()
+        await queue.submit(.init(audioURL: url, modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 1, appleEvidence: "", recordingURL: nil), handler: collector.append)
+        await queue.finish()
+        #expect(collector.events.contains { if case .final(text: "This is an English caption.", start: _, end: _, hints: _) = $0 { return true }; return false })
+    }
+
+    @Test func idleContextRetryIsRecordedWithoutDuplicatingCaptions() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let recording = try audio(in: dir, name: "recording.wav", seconds: 4)
+        let chunk = try audio(in: dir, name: "chunk.wav")
+        let queue = SpeechPipeline.TranscriptionQueue { url, _, _ in
+            url.lastPathComponent.hasPrefix("LiveLingo-retry-") ? "A recovered sentence with surrounding context." : ""
+        }
+        let collector = ASREventCollector()
+        await queue.submit(.init(audioURL: chunk, modelKey: "primary", fallbackModelKey: "fallback",
+            start: 1, end: 2, appleEvidence: "", recordingURL: recording), handler: collector.append)
+        for _ in 0..<60 {
+            if collector.events.contains(where: { if case let .transcriptionIssue(_, _, message) = $0 { return message.contains("待核对") }; return false }) { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        await queue.finish()
+        let journal = try String(contentsOf: dir.appendingPathComponent("transcription-issues.jsonl"), encoding: .utf8)
+        #expect(journal.contains("transcription_retry"))
+        #expect(journal.contains("A recovered sentence"))
+        #expect(!collector.events.contains { if case .final = $0 { return true }; return false })
+    }
+
+    @Test func newCaptionCancelsOptionalRetry() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let recording = try audio(in: dir, name: "recording.wav", seconds: 4)
+        let bad = try audio(in: dir, name: "bad.wav")
+        let good = try audio(in: dir, name: "good.wav")
+        let collector = ASREventCollector()
+        let queue = SpeechPipeline.TranscriptionQueue { url, _, _ in
+            if url.lastPathComponent.hasPrefix("LiveLingo-retry-") {
+                collector.append(.transcriptionIssue(start: -1, end: -1, message: "retryStarted"))
+                do { try await Task.sleep(for: .seconds(15)) }
+                catch {
+                    collector.append(.transcriptionIssue(start: -1, end: -1, message: "retryCancelled"))
+                    throw error
+                }
+            }
+            return url.lastPathComponent == "good.wav" ? "The next caption wins." : ""
+        }
+        await queue.submit(.init(audioURL: bad, modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 1, appleEvidence: "", recordingURL: recording), handler: collector.append)
+        for _ in 0..<60 {
+            if collector.events.contains(where: { if case .transcriptionIssue(start: -1, end: -1, message: "retryStarted") = $0 { return true }; return false }) { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        await queue.submit(.init(audioURL: good, modelKey: "primary", fallbackModelKey: "fallback",
+            start: 1, end: 2, appleEvidence: "", recordingURL: recording), handler: collector.append)
+        await queue.finish()
+        #expect(collector.events.contains { if case .transcriptionIssue(start: -1, end: -1, message: "retryCancelled") = $0 { return true }; return false })
+        #expect(collector.events.contains { if case .final(text: "The next caption wins.", start: _, end: _, hints: _) = $0 { return true }; return false })
+    }
+
+    @Test func contextRetryReadsOnlyBoundedNeighbourAudio() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let recording = try audio(in: dir, name: "recording.wav", seconds: 4)
+        let retry = try RecordingDiagnostics.contextAudio(recordingURL: recording, start: 1, end: 2)
+        defer { try? FileManager.default.removeItem(at: retry) }
+        let file = try AVAudioFile(forReading: retry)
+        #expect(abs(Double(file.length) / file.processingFormat.sampleRate - 2.5) < 0.001)
     }
 }

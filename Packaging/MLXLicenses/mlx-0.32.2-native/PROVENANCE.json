@@ -1,0 +1,46 @@
+[
+  {
+    "component": "fmt",
+    "tag": "12.1.0",
+    "revision": "407c905e45ad75fc29bf0f9bb7c5c2fd3475976f",
+    "sourceURL": "https://codeload.github.com/fmtlib/fmt/tar.gz/407c905e45ad75fc29bf0f9bb7c5c2fd3475976f",
+    "archiveSHA256": "2bc1fe4a5b6d5d6a614239b4ca1d520e66e152a02d3d262684d26dfd6ab3438a",
+    "texts": [
+      "fmt/LICENSE",
+      "fmt/doc/python-license.txt"
+    ]
+  },
+  {
+    "component": "nanobind",
+    "tag": "v2.15.0",
+    "revision": "a47983000e9dda68177fc1fd426f7147d785c2c0",
+    "sourceURL": "https://codeload.github.com/wjakob/nanobind/tar.gz/a47983000e9dda68177fc1fd426f7147d785c2c0",
+    "archiveSHA256": "830bd5a0600165b1443f3c7a6e1d6deac5bb136dd4d2c57c6026fefdb4c475d3",
+    "texts": [
+      "nanobind/LICENSE"
+    ]
+  },
+  {
+    "component": "json",
+    "tag": "v3.11.3",
+    "revision": "9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03",
+    "sourceURL": "https://codeload.github.com/nlohmann/json/tar.gz/9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03",
+    "archiveSHA256": "0dbc5e40a01ff142e7e68c03e85247a4dcede2f592d12d3677dee3664d17975a",
+    "texts": [
+      "json/LICENSE.MIT",
+      "json/docs/mkdocs/docs/home/license.md"
+    ]
+  },
+  {
+    "component": "MLX",
+    "revision": "1f8e74e3f12f31365464a6867c6579f0e9b29d85",
+    "unmodified": true,
+    "sourceURL": "https://github.com/ml-explore/mlx/tree/v0.32.2"
+  },
+  {
+    "component": "nanobind/robin-map",
+    "revision": "4ec1bf19c6a96125ea22062f38c2cf5b958e448e",
+    "sourceURL": "https://raw.githubusercontent.com/Tessil/robin-map/4ec1bf19c6a96125ea22062f38c2cf5b958e448e/LICENSE",
+    "licenseSHA256": "11f2c685ba565a31aef1219f63a7a8845602c97bff70016b9e3278dfe51a2ec5"
+  }
+]

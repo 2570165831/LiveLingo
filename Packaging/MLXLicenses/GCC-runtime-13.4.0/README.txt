@@ -1,0 +1,1 @@
+GCC 13.4.0 source is included for the GNU runtime libraries carried by SciPy 1.18.1. Both selected SciPy installations report gcc 13.4.0 as their Fortran compiler. The upstream compiler archive and build-metadata basis are recorded in PROVENANCE.json; this does not claim a byte-identical reproduction of the wheel. Library-specific license and runtime exception texts are included.

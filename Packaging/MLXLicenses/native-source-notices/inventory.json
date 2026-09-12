@@ -1,0 +1,728 @@
+[
+  {
+    "name": "hf-xet",
+    "version": "1.6.0",
+    "sourceURL": "https://files.pythonhosted.org/packages/1b/ab/522a2ab67f27971a9d48ca666d4fca85ef7d5282d142e31fd087e27b1bbe/hf_xet-1.6.0.tar.gz",
+    "sourceSHA256": "2e58454a340b3556dfa4972d5451aff4fba8dd42a236600ba1a1d2b1514f0fef",
+    "noticeFiles": [
+      {
+        "path": "hf_xet/LICENSE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      },
+      {
+        "path": "LICENSE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      }
+    ],
+    "cargoManifests": [
+      {
+        "path": "xet_pkg/Cargo.toml",
+        "sha256": "03d7b9191bd0451c5fb17f493354060beeac592cd955a57a32494a3a4c54fb82"
+      },
+      {
+        "path": "xet_core_structures/Cargo.toml",
+        "sha256": "50b7783e042c986d1536920788c09973d1256c4b75e87930391fb1a6241d1066"
+      },
+      {
+        "path": "xet_data/Cargo.toml",
+        "sha256": "5f5d6a69a0a13b614df5795d54efe2aa33737ee7da3ecf84f5e80ff429ab3ea0"
+      },
+      {
+        "path": "hf_xet/Cargo.lock",
+        "sha256": "042146dd9c975cf623bd50a5cdb319d132ec715f6dd770342942992895d59f6f"
+      },
+      {
+        "path": "hf_xet/Cargo.toml",
+        "sha256": "140eeaed487d842fcfd4a0b97f493a117aac131e542db350e8ca5cbee03ad6cb"
+      },
+      {
+        "path": "xet_client/Cargo.toml",
+        "sha256": "2d3933712082e068a9d06c5018605220c3232e2a9be550dadfa214a422e46404"
+      },
+      {
+        "path": "xet_runtime/Cargo.toml",
+        "sha256": "0f44692170d57fe78d19cbf8214639cee1aea50996970abb25f04d2dc8b48b65"
+      },
+      {
+        "path": "Cargo.toml",
+        "sha256": "794a6fa509c2d49a443dcf3b6faa1f4b806b30aef08fac87289594e5608467ce"
+      }
+    ]
+  },
+  {
+    "name": "markupsafe",
+    "version": "3.0.3",
+    "sourceURL": "https://files.pythonhosted.org/packages/7e/99/7690b6d4034fffd95959cbe0c02de8deb3098cc577c67bb6a24fe5d7caa7/markupsafe-3.0.3.tar.gz",
+    "sourceSHA256": "722695808f4b6457b320fdc131280796bdceb04ab50fe1795cd540799ebe1698",
+    "noticeFiles": [
+      {
+        "path": "LICENSE.txt",
+        "sha256": "489a8e1108509ed98a37bb983e11e0f7e1d31f0bd8f99a79c8448e7ff37d07ea"
+      },
+      {
+        "path": "docs/license.rst",
+        "sha256": "6fc7e80b75b5999783a328d90976a2585e0956c4a348c3c888453938ceca742d"
+      }
+    ],
+    "cargoManifests": []
+  },
+  {
+    "name": "mlx",
+    "version": "0.32.2",
+    "sourceURL": "https://github.com/ml-explore/mlx/tree/1f8e74e3f12f31365464a6867c6579f0e9b29d85",
+    "noticeDirectory": "../mlx-0.32.2-native",
+    "sourceKind": "unmodified git source; no PyPI sdist published",
+    "noticeFiles": [
+      {
+        "path": "../mlx-0.32.2-native/MLX-LICENSE",
+        "sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01"
+      }
+    ]
+  },
+  {
+    "name": "numpy",
+    "version": "2.5.3",
+    "sourceURL": "https://files.pythonhosted.org/packages/13/01/11703282db468b85f6f7b8c7f22d058de5970d5c7e60a3a8aaa313c3de36/numpy-2.5.3.tar.gz",
+    "sourceSHA256": "df2d5874ff183595a4ba404edd04f6bd9b5505c1d7708573f6a6c17489a67563",
+    "noticeFiles": [
+      {
+        "path": ".spin/LICENSE",
+        "sha256": "990e6a6dbaee82e655163c3d2a51d1002471e5c0964da4881bc193eaa6a8ee3b"
+      },
+      {
+        "path": "LICENSE.txt",
+        "sha256": "1be1df33863f97a7bc1c4d67980bd6c69c9a6fef0a5ee76e6ad6cb91e56e8491"
+      },
+      {
+        "path": "doc/source/_static/scipy-mathjax/LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      {
+        "path": "doc/source/license.rst",
+        "sha256": "563953e4bf6aba42f430420da7494dce2747f60d56e82ca165e24dfaf766d256"
+      },
+      {
+        "path": "numpy/_build_utils/tempita/LICENSE.txt",
+        "sha256": "743b0f4a0087fe3607167113fffab6f2ca069c8da321763697ab5d0d8411634a"
+      },
+      {
+        "path": "numpy/_core/include/numpy/libdivide/LICENSE.txt",
+        "sha256": "fbc539f47d0cf83bc61378080fb873d5c14630126cacbfe754035c3926daa5ec"
+      },
+      {
+        "path": "numpy/_core/src/common/pythoncapi-compat/COPYING",
+        "sha256": "3f2c1ffa76383a55ae0aac01c9737cd70050dff63e1f026694fbe9d662573c98"
+      },
+      {
+        "path": "numpy/_core/src/highway/LICENSE",
+        "sha256": "e340270d4f64384569a91d546acb5b094d69ce47f0c015db77abb74dc6f815af"
+      },
+      {
+        "path": "numpy/_core/src/highway/debian/copyright",
+        "sha256": "6e4ecf1cae052b678ea3178dd4b3652d581ee66a82d58db8800dd7d80dd6de76"
+      },
+      {
+        "path": "numpy/_core/src/multiarray/dragon4_LICENSE.txt",
+        "sha256": "f7b14309e5f54e5022b26448eefd419988ada2aec01d3c1162d84a0ea8f21f2c"
+      },
+      {
+        "path": "numpy/_core/src/npysort/x86-simd-sort/LICENSE.md",
+        "sha256": "211e7d737d6179a08f791ebb0a99897ce7cd2457410c542876d125576edfe910"
+      },
+      {
+        "path": "numpy/_core/src/umath/svml/LICENSE",
+        "sha256": "c17011467b4fe6e20fbfbeda4df09e58c2bca5480a063e55735a4000a379aad9"
+      },
+      {
+        "path": "numpy/fft/pocketfft/LICENSE.md",
+        "sha256": "a85ca13fdf90160b64a0698215868c13b74d835ad0a4e2ba44713b8c5058a056"
+      },
+      {
+        "path": "numpy/linalg/lapack_lite/LICENSE.txt",
+        "sha256": "a14cc25e10d40a3aa705b7de2fb764a6535d8ee9b2db4e1724900585457dfd55"
+      },
+      {
+        "path": "numpy/ma/LICENSE",
+        "sha256": "05f3b88351988ecfad10abe92c0c50e5875c6452d5009a0084cc291551ffcca6"
+      },
+      {
+        "path": "numpy/random/LICENSE.md",
+        "sha256": "103166b62b80443afb9eb3488e052ea06be0cff566b908f199e561fde49af19f"
+      },
+      {
+        "path": "numpy/random/src/distributions/LICENSE.md",
+        "sha256": "469778be8f33d54e1bcaab28c281cc472916d2d273f835e55bc487d30503face"
+      },
+      {
+        "path": "numpy/random/src/mt19937/LICENSE.md",
+        "sha256": "0e111337b25494a773106695f0e799f642b8567aaacca4f116a74a8177179156"
+      },
+      {
+        "path": "numpy/random/src/pcg64/LICENSE.md",
+        "sha256": "e7d4f4fb20358f314210a892ae17351e04993813646f697ec387385ca2a36918"
+      },
+      {
+        "path": "numpy/random/src/philox/LICENSE.md",
+        "sha256": "6f5828a57223d4cc7f8ea505a2623e7b978b242752c1515e355f46ba2cec1800"
+      },
+      {
+        "path": "numpy/random/src/sfc64/LICENSE.md",
+        "sha256": "9d4098846018319cd68e228ee6220361787f73bccbf00237a85e4fc9621b998f"
+      },
+      {
+        "path": "numpy/random/src/splitmix64/LICENSE.md",
+        "sha256": "268b0ca06759d31ea3ca68dd35f20e877916e927b1c2a835e4592a3c4354b1f9"
+      },
+      {
+        "path": "vendored-meson/meson/COPYING",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      {
+        "path": "vendored-meson/meson/docs/theme/extra/templates/license.html",
+        "sha256": "15fcbcade0003df4b37350f12bea7dfeb25d4d2ac9e99d12d893773c4d5359fd"
+      },
+      {
+        "path": "vendored-meson/meson/packaging/License.rtf",
+        "sha256": "e3e8d7b15b2021c994047314ad0ac5e367561f64771a60a85a9c0952d8cd4c3a"
+      },
+      {
+        "path": "vendored-meson/meson/packaging/macpages/English.lproj/license.html",
+        "sha256": "bca11d525505d21cdfb021e634b0f1d48ece827f9bedcf8cd41356c48a09be24"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/common/42 subproject/mylicense.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/common/42 subproject/subprojects/sublib/sublicense1.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/common/42 subproject/subprojects/sublib/sublicense2.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "cargoManifests": [
+      {
+        "path": "vendored-meson/meson/test cases/failing/135 cargo toml error/subprojects/foo-0-rs/Cargo.toml",
+        "sha256": "450080b234d868a0388b5b2304faa2f60f8a43d7aca02e989f44823b7aa2743e"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/bar-0.1-rs/Cargo.toml",
+        "sha256": "53f37f5a7deec2797d1a4ff46f7b791f0743a96d345157c03673c4fb78877351"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/common-0-rs/Cargo.toml",
+        "sha256": "08104e51fcf437e418fbed4d5a1fc86c5a1cb45b86c11d15af0eda456924a839"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/foo-0-rs/Cargo.toml",
+        "sha256": "22a8f21c108d05dd448302559d0d5ccde31a3b8c3189a5e62d2bae6a95e816fd"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/libname-1-rs/Cargo.toml",
+        "sha256": "89e3ece9ebc731aa576e54ff6b2397a4f6fef2f5e16b3a874b7a0af8146e0b11"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/unixdep-0.1-rs/Cargo.toml",
+        "sha256": "17b4564374c29c4846c57f08125110c1921d9fccc9df254102018137e86d6270"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/25 cargo lock/Cargo.lock",
+        "sha256": "c5990ac679b7b44013cb75518ced8d62bcb03c5aa990fdcfffebc1b7958cc482"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/26 cargo system deps/subprojects/sub-1-rs/Cargo.toml",
+        "sha256": "d66e05199f4e679a966685c6fc4bd7b32a373afe0fe24947bc1d3b64bf0839dd"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/32 rust.workspace package/Cargo.lock",
+        "sha256": "3cd761854b74f0cc709366459b5975ed798b5a0c1263a6fe1c66d917127f0d0a"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/32 rust.workspace package/Cargo.toml",
+        "sha256": "32bee30fc6b40aa65590b6f9649be4181823e7bd41a1b54f6482a26ed9c73935"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/32 rust.workspace package/subprojects/answer-2.1/Cargo.toml",
+        "sha256": "0f9f076f5faf048e17671129f02d0ed00d64c7bc6a1e4ca765a8e388875d45aa"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/32 rust.workspace package/subprojects/hello-1.0/Cargo.toml",
+        "sha256": "f728a07307d7843fcef9f0e0f28b0e4bfc6a213f5553af7aac4b82b96143f302"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/33 cargo workspace/subprojects/foo/Cargo.toml",
+        "sha256": "9bad7c946266b0fd6b85fbaefae3f8d4e701a97e07c49a904b5660a31b5f7278"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/33 cargo workspace/subprojects/foo/src/foo/Cargo.toml",
+        "sha256": "c8820354b5a00e30ad80dfa8754cab60268b2fe58defdb43f4a84113d5d82146"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/33 cargo workspace/subprojects/foo/src/member1/Cargo.toml",
+        "sha256": "7ed6e0d12e1b7abb595f68b16c293e075993f503e465923f7834be19086d051a"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/33 cargo workspace/subprojects/foo/subprojects/member2-1.0/Cargo.toml",
+        "sha256": "433e7ee9892e284d85af40cc9a598888fa3375a6713ad36f90767dc2d99e688e"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/Cargo.lock",
+        "sha256": "3c1e85b8882168608aaa24cb5615698ae51516a6fd501cf6692f09631369ecda"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/Cargo.toml",
+        "sha256": "5b02687f3d615c731e08ae45c95a2fba47f0598c0200daef026a9eefe518f8ef"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/more/Cargo.toml",
+        "sha256": "832856723f6fb97c5dc06f2e503c3d8c390197ff8802ca45966243809cc567f6"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/subprojects/answer-2.1/Cargo.toml",
+        "sha256": "0f9f076f5faf048e17671129f02d0ed00d64c7bc6a1e4ca765a8e388875d45aa"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/subprojects/hello-1.0/Cargo.toml",
+        "sha256": "f728a07307d7843fcef9f0e0f28b0e4bfc6a213f5553af7aac4b82b96143f302"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/35 cargo multiple versions/subprojects/foo-1-rs/Cargo.toml",
+        "sha256": "625aef5afb922b14e39f792df562cb3aef80e17102b330ae1e5b053881e9f8fc"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/35 cargo multiple versions/subprojects/foo-2-rs/Cargo.toml",
+        "sha256": "eb02215de464a69e4a25eaf9c0036433d7b231c2891b9642aa5d08028369d536"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/35 cargo multiple versions/subprojects/main/Cargo.toml",
+        "sha256": "0d2eeb14d26ae4a8f69f2d7d654ce80faf6a1823fd26a354cdc7dd958494154a"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/40 cargo dep multiple version/Cargo.lock",
+        "sha256": "cf031216b2055f9f518d5b9b61a15658d0ad9b9f917a7c1f40c5679d12f813c0"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/40 cargo dep multiple version/Cargo.toml",
+        "sha256": "a8a19f256297b6443e87a27e6e188103c50d1eaf2d026c91154247417a653fa6"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/40 cargo dep multiple version/subprojects/answer-2.1/Cargo.toml",
+        "sha256": "1fbbc581eb50c0cbcb07d23ad2635470728e64868d40dde1dfccf1d7378e7a27"
+      },
+      {
+        "path": "vendored-meson/meson/test cases/rust/40 cargo dep multiple version/subprojects/hello-3.0/Cargo.toml",
+        "sha256": "8bddb9a2cea78acca23491663d0a8474d01a99e12bf0c71138ed5ea8933b1b5a"
+      }
+    ]
+  },
+  {
+    "name": "outlines-core",
+    "version": "0.2.14",
+    "sourceURL": "https://files.pythonhosted.org/packages/6a/04/4a0812eb27c086cfd2e66e7ec9150f33e105912a9b7f8b335e3479f03a06/outlines_core-0.2.14.tar.gz",
+    "sourceSHA256": "64808deed1591ca3029ff64346ceb974cd5d780c916ea82504951fe83523039e",
+    "noticeFiles": [
+      {
+        "path": "LICENSE",
+        "sha256": "f71078ee8aaa3d5670488756f1993b9de3ae64c9546a0232ebbbdd595c5375d7"
+      }
+    ],
+    "cargoManifests": [
+      {
+        "path": "Cargo.lock",
+        "sha256": "e354efc9b64e8b80462662428d3adc1273e9ece5474ce949512d0f2bd875dcf7"
+      },
+      {
+        "path": "Cargo.toml",
+        "sha256": "bad616adab1842f9af9d21b350aa97cc19e852de876ff8998fa2b37e189ff890"
+      }
+    ]
+  },
+  {
+    "name": "pillow",
+    "version": "12.3.0",
+    "sourceURL": "https://files.pythonhosted.org/packages/1c/3d/bb7fca845737cf9d7dbde16ed1843984665ff2e0a518f5db43e77ec540b9/pillow-12.3.0.tar.gz",
+    "sourceSHA256": "3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce",
+    "noticeFiles": [
+      {
+        "path": "LICENSE",
+        "sha256": "15181e7363dca9aed78b79bebebc7fde7f1814b8bd311ea3b87ae8ccadfc185b"
+      },
+      {
+        "path": "Tests/fonts/DejaVuSans/LICENSE.txt",
+        "sha256": "ba4aee7ef5b2ebc285e76df2497953d8a6e7480bc249f4e0a55f1199a3396622"
+      },
+      {
+        "path": "Tests/fonts/LICENSE.txt",
+        "sha256": "b79f6f6a2fc060b2e0a6e7a6946c446ae199bec07b92a3df1295975e25c4d96b"
+      },
+      {
+        "path": "Tests/icc/LICENSE.txt",
+        "sha256": "09e62757edb34e284bc11c54e3429b438d9db37f46c9cb36bd57b1b25ae36184"
+      },
+      {
+        "path": "docs/COPYING",
+        "sha256": "d44ce2bbf81806be0eb34ec0ecb0cb013ccd56a94057daf214fb7381adde8f0c"
+      },
+      {
+        "path": "src/thirdparty/raqm/AUTHORS",
+        "sha256": "e81eb8c13d248620f229af26700a5d8c928bac0fd971cae6e76e2f88228ea9e2"
+      },
+      {
+        "path": "src/thirdparty/raqm/COPYING",
+        "sha256": "4a574f631d5aee5223d108d3f7ec4f717343685d8a8904f42591be72c907ecba"
+      }
+    ],
+    "cargoManifests": []
+  },
+  {
+    "name": "protobuf",
+    "version": "7.36.1",
+    "sourceURL": "https://files.pythonhosted.org/packages/86/73/f66c748df06e7fe24e658eddd600d19c4b40bad836c97ce2d0ad9851fb6b/protobuf-7.36.1.tar.gz",
+    "sourceSHA256": "d0f6470f0ce2b84e3feaea2d4b816378b37ba4d4aa08a274305373de93e2d524",
+    "noticeFiles": [
+      {
+        "path": "LICENSE",
+        "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
+      }
+    ],
+    "cargoManifests": []
+  },
+  {
+    "name": "pydantic-core",
+    "version": "2.46.5",
+    "sourceURL": "https://files.pythonhosted.org/packages/af/f9/8a06bea35ef8daf588f707784c973a7046e0034c8d8cfb08828eeffb8b75/pydantic_core-2.46.5.tar.gz",
+    "sourceSHA256": "10416c15b8839ecc4ef4d0885da76da6fd0f67333a0eb8aff6d93c4b8f2910fc",
+    "noticeFiles": [
+      {
+        "path": "LICENSE",
+        "sha256": "2afdd30d54b4d62b6f488a6bcc1546e84ec5061f13f4209c03d012348783795a"
+      }
+    ],
+    "cargoManifests": [
+      {
+        "path": "Cargo.lock",
+        "sha256": "5f04266831ef75fbb5eeb0acd509b85a15f6ebc8a690eed4d7fd191fd11ec108"
+      },
+      {
+        "path": "Cargo.toml",
+        "sha256": "178d537feb822d845526eeac2438f817cf25ad15d15fe1261b81b9b3452edbb3"
+      }
+    ]
+  },
+  {
+    "name": "pyyaml",
+    "version": "6.0.3",
+    "sourceURL": "https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd7729d542c61a4d537767a59645b82a0b521206e1e25c2/pyyaml-6.0.3.tar.gz",
+    "sourceSHA256": "d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f",
+    "noticeFiles": [
+      {
+        "path": "LICENSE",
+        "sha256": "8d3928f9dc4490fd635707cb88eb26bd764102a7282954307d3e5167a577e8a4"
+      }
+    ],
+    "cargoManifests": []
+  },
+  {
+    "name": "regex",
+    "version": "2026.9.10",
+    "sourceURL": "https://files.pythonhosted.org/packages/b9/5c/f403115361de25809e8f785686ec7096e30fef73be9ae35aa51da4e80abb/regex-2026.9.10.tar.gz",
+    "sourceSHA256": "1e321e2c84f0e52c457f5ea5944f796d6e8e09cb99738ea98dcc1bfe402a128d",
+    "noticeFiles": [
+      {
+        "path": "LICENSE.txt",
+        "sha256": "bff55ef4cdcc8c14ce259f8e8ab60e264418440d6335f4dc138273fbd506144d"
+      }
+    ],
+    "cargoManifests": []
+  },
+  {
+    "name": "rpds-py",
+    "version": "2026.6.3",
+    "sourceURL": "https://files.pythonhosted.org/packages/aa/2a/9618a122aeb2a169a28b03889a2995fe297588964333d4a7d67bdf46e147/rpds_py-2026.6.3.tar.gz",
+    "sourceSHA256": "1cebd1337c242e4ec2293e541f712b2da849b29f48f0c293684b71c0632625d4",
+    "noticeFiles": [
+      {
+        "path": "LICENSE",
+        "sha256": "314e4e91be3baa93c0fb4bccc9e4e97cd643eb839b065af921782c2175fe9909"
+      }
+    ],
+    "cargoManifests": [
+      {
+        "path": "Cargo.lock",
+        "sha256": "6c04984e9c05d00e24e23eeade8463ea09d7a7fba9f8f5706da9bdbc026baee4"
+      },
+      {
+        "path": "Cargo.toml",
+        "sha256": "2fb9471df809676863caf7254a59bc16658dc83567bf5972620fa8a760d01a45"
+      }
+    ]
+  },
+  {
+    "name": "safetensors",
+    "version": "0.8.0",
+    "sourceURL": "https://files.pythonhosted.org/packages/45/06/f955dbbb1859e3bd23c8ac6141af5106e7ad5fedec4a3a6e3d60f94b7001/safetensors-0.8.0.tar.gz",
+    "sourceSHA256": "fabaf3e0f18a6618d9b36560682562157f77c2b71fcffc7b432be2baed9d753d",
+    "noticeFiles": [
+      {
+        "path": "LICENSE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      },
+      {
+        "path": "bindings/python/LICENSE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      },
+      {
+        "path": "safetensors/LICENSE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      }
+    ],
+    "cargoManifests": [
+      {
+        "path": "bindings/python/Cargo.lock",
+        "sha256": "f7d484a57bc394042b3424d57dab0a17d6a343f5e57e30870b9dd72dfb90f6b7"
+      },
+      {
+        "path": "bindings/python/Cargo.toml",
+        "sha256": "9e8f8910c092b4069081b27668ab8826516ebdef236acbc3919ab6f5576fd1f8"
+      },
+      {
+        "path": "safetensors/Cargo.toml",
+        "sha256": "40e01570a0a0d554fab7bce451d6edf135e091a75926366fa756a93b2642e195"
+      }
+    ]
+  },
+  {
+    "name": "scipy",
+    "version": "1.18.1",
+    "sourceURL": "https://files.pythonhosted.org/packages/7e/74/66de6258867beb2ef08f35f9f2ac017a52cacd5081714d239ff1a442d458/scipy-1.18.1.tar.gz",
+    "sourceSHA256": "52c4b7422442aba924d03ad4019852b08a92e64ea187b933135687bfe2747307",
+    "noticeFiles": [
+      {
+        "path": "LICENSE.txt",
+        "sha256": "221e59f5e910fd7f94e44f0dac77436a11338c285c6346232e4a850a50da0e94"
+      },
+      {
+        "path": "LICENSES_bundled.txt",
+        "sha256": "45b1a2cf4eb57277812fcbca2b6af7d84e98c942a5e4dcc360610f49de16c63f"
+      },
+      {
+        "path": "doc/source/_static/scipy-mathjax/LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      {
+        "path": "scipy/_build_utils/tempita/LICENSE.txt",
+        "sha256": "743b0f4a0087fe3607167113fffab6f2ca069c8da321763697ab5d0d8411634a"
+      },
+      {
+        "path": "scipy/_external/packaging_version/src/LICENSE.BSD",
+        "sha256": "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5"
+      },
+      {
+        "path": "scipy/_lib/_uarray/LICENSE",
+        "sha256": "c80c39b5fce06ba4897e14e0b0a88b54458334d951eb1361402ffad2cfb863b4"
+      },
+      {
+        "path": "scipy/fft/_duccfft/LICENSE.md",
+        "sha256": "c254b2b5fd30ae3c89d36ba061730563b9760fca04f1b746a1b2c3157da2c789"
+      },
+      {
+        "path": "scipy/integrate/src/LICENSE_DOP",
+        "sha256": "ed9bf58c6d74d3fad9d92d1d67d9bff8141d8ab60de784516b0711364fd43357"
+      },
+      {
+        "path": "scipy/io/_fast_matrix_market/LICENSE.txt",
+        "sha256": "4421977664ada9a02087ab1b031b50335f02b500e2cb58a1757074f31b4a89f5"
+      },
+      {
+        "path": "scipy/io/_fast_matrix_market/fast_matrix_market/dependencies/fast_float/LICENSE-MIT",
+        "sha256": "e562f3f974ced7e69dd1db77b820b36bcf8f30377f1aa105723fba449c53c4e6"
+      },
+      {
+        "path": "scipy/io/_fast_matrix_market/fast_matrix_market/dependencies/ryu/LICENSE-Boost",
+        "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+      },
+      {
+        "path": "scipy/ndimage/LICENSE.txt",
+        "sha256": "606209a000716c5f66e33e180ce08434b96ed17db4975ab9723c6b5fbcc89609"
+      },
+      {
+        "path": "scipy/optimize/_direct/AUTHORS",
+        "sha256": "b5829d45e21b4934fc0e2da7071298b6047d734470ebcc6d965bf50f0653c899"
+      },
+      {
+        "path": "scipy/optimize/_direct/COPYING",
+        "sha256": "a7669da81aac1b0539f161cf93d6a94956d24ff476537e0b0579925997eec3f0"
+      },
+      {
+        "path": "scipy/optimize/tnc/LICENSE",
+        "sha256": "3df9207af2fdb861af0ae3b22026f163b9bcfab4e525dc4943afe2ffa3f77624"
+      },
+      {
+        "path": "scipy/sparse/linalg/_dsolve/SuperLU/License.txt",
+        "sha256": "f0cedf52503b2d42b83411a0a16e6fefac346dfad8fddc66f50050150123470c"
+      },
+      {
+        "path": "scipy/sparse/linalg/_eigen/arpack/arnaud/ARPACK_LICENSE.txt",
+        "sha256": "53c82c54b92d94ef8c2ffee82e12135c6c3fdf23c3949d7bf6315282b14d6b8b"
+      },
+      {
+        "path": "scipy/sparse/linalg/_eigen/arpack/arnaud/LICENSE",
+        "sha256": "f49da99252dee2c12dbd5c71762b0724063f4531de193fbcece550ad9a3b6354"
+      },
+      {
+        "path": "scipy/sparse/linalg/_propack/PROPACK/LICENSE",
+        "sha256": "f49da99252dee2c12dbd5c71762b0724063f4531de193fbcece550ad9a3b6354"
+      },
+      {
+        "path": "scipy/sparse/linalg/_propack/PROPACK/PROPACK_LICENSE.txt",
+        "sha256": "7f961824c2570a623cb1420269cd4336807776379ac161771aacbecfdcf176c0"
+      },
+      {
+        "path": "scipy/spatial/COPYING_QHULL.txt",
+        "sha256": "106d55c931fd6a84822e5345d900273d059f1c27310d02567ccb313c5d18c55d"
+      },
+      {
+        "path": "scipy/stats/biasedurn/license.txt",
+        "sha256": "c2bf3b1e5a5cde539b9f8e38b5c870f49db0b5f01c7f9cdd1d1291bafc81d22f"
+      },
+      {
+        "path": "subprojects/array_api_compat/array_api_compat/LICENSE",
+        "sha256": "4ffd978e3fa18d058d98c66771cfea7ed634aaf7023cf9612b8b55eee9a8f0fe"
+      },
+      {
+        "path": "subprojects/array_api_extra/LICENSE",
+        "sha256": "58494398fe147fdce76a68b2decd4c08ce3a1ea237b6d6785001c15f822c6ed6"
+      },
+      {
+        "path": "subprojects/boost_math/math/LICENSE",
+        "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+      },
+      {
+        "path": "subprojects/cobyqa/.github/workflows/license.yml",
+        "sha256": "13f8b813fefcb28457fc72c77fb6913dd4ee043d52841b4e21dff70868c77bbd"
+      },
+      {
+        "path": "subprojects/cobyqa/LICENSE",
+        "sha256": "a4d7975be6d6487b7125ce6e79f299a5396b300b1a67e3644a1cf6467b426708"
+      },
+      {
+        "path": "subprojects/cobyqa/doc/source/license.rst",
+        "sha256": "51360f9096b34021dee78d8a34869f3c8d740fda65ea2a9eeda6d477cc8cc61d"
+      },
+      {
+        "path": "subprojects/duccfft/LICENSE.md",
+        "sha256": "c254b2b5fd30ae3c89d36ba061730563b9760fca04f1b746a1b2c3157da2c789"
+      },
+      {
+        "path": "subprojects/highs/AUTHORS",
+        "sha256": "16c676ba3d06c94e99186cee4552cd337238495a6c7bd6a2bacb61a67b94b648"
+      },
+      {
+        "path": "subprojects/highs/LICENSE.txt",
+        "sha256": "10b39dba7b7731175f0705398b6db4320b64add1bd2ed9f9ec5b512a9ef1bd95"
+      },
+      {
+        "path": "subprojects/highs/extern/LICENCE_1_0.txt",
+        "sha256": "8d8291caf1cee26d23acf3eb67c9f9a2d58f1c681b16a4fbe8cbfb9e3c0b5a9b"
+      },
+      {
+        "path": "subprojects/highs/extern/filereaderlp/LICENSE",
+        "sha256": "4374bb8064e5302f5ac6b82fd3e153a36670f04d0a6ee1bc55b3dc3faee923cc"
+      },
+      {
+        "path": "subprojects/highs/extern/pdqsort/license.txt",
+        "sha256": "323fc18e35fcf058d69d684022ef844f206cb8fefb2bac1298fa1767e0b9ae38"
+      },
+      {
+        "path": "subprojects/pyprima/pyprima/LICENCE.txt",
+        "sha256": "997379b2c1bf53a391d2fd3295dce75bf3c94ed28d64882ede30d1b518cb0dd6"
+      },
+      {
+        "path": "subprojects/qhull_r/libqhull_r/COPYING.txt",
+        "sha256": "106d55c931fd6a84822e5345d900273d059f1c27310d02567ccb313c5d18c55d"
+      },
+      {
+        "path": "subprojects/unuran/UNURAN_AUTHORS",
+        "sha256": "58bd3e57256c6da2e838a321a16937a0abad7addd3381e2f02c54414f82fa7a2"
+      },
+      {
+        "path": "subprojects/unuran/license.txt",
+        "sha256": "8d62d5c8e1752ee5c3d3a0f8fd0dd0b45865c243fa282cf5e63f00288a01c5ee"
+      },
+      {
+        "path": "subprojects/xsf/LICENSE",
+        "sha256": "632f86f8bd24a264ac49c002f39866f407a38e8cbd8a6568df7596cc7fbe0048"
+      },
+      {
+        "path": "subprojects/xsf/LICENSES_bundled.txt",
+        "sha256": "e28d89b1e6c248e98d1f02c946f52556e76e8757bec371cf5a67bffe7aa43cac"
+      },
+      {
+        "path": "tools/authors.py",
+        "sha256": "4db7803e3c24b12213295430a5017e4842ec265804c0f37ca5f4729c9ee76f46"
+      }
+    ],
+    "cargoManifests": []
+  },
+  {
+    "name": "sentencepiece",
+    "version": "0.2.2",
+    "sourceURL": "https://files.pythonhosted.org/packages/cc/33/ea3cb3839607eb175da835244a798f797f478c5ddf0e8ecdf57ea85a4c70/sentencepiece-0.2.2.tar.gz",
+    "sourceSHA256": "3d2b5e824b5622038dc7b490897efe05ebbbb9e7350fc142f3ecc8789ef9bdf6",
+    "noticeFiles": [
+      {
+        "path": "sentencepiece/LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      {
+        "path": "sentencepiece/third_party/abseil-cpp/AUTHORS",
+        "sha256": "1fd39030c119b4c97014f59e0ad0ed65f23475bbdf55a52740f31eb82b34b4ee"
+      },
+      {
+        "path": "sentencepiece/third_party/abseil-cpp/LICENSE",
+        "sha256": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747"
+      },
+      {
+        "path": "sentencepiece/third_party/darts_clone/LICENSE",
+        "sha256": "155f59997298ee336602c49f9c1110f268ac394ca2197eb02647a3555935ad52"
+      },
+      {
+        "path": "sentencepiece/third_party/esaxx/LICENSE",
+        "sha256": "7c28553d1d3312d65fe309f76a22ebaf33a3d76c8c1e3b98a88ee4654ecb53db"
+      },
+      {
+        "path": "sentencepiece/third_party/protobuf-lite/LICENSE",
+        "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
+      }
+    ],
+    "cargoManifests": []
+  },
+  {
+    "name": "tokenizers",
+    "version": "0.23.2",
+    "sourceURL": "https://files.pythonhosted.org/packages/18/1e/bc6587c5ab643b2e17776cace9070a2ae73549c86bffac9934a600bf3c31/tokenizers-0.23.2.tar.gz",
+    "sourceSHA256": "7f0f085686b9de0d0079e6f874ae053600db64c5d13049e0bbc0119926d25aac",
+    "noticeFiles": [
+      {
+        "path": "tokenizers/LICENSE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      }
+    ],
+    "cargoManifests": [
+      {
+        "path": "bindings/python/Cargo.lock",
+        "sha256": "b1d180c13b28254858aaf9778e62204ad6ae94531b26421227b0ed5be565d0bf"
+      },
+      {
+        "path": "bindings/python/Cargo.toml",
+        "sha256": "ef7cc464f8c65147c4b77067a961d016f29916d1e94bfd14fe80b03c69ad14dc"
+      },
+      {
+        "path": "tokenizers/Cargo.toml",
+        "sha256": "89a917cebfbbad09833ab156b4e4f265935e565524483736be7cf62fbd85803b"
+      }
+    ]
+  }
+]

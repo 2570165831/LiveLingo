@@ -1,0 +1,6 @@
+{
+  "source": "https://ftp.gnu.org/gnu/gcc/gcc-13.4.0/gcc-13.4.0.tar.xz",
+  "sha256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
+  "bytes": 88530720,
+  "selectionEvidence": "Both installed SciPy 1.18.1 builds report Fortran gcc 13.4.0 in scipy.__config__.CONFIG. This is compiler metadata, not a byte-identical rebuild proof."
+}

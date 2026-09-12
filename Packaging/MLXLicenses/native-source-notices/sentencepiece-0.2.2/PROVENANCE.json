@@ -1,0 +1,33 @@
+{
+  "name": "sentencepiece",
+  "version": "0.2.2",
+  "sourceURL": "https://files.pythonhosted.org/packages/cc/33/ea3cb3839607eb175da835244a798f797f478c5ddf0e8ecdf57ea85a4c70/sentencepiece-0.2.2.tar.gz",
+  "sourceSHA256": "3d2b5e824b5622038dc7b490897efe05ebbbb9e7350fc142f3ecc8789ef9bdf6",
+  "noticeFiles": [
+    {
+      "path": "sentencepiece/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "sentencepiece/third_party/abseil-cpp/AUTHORS",
+      "sha256": "1fd39030c119b4c97014f59e0ad0ed65f23475bbdf55a52740f31eb82b34b4ee"
+    },
+    {
+      "path": "sentencepiece/third_party/abseil-cpp/LICENSE",
+      "sha256": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747"
+    },
+    {
+      "path": "sentencepiece/third_party/darts_clone/LICENSE",
+      "sha256": "155f59997298ee336602c49f9c1110f268ac394ca2197eb02647a3555935ad52"
+    },
+    {
+      "path": "sentencepiece/third_party/esaxx/LICENSE",
+      "sha256": "7c28553d1d3312d65fe309f76a22ebaf33a3d76c8c1e3b98a88ee4654ecb53db"
+    },
+    {
+      "path": "sentencepiece/third_party/protobuf-lite/LICENSE",
+      "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
+    }
+  ],
+  "cargoManifests": []
+}

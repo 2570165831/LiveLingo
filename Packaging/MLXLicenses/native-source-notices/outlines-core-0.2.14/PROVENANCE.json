@@ -1,0 +1,22 @@
+{
+  "name": "outlines-core",
+  "version": "0.2.14",
+  "sourceURL": "https://files.pythonhosted.org/packages/6a/04/4a0812eb27c086cfd2e66e7ec9150f33e105912a9b7f8b335e3479f03a06/outlines_core-0.2.14.tar.gz",
+  "sourceSHA256": "64808deed1591ca3029ff64346ceb974cd5d780c916ea82504951fe83523039e",
+  "noticeFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "f71078ee8aaa3d5670488756f1993b9de3ae64c9546a0232ebbbdd595c5375d7"
+    }
+  ],
+  "cargoManifests": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "e354efc9b64e8b80462662428d3adc1273e9ece5474ce949512d0f2bd875dcf7"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "bad616adab1842f9af9d21b350aa97cc19e852de876ff8998fa2b37e189ff890"
+    }
+  ]
+}
