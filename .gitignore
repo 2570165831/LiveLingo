@@ -1,0 +1,62 @@
+# macOS and Xcode user state
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
+# Build products and caches
+work/
+outputs/
+DerivedData/
+**/DerivedData/
+ModuleCache/
+**/ModuleCache/
+*.app/
+*.xcarchive/
+*.xcresult/
+*.dSYM/
+*.dSYM.zip
+*.pkg
+*.dmg
+*.zip
+*.log
+*.profdata
+*.profraw
+*.xcent
+*.cms
+*.der
+*.sig
+
+# LiveLingo recordings and exported session data
+LiveLingo 20??-??-?? ??.??.??/
+*.wav
+*.aiff
+*.aif
+*.m4a
+**/recording.wav
+**/transcript-en.txt
+**/transcript-zh-Hans.txt
+**/bilingual.jsonl
+**/bilingual.srt
+**/manifest.json
+**/summary-zh-Hans.md
+**/summary-before-review.md
+**/summary-review.md
+*.ndjson
+
+# Credentials and signing material
+.env
+.env.*
+!.env.example
+*.cer
+*.crt
+*.csr
+*.p12
+*.pfx
+*.pem
+*.key
+*.mobileprovision
+*.provisionprofile
+
+# Python caches
+__pycache__/
+*.py[cod]

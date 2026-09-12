@@ -1,0 +1,20 @@
+[
+  {
+    "file": "Qwen3.5-4B-LICENSE",
+    "url": "https://huggingface.co/Qwen/Qwen3.5-4B/raw/main/LICENSE",
+    "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a"
+  },
+  {
+    "file": "Qwen3.5-9B-LICENSE",
+    "url": "https://huggingface.co/Qwen/Qwen3.5-9B/raw/main/LICENSE",
+    "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a"
+  },
+  {
+    "file": "Qwen3.5-9B-MLX-4bit-README.md",
+    "url": "https://huggingface.co/lmstudio-community/Qwen3.5-9B-MLX-4bit/raw/main/README.md",
+    "revision": "b455506b0f574c74616dbcd56879bde38fafcff3",
+    "sha256": "5948f5b78cc6855de90557f8ac6106d6bfc2c88e458e8b500bce735b94c82bb4"
+  }
+]

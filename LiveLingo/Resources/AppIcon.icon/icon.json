@@ -1,0 +1,68 @@
+{
+  "fill-specializations": [
+    {
+      "value": {
+        "solid": "srgb:0.80,0.84,0.78,1"
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "solid": "srgb:0.09,0.16,0.16,1"
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "Glass Emblem",
+      "layers": [
+        {
+          "image-name": "liquid-emblem.png",
+          "name": "Emblem",
+          "glass": true,
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "srgb:0.43,0.67,0.57,1",
+                  "srgb:0.28,0.48,0.41,1"
+                ]
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "linear-gradient": [
+                  "srgb:0.44,0.69,0.63,1",
+                  "srgb:0.23,0.48,0.45,1"
+                ]
+              }
+            }
+          ],
+          "position": {
+            "scale": 0.7,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.35
+      },
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.35
+      },
+      "lighting": "individual"
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}

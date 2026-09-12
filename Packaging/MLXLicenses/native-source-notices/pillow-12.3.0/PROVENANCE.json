@@ -1,0 +1,37 @@
+{
+  "name": "pillow",
+  "version": "12.3.0",
+  "sourceURL": "https://files.pythonhosted.org/packages/1c/3d/bb7fca845737cf9d7dbde16ed1843984665ff2e0a518f5db43e77ec540b9/pillow-12.3.0.tar.gz",
+  "sourceSHA256": "3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce",
+  "noticeFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "15181e7363dca9aed78b79bebebc7fde7f1814b8bd311ea3b87ae8ccadfc185b"
+    },
+    {
+      "path": "Tests/fonts/DejaVuSans/LICENSE.txt",
+      "sha256": "ba4aee7ef5b2ebc285e76df2497953d8a6e7480bc249f4e0a55f1199a3396622"
+    },
+    {
+      "path": "Tests/fonts/LICENSE.txt",
+      "sha256": "b79f6f6a2fc060b2e0a6e7a6946c446ae199bec07b92a3df1295975e25c4d96b"
+    },
+    {
+      "path": "Tests/icc/LICENSE.txt",
+      "sha256": "09e62757edb34e284bc11c54e3429b438d9db37f46c9cb36bd57b1b25ae36184"
+    },
+    {
+      "path": "docs/COPYING",
+      "sha256": "d44ce2bbf81806be0eb34ec0ecb0cb013ccd56a94057daf214fb7381adde8f0c"
+    },
+    {
+      "path": "src/thirdparty/raqm/AUTHORS",
+      "sha256": "e81eb8c13d248620f229af26700a5d8c928bac0fd971cae6e76e2f88228ea9e2"
+    },
+    {
+      "path": "src/thirdparty/raqm/COPYING",
+      "sha256": "4a574f631d5aee5223d108d3f7ec4f717343685d8a8904f42591be72c907ecba"
+    }
+  ],
+  "cargoManifests": []
+}
