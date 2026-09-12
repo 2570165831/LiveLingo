@@ -1,0 +1,203 @@
+2025-06-05  Release Manager
+
+	* GCC 13.4.0 released.
+
+2025-05-23  Jakub Jelinek  <jakub@redhat.com>
+
+	Backported from master:
+	2025-05-13  Jakub Jelinek  <jakub@redhat.com>
+
+	PR libfortran/120196
+	* m4/ifindloc2.m4 (header1, header2): For back use i > 0 rather than
+	i >= 0 as for condition.
+	* generated/findloc2_s1.c: Regenerate.
+	* generated/findloc2_s4.c: Regenerate.
+
+2025-05-23  Jakub Jelinek  <jakub@redhat.com>
+
+	Backported from master:
+	2025-05-13  Jakub Jelinek  <jakub@redhat.com>
+
+	PR fortran/120191
+	* m4/ifunction-s.m4 (SCALAR_ARRAY_FUNCTION): Don't multiply
+	GFC_DESCRIPTOR_EXTENT(array,) by string_len.
+	* generated/maxloc1_4_s1.c: Regenerate.
+	* generated/maxloc1_4_s4.c: Regenerate.
+	* generated/maxloc1_8_s1.c: Regenerate.
+	* generated/maxloc1_8_s4.c: Regenerate.
+	* generated/maxloc1_16_s1.c: Regenerate.
+	* generated/maxloc1_16_s4.c: Regenerate.
+	* generated/minloc1_4_s1.c: Regenerate.
+	* generated/minloc1_4_s4.c: Regenerate.
+	* generated/minloc1_8_s1.c: Regenerate.
+	* generated/minloc1_8_s4.c: Regenerate.
+	* generated/minloc1_16_s1.c: Regenerate.
+	* generated/minloc1_16_s4.c: Regenerate.
+
+2025-05-23  Jakub Jelinek  <jakub@redhat.com>
+
+	Backported from master:
+	2025-05-13  Jakub Jelinek  <jakub@redhat.com>
+
+	PR fortran/120191
+	* m4/maxloc2s.m4: For smaxloc2 call maxloc2 if mask is NULL or *mask.
+	Swap back and len arguments.
+	* m4/minloc2s.m4: Likewise.
+	* generated/maxloc2_4_s1.c: Regenerate.
+	* generated/maxloc2_4_s4.c: Regenerate.
+	* generated/maxloc2_8_s1.c: Regenerate.
+	* generated/maxloc2_8_s4.c: Regenerate.
+	* generated/maxloc2_16_s1.c: Regenerate.
+	* generated/maxloc2_16_s4.c: Regenerate.
+	* generated/minloc2_4_s1.c: Regenerate.
+	* generated/minloc2_4_s4.c: Regenerate.
+	* generated/minloc2_8_s1.c: Regenerate.
+	* generated/minloc2_8_s4.c: Regenerate.
+	* generated/minloc2_16_s1.c: Regenerate.
+	* generated/minloc2_16_s4.c: Regenerate.
+
+2024-05-21  Release Manager
+
+	* GCC 13.3.0 released.
+
+2024-04-22  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	PR libfortran/114304
+	PR libfortran/105473
+	* io/list_read.c (eat_separator): Add logic to handle spaces
+	preceding a comma or semicolon such that that a 'null' read
+	occurs without error at the end of comma or semicolon
+	terminated input lines. Add check and error message for ';'.
+	Accept tab as alternative to space.
+	(list_formatted_read_scalar): Treat comma as a decimal point
+	when specified by the decimal mode on the first item.
+
+2024-03-11  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	Backported from master:
+	2024-03-11  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	PR libfortran/105437
+	PR libfortran/114304
+	* io/list_read.c (eat_separator): Remove check for decimal
+	point mode and semicolon used as a seprator. Removes
+	the regression.
+
+2024-03-08  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	Backported from master:
+	2024-02-17  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	PR libfortran/105473
+	* io/list_read.c (eat_separator): Reject comma as a
+	separator when it is being used as a decimal point.
+	(parse_real): Reject a '.' when it should be a comma.
+	(read_real): Likewise.
+	* io/read.c (read_f): Add more checks for ',' and '.'
+	conditions.
+
+2024-02-13  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	Backported from master:
+	2024-02-12  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	* io/transfer.c (formatted_transfer_scalar_write): Adjust
+	bytes_used and pos variable for stream access.
+
+2024-02-13  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	Backported from master:
+	2024-02-03  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	PR libfortran/111022
+	* io/format.c (get_fnode): Update initialization of fnode.
+	(parse_format_list): Initialization.
+	* io/format.h (struct fnode): Added the new 'pushed' component.
+	* io/write.c (select_buffer): Whitespace.
+	(write_real): Whitespace.
+	(write_real_w0): Adjust logic for the d == 0 condition.
+	* io/write_float.def (determine_precision): Whitespace.
+	(build_float_string): Calculate width of ..E0 exponents and
+	adjust logic accordingly.
+	(build_infnan_string): Whitespace.
+	(CALCULATE_EXP): Whitespace.
+	(quadmath_snprintf): Whitespace.
+	(determine_en_precision): Whitespace.
+
+2024-02-11  Francois-Xavier Coudert  <fxcoudert@gcc.gnu.org>
+
+	PR libfortran/110651
+	* libgfortran.spec.in: Remove duplicate libraries.
+
+2024-01-13  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	Backported from master:
+	2024-01-07  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	* io/write.c (namelist_write): If internal_unit precede with space.
+
+2023-07-27  Release Manager
+
+	* GCC 13.2.0 released.
+
+2023-04-26  Release Manager
+
+	* GCC 13.1.0 released.
+
+2023-02-28  Jerry DeLisle  <jvdelisle@gcc.gnu.org>
+
+	* generated/pack_c10.c (pack_c10): Regenerated.
+	* generated/pack_c16.c (pack_c16): Regenerated.
+	* generated/pack_c17.c (pack_c17): Regenerated.
+	* generated/pack_c4.c (pack_c4): Regenerated.
+	* generated/pack_c8.c (pack_c8): Regenerated.
+	* generated/pack_i1.c (pack_i1): Regenerated.
+	* generated/pack_i16.c (pack_i16): Regenerated.
+	* generated/pack_i2.c (pack_i2): Regenerated.
+	* generated/pack_i4.c (pack_i4): Regenerated.
+	* generated/pack_i8.c (pack_i8): Regenerated.
+	* generated/pack_r10.c (pack_r10): Regenerated.
+	* generated/pack_r16.c (pack_r16): Regenerated.
+	* generated/pack_r17.c (pack_r17): Regenerated.
+	* generated/pack_r4.c (pack_r4): Regenerated.
+	* generated/pack_r8.c (pack_r8): Regenerated.
+	* generated/spread_c10.c (spread_c10): Regenerated.
+	* generated/spread_c16.c (spread_c16): Regenerated.
+	* generated/spread_c17.c (spread_c17): Regenerated.
+	* generated/spread_c4.c (spread_c4): Regenerated.
+	* generated/spread_c8.c (spread_c8): Regenerated.
+	* generated/spread_i1.c (spread_i1): Regenerated.
+	* generated/spread_i16.c (spread_i16): Regenerated.
+	* generated/spread_i2.c (spread_i2): Regenerated.
+	* generated/spread_i4.c (spread_i4): Regenerated.
+	* generated/spread_i8.c (spread_i8): Regenerated.
+	* generated/spread_r10.c (spread_r10): Regenerated.
+	* generated/spread_r16.c (spread_r16): Regenerated.
+	* generated/spread_r17.c (spread_r17): Regenerated.
+	* generated/spread_r4.c (spread_r4): Regenerated.
+	* generated/spread_r8.c (spread_r8): Regenerated.
+	* intrinsics/execute_command_line.c (execute_command_line_i4),
+	(execute_command_line_i8): Set estat_initial to zero.
+	* intrinsics/pack_generic.c (pack_internal): Set sstride[0] and
+	mstride[0] to zero.
+	* intrinsics/spread_generic.c (spread_internal): Set sstride[0].
+	* m4/pack.m4: Set sstride[0] and mstride[0].
+	* m4/spread.m4: Set sstride[0].
+
+2023-01-18  Tobias Burnus  <tobias@codesourcery.com>
+
+	* intrinsics/execute_command_line.c (execute_command_line): On
+	Windows, regard system()'s return value of 9009 as EXEC_INVALIDCOMMAND.
+
+2023-01-07  LIU Hao  <lh_mouse@126.com>
+
+	PR middle-end/108300
+	* intrinsics/sleep.c: Define `WIN32_LEAN_AND_MEAN` before
+	<windows.h>.
+
+
+Copyright (C) 2023 Free Software Foundation, Inc.
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.

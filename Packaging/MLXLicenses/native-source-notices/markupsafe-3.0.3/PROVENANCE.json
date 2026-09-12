@@ -1,0 +1,17 @@
+{
+  "name": "markupsafe",
+  "version": "3.0.3",
+  "sourceURL": "https://files.pythonhosted.org/packages/7e/99/7690b6d4034fffd95959cbe0c02de8deb3098cc577c67bb6a24fe5d7caa7/markupsafe-3.0.3.tar.gz",
+  "sourceSHA256": "722695808f4b6457b320fdc131280796bdceb04ab50fe1795cd540799ebe1698",
+  "noticeFiles": [
+    {
+      "path": "LICENSE.txt",
+      "sha256": "489a8e1108509ed98a37bb983e11e0f7e1d31f0bd8f99a79c8448e7ff37d07ea"
+    },
+    {
+      "path": "docs/license.rst",
+      "sha256": "6fc7e80b75b5999783a328d90976a2585e0956c4a348c3c888453938ceca742d"
+    }
+  ],
+  "cargoManifests": []
+}

@@ -1,8 +1,17 @@
 #!/bin/zsh
+# LEGACY developer/rollback helper: install the loopback ASR service as a
+# per-user LaunchAgent. The current MLX candidate ships and starts its own
+# bundled ASRRuntime and does not need this script; it is kept for local
+# development and for rolling back to the older development layout.
+#
+# The Python environment is never guessed: set
+#   LIVELINGO_QWEN_PYTHON_ENV=/absolute/path/to/python-env
+# to a complete environment with mlx-audio installed.
 set -euo pipefail
 
 script_dir="${0:A:h}"
-user_root="/Users/li"
+current_user="$(/usr/bin/id -un)"
+user_root="${HOME:-$(/usr/bin/dscl . -read "/Users/${current_user}" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')}"
 label="com.jianhongli.LiveLingoASR"
 launch_agents_dir="${user_root}/Library/LaunchAgents"
 log_dir="${user_root}/Library/Logs/LiveLingo"
@@ -10,11 +19,22 @@ service_dir="${user_root}/Library/Application Support/LiveLingo/ASRService"
 plist_path="${launch_agents_dir}/${label}.plist"
 source_runner_path="${script_dir}/run-qwen-service.sh"
 source_service_path="${script_dir}/qwen_asr_service.py"
-source_python_env="/Users/li/Documents/Codex/2026-09-01/live-lingo-specialist/work/asr-venv"
+source_python_env="${LIVELINGO_QWEN_PYTHON_ENV:-}"
 runner_path="${service_dir}/run-qwen-service.sh"
-user_id="$(/usr/bin/id -u li)"
+user_id="$(/usr/bin/id -u)"
 service_domain="gui/${user_id}"
 service_target="${service_domain}/${label}"
+
+if [[ -z "${user_root}" ]]; then
+  print -u2 "Cannot determine the current user's home directory; set HOME before running this script."
+  exit 1
+fi
+
+if [[ -z "${source_python_env}" ]]; then
+  print -u2 "Set LIVELINGO_QWEN_PYTHON_ENV=/absolute/path/to/python-env (a complete Python environment with mlx-audio installed)."
+  print -u2 "This script does not fall back to a developer-specific or home-directory environment."
+  exit 1
+fi
 
 if [[ ! -x "${source_runner_path}" ]]; then
   print -u2 "ASR service runner is missing or not executable: ${source_runner_path}"
@@ -44,7 +64,7 @@ trap '/bin/rm -f -- "${temporary_plist}"' EXIT
 /usr/bin/plutil -insert RunAtLoad -bool true "${temporary_plist}"
 /usr/bin/plutil -insert KeepAlive -bool true "${temporary_plist}"
 /usr/bin/plutil -insert ThrottleInterval -integer 5 "${temporary_plist}"
-/usr/bin/plutil -insert ProcessType -string Background "${temporary_plist}"
+/usr/bin/plutil -insert ProcessType -string Interactive "${temporary_plist}"
 /usr/bin/plutil -insert StandardOutPath -string "${log_dir}/asr.log" "${temporary_plist}"
 /usr/bin/plutil -insert StandardErrorPath -string "${log_dir}/asr-error.log" "${temporary_plist}"
 /usr/bin/plutil -lint "${temporary_plist}"

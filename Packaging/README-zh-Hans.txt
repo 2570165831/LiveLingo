@@ -1,43 +1,21 @@
-LiveLingo 全离线安装包（Apple Silicon）
-========================================
-
-这份安装包包含：
-- LiveLingo.app
-- Parakeet TDT 0.6B v2（主转写）
-- Qwen3-ASR 1.7B 4-bit（异常回退转写）
-- Qwen3.5 4B MLX 8-bit（省电翻译）
-- Qwen3.5 9B MLX 4-bit（高质量翻译，关闭思考）
-- 便携 Python/MLX ASR 运行环境
-- 官方未改动的 LM Studio 0.4.23-1 Apple Silicon 安装镜像
-
-要求
-----
-- Apple Silicon Mac
-- macOS 27.0 或更高版本
-- 至少 20 GB 可用磁盘空间
-- 16 GB 统一内存可以使用；长时间离电建议选“省电”（Parakeet + 4B），
-  接电或更重视质量时选“高质量”（Parakeet + 9B）。模型按需加载，不会同时常驻。
+LiveLingo 离线版 — Apple 芯片，macOS 14 及以上
 
 安装
-----
-1. 双击“验证安装包.command”，等待全部项目显示 OK。
-2. 双击“安装 LiveLingo.command”。脚本会再次校验后再改动本机。
-3. 安装脚本会备份已有 LiveLingo 与 ASR 服务。已有同名模型若内容不同，
-   安装会停止，不会覆盖。
-4. 首次使用麦克风时允许麦克风权限；首次使用“系统音频（内录）”时允许
-   屏幕与系统音频录制权限。LiveLingo 只读取系统音频，不保存画面。
+1. 将 LiveLingo.app 拖到旁边的 Applications 文件夹。
+   如果已安装旧版，请先退出 LiveLingo，再替换应用。
+2. 复制完成后推出磁盘映像，从“应用程序”打开 LiveLingo。
+3. 按系统提示授予麦克风或系统音频录制权限。
 
-运行方式
---------
-- LM Studio 服务只监听 127.0.0.1:1234；翻译模型由 LiveLingo 按模式自动加载。
-- ASR 服务只监听 127.0.0.1:18765。
-- “实时”仍会写临时录音，停止时删除临时文件并清空历史；暂停不会清空。
-- 实时过程中点“转为录音”并选择目录，停止后会把完整会话移入该目录。
+首次启动无需安装 Python、LM Studio 或下载模型。
+转写、翻译、笔记和复查所需的运行环境与模型均已包含在 App 中，可以离线使用。
+首次打开时，macOS 可能询问是否打开从互联网下载的应用。
 
-安全与分发边界
---------------
-- LiveLingo 使用 Developer ID 签名和 hardened runtime，但本次个人离线包未做
-  Apple 公证。若另一台 Mac 的 Gatekeeper 阻止首次打开，请在 Finder 中右键
-  LiveLingo 选择“打开”；不要关闭系统安全功能。
-- 内含 LM Studio 官方原始安装镜像，只供本人设备离线迁移；不要公开再分发。
-- 第三方模型和运行库的来源与许可证见 THIRD_PARTY_NOTICES.md。
+数据
+录音与导出文件保存在你选择的目录中。
+替换 App 不会删除已保存的录音和笔记。
+卸载时将 LiveLingo.app 移到废纸篓即可；已保存的录音与导出文件会保留。
+
+许可证
+在 Finder 中右键点按 LiveLingo.app，选择“显示包内容”，打开 Contents/Resources。
+LICENSE 与 THIRD_PARTY_NOTICES.md 包含本应用及第三方组件的许可说明；
+运行库和模型的详细许可证保留在 LanguageRuntime、ASRRuntime 和 Models 目录中。

@@ -1,0 +1,22 @@
+{
+  "name": "pydantic-core",
+  "version": "2.46.5",
+  "sourceURL": "https://files.pythonhosted.org/packages/af/f9/8a06bea35ef8daf588f707784c973a7046e0034c8d8cfb08828eeffb8b75/pydantic_core-2.46.5.tar.gz",
+  "sourceSHA256": "10416c15b8839ecc4ef4d0885da76da6fd0f67333a0eb8aff6d93c4b8f2910fc",
+  "noticeFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "2afdd30d54b4d62b6f488a6bcc1546e84ec5061f13f4209c03d012348783795a"
+    }
+  ],
+  "cargoManifests": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "5f04266831ef75fbb5eeb0acd509b85a15f6ebc8a690eed4d7fd191fd11ec108"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "178d537feb822d845526eeac2438f817cf25ad15d15fe1261b81b9b3452edbb3"
+    }
+  ]
+}

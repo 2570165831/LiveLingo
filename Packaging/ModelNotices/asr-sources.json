@@ -1,0 +1,27 @@
+[
+  {
+    "file": "CC-BY-4.0.txt",
+    "url": "https://raw.githubusercontent.com/creativecommons/cc-legal-tools-data/main/docs/licenses/by/4.0/legalcode.txt",
+    "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411"
+  },
+  {
+    "file": "Qwen3-ASR-1.7B-LICENSE",
+    "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  {
+    "file": "Qwen3-ASR-1.7B-original-README.md",
+    "url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/raw/main/README.md",
+    "sha256": "5058416891bc47a2051557765997e8c42f8eb78a0e33c3e775bd17d4b0ba4d50"
+  },
+  {
+    "file": "Qwen3-ASR-1.7B-4bit-README.md",
+    "url": "https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-4bit/raw/main/README.md",
+    "sha256": "4d7f16d0a01cd626a3d5291b77249f135eeedd9b1b259d17716cc6b3ef7365cb"
+  },
+  {
+    "file": "Parakeet-tdt-0.6b-v2-original-README.md",
+    "url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2/raw/main/README.md",
+    "sha256": "e2d10f955eb14a871092de134d2e82a59f494f001a181111fb95c74805763c65"
+  }
+]

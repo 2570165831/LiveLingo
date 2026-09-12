@@ -23,6 +23,10 @@ entitlements="${project_root}/LiveLingo/Resources/LiveLingo.entitlements"
   build
 
 if [[ -z "${LIVELINGO_SIGN_IDENTITY:-}" ]]; then
+  if [[ -n "${LIVELINGO_CERTIFICATE_PATH:-}" || -n "${LIVELINGO_KEYCHAIN_PATH:-}" ]]; then
+    echo "LIVELINGO_SIGN_IDENTITY is required when signing material is supplied; refusing to fall back to an unsigned build." >&2
+    exit 1
+  fi
   echo "Unsigned Release build: ${product}"
   echo "Set LIVELINGO_SIGN_IDENTITY, LIVELINGO_CERTIFICATE_PATH, and LIVELINGO_KEYCHAIN_PATH to create a Developer ID-signed build."
   exit 0

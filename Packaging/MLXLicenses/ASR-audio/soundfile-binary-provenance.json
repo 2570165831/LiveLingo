@@ -1,0 +1,6 @@
+{
+  "source": "https://raw.githubusercontent.com/bastibe/libsndfile-binaries/a3e6f9769d0c7e91d2d036cf0fdbe5b4bbf18b87/libsndfile_arm64.dylib",
+  "upstreamSHA256": "e9fd4d76bc457dcfb956617e8d467df85087ce069747fccd78e1e702d8629c14",
+  "localSHA256": "e9fd4d76bc457dcfb956617e8d467df85087ce069747fccd78e1e702d8629c14",
+  "exactMatch": true
+}

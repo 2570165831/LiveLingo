@@ -1,0 +1,238 @@
+{
+  "name": "numpy",
+  "version": "2.5.3",
+  "sourceURL": "https://files.pythonhosted.org/packages/13/01/11703282db468b85f6f7b8c7f22d058de5970d5c7e60a3a8aaa313c3de36/numpy-2.5.3.tar.gz",
+  "sourceSHA256": "df2d5874ff183595a4ba404edd04f6bd9b5505c1d7708573f6a6c17489a67563",
+  "noticeFiles": [
+    {
+      "path": ".spin/LICENSE",
+      "sha256": "990e6a6dbaee82e655163c3d2a51d1002471e5c0964da4881bc193eaa6a8ee3b"
+    },
+    {
+      "path": "LICENSE.txt",
+      "sha256": "1be1df33863f97a7bc1c4d67980bd6c69c9a6fef0a5ee76e6ad6cb91e56e8491"
+    },
+    {
+      "path": "doc/source/_static/scipy-mathjax/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "doc/source/license.rst",
+      "sha256": "563953e4bf6aba42f430420da7494dce2747f60d56e82ca165e24dfaf766d256"
+    },
+    {
+      "path": "numpy/_build_utils/tempita/LICENSE.txt",
+      "sha256": "743b0f4a0087fe3607167113fffab6f2ca069c8da321763697ab5d0d8411634a"
+    },
+    {
+      "path": "numpy/_core/include/numpy/libdivide/LICENSE.txt",
+      "sha256": "fbc539f47d0cf83bc61378080fb873d5c14630126cacbfe754035c3926daa5ec"
+    },
+    {
+      "path": "numpy/_core/src/common/pythoncapi-compat/COPYING",
+      "sha256": "3f2c1ffa76383a55ae0aac01c9737cd70050dff63e1f026694fbe9d662573c98"
+    },
+    {
+      "path": "numpy/_core/src/highway/LICENSE",
+      "sha256": "e340270d4f64384569a91d546acb5b094d69ce47f0c015db77abb74dc6f815af"
+    },
+    {
+      "path": "numpy/_core/src/highway/debian/copyright",
+      "sha256": "6e4ecf1cae052b678ea3178dd4b3652d581ee66a82d58db8800dd7d80dd6de76"
+    },
+    {
+      "path": "numpy/_core/src/multiarray/dragon4_LICENSE.txt",
+      "sha256": "f7b14309e5f54e5022b26448eefd419988ada2aec01d3c1162d84a0ea8f21f2c"
+    },
+    {
+      "path": "numpy/_core/src/npysort/x86-simd-sort/LICENSE.md",
+      "sha256": "211e7d737d6179a08f791ebb0a99897ce7cd2457410c542876d125576edfe910"
+    },
+    {
+      "path": "numpy/_core/src/umath/svml/LICENSE",
+      "sha256": "c17011467b4fe6e20fbfbeda4df09e58c2bca5480a063e55735a4000a379aad9"
+    },
+    {
+      "path": "numpy/fft/pocketfft/LICENSE.md",
+      "sha256": "a85ca13fdf90160b64a0698215868c13b74d835ad0a4e2ba44713b8c5058a056"
+    },
+    {
+      "path": "numpy/linalg/lapack_lite/LICENSE.txt",
+      "sha256": "a14cc25e10d40a3aa705b7de2fb764a6535d8ee9b2db4e1724900585457dfd55"
+    },
+    {
+      "path": "numpy/ma/LICENSE",
+      "sha256": "05f3b88351988ecfad10abe92c0c50e5875c6452d5009a0084cc291551ffcca6"
+    },
+    {
+      "path": "numpy/random/LICENSE.md",
+      "sha256": "103166b62b80443afb9eb3488e052ea06be0cff566b908f199e561fde49af19f"
+    },
+    {
+      "path": "numpy/random/src/distributions/LICENSE.md",
+      "sha256": "469778be8f33d54e1bcaab28c281cc472916d2d273f835e55bc487d30503face"
+    },
+    {
+      "path": "numpy/random/src/mt19937/LICENSE.md",
+      "sha256": "0e111337b25494a773106695f0e799f642b8567aaacca4f116a74a8177179156"
+    },
+    {
+      "path": "numpy/random/src/pcg64/LICENSE.md",
+      "sha256": "e7d4f4fb20358f314210a892ae17351e04993813646f697ec387385ca2a36918"
+    },
+    {
+      "path": "numpy/random/src/philox/LICENSE.md",
+      "sha256": "6f5828a57223d4cc7f8ea505a2623e7b978b242752c1515e355f46ba2cec1800"
+    },
+    {
+      "path": "numpy/random/src/sfc64/LICENSE.md",
+      "sha256": "9d4098846018319cd68e228ee6220361787f73bccbf00237a85e4fc9621b998f"
+    },
+    {
+      "path": "numpy/random/src/splitmix64/LICENSE.md",
+      "sha256": "268b0ca06759d31ea3ca68dd35f20e877916e927b1c2a835e4592a3c4354b1f9"
+    },
+    {
+      "path": "vendored-meson/meson/COPYING",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "vendored-meson/meson/docs/theme/extra/templates/license.html",
+      "sha256": "15fcbcade0003df4b37350f12bea7dfeb25d4d2ac9e99d12d893773c4d5359fd"
+    },
+    {
+      "path": "vendored-meson/meson/packaging/License.rtf",
+      "sha256": "e3e8d7b15b2021c994047314ad0ac5e367561f64771a60a85a9c0952d8cd4c3a"
+    },
+    {
+      "path": "vendored-meson/meson/packaging/macpages/English.lproj/license.html",
+      "sha256": "bca11d525505d21cdfb021e634b0f1d48ece827f9bedcf8cd41356c48a09be24"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/common/42 subproject/mylicense.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/common/42 subproject/subprojects/sublib/sublicense1.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/common/42 subproject/subprojects/sublib/sublicense2.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "cargoManifests": [
+    {
+      "path": "vendored-meson/meson/test cases/failing/135 cargo toml error/subprojects/foo-0-rs/Cargo.toml",
+      "sha256": "450080b234d868a0388b5b2304faa2f60f8a43d7aca02e989f44823b7aa2743e"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/bar-0.1-rs/Cargo.toml",
+      "sha256": "53f37f5a7deec2797d1a4ff46f7b791f0743a96d345157c03673c4fb78877351"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/common-0-rs/Cargo.toml",
+      "sha256": "08104e51fcf437e418fbed4d5a1fc86c5a1cb45b86c11d15af0eda456924a839"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/foo-0-rs/Cargo.toml",
+      "sha256": "22a8f21c108d05dd448302559d0d5ccde31a3b8c3189a5e62d2bae6a95e816fd"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/libname-1-rs/Cargo.toml",
+      "sha256": "89e3ece9ebc731aa576e54ff6b2397a4f6fef2f5e16b3a874b7a0af8146e0b11"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/22 cargo subproject/subprojects/unixdep-0.1-rs/Cargo.toml",
+      "sha256": "17b4564374c29c4846c57f08125110c1921d9fccc9df254102018137e86d6270"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/25 cargo lock/Cargo.lock",
+      "sha256": "c5990ac679b7b44013cb75518ced8d62bcb03c5aa990fdcfffebc1b7958cc482"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/26 cargo system deps/subprojects/sub-1-rs/Cargo.toml",
+      "sha256": "d66e05199f4e679a966685c6fc4bd7b32a373afe0fe24947bc1d3b64bf0839dd"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/32 rust.workspace package/Cargo.lock",
+      "sha256": "3cd761854b74f0cc709366459b5975ed798b5a0c1263a6fe1c66d917127f0d0a"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/32 rust.workspace package/Cargo.toml",
+      "sha256": "32bee30fc6b40aa65590b6f9649be4181823e7bd41a1b54f6482a26ed9c73935"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/32 rust.workspace package/subprojects/answer-2.1/Cargo.toml",
+      "sha256": "0f9f076f5faf048e17671129f02d0ed00d64c7bc6a1e4ca765a8e388875d45aa"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/32 rust.workspace package/subprojects/hello-1.0/Cargo.toml",
+      "sha256": "f728a07307d7843fcef9f0e0f28b0e4bfc6a213f5553af7aac4b82b96143f302"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/33 cargo workspace/subprojects/foo/Cargo.toml",
+      "sha256": "9bad7c946266b0fd6b85fbaefae3f8d4e701a97e07c49a904b5660a31b5f7278"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/33 cargo workspace/subprojects/foo/src/foo/Cargo.toml",
+      "sha256": "c8820354b5a00e30ad80dfa8754cab60268b2fe58defdb43f4a84113d5d82146"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/33 cargo workspace/subprojects/foo/src/member1/Cargo.toml",
+      "sha256": "7ed6e0d12e1b7abb595f68b16c293e075993f503e465923f7834be19086d051a"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/33 cargo workspace/subprojects/foo/subprojects/member2-1.0/Cargo.toml",
+      "sha256": "433e7ee9892e284d85af40cc9a598888fa3375a6713ad36f90767dc2d99e688e"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/Cargo.lock",
+      "sha256": "3c1e85b8882168608aaa24cb5615698ae51516a6fd501cf6692f09631369ecda"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/Cargo.toml",
+      "sha256": "5b02687f3d615c731e08ae45c95a2fba47f0598c0200daef026a9eefe518f8ef"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/more/Cargo.toml",
+      "sha256": "832856723f6fb97c5dc06f2e503c3d8c390197ff8802ca45966243809cc567f6"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/subprojects/answer-2.1/Cargo.toml",
+      "sha256": "0f9f076f5faf048e17671129f02d0ed00d64c7bc6a1e4ca765a8e388875d45aa"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/34 rust.workspace workspace/subprojects/hello-1.0/Cargo.toml",
+      "sha256": "f728a07307d7843fcef9f0e0f28b0e4bfc6a213f5553af7aac4b82b96143f302"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/35 cargo multiple versions/subprojects/foo-1-rs/Cargo.toml",
+      "sha256": "625aef5afb922b14e39f792df562cb3aef80e17102b330ae1e5b053881e9f8fc"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/35 cargo multiple versions/subprojects/foo-2-rs/Cargo.toml",
+      "sha256": "eb02215de464a69e4a25eaf9c0036433d7b231c2891b9642aa5d08028369d536"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/35 cargo multiple versions/subprojects/main/Cargo.toml",
+      "sha256": "0d2eeb14d26ae4a8f69f2d7d654ce80faf6a1823fd26a354cdc7dd958494154a"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/40 cargo dep multiple version/Cargo.lock",
+      "sha256": "cf031216b2055f9f518d5b9b61a15658d0ad9b9f917a7c1f40c5679d12f813c0"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/40 cargo dep multiple version/Cargo.toml",
+      "sha256": "a8a19f256297b6443e87a27e6e188103c50d1eaf2d026c91154247417a653fa6"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/40 cargo dep multiple version/subprojects/answer-2.1/Cargo.toml",
+      "sha256": "1fbbc581eb50c0cbcb07d23ad2635470728e64868d40dde1dfccf1d7378e7a27"
+    },
+    {
+      "path": "vendored-meson/meson/test cases/rust/40 cargo dep multiple version/subprojects/hello-3.0/Cargo.toml",
+      "sha256": "8bddb9a2cea78acca23491663d0a8474d01a99e12bf0c71138ed5ea8933b1b5a"
+    }
+  ]
+}

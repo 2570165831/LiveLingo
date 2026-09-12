@@ -1,10 +1,84 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import OSLog
 import ScreenCaptureKit
 import Speech
 
+@available(macOS 27, *)
+private final class ModernPreviewState {
+    var transcriber: SpeechTranscriber?
+    var analyzer: SpeechAnalyzer?
+    var converter: AnalyzerInputConverter?
+    var continuation: AsyncStream<AnalyzerInput>.Continuation?
+}
+
+// Compatibility preview only; Parakeet remains the authoritative transcript.
+// Never permit Apple's legacy recognizer to send audio to a server.
+private final class LegacySpeechPreview: @unchecked Sendable {
+    private let lock = NSLock()
+    private let recognizer: SFSpeechRecognizer?
+    private let emit: @Sendable (String, TimeInterval, TimeInterval) -> Void
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var task: SFSpeechRecognitionTask?
+    private var generation = UUID()
+    private var elapsed: TimeInterval = 0
+    private var requestStart: TimeInterval = 0
+    private var stopped = false
+
+    init(locale: Locale, emit: @escaping @Sendable (String, TimeInterval, TimeInterval) -> Void) {
+        recognizer = SFSpeechRecognizer(locale: locale)
+        self.emit = emit
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.withLock {
+            guard !stopped, let recognizer, recognizer.supportsOnDeviceRecognition else { return }
+            if request == nil || elapsed - requestStart >= 45 {
+                generation = UUID()
+                request?.endAudio()
+                task?.cancel()
+                let newRequest = SFSpeechAudioBufferRecognitionRequest()
+                newRequest.requiresOnDeviceRecognition = true
+                newRequest.shouldReportPartialResults = true
+                requestStart = elapsed
+                let offset = requestStart
+                let token = generation
+                request = newRequest
+                task = recognizer.recognitionTask(with: newRequest) { [weak self] result, error in
+                    guard let self else { return }
+                    let accepted = self.lock.withLock {
+                        guard !self.stopped, self.generation == token else { return false }
+                        if error != nil || result?.isFinal == true { self.request = nil }
+                        return true
+                    }
+                    guard accepted, let result else { return }
+                    let transcript = result.bestTranscription
+                    guard !transcript.formattedString.isEmpty else { return }
+                    let end = transcript.segments.last.map { $0.timestamp + $0.duration } ?? 0
+                    self.emit(transcript.formattedString, offset, offset + end)
+                }
+            }
+            request?.append(buffer)
+            elapsed += Double(buffer.frameLength) / buffer.format.sampleRate
+        }
+    }
+
+    func stop() {
+        lock.withLock {
+            stopped = true
+            generation = UUID()
+            request?.endAudio()
+            task?.cancel()
+            request = nil
+            task = nil
+        }
+    }
+}
+
 final class SpeechPipeline: NSObject, @unchecked Sendable {
+    // The frozen candidate still has a 10-second hard ceiling, but normal
+    // rotation is now driven by the causal sentence/pause policy.
     static let stableChunkDuration: TimeInterval = 10
     static let waveformUpdateInterval: TimeInterval = 0.1
 
@@ -21,6 +95,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             hints: [AuxiliaryTranslationHint]
         )
         case failure(String)
+        case rejectedTranscript
+        case transcriptionIssue(start: TimeInterval, end: TimeInterval, message: String)
     }
 
     enum PipelineError: LocalizedError {
@@ -46,13 +122,14 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         }
     }
 
-    private struct ChunkJob: Sendable {
+    struct ChunkJob: Sendable {
         let audioURL: URL
         let modelKey: String
         let fallbackModelKey: String?
         let start: TimeInterval
         let end: TimeInterval
         let appleEvidence: String
+        let recordingURL: URL?
     }
 
     private struct FlushSnapshot: Sendable {
@@ -60,18 +137,99 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         let handler: (@Sendable (Event) -> Void)?
     }
 
-    private actor TranscriptionQueue {
+    actor TranscriptionQueue {
+        typealias Transcriber = @Sendable (URL, String, Bool) async throws -> String
+        private let transcriber: Transcriber
+        init(transcriber: @escaping Transcriber = { url, model, enhance in
+            try await QwenASRClient.transcribe(audioURL: url, modelKey: model, enhanceSpeech: enhance)
+        }) { self.transcriber = transcriber }
         private var tail: Task<Void, Never>?
+        private var recentFormulaContext = ""
+        private var jobs: [UUID: Task<Void, Never>] = [:]
+        private var retryTask: Task<Void, Never>?
+        private var pendingRetries: [(ChunkJob, @Sendable (Event) -> Void)] = []
+        private var finishing = false
+
+        private func report(_ job: ChunkJob, _ message: String, handler: @escaping @Sendable (Event) -> Void) {
+            RecordingDiagnostics.append(recordingURL: job.recordingURL, event: "transcription_missing",
+                start: job.start, end: job.end, detail: message)
+            handler(.transcriptionIssue(start: job.start, end: job.end, message: message))
+            // A small bounded backlog; skipped retry work remains recorded against
+            // the full recording and does not retain an unbounded chunk directory.
+            if pendingRetries.count < 8, job.recordingURL != nil {
+                pendingRetries.append((job, handler))
+            }
+        }
+
+        private func scheduleRetryIfIdle() {
+            guard !finishing, jobs.isEmpty, retryTask == nil, !pendingRetries.isEmpty else { return }
+            retryTask = Task {
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { retryTask = nil; return }
+                guard jobs.isEmpty, !finishing else { retryTask = nil; return }
+                let (job, handler) = pendingRetries.removeFirst()
+                defer { retryTask = nil; scheduleRetryIfIdle() }
+                do {
+                    guard let recordingURL = job.recordingURL else { return }
+                    let context = try RecordingDiagnostics.contextAudio(recordingURL: recordingURL, start: job.start, end: job.end)
+                    defer { try? FileManager.default.removeItem(at: context) }
+                    let text = try await transcriber(context, job.fallbackModelKey ?? job.modelKey, true)
+                    try Task.checkCancellation()
+                    let accepted = SpeechPipeline.preferredTranscript(primary: nil, fallback: text,
+                        audioDuration: job.end - job.start + 1.5)
+                    let message: String
+                    if !accepted.isEmpty {
+                        // Context includes adjacent speech. Do not silently insert
+                        // it into the timestamped transcript and duplicate sentences.
+                        message = "上下文重试得到候选文字（待核对）：\(accepted)"
+                    } else if !text.isEmpty, !EnglishTranscriptGate.accepts(text) {
+                        message = "重试识别为非英语内容，未写入英文字幕。"
+                    } else {
+                        message = "重试仍未得到可靠文字；此处转写缺失，音频保留。"
+                    }
+                    RecordingDiagnostics.append(recordingURL: recordingURL, event: "transcription_retry",
+                        start: job.start, end: job.end, detail: message, candidate: text)
+                    handler(.transcriptionIssue(start: job.start, end: job.end, message: message))
+                } catch {
+                    RecordingDiagnostics.append(recordingURL: job.recordingURL, event: "transcription_retry_interrupted",
+                        start: job.start, end: job.end, detail: error.localizedDescription)
+                }
+            }
+        }
 
         func submit(_ job: ChunkJob, handler: @escaping @Sendable (Event) -> Void) {
+            // New captions take priority over the optional context retry.
+            finishing = false
+            retryTask?.cancel()
+            let previousRetry = retryTask
             let previous = tail
-            tail = Task {
+            let id = UUID()
+            let task = Task {
+                defer {
+                    jobs[id] = nil
+                    scheduleRetryIfIdle()
+                    try? FileManager.default.removeItem(at: job.audioURL)
+                }
                 if let previous { await previous.value }
+                if let previousRetry { await previousRetry.value }
                 guard !Task.isCancelled else { return }
-                defer { try? FileManager.default.removeItem(at: job.audioURL) }
                 do {
+                    if try DigitalSilenceGate.isSilent(job.audioURL) {
+                        handler(.volatile(text: "", start: job.start, end: job.end))
+                        return
+                    }
                     let text = try await transcribeWithFallback(job)
-                    guard !text.isEmpty else { return }
+                    recentFormulaContext = String(text.suffix(1000))
+                    try Task.checkCancellation()
+                    guard !text.isEmpty else {
+                        report(job, "此处转写缺失（空白、非英语或异常重复），录音继续。", handler: handler)
+                        return
+                    }
+                    if ASRQualityGate.isShortRepetition(text) {
+                        RecordingDiagnostics.append(recordingURL: job.recordingURL, event: "short_repetition_kept",
+                            start: job.start, end: job.end, detail: "短句含重复用词，保留待核对。", candidate: text)
+                        handler(.transcriptionIssue(start: job.start, end: job.end, message: "短句含重复用词，已保留，请核对。"))
+                    }
                     let hints = AuxiliaryTranslationHintExtractor.extract(
                         from: job.appleEvidence,
                         primary: text
@@ -85,68 +243,109 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 } catch is CancellationError {
                     return
                 } catch {
-                    handler(.failure("本机转写失败：\(error.localizedDescription)"))
+                    guard !Task.isCancelled else { return }
+                    report(job, "本机转写失败：\(error.localizedDescription)；录音继续，音频保留。", handler: handler)
                 }
             }
+            jobs[id] = task
+            tail = task
         }
 
         private func transcribeWithFallback(_ job: ChunkJob) async throws -> String {
             let primaryText: String
             do {
-                primaryText = try await QwenASRClient.transcribe(
-                    audioURL: job.audioURL,
-                    modelKey: job.modelKey
-                )
+                primaryText = try await transcriber(job.audioURL, job.modelKey, false)
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 guard let fallbackModelKey = job.fallbackModelKey else { throw error }
-                let fallbackText = try await QwenASRClient.transcribe(
-                    audioURL: job.audioURL,
-                    modelKey: fallbackModelKey,
-                    enhanceSpeech: true
-                )
+                let fallbackText = try await transcriber(job.audioURL, fallbackModelKey, true)
                 return SpeechPipeline.preferredTranscript(
                     primary: nil,
-                    fallback: fallbackText
+                    fallback: fallbackText,
+                    audioDuration: max(0, job.end - job.start)
                 )
             }
 
+            let reviewFormula = FormulaASRReview.needsReview(primaryText, context: recentFormulaContext)
             guard let fallbackModelKey = job.fallbackModelKey,
-                  ASRQualityGate.fallbackReason(
+                  reviewFormula || !EnglishTranscriptGate.accepts(primaryText) || ASRQualityGate.fallbackReason(
                       for: primaryText,
                       audioDuration: max(0, job.end - job.start)
                   ) != nil
-            else { return primaryText }
+            else {
+                return SpeechPipeline.preferredTranscript(
+                    primary: primaryText, fallback: "",
+                    audioDuration: max(0, job.end - job.start)
+                )
+            }
 
-            let fallbackText = try await QwenASRClient.transcribe(
-                audioURL: job.audioURL,
-                modelKey: fallbackModelKey,
-                enhanceSpeech: true
+            let fallbackText: String
+            do {
+                fallbackText = try await transcriber(job.audioURL, fallbackModelKey, true)
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                if reviewFormula {
+                    let usable = SpeechPipeline.preferredTranscript(primary: primaryText, fallback: "", audioDuration: max(0, job.end - job.start))
+                    return usable.isEmpty ? "" : usable + " [Formula transcription uncertain]"
+                }
+                throw error
+            }
+            if !fallbackText.isEmpty, !EnglishTranscriptGate.accepts(fallbackText) {
+                RecordingDiagnostics.append(recordingURL: job.recordingURL, event: "non_english_asr",
+                    start: job.start, end: job.end, detail: "备用识别结果不是英语", candidate: fallbackText)
+            }
+            let selected = SpeechPipeline.preferredTranscript(
+                primary: primaryText, fallback: fallbackText,
+                audioDuration: max(0, job.end - job.start)
             )
-            return SpeechPipeline.preferredTranscript(
-                primary: primaryText,
-                fallback: fallbackText
-            )
+            if selected.isEmpty, !fallbackText.isEmpty, !EnglishTranscriptGate.accepts(fallbackText) {
+                throw QwenRuntimeError.requestFailed("识别为非英语内容，未写入英文字幕。")
+            }
+            // A second recognizer is evidence, not a verified formula. Keep
+            // uncertainty explicit instead of silently manufacturing notation.
+            if reviewFormula, !selected.isEmpty {
+                return selected + " [Formula transcription uncertain]"
+            }
+            return selected
         }
 
         func finish() async {
+            finishing = true
+            retryTask?.cancel()
             await tail?.value
+            await retryTask?.value
+            pendingRetries.removeAll()
         }
 
-        func cancel() {
-            tail?.cancel()
+        func cancel() async {
+            finishing = true
+            retryTask?.cancel()
+            pendingRetries.removeAll()
+            let active = Array(jobs.values)
+            for task in active { task.cancel() }
+            for task in active { await task.value }
+            await retryTask?.value
+            jobs.removeAll()
             tail = nil
         }
+
     }
 
-    static func preferredTranscript(primary: String?, fallback: String) -> String {
-        let fallback = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !fallback.isEmpty, EnglishTranscriptGate.accepts(fallback) {
-            return fallback
-        }
-
-        let primary = primary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !primary.isEmpty, EnglishTranscriptGate.accepts(primary) {
-            return primary
+    static func preferredTranscript(
+        primary: String?, fallback: String, audioDuration: TimeInterval = 10
+    ) -> String {
+        for candidate in [fallback, primary ?? ""] {
+            let text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty, EnglishTranscriptGate.accepts(text) else { continue }
+            switch ASRQualityGate.fallbackReason(for: text, audioDuration: audioDuration) {
+            case nil, .implausiblyShort:
+                // A short acknowledgement may be valid. It triggers a retry,
+                // but is not evidence of corruption on its own.
+                return text
+            case .emptyTranscript, .invalidText, .repeatedLoop, .runawayText:
+                continue
+            }
         }
         return ""
     }
@@ -163,10 +362,9 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private var chunkURL: URL?
     private var chunkDirectory: URL?
     private var inputFormat: AVAudioFormat?
-    private var chunkTimerTask: Task<Void, Never>?
+    private var submissionTail: Task<Void, Never>?
     private var eventHandler: (@Sendable (Event) -> Void)?
     private var profile = QwenModelProfile.energySaver
-    private var sessionStartedAt: Date?
     private var chunkStartedAt: TimeInterval = 0
     private var nextChunkIndex = 0
     private var inputMode: AudioInputMode?
@@ -174,19 +372,47 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private var microphoneConfigurationObserver: NSObjectProtocol?
     private var microphoneWatchdogTask: Task<Void, Never>?
     private var lastAudioCallbackUptime: TimeInterval?
-    private var lastWaveformUpdateUptime: TimeInterval?
+    private var waveformMeter = WaveformMeter()
     private var microphoneRecoveryScheduled = false
     private var microphoneRecoveryAttempts = 0
     private var capturePaused = false
     private var isStopping = false
     private var previewSupportedLocale: Locale?
-    private var previewTranscriber: SpeechTranscriber?
-    private var previewAnalyzer: SpeechAnalyzer?
-    private var previewConverter: AnalyzerInputConverter?
-    private var previewInputContinuation: AsyncStream<AnalyzerInput>.Continuation?
+    private var modernPreviewStorage: Any?
+    private var legacyPreview: LegacySpeechPreview?
+    @available(macOS 27, *)
+    private var modernPreview: ModernPreviewState {
+        if let value = modernPreviewStorage as? ModernPreviewState { return value }
+        let value = ModernPreviewState()
+        modernPreviewStorage = value
+        return value
+    }
+    @available(macOS 27, *)
+    private var previewTranscriber: SpeechTranscriber? {
+        get { modernPreview.transcriber }
+        set { modernPreview.transcriber = newValue }
+    }
+    @available(macOS 27, *)
+    private var previewAnalyzer: SpeechAnalyzer? {
+        get { modernPreview.analyzer }
+        set { modernPreview.analyzer = newValue }
+    }
+    @available(macOS 27, *)
+    private var previewConverter: AnalyzerInputConverter? {
+        get { modernPreview.converter }
+        set { modernPreview.converter = newValue }
+    }
+    @available(macOS 27, *)
+    private var previewInputContinuation: AsyncStream<AnalyzerInput>.Continuation? {
+        get { modernPreview.continuation }
+        set { modernPreview.continuation = newValue }
+    }
     private var previewAnalysisTask: Task<Void, Never>?
     private var previewResultTask: Task<Void, Never>?
     private var previewObservations: [AuxiliaryTranscriptObservation] = []
+    private var activityDetector: SpeechActivityDetector?
+    private var boundaryPolicy = CausalBoundaryPolicy()
+    private var capturedAudioDuration: TimeInterval = 0
 
     func update(profile: QwenModelProfile) {
         stateLock.lock()
@@ -214,6 +440,19 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private func prepareStreamingPreviewModel() async -> Bool {
+        if #available(macOS 27, *) { return await prepareModernPreviewModel() }
+        let authorized = await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { status in
+                continuation.resume(returning: status == .authorized)
+            }
+        }
+        let supported = authorized && SFSpeechRecognizer(locale: previewLocale)?.supportsOnDeviceRecognition == true
+        stateLock.withLock { previewSupportedLocale = supported ? previewLocale : nil }
+        return supported
+    }
+
+    @available(macOS 27, *)
+    private func prepareModernPreviewModel() async -> Bool {
         guard SpeechTranscriber.isAvailable,
               let locale = await SpeechTranscriber.supportedLocale(equivalentTo: previewLocale)
         else {
@@ -227,9 +466,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 preset: .timeIndexedProgressiveTranscription
             )
             let modules: [any SpeechModule] = [probe]
-            if await AssetInventory.status(forModules: modules) != .installed,
-               let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
-                try await request.downloadAndInstall()
+            // Preview is optional. Offline startup must never wait for an
+            // operating-system speech model download; bundled ASR remains usable.
+            guard await AssetInventory.status(forModules: modules) == .installed else {
+                stateLock.withLock { previewSupportedLocale = nil }
+                return false
             }
             _ = try await AssetInventory.reserve(locale: locale)
             stateLock.withLock { previewSupportedLocale = locale }
@@ -282,24 +523,15 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             self.inputMode = inputMode
             capturePaused = false
             isStopping = false
-            lastWaveformUpdateUptime = nil
+            waveformMeter = WaveformMeter()
         }
         if inputMode == .microphone {
             startMicrophoneHealthMonitoring()
         }
 
-        chunkTimerTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(for: .seconds(Self.stableChunkDuration))
-                } catch {
-                    break
-                }
-                guard !Task.isCancelled else { break }
-                await self.flushCurrentChunk(openNext: true)
-            }
-        }
+        // Audio callbacks and classifier/preview observations drive semantic
+        // rotation.  There is no independent wall-clock timer: paused capture
+        // must not create empty or overlong chunks.
     }
 
     private func startMicrophoneCapture(
@@ -331,10 +563,17 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             chunkDirectory: temporaryDirectory
         )
 
-        try inputNode.installAudioTap(onBus: 0, bufferSize: 2_048, format: format) { [weak self] sourceBuffer, time in
-            guard let self else { return }
-            let buffer = AVAudioPCMBuffer(copying: sourceBuffer)
-            self.write(buffer, at: time)
+        if #available(macOS 27, *) {
+            try inputNode.installAudioTap(onBus: 0, bufferSize: 2_048, format: format) { [weak self] sourceBuffer, time in
+                guard let self else { return }
+                let buffer = AVAudioPCMBuffer(copying: sourceBuffer)
+                self.write(buffer, at: time)
+            }
+        } else {
+            inputNode.installTap(onBus: 0, bufferSize: 2_048, format: format) { [weak self] buffer, time in
+                // All consumers finish reading before the tap returns.
+                self?.write(buffer, at: time)
+            }
         }
         stateLock.withLock { microphoneTapInstalled = true }
 
@@ -443,20 +682,28 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     func stop() async {
+        let started = ProcessInfo.processInfo.systemUptime
         await stopCaptureSource()
-        await finishStreamingPreview()
-        chunkTimerTask?.cancel()
-        chunkTimerTask = nil
-        await flushCurrentChunk(openNext: false)
+        // Capture is stopped and preview callbacks now reject new observations.
+        // Keep cleanup joined, but do not delay the last ASR chunk behind preview finalization.
+        async let previewFinished: Void = finishStreamingPreview()
+        await waitForPendingSubmissions()
+        await flushCurrentChunk(openNext: false, finishBoundary: true)
+        let submitted = ProcessInfo.processInfo.systemUptime
         await transcriptionQueue.finish()
+        let transcribed = ProcessInfo.processInfo.systemUptime
+        await previewFinished
         closeFilesAndCleanUp()
+        let finished = ProcessInfo.processInfo.systemUptime
+        Logger(subsystem: "com.jianhongli.LiveLingo", category: "StopLatency").notice(
+            "stop pipeline submit_ms=\(Int((submitted-started)*1000)) asr_wait_ms=\(Int((transcribed-submitted)*1000)) preview_join_cleanup_ms=\(Int((finished-transcribed)*1000)) total_ms=\(Int((finished-started)*1000))"
+        )
     }
 
     func cancel() async {
         await stopCaptureSource()
         await cancelStreamingPreview()
-        chunkTimerTask?.cancel()
-        chunkTimerTask = nil
+        await waitForPendingSubmissions()
         await transcriptionQueue.cancel()
         closeFilesAndCleanUp()
     }
@@ -480,6 +727,12 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             try? await stream.stopCapture()
             systemAudioStream = nil
         }
+        let detector = stateLock.withLock { () -> SpeechActivityDetector? in
+            let value = activityDetector
+            activityDetector = nil
+            return value
+        }
+        detector?.finish()
     }
 
     private func write(_ buffer: AVAudioPCMBuffer, at audioTime: AVAudioTime? = nil) {
@@ -491,18 +744,16 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         let now = ProcessInfo.processInfo.systemUptime
         lastAudioCallbackUptime = now
         microphoneRecoveryAttempts = 0
-        let converter = previewConverter
-        let continuation = previewInputContinuation
-        let shouldUpdateWaveform = lastWaveformUpdateUptime.map {
-            now - $0 >= Self.waveformUpdateInterval
-        } ?? true
-        if shouldUpdateWaveform {
-            lastWaveformUpdateUptime = now
-        }
-        let waveformHandler = shouldUpdateWaveform ? eventHandler : nil
+        let legacy = legacyPreview
+        let detector = activityDetector
+        let statistics = Self.audioStatistics(from: buffer)
+        let level = waveformMeter.consume(sumSquares: statistics.sumSquares, count: statistics.count,
+            peak: statistics.peak, duration: Double(buffer.frameLength) / buffer.format.sampleRate)
+        let waveformHandler = level == nil ? nil : eventHandler
         do {
             try recordingFile?.write(from: buffer)
             try chunkFile?.write(from: buffer)
+            capturedAudioDuration += Double(buffer.frameLength) / buffer.format.sampleRate
             stateLock.unlock()
         } catch {
             let handler = eventHandler
@@ -512,9 +763,22 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         }
 
         if let waveformHandler {
-            waveformHandler(.audioLevel(Self.normalizedAudioLevel(from: buffer)))
+            waveformHandler(.audioLevel(level ?? 0))
         }
 
+        detector?.analyze(buffer)
+        evaluateBoundaryAndRotate()
+
+        if #available(macOS 27, *) {
+            writeModernPreview(buffer, at: audioTime)
+        } else {
+            legacy?.append(buffer)
+        }
+    }
+
+    @available(macOS 27, *)
+    private func writeModernPreview(_ buffer: AVAudioPCMBuffer, at audioTime: AVAudioTime?) {
+        let (converter, continuation) = stateLock.withLock { (previewConverter, previewInputContinuation) }
         guard let converter, let continuation else { return }
         do {
             for input in try converter.convert(buffer, at: audioTime) {
@@ -530,23 +794,33 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     static func normalizedAudioLevel(from buffer: AVAudioPCMBuffer) -> Float {
+        let stats = audioStatistics(from: buffer)
+        guard stats.count > 0 else { return 0 }
+        return normalizedAudioLevel(rms: sqrt(stats.sumSquares / Double(stats.count)))
+    }
+
+    static func audioStatistics(from buffer: AVAudioPCMBuffer) -> (sumSquares: Double, count: Int, peak: Double) {
         let frameCount = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
-        guard frameCount > 0, channelCount > 0 else { return 0 }
+        guard frameCount > 0, channelCount > 0 else { return (0, 0, 0) }
 
         var sumOfSquares = 0.0
+        var peak = 0.0
         var sampleCount = 0
         let isInterleaved = buffer.format.isInterleaved
 
         switch buffer.format.commonFormat {
         case .pcmFormatFloat32:
-            guard let channels = buffer.floatChannelData else { return 0 }
+            guard let channels = buffer.floatChannelData else { return (0, 0, 0) }
             let buffers = isInterleaved ? 1 : channelCount
             let samplesPerBuffer = isInterleaved ? frameCount * channelCount : frameCount
             for channel in 0..<buffers {
                 for index in 0..<samplesPerBuffer {
                     let sample = Double(channels[channel][index])
-                    sumOfSquares += sample * sample
+                    if sample.isFinite {
+                        sumOfSquares += sample * sample
+                        peak = max(peak, abs(sample))
+                    }
                 }
             }
             sampleCount = buffers * samplesPerBuffer
@@ -558,38 +832,47 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 let samplesInBuffer = Int(audioBuffer.mDataByteSize) / MemoryLayout<Double>.size
                 for index in 0..<samplesInBuffer {
                     let sample = samples[index]
-                    sumOfSquares += sample * sample
+                    if sample.isFinite {
+                        sumOfSquares += sample * sample
+                        peak = max(peak, abs(sample))
+                    }
                 }
                 sampleCount += samplesInBuffer
             }
         case .pcmFormatInt16:
-            guard let channels = buffer.int16ChannelData else { return 0 }
+            guard let channels = buffer.int16ChannelData else { return (0, 0, 0) }
             let buffers = isInterleaved ? 1 : channelCount
             let samplesPerBuffer = isInterleaved ? frameCount * channelCount : frameCount
             for channel in 0..<buffers {
                 for index in 0..<samplesPerBuffer {
                     let sample = Double(channels[channel][index]) / 32_768.0
-                    sumOfSquares += sample * sample
+                    if sample.isFinite {
+                        sumOfSquares += sample * sample
+                        peak = max(peak, abs(sample))
+                    }
                 }
             }
             sampleCount = buffers * samplesPerBuffer
         case .pcmFormatInt32:
-            guard let channels = buffer.int32ChannelData else { return 0 }
+            guard let channels = buffer.int32ChannelData else { return (0, 0, 0) }
             let buffers = isInterleaved ? 1 : channelCount
             let samplesPerBuffer = isInterleaved ? frameCount * channelCount : frameCount
             for channel in 0..<buffers {
                 for index in 0..<samplesPerBuffer {
                     let sample = Double(channels[channel][index]) / 2_147_483_648.0
-                    sumOfSquares += sample * sample
+                    if sample.isFinite {
+                        sumOfSquares += sample * sample
+                        peak = max(peak, abs(sample))
+                    }
                 }
             }
             sampleCount = buffers * samplesPerBuffer
         default:
-            return 0
+            return (0, 0, 0)
         }
 
-        guard sampleCount > 0 else { return 0 }
-        return normalizedAudioLevel(rms: sqrt(sumOfSquares / Double(sampleCount)))
+        guard sampleCount > 0 else { return (0, 0, 0) }
+        return (sumOfSquares, sampleCount, peak)
     }
 
     static func normalizedAudioLevel(rms: Double) -> Float {
@@ -599,6 +882,16 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private func startStreamingPreviewIfAvailable() async {
+        if #available(macOS 27, *) { await startModernPreview(); return }
+        guard let locale = stateLock.withLock({ previewSupportedLocale }) else { return }
+        let preview = LegacySpeechPreview(locale: locale) { [weak self] text, start, end in
+            self?.emitStreamingPreview(text: text, start: start, end: end)
+        }
+        stateLock.withLock { legacyPreview = preview }
+    }
+
+    @available(macOS 27, *)
+    private func startModernPreview() async {
         guard let locale = stateLock.withLock({ previewSupportedLocale }) else { return }
 
         do {
@@ -677,12 +970,25 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             } else {
                 previewObservations.append(observation)
             }
+            boundaryPolicy.observePreview(
+                text: text,
+                start: observation.start,
+                end: observation.end,
+                arrival: max(observation.end, capturedAudioDuration)
+            )
             return eventHandler
         }
         handler?(.volatile(text: text, start: start, end: end))
+        evaluateBoundaryAndRotate()
     }
 
     private func finishStreamingPreview() async {
+        if #available(macOS 27, *) { await finishModernPreview(); return }
+        stopLegacyPreview()
+    }
+
+    @available(macOS 27, *)
+    private func finishModernPreview() async {
         let state = detachStreamingPreviewState()
         state.continuation?.finish()
         if let analyzer = state.analyzer {
@@ -696,6 +1002,17 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private func cancelStreamingPreview() async {
+        if #available(macOS 27, *) { await cancelModernPreview(); return }
+        stopLegacyPreview()
+    }
+
+    private func stopLegacyPreview() {
+        let preview = stateLock.withLock { let value = legacyPreview; legacyPreview = nil; return value }
+        preview?.stop()
+    }
+
+    @available(macOS 27, *)
+    private func cancelModernPreview() async {
         let state = detachStreamingPreviewState()
         state.continuation?.finish()
         await state.analyzer?.cancelAndFinishNow()
@@ -704,6 +1021,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         clearStreamingPreviewObjects()
     }
 
+    @available(macOS 27, *)
     private func detachStreamingPreviewState() -> (
         continuation: AsyncStream<AnalyzerInput>.Continuation?,
         analyzer: SpeechAnalyzer?,
@@ -723,6 +1041,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         }
     }
 
+    @available(macOS 27, *)
     private func clearStreamingPreviewObjects() {
         stateLock.withLock {
             previewTranscriber = nil
@@ -881,9 +1200,14 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         return now - lastCallbackUptime >= microphoneStallTimeout
     }
 
-    private func flushCurrentChunk(openNext: Bool) async {
-        let elapsed = max(0, Date().timeIntervalSince(sessionStartedAt ?? Date()))
-        let snapshot = rotateCurrentChunk(elapsed: elapsed, openNext: openNext)
+    private func flushCurrentChunk(openNext: Bool, finishBoundary: Bool = false) async {
+        let snapshot = stateLock.withLock { () -> FlushSnapshot in
+            let elapsed = capturedAudioDuration
+            if finishBoundary {
+                _ = boundaryPolicy.finish(at: elapsed)
+            }
+            return rotateCurrentChunkLocked(elapsed: elapsed, openNext: openNext)
+        }
         if let job = snapshot.job, let handler = snapshot.handler {
             await transcriptionQueue.submit(job, handler: handler)
         }
@@ -894,21 +1218,37 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         recordingFile: AVAudioFile?,
         chunkDirectory: URL
     ) throws {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        inputFormat = format
-        self.recordingFile = recordingFile
-        self.chunkDirectory = chunkDirectory
-        sessionStartedAt = Date()
-        chunkStartedAt = 0
-        nextChunkIndex = 0
-        previewObservations = []
-        try openNextChunkLocked()
+        let detector = SpeechActivityDetector()
+        var detectorReady = false
+        do {
+            try detector.start(format: format) { [weak self] observation in
+                self?.receiveSpeechActivity(observation)
+            }
+            detectorReady = true
+        } catch {
+            // Missing classifier evidence leaves the ten-second ceiling active.
+            detector.finish()
+        }
+        do {
+            try stateLock.withLock {
+                inputFormat = format
+                self.recordingFile = recordingFile
+                self.chunkDirectory = chunkDirectory
+                chunkStartedAt = 0
+                nextChunkIndex = 0
+                previewObservations = []
+                boundaryPolicy = CausalBoundaryPolicy()
+                capturedAudioDuration = 0
+                activityDetector = detectorReady ? detector : nil
+                try openNextChunkLocked()
+            }
+        } catch {
+            detector.finish()
+            throw error
+        }
     }
 
-    private func rotateCurrentChunk(elapsed: TimeInterval, openNext: Bool) -> FlushSnapshot {
-        stateLock.lock()
-        defer { stateLock.unlock() }
+    private func rotateCurrentChunkLocked(elapsed: TimeInterval, openNext: Bool) -> FlushSnapshot {
         let completedURL = chunkURL
         let completedLength = chunkFile?.length ?? 0
         let completedStart = chunkStartedAt
@@ -938,13 +1278,53 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                     fallbackModelKey: completedProfile.fallbackASRKey,
                     start: completedStart,
                     end: elapsed,
-                    appleEvidence: appleEvidence
+                    appleEvidence: appleEvidence,
+                    recordingURL: recordingFile?.url
                 ),
                 handler: handler
             )
         }
         if let completedURL { try? FileManager.default.removeItem(at: completedURL) }
         return FlushSnapshot(job: nil, handler: handler)
+    }
+
+    private func receiveSpeechActivity(_ observation: SpeechActivityObservation) {
+        stateLock.withLock {
+            boundaryPolicy.observeActivity(
+                speech: observation.speech,
+                start: observation.start,
+                end: observation.end
+            )
+        }
+        evaluateBoundaryAndRotate()
+    }
+
+    private func evaluateBoundaryAndRotate() {
+        stateLock.withLock {
+            guard !capturePaused, !isStopping,
+                  boundaryPolicy.decision(at: capturedAudioDuration) != nil
+            else { return }
+            let snapshot = rotateCurrentChunkLocked(
+                elapsed: capturedAudioDuration,
+                openNext: true
+            )
+            guard let job = snapshot.job, let handler = snapshot.handler else { return }
+            // Rotate and enqueue under the same lock so callbacks cannot reorder chunks.
+            let previous = submissionTail
+            submissionTail = Task { [transcriptionQueue] in
+                if let previous { await previous.value }
+                await transcriptionQueue.submit(job, handler: handler)
+            }
+        }
+    }
+
+    private func waitForPendingSubmissions() async {
+        let task = stateLock.withLock { () -> Task<Void, Never>? in
+            let value = submissionTail
+            submissionTail = nil
+            return value
+        }
+        await task?.value
     }
 
     private func openNextChunkLocked() throws {
@@ -979,20 +1359,21 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         microphoneConfigurationObserver = nil
         microphoneWatchdogTask = nil
         lastAudioCallbackUptime = nil
-        lastWaveformUpdateUptime = nil
+        waveformMeter = WaveformMeter()
         microphoneRecoveryScheduled = false
         microphoneRecoveryAttempts = 0
         capturePaused = false
         isStopping = false
         eventHandler = nil
-        sessionStartedAt = nil
-        previewTranscriber = nil
-        previewAnalyzer = nil
-        previewConverter = nil
-        previewInputContinuation = nil
+        modernPreviewStorage = nil
+        legacyPreview = nil
         previewAnalysisTask = nil
         previewResultTask = nil
         previewObservations = []
+        activityDetector = nil
+        boundaryPolicy = CausalBoundaryPolicy()
+        capturedAudioDuration = 0
+        submissionTail = nil
         stateLock.unlock()
 
         if let directory { try? FileManager.default.removeItem(at: directory) }
@@ -1043,5 +1424,143 @@ extension SpeechPipeline: SCStreamOutput, SCStreamDelegate {
         if shouldReport {
             handler?(.failure("系统音频内录已停止：\(error.localizedDescription)"))
         }
+    }
+}
+
+
+// Only reject effectively digital silence; quiet speech must remain eligible.
+enum DigitalSilenceGate {
+    static func isSilent(_ url: URL) throws -> Bool {
+        let file = try AVAudioFile(forReading: url)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4096),
+              file.processingFormat.commonFormat == .pcmFormatFloat32 else { return false }
+        while file.framePosition < file.length {
+            try file.read(into: buffer)
+            guard buffer.frameLength > 0, let channels = buffer.floatChannelData else { return false }
+            for channel in 0..<Int(buffer.format.channelCount) {
+                for frame in 0..<Int(buffer.frameLength) {
+                    let value = channels[channel][frame]
+                    if !value.isFinite || abs(value) > 0.00001 { return false }
+                }
+            }
+        }
+        return true
+    }
+}
+
+#if LIVELINGO_CLI
+extension SpeechPipeline {
+    /// Feeds the same post-capture PCM path without opening an output device.
+    func cliReplay(file: URL, recordingURL: URL,
+                   eventHandler: @escaping @Sendable (Event) -> Void) async throws {
+        self.eventHandler = eventHandler
+        let audio = try AVAudioFile(forReading: file)
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-CLI-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: false)
+        let output = try AVAudioFile(forWriting: recordingURL, settings: audio.processingFormat.settings)
+        await startStreamingPreviewIfAvailable()
+        try configureSession(format: audio.processingFormat, recordingFile: output, chunkDirectory: temporary)
+        stateLock.withLock { capturePaused = false; isStopping = false; inputMode = .systemAudio }
+        let start = ProcessInfo.processInfo.systemUptime
+        while audio.framePosition < audio.length {
+            try Task.checkCancellation()
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
+                frameCapacity: AVAudioFrameCount(audio.processingFormat.sampleRate * 0.05)) else {
+                throw PipelineError.invalidInputFormat
+            }
+            try audio.read(into: buffer)
+            write(buffer)
+            let target = Double(audio.framePosition) / audio.processingFormat.sampleRate
+            let delay = target - (ProcessInfo.processInfo.systemUptime-start)
+            if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+        }
+    }
+}
+#endif
+
+/// Accumulates every callback, so a pulse between display updates is retained.
+struct WaveformMeter {
+    private var sum = 0.0
+    private var count = 0
+    private var peak = 0.0
+    private var duration = 0.0
+    private var displayed: Float = 0
+
+    mutating func consume(sumSquares: Double, count: Int, peak: Double, duration: Double) -> Float? {
+        guard count > 0, sumSquares.isFinite, peak.isFinite, duration.isFinite, duration > 0 else { return nil }
+        sum += max(0, sumSquares)
+        self.count += count
+        self.peak = max(self.peak, max(0, peak))
+        self.duration += duration
+        guard self.duration >= SpeechPipeline.waveformUpdateInterval else { return nil }
+        let rms = sqrt(sum / Double(self.count))
+        let average = SpeechPipeline.normalizedAudioLevel(rms: rms)
+        let transient = SpeechPipeline.normalizedAudioLevel(rms: self.peak)
+        let target = pow(average * 0.8 + transient * 0.2, 2)
+        // Immediate attack; release depends on captured time rather than callback count.
+        displayed = max(target, displayed * Float(exp(-self.duration / 0.22)))
+        sum = 0; self.count = 0; self.peak = 0; self.duration = 0
+        return displayed < 0.005 ? 0 : displayed
+    }
+}
+
+/// A session-side record survives normal export and error-triggered saving.
+/// Audio remains in recording.wav; diagnostic entries contain only failed/retried spans.
+enum RecordingDiagnostics {
+    private static let lock = NSLock()
+
+    static func append(recordingURL: URL?, event: String, start: TimeInterval? = nil,
+                       end: TimeInterval? = nil, detail: String, candidate: String? = nil) {
+        let logger = Logger(subsystem: "com.jianhongli.LiveLingo", category: "RecordingDiagnostics")
+        logger.notice("event=\(event, privacy: .public) detail=\(detail, privacy: .private)")
+        guard let recordingURL else { return }
+        lock.withLock {
+            do {
+                var row: [String: Any] = ["date": ISO8601DateFormatter().string(from: Date()),
+                    "event": event, "detail": detail]
+                if let start { row["start"] = start }
+                if let end { row["end"] = end }
+                if let candidate { row["candidate"] = candidate }
+                var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
+                data.append(0x0a)
+                let url = recordingURL.deletingLastPathComponent().appendingPathComponent("transcription-issues.jsonl")
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    try data.write(to: url, options: .atomic)
+                } else {
+                    let handle = try FileHandle(forWritingTo: url)
+                    defer { try? handle.close() }
+                    try handle.seekToEnd()
+                    try handle.write(contentsOf: data)
+                }
+            } catch {
+                logger.error("Recording diagnostic write failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    static func contextAudio(recordingURL: URL, start: TimeInterval, end: TimeInterval) throws -> URL {
+        let input = try AVAudioFile(forReading: recordingURL)
+        let rate = input.processingFormat.sampleRate
+        let first = AVAudioFramePosition(max(0, start - 0.75) * rate)
+        let last = min(input.length, AVAudioFramePosition((end + 0.75) * rate))
+        guard last > first, last - first <= AVAudioFramePosition(rate * 90),
+              let buffer = AVAudioPCMBuffer(pcmFormat: input.processingFormat,
+                  frameCapacity: AVAudioFrameCount(last - first)) else {
+            throw SpeechPipeline.PipelineError.invalidInputFormat
+        }
+        input.framePosition = first
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-retry-\(UUID().uuidString).wav")
+        try autoreleasepool {
+            let output = try AVAudioFile(forWriting: url, settings: input.processingFormat.settings)
+            var remaining = AVAudioFrameCount(last - first)
+            while remaining > 0 {
+                try input.read(into: buffer, frameCount: remaining)
+                guard buffer.frameLength > 0 else { break }
+                try output.write(from: buffer)
+                remaining -= buffer.frameLength
+            }
+            if #available(macOS 15, *) { output.close() }
+        }
+        return url
     }
 }

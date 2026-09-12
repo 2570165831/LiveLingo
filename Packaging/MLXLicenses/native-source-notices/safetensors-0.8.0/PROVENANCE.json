@@ -1,0 +1,34 @@
+{
+  "name": "safetensors",
+  "version": "0.8.0",
+  "sourceURL": "https://files.pythonhosted.org/packages/45/06/f955dbbb1859e3bd23c8ac6141af5106e7ad5fedec4a3a6e3d60f94b7001/safetensors-0.8.0.tar.gz",
+  "sourceSHA256": "fabaf3e0f18a6618d9b36560682562157f77c2b71fcffc7b432be2baed9d753d",
+  "noticeFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "path": "bindings/python/LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "path": "safetensors/LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    }
+  ],
+  "cargoManifests": [
+    {
+      "path": "bindings/python/Cargo.lock",
+      "sha256": "f7d484a57bc394042b3424d57dab0a17d6a343f5e57e30870b9dd72dfb90f6b7"
+    },
+    {
+      "path": "bindings/python/Cargo.toml",
+      "sha256": "9e8f8910c092b4069081b27668ab8826516ebdef236acbc3919ab6f5576fd1f8"
+    },
+    {
+      "path": "safetensors/Cargo.toml",
+      "sha256": "40e01570a0a0d554fab7bce451d6edf135e091a75926366fa756a93b2642e195"
+    }
+  ]
+}

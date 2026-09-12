@@ -38,6 +38,10 @@ LiveLingo 20??-??-?? ??.??.??/
 **/bilingual.jsonl
 **/bilingual.srt
 **/manifest.json
+**/summary-zh-Hans.md
+**/summary-before-review.md
+**/summary-review.md
+*.ndjson
 
 # Credentials and signing material
 .env
