@@ -168,8 +168,8 @@ stage_copy "${signed_app}" "${package_root}/LiveLingo.app"
 /bin/ln -s /Applications "${package_root}/Applications"
 /usr/bin/install -m 0644 "${readme_source}" "${package_root}/使用说明.txt"
 
-# The DMG top level is exactly: LiveLingo.app, Applications symlink, 使用说明.txt.
-top_level="$(/bin/ls -A "${package_root}" | LC_ALL=C /usr/bin/sort | /usr/bin/tr '\n' ' ')"
+# Validate payload entries; Finder may add its harmless .DS_Store metadata.
+top_level="$(/bin/ls -A "${package_root}" | /usr/bin/awk '$0 != ".DS_Store"' | LC_ALL=C /usr/bin/sort | /usr/bin/tr '\n' ' ')"
 [[ "${top_level}" == "Applications LiveLingo.app 使用说明.txt " ]] || \
   fail "DMG 顶层内容不符合预期（${top_level}）；不允许 Payload、安装器或校验脚本。"
 
