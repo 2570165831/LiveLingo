@@ -16,7 +16,9 @@
 
 当前安装包为 **`LiveLingo-0.1.0-macOS14+-arm64.dmg`**，适用于 Apple 芯片 Mac（macOS 14 及以上）。此版本已完成 Developer ID 签名与苹果公证。
 
-从 [GitHub 0.1.0 发布页](https://github.com/2570165831/LiveLingo/releases/tag/v0.1.0) 下载全部 8 个 `.part` 分卷，放进同一个新建文件夹，再按附件[分卷合并说明](https://github.com/2570165831/LiveLingo/releases/download/v0.1.0/INSTALL-zh.md)操作。说明中的命令会先检查各分卷是否齐全、大小是否正确，再按顺序还原 DMG，不会覆盖已有同名 DMG。分卷不能单独打开安装，也不是 ZIP 压缩包。
+完整安装包可从 [Google Drive 下载](https://drive.google.com/file/d/1QHdsMVbiWxhJ9bdzctMRr3ka02Hr9D-T/view?usp=sharing)，无需合并分卷。链接仅授予查看和下载权限，不授予编辑权限。
+
+也可以从 [GitHub 0.1.0 发布页](https://github.com/2570165831/LiveLingo/releases/tag/v0.1.0) 下载全部 8 个 `.part` 分卷，放进同一个新建文件夹，再按附件[分卷合并说明](https://github.com/2570165831/LiveLingo/releases/download/v0.1.0/INSTALL-zh.md)操作。说明中的命令会先检查各分卷是否齐全、大小是否正确，再按顺序还原 DMG，不会覆盖已有同名 DMG。分卷不能单独打开安装，也不是 ZIP 压缩包。
 
 如果拿到的是完整 DMG，就直接打开，将 **LiveLingo 拖入“应用程序”**。不需要运行安装命令。运行库和正式转写、翻译、笔记模型都已内置，无需配置 Python、安装 LM Studio 或另外下载这些模型；App 和 DMG 不包含测试 CLI。首次使用时按系统提示授予麦克风、语音识别、系统音频录制及保存目录等所需权限。
 
