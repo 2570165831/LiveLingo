@@ -15,12 +15,13 @@
 
 - 主机 macOS 27.2：Xcode `394 passed / 1 skipped / 0 failed`。
 - 最终候选主程序 SHA-256：`ee27400d7f7bd2fdaeaae5c802a55eafd99c455ca39e3eb02fa50fb0ea4fb06b`。
-- 文档收尾前，当前正式源码对冻结清单 2233 个文件重新计算 SHA-256，`2233/2233` 一致；写入本轮 README 后再次核验，清单内唯一漂移为 `README.md`，应用、测试与打包源码仍与固定候选一致。
+- 冻结候选时，正式源码对清单 2233 个文件重新计算 SHA-256，`2233/2233` 一致；最终收尾后，清单内只有 `README.md` 的验收说明和工程文件中的单个行尾空格清理与冻结字节不同，应用行为源码、测试源码与打包逻辑仍与固定候选一致。
 - 最终候选 6 已完成真实 GUI WAV 导入：4 段转写与中文译文、双语 SRT/JSONL、学习摘要、录音和会话快照均成功落盘；持久化状态最终为 `completed`。
 - 离线 DMG 已完成 Developer ID 签名、公证、`stapler` 校验、Gatekeeper/镜像完整性检查，并确认 iCloud 上传完成。
+- Apple Silicon macOS 14.6.1（23G93）VM 已对同一最终 DMG 完成实测：镜像 CRC 校验通过，App 版本为 `0.1.0 / 20260922.2`，主程序 SHA-256 与最终候选一致，严格签名验证通过，Gatekeeper 返回 `accepted / Notarized Developer ID`。
+- macOS 14 完整模型流程处理 40.89 秒 WAV 后得到 4 段转写、4 段翻译、摘要、复查结果及 Markdown/TXT/DOCX/PDF 导出；最终为 `processing_finished`、`run_verified`，待处理转写为 0，ASR 与 MLX 子进程均确认清理完成。该验收轮同时保留了最终 DMG App 在 macOS 14 上启动的 GUI 截图。
 
-## 仍未完成的发布门槛
+## 当前发布边界
 
-- macOS 14 最终候选真实运行仍为 `BLOCKED / NOT RUN`。用于验收的 Parallels VM 保存在外置卷 `光樞雷獄`；当前该物理设备没有出现在系统中，因此 VM 资源不可达。
-- 在外置盘重新可见并完成 macOS 14 实测前，不将本构建标记为“全平台最终验收完成”。
+- 本轮定义的主机 GUI 与 Apple Silicon macOS 14 最终候选验收门槛均已完成。
 - 公开 GitHub/Google Drive 下载入口仍可能指向此前发布件；本文件不宣称这些旧入口已经替换为 20260922.2。
