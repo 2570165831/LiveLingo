@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import os
 
 struct SummaryRefreshPolicy: Sendable {
     static let idleDuration: TimeInterval = 2
@@ -78,4 +79,69 @@ struct SummaryEvidenceBatch: Equatable {
         let affected = batches.filter { $0.ids.contains(id) }
         return (batches.filter { !$0.ids.contains(id) }, Set(affected.flatMap { $0.ids }))
     }
+}
+
+/// The app's own scheduling policy for "let LiveLingo take priority".
+///
+/// Background review shares one language-model process with live translation, so
+/// the only real way to prioritise live work is to keep the review off the
+/// worker while anything live is waiting. This policy only reorders *this app's*
+/// work: it never changes system-wide scheduling, never kills another app,
+/// never resumes a paused review and never blocks a new recording.
+enum ProcessingFocusPolicy {
+    static let focusReserveBytes: UInt64 = 6 * 1_024 * 1_024 * 1_024
+    static let focusRecordingReserveBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
+    static let standardRecordingReserveBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
+    static let standardIdleReserveBytes: UInt64 = 4 * 1_024 * 1_024 * 1_024
+
+    struct Context: Equatable {
+        let focusMode: Bool
+        let recording: Bool
+        let memoryNormal: Bool
+        let hasCaptionBacklog: Bool
+        /// A caption translation, the typed translator or the summary is using
+        /// the shared language worker right now.
+        let liveWorkPending: Bool
+        let availableBytes: UInt64
+        /// Existing latency-based rule for running review during recording.
+        let latencyAllowsConcurrency: Bool
+    }
+
+    struct Decision: Equatable {
+        /// Whether background review may run while a recording session is active.
+        let allowConcurrentReview: Bool
+        /// Whether the review queue may start another batch at all.
+        let resourcesAvailable: Bool
+    }
+
+    static func decision(_ context: Context) -> Decision {
+        let allowConcurrent = context.focusMode ? false : context.latencyAllowsConcurrency
+        let reserve = context.focusMode
+            ? (context.recording ? focusRecordingReserveBytes : focusReserveBytes)
+            : (context.recording ? standardRecordingReserveBytes : standardIdleReserveBytes)
+        var available = context.memoryNormal
+            && !context.hasCaptionBacklog
+            && context.availableBytes >= reserve
+        if context.focusMode {
+            // Live work wins the shared worker: the review waits for a genuinely
+            // idle app instead of only for a caption backlog.
+            available = available && !context.liveWorkPending
+        }
+        return Decision(allowConcurrentReview: allowConcurrent, resourcesAvailable: available)
+    }
+
+    static func statusLine(focusMode: Bool) -> String {
+        focusMode
+            ? "专注模式：录音与实时翻译优先，摘要让位，后台复查仅在完全空闲时运行"
+            : "标准：字幕积压时让出摘要，条件允许时并行复查"
+    }
+
+    static let explanation = """
+    只调整 LiveLingo 自己的任务顺序：录音采集、实时转写与翻译优先；摘要让位；\
+    后台复查只在没有实时任务、内存充足且未在录音时运行，让出与实时翻译共用的语言模型进程。\
+    本机实测 LiveLingo 的进程已经在系统最高默认优先级（BSD 31），没有继续提高的空间，\
+    所以这里不提供“提高进程优先级”的开关；也不会修改系统全局调度、结束其他应用或阻止系统睡眠。\
+    实测同一音频下并发复查没有拖慢字幕翻译（0.44 秒/句，与空闲时相同），因此不承诺更快。\
+    关闭开关即恢复标准调度，用户手动暂停的复查不会被自动恢复。
+    """
 }

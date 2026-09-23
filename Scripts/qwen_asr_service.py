@@ -8,6 +8,9 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
+import gc
+import re
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,6 +48,15 @@ MIN_ACTIVE_RMS_DBFS = -55.0
 PEAK_CEILING_DBFS = -1.0
 MODEL_LOCK = threading.Lock()
 MODELS = {}
+MODEL_STATE_LOCK = threading.Lock()
+MODEL_LAST_USED = {}
+UNLOADING_MODELS = set()
+REQUEST_STATES = {}
+COMPLETED_REQUESTS = {}
+MAX_COMPLETION_RECEIPTS = 256
+MAX_INFERENCE_REQUESTS = 3  # one running, at most two submitted ahead
+INFERENCE_SLOTS = threading.BoundedSemaphore(MAX_INFERENCE_REQUESTS)
+IDLE_MODEL_SECONDS = 120.0
 INFERENCE_WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-inference")
 
 
@@ -88,7 +100,10 @@ def model_for(key: str):
 
         started = time.monotonic()
         print(f"ASR loading model={key}", flush=True)
-        MODELS[key] = load_model(str(path))
+        loaded = load_model(str(path))
+        with MODEL_STATE_LOCK:
+            MODELS[key] = loaded
+            MODEL_LAST_USED[key] = time.monotonic()
         print(f"ASR loaded model={key} seconds={time.monotonic() - started:.3f}", flush=True)
     return MODELS[key]
 
@@ -167,15 +182,95 @@ def speech_band_enhance(source_path: str) -> tuple[str, dict]:
 def transcribe_audio(model_input_path: str, model_key: str) -> str:
     # Keep MLX loading, evaluation and result access on one long-lived thread.
     with MODEL_LOCK:
-        model = model_for(model_key)
-        if model_key == "parakeet":
-            result = model.generate(model_input_path, verbose=False)
-        else:
-            result = model.generate(
-                model_input_path, language="English", max_tokens=256,
-                temperature=0.0, verbose=False,
-            )
-        return result.text.strip()
+        try:
+            model = model_for(model_key)
+            if model_key == "parakeet":
+                result = model.generate(model_input_path, verbose=False)
+            else:
+                result = model.generate(
+                    model_input_path, language="English", max_tokens=256,
+                    temperature=0.0, verbose=False,
+                )
+            return result.text.strip()
+        finally:
+            with MODEL_STATE_LOCK:
+                if model_key in MODELS: MODEL_LAST_USED[model_key] = time.monotonic()
+
+
+def run_registered_transcription(request_id, model_input_path, model_key):
+    with MODEL_STATE_LOCK:
+        REQUEST_STATES[request_id] = {'model': model_key, 'state': 'running'}
+    try:
+        return transcribe_audio(model_input_path, model_key)
+    finally:
+        # A disconnected HTTP caller does not prove inference has stopped.
+        # Keep the request registered until the model call actually returns.
+        with MODEL_STATE_LOCK:
+            REQUEST_STATES[request_id] = {'model': model_key, 'state': 'finished'}
+
+
+def resource_snapshot():
+    with MODEL_STATE_LOCK:
+        return {'loaded_models': sorted(MODELS),
+                'unloading_models': sorted(UNLOADING_MODELS),
+                'requests': {key: dict(value) for key, value in REQUEST_STATES.items()},
+                'completed_requests': {key: dict(value) for key, value in COMPLETED_REQUESTS.items()}}
+
+
+def finish_request(request_id, model_key):
+    """Retain bounded proof after a response is lost. Absence alone proves nothing."""
+    with MODEL_STATE_LOCK:
+        REQUEST_STATES.pop(request_id, None)
+        COMPLETED_REQUESTS[request_id] = {'model': model_key, 'state': 'finished'}
+        while len(COMPLETED_REQUESTS) > MAX_COMPLETION_RECEIPTS:
+            COMPLETED_REQUESTS.pop(next(iter(COMPLETED_REQUESTS)))
+
+
+def unload_idle_models(now=None, idle_seconds=IDLE_MODEL_SECONDS):
+    """Run on the inference executor; publish release only after cleanup succeeds."""
+    now = time.monotonic() if now is None else now
+    retired = []
+    with MODEL_LOCK:
+        with MODEL_STATE_LOCK:
+            # Even a finished handler can retain an exception traceback with
+            # a model reference until its response and finalizer have settled.
+            used = {value['model'] for value in REQUEST_STATES.values()}
+            for key in list(MODELS):
+                last = MODEL_LAST_USED.get(key)
+                if key in used or last is None or now - last < idle_seconds:
+                    continue
+                UNLOADING_MODELS.add(key)
+                del MODELS[key]
+                MODEL_LAST_USED.pop(key, None)
+                retired.append(key)
+            pending_release = set(UNLOADING_MODELS)
+        if pending_release:
+            gc.collect()
+            try:
+                import mlx.core as mx
+                mx.clear_cache()
+            except ImportError:
+                pass
+            with MODEL_STATE_LOCK:
+                UNLOADING_MODELS.difference_update(pending_release)
+            print('ASR unloaded models=' + ','.join(sorted(pending_release)), flush=True)
+    return sorted(retired)
+
+
+def start_idle_maintenance():
+    stopped = threading.Event()
+    def maintain():
+        while not stopped.wait(5):
+            with MODEL_STATE_LOCK:
+                busy = bool(REQUEST_STATES)
+                loaded = bool(MODELS) or bool(UNLOADING_MODELS)
+            if busy or not loaded: continue
+            # One maintenance future at a time, on the same thread as MLX.
+            try: INFERENCE_WORKER.submit(unload_idle_models).result()
+            except Exception as error:
+                print(f'ASR idle-unload failed type={type(error).__name__}', flush=True)
+    threading.Thread(target=maintain, name='asr-idle-maintenance', daemon=True).start()
+    return stopped
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -198,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
                 "supervised": bool(SUPERVISED),
                 "models_root": str(MODEL_ROOT),
                 "available_models": available_model_keys(),
-                "loaded_models": sorted(MODELS),
+                **resource_snapshot(),
             },
         )
 
@@ -220,12 +315,30 @@ class Handler(BaseHTTPRequestHandler):
         if size <= 0 or size > MAX_AUDIO_BYTES:
             self.send_json(413, {"error": "Audio body is empty or too large"})
             return
-
-        audio = self.rfile.read(size)
+        if not INFERENCE_SLOTS.acquire(blocking=False):
+            self.send_json(503, {"error": "ASR queue is full", "retryable": True})
+            return
+        request_id = self.headers.get('X-LiveLingo-Request-ID') or uuid.uuid4().hex
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', request_id):
+            INFERENCE_SLOTS.release()
+            self.send_json(400, {"error": "Invalid request ID"})
+            return
+        with MODEL_STATE_LOCK:
+            if request_id in REQUEST_STATES or request_id in COMPLETED_REQUESTS:
+                INFERENCE_SLOTS.release()
+                duplicate = True
+            else:
+                REQUEST_STATES[request_id] = {'model': model_key, 'state': 'waiting'}
+                duplicate = False
+        if duplicate:
+            self.send_json(409, {"error": "Request ID is already in use"})
+            return
         temporary_path = None
         model_input_path = None
         enhancement = {"applied": False, "reason": "disabled"}
         try:
+            audio = self.rfile.read(size)
+            if len(audio) != size: raise ValueError('Incomplete audio request')
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temporary:
                 temporary.write(audio)
                 temporary_path = temporary.name
@@ -233,20 +346,23 @@ class Handler(BaseHTTPRequestHandler):
             if should_enhance:
                 model_input_path, enhancement = speech_band_enhance(temporary_path)
             started = time.monotonic()
-            print(f"ASR request model={model_key} bytes={size}", flush=True)
-            text = INFERENCE_WORKER.submit(transcribe_audio, model_input_path, model_key).result()
-            print(f"ASR completed model={model_key} seconds={time.monotonic() - started:.3f}", flush=True)
+            print(f"ASR request id={request_id} model={model_key} bytes={size}", flush=True)
+            text = INFERENCE_WORKER.submit(run_registered_transcription, request_id, model_input_path, model_key).result()
+            print(f"ASR completed id={request_id} model={model_key} seconds={time.monotonic() - started:.3f}", flush=True)
             self.send_json(
                 200,
                 {
                     "text": text,
                     "model": model_key,
+                    "request_id": request_id,
                     "audio_enhancement": enhancement,
                 },
             )
         except Exception as error:
-            self.send_json(500, {"error": str(error)})
+            self.send_json(500, {"error": str(error), "request_id": request_id, "model": model_key})
         finally:
+            finish_request(request_id, model_key)
+            INFERENCE_SLOTS.release()
             if model_input_path and model_input_path != temporary_path:
                 try:
                     os.unlink(model_input_path)
@@ -352,17 +468,14 @@ def announce_ready(server, host: str) -> dict:
 
 def request_shutdown(server, reason: str) -> None:
     """Exit immediately; the parent is gone and this process must not linger."""
-    print(f"ASR shutdown reason={reason}", flush=True)
     try:
-        server.shutdown()
-    except Exception:
+        # The parent may have closed stdout as well as stdin. Logging must not
+        # prevent this watchdog from exiting the orphaned inference process.
+        print(f"ASR shutdown reason={reason}", flush=True)
+    except OSError:
         pass
-    try:
-        server.server_close()
-    except Exception:
-        pass
-    # The interpreter may still be inside an inference call or waiting on a
-    # non-daemon worker thread; the parent is gone, so leave immediately.
+    # No caller can use the service after its parent exits. A graceful server
+    # close can wait for an in-flight inference, so it cannot be the exit gate.
     os._exit(0)
 
 
@@ -414,11 +527,13 @@ def main(argv=None) -> int:
           flush=True)
     if SUPERVISED:
         start_parent_watchdog(server)
+    maintenance = start_idle_maintenance()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        maintenance.set()
         server.server_close()
     return 0
 

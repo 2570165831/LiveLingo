@@ -1,0 +1,570 @@
+{
+  "version": 1,
+  "authorship": "Synthetic, source-authored expectations fixed before any model outputs. No real classroom or private data.",
+  "limits": "Regex matches are coverage signals, not a complete semantic correctness proof. Review final point text against each stated meaning; source quotations and warnings do not count as retained teaching.",
+  "gates": {
+    "knownFactualErrorsAllowed": 0,
+    "independentCoverageRegressionAllowed": 0,
+    "requiresSemanticReadback": true
+  },
+  "cases": [
+    {
+      "id": "constant-acceleration",
+      "split": "development",
+      "categories": [
+        "formula",
+        "units",
+        "condition",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "u",
+          "meaning": "初速度为3 m/s",
+          "stage": 2,
+          "patterns": [
+            "初速度.{0,16}3\\s*(?:米|m)"
+          ]
+        },
+        {
+          "id": "a",
+          "meaning": "加速度恒为2 m/s²",
+          "stage": 2,
+          "patterns": [
+            "加速度.{0,18}2\\s*(?:米|m)"
+          ]
+        },
+        {
+          "id": "formula",
+          "meaning": "v=u+at",
+          "stage": 2,
+          "patterns": [
+            "v\\s*=\\s*u\\s*\\+\\s*a\\s*\\*?\\s*t"
+          ]
+        },
+        {
+          "id": "answer",
+          "meaning": "4秒后速度11 m/s",
+          "stage": 2,
+          "patterns": [
+            "4\\s*秒.{0,55}11\\s*(?:米|m)"
+          ]
+        },
+        {
+          "id": "condition",
+          "meaning": "公式需要恒定加速度",
+          "stage": 2,
+          "patterns": [
+            "(?:恒定|恒|不变).{0,10}加速度|加速度.{0,10}(?:恒定|不变)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "system-boundaries",
+      "split": "development",
+      "categories": [
+        "negation",
+        "condition",
+        "comparison"
+      ],
+      "facts": [
+        {
+          "id": "isolated",
+          "meaning": "孤立系统不交换物质与能量",
+          "stage": 2,
+          "patterns": [
+            "孤立.{0,45}(?:不|无|隔绝).{0,18}(?:物质.{0,20}能量|能量.{0,20}物质)"
+          ]
+        },
+        {
+          "id": "conservation",
+          "meaning": "孤立系统总能量守恒",
+          "stage": 2,
+          "patterns": [
+            "(?:孤立.{0,55}能量.{0,12}守恒|总能量.{0,12}不变)"
+          ]
+        },
+        {
+          "id": "closed-energy",
+          "meaning": "封闭系统可交换能量",
+          "stage": 2,
+          "patterns": [
+            "封闭.{0,35}(?:可|允许|能够).{0,12}(?:交换|传递).{0,6}能量"
+          ]
+        },
+        {
+          "id": "closed-matter",
+          "meaning": "封闭系统不能交换物质",
+          "stage": 2,
+          "patterns": [
+            "封闭.{0,80}(?:不|无).{0,12}(?:交换|传递).{0,6}物质"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "late-reference",
+      "split": "development",
+      "categories": [
+        "pronoun",
+        "clarification",
+        "subject",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "a-mass",
+          "meaning": "A质量5克",
+          "stage": 2,
+          "patterns": [
+            "(?:样品\\s*)?A.{0,16}质量.{0,10}5\\s*(?:克|g)"
+          ]
+        },
+        {
+          "id": "b-mass",
+          "meaning": "B质量7克",
+          "stage": 2,
+          "patterns": [
+            "(?:样品\\s*)?B.{0,16}质量.{0,10}7\\s*(?:克|g)"
+          ]
+        },
+        {
+          "id": "a-temperature",
+          "meaning": "A加热前20°C",
+          "stage": 2,
+          "patterns": [
+            "(?:样品\\s*)?A.{0,35}20\\s*(?:摄氏|°\\s*C|℃)"
+          ]
+        },
+        {
+          "id": "b-temperature",
+          "meaning": "B加热前30°C",
+          "stage": 2,
+          "patterns": [
+            "(?:样品\\s*)?B.{0,35}30\\s*(?:摄氏|°\\s*C|℃)"
+          ]
+        }
+      ],
+      "requiresQuestionAtStage": 1,
+      "requiresFollowUpAtStage": 2
+    },
+    {
+      "id": "reaction-balance",
+      "split": "development",
+      "categories": [
+        "formula",
+        "condition",
+        "negation"
+      ],
+      "facts": [
+        {
+          "id": "balanced",
+          "meaning": "2H2+O2→2H2O",
+          "stage": 2,
+          "patterns": [
+            "2\\s*H[2₂]\\s*\\+\\s*O[2₂].{0,8}2\\s*H[2₂]O"
+          ]
+        },
+        {
+          "id": "subscripts",
+          "meaning": "配平不可改下标",
+          "stage": 2,
+          "patterns": [
+            "(?:不|不能|禁止|不得).{0,10}(?:改|变).{0,12}下标"
+          ]
+        },
+        {
+          "id": "ratio",
+          "meaning": "分子数比2:1:2",
+          "stage": 2,
+          "patterns": [
+            "2\\s*[:：]\\s*1\\s*[:：]\\s*2"
+          ]
+        },
+        {
+          "id": "mass",
+          "meaning": "封闭反应总质量守恒",
+          "stage": 2,
+          "patterns": [
+            "封闭.{0,40}质量.{0,10}守恒"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "boyle-conditions",
+      "split": "holdout",
+      "categories": [
+        "formula",
+        "condition",
+        "units",
+        "comparison"
+      ],
+      "facts": [
+        {
+          "id": "temperature",
+          "meaning": "温度恒定",
+          "stage": 2,
+          "patterns": [
+            "(?:恒温|温度.{0,8}(?:不变|恒定))"
+          ]
+        },
+        {
+          "id": "amount",
+          "meaning": "气体量恒定",
+          "stage": 2,
+          "patterns": [
+            "(?:一定量|固定量|气体(?:量|的量).{0,10}(?:不变|固定|恒定))"
+          ]
+        },
+        {
+          "id": "pv",
+          "meaning": "PV不变或P1V1=P2V2",
+          "stage": 2,
+          "patterns": [
+            "(?:压强.{0,8}体积.{0,8}(?:乘积|积).{0,8}(?:不变|恒定)|P[₁1]?\\s*V[₁1]?.{0,4}=)"
+          ]
+        },
+        {
+          "id": "volume",
+          "meaning": "末体积1.5升",
+          "stage": 2,
+          "patterns": [
+            "1\\.5\\s*(?:升|L|l)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "search-comparison",
+      "split": "holdout",
+      "categories": [
+        "comparison",
+        "condition",
+        "negation",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "binary-sorted",
+          "meaning": "二分要求有序",
+          "stage": 2,
+          "patterns": [
+            "二分.{0,30}(?:有序|排序)"
+          ]
+        },
+        {
+          "id": "binary-complexity",
+          "meaning": "二分O(log n)",
+          "stage": 2,
+          "patterns": [
+            "二分.{0,60}O\\s*\\(\\s*log\\s*n\\s*\\)"
+          ]
+        },
+        {
+          "id": "linear-complexity",
+          "meaning": "线性O(n)",
+          "stage": 2,
+          "patterns": [
+            "线性.{0,75}O\\s*\\(\\s*n\\s*\\)"
+          ]
+        },
+        {
+          "id": "linear-unsorted",
+          "meaning": "线性适用未排序",
+          "stage": 2,
+          "patterns": [
+            "线性.{0,45}(?:未排序|无序)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "density-conversion",
+      "split": "holdout",
+      "categories": [
+        "units",
+        "formula",
+        "subject"
+      ],
+      "facts": [
+        {
+          "id": "definition",
+          "meaning": "密度质量除体积",
+          "stage": 2,
+          "patterns": [
+            "密度.{0,12}质量.{0,5}(?:除|/).{0,5}体积"
+          ]
+        },
+        {
+          "id": "first",
+          "meaning": "第一样品2g/mL",
+          "stage": 2,
+          "patterns": [
+            "2\\s*(?:克.{0,4}毫升|g\\s*/\\s*m[Ll])"
+          ]
+        },
+        {
+          "id": "conversion",
+          "meaning": "2g/mL=2000kg/m³",
+          "stage": 2,
+          "patterns": [
+            "2000\\s*(?:千克.{0,4}立方米|kg\\s*/\\s*m[3³])"
+          ]
+        },
+        {
+          "id": "comparison",
+          "meaning": "第二样品密度是一半",
+          "stage": 2,
+          "patterns": [
+            "(?:一半|1/2|0\\.5\\s*倍)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "separate-geometry",
+      "split": "holdout",
+      "categories": [
+        "formula",
+        "subject",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "square-perimeter",
+          "meaning": "正方形周长8cm",
+          "stage": 2,
+          "patterns": [
+            "正方形.{0,55}周长.{0,8}8"
+          ]
+        },
+        {
+          "id": "square-area",
+          "meaning": "正方形面积4cm²",
+          "stage": 2,
+          "patterns": [
+            "正方形.{0,80}面积.{0,8}4"
+          ]
+        },
+        {
+          "id": "rectangle-perimeter",
+          "meaning": "长方形周长14cm",
+          "stage": 2,
+          "patterns": [
+            "(?:长方形|矩形).{0,65}周长.{0,8}14"
+          ]
+        },
+        {
+          "id": "rectangle-area",
+          "meaning": "长方形面积10cm²",
+          "stage": 2,
+          "patterns": [
+            "(?:长方形|矩形).{0,95}面积.{0,8}10"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "chatter-then-knowledge",
+      "split": "holdout",
+      "categories": [
+        "no-new-knowledge",
+        "incremental",
+        "negation"
+      ],
+      "facts": [
+        {
+          "id": "ohm",
+          "meaning": "V=IR",
+          "stage": 2,
+          "patterns": [
+            "V\\s*=\\s*I\\s*\\*?\\s*R|电压.{0,8}电流.{0,8}(?:乘|×).{0,5}电阻"
+          ]
+        },
+        {
+          "id": "current",
+          "meaning": "0.2A",
+          "stage": 2,
+          "patterns": [
+            "0\\.2\\s*(?:安培|安|A)"
+          ]
+        },
+        {
+          "id": "resistance",
+          "meaning": "10Ω",
+          "stage": 2,
+          "patterns": [
+            "10\\s*(?:欧姆|欧|Ω)"
+          ]
+        },
+        {
+          "id": "voltage",
+          "meaning": "2V",
+          "stage": 2,
+          "patterns": [
+            "(?:电压.{0,15}2\\s*(?:伏特|伏|V)|2\\s*伏特)"
+          ]
+        }
+      ],
+      "requiresEmptyStage": 1
+    },
+    {
+      "id": "overflow-ledger",
+      "split": "holdout",
+      "categories": [
+        "overflow",
+        "numeric",
+        "subject"
+      ],
+      "facts": [
+        {
+          "id": "sample-1",
+          "meaning": "S01温度280K",
+          "stage": 1,
+          "patterns": [
+            "S01.{0,45}280\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-2",
+          "meaning": "S02温度281K",
+          "stage": 1,
+          "patterns": [
+            "S02.{0,45}281\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-3",
+          "meaning": "S03温度282K",
+          "stage": 1,
+          "patterns": [
+            "S03.{0,45}282\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-4",
+          "meaning": "S04温度283K",
+          "stage": 1,
+          "patterns": [
+            "S04.{0,45}283\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-5",
+          "meaning": "S05温度284K",
+          "stage": 1,
+          "patterns": [
+            "S05.{0,45}284\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-6",
+          "meaning": "S06温度285K",
+          "stage": 1,
+          "patterns": [
+            "S06.{0,45}285\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-7",
+          "meaning": "S07温度286K",
+          "stage": 1,
+          "patterns": [
+            "S07.{0,45}286\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-8",
+          "meaning": "S08温度287K",
+          "stage": 1,
+          "patterns": [
+            "S08.{0,45}287\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-9",
+          "meaning": "S09温度288K",
+          "stage": 1,
+          "patterns": [
+            "S09.{0,45}288\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-10",
+          "meaning": "S10温度289K",
+          "stage": 1,
+          "patterns": [
+            "S10.{0,45}289\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-11",
+          "meaning": "S11温度290K",
+          "stage": 1,
+          "patterns": [
+            "S11.{0,45}290\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-12",
+          "meaning": "S12温度291K",
+          "stage": 1,
+          "patterns": [
+            "S12.{0,45}291\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-13",
+          "meaning": "S13温度292K",
+          "stage": 1,
+          "patterns": [
+            "S13.{0,45}292\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-14",
+          "meaning": "S14温度293K",
+          "stage": 1,
+          "patterns": [
+            "S14.{0,45}293\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-15",
+          "meaning": "S15温度294K",
+          "stage": 1,
+          "patterns": [
+            "S15.{0,45}294\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-16",
+          "meaning": "S16温度295K",
+          "stage": 1,
+          "patterns": [
+            "S16.{0,45}295\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-17",
+          "meaning": "S17温度296K",
+          "stage": 1,
+          "patterns": [
+            "S17.{0,45}296\\s*(?:开尔文|K)"
+          ]
+        },
+        {
+          "id": "sample-18",
+          "meaning": "S18温度297K",
+          "stage": 1,
+          "patterns": [
+            "S18.{0,45}297\\s*(?:开尔文|K)"
+          ]
+        }
+      ],
+      "minimumRequests": 2
+    }
+  ]
+}

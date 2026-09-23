@@ -59,6 +59,176 @@ enum PowerSourceMonitor {
     }
 }
 
+/// Acceptance rules shared by the first translation and the adjacent-sentence
+/// repair. A caption must never store an English echo, a prompt leak or an
+/// unfinished answer as if it were the Chinese translation.
+enum TranslationAcceptance {
+    enum Rejection: Equatable {
+        case empty
+        case controlMarker
+        case promptLeak
+        case sourceEcho
+        case englishProse
+        case nonChineseText
+
+        var reason: String {
+            switch self {
+            case .empty: return "返回内容为空"
+            case .controlMarker: return "返回内容含模型控制标记"
+            case .promptLeak: return "返回内容含提示词或结构泄漏"
+            case .sourceEcho: return "返回内容为英文原样复述"
+            case .englishProse: return "返回内容为纯英文句子"
+            case .nonChineseText: return "返回内容不是中文译文"
+            }
+        }
+    }
+
+    /// Strings that only appear when the model echoes the instruction wrapper
+    /// instead of translating. Kept short and structural on purpose: ordinary
+    /// lecture English must not be classified as a leak.
+    private static let leakMarkers = [
+        "target_translate_only", "context_before_do_not_translate", "context_after_do_not_translate",
+        "primary asr transcript", "auxiliary token hints", "translate only",
+        "as an ai language model", "```", "here is the translation:"
+    ]
+
+    private static let controlMarkers = [
+        "<think>", "</think>", "<|im_start|>", "<|im_end|>", "<|endoftext|>"
+    ]
+
+    static let formulaNotice = "【公式待核对】"
+
+    /// Very common English function words. Their presence in an output without
+    /// any Chinese characters is strong evidence of an untranslated English sentence;
+    /// technical terms, acronyms and proper nouns do not contain them.
+    private static let englishFunctionWords: Set<String> = [
+        "the", "of", "and", "is", "are", "was", "were", "be", "been", "to", "in", "on", "for",
+        "with", "that", "this", "it", "you", "we", "they", "he", "she", "do", "does", "did",
+        "can", "will", "would", "should", "not", "but", "or", "as", "at", "by", "from", "have",
+        "has", "had", "if", "then", "there", "here", "what", "which", "when", "where", "who",
+        "how", "because", "so", "my", "your", "our", "their", "about", "into", "these", "those"
+    ]
+
+    static func rejection(candidate: String, source: String) -> Rejection? {
+        // Application status text is not evidence that the model translated the
+        // body. This also applies when restored/retried captions are revalidated.
+        let trimmed = bodyWithoutApplicationNotice(candidate).folding(
+            options: [.widthInsensitive, .diacriticInsensitive], locale: nil
+        )
+        guard !trimmed.isEmpty else { return .empty }
+        let lowercased = trimmed.lowercased()
+        if controlMarkers.contains(where: lowercased.contains) { return .controlMarker }
+        if leakMarkers.contains(where: lowercased.contains) { return .promptLeak }
+
+        let sourceForm = echoForm(source)
+        // An exact copy is only an echo when the source really is an English
+        // sentence. A formula-only or acronym-only source may legitimately come
+        // back unchanged.
+        if echoForm(trimmed) == sourceForm, englishContentTokens(source).count >= 3 {
+            return .sourceEcho
+        }
+        guard !containsHan(trimmed) else { return nil }
+        if containsKanaOrHangul(trimmed) { return .nonChineseText }
+        // Punctuation by itself is not a translation. Mathematical symbols,
+        // digits, units and names remain eligible for the technical exceptions.
+        guard trimmed.unicodeScalars.contains(where: {
+            CharacterSet.alphanumerics.contains($0) || CharacterSet.symbols.contains($0)
+        }) else { return .empty }
+
+        let sourceTokens = Set(englishTokens(source).filter { $0.count >= 3 }.map { $0.lowercased() })
+        switch englishProseEvidence(trimmed, sourceTokens: sourceTokens) {
+        case .some(.echo): return .sourceEcho
+        case .some(.prose): return .englishProse
+        case .none: return nil
+        }
+    }
+
+    static func validated(_ candidate: String, source: String) throws -> String {
+        if let rejection = rejection(candidate: candidate, source: source) {
+            throw QwenRuntimeError.requestFailed("译文未通过验收：\(rejection.reason)。")
+        }
+        return candidate
+    }
+
+    private enum ProseEvidence { case prose, echo }
+
+    private static func bodyWithoutApplicationNotice(_ text: String) -> String {
+        var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while body.hasPrefix(formulaNotice) {
+            body = String(body.dropFirst(formulaNotice.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return body
+    }
+
+    /// Case-, width- and punctuation-insensitive comparison form. Two strings
+    /// that carry the same letters and digits are treated as the same sentence.
+    static func echoForm(_ text: String) -> String {
+        let folded = text.folding(
+            options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive],
+            locale: nil
+        )
+        return String(folded.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+    }
+
+    /// Only Han characters provide Chinese content evidence. CJK punctuation,
+    /// fullwidth Latin letters, kana and Hangul must not bypass prose checks.
+    private static func containsHan(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF,
+                 0x20000...0x2FA1F, 0x30000...0x323AF:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func containsKanaOrHangul(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x31F0...0x31FF, 0x1B000...0x1B16F,
+                 0x1100...0x11FF, 0x3130...0x318F, 0xA960...0xA97F,
+                 0xAC00...0xD7FF:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func englishTokens(_ text: String) -> [String] {
+        let folded = text.folding(options: [.widthInsensitive, .diacriticInsensitive], locale: nil)
+        return folded.split(whereSeparator: { !($0.isLetter || $0 == "'" || $0 == "’") }).map(String.init)
+    }
+
+    /// A token without lowercase letters is a symbol, acronym or placeholder
+    /// (FTIR, DNA, ZXQCHEM0QXZ), never prose evidence.
+    private static func isAcronym(_ word: String) -> Bool {
+        word.count <= 12 && !word.contains(where: { $0.isLowercase })
+    }
+
+    private static func englishContentTokens(_ text: String) -> [String] {
+        englishTokens(text).filter { $0.count >= 3 && !isAcronym($0) }
+    }
+
+    /// An output without Chinese is a failure when it reads like English prose:
+    /// at least three content words plus either a function word or a strong
+    /// overlap with the English source. "pH 7.4", "FTIR", "2H2 + O2 → 2H2O" and
+    /// "Dijkstra" therefore stay accepted.
+    private static func englishProseEvidence(_ text: String, sourceTokens: Set<String>) -> ProseEvidence? {
+        let content = englishContentTokens(text)
+        guard content.count >= 3 else { return nil }
+        let lowered = content.map { $0.lowercased() }
+        let overlap = Double(lowered.filter { sourceTokens.contains($0) }.count) / Double(lowered.count)
+        if lowered.contains(where: { englishFunctionWords.contains($0) }) {
+            return overlap >= 0.5 ? .echo : .prose
+        }
+        return overlap >= 0.6 ? .echo : nil
+    }
+}
+
 enum QwenRuntimeError: LocalizedError {
     case serviceUnavailable
     case transcriptionTimedOut
@@ -95,11 +265,6 @@ enum QwenASRClient {
     /// Must match `TOKEN_HEADER` in qwen_asr_service.py.
     private static let tokenHeader = "X-LiveLingo-Token"
 
-    private struct Service: Sendable {
-        let baseURL: URL
-        let token: String?
-    }
-
     /// Explicit, test-only endpoint override. When it is set the supervised
     /// bundled runtime is never started, so an isolated test can point at its
     /// own loopback service. There is no fixed-port fallback: without this
@@ -115,14 +280,14 @@ enum QwenASRClient {
     /// Resolves the endpoint to use and starts the bundled service when needed.
     /// Concurrent callers share one launch; cancelling a caller cancels only
     /// that caller's request.
-    private static func resolveService() async throws -> Service {
+    private static func resolveService() async throws -> ASRRuntime.Endpoint {
         if let override = endpointOverride {
             let raw = ProcessInfo.processInfo.environment["LIVELINGO_ASR_TOKEN"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            return Service(baseURL: override, token: (raw?.isEmpty == false) ? raw : nil)
+            return ASRRuntime.Endpoint(baseURL: override, token: raw ?? "")
         }
         let endpoint = try await ASRRuntime.shared.endpoint()
-        return Service(baseURL: endpoint.baseURL, token: endpoint.token)
+        return endpoint
     }
 
     private static func authorize(_ request: inout URLRequest, token: String?) {
@@ -162,37 +327,28 @@ enum QwenASRClient {
         }
     }
 
+    static func resourceState() async -> ASRResourceSnapshot {
+        guard endpointOverride != nil else { return await ASRRuntime.shared.resourceState() }
+        do {
+            return await ASRRequestCoordinator.shared.resourceState(endpoint: try await resolveService())
+        } catch {
+            return .init(status: .unavailable, diagnostic: "本地转写服务状态不可用。")
+        }
+    }
+
     static func transcribe(
         audioURL: URL,
         modelKey: String,
-        enhanceSpeech: Bool = false
+        enhanceSpeech: Bool = false,
+        requestID: String? = nil
     ) async throws -> String {
         let service = try await resolveService()
-        var components = URLComponents(url: service.baseURL.appending(path: "transcribe"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [
-            URLQueryItem(name: "model", value: modelKey),
-            URLQueryItem(name: "enhance", value: enhanceSpeech ? "speech" : "off")
-        ]
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 120
-        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
-        authorize(&request, token: service.token)
-        request.httpBody = try Data(contentsOf: audioURL)
-
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await URLSession.shared.data(for: request)
-        } catch {
-            throw transportError(error)
-        }
-        try Task.checkCancellation()
-        guard let http = response as? HTTPURLResponse else { throw QwenRuntimeError.invalidResponse }
-        guard http.statusCode == 200 else { throw responseError(from: data) }
-        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let text = payload["text"] as? String
-        else { throw QwenRuntimeError.invalidResponse }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceID = String(audioURL.deletingPathExtension().lastPathComponent.utf8.filter {
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
+        }.prefix(60).map { Character(UnicodeScalar($0)) })
+        return try await ASRRequestCoordinator.shared.transcribe(endpoint: service, audioURL: audioURL,
+            modelKey: modelKey, enhanceSpeech: enhanceSpeech,
+            requestID: requestID ?? ASRRequestContext.requestID ?? sourceID + "-" + UUID().uuidString)
     }
 
     static func transportError(_ error: Error) -> Error {
@@ -566,7 +722,11 @@ actor TranslationModelLifetime {
             // Re-check after scheduling so a quick switch-back can cancel retirement.
             if model != selected, users[model, default: 0] == 0 {
                 do { try await unload(model) }
-                catch { Logger(subsystem: "com.jianhongli.LiveLingo", category: "model-lifetime").error("Model unload failed: \(model, privacy: .public), \(error.localizedDescription, privacy: .public)") }
+                catch {
+                    let code = (error as NSError).code
+                    Logger(subsystem: "com.jianhongli.LiveLingo", category: "model-lifetime")
+                        .error("event=model_unload_failed model=\(model, privacy: .public) code=\(code)")
+                }
             }
             unloading[model] = nil
         }
@@ -650,12 +810,18 @@ enum QwenTranslationClient {
             onUpdate: onUpdate
         )
             }
-        return FormulaASRReview.uncertain(text) ? "【公式待核对】" + output : output
+        let accepted = try TranslationAcceptance.validated(output, source: text)
+        return FormulaASRReview.uncertain(text) ? TranslationAcceptance.formulaNotice + accepted : accepted
     }
 
-    struct AdjacentTranslation: Decodable {
-        let previous: String
-        let current: String
+    /// Independent outcomes for the two halves of a boundary translation. A
+    /// failed repair keeps the previous Chinese line, and a failed current
+    /// sentence never discards a repair that is already valid.
+    struct AdjacentTranslation: Sendable {
+        let previous: String?
+        let current: String?
+        let previousRejection: String?
+        let currentRejection: String?
     }
 
     static func translateAdjacent(previous: String, previousChinese: String, current: String,
@@ -684,9 +850,31 @@ enum QwenTranslationClient {
             }
         }
         let boundaryInput = boundaryTranslationTarget(current, previous: previous)
-        let currentTranslation = try await contextual(boundaryInput, before: context + " " + previous, after: "")
+        // 2026-09-19（**根因修复 ②** ✓，替代不可靠的长度判据 ✗）：这次调用**不再把上下文塞给模型** ✗。
+        // 原因（三条实测 ✓）：① 模型单独翻译时**完全干净** ✓（round-425/428 探针 ✓）；
+        // ② 一旦把 `context + previous` 当 `before` 交出去 ✓，模型**会把它们也翻一遍** ✗
+        //    （字段名 `context_before_do_not_translate` 形同虚设 ✗，round-430 复现 ✓）；
+        // ③ 长度判据拦不住 ✗ —— 这种污染是"**把本段译文换掉**"✗，长度与本段英文相当（实测 1.07 倍 ✓）。
+        // 因此：本段就按**正常路径**翻（那是干净的 ✓）；`before` 只保留 `previous` 的最后一句，
+        // 不传两段 context，避免把上下文"喂"成可翻译的素材 ✗。
+        let previousTail = previous.split(separator: ".").suffix(1).joined()
+        let currentTranslation = try await contextual(boundaryInput, before: String(String(previousTail).suffix(160)), after: "")
         try Task.checkCancellation()
-        guard repairPrevious else { return AdjacentTranslation(previous: previousChinese, current: currentTranslation) }
+        // 2026-09-19（**根因修复 ①** ✓）：这次调用把 `context` 与 `previous` 一起当 `before` 交给模型 ✗，
+        // 而模型偶发**先把上下文和前段翻了一遍** ✗、本段还没轮到就被 token 上限截断 ✗
+        //（round-430 用独立探测驱动**复现**过 ✓：返回的 current 前半是 context 译文、后半是 previous 译文 ✗）。
+        // 后果：那段"别的内容"会被当作**本段译文**存下来 ✗，而本段真正的译文**一直缺席** ✗。
+        // 判据：产物相对 `boundaryInput`（模型真正该翻的那段 ✓）长得离谱 → 判为无效 ✓；
+        // 返回 `nil` 时应用会"**保留英文行等待重译**" ✓（`AppModel.swift:986-992` ✓，不会丢内容 ✓）。
+        let currentPlausible = TranslationLengthGuard.isPlausible(chinese: currentTranslation,
+                                                                 english: boundaryInput)
+        let currentLengthRejection: String? = currentPlausible ? nil : "译文长度与原文不成比例（疑似混入上下文）"
+        let currentRejection = TranslationAcceptance.rejection(candidate: currentTranslation, source: boundaryInput)
+        guard repairPrevious else {
+            return AdjacentTranslation(previous: nil,
+                current: (currentRejection == nil && currentLengthRejection == nil) ? currentTranslation : nil,
+                previousRejection: nil, currentRejection: currentRejection?.reason ?? currentLengthRejection)
+        }
         let prefix = stableTranslationPrefix(previousChinese)
         let source = previous.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = source.dropLast(source.last.map { ".!?".contains($0) } == true ? 1 : 0)
@@ -696,17 +884,41 @@ enum QwenTranslationClient {
         let canRepairTail = !prefix.isEmpty && split != nil
         let previousTranslation = try await contextual(canRepairTail ? tail : previous,
             before: context + (canRepairTail ? " " + String(source[..<split!.upperBound]) : ""), after: current)
+        // 2026-09-18：`repairSource` 是**模型真正被要求翻译的那段** ✓（`canRepairTail` 时只是"尾句" ✓）。
+        // 相邻修复的产物会与"稳定前缀"拼接 ✓，所以必须拿**它**做长度判据 ✓ ——
+        // 否则模型"顺手把上下文也翻了" ✗ 时（提示词要求别翻 ✗ 但偶发不听 ✓），
+        // 中文里就会多出前面几句 ✗，而拿"整段前英文"比是**比错了对象** ✗（比例仍在阈值内 ✗），拦不住 ✓。
+        let repairSource = canRepairTail ? tail : previous
+        let previousRejection = TranslationAcceptance.rejection(candidate: previousTranslation, source: repairSource)
         let normalizedPrevious = SimplifiedChineseNormalizer.normalize(previousTranslation)
-        let result = AdjacentTranslation(
-            previous: canRepairTail ? prefix + normalizedPrevious
-                : (prefix.isEmpty ? normalizedPrevious : previousChinese),
-            current: currentTranslation)
-        guard !result.previous.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !result.current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw NSError(domain: "LiveLingo.Translation", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "跨段翻译返回空内容"])
+        let revisedPrevious: String?
+        if previousRejection != nil {
+            // Keep the Chinese line that is already on screen.
+            revisedPrevious = nil
+        } else if canRepairTail {
+            // 2026-09-18（重复缺陷的定点修复 ✓）：模型**只被要求翻"尾句"** ✓，
+            // 所以产物就该与"尾句"成比例 ✓；若它顺手把提示词里的上下文也翻了 ✗，
+            // 产物会明显长于尾句 ✗（实测：段 114 的中文＝5 句别的内容 + 本段译文 ✗）。
+            // 判据用 `repairSource`（＝tail ✓）而不是整段英文 ✓ —— 后者会让这种情形的比例
+            // 仍落在阈值内 ✗，等于拦不住 ✓。不可信时**返回 nil** ✓：保留屏幕上的原译文 ✓，
+            // 与"修复失败就保持原样"的既有语义一致 ✓。
+            let plausible = TranslationLengthGuard.isPlausible(chinese: normalizedPrevious, english: repairSource)
+            revisedPrevious = plausible ? prefix + normalizedPrevious : nil
+        } else {
+            // 2026-09-19：这条分支此前**没有判据** ✗ —— 而提示词里带着
+            // `context_before_do_not_translate`（最多 1600 字符 ✓），模型偶发**不听** ✗、
+            // 把上下文也翻了 ✓ → 产物会长于它真正该翻的那段 ✓。
+            // 因此**同样按 `repairSource` 判长度** ✓：不可信就不采用 ✓（保留屏幕上的原译文 ✓）。
+            let plausible = TranslationLengthGuard.isPlausible(chinese: normalizedPrevious, english: repairSource)
+            revisedPrevious = prefix.isEmpty
+                ? (plausible ? normalizedPrevious : nil)
+                : previousChinese
         }
-        return result
+        return AdjacentTranslation(
+            previous: revisedPrevious,
+            current: (currentRejection == nil && currentLengthRejection == nil) ? currentTranslation : nil,
+            previousRejection: previousRejection?.reason,
+            currentRejection: currentRejection?.reason ?? currentLengthRejection)
     }
 
     static func boundaryTranslationTarget(_ current: String, previous: String) -> String {
@@ -793,6 +1005,7 @@ enum QwenTranslationClient {
 
     static func reviewLearningNote(
         _ input: String, prefix: String = "",
+        onRequestIdentity: (@Sendable (String) -> Void)? = nil,
         onUpdate: (@MainActor @Sendable (String) async -> Void)? = nil
     ) async throws -> String {
         let model = QwenModelProfile.highQuality.translationModel
@@ -807,7 +1020,8 @@ enum QwenTranslationClient {
                     maximumOutputTokens: prefix.contains("</think>") ? 4_096 : 16_384,
                     timeout: 1_200, thinking: true,
                     continuationPrompt: prompt + prefix, initialOutput: prefix, onWireUpdate: onUpdate,
-                    inactivityTimeout: 180, allowContinuationAtLimit: true
+                    inactivityTimeout: 180, allowContinuationAtLimit: true,
+                    onRequestIdentity: onRequestIdentity
                 )
             } catch let limit as QwenCompletionLimit {
                 // A long reasoning phase must not consume the final JSON budget.
@@ -820,7 +1034,8 @@ enum QwenTranslationClient {
                     input, modelName: model, systemPrompt: LearningPrompts.review,
                     maximumOutputTokens: 4_096, timeout: 1_200, thinking: true,
                     continuationPrompt: prompt + closed, initialOutput: closed, onWireUpdate: onUpdate,
-                    inactivityTimeout: 180
+                    inactivityTimeout: 180,
+                    onRequestIdentity: onRequestIdentity
                 )
             }
         }
@@ -896,6 +1111,7 @@ enum QwenTranslationClient {
         onWireUpdate: (@MainActor @Sendable (String) async -> Void)? = nil,
         inactivityTimeout: TimeInterval? = nil,
         allowContinuationAtLimit: Bool = false,
+        onRequestIdentity: (@Sendable (String) -> Void)? = nil,
         onUpdate: (@MainActor @Sendable (String) async -> Void)? = nil
     ) async throws -> String {
         if endpoint == nil {
@@ -906,7 +1122,7 @@ enum QwenTranslationClient {
             let purpose = systemPrompt == LearningPrompts.generate ? "note" : (systemPrompt == LearningPrompts.review ? "review" : "text")
             _ = try await MLXRuntime.shared.generate(model: modelName, prompt: prompt, input: input, prefix: initialOutput,
                 thinking: thinking, purpose: purpose, finalBudget: min(maximumOutputTokens, 4096), timeout: timeout,
-                inactivityTimeout: inactivityTimeout) { wire in
+                inactivityTimeout: inactivityTimeout, onRequestIdentity: onRequestIdentity) { wire in
                     let partial = try presentation.update(wire)
                     await onWireUpdate?(presentation.wire)
                     await onRawUpdate?(presentation.raw)
@@ -1279,8 +1495,7 @@ enum LectureSummaryInput {
         var size = 0
         for segment in segments where !coveredIDs.contains(segment.id) {
             guard !segment.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !segment.chinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !segment.chinese.hasPrefix("[翻译失败：") else { continue }
+                  segment.hasUsableTranslation else { continue }
             let entrySize = segment.english.count + segment.chinese.count + 32
             if !selected.isEmpty, size + entrySize > maximumCharacters { break }
             selected.append(segment)
@@ -1312,8 +1527,7 @@ enum LectureSummaryInput {
     ) -> String {
         let completed = segments.filter {
             !$0.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                && !$0.chinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                && !$0.chinese.hasPrefix("[翻译失败：")
+                && $0.hasUsableTranslation
         }
         guard !completed.isEmpty else { return "" }
 
@@ -1337,6 +1551,27 @@ enum LectureSummaryInput {
     private static func clock(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds))
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+}
+
+/// 2026-09-18：**译文长度合理性**护栏（纯函数，可单测 ✓）。
+///
+/// 起因：全库实测（1,784 段）发现约 **1% 的段落**中文里混进了邻居段的内容 ✗ ——
+/// 音频时长与该段英文都正常 ✓，只有中文异常长 ✗（字符数比中位 0.37、99% 才 1.24、最大 4.96 ✗）。
+/// 处理方式**不伤害无辜** ✓：只有在"原译文不可信、且重试结果可信"时才替换 ✓，
+/// 否则保留原样 ✓（见 AppModel 的调用点 ✓）。
+enum TranslationLengthGuard {
+    /// 中文不设上下限，只判"相对英文是否长得离谱"。
+    /// 阈值 1.3 来自实测：99% 的正常段落都在 1.24 以下 ✓。
+    static let maximumRatio = 1.3
+    /// 英文过短时（如 "Okay."）比例噪声大，不判。
+    static let minimumEnglishCount = 24
+
+    static func isPlausible(chinese: String, english: String) -> Bool {
+        let zh = chinese.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) }.count
+        guard zh > 0 else { return true }
+        guard english.count >= minimumEnglishCount else { return true }
+        return Double(zh) <= Double(english.count) * maximumRatio
     }
 }
 

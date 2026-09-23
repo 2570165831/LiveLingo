@@ -1,0 +1,25 @@
+{
+  "id": "separate-geometry",
+  "stages": [
+    [
+      {
+        "english": "A square has side length 2 centimetres. Its perimeter is 8 centimetres and its area is 4 square centimetres.",
+        "chinese": "正方形边长为 2 厘米，周长为 8 厘米，面积为 4 平方厘米。"
+      },
+      {
+        "english": "Perimeter measures boundary length, whereas area measures surface size. Their units are different.",
+        "chinese": "周长衡量边界长度，面积衡量平面大小，两者单位不同。"
+      }
+    ],
+    [
+      {
+        "english": "A separate rectangle has sides of 2 centimetres and 5 centimetres. Its perimeter is 14 centimetres and its area is 10 square centimetres.",
+        "chinese": "另一个长方形两边分别为 2 厘米和 5 厘米，其周长为 14 厘米，面积为 10 平方厘米。"
+      },
+      {
+        "english": "Keep the square and rectangle results separate; they describe two different figures, not a correction to the first measurement.",
+        "chinese": "正方形与长方形的结果应分别保留，它们描述两个不同图形，并非对第一次测量的更正。"
+      }
+    ]
+  ]
+}

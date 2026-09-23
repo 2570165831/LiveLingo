@@ -10,23 +10,24 @@ import mlx.core as mx
 from mlx_lm import load
 from mlx_lm.models.cache import make_prompt_cache, save_prompt_cache, load_prompt_cache
 from mlx_lm.sample_utils import apply_top_k, apply_top_p
-from outlines.models.mlxlm import MLXLM
-from outlines.backends.outlines_core import OutlinesCoreBackend
-from outlines_core import Guide
+from outlines_core import Guide, Index
+from outlines_core.json_schema import build_regex_from_schema
+from grammar_vocabulary import build_vocabulary
+from review_diagnostics import grammar_error
 from outlines_core.kernels.mlx import allocate_token_bitmask, fill_next_token_bitmask, apply_token_bitmask
 
 class Engine:
     def __init__(self, model_path):
         self.model_path = str(Path(model_path).resolve())
         self.model, self.tokenizer = load(self.model_path)
-        self.backend = OutlinesCoreBackend(MLXLM(self.model, self.tokenizer))
+        self.vocabulary = build_vocabulary(self.tokenizer)
         self.indices = OrderedDict()
         self.end_think = self.tokenizer.encode('</think>', add_special_tokens=False)
         if len(self.end_think) != 1:
             raise ValueError('Thinking delimiter must be one token for this adapter')
         identity = [('runtime', [(name, version(name)) for name in
                     ('mlx', 'mlx-lm', 'outlines', 'outlines_core', 'transformers')])]
-        for name in ('engine.py', 'schemas.py', 'checks.py', 'worker.py'):
+        for name in ('engine.py', 'schemas.py', 'checks.py', 'worker.py', 'grammar_vocabulary.py', 'review_diagnostics.py'):
             source = Path(__file__).with_name(name)
             if source.is_file():
                 identity.append((name, hashlib.sha256(source.read_bytes()).hexdigest()))
@@ -42,7 +43,10 @@ class Engine:
         # before asking for the no-new-knowledge decision.
         key = json.dumps(schema, ensure_ascii=False)
         if key not in self.indices:
-            self.indices[key] = self.backend.get_json_schema_logits_processor(key).index
+            try:
+                self.indices[key] = Index(build_regex_from_schema(key), self.vocabulary)
+            except Exception as error:
+                raise grammar_error(error) from None
         self.indices.move_to_end(key)
         while len(self.indices) > 8:
             self.indices.popitem(last=False)

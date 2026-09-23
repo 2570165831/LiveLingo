@@ -1,0 +1,25 @@
+{
+  "id": "late-reference",
+  "stages": [
+    [
+      {
+        "english": "Sample A has a mass of 5 grams. Sample B has a mass of 7 grams.",
+        "chinese": "样品 A 的质量是 5 克，样品 B 的质量是 7 克。"
+      },
+      {
+        "english": "Its temperature is 20 degrees Celsius. The speaker has not yet said which sample this temperature belongs to.",
+        "chinese": "它的温度是 20 摄氏度，讲述者尚未说明这个温度属于哪个样品。"
+      }
+    ],
+    [
+      {
+        "english": "The earlier temperature of 20 degrees Celsius belongs to sample A. It was measured before heating.",
+        "chinese": "先前提到的 20 摄氏度属于样品 A，是加热前测得的温度。"
+      },
+      {
+        "english": "Sample B has a temperature of 30 degrees Celsius before heating. This is a separate measurement, not a change in sample A.",
+        "chinese": "样品 B 加热前的温度是 30 摄氏度，这是另一项测量，并非样品 A 的温度变化。"
+      }
+    ]
+  ]
+}

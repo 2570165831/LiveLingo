@@ -1,0 +1,25 @@
+{
+  "id": "chatter-then-knowledge",
+  "stages": [
+    [
+      {
+        "english": "Good morning everyone. Thank you for joining the class today.",
+        "chinese": "大家早上好，感谢今天来上课。"
+      },
+      {
+        "english": "We will take a short break now. Please come back when the break ends.",
+        "chinese": "现在短暂休息，请在休息结束时回来。"
+      }
+    ],
+    [
+      {
+        "english": "For a fixed resistor in this ideal circuit, Ohm's law is voltage equals current multiplied by resistance: V equals I R.",
+        "chinese": "在这个理想电路中，对固定电阻，欧姆定律是电压等于电流乘以电阻，即 V = IR。"
+      },
+      {
+        "english": "A current of 0.2 amperes through a 10 ohm resistor gives a voltage of 2 volts.",
+        "chinese": "0.2 安培电流通过 10 欧姆电阻时，电压为 2 伏特。"
+      }
+    ]
+  ]
+}

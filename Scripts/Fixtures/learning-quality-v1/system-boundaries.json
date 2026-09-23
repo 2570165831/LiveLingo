@@ -1,0 +1,25 @@
+{
+  "id": "system-boundaries",
+  "stages": [
+    [
+      {
+        "english": "An isolated system exchanges neither matter nor energy with its surroundings.",
+        "chinese": "孤立系统既不与外界交换物质，也不交换能量。"
+      },
+      {
+        "english": "Energy is conserved within an isolated system. Transfers inside that system do not change its total energy.",
+        "chinese": "孤立系统的总能量守恒，内部能量转移不改变其总能量。"
+      }
+    ],
+    [
+      {
+        "english": "A closed system can exchange energy with its surroundings, but it cannot exchange matter.",
+        "chinese": "封闭系统可以与外界交换能量，但不能交换物质。"
+      },
+      {
+        "english": "A closed system and an isolated system are different: only the isolated system excludes both exchanges.",
+        "chinese": "封闭系统与孤立系统不同，只有孤立系统同时排除这两类交换。"
+      }
+    ]
+  ]
+}

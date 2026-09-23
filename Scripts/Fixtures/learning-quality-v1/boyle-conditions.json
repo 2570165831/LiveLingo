@@ -1,0 +1,25 @@
+{
+  "id": "boyle-conditions",
+  "stages": [
+    [
+      {
+        "english": "For a fixed amount of ideal gas at constant temperature, pressure multiplied by volume is constant.",
+        "chinese": "一定量的理想气体在恒温条件下，压强与体积的乘积保持不变。"
+      },
+      {
+        "english": "This relationship is Boyle's law. Holding the amount of gas and the temperature fixed is essential.",
+        "chinese": "这一关系称为波义耳定律，必须保持气体量和温度不变。"
+      }
+    ],
+    [
+      {
+        "english": "A gas starts at 2 kilopascals and 3 litres. Under those fixed conditions, raising the pressure to 4 kilopascals reduces its volume to 1.5 litres.",
+        "chinese": "气体初始压强为 2 千帕、体积为 3 升。在上述条件下，压强升到 4 千帕时，体积减到 1.5 升。"
+      },
+      {
+        "english": "Do not use the inverse pressure-volume relationship unchanged if the temperature or amount of gas changes.",
+        "chinese": "温度或气体量变化时，不能原样套用压强与体积的反比关系。"
+      }
+    ]
+  ]
+}

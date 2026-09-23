@@ -36,9 +36,20 @@ actor ASRRuntime {
     static let shared = ASRRuntime()
 
     /// A live service the app may talk to.
-    struct Endpoint: Sendable, Equatable {
+    struct Endpoint: Sendable, Hashable {
         let baseURL: URL
         let token: String
+        /// Only endpoints created by this runtime carry an owned child identity.
+        /// An isolated external test endpoint leaves both values nil.
+        let runtimeID: UUID?
+        let processIdentifier: Int32?
+
+        init(baseURL: URL, token: String, runtimeID: UUID? = nil, processIdentifier: Int32? = nil) {
+            self.baseURL = baseURL
+            self.token = token
+            self.runtimeID = runtimeID
+            self.processIdentifier = processIdentifier
+        }
     }
 
     private static let logger = Logger(subsystem: "com.jianhongli.LiveLingo", category: "ASRRuntime")
@@ -46,12 +57,20 @@ actor ASRRuntime {
     private static let readyPrefix = "LIVELINGO_ASR_READY"
     /// Must match `PROTOCOL_VERSION` in qwen_asr_service.py.
     private static let protocolVersion = 1
-    private static let readinessTimeout: TimeInterval = 30
+    // A newly signed offline bundle can take longer to load its Python/MLX
+    // runtime on first launch. Keep waiting while the supervised child is
+    // alive; the failure path below still reports a bounded timeout.
+    private static let readinessTimeout: TimeInterval = 90
     private static let exitTimeout: TimeInterval = 5
     private static let logLimit = 16_000
 
     private var service: Service?
     private var startTask: Task<Endpoint, Error>?
+    private var stopTask: Task<Void, Never>?
+    private var retiringServiceID: UUID?
+    // Only an observed exit of an exact owned endpoint is positive evidence.
+    // Bounded history handles callers that still hold a recently retired URL.
+    private var exitedEndpoints: [Endpoint] = []
 
     // MARK: - Public entry points
 
@@ -61,16 +80,26 @@ actor ASRRuntime {
     /// Concurrent callers share a single launch, and cancelling one caller
     /// never cancels that shared launch or the service itself.
     func endpoint() async throws -> Endpoint {
+        if let stopTask { await stopTask.value }
+        try Task.checkCancellation()
+        if let service, retiringServiceID == service.id, service.isAlive {
+            throw QwenRuntimeError.requestFailed("上一个转写进程尚未退出，任务已保留。")
+        }
         if let service, let endpoint = service.endpoint, service.isAlive {
             return endpoint
         }
         if let service {
             // The child died between requests. Drop it and start a fresh one.
             Self.logger.error(
-                "ASR service exited: \(service.exitDescription ?? "unknown", privacy: .public)"
+                "ASR service event=exited pid=\(service.processIdentifier)"
             )
+            rememberExit(of: service)
             self.service = nil
             service.closePipes()
+            retiringServiceID = nil
+            if let endpoint = service.endpoint {
+                await ASRRequestCoordinator.shared.confirmServiceExited(endpoint)
+            }
         }
         return try await start()
     }
@@ -84,7 +113,7 @@ actor ASRRuntime {
             // The view that asked for the warm-up went away. The shared launch
             // is not owned by that caller and continues on its own.
         } catch {
-            Self.logger.error("ASR runtime warm-up failed: \(error.localizedDescription, privacy: .public)")
+            Self.logger.error("ASR runtime event=warmup_failed")
         }
     }
 
@@ -94,14 +123,31 @@ actor ASRRuntime {
     /// this runtime spawned has its stdin closed first, is waited for with a
     /// bound, and is only then signalled.
     func stop() async {
+        if let stopTask { await stopTask.value; return }
+        let task = Task { await self.finishStop() }
+        stopTask = task
+        await task.value
+    }
+
+    private func finishStop() async {
+        defer { stopTask = nil }
         if let startTask {
             startTask.cancel()
             _ = try? await startTask.value
             self.startTask = nil
         }
         guard let service else { return }
-        self.service = nil
+        retiringServiceID = service.id
         await Self.terminate(service)
+        // Keep the exact child owned if even SIGKILL has not produced an exit.
+        // No replacement endpoint can then be returned as though it were idle.
+        guard !service.isAlive else { return }
+        rememberExit(of: service)
+        self.service = nil
+        retiringServiceID = nil
+        if let endpoint = service.endpoint {
+            await ASRRequestCoordinator.shared.confirmServiceExited(endpoint)
+        }
     }
 
     /// Bounded, synchronous stop for `applicationWillTerminate`, which cannot
@@ -118,6 +164,51 @@ actor ASRRuntime {
 
     /// Whether a supervised service is currently running.
     var isRunning: Bool { service?.isAlive ?? false }
+
+    /// Read-only: querying resources never starts a service or loads weights.
+    func resourceState() async -> ASRResourceSnapshot {
+        guard let service else {
+            return .init(status: startTask == nil ? .stopped : .starting)
+        }
+        guard let endpoint = service.endpoint else {
+            return .init(status: service.isAlive ? (retiringServiceID == service.id ? .retiring : .starting) : .stopped,
+                         runtimeID: service.id, processIdentifier: service.processIdentifier)
+        }
+        guard service.isAlive else {
+            rememberExit(of: service)
+            await ASRRequestCoordinator.shared.confirmServiceExited(endpoint)
+            guard self.service?.id == service.id else {
+                return .init(status: .unavailable, diagnostic: "转写服务已切换，等待刷新资源状态。")
+            }
+            return .init(status: .stopped)
+        }
+        let snapshot = await ASRRequestCoordinator.shared.resourceState(endpoint: endpoint)
+        // An old HTTP health response cannot describe a replacement process.
+        guard self.service?.id == service.id, service.isAlive else {
+            return .init(status: .unavailable, diagnostic: "转写服务已切换，等待刷新资源状态。")
+        }
+        if retiringServiceID == service.id {
+            return snapshot.withStatus(.retiring)
+        }
+        return snapshot
+    }
+
+    func hasExited(_ endpoint: Endpoint) -> Bool? {
+        guard endpoint.runtimeID != nil, let pid = endpoint.processIdentifier, pid > 0 else { return nil }
+        if let service, service.endpoint == endpoint {
+            if service.isAlive { return false }
+            rememberExit(of: service)
+            return true
+        }
+        return exitedEndpoints.contains(endpoint) ? true : nil
+    }
+
+    private func rememberExit(of service: Service) {
+        guard !service.isAlive, let endpoint = service.endpoint,
+              !exitedEndpoints.contains(endpoint) else { return }
+        exitedEndpoints.append(endpoint)
+        if exitedEndpoints.count > 256 { exitedEndpoints.removeFirst() }
+    }
 
     // MARK: - Launch
 
@@ -205,6 +296,10 @@ actor ASRRuntime {
             // Never leave a half-started child behind, including on cancellation
             // (which is how `stop()` interrupts a launch in flight).
             await Self.terminate(service)
+            if service.isAlive {
+                self.service = service
+                self.retiringServiceID = service.id
+            }
             throw error
         }
     }
@@ -249,8 +344,8 @@ actor ASRRuntime {
         guard announcement.auth && announcement.supervised else {
             throw failure("内置 ASR 服务未启用请求令牌，拒绝连接", service: service)
         }
-        let expectedModels = try resolvePaths().models.standardizedFileURL.resolvingSymlinksInPath()
-        guard URL(fileURLWithPath: announcement.modelsRoot).standardizedFileURL.resolvingSymlinksInPath() == expectedModels else {
+        let expectedModels = try resolvePaths().models
+        guard modelDirectoryMatches(announcement.modelsRoot, expected: expectedModels) else {
             throw failure("内置转写服务使用了不匹配的模型目录", service: service)
         }
         let host = announcement.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -264,9 +359,28 @@ actor ASRRuntime {
             throw failure("内置 ASR 服务报告了无效端口：\(announcement.port)", service: service)
         }
         logger.notice(
-            "ASR service models root=\(announcement.modelsRoot, privacy: .public) auth=\(announcement.auth)"
+            "ASR service event=models_root_verified auth=\(announcement.auth)"
         )
-        return Endpoint(baseURL: baseURL, token: service.token)
+        return Endpoint(baseURL: baseURL, token: service.token,
+                        runtimeID: service.id, processIdentifier: service.processIdentifier)
+    }
+
+    /// Foundation can preserve a different trailing-slash directory hint when
+    /// resolving a symlink. Compare canonical filesystem paths after checking
+    /// both are existing directories; URL equality also compares that hint.
+    /// No prefix matching or fallback directory is allowed.
+    static func modelDirectoryMatches(_ reportedPath: String, expected: URL) -> Bool {
+        guard reportedPath.hasPrefix("/"), !reportedPath.utf8.contains(0), expected.isFileURL else { return false }
+        let reported = URL(fileURLWithPath: reportedPath, isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let required = expected.standardizedFileURL.resolvingSymlinksInPath()
+        var reportedIsDirectory: ObjCBool = false
+        var expectedIsDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: reported.path, isDirectory: &reportedIsDirectory),
+              reportedIsDirectory.boolValue,
+              FileManager.default.fileExists(atPath: required.path, isDirectory: &expectedIsDirectory),
+              expectedIsDirectory.boolValue else { return false }
+        return reported.path == required.path
     }
 
     // MARK: - Teardown
@@ -290,6 +404,7 @@ actor ASRRuntime {
             // Last resort; still limited to our own child pid.
             kill(service.processIdentifier, SIGKILL)
         }
+        _ = await waitForExit(service)
         service.closePipes()
     }
 
@@ -387,7 +502,9 @@ actor ASRRuntime {
         if !captured.error.isEmpty { lines.append("stderr：\n\(captured.error)") }
         if !captured.output.isEmpty { lines.append("stdout：\n\(captured.output)") }
         let message = lines.joined(separator: "\n")
-        logger.error("ASR runtime failure: \(message, privacy: .public)")
+        // Child output and error descriptions may contain course text, paths,
+        // or credentials. Keep those details out of ordinary diagnostics.
+        logger.error("ASR runtime event=failed pid=\(service.processIdentifier) running=\(service.isAlive) stdout_bytes=\(captured.output.utf8.count) stderr_bytes=\(captured.error.utf8.count)")
         return QwenRuntimeError.requestFailed(message)
     }
 
@@ -410,6 +527,7 @@ actor ASRRuntime {
 
     /// One supervised child: its pipes are retained from launch until `stop()`.
     private final class Service: @unchecked Sendable {
+        let id = UUID()
         let process: Process
         let token: String
         let standardInput: Pipe
