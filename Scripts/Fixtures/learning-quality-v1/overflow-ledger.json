@@ -1,0 +1,79 @@
+{
+  "id": "overflow-ledger",
+  "stages": [
+    [
+      {
+        "english": "In experiment 1, sample S01 is held at 280 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 1 中，样品 S01 保持在 280 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 2, sample S02 is held at 281 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 2 中，样品 S02 保持在 281 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 3, sample S03 is held at 282 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 3 中，样品 S03 保持在 282 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 4, sample S04 is held at 283 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 4 中，样品 S04 保持在 283 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 5, sample S05 is held at 284 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 5 中，样品 S05 保持在 284 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 6, sample S06 is held at 285 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 6 中，样品 S06 保持在 285 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 7, sample S07 is held at 286 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 7 中，样品 S07 保持在 286 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 8, sample S08 is held at 287 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 8 中，样品 S08 保持在 287 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 9, sample S09 is held at 288 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 9 中，样品 S09 保持在 288 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 10, sample S10 is held at 289 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 10 中，样品 S10 保持在 289 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 11, sample S11 is held at 290 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 11 中，样品 S11 保持在 290 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 12, sample S12 is held at 291 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 12 中，样品 S12 保持在 291 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 13, sample S13 is held at 292 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 13 中，样品 S13 保持在 292 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 14, sample S14 is held at 293 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 14 中，样品 S14 保持在 293 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 15, sample S15 is held at 294 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 15 中，样品 S15 保持在 294 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 16, sample S16 is held at 295 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 16 中，样品 S16 保持在 295 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 17, sample S17 is held at 296 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 17 中，样品 S17 保持在 296 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      },
+      {
+        "english": "In experiment 18, sample S18 is held at 297 kelvin. This is an independent temperature reading for that named sample. The reference conditions are recorded so that measurements from different samples are not merged. No reading here corrects or replaces another sample. Keep the sample identifier with its temperature.",
+        "chinese": "实验 18 中，样品 S18 保持在 297 开尔文。这是该样品独立的温度记录。各样品的测量结果分别保留，不互相更正或替代。"
+      }
+    ]
+  ]
+}

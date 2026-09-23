@@ -1,0 +1,25 @@
+{
+  "id": "constant-acceleration",
+  "stages": [
+    [
+      {
+        "english": "A trolley has an initial velocity of 3 metres per second. Its acceleration is constant at 2 metres per second squared.",
+        "chinese": "小车初速度为 3 米每秒，加速度恒为 2 米每二次方秒。"
+      },
+      {
+        "english": "For constant acceleration, final velocity is initial velocity plus acceleration multiplied by elapsed time: v equals u plus a t.",
+        "chinese": "恒定加速度下，末速度等于初速度加上加速度乘时间，即 v = u + at。"
+      }
+    ],
+    [
+      {
+        "english": "After 4 seconds the trolley has a velocity of 11 metres per second, because 3 plus 2 times 4 equals 11.",
+        "chinese": "4 秒后，小车速度为 11 米每秒，因为 3 + 2 × 4 = 11。"
+      },
+      {
+        "english": "This velocity formula requires constant acceleration over the time interval; a changing acceleration cannot simply be substituted as one fixed value.",
+        "chinese": "这一速度公式要求该时间段内加速度恒定；变化的加速度不能直接作为一个固定值代入。"
+      }
+    ]
+  ]
+}

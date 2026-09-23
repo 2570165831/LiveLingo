@@ -78,7 +78,7 @@ for required_file in "${required_files[@]}"; do
 done
 
 print "[5/5] 校验内置 MLX 运行库与离线许可证…"
-for relative in worker.py engine.py schemas.py checks.py python/bin/python3; do
+for relative in worker.py engine.py schemas.py checks.py review_diagnostics.py grammar_vocabulary.py python/bin/python3; do
   [[ -s "${app_path}/Contents/Resources/LanguageRuntime/${relative}" ]] || fail "语言运行库缺失：${relative}"
 done
 [[ -d "${app_path}/Contents/Resources/LanguageRuntime/Licenses" ]] || fail "缺少运行库离线许可证。"

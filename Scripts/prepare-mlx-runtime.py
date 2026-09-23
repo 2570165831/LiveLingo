@@ -10,6 +10,17 @@ from importlib import metadata
 import json
 from pathlib import Path
 import shutil
+
+RUNTIME_MODULES=('worker.py','engine.py','schemas.py','checks.py','review_diagnostics.py','grammar_vocabulary.py')
+# 先确认运行时模块都在，再谈环境：否则从克隆构建时只会看到裸的 FileNotFoundError，
+# 不会知道"某个模块没有被纳入版本控制"。这段只用 stdlib，因此任何 python 都能先给出结论。
+_source_dir=Path(__file__).parent/'mlx_runtime'
+_missing=[name for name in RUNTIME_MODULES if not (_source_dir/name).is_file()]
+if _missing:
+ raise SystemExit(
+  '缺少运行时模块：' + ', '.join(_missing) + '\n'
+  '查找路径：' + str(_source_dir) + '\n'
+  '提示：这些是运行时必需件；若从 git 克隆后缺失，说明它们没有被提交，先补齐再构建。')
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -65,7 +76,7 @@ for name,dist in sorted(selected.items()):
    shutil.copy2(supplement,license_dir/'LICENSE');licenses.append('LICENSE')
   else:missing.append(name)
  manifest.append(dict(name=dist.metadata['Name'],version=dist.version,licenses=licenses))
-for name in ['worker.py','engine.py','schemas.py','checks.py']:
+for name in ['worker.py','engine.py','schemas.py','checks.py','review_diagnostics.py','grammar_vocabulary.py']:
  shutil.copy2(Path(__file__).parent/'mlx_runtime'/name,root/name)
 for source in base.rglob('*'):
  if source.is_file() and source.name.lower() in ('license','license.txt','license.rst','notice','copying'):

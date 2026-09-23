@@ -42,12 +42,17 @@ ASR_MODELS = (
     ("mlx-community/parakeet-tdt-0.6b-v2", "CC-BY-4.0.txt", "Parakeet-tdt-0.6b-v2-original-README.md"),
     ("mlx-community/Qwen3-ASR-1.7B-4bit", "Qwen3-ASR-1.7B-LICENSE", "Qwen3-ASR-1.7B-4bit-README.md"),
 )
-RUNTIME_MODULES = ("worker.py", "engine.py", "schemas.py", "checks.py")
+RUNTIME_MODULES = ("worker.py", "engine.py", "schemas.py", "checks.py", "review_diagnostics.py", "grammar_vocabulary.py")
 
 # Test artifacts that must never reach the candidate. "virtual-player" alone does
 # not match "virtual-audio-player.swift", so all spellings are listed.
 FORBIDDEN_NAME_PARTS = (
     "livelingo-cli",
+    "learning-quality-cli",
+    "evaluate-learning-quality",
+    "test_learning_quality",
+    "test-cli-lifecycle",
+    "test-cli-process",
     "livelingotests",
     "virtual-audio-player",
     "virtual-player",
@@ -103,6 +108,20 @@ def clone_tree(source, destination):
         run(["/usr/bin/ditto", "--rsrc", "--extattr", source, destination])
     if not destination.is_dir() or destination.is_symlink():
         fail("copy did not produce a real directory: %s" % destination)
+
+
+def repair_portable_asr_dylib_links(python_root):
+    """Resolve Numba's OpenMP dependency to the copy already shipped by sklearn."""
+    packages = python_root / "lib/python3.13/site-packages"
+    extensions = list((packages / "numba/np/ufunc").glob("omppool*.so"))
+    libomp = packages / "sklearn/.dylibs/libomp.dylib"
+    if len(extensions) != 1 or not libomp.is_file() or libomp.is_symlink():
+        fail("portable ASR runtime is missing its pinned Numba/sklearn OpenMP pair")
+    extension = extensions[0]
+    replacement = "@loader_path/../../../sklearn/.dylibs/libomp.dylib"
+    if (extension.parent / "../../../sklearn/.dylibs/libomp.dylib").resolve() != libomp.resolve():
+        fail("portable ASR OpenMP loader path does not resolve within the bundle")
+    run(["/usr/bin/install_name_tool", "-change", "@rpath/libomp.dylib", replacement, extension])
 
 
 def install_file(source, target, mode=None, replace=False):
@@ -275,6 +294,7 @@ def main():
                      replace=True)
 
     clone_tree(args.asr_python, resources / "ASRRuntime/python")
+    repair_portable_asr_dylib_links(resources / "ASRRuntime/python")
     install_file(args.asr_service, resources / "ASRRuntime/qwen_asr_service.py", mode=0o755, replace=True)
     install_file(REPO_ROOT / "Packaging/ASRRuntime.lock.json", resources / "ASRRuntime/ASRRuntime.lock.json")
     python_licenses = install_python_licenses(args.asr_python, resources / "ASRRuntime/Licenses/CPython")
@@ -346,6 +366,15 @@ def main():
         info = plistlib.loads(info_path.read_bytes())
         info["CFBundleIdentifier"] = args.bundle_id
         info_path.write_bytes(plistlib.dumps(info))
+
+    # A distributable bundle must be readable by the installing user, even when
+    # a source editor or license archive supplied owner-only permissions.
+    # Only normalize regular resources in this newly created candidate.
+    for path in resources.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            current_mode = path.stat().st_mode & 0o777
+            if current_mode & 0o444 != 0o444:
+                path.chmod(current_mode | 0o444)
 
     check_required_paths(args.output)
     scan_forbidden(args.output, "assembled candidate")

@@ -1,0 +1,25 @@
+{
+  "id": "density-conversion",
+  "stages": [
+    [
+      {
+        "english": "Density is mass divided by volume. A sample with a mass of 20 grams and a volume of 10 millilitres has a density of 2 grams per millilitre.",
+        "chinese": "密度等于质量除以体积。质量 20 克、体积 10 毫升的样品，密度为 2 克每毫升。"
+      },
+      {
+        "english": "One gram per millilitre equals 1000 kilograms per cubic metre.",
+        "chinese": "1 克每毫升等于 1000 千克每立方米。"
+      }
+    ],
+    [
+      {
+        "english": "The same sample therefore has a density of 2000 kilograms per cubic metre. Changing units does not change the material or its density as a physical quantity.",
+        "chinese": "同一样品的密度因此为 2000 千克每立方米；更换单位并未改变物质或密度这一物理量。"
+      },
+      {
+        "english": "A different sample has density 1 gram per millilitre. It has half the density of the first sample, not twice the density.",
+        "chinese": "另一份样品的密度为 1 克每毫升，是第一份样品密度的一半，并非两倍。"
+      }
+    ]
+  ]
+}

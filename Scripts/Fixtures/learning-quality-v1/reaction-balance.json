@@ -1,0 +1,25 @@
+{
+  "id": "reaction-balance",
+  "stages": [
+    [
+      {
+        "english": "Hydrogen and oxygen form water. The balanced equation is 2 H2 plus O2 gives 2 H2O.",
+        "chinese": "氢气与氧气生成水，配平反应方程式是 2 H2 + O2 → 2 H2O。"
+      },
+      {
+        "english": "Balancing changes coefficients, not chemical subscripts. Changing H2O into H2O2 would change the substance.",
+        "chinese": "配平改变的是化学计量系数，不能改动化学式下标；把 H2O 改成 H2O2 会改变物质。"
+      }
+    ],
+    [
+      {
+        "english": "In this equation the molecular ratio of hydrogen to oxygen to water is 2 to 1 to 2.",
+        "chinese": "在该方程式中，氢气、氧气、水的分子数之比为 2:1:2。"
+      },
+      {
+        "english": "In a closed reaction vessel, total mass is conserved even when the visible amount of gas changes.",
+        "chinese": "在封闭反应容器中，即使可见气体的量发生变化，总质量仍然守恒。"
+      }
+    ]
+  ]
+}

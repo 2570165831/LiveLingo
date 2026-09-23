@@ -1,0 +1,25 @@
+{
+  "id": "search-comparison",
+  "stages": [
+    [
+      {
+        "english": "Binary search repeatedly halves the remaining search interval in a sorted array. It requires the elements to be ordered.",
+        "chinese": "二分查找在已排序数组中反复把搜索区间减半，要求元素有序。"
+      },
+      {
+        "english": "Its worst-case time complexity is logarithmic, written O of log n.",
+        "chinese": "二分查找的最坏时间复杂度是对数级，记为 O(log n)。"
+      }
+    ],
+    [
+      {
+        "english": "Linear search checks elements one by one and works on unsorted arrays. Its worst-case time complexity is O of n.",
+        "chinese": "线性查找逐项检查元素，也能用于未排序数组，最坏时间复杂度为 O(n)。"
+      },
+      {
+        "english": "For an unsorted array, binary search cannot be applied directly merely because it is faster on sorted data. Sorting has its own cost.",
+        "chinese": "对于未排序数组，不能只因为二分查找在有序数据上更快就直接使用它；排序本身也有成本。"
+      }
+    ]
+  ]
+}
