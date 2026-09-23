@@ -24,4 +24,4 @@
 ## 当前发布边界
 
 - 本轮定义的主机 GUI 与 Apple Silicon macOS 14 最终候选验收门槛均已完成。
-- 新版源码和可还原为最终 DMG 的 8 个分卷经 [GitHub 最新发布页](https://github.com/2570165831/LiveLingo/releases/latest)公开，发布附件包含合并说明和校验清单。旧版 `v0.1.0` 以及旧版 Google Drive 完整包保留，不能当作本次整改后的安装包。
+- 新版源码和可还原为最终 DMG 的 8 个分卷经 [GitHub 最新发布页](https://github.com/2570165831/LiveLingo/releases/latest)公开，发布附件包含合并说明和校验清单。[新版完整 DMG](https://drive.google.com/file/d/1UxYwkBybdcMJq9FuNws55ZTxROEzedHL/view?usp=drivesdk)也已在 Google Drive 开放只读下载。旧版 `v0.1.0` 与旧版 Google Drive 完整包保留。
