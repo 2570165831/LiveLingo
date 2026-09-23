@@ -38,6 +38,7 @@ LiveLingo 20??-??-?? ??.??.??/
 **/bilingual.jsonl
 **/bilingual.srt
 **/manifest.json
+!Scripts/Fixtures/learning-quality-v1/manifest.json
 **/summary-zh-Hans.md
 **/summary-before-review.md
 **/summary-review.md
