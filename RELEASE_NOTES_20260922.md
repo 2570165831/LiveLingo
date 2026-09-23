@@ -24,4 +24,4 @@
 ## 当前发布边界
 
 - 本轮定义的主机 GUI 与 Apple Silicon macOS 14 最终候选验收门槛均已完成。
-- 公开 GitHub/Google Drive 下载入口仍可能指向此前发布件；本文件不宣称这些旧入口已经替换为 20260922.2。
+- 新版源码和可还原为最终 DMG 的 8 个分卷经 [GitHub 最新发布页](https://github.com/2570165831/LiveLingo/releases/latest)公开，发布附件包含合并说明和校验清单。旧版 `v0.1.0` 以及旧版 Google Drive 完整包保留，不能当作本次整改后的安装包。

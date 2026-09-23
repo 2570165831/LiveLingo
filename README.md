@@ -8,7 +8,7 @@
 
 - **当前应用与打包源码**对应固定候选 6（`0.1.0 / 20260922.2`）。冻结候选时，清单 2233 个文件逐项 SHA-256 一致；最终收尾后重新核对，清单内只有 `README.md` 的验收说明和 `LiveLingo.xcodeproj/project.pbxproj` 的单个行尾空格清理与冻结字节不同，`RELEASE_NOTES_20260922.md` 为清单外新增文档。应用行为源码、测试源码与打包逻辑未发现候选后漂移。整改包括课程状态恢复、持久化转写队列、复查意见汇集、资源归属检查、导入收尾与学习笔记来源约束等。
 - **本机应用**已更新为 `0.1.0 / 20260922.2`；最终候选 6 的主程序 SHA-256 为 `ee27400d7f7bd2fdaeaae5c802a55eafd99c455ca39e3eb02fa50fb0ea4fb06b`。本机安装状态只代表当前验收机。
-- **最新离线交付件**为 `LiveLingo-0.1.0-20260922-macOS14+-arm64.dmg`。它已完成 Developer ID 签名、公证、装订与完整性检查，并已确认 iCloud 上传完成。下方公开下载入口仍可能指向先前的 `v0.1.0` 发布件，不能用旧链接反推新交付件内容。
+- **最新离线交付件**为 `LiveLingo-0.1.0-20260922-macOS14+-arm64.dmg`。它已完成 Developer ID 签名、公证、装订与完整性检查，并已确认 iCloud 上传完成。公开的 GitHub 新版发布页提供可合并为这份 DMG 的分卷。
 
 ## 能做什么
 
@@ -25,11 +25,9 @@
 
 ## 下载与安装
 
-公开下载入口当前仍对应此前发布的 **`LiveLingo-0.1.0-macOS14+-arm64.dmg`**，适用于 Apple 芯片 Mac（macOS 14 及以上）。2026-09-22 的整改交付件使用带日期的文件名 `LiveLingo-0.1.0-20260922-macOS14+-arm64.dmg`，其验收状态独立记录；公开下载入口尚未在本 README 中改指向该新交付件。
+新版 `0.1.0 / 20260922.2` 适用于 Apple 芯片 Mac（macOS 14 及以上）。从 [GitHub 最新发布页](https://github.com/2570165831/LiveLingo/releases/latest)下载带 `20260922` 日期的全部 8 个 `.part00`–`.part07` 分卷，放进同一个新建文件夹，按同页 `INSTALL-zh.md` 合并并自动核对 SHA-256；同页 `SHA256SUMS` 也列出各分卷的校验值。新版完整 DMG 的 SHA-256 是 `420bb3375425df5eb730bffb53e697d11b9e7e677c81cce2b0001d8900dae311`。分卷不能单独打开安装，也不是 ZIP 压缩包。
 
-完整安装包可从 [Google Drive 下载](https://drive.google.com/file/d/1QHdsMVbiWxhJ9bdzctMRr3ka02Hr9D-T/view?usp=sharing)，无需合并分卷。链接仅授予查看和下载权限，不授予编辑权限。
-
-也可以从 [GitHub 0.1.0 发布页](https://github.com/2570165831/LiveLingo/releases/tag/v0.1.0) 下载全部 8 个 `.part` 分卷，放进同一个新建文件夹，再按附件[分卷合并说明](https://github.com/2570165831/LiveLingo/releases/download/v0.1.0/INSTALL-zh.md)操作。说明中的命令会先检查各分卷是否齐全、大小是否正确，再按顺序还原 DMG，不会覆盖已有同名 DMG。分卷不能单独打开安装，也不是 ZIP 压缩包。
+[旧版 `v0.1.0` 发布页](https://github.com/2570165831/LiveLingo/releases/tag/v0.1.0)和[旧版 Google Drive 完整 DMG](https://drive.google.com/file/d/1QHdsMVbiWxhJ9bdzctMRr3ka02Hr9D-T/view?usp=sharing)仍保留，文件名不带 `20260922`，不能当作本次整改后的安装包。
 
 如果拿到的是完整 DMG，就直接打开，将 **LiveLingo 拖入“应用程序”**。不需要运行安装命令。运行库和正式转写、翻译、笔记模型都已内置，无需配置 Python、安装 LM Studio 或另外下载这些模型；App 和 DMG 不包含测试 CLI。首次使用时按系统提示授予麦克风、语音识别、系统音频录制及保存目录等所需权限。
 
