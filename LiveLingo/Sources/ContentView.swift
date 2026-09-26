@@ -43,12 +43,14 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            recordingStrip
             workspace
             statusBar
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .frame(minWidth: 820, minHeight: 700)
+        .navigationTitle(windowTitle)
+        .toolbar { classroomToolbar }
         .sheet(item: $activeSheet, onDismiss: {
             model.stopCandidatePlayback()
             focusedSheetButton = sheetReturnFocus
@@ -59,40 +61,102 @@ struct ContentView: View {
         .modifier(ApplePreviewTranslationHost())
     }
 
-    private var header: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                Text("实时课堂")
-                    .font(.system(size: 20, weight: .semibold))
-                Circle().fill(phaseColor).frame(width: 7, height: 7)
-                    .accessibilityHidden(true)
-                Text(model.phaseLabel)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Button { model.chooseSavedSession() } label: {
-                    Label("打开课程…", systemImage: "folder")
-                }
-                .keyboardShortcut("o", modifiers: .command)
-                .disabled(model.phase.isBusy || model.archiveLoading || model.isImportingFile)
-                .accessibilityIdentifier("classroom-open-session")
-                Button { presentSheet(.translation) } label: {
-                    Label(model.isManualTranslating ? "文字翻译中…" : "文字翻译", systemImage: "character.bubble")
-                }
-                .accessibilityIdentifier("classroom-typed-translation")
-                .focused($focusedSheetButton, equals: .translation)
-                Button { presentSheet(.settings) } label: {
-                    Label("课堂设置…", systemImage: "slider.horizontal.3")
-                }
-                .accessibilityIdentifier("classroom-settings")
-                .focused($focusedSheetButton, equals: .settings)
+    /// The window title names the current lesson; the app name stays in the menu bar.
+    private var windowTitle: String {
+        if case .saved(let directory) = model.phase { return directory.lastPathComponent }
+        return "实时课堂"
+    }
+
+    /// At most four visible actions: one prominent record control, the
+    /// session's pause control, floating captions, and everything else in 更多.
+    @ToolbarContentBuilder
+    private var classroomToolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) { moreMenu }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                openWindow(id: "subtitles")
+            } label: {
+                Label("浮动字幕", systemImage: "pip")
             }
-            .buttonStyle(.borderless)
-            recordingDeck
+            .help("打开浮动字幕")
+            .accessibilityIdentifier("classroom-floating-subtitles")
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .overlay(alignment: .bottom) { Divider() }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                model.isPaused ? model.resume() : model.pause()
+            } label: {
+                Label(model.isPaused ? "继续" : "暂停",
+                      systemImage: model.isPaused ? "play.fill" : "pause.fill")
+            }
+            .disabled(!model.hasActiveSession)
+            .help(model.isPaused ? "继续录音" : "暂停录音")
+            .accessibilityIdentifier("classroom-pause-resume")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                model.hasActiveSession ? model.stop() : model.start()
+            } label: {
+                Label(model.hasActiveSession ? stopTitle : "开始记录",
+                      systemImage: model.hasActiveSession ? "stop.circle.fill" : "record.circle")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(model.hasActiveSession ? .red : .accentColor)
+            .disabled(!model.hasActiveSession && (!model.canStart || model.phase.isBusy))
+            .accessibilityIdentifier("classroom-record-stop")
+        }
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            Button { model.chooseSavedSession() } label: {
+                Label("打开课程…", systemImage: "folder")
+            }
+            .disabled(model.phase.isBusy || model.archiveLoading || model.isImportingFile)
+            .accessibilityIdentifier("classroom-open-session")
+            Button { model.chooseAndImportMediaFile() } label: {
+                Label("导入音频或视频…", systemImage: "square.and.arrow.down")
+            }
+            .disabled(model.phase.isBusy || !model.translationReady || model.isImportingFile)
+            .accessibilityIdentifier("classroom-import")
+            if model.isLiveOnly && model.hasActiveSession {
+                Button { model.convertCurrentSessionToRecording() } label: {
+                    Label("转为录音…", systemImage: "folder.badge.plus")
+                }
+                .help("选择目录；当前录音会继续，结束后再移动到所选目录")
+            }
+            Divider()
+            Button { presentSheet(.translation) } label: {
+                Label(model.isManualTranslating ? "文字翻译中…" : "文字翻译…", systemImage: "character.bubble")
+            }
+            .accessibilityIdentifier("classroom-typed-translation")
+            Picker(selection: $transcriptTextSize) {
+                Text("标准").tag(18.0)
+                Text("大").tag(21.0)
+                Text("特大").tag(24.0)
+            } label: {
+                Label("字幕字号", systemImage: "textformat.size")
+            }
+            .accessibilityIdentifier("classroom-caption-size")
+            Divider()
+            if !model.isLiveOnly {
+                Button("保存位置…") { model.chooseOutputDirectory() }
+                    .disabled(model.phase.isBusy)
+                if case .saved = model.phase {
+                    Button("录音处理…") { presentSheet(.processing) }
+                        .accessibilityIdentifier("classroom-saved-processing")
+                    Button("在访达中显示") { model.revealSavedSession() }
+                }
+            }
+            Button { presentSheet(.settings) } label: {
+                Label("课堂设置…", systemImage: "slider.horizontal.3")
+            }
+            .accessibilityIdentifier("classroom-settings")
+        } label: {
+            Label("更多", systemImage: "ellipsis.circle")
+        }
+        .help("打开课程、导入、文字翻译、字号与设置")
+        .accessibilityIdentifier("classroom-more")
     }
 
     private var settingsControls: some View {
@@ -201,110 +265,34 @@ struct ContentView: View {
         activeSheet = sheet
     }
 
-    private var recordingDeck: some View {
-        HStack(spacing: 13) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(Self.duration(model.elapsedSeconds))
-                    .font(.system(size: 17, weight: .medium).monospacedDigit())
-                Text(recordingSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+    /// Recording state stays in the reading area, where it can be glanced at
+    /// during class; idle shows one short line and no waveform.
+    private var recordingStrip: some View {
+        HStack(spacing: 12) {
+            Circle().fill(phaseColor).frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text(Self.duration(model.elapsedSeconds))
+                .font(.system(size: 17, weight: .medium).monospacedDigit())
+            Text(stripDetail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            if model.hasActiveSession {
+                RecordingWaveform(samples: model.waveformSamples, active: model.isRecording, lastUpdate: model.lastAudioLevelAt)
+                    .frame(width: 64, height: 20)
             }
-            .frame(width: 160, alignment: .leading)
-
-            RecordingWaveform(samples: model.waveformSamples, active: model.isRecording, lastUpdate: model.lastAudioLevelAt)
-                .frame(width: 64, height: 24)
-
-            Spacer(minLength: 10)
-
-            Menu {
-                Picker("字幕字号", selection: $transcriptTextSize) {
-                    Text("标准").tag(18.0)
-                    Text("大").tag(21.0)
-                    Text("特大").tag(24.0)
-                }
-            } label: { Image(systemName: "textformat.size") }
-            .help("主窗口字幕字号")
-            .accessibilityLabel("字幕字号")
-            .accessibilityIdentifier("classroom-caption-size")
-
-            Button {
-                openWindow(id: "subtitles")
-            } label: {
-                Image(systemName: "pip")
-            }
-            .buttonStyle(.bordered)
-            .help("打开浮动字幕")
-            .accessibilityLabel("打开浮动字幕")
-            .accessibilityIdentifier("classroom-floating-subtitles")
-
-            if model.isLiveOnly && model.hasActiveSession {
-                Button {
-                    model.convertCurrentSessionToRecording()
-                } label: {
-                    Label("转为录音", systemImage: "folder.badge.plus")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .help("选择目录；当前录音会继续，结束后再移动到所选目录")
-            }
-
-            Button {
-                model.isPaused ? model.resume() : model.pause()
-            } label: {
-                Label(
-                    model.isPaused ? "继续" : "暂停",
-                    systemImage: model.isPaused ? "play.fill" : "pause.fill"
-                )
-                .frame(minWidth: 64)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
-            .disabled(!model.hasActiveSession)
-            .accessibilityIdentifier("classroom-pause-resume")
-
+            Spacer(minLength: 8)
             if model.isImportingFile {
-                Button {
-                    model.cancelMediaImport()
-                } label: {
-                    Label("停止导入", systemImage: "stop.circle")
-                        .frame(minWidth: 94)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .disabled(model.phase == .stopping)
-                .help("停止导入；已经转出的部分会照常整理、导出并保存")
-            } else {
-                Button {
-                    model.chooseAndImportMediaFile()
-                } label: {
-                    Image(systemName: "square.and.arrow.down")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .disabled(model.phase.isBusy || !model.translationReady)
-                .help("导入本地音频或视频文件…")
-                .accessibilityLabel("导入本地音频或视频文件")
-                .accessibilityIdentifier("classroom-import")
+                Button("停止导入") { model.cancelMediaImport() }
+                    .disabled(model.phase == .stopping)
+                    .help("停止导入；已经转出的部分会照常整理、导出并保存")
             }
-
-            Button {
-                model.hasActiveSession ? model.stop() : model.start()
-            } label: {
-                Label(
-                    model.hasActiveSession ? stopTitle : "开始记录",
-                    systemImage: model.hasActiveSession ? "stop.circle.fill" : "record.circle"
-                )
-                .frame(minWidth: 94)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(model.hasActiveSession ? .red : .accentColor)
-            .controlSize(.regular)
-            .disabled(!model.hasActiveSession && (!model.canStart || model.phase.isBusy))
-            .accessibilityIdentifier("classroom-record-stop")
         }
-        .frame(height: 42)
+        .padding(.horizontal, 20)
+        .frame(height: 44)
+        .overlay(alignment: .bottom) { Divider() }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("classroom-recording-strip")
     }
 
     private var workspace: some View {
@@ -701,64 +689,41 @@ struct ContentView: View {
         .frame(width: 380)
     }
 
+    /// One line: the current message, then details and dismissal. Save
+    /// location and saved-lesson actions live in the 更多 menu.
     private var statusBar: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: model.errorMessage == nil ? model.currentInputMode.statusIcon : "exclamationmark.triangle")
-                    .foregroundStyle(model.errorMessage == nil ? Color.secondary : Color.orange)
-                    .accessibilityHidden(true)
-                Text(model.errorMessage ?? model.savedProcessingStatus ?? model.archiveNotice ?? model.translationStatus)
-                    .font(.callout)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("classroom-status-message")
-                Button("状态详情…") { showStatusDetails = true }
+        HStack(spacing: 10) {
+            Image(systemName: model.errorMessage == nil ? model.currentInputMode.statusIcon : "exclamationmark.triangle")
+                .foregroundStyle(model.errorMessage == nil ? Color.secondary : Color.orange)
+                .accessibilityHidden(true)
+            Text(model.errorMessage ?? model.savedProcessingStatus ?? model.archiveNotice ?? model.translationStatus)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("classroom-status-message")
+            if !model.translationReady {
+                Button("重新检查模型") { model.retryRuntimePreparation() }
                     .buttonStyle(.borderless)
-                    .accessibilityIdentifier("classroom-status-details")
-                    .popover(isPresented: $showStatusDetails, arrowEdge: .top) { statusDetails }
-                Group {
-                    if let notice = model.sessionNotice, notice == model.errorMessage {
-                        Button(action: model.dismissSessionNotice) {
-                            Image(systemName: "xmark").frame(width: 24, height: 24)
-                        }
-                        .buttonStyle(.borderless)
-                        .help("关闭这条提示")
-                        .accessibilityLabel("关闭这条提示")
-                    } else {
-                        Color.clear.accessibilityHidden(true)
-                    }
-                }
-                .frame(width: 24, height: 24)
             }
-            .frame(height: 38)
-            HStack(spacing: 12) {
-                if model.isLiveOnly {
-                    Text("实时暂存 · 停止后删除录音并清空")
+            Button("状态详情") { showStatusDetails = true }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("classroom-status-details")
+                .popover(isPresented: $showStatusDetails, arrowEdge: .top) { statusDetails }
+            Group {
+                if let notice = model.sessionNotice, notice == model.errorMessage {
+                    Button(action: model.dismissSessionNotice) {
+                        Image(systemName: "xmark").frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("关闭这条提示")
+                    .accessibilityLabel("关闭这条提示")
                 } else {
-                    Button("保存位置…") { model.chooseOutputDirectory() }
-                        .buttonStyle(.borderless)
-                        .disabled(model.phase.isBusy)
-                    Text(model.outputDirectory?.lastPathComponent ?? "尚未选择保存位置")
-                        .lineLimit(1)
-                    if case .saved = model.phase {
-                        Button("录音处理…") { presentSheet(.processing) }
-                            .buttonStyle(.borderless)
-                            .focused($focusedSheetButton, equals: .processing)
-                            .accessibilityIdentifier("classroom-saved-processing")
-                        Button("在访达中显示") { model.revealSavedSession() }
-                            .buttonStyle(.borderless)
-                    }
-                }
-                Spacer(minLength: 8)
-                if !model.translationReady {
-                    Button("重新检查模型") { model.retryRuntimePreparation() }
-                        .buttonStyle(.borderless)
+                    Color.clear.accessibilityHidden(true)
                 }
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .frame(height: 30)
+            .frame(width: 24, height: 24)
         }
+        .font(.callout)
+        .frame(height: 36)
         .padding(.horizontal, 18)
         .overlay(alignment: .top) { Divider() }
         .accessibilityElement(children: .contain)
@@ -776,6 +741,8 @@ struct ContentView: View {
                 }
                 if let status = model.savedProcessingStatus { Text(status) }
                 if let notice = model.archiveNotice { Text(notice) }
+                Text(model.isLiveOnly ? "保存：实时暂存，结束后删除录音并清空"
+                     : "保存位置：\(model.outputDirectory?.lastPathComponent ?? "尚未选择")")
                 Text("音源：\(model.audioInputStatus)")
                 Text("识别：\(model.speechStatus)")
                 Text("翻译：\(model.translationStatus)")
@@ -803,15 +770,22 @@ struct ContentView: View {
         return .secondary
     }
 
-    private var recordingSubtitle: String {
+    private var stripDetail: String {
         if model.isImportingFile {
             return "正在导入本地文件 \(Int(model.importProgress * 100))%"
         }
         let input = model.currentInputMode == .microphone ? "麦克风" : "系统内录"
-        if model.isPaused { return "\(input) · 计时已暂停" }
-        if model.isRecording { return "\(input) · 录音中" }
-        if case .saved = model.phase { return model.savedProcessingStatus ?? "录音已停止 · 课程已保存" }
-        return model.translationReady ? "\(input) · 模型已就绪" : "\(input) · 正在检查模型"
+        let storage = model.isLiveOnly ? " · 实时暂存" : ""
+        switch model.phase {
+        case .idle:
+            return (model.translationReady ? "\(input) · 就绪" : "\(input) · 正在检查模型") + storage
+        case .recording:
+            return "\(input) · 录音中" + storage
+        case .paused:
+            return "\(input) · 计时已暂停" + storage
+        default:
+            return model.phaseLabel
+        }
     }
 
     private var stopTitle: String {

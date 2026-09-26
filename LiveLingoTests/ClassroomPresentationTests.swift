@@ -42,7 +42,7 @@ final class ClassroomPresentationTests: XCTestCase {
     }
 
     private func window(model: AppModel, width: CGFloat, height: CGFloat = 820,
-                        dark: Bool = false, notes: Bool = false) throws -> (NSWindow, NSHostingView<AnyView>) {
+                        dark: Bool = false, notes: Bool = false) throws -> (NSWindow, NSView) {
         let defaults = try XCTUnwrap(presentationDefaults)
         let root = AnyView(ContentView(showWholeLessonNotes: notes)
             .environmentObject(model)
@@ -50,13 +50,15 @@ final class ClassroomPresentationTests: XCTestCase {
             .environment(\.colorScheme, dark ? .dark : .light)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("classroom-test-root"))
-        let view = NSHostingView(rootView: root)
+        // A hosting controller bridges the SwiftUI toolbar and title into this window.
+        let controller = NSHostingController(rootView: root)
+        controller.sceneBridgingOptions = [.toolbars, .title]
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        window.title = "LiveLingo · 合成界面验收"
-        window.contentView = view
+        window.contentViewController = controller
+        let view = controller.view
         window.setContentSize(NSSize(width: width, height: height))
         window.makeKeyAndOrderFront(nil)
         return (window, view)
@@ -94,6 +96,38 @@ final class ClassroomPresentationTests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    /// The window frame view includes the title bar and toolbar. Off-screen
+    /// capture shows layout only; toolbar glass must be judged in the real app.
+    private func captureWindow(_ window: NSWindow, name: String) throws {
+        let frameView = try XCTUnwrap(window.contentView?.superview)
+        frameView.layoutSubtreeIfNeeded()
+        try capture(frameView, name: name)
+    }
+
+    /// Runs one item of the toolbar 更多 menu without system-wide input.
+    private func performMoreMenuItem(_ title: String, in window: NSWindow) throws {
+        let toolbar = try XCTUnwrap(window.toolbar, "The classroom toolbar must be bridged into the window")
+        var menus = toolbar.items.compactMap { ($0 as? NSMenuToolbarItem)?.menu }
+        for item in toolbar.items {
+            if let view = item.view {
+                menus += descendants(view).compactMap { ($0 as? NSPopUpButton)?.menu ?? $0.menu }
+            }
+            if let submenu = item.menuFormRepresentation?.submenu { menus.append(submenu) }
+        }
+        for menu in menus {
+            menu.update()
+            let index = menu.indexOfItem(withTitle: title)
+            if index >= 0 {
+                menu.performActionForItem(at: index)
+                return
+            }
+        }
+        let shape = toolbar.items.map { item in
+            "\(type(of: item)):\(item.label):" + (item.view.map { descendants($0).map { "\(type(of: $0))" }.joined(separator: ",") } ?? "-")
+        }
+        XCTFail("Missing menu item \(title); menus: \(menus.map { $0.items.map(\.title) }); toolbar: \(shape)")
     }
 
     private struct AccessibleNode {
@@ -167,6 +201,7 @@ final class ClassroomPresentationTests: XCTestCase {
             defer { window.close() }
             try await settle(view)
             try capture(view, name: "classroom-\(Int(width))-\(dark ? "dark" : "light")-\(notes ? "notes" : "captions")-\(Int(size))")
+            try captureWindow(window, name: "window-\(Int(width))-\(dark ? "dark" : "light")-\(notes ? "notes" : "captions")-\(Int(size))")
             XCTAssertEqual(view.bounds.width, width, accuracy: 1)
             XCTAssertEqual(view.bounds.height, height, accuracy: 1)
             let frames = scrollFrames(in: view)
@@ -193,7 +228,7 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertEqual(before, after, "Notice must not shift or resize the reading workspace")
         XCTAssertEqual(model.errorMessage, notice)
         try capture(view, name: "classroom-long-notice-stable")
-        try click(window, content: view, x: view.bounds.width - 30, yFromTop: view.bounds.height - 49)
+        try click(window, content: view, x: view.bounds.width - 30, yFromTop: view.bounds.height - 18)
         try await settle(view)
         XCTAssertNil(model.sessionNotice)
         XCTAssertEqual(before, scrollFrames(in: view))
@@ -208,7 +243,7 @@ final class ClassroomPresentationTests: XCTestCase {
         try await settle(view)
         let before = scrollFrames(in: view)
         let visible = Set(NSApp.windows.filter(\.isVisible).map(\.windowNumber))
-        try click(window, content: view, x: view.bounds.width - 95, yFromTop: view.bounds.height - 49)
+        try click(window, content: view, x: view.bounds.width - 76, yFromTop: view.bounds.height - 18)
         try await Task.sleep(for: .milliseconds(300))
         let popover = try XCTUnwrap(NSApp.windows.first { $0.isVisible && !visible.contains($0.windowNumber) })
         let content = try XCTUnwrap(popover.contentView)
@@ -228,7 +263,7 @@ final class ClassroomPresentationTests: XCTestCase {
         defer { window.close() }
         try await settle(view)
         let visible = Set(NSApp.windows.filter(\.isVisible).map(\.windowNumber))
-        try click(window, content: view, x: view.bounds.width - 105, yFromTop: view.bounds.height - 123)
+        try click(window, content: view, x: view.bounds.width - 105, yFromTop: view.bounds.height - 91)
         try await Task.sleep(for: .milliseconds(300))
         let popover = try XCTUnwrap(NSApp.windows.first { $0.isVisible && !visible.contains($0.windowNumber) })
         XCTAssertNotNil(popover.contentView)
@@ -244,9 +279,7 @@ final class ClassroomPresentationTests: XCTestCase {
         let (window, view) = try window(model: model, width: 1260)
         defer { window.close() }
         try await settle(view)
-        // The point belongs to this test window's visible settings button,
-        // checked against the retained 1260-wide render; no system-wide input.
-        try click(window, content: view, x: view.bounds.width - 65, yFromTop: 24)
+        try performMoreMenuItem("课堂设置…", in: window)
         try await Task.sleep(for: .milliseconds(300))
         let sheet = try XCTUnwrap(window.attachedSheet)
         let content = try XCTUnwrap(sheet.contentView)
@@ -275,7 +308,7 @@ final class ClassroomPresentationTests: XCTestCase {
         defer { window.close() }
         try await settle(view)
         for attempt in 0..<2 {
-            try click(window, content: view, x: view.bounds.width - 168, yFromTop: 24)
+            try performMoreMenuItem("文字翻译…", in: window)
             try await Task.sleep(for: .milliseconds(300))
             let sheet = try XCTUnwrap(window.attachedSheet)
             let content = try XCTUnwrap(sheet.contentView)
@@ -302,7 +335,7 @@ final class ClassroomPresentationTests: XCTestCase {
         try await settle(view)
         XCTAssertTrue(model.canManuallyReview)
         XCTAssertEqual(model.reviewBatchChoices.count, notebook.batches.count)
-        try click(window, content: view, x: 83, yFromTop: view.bounds.height - 123)
+        try click(window, content: view, x: 83, yFromTop: view.bounds.height - 91)
         try await Task.sleep(for: .milliseconds(300))
         let sheet = try XCTUnwrap(window.attachedSheet)
         let content = try XCTUnwrap(sheet.contentView)
@@ -337,11 +370,11 @@ final class ClassroomPresentationTests: XCTestCase {
             preview: String(repeating: "A much longer synthetic preview with its original conditions. ", count: 20))
         try await settle(view)
         XCTAssertEqual(before, scrollFrames(in: view), "Preview growth must stay inside the reserved reading slots")
-        try click(window, content: view, x: 439, yFromTop: 132)
+        try click(window, content: view, x: 439, yFromTop: 72)
         try await settle(view)
         let notes = scrollFrames(in: view)
         XCTAssertLessThan(notes.count, before.count, "The compact notes tab must replace the caption view")
-        try click(window, content: view, x: 382, yFromTop: 132)
+        try click(window, content: view, x: 382, yFromTop: 72)
         try await settle(view)
         XCTAssertEqual(before, scrollFrames(in: view))
         XCTAssertEqual(model.segments, evidence)
@@ -358,7 +391,7 @@ final class ClassroomPresentationTests: XCTestCase {
             .first { $0.bounds.width > 600 })
         // The follow control is in the top right of this synthetic transcript panel.
         let historyFrame = view.convert(history.bounds, from: history)
-        try click(window, content: view, x: historyFrame.maxX - 47, yFromTop: 152)
+        try click(window, content: view, x: historyFrame.maxX - 47, yFromTop: 96)
         history.contentView.scroll(to: NSPoint(x: 0, y: 200))
         history.reflectScrolledClipView(history.contentView)
         try await settle(view)
@@ -383,7 +416,7 @@ final class ClassroomPresentationTests: XCTestCase {
         // not changes to the estimated height of the entire document.
         XCTAssertEqual(after.minY, before.minY, accuracy: 1,
                        "The visible earlier caption must stay at the same screen position")
-        try click(window, content: view, x: historyFrame.maxX - 47, yFromTop: 152)
+        try click(window, content: view, x: historyFrame.maxX - 47, yFromTop: 96)
         try await settle(view)
         XCTAssertEqual(history.contentView.bounds.minY, 0, accuracy: 3,
                        "Re-enabling follow must return to the newest caption")
@@ -395,12 +428,13 @@ final class ClassroomPresentationTests: XCTestCase {
         let (window, view) = try window(model: model, width: 1260)
         defer { window.close() }
         try await settle(view)
-        let nodes = elements(view)
-        guard nodes.count > 2 else {
-            throw XCTSkip("This in-process SwiftUI host exposes only the menu node; full keyboard and VoiceOver acceptance remains unverified")
+        // Toolbar controls live in the window, outside the content view.
+        let ids = Set((elements(window) + elements(view)).compactMap { $0.accessibilityIdentifier() })
+        guard ids.contains("classroom-test-root") else {
+            throw XCTSkip("This in-process SwiftUI host exposes no SwiftUI identifiers; full keyboard and VoiceOver acceptance remains unverified")
         }
-        for id in ["classroom-settings", "classroom-typed-translation", "classroom-record-stop", "classroom-status-details"] {
-            _ = try element(id, in: view)
+        for id in ["classroom-more", "classroom-record-stop", "classroom-status-details"] {
+            XCTAssertTrue(ids.contains(id), "Missing accessible element: \(id); found: \(ids.sorted())")
         }
     }
 }
