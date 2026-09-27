@@ -1580,14 +1580,27 @@ enum AcademicInputNormalizer {
         var normalized = source
             .replacingOccurrences(of: "thiosyanate", with: "thiocyanate", options: .caseInsensitive)
             .replacingOccurrences(of: "FeSCN²⁺", with: "[FeSCN]²⁺")
-            .replacingOccurrences(of: "F E three plus", with: "Fe³⁺", options: .caseInsensitive)
-            .replacingOccurrences(of: "S C N minus", with: "SCN⁻", options: .caseInsensitive)
-            .replacingOccurrences(of: "F E S C N two plus", with: "[FeSCN]²⁺", options: .caseInsensitive)
-            .replacingOccurrences(of: "S N two", with: "SN2", options: .caseInsensitive)
-            .replacingOccurrences(of: "eigen vectors", with: "eigenvectors", options: .caseInsensitive)
-            .replacingOccurrences(of: "Bellman Ford", with: "Bellman-Ford", options: .caseInsensitive)
-            .replacingOccurrences(of: "N A D H", with: "NADH", options: .caseInsensitive)
-            .replacingOccurrences(of: "A T P", with: "ATP", options: .caseInsensitive)
+
+        // Spelled terms must occupy complete tokens. Without boundaries,
+        // "This N two" becomes "ThiSN2" and "alpha T plus" becomes "alphATPlus".
+        for (spoken, term) in [
+            ("F E three plus", "Fe³⁺"),
+            ("S C N minus", "SCN⁻"),
+            ("F E S C N two plus", "[FeSCN]²⁺"),
+            ("S N two", "SN2"),
+            ("eigen vectors", "eigenvectors"),
+            ("Bellman Ford", "Bellman-Ford"),
+            ("N A D H", "NADH"),
+            ("A T P", "ATP")
+        ] {
+            normalized = replacing(
+                pattern: #"(?<![\p{L}\p{N}_])"#
+                    + NSRegularExpression.escapedPattern(for: spoken)
+                    + #"(?![\p{L}\p{N}_])"#,
+                in: normalized,
+                with: term
+            )
+        }
 
         if normalized.range(of: "Bellman-Ford", options: .caseInsensitive) != nil,
            normalized.range(of: "time complexity", options: .caseInsensitive) != nil {
@@ -1623,13 +1636,13 @@ enum AcademicInputNormalizer {
                 in: normalized,
                 with: "SN2"
             )
-            if normalized.contains("Fe³⁺") {
-                normalized = replacing(
-                    pattern: #"\b(?:Ferri|Ferric|Ferrous)\s+ions?\b"#,
-                    in: normalized,
-                    with: "Ferric ions"
-                )
-            }
+            // Correct the name only when Fe³⁺ directly labels that ion.
+            // Another ion, reaction product or comparison cannot rename it.
+            normalized = replacing(
+                pattern: #"\b(?:Ferri|Ferrous)(\s+ions?)(?=\s+Fe³⁺(?![\p{L}\p{N}_]))"#,
+                in: normalized,
+                with: "Ferric$1"
+            )
         }
 
         if normalized.range(of: "equilibrium", options: .caseInsensitive) != nil,

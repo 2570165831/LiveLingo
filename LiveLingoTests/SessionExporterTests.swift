@@ -464,6 +464,44 @@ struct SessionExporterTests {
         )
     }
 
+    @Test(arguments: [
+        "This N two matrix has nonzero entries.",
+        "Compare the vectors N two and N three separately.",
+        "Use labels N two and N three for the branches.",
+        "The numerator is alpha T plus beta.",
+        "In this formula, theta T plus phi is the numerator.",
+        "Use S N twofold as the exact label in the source code.",
+        "Use prefix_S N two and S N two_suffix as literal labels.",
+        "Keep βS N two and 2S N two unchanged."
+    ])
+    func academicInputNormalizerDoesNotJoinPartsOfOtherWords(_ source: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == source)
+    }
+
+    @Test(arguments: [
+        "Ferric ions Fe³⁺ and ferrous ions Fe²⁺ are different. SCN⁻ is the ligand.",
+        "Ferrous ions are in sample A; ferric ions Fe³⁺ react with SCN⁻ in sample B.",
+        "SCN⁻ reacts with Fe³⁺. Do not call ferrous ions ferric ions.",
+        "We compare ferrous ions with ferric ions Fe³⁺ before adding SCN⁻.",
+        "A ferrous ion is different from a ferric ion Fe³⁺. Consider the SCN⁻ experiment.",
+        "Ferrous ions are oxidised to Fe³⁺ in the SCN⁻ experiment.",
+        "Ferrous ions and Fe³⁺ are both present in the SCN⁻ solution."
+    ])
+    func academicInputNormalizerPreservesOtherIonNames(_ source: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == source)
+    }
+
+    @Test func academicInputNormalizerKeepsSingularWhenCorrectingDirectChargeLabel() {
+        #expect(
+            AcademicInputNormalizer.normalize("A ferrous ion Fe 3 + interacts with SCN -.")
+                == "A Ferric ion Fe³⁺ interacts with SCN⁻."
+        )
+        #expect(
+            AcademicInputNormalizer.normalize("(s n two), N A D H and A T P.")
+                == "(SN2), NADH and ATP."
+        )
+    }
+
     @Test func academicInputNormalizerUsesLectureContextForNamedTerms() {
         let source = "Lagrange's principle predicts how an equilibrium responds to stress. Faraday's law says magnetic flux induces an electromagnetic force."
 
