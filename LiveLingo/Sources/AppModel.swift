@@ -3451,10 +3451,54 @@ enum ChemistryTranslationProtector {
         "LC-MS", "TLC", "IR", "MS", "SN1", "SN2", "E1", "E2", "sp2", "sp3"]
 
     static func prepare(_ source: String) -> ProtectedChemistryTranslationInput {
-        let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
-        var candidates: [NSRange] = []
+        prepare(source, includeFormulas: true)
+    }
 
-        if let expression = try? NSRegularExpression(pattern: formulaPattern) {
+    static func prepareLiterals(_ source: String) -> ProtectedChemistryTranslationInput {
+        prepare(source, includeFormulas: false)
+    }
+
+    /// Only explicit literal/code naming is eligible. Ordinary quoted speech
+    /// remains translatable and eligible for academic ASR correction.
+    private static func literalRanges(in source: String) -> [NSRange] {
+        let whole = NSRange(source.startIndex..<source.endIndex, in: source)
+        let quoted = #"(?:[\"“]([^\"”\r\n]+)[\"”]|'([^'\r\n]+)')"#
+        var result: [NSRange] = []
+        let patterns = [
+            #"`([^`\r\n]+)`"#,
+            #"(?i)\b(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\s+(?:is\s+)?"# + quoted,
+            quoted + #"(?i)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#,
+            #"(?i)\b(?:identifier|function|variable)\s+"# + quoted
+        ]
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in expression.matches(in: source, range: whole) {
+                for index in 1..<match.numberOfRanges where match.range(at: index).location != NSNotFound {
+                    result.append(match.range(at: index))
+                }
+            }
+        }
+        // ASR often supplies no quote marks. Require both an explicit exact-name
+        // construction and a code-like span, rather than treating "use it" as a name.
+        let unquoted = #"(?i)\buse\s+([^\r\n]+?)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#
+        if let expression = try? NSRegularExpression(pattern: unquoted) {
+            for match in expression.matches(in: source, range: whole) {
+                let range = match.range(at: 1)
+                let value = (source as NSString).substring(with: range)
+                guard !value.contains("\"") && !value.contains("'") && !value.contains("“") && !value.contains("`") else { continue }
+                let codeLike = value.range(of: #"(?:\b[A-Z]\b|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[A-Za-z]+[0-9]+)"#,
+                                           options: .regularExpression) != nil
+                if codeLike { result.append(range) }
+            }
+        }
+        return result
+    }
+
+    private static func prepare(_ source: String, includeFormulas: Bool) -> ProtectedChemistryTranslationInput {
+        let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
+        var candidates = literalRanges(in: source) + spokenNameRanges(in: source)
+
+        if includeFormulas, let expression = try? NSRegularExpression(pattern: formulaPattern) {
             for match in expression.matches(in: source, range: fullRange) {
                 guard match.range.length > 0 else { continue }
                 let original = (source as NSString).substring(with: match.range)
@@ -3490,6 +3534,46 @@ enum ChemistryTranslationProtector {
             text: mutable as String,
             replacements: replacements
         )
+    }
+
+    /// Preserve a spoken name when a vector/matrix/label/variable explicitly
+    /// introduces it. The number is not enough evidence to invent an exponent.
+    private static func spokenNameRanges(in source: String) -> [NSRange] {
+        let number = "(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)"
+        let name = #"(?<![A-Za-z0-9_])([A-Za-z])\s+(?i:"# + number + "(?:[ -]+" + number + #")*)(?![A-Za-z0-9_])"#
+        guard let sentences = try? NSRegularExpression(pattern: #"[^.!?\r\n]+"#),
+              let names = try? NSRegularExpression(pattern: name) else { return [] }
+        let ns = source as NSString
+        var result: [NSRange] = []
+        for sentence in sentences.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
+            let matches = names.matches(in: source, range: sentence.range)
+            var introduced: Set<String> = []
+            var previousIntroducedEnd: Int?
+            for match in matches {
+                let before = ns.substring(with: NSRange(location: sentence.range.location,
+                    length: match.range.location - sentence.range.location))
+                let end = NSMaxRange(match.range)
+                let after = ns.substring(with: NSRange(location: end, length: NSMaxRange(sentence.range) - end))
+                let direct = before.range(of: #"(?i)\b(?:vectors?|matrices|matrix|labels?|variables?|branches)\s*$"#,
+                                          options: .regularExpression) != nil
+                    || after.range(of: #"(?i)^\s+(?:vectors?|matrices|matrix|labels?|variables?)\b"#,
+                                   options: .regularExpression) != nil
+                let linked = previousIntroducedEnd.map { previous in
+                    ns.substring(with: NSRange(location: previous, length: match.range.location - previous))
+                        .range(of: #"(?i)^\s*(?:,\s*)?(?:and|or)?\s*$"#, options: .regularExpression) != nil
+                } ?? false
+                if direct || linked {
+                    introduced.insert(ns.substring(with: match.range(at: 1)))
+                    previousIntroducedEnd = end
+                } else {
+                    previousIntroducedEnd = nil
+                }
+            }
+            for match in matches where introduced.contains(ns.substring(with: match.range(at: 1))) {
+                result.append(match.range)
+            }
+        }
+        return result
     }
 
     private static func looksLikeChemicalFormula(_ range: NSRange, in source: String) -> Bool {

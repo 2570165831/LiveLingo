@@ -218,6 +218,71 @@ final class TranslationAcceptanceTests: XCTestCase {
         XCTAssertEqual(plain.translationHints(from: hints), hints)
     }
 
+    func testExplicitLiteralNamesSurviveNormalizationAndTranslationProtection() throws {
+        for (source, literal) in [
+            (#"Use "S N two" as the exact text in the source code."#, "S N two"),
+            ("Use S N twofold as the exact label in the source code.", "S N twofold"),
+            ("The literal identifier 'A T P' is different from ATP.", "A T P"),
+            ("The exact label is “N two”.", "N two"),
+            ("Call the function 'read_file'.", "read_file"),
+            ("The variable \"value_two\" differs from value_squared.", "value_two"),
+            ("Use `S N two` in the code.", "S N two")
+        ] {
+            let normalized = AcademicInputNormalizer.normalize(source)
+            XCTAssertTrue(normalized.contains(literal), source)
+            let protected = ChemistryTranslationProtector.prepare(normalized)
+            XCTAssertFalse(protected.text.contains(literal), source)
+            XCTAssertEqual(try protected.validatedRestore(in: protected.text), normalized)
+        }
+        let mixed = #"Use "S N two" as the exact label. The mechanism is S N two."#
+        XCTAssertEqual(AcademicInputNormalizer.normalize(mixed),
+                       #"Use "S N two" as the exact label. The mechanism is SN2."#)
+    }
+
+    func testOrdinaryQuotesAndPronounsDoNotBecomeLiteralNames() {
+        for source in ["The lecturer said 'S N two attacks the carbon'.",
+                       "The code comments say \"S N two attacks the carbon\"."] {
+            let normalized = AcademicInputNormalizer.normalize(source)
+            XCTAssertTrue(normalized.contains("SN2 attacks the carbon"))
+            XCTAssertEqual(ChemistryTranslationProtector.prepare(normalized).text, normalized)
+        }
+        for source in ["Use it as the exact text in the source code.",
+                       "Use the previous result as the exact label.",
+                       "Use this value as the exact name."] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source)
+        }
+    }
+
+    func testSpokenNamesArePreservedWithoutInventingPowers() throws {
+        for source in ["This N two matrix has nonzero entries.",
+                       "Compare the vectors N two and M three separately.",
+                       "The vector v two is twice v one.",
+                       "Vector q four points left; vector q five points right.",
+                       "The label x twenty one is not x squared."] {
+            let protected = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertNotEqual(protected.text, source, source)
+            XCTAssertEqual(try protected.validatedRestore(in: protected.text), source)
+        }
+        XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals("Compare the vectors N two and M three separately.").text,
+                       "Compare the vectors ZXQCHEM0QXZ and ZXQCHEM1QXZ separately.")
+        XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals("The vector v two is twice v one.").text,
+                       "The vector ZXQCHEM0QXZ is twice ZXQCHEM1QXZ.")
+        for source in ["Compute x squared plus y cubed.", "Raise z to the fourth power.",
+                       "Nitrogen gas is N two.", "A two by two matrix is square."] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source)
+        }
+        XCTAssertEqual(AcademicInputNormalizer.normalize("The mechanism is S N two."), "The mechanism is SN2.")
+    }
+
+    func testLiteralAndFormulaUseSeparateMarkersAndRejectDroppedLiteral() throws {
+        let source = #"Use "S N two" as the exact label next to H2O."#
+        let protected = ChemistryTranslationProtector.prepare(AcademicInputNormalizer.normalize(source))
+        XCTAssertEqual(protected.text, #"Use "ZXQCHEM0QXZ" as the exact label next to ZXQCHEM1QXZ."#)
+        XCTAssertEqual(try protected.validatedRestore(in: "在 ZXQCHEM1QXZ 旁边使用 ZXQCHEM0QXZ 作为确切标签。"),
+                       "在 H2O 旁边使用 S N two 作为确切标签。")
+        XCTAssertThrowsError(try protected.validatedRestore(in: "使用 S N 二作为标签，旁边是 ZXQCHEM1QXZ。"))
+    }
+
     func testMissingDuplicateChangedAndUnknownMarkersCannotBecomeFinalText() {
         let protected = ChemistryTranslationProtector.prepare("Compare Na⁺ with Cl⁻.")
         let broken = [
