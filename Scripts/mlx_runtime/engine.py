@@ -1,5 +1,6 @@
 """Isolated candidate: explicit token boundaries, per-request RNG and grammar state."""
 import hashlib
+import copy
 import json
 import os
 import secrets
@@ -16,10 +17,50 @@ from grammar_vocabulary import build_vocabulary
 from review_diagnostics import grammar_error
 from outlines_core.kernels.mlx import allocate_token_bitmask, fill_next_token_bitmask, apply_token_bitmask
 
+PREFILL_STEP = 256
+
+
+class PromptPrefixCache:
+    """One bounded, immutable prefill snapshot owned by one loaded model.
+
+    Qwen3.5 includes recurrent state: a longer cache cannot be trimmed back to
+    an earlier prefix. Only exact token prefixes at existing prefill boundaries
+    are reusable. Deep copies isolate both recurrent and attention state from
+    every request, including requests interleaved by the worker.
+    """
+    def __init__(self, max_tokens=512, max_bytes=128 * 1024**2):
+        self.max_tokens = max(0, max_tokens // PREFILL_STEP * PREFILL_STEP)
+        self.max_bytes = max(0, max_bytes)
+        self.tokens = ()
+        self.cache = None
+        self.nbytes = 0
+
+    def fetch(self, tokens):
+        count = len(self.tokens)
+        # Leave at least one input token for the first output distribution.
+        if count and len(tokens) > count and tuple(tokens[:count]) == self.tokens:
+            return copy.deepcopy(self.cache), count
+        return None, 0
+
+    def remember(self, tokens, cache):
+        tokens = tuple(tokens)
+        if not tokens or len(tokens) % PREFILL_STEP or len(tokens) > self.max_tokens:
+            return False
+        size = sum(item.nbytes for item in cache)
+        if size > self.max_bytes:
+            return False
+        if tokens != self.tokens:
+            self.cache = copy.deepcopy(cache)
+            self.tokens = tokens
+            self.nbytes = size
+        return True
+
+
 class Engine:
     def __init__(self, model_path):
         self.model_path = str(Path(model_path).resolve())
         self.model, self.tokenizer = load(self.model_path)
+        self.prefix_cache = PromptPrefixCache()
         self.vocabulary = build_vocabulary(self.tokenizer)
         self.indices = OrderedDict()
         self.end_think = self.tokenizer.encode('</think>', add_special_tokens=False)
@@ -64,7 +105,22 @@ class Generation:
         self.spec['seed'] = seed
         self.initial_prefix = prefix
         self.pending = engine.tokenizer.encode(prompt + prefix, add_special_tokens=False)
-        self.cache = make_prompt_cache(engine.model)
+        self.reused_prefix_tokens = 0
+        self.prefill_tokens = 0
+        # Resumable/grammar-constrained work keeps its existing checkpoint path.
+        # Ordinary translation reuses only input computation, never output.
+        self._prefix_cache = (getattr(engine, 'prefix_cache', None)
+                              if not thinking and schema is None and not prefix else None)
+        self._cache_tokens = ()
+        self.cache = None
+        if self._prefix_cache is not None:
+            count = min((len(self.pending) - 1) // PREFILL_STEP * PREFILL_STEP,
+                        self._prefix_cache.max_tokens)
+            self._cache_tokens = tuple(self.pending[:max(0, count)])
+            self.cache, self.reused_prefix_tokens = self._prefix_cache.fetch(self.pending)
+            self.pending = self.pending[self.reused_prefix_tokens:]
+        if self.cache is None:
+            self.cache = make_prompt_cache(engine.model)
         self.ids = []
         self.final_ids = []
         self.key = mx.random.key(seed)
@@ -93,10 +149,14 @@ class Generation:
     def step(self):
         if self.done:
             return 'done'
-        if len(self.pending) > 256:
-            chunk, self.pending = self.pending[:256], self.pending[256:]
+        if len(self.pending) > PREFILL_STEP:
+            chunk, self.pending = self.pending[:PREFILL_STEP], self.pending[PREFILL_STEP:]
             self.engine.model(mx.array([chunk]), cache=self.cache)
             mx.eval([c.state for c in self.cache])
+            self.prefill_tokens += len(chunk)
+            if (self._cache_tokens and self.prefill_tokens + self.reused_prefix_tokens
+                    == len(self._cache_tokens)):
+                self._prefix_cache.remember(self._cache_tokens, self.cache)
             return 'prefill'
         logits = self.engine.model(mx.array([self.pending]), cache=self.cache)[:, -1, :]
         if self.phase == 'final' and self.guide:
@@ -166,6 +226,10 @@ class Generation:
         result = cls(engine, **state['spec'], prefix=state['prefix'])
         if result.identity != expected_identity:
             raise ValueError('Model or request changed')
+        # A restored cache may already contain an arbitrary part of the input.
+        # It must never be recorded under a fresh request's prefix boundary.
+        result._prefix_cache = None
+        result._cache_tokens = ()
         result.cache = cache
         result.pending = state['pending']
         result.ids = state['ids']
