@@ -176,7 +176,7 @@ enum TranslationAcceptance {
 
     private enum ProseEvidence { case prose, echo }
 
-    private static func bodyWithoutApplicationNotice(_ text: String) -> String {
+    fileprivate static func bodyWithoutApplicationNotice(_ text: String) -> String {
         var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         while body.hasPrefix(formulaNotice) {
             body = String(body.dropFirst(formulaNotice.count))
@@ -198,14 +198,16 @@ enum TranslationAcceptance {
     /// Only Han characters provide Chinese content evidence. CJK punctuation,
     /// fullwidth Latin letters, kana and Hangul must not bypass prose checks.
     private static func containsHan(_ text: String) -> Bool {
-        text.unicodeScalars.contains { scalar in
-            switch scalar.value {
-            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF,
-                 0x20000...0x2FA1F, 0x30000...0x323AF:
-                return true
-            default:
-                return false
-            }
+        text.unicodeScalars.contains(where: isHan)
+    }
+
+    fileprivate static func isHan(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF,
+             0x20000...0x2FA1F, 0x30000...0x323AF:
+            return true
+        default:
+            return false
         }
     }
 
@@ -1677,22 +1679,24 @@ enum LectureSummaryInput {
 
 /// 2026-09-18：**译文长度合理性**护栏（纯函数，可单测 ✓）。
 ///
-/// 起因：全库实测（1,784 段）发现约 **1% 的段落**中文里混进了邻居段的内容 ✗ ——
-/// 音频时长与该段英文都正常 ✓，只有中文异常长 ✗（字符数比中位 0.37、99% 才 1.24、最大 4.96 ✗）。
-/// 处理方式**不伤害无辜** ✓：只有在"原译文不可信、且重试结果可信"时才替换 ✓，
-/// 否则保留原样 ✓（见 AppModel 的调用点 ✓）。
+/// A coarse runaway-output check, not a test of translation correctness.
+/// Short captions retain an absolute allowance for acronym/name expansion.
 enum TranslationLengthGuard {
-    /// 中文不设上下限，只判"相对英文是否长得离谱"。
-    /// 阈值 1.3 来自实测：99% 的正常段落都在 1.24 以下 ✓。
+    // Preserve the existing long-caption ratio; the floor replaces the old
+    // unlimited short-input exemption. These are heuristics, not accuracy data.
     static let maximumRatio = 1.3
-    /// 英文过短时（如 "Okay."）比例噪声大，不判。
     static let minimumEnglishCount = 24
 
     static func isPlausible(chinese: String, english: String) -> Bool {
-        let zh = chinese.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) }.count
-        guard zh > 0 else { return true }
-        guard english.count >= minimumEnglishCount else { return true }
-        return Double(zh) <= Double(english.count) * maximumRatio
+        let sourceCount = english.trimmingCharacters(in: .whitespacesAndNewlines).count
+        let allowance = Double(max(sourceCount, minimumEnglishCount)) * maximumRatio
+        let body = TranslationAcceptance.bodyWithoutApplicationNotice(chinese)
+        var count = 0
+        for scalar in body.unicodeScalars where TranslationAcceptance.isHan(scalar) {
+            count += 1
+            if Double(count) > allowance { return false }
+        }
+        return true
     }
 }
 

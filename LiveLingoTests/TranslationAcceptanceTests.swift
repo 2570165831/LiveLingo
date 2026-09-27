@@ -5,6 +5,49 @@ import XCTest
 /// These tests pin the acceptance rules that must stop it, and the technical
 /// exceptions that must keep working.
 final class TranslationAcceptanceTests: XCTestCase {
+    func testShortCaptionLengthPreservesTermsButRejectsRunawayChinese() throws {
+        let positive: [(String, String)] = [
+            ("Okay.", "好的。"), ("Not yet.", "还没有。"),
+            ("FTIR", "傅里叶变换红外光谱"), ("HIV", "人类免疫缺陷病毒"),
+            ("qPCR", "实时荧光定量聚合酶链式反应"),
+            ("Less, not more.", "少一些，而不是更多。"),
+            ("Na⁺ and Cl⁻.", "Na⁺ 和 Cl⁻。"),
+            ("[Cu(NH3)4]²⁺", "[Cu(NH3)4]²⁺"),
+            ("Dijkstra", "Dijkstra"), ("2H2 + O2 → 2H2O", "2H2 + O2 → 2H2O")
+        ]
+        for (source, candidate) in positive {
+            XCTAssertEqual(try TranslationAcceptance.validatedCaption(candidate, source: source), candidate)
+        }
+        let unrelated = String(repeating: "这是别的段落的内容。", count: 8)
+        for source in ["Okay.", "Compare Na⁺ with Cl⁻."] {
+            XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(unrelated, source: source))
+        }
+    }
+
+    func testApplicationFormulaNoticeDoesNotConsumeTranslationLengthAllowance() throws {
+        let body = String(repeating: "中", count: 31)
+        let source = "The force stays constant."
+        XCTAssertTrue(TranslationLengthGuard.isPlausible(chinese: body, english: source))
+        for candidate in [TranslationAcceptance.formulaNotice + body,
+                          TranslationAcceptance.formulaNotice + "\n" + TranslationAcceptance.formulaNotice + body] {
+            XCTAssertEqual(try TranslationAcceptance.validatedCaption(candidate, source: source), candidate)
+        }
+    }
+
+    func testLengthGuardCountsEverySupportedHanRange() {
+        for character in ["中", "㐀", "𠀀", "𰀀"] {
+            let candidate = String(repeating: character, count: 80)
+            XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(candidate,
+                source: "The force stays constant."), "Han evidence and Han length must use the same character ranges")
+        }
+    }
+
+    func testWhitespacePaddingCannotDisableShortCaptionLengthGuard() {
+        let source = String(repeating: " ", count: 60) + "Okay." + String(repeating: " \n", count: 30)
+        XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(
+            String(repeating: "这是别的段落的内容。", count: 8), source: source))
+    }
+
     func testRecoveryRequestBudgetsAccountForProtectedIDsAndStayBounded() {
         let plain = "The temperature rises."
         let dense = (0..<24).map { "ZXQCHEM\($0)QXZ" }.joined(separator: ", ")

@@ -781,8 +781,9 @@ struct ASRRecoveryTests {
         #expect(!TranslationLengthGuard.isPlausible(chinese: String(repeating: "中", count: 200), english: longEnglish))
         // 正常比例（0.3–0.5）✓ 应判可信
         #expect(TranslationLengthGuard.isPlausible(chinese: String(repeating: "中", count: 40), english: longEnglish))
-        // 英文过短时不判 ✓（"Okay." 这类噪声）
-        #expect(TranslationLengthGuard.isPlausible(chinese: String(repeating: "中", count: 80), english: "Okay."))
+        // 短句保留固定容差，但不允许附带长篇无关正文。
+        #expect(TranslationLengthGuard.isPlausible(chinese: "好的。", english: "Okay."))
+        #expect(!TranslationLengthGuard.isPlausible(chinese: String(repeating: "中", count: 80), english: "Okay."))
         // 纯英文/无中文不判 ✓
         #expect(TranslationLengthGuard.isPlausible(chinese: "plain english", english: longEnglish))
     }

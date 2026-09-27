@@ -161,6 +161,40 @@ final class CaptionIdentityTests: XCTestCase {
         }
     }
 
+    func testShortCaptionRunawayNeverCompletesAfterRecovery() async throws {
+        for firstIsRuntimeFailure in [false, true] {
+            var calls = 0
+            let model = try makeModel(.init(translate: { _, _, _, _, _ in
+                calls += 1
+                if calls == 1 && firstIsRuntimeFailure { throw QwenRuntimeError.invalidResponse }
+                return String(repeating: "这是别的段落的内容。", count: 8)
+            }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+            model.receiveCaptionForTesting("No net force.", start: 0, end: 8)
+            await model.translationTaskForTesting?.value
+            XCTAssertEqual(calls, 2)
+            XCTAssertEqual(model.segments[0].english, "No net force.")
+            XCTAssertFalse(model.segments[0].hasUsableTranslation)
+            XCTAssertTrue(model.segments[0].chinese.isEmpty)
+        }
+    }
+
+    func testShortAdjacentTargetsKeepIndependentLengthChecks() async throws {
+        let unrelated = String(repeating: "这是别的段落的内容。", count: 8)
+        for (badCurrent, badPrevious) in [(true, false), (false, true), (true, true)] {
+            let probe = AdjacentRequestProbe([
+                .text(badCurrent ? unrelated : "所以速率保持不变。"),
+                .text(badPrevious ? unrelated : "合力为零。")
+            ])
+            let pair = try await QwenTranslationClient.translateAdjacent(
+                previous: "Net force is zero.", previousChinese: "合力是零。",
+                current: "so speed is constant.", context: "", modelName: "test",
+                request: { try await probe.request($0, $1, $2) })
+            XCTAssertEqual(pair.current, badCurrent ? nil : "所以速率保持不变。")
+            XCTAssertEqual(pair.previous, badPrevious ? nil : "合力为零。")
+            XCTAssertEqual(pair.currentRejection != nil, badCurrent)
+        }
+    }
+
     func testRecoveryChangesOnlyWhatTheFailureRequiresAndPreservesFormulas() async throws {
         let failures: [(QwenRuntimeError, CaptionTranslationAttempt?)] = [
             (.translationRejected("wrong output"), .repairContent),
