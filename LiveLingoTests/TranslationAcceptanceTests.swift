@@ -55,12 +55,12 @@ final class TranslationAcceptanceTests: XCTestCase {
     func testFormulasNumbersUnitsAndAcronymsAreAccepted() {
         let accepted: [(candidate: String, source: String)] = [
             ("2H2 + O2 → 2H2O", "two H two plus O two gives two H two O"),
-            ("pH 7.4", "the pH of this solution is 7.4"),
-            ("FTIR", "we measured the sample with FTIR"),
-            ("Dijkstra", "the shortest path uses Dijkstra"),
-            ("NH3", "ammonia is written as NH3"),
-            ("4s", "we fill the 4s orbital first"),
-            ("298 K", "the temperature is 298 K")
+            ("pH 7.4", "pH 7.4"),
+            ("FTIR", "FTIR"),
+            ("Dijkstra", "Dijkstra"),
+            ("NH3", "NH3"),
+            ("4s", "4s"),
+            ("298 K", "three hundred Kelvin")
         ]
         for item in accepted {
             XCTAssertNil(
@@ -148,11 +148,10 @@ final class TranslationAcceptanceTests: XCTestCase {
     }
 
     func testFormulaNoticePreservesChineseAndTechnicalExceptions() throws {
-        let source = "The partial derivative is positive [Formula transcription uncertain]"
         for body in ["偏导数 partial derivative 为正。", "2H2 + O2 → 2H2O", "pH 7.4", "FTIR",
                      "Dijkstra", "ΔG = ΔH − TΔS", "ｐＨ ７．４"] {
             let candidate = TranslationAcceptance.formulaNotice + body
-            XCTAssertEqual(try TranslationAcceptance.validated(candidate, source: source), candidate,
+            XCTAssertEqual(try TranslationAcceptance.validated(candidate, source: body + " [Formula transcription uncertain]"), candidate,
                            "验收不得删掉有效译文的提示、公式、单位或专名")
         }
     }
@@ -193,6 +192,121 @@ final class TranslationAcceptanceTests: XCTestCase {
         XCTAssertTrue(leaks.isEmpty, "流式输出泄漏了占位符片段：\(leaks.prefix(3))")
 
         XCTAssertEqual(protected.restorePartial(in: protected.text), source, "完整喂完后应还原成原文")
+    }
+
+    func testWholeSpeciesAndChargesAreProtectedButReactionCoefficientsStayVisible() throws {
+        let source = "2H₂ + O₂ → 2H₂O; [FeSCN]²⁺ forms from Fe³⁺ and SCN⁻."
+        let protected = ChemistryTranslationProtector.prepare(source)
+        XCTAssertEqual(protected.text,
+                       "2ZXQCHEM0QXZ + ZXQCHEM1QXZ → 2ZXQCHEM2QXZ; ZXQCHEM3QXZ forms from ZXQCHEM4QXZ and ZXQCHEM5QXZ.")
+        XCTAssertEqual(try protected.validatedRestore(in: protected.text), source)
+        for term in ["[Cu(NH3)4]²⁺", "[Fe(CN)6]3-", "Ca(OH)2", "K₄[Fe(CN)₆]",
+                     "CuSO4·5H2O", "¹⁴C", "NH₄⁺", "SO₄²⁻"] {
+            let item = ChemistryTranslationProtector.prepare(term)
+            XCTAssertEqual(item.text, "ZXQCHEM0QXZ", term)
+            XCTAssertEqual(try item.validatedRestore(in: item.text), term)
+        }
+    }
+
+    func testAlreadyProtectedFormulasDoNotReappearAsAuxiliaryHints() {
+        let protected = ChemistryTranslationProtector.prepare("[FeSCN]²⁺ forms from Fe³⁺ and SCN⁻.")
+        let hints: [AuxiliaryTranslationHint] = [.init(kind: .formula, value: "Fe³⁺"),
+                                                .init(kind: .unit, value: "2 mL"),
+                                                .init(kind: .acronym, value: "NMR")]
+        XCTAssertEqual(protected.translationHints(from: hints), Array(hints.dropFirst()))
+        let plain = ChemistryTranslationProtector.prepare("The lecturer says F E three plus.")
+        XCTAssertEqual(plain.translationHints(from: hints), hints)
+    }
+
+    func testMissingDuplicateChangedAndUnknownMarkersCannotBecomeFinalText() {
+        let protected = ChemistryTranslationProtector.prepare("Compare Na⁺ with Cl⁻.")
+        let broken = [
+            "比较 ZXQCHEM0QXZ。",
+            "比较 ZXQCHEM0QXZ 和 ZXQCHEM0QXZ。",
+            "比较 ZnQCHEM0QXZ 和 ZXQCHEM1QXZ。",
+            "比较 ZXQCHEM0QXZ 和 ZXQCHEM10QXZ。",
+            "比较 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ，以及 ZXQCHEM2QXZ。",
+            "比较 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ QXZ。",
+            "比较 ZXQCHEM0QXZ 和 ZXQCHEM1"
+        ]
+        for output in broken {
+            XCTAssertNotNil(protected.restorationFailure(in: output), output)
+            XCTAssertThrowsError(try protected.validatedRestore(in: output), output)
+        }
+        XCTAssertEqual(try protected.validatedRestore(in: "比较 zxqchem0qxz 和 ZXQCHEM1QXZ。"),
+                       "比较 Na⁺ 和 Cl⁻。")
+        // Chinese can reorder phrases; the structural check does not prove
+        // that a formula is attached to the correct subject.
+        XCTAssertNil(protected.restorationFailure(in: "ZXQCHEM1QXZ 与 ZXQCHEM0QXZ 不同。"))
+    }
+
+    func testSourceLiteralMarkerDoesNotCollideWithGeneratedFormulaMarker() throws {
+        let source = "The literal ZXQCHEM0QXZ is not H2O."
+        let protected = ChemistryTranslationProtector.prepare(source)
+        XCTAssertEqual(protected.text, "The literal ZXQCHEM0QXZ is not ZXQCHEM1QXZ.")
+        XCTAssertEqual(try protected.validatedRestore(in: "字面标签 ZXQCHEM0QXZ 不是 ZXQCHEM1QXZ。"),
+                       "字面标签 ZXQCHEM0QXZ 不是 H2O。")
+        XCTAssertEqual(protected.restorePartial(in: "ZXQCHEM1QXZ 与 ZXQCHEM0QXZ"),
+                       "H2O 与 ZXQCHEM0QXZ")
+    }
+
+    func testObservedMalformedMarkerIsHeldThroughoutStreaming() {
+        let protected = ChemistryTranslationProtector.prepare("[FeSCN]²⁺ forms from Fe³⁺ and SCN⁻.")
+        let output = "[ZnQCHEM0QXZ]²⁺ 由 ZXQCHEM1QXZ 和 ZXQCHEM2QXZ 形成。"
+        var partial = ""
+        for character in output {
+            partial.append(character)
+            let shown = protected.restorePartial(in: partial).lowercased()
+            XCTAssertFalse(shown.contains("zn") || shown.contains("chem") || shown.contains("qxz"), shown)
+        }
+        XCTAssertThrowsError(try protected.validatedRestore(in: output))
+        let ordinary = ChemistryTranslationProtector.prepare("Zero is a number.")
+        XCTAssertEqual(ordinary.restorePartial(in: "Zinc"), "Zinc")
+    }
+
+    func testCopyInstructionOnlyAppliesToProtectedInput() {
+        XCTAssertEqual(ChemistryTranslationProtector.promptSuffix(for: "The velocity is negative."), "")
+        XCTAssertEqual(ChemistryTranslationProtector.promptSuffix(for: "Use ZXQCHEM0QXZ."),
+                       ChemistryTranslationProtector.copyInstruction)
+        let plain = QwenTranslationClient.systemPrompt
+        XCTAssertEqual(ChemistryTranslationProtector.translationPrompt(base: plain, text: "Use FTIR first."), plain)
+        let masked = ChemistryTranslationProtector.translationPrompt(base: plain, text: "ZXQCHEM0QXZ reacts.")
+        XCTAssertTrue(masked.contains(ChemistryTranslationProtector.copyInstruction))
+        XCTAssertTrue(masked.hasSuffix("Return only the complete Simplified Chinese translation. Do not use markdown."))
+    }
+
+    func testAdjacentContextIsSeparateFromProtectedTarget() throws {
+        let protected = ChemistryTranslationProtector.prepare("Na⁺ stays in sample A.")
+        let input = try protected.contextualJSON(before: "K⁺ was in sample B.", after: "Next, discuss Cl⁻.")
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
+        XCTAssertEqual(fields["target_translate_only"], "ZXQCHEM0QXZ stays in sample A.")
+        XCTAssertEqual(fields["context_before_do_not_translate"], "K⁺ was in sample B.")
+        XCTAssertEqual(fields["context_after_do_not_translate"], "Next, discuss Cl⁻.")
+        XCTAssertEqual(try protected.validatedRestore(in: "ZXQCHEM0QXZ 留在 A 样品中。"), "Na⁺ 留在 A 样品中。")
+        XCTAssertThrowsError(try protected.validatedRestore(in: "K⁺ 留在 A 样品中。"))
+    }
+
+    func testTechnicalListCannotReplaceAnEnglishInstruction() {
+        let source = "Use FTIR first, then NMR, and finally LC-MS."
+        for output in ["FTIR NMR LC-MS", TranslationAcceptance.formulaNotice + "FTIR NMR LC-MS"] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: source), .incompleteProse)
+        }
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "Dijkstra", source: "The shortest path uses Dijkstra"), .incompleteProse)
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: "先用 FTIR，再用 NMR，最后用 LC-MS。", source: source))
+    }
+
+    func testUnmaskedRepairPreservesSpeciesBeforeReplacingTheOldCaption() throws {
+        let prepared = ChemistryTranslationProtector.prepare("Na⁺ and Cl⁻ are different ions.")
+        let json = try prepared.contextualJSON(before: "Earlier context.", after: "Later context.", protectTarget: false)
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
+        XCTAssertEqual(fields["target_translate_only"], "Na⁺ and Cl⁻ are different ions.")
+        XCTAssertNil(prepared.unmaskedFailure(in: "Na⁺ 和 Cl⁻ 是不同的离子。"))
+        XCTAssertNotNil(prepared.unmaskedFailure(in: "Na⁺ 和 K⁺ 是不同的离子。"))
+        XCTAssertNotNil(prepared.unmaskedFailure(in: "Na⁺ 是离子。"))
+        XCTAssertNotNil(prepared.unmaskedFailure(in: "Na⁺、Na⁺ 和 Cl⁻ 是离子。"))
+        // This first guard is strict about notation; it keeps the previous
+        // caption even when an alternative notation might be equivalent.
+        XCTAssertNotNil(prepared.unmaskedFailure(in: "Na+ 和 Cl- 是不同的离子。"))
     }
 
     // MARK: - SSE 流式解析（QwenSSEParser，此前无测试）

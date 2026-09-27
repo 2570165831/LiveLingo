@@ -27,16 +27,16 @@ enum AppRuntimeEnvironment {
 struct CaptionTranslationDependencies {
     typealias Update = @MainActor @Sendable (String) async -> Void
     var translate: (String, String, [AuxiliaryTranslationHint], Update?) async throws -> String
-    var adjacent: (String, String, String, String, String, Bool) async throws -> QwenTranslationClient.AdjacentTranslation
+    var adjacent: (String, String, String, String, String, Bool, [AuxiliaryTranslationHint]) async throws -> QwenTranslationClient.AdjacentTranslation
 
     static let live = Self(
         translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, onUpdate: $3) },
         adjacent: { try await QwenTranslationClient.translateAdjacent(previous: $0, previousChinese: $1,
-            current: $2, context: $3, modelName: $4, repairPrevious: $5) }
+            current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6) }
     )
     static let unavailable = Self(
         translate: { _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
-        adjacent: { _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
+        adjacent: { _, _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
     )
 }
 
@@ -2220,9 +2220,9 @@ final class AppModel: ObservableObject {
         consume(.final(text: text, start: start, end: end, hints: []))
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
-    func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment) {
+    func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
-        appendConfirmedCaption(segment, hints: [])
+        appendConfirmedCaption(segment, hints: hints)
     }
     func reviseCaptionForTesting(id: UUID, english: String) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
@@ -2295,7 +2295,7 @@ final class AppModel: ObservableObject {
                 let normalizedInput = AcademicInputNormalizer.normalize(english, recentContext: recentContext)
                 let protectedInput = ChemistryTranslationProtector.prepare(normalizedInput)
                 let translationModel = self.effectiveProfile.translationModel
-                let hints = self.translationHints.removeValue(forKey: id) ?? []
+                let hints = protectedInput.translationHints(from: self.translationHints.removeValue(forKey: id) ?? [])
                 let started = ProcessInfo.processInfo.systemUptime
                 let enqueued = self.translationEnqueuedAt[id] ?? started
                 Self.traceTranslation("request", id: id, elapsed: started - enqueued)
@@ -2311,12 +2311,13 @@ final class AppModel: ObservableObject {
                         let pair = try await self.captionTranslation.adjacent(
                             previousInput.english,
                             previousInput.chinese,
-                            QwenTranslationClient.translationInput(text: normalizedInput, modelName: translationModel, hints: hints),
+                            normalizedInput,
                             self.segments[..<previousIndex].suffix(2).map(\.english).joined(separator: " "),
                             translationModel,
                             previousInput.endTime - previousInput.startTime >= 9.5
                                 || !".!?".contains(previousInput.english.last ?? " ")
-                                || english.first?.isLowercase == true)
+                                || english.first?.isLowercase == true,
+                            hints)
                         try Task.checkCancellation()
                         guard currentGeneration == self.generation, currentSession == self.sessionID,
                               self.translationWorkerID == workerID, !self.processingPaused else { return }
@@ -2396,11 +2397,11 @@ final class AppModel: ObservableObject {
                     )
                     }
                     try Task.checkCancellation()
-                    let restored = previousIndex == nil ? protectedInput.restore(in: response) : response
+                    let restored = previousIndex == nil ? try protectedInput.validatedRestore(in: response) : response
                     let chinese = SimplifiedChineseNormalizer.normalize(restored)
                     // The restore step must not turn a technical answer into an
                     // English sentence after the model output was accepted.
-                    _ = try TranslationAcceptance.validated(chinese, source: protectedInput.text)
+                    _ = try TranslationAcceptance.validated(chinese, source: normalizedInput)
                     guard currentGeneration == self.generation, currentSession == self.sessionID,
                           self.translationWorkerID == workerID, !self.processingPaused else { return }
                     guard self.translationInputIndex(input, session: currentSession,
@@ -2410,13 +2411,14 @@ final class AppModel: ObservableObject {
                     // 全库实测约 1% 的段落中文里混进了邻居内容 ✗（音频与英文都正常、只有中文异常长 ✗）。
                     // 规则：原译文不可信 → 重试一次 → **只有重试结果可信才替换** ✓；否则保留原样 ✓。
                     var finalChinese = chinese
-                    if !TranslationLengthGuard.isPlausible(chinese: chinese, english: protectedInput.text),
+                    if !TranslationLengthGuard.isPlausible(chinese: chinese, english: normalizedInput),
                        !Task.isCancelled, currentGeneration == self.generation,
                        let retry = try? await self.captionTranslation.translate(
                            protectedInput.text, translationModel, hints, nil) {
-                        let restoredRetry = SimplifiedChineseNormalizer.normalize(protectedInput.restore(in: retry))
-                        if let validatedRetry = try? TranslationAcceptance.validated(restoredRetry, source: protectedInput.text),
-                           TranslationLengthGuard.isPlausible(chinese: validatedRetry, english: protectedInput.text) {
+                        if let restoredRetry = try? protectedInput.validatedRestore(in: retry),
+                           let validatedRetry = try? TranslationAcceptance.validated(
+                               SimplifiedChineseNormalizer.normalize(restoredRetry), source: normalizedInput),
+                           TranslationLengthGuard.isPlausible(chinese: validatedRetry, english: normalizedInput) {
                             finalChinese = validatedRetry
                             Self.traceTranslation("length_guard_replaced", id: id,
                                                   elapsed: ProcessInfo.processInfo.systemUptime - started)
@@ -2460,9 +2462,9 @@ final class AppModel: ObservableObject {
                     guard let currentIndex = self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) else { continue }
                     var accepted: String?
-                    if let recovered {
-                        let restored = SimplifiedChineseNormalizer.normalize(protectedInput.restore(in: recovered))
-                        if let validated = try? TranslationAcceptance.validated(restored, source: protectedInput.text),
+                    if let recovered, let restored = try? protectedInput.validatedRestore(in: recovered) {
+                        if let validated = try? TranslationAcceptance.validated(
+                            SimplifiedChineseNormalizer.normalize(restored), source: normalizedInput),
                            !validated.isEmpty {
                             accepted = validated
                         }
@@ -3284,6 +3286,15 @@ struct ProtectedChemistryTranslationInput: Sendable {
     let text: String
     fileprivate let replacements: [(placeholder: String, original: String)]
 
+    func contextualJSON(before: String, after: String, protectTarget: Bool = true) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "context_before_do_not_translate": String(before.suffix(1600)),
+            "target_translate_only": protectTarget ? text : restore(in: text),
+            "context_after_do_not_translate": after
+        ], options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
+
     func restore(in translatedText: String) -> String {
         replacements.reduce(translatedText) { result, replacement in
             result.replacingOccurrences(
@@ -3294,7 +3305,78 @@ struct ProtectedChemistryTranslationInput: Sendable {
         }
     }
 
+    func restorationFailure(in translatedText: String) -> String? {
+        guard !replacements.isEmpty else { return nil }
+        // Each occurrence has its own ID. Never guess which original formula
+        // a misspelled, missing or duplicated ID was supposed to refer to.
+        guard replacements.allSatisfy({
+            Self.occurrences(of: $0.placeholder, in: translatedText) == 1
+        }) else { return "译文没有完整保留原文的公式、单位或术语" }
+        let restored = restore(in: translatedText)
+        let source = restore(in: text)
+        for marker in ["zxq", "qchem", "qxz"] where
+            Self.occurrences(of: marker, in: restored) > Self.occurrences(of: marker, in: source) {
+            return "译文含有无法还原的公式标记"
+        }
+        return nil
+    }
+
+    func validatedRestore(in translatedText: String) throws -> String {
+        if let reason = restorationFailure(in: translatedText) {
+            throw QwenRuntimeError.requestFailed("译文未通过验收：\(reason)。")
+        }
+        return restore(in: translatedText)
+    }
+
+    func translationHints(from hints: [AuxiliaryTranslationHint]) -> [AuxiliaryTranslationHint] {
+        // The source already specifies these formulas exactly. Repeating their
+        // unmasked spelling as a hint made the model replace a protected ID.
+        hints.filter { hint in
+            hint.kind != .formula || !replacements.contains(where: { $0.original == hint.value })
+        }
+    }
+
+    /// Contextual repair sees original terms so their meaning is not hidden.
+    /// If spelling or count changes, preserve the previous caption. This strict
+    /// check does not establish that each formula has the correct subject.
+    func unmaskedFailure(in translatedText: String) -> String? {
+        guard !replacements.isEmpty else { return nil }
+        func inventory(_ items: [(placeholder: String, original: String)]) -> [String: Int] {
+            items.reduce(into: [:]) { $0[$1.original, default: 0] += 1 }
+        }
+        let actual = ChemistryTranslationProtector.prepare(translatedText)
+        return inventory(replacements) == inventory(actual.replacements)
+            ? nil : "重译的化学式写法或数量与原文不一致"
+    }
+
+    private static func occurrences(of value: String, in text: String) -> Int {
+        var count = 0
+        var start = text.startIndex
+        while start < text.endIndex,
+              let range = text.range(of: value, options: .caseInsensitive, range: start..<text.endIndex) {
+            count += 1
+            start = range.upperBound
+        }
+        return count
+    }
+
     func restorePartial(in translatedText: String) -> String {
+        guard !replacements.isEmpty else { return translatedText }
+        let restored = restore(in: translatedText)
+        let original = restore(in: text)
+        // Do not flash malformed markers such as ZnQCHEM0QXZ on screen.
+        // A complete literal marker already present in the source is allowed.
+        let markerPattern = #"(?i)[A-Za-z0-9_]*(?:ZXQ|QCHEM|QXZ)[A-Za-z0-9_]*"#
+        if let expression = try? NSRegularExpression(pattern: markerPattern) {
+            let range = NSRange(restored.startIndex..<restored.endIndex, in: restored)
+            for match in expression.matches(in: restored, range: range) {
+                guard let matchRange = Range(match.range, in: restored) else { continue }
+                let fragment = String(restored[matchRange])
+                if original.range(of: fragment, options: .caseInsensitive) == nil {
+                    return String(restored[..<matchRange.lowerBound])
+                }
+            }
+        }
         let lower = translatedText.lowercased()
         // A placeholder may arrive across several tokens. Hold its unfinished
         // suffix until the formula can be restored in full.
@@ -3308,11 +3390,37 @@ struct ProtectedChemistryTranslationInput: Sendable {
                 if lower.hasSuffix(placeholder.prefix(length)) { heldCount = length }
             }
         }
+        // Before a malformed marker has reached its distinctive QCHEM part,
+        // hold the unfinished Z-word. Ordinary words resume at their delimiter.
+        if let range = translatedText.range(of: #"(?i)(?<![A-Za-z0-9_])z[A-Za-z0-9_]*$"#,
+                                            options: .regularExpression) {
+            let word = String(translatedText[range])
+            let literalPattern = #"(?i)(?<![A-Za-z0-9_])"# + NSRegularExpression.escapedPattern(for: word)
+                + #"(?![A-Za-z0-9_])"#
+            if original.range(of: literalPattern, options: .regularExpression) == nil {
+                heldCount = max(heldCount, word.count)
+            } else {
+                heldCount = 0
+            }
+        }
         return restore(in: String(translatedText.dropLast(heldCount)))
     }
 }
 
 enum ChemistryTranslationProtector {
+    static let copyInstruction = "Text like ZXQCHEM0QXZ is an unchanged source term. Keep those tokens verbatim while translating the entire sentence, including all surrounding words and clauses. Do not output a list of tokens in place of the translation."
+
+    static func promptSuffix(for text: String) -> String {
+        text.range(of: #"ZXQCHEM[0-9]+QXZ"#, options: .regularExpression) == nil ? "" : copyInstruction
+    }
+
+    static func translationPrompt(base: String, text: String) -> String {
+        let instruction = promptSuffix(for: text)
+        guard !instruction.isEmpty else { return base }
+        let ending = "Return only the complete Simplified Chinese translation. Do not use markdown."
+        return base.replacingOccurrences(of: ending, with: instruction + "\n" + ending)
+    }
+
     private static let elementSymbols: Set<String> = [
         "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar",
         "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr",
@@ -3323,24 +3431,34 @@ enum ChemistryTranslationProtector {
         "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og"
     ]
 
-    private static let patterns = [
-        #"(?<![A-Za-z])pH\s*\d+(?:\.\d+)?(?![A-Za-z])"#,
-        #"(?<![A-Za-z])(?:[A-Z][a-z]?\d*|\((?:[A-Z][a-z]?\d*)+\)\d*)+(?:\^\d*[+-]|\d*[+-])?(?![A-Za-z])"#,
-        #"(?<![A-Za-z0-9])(?:\d+(?:\.\d+)?\s*)?(?:μ|µ|u|m|c|d|k|M)?(?:mol|g|L|l|M|Pa|bar|atm|K|°C)(?:\s*/\s*(?:mol|L|l|g))?(?![A-Za-z])"#,
-        #"(?<![A-Za-z0-9])(?:FTIR|NMR|UV-Vis|HPLC|UPLC|GC-MS|LC-MS|TLC|IR|MS|SN1|SN2|E1|E2|sp2|sp3)(?![A-Za-z0-9])"#
-    ]
+    private static let formulaPattern: String = {
+        let atom = #"[A-Z][a-z]?[0-9₀-₉]*"#
+        let group = #"\((?:"# + atom + #")+\)[0-9₀-₉]*"#
+        let simple = "(?:" + atom + "|" + group + ")+"
+        let bracket = #"\["# + simple + #"\][0-9₀-₉]*"#
+        let body = "(?:" + atom + "|" + group + "|" + bracket + ")+"
+        let hydrate = "(?:[·⋅][0-9]*" + simple + ")*"
+        let charge = #"(?:\^[0-9]*[+−-]|[⁰¹²³⁴⁵⁶⁷⁸⁹]*[+⁺−⁻-])?"#
+        // Reaction coefficients stay visible: hiding the 2 in 2H2 made a
+        // model add a second coefficient while translating the surrounding prose.
+        return #"(?<![A-Za-z_])[⁰¹²³⁴⁵⁶⁷⁸⁹]*"# + body + hydrate + charge
+            + #"(?![A-Za-z0-9_₀-₉⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻^])"#
+    }()
+
+    // Units, pH and instrument names stay visible. Hiding their meaning made
+    // pH become a temperature, and "2 mL H2O" become two separate items.
+    private static let visibleTerms: Set<String> = ["FTIR", "NMR", "UV-Vis", "HPLC", "UPLC", "GC-MS",
+        "LC-MS", "TLC", "IR", "MS", "SN1", "SN2", "E1", "E2", "sp2", "sp3"]
 
     static func prepare(_ source: String) -> ProtectedChemistryTranslationInput {
         let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
         var candidates: [NSRange] = []
 
-        for pattern in patterns {
-            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+        if let expression = try? NSRegularExpression(pattern: formulaPattern) {
             for match in expression.matches(in: source, range: fullRange) {
                 guard match.range.length > 0 else { continue }
-                if pattern == patterns[1], !looksLikeChemicalFormula(match.range, in: source) {
-                    continue
-                }
+                let original = (source as NSString).substring(with: match.range)
+                guard !visibleTerms.contains(original), looksLikeChemicalFormula(match.range, in: source) else { continue }
                 candidates.append(match.range)
             }
         }
@@ -3353,9 +3471,13 @@ enum ChemistryTranslationProtector {
 
         let mutable = NSMutableString(string: source)
         let sourceString = source as NSString
-        let replacements = selected.enumerated().map { index, range in
-            (
-                placeholder: "ZXQCHEM\(index)QXZ",
+        var index = 0
+        let replacements = selected.map { range in
+            while source.range(of: "ZXQCHEM\(index)QXZ", options: .caseInsensitive) != nil { index += 1 }
+            let placeholder = "ZXQCHEM\(index)QXZ"
+            index += 1
+            return (
+                placeholder: placeholder,
                 original: sourceString.substring(with: range)
             )
         }
@@ -3378,8 +3500,9 @@ enum ChemistryTranslationProtector {
         let symbols = matches.map { (candidate as NSString).substring(with: $0.range) }
         guard !symbols.isEmpty, symbols.allSatisfy(elementSymbols.contains) else { return false }
 
-        if candidate.rangeOfCharacter(from: .decimalDigits) != nil { return true }
-        if candidate.rangeOfCharacter(from: CharacterSet(charactersIn: "()+-^")) != nil { return true }
+        let numbers = CharacterSet.decimalDigits.union(CharacterSet(charactersIn: "₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹"))
+        if candidate.rangeOfCharacter(from: numbers) != nil { return true }
+        if candidate.rangeOfCharacter(from: CharacterSet(charactersIn: "()[]+−-^⁺⁻")) != nil { return true }
         return symbols.count >= 2
     }
 

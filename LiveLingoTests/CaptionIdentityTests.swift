@@ -57,6 +57,59 @@ final class CaptionIdentityTests: XCTestCase {
         return model
     }
 
+    func testAdjacentTargetKeepsAuxiliaryHintsSeparateFromTranscript() async throws {
+        let hints: [AuxiliaryTranslationHint] = [.init(kind: .formula, value: "H2O"),
+                                                .init(kind: .unit, value: "2 mL")]
+        let source = "Add 2 mL H2O to sample A."
+        var adjacentCalls = 0
+        let model = try makeModel(.init(
+            translate: { _, _, _, _ in "准备好样品。" },
+            adjacent: { _, _, current, _, _, _, receivedHints in
+                adjacentCalls += 1
+                XCTAssertEqual(current, source)
+                XCTAssertEqual(receivedHints, [.init(kind: .unit, value: "2 mL")])
+                XCTAssertFalse(current.contains("Primary ASR transcript"))
+                XCTAssertFalse(current.contains("Auxiliary token hints"))
+                return .init(previous: nil, current: "向样品 A 加入 2 mL H2O。",
+                             previousRejection: nil, currentRejection: nil)
+            }))
+        model.receiveIdentifiedCaptionForTesting(.init(startTime: 0, endTime: 8,
+                                                      english: "Prepare the sample."))
+        await model.translationTaskForTesting?.value
+        model.receiveIdentifiedCaptionForTesting(.init(startTime: 8, endTime: 16, english: source), hints: hints)
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(adjacentCalls, 1)
+        XCTAssertEqual(model.segments.last?.english, source)
+        XCTAssertEqual(model.segments.last?.chinese, "向样品 A 加入 2 mL H2O。")
+    }
+
+    func testMalformedFormulaOutputIsRejectedAndRetryMustRestoreEveryTerm() async throws {
+        for retrySucceeds in [false, true] {
+            var calls = 0
+            let broken = "比较 ZnQCHEM0QXZ 和 ZXQCHEM1QXZ。"
+            let model = try makeModel(.init(translate: { text, _, _, update in
+                calls += 1
+                XCTAssertEqual(text, "Compare ZXQCHEM0QXZ with ZXQCHEM1QXZ.")
+                await update?(broken)
+                return calls == 2 && retrySucceeds ? "比较 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ。" : broken
+            }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+            let caption = TranscriptSegment(startTime: 0, endTime: 8,
+                                            english: "Compare Na⁺ with Cl⁻.")
+            model.receiveIdentifiedCaptionForTesting(caption)
+            await model.translationTaskForTesting?.value
+            XCTAssertEqual(calls, 2)
+            XCTAssertEqual(model.segments[0].english, caption.english)
+            XCTAssertFalse(model.segments[0].chinese.contains("CHEM"))
+            XCTAssertFalse(model.streamingChinese.contains("CHEM"))
+            if retrySucceeds {
+                XCTAssertEqual(model.segments[0].chinese, "比较 Na⁺ 和 Cl⁻。")
+                XCTAssertEqual(model.segments[0].translationState, .completed)
+            } else {
+                XCTAssertFalse(model.segments[0].hasUsableTranslation)
+            }
+        }
+    }
+
     func testSummaryCommitSurvivesUnrelatedRevisionButRejectsDependencyRevision() async throws {
         for dependsOnEarlier in [false, true] {
             let gate = CaptionIdentityGate<String>()
@@ -102,7 +155,7 @@ final class CaptionIdentityTests: XCTestCase {
                                         english: "This earlier sentence was recovered later.")
         let model = try makeModel(.init(
             translate: { text, _, _, _ in text.contains("earlier") ? "较早补转的译文。" : "先前句子的译文。" },
-            adjacent: { _, _, _, _, _, _ in try await gate.wait() }))
+            adjacent: { _, _, _, _, _, _, _ in try await gate.wait() }))
         model.receiveIdentifiedCaptionForTesting(first)
         await model.translationTaskForTesting?.value
         model.receiveIdentifiedCaptionForTesting(current)
@@ -127,7 +180,7 @@ final class CaptionIdentityTests: XCTestCase {
             if text.contains("revised") { return "确认修订后的译文。" }
             oldUpdate = update
             return try await gate.wait()
-        }, adjacent: { _, _, _, _, _, _ in throw CancellationError() }))
+        }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
         let caption = TranscriptSegment(startTime: 0, endTime: 8,
                                         english: "The original sentence says that pressure increases.")
         model.receiveIdentifiedCaptionForTesting(caption)
@@ -157,7 +210,7 @@ final class CaptionIdentityTests: XCTestCase {
                     return String(repeating: "这是过长的中文译文。", count: 60)
                 }
                 return try await gate.wait()
-            }, adjacent: { _, _, _, _, _, _ in throw CancellationError() }))
+            }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
             let caption = TranscriptSegment(startTime: 0, endTime: 8,
                 english: "The system gains energy and its temperature increases.")
             model.receiveIdentifiedCaptionForTesting(caption)
@@ -178,7 +231,7 @@ final class CaptionIdentityTests: XCTestCase {
         var pairCalls = 0
         let model = try makeModel(.init(translate: { text, _, _, _ in
             text.contains("revised") ? "确认后的前句译文。" : "前句原有译文。"
-        }, adjacent: { _, _, _, _, _, _ in
+        }, adjacent: { _, _, _, _, _, _, _ in
             pairCalls += 1
             if pairCalls == 1 { return try await gate.wait() }
             return .init(previous: nil, current: "根据新上下文翻译当前句。",
@@ -223,7 +276,7 @@ final class CaptionIdentityTests: XCTestCase {
             calls += 1
             if calls == 1 { return try await gate.wait() }
             return "恢复后完成的译文。"
-        }, adjacent: { _, _, _, _, _, _ in throw CancellationError() }))
+        }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
         model.loadPresentationForTesting(phase: .idle, evidence: [])
         try await model.openSavedSession(root)
         XCTAssertTrue(model.savedProcessingIsPaused)

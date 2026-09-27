@@ -266,15 +266,16 @@ struct SessionExporterTests {
         #expect(QwenTranslationClient.summarySystemPrompt.contains("Simplified Chinese"))
     }
 
-    @Test func chemistryTranslationProtectsFormulasUnitsAndInstrumentNames() {
+    @Test func chemistryTranslationProtectsSpeciesAndKeepsUnitMeaningVisible() {
         let source = "Dissolve 5.0 mmol of NaCl in 10 mL H2O at pH 7.4, then analyze by LC-MS."
         let prepared = ChemistryTranslationProtector.prepare(source)
 
         #expect(!prepared.text.contains("NaCl"))
-        #expect(!prepared.text.contains("10 mL"))
+        #expect(prepared.text.contains("5.0 mmol"))
+        #expect(prepared.text.contains("10 mL"))
         #expect(!prepared.text.contains("H2O"))
-        #expect(!prepared.text.contains("pH 7.4"))
-        #expect(!prepared.text.contains("LC-MS"))
+        #expect(prepared.text.contains("pH 7.4"))
+        #expect(prepared.text.contains("LC-MS"))
         #expect(prepared.restore(in: "译文：\(prepared.text)") == "译文：\(source)")
     }
 
