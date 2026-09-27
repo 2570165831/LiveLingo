@@ -1,6 +1,38 @@
 import XCTest
 @testable import LiveLingo
 
+private actor AdjacentRequestProbe {
+    enum Response: Sendable {
+        case text(String), failure(QwenRuntimeError), cancelled
+        case cancelThenText(String), cancelThenFailure(QwenRuntimeError)
+    }
+    struct Request: Sendable {
+        let input: String
+        let prompt: String
+        let budget: Int
+    }
+    private var responses: [Response]
+    private(set) var requests: [Request] = []
+
+    init(_ responses: [Response]) { self.responses = responses }
+
+    func request(_ input: String, _ prompt: String, _ budget: Int) throws -> String {
+        requests.append(.init(input: input, prompt: prompt, budget: budget))
+        guard !responses.isEmpty else { throw QwenRuntimeError.requestFailed("Unexpected extra generation") }
+        switch responses.removeFirst() {
+        case .text(let value): return value
+        case .failure(let error): throw error
+        case .cancelled: throw CancellationError()
+        case .cancelThenText(let value):
+            withUnsafeCurrentTask { $0?.cancel() }
+            return value
+        case .cancelThenFailure(let error):
+            withUnsafeCurrentTask { $0?.cancel() }
+            throw error
+        }
+    }
+}
+
 @MainActor
 private final class CaptionIdentityGate<Value: Sendable> {
     var continuation: CheckedContinuation<Value, Error>?
@@ -188,6 +220,160 @@ final class CaptionIdentityTests: XCTestCase {
         XCTAssertTrue(model.segments[0].hasUsableTranslation)
         XCTAssertFalse(model.segments[1].hasUsableTranslation)
         XCTAssertEqual(calls, 2)
+    }
+
+    func testPreviousRepairFailureDoesNotRetranslateCompletedCurrent() async throws {
+        let failures: [QwenRuntimeError] = [
+            .outputLimitReached("repair budget"), .generationInterrupted("repair worker exited"),
+            .requestTimedOut, .invalidResponse, .requestFailed("repair transport failure")
+        ]
+        for failure in failures {
+            let probe = AdjacentRequestProbe([.text("温度随之升高。"), .failure(failure)])
+            var ordinaryCalls = 0
+            let model = try makeModel(.init(translate: { _, _, _, _, _ in
+                ordinaryCalls += 1
+                return ordinaryCalls == 1 ? "系统吸收热能。" : "重算后的另一份译文。"
+            }, adjacent: { previous, chinese, current, context, name, repair, hints in
+                XCTAssertTrue(repair)
+                return try await QwenTranslationClient.translateAdjacent(previous: previous,
+                    previousChinese: chinese, current: current, context: context, modelName: name,
+                    repairPrevious: repair, currentHints: hints,
+                    request: { try await probe.request($0, $1, $2) })
+            }))
+            model.receiveCaptionForTesting("The system absorbs thermal energy.", start: 0, end: 10)
+            await model.translationTaskForTesting?.value
+            model.receiveCaptionForTesting("and its temperature rises.", start: 10, end: 18)
+            await model.translationTaskForTesting?.value
+            let requests = await probe.requests
+            XCTAssertEqual(requests.count, 2)
+            XCTAssertEqual(ordinaryCalls, 1, "A previous repair failure must not retranslate a valid current sentence")
+            XCTAssertEqual(model.segments[0].chinese, "系统吸收热能。")
+            XCTAssertEqual(model.segments[1].chinese, "温度随之升高。")
+            XCTAssertTrue(model.segments.allSatisfy(\.hasUsableTranslation))
+        }
+    }
+
+    func testPreviousRepairWithoutMappableTailSkipsUnusedGeneration() async throws {
+        let probe = AdjacentRequestProbe([.text("它使物体转向。"), .text("力指向中心。")])
+        let pair = try await QwenTranslationClient.translateAdjacent(
+            previous: "The force acts toward the center.", previousChinese: "先说明方向。力指向中心。",
+            current: "and it turns the object.", context: "", modelName: "test",
+            request: { try await probe.request($0, $1, $2) })
+        let requests = await probe.requests
+        XCTAssertEqual(requests.count, 1, "Do not generate a repair that cannot replace the stable Chinese prefix")
+        XCTAssertEqual(pair.current, "它使物体转向。")
+        XCTAssertNil(pair.previous)
+        XCTAssertNil(pair.currentRejection)
+    }
+
+    func testAdjacentCancellationAlwaysPropagatesFromPreviousRepair() async throws {
+        let responses: [AdjacentRequestProbe.Response] = [
+            .cancelled, .cancelThenText("力指向中心。"), .cancelThenFailure(.invalidResponse)
+        ]
+        for response in responses {
+            let probe = AdjacentRequestProbe([.text("它使物体转向。"), response])
+            let task = Task {
+                try await QwenTranslationClient.translateAdjacent(
+                    previous: "The force acts toward the center.", previousChinese: "力指向中心。",
+                    current: "and it turns the object.", context: "", modelName: "test",
+                    request: { try await probe.request($0, $1, $2) })
+            }
+            do {
+                _ = try await task.value
+                XCTFail("A dependency that returns after cancellation must not turn the pair into a success")
+            } catch is CancellationError { }
+            catch { XCTFail("Cancellation must take precedence over a repair error: \(error)") }
+            let requests = await probe.requests
+            XCTAssertEqual(requests.count, 2)
+        }
+    }
+
+    func testAdjacentSuccessfulTailRepairRetainsStablePrefixAndRequestShape() async throws {
+        let probe = AdjacentRequestProbe([.text("指向中心。"), .text("力指向中心。")])
+        let pair = try await QwenTranslationClient.translateAdjacent(
+            previous: "Check the direction. The force acts.", previousChinese: "先检查方向。力起作用。",
+            current: "toward the center.", context: "Earlier context.", modelName: "test",
+            request: { try await probe.request($0, $1, $2) })
+        XCTAssertEqual(pair.previous, "先检查方向。力指向中心。")
+        XCTAssertEqual(pair.current, "指向中心。")
+        XCTAssertNil(pair.previousRejection)
+        XCTAssertNil(pair.currentRejection)
+        let requests = await probe.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0].input, "toward the center.")
+        XCTAssertEqual(requests.map(\.budget), [160, 320])
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(requests[1].input.utf8)) as? [String: String])
+        XCTAssertEqual(json["target_translate_only"], "The force acts.")
+        XCTAssertTrue(json["context_before_do_not_translate"]?.contains("Check the direction.") == true)
+        XCTAssertEqual(json["context_after_do_not_translate"], "toward the center.")
+        XCTAssertTrue(requests[1].prompt.contains("Translate ONLY target_translate_only"))
+    }
+
+    func testAdjacentCurrentValidationRemainsIndependentOfRepairOutcome() async throws {
+        for repair in [AdjacentRequestProbe.Response.text("力指向中心。"), .failure(.invalidResponse)] {
+            let probe = AdjacentRequestProbe([.text("and it turns the object."), repair])
+            let pair = try await QwenTranslationClient.translateAdjacent(
+                previous: "The force acts toward the center.", previousChinese: "力起作用。",
+                current: "and it turns the object.", context: "", modelName: "test",
+                request: { try await probe.request($0, $1, $2) })
+            XCTAssertNil(pair.current)
+            XCTAssertNotNil(pair.currentRejection)
+            switch repair {
+            case .text:
+                XCTAssertEqual(pair.previous, "力指向中心。")
+                XCTAssertNil(pair.previousRejection)
+            default:
+                XCTAssertNil(pair.previous)
+                XCTAssertNotNil(pair.previousRejection)
+            }
+        }
+    }
+
+    func testAdjacentRejectedFormulaOrOverlongRepairKeepsValidCurrent() async throws {
+        let previous = "Compare the Na⁺ ions with the Cl⁻ ions in the solution."
+        XCTAssertGreaterThanOrEqual(previous.count, TranslationLengthGuard.minimumEnglishCount)
+        for output in ["Na⁺ 仍在溶液中。", String(repeating: "这是来自其他段落的内容。", count: 60) + "Na⁺ 和 Cl⁻。"] {
+            let probe = AdjacentRequestProbe([.text("然后搅拌溶液。"), .text(output)])
+            let pair = try await QwenTranslationClient.translateAdjacent(
+                previous: previous, previousChinese: "比较溶液中的 Na⁺ 和 Cl⁻ 离子。",
+                current: "Then stir the solution.", context: "", modelName: "test",
+                request: { try await probe.request($0, $1, $2) })
+            XCTAssertEqual(pair.current, "然后搅拌溶液。")
+            XCTAssertNil(pair.previous)
+        }
+    }
+
+    func testAdjacentCurrentFailureDoesNotStartOptionalRepair() async throws {
+        let probe = AdjacentRequestProbe([.failure(.outputLimitReached("current budget"))])
+        do {
+            _ = try await QwenTranslationClient.translateAdjacent(
+                previous: "The force acts toward the center.", previousChinese: "力起作用。",
+                current: "and it turns the object.", context: "", modelName: "test",
+                request: { try await probe.request($0, $1, $2) })
+            XCTFail("Current generation failure must reach the existing recovery policy")
+        } catch QwenRuntimeError.outputLimitReached(let reason) { XCTAssertEqual(reason, "current budget") }
+        let requests = await probe.requests
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    func testAdjacentWithoutRepairRestoresFormulasAndKeepsHintsSeparate() async throws {
+        let probe = AdjacentRequestProbe([.text("向样品 A 加入 2 mL ZXQCHEM0QXZ。")])
+        let pair = try await QwenTranslationClient.translateAdjacent(
+            previous: "Prepare the sample.", previousChinese: "准备样品。",
+            current: "Add 2 mL H2O to sample A.", context: "Do not include this earlier sentence.",
+            modelName: QwenModelProfile.highQuality.translationModel, repairPrevious: false,
+            currentHints: [.init(kind: .formula, value: "H2O"), .init(kind: .unit, value: "2 mL")],
+            request: { try await probe.request($0, $1, $2) })
+        XCTAssertEqual(pair.current, "向样品 A 加入 2 mL H2O。")
+        XCTAssertNil(pair.previous)
+        XCTAssertNil(pair.currentRejection)
+        let requests = await probe.requests
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(requests[0].input.contains("Add 2 mL ZXQCHEM0QXZ to sample A."))
+        XCTAssertFalse(requests[0].input.contains("H2O"))
+        XCTAssertTrue(requests[0].input.contains("Auxiliary token hints"))
+        XCTAssertFalse(requests[0].input.contains("earlier sentence"))
+        XCTAssertEqual(requests[0].budget, 168)
     }
 
     func testSummaryCommitSurvivesUnrelatedRevisionButRejectsDependencyRevision() async throws {
