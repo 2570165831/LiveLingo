@@ -235,7 +235,10 @@ def main():
         generation.save(state_directory/(generation.identity+'.safetensors'))
         # Tensor caches are replaceable accelerators; the app owns the durable
         # text journal. Bound cold caches so paused jobs cannot fill the disk.
-        protected={generation.identity, *[g.identity for g in active.values()], *paused.keys()}
+        # A done event is not a delivery receipt. Protect completed records
+        # until ACK/CANCEL, just like active and hot paused generations.
+        protected={generation.identity, *[g.identity for g in active.values()],
+                   *paused.keys(), *completed.values()}
         files=[p for p in state_directory.iterdir() if not p.is_symlink() and p.is_file()
                and re.fullmatch(r'[0-9a-f]{64}\.safetensors',p.name)]
         total=sum(p.stat().st_size for p in files)

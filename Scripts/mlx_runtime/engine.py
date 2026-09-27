@@ -12,6 +12,7 @@ from mlx_lm import load
 from mlx_lm.models.cache import make_prompt_cache, save_prompt_cache, load_prompt_cache
 from mlx_lm.sample_utils import apply_top_k, apply_top_p
 from outlines_core import Guide, Index
+from safetensors import safe_open
 from outlines_core.json_schema import build_regex_from_schema
 from grammar_vocabulary import build_vocabulary
 from review_diagnostics import grammar_error
@@ -214,13 +215,30 @@ class Generation:
             key=self.key.tolist(), phase=self.phase, thinking_count=self.thinking_count,
             final_count=self.final_count, done=self.done)
         temporary = path.with_name(path.stem+'.pending.safetensors')
-        save_prompt_cache(str(temporary), self.cache, {'generation':json.dumps(metadata, ensure_ascii=False)})
+        serialized = json.dumps(metadata, ensure_ascii=False)
+        if self.done:
+            # A completed request only replays its result while awaiting ACK.
+            # Persist its exact tokens/RNG/spec atomically, without writing KV
+            # tensors that will never be used for another model step.
+            mx.save_safetensors(str(temporary), {}, {'livelingo.completed': serialized})
+        else:
+            save_prompt_cache(str(temporary), self.cache, {'generation': serialized})
         os.replace(temporary, path)
 
     @classmethod
     def restore(cls, engine, path, expected_identity):
-        cache, metadata = load_prompt_cache(str(path), return_metadata=True)
-        state = json.loads(metadata['generation'])
+        # Read only the header to distinguish result-only records from legacy
+        # and unfinished tensor checkpoints. Do not load a large cache twice.
+        with safe_open(str(path), framework='numpy') as checkpoint:
+            completed = (checkpoint.metadata() or {}).get('livelingo.completed')
+        if completed is not None:
+            state = json.loads(completed)
+            if state.get('done') is not True:
+                raise ValueError('Result-only checkpoint is not complete')
+            cache = []
+        else:
+            cache, metadata = load_prompt_cache(str(path), return_metadata=True)
+            state = json.loads(metadata['generation'])
         if state['version'] != cls.VERSION or state['identity'] != expected_identity:
             raise ValueError('Checkpoint identity mismatch')
         result = cls(engine, **state['spec'], prefix=state['prefix'])
