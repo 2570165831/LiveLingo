@@ -27,16 +27,16 @@ enum AppRuntimeEnvironment {
 struct CaptionTranslationDependencies {
     typealias Update = @MainActor @Sendable (String) async -> Void
     var translate: (String, String, [AuxiliaryTranslationHint], CaptionTranslationAttempt, Update?) async throws -> String
-    var adjacent: (String, String, String, String, String, Bool, [AuxiliaryTranslationHint]) async throws -> QwenTranslationClient.AdjacentTranslation
+    var adjacent: (String, String, String, String, String, Bool, [AuxiliaryTranslationHint], Update?) async throws -> QwenTranslationClient.AdjacentTranslation
 
     static let live = Self(
         translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, attempt: $3, onUpdate: $4) },
         adjacent: { try await QwenTranslationClient.translateAdjacent(previous: $0, previousChinese: $1,
-            current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6) }
+            current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6, onCurrent: $7) }
     )
     static let unavailable = Self(
         translate: { _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
-        adjacent: { _, _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
+        adjacent: { _, _, _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
     )
 }
 
@@ -496,6 +496,7 @@ final class AppModel: ObservableObject {
     // Draft output belongs to one segment and never enters exported history.
     @Published private(set) var translatingSegmentID: UUID?
     @Published private(set) var streamingChinese = ""
+    private var streamingDependencyIDs: Set<UUID> = []
     @Published private(set) var segments: [TranscriptSegment] = [] {
         didSet { persistCurrentSession() }
     }
@@ -1344,6 +1345,7 @@ final class AppModel: ObservableObject {
         let translationID = translationWorkerID
         let summary = summaryTask
         processingPaused = true
+        clearTranslationPreview()
         oldProcessing?.cancel()
         translation?.cancel()
         cancelSummaryTask()
@@ -1367,7 +1369,7 @@ final class AppModel: ObservableObject {
                 translationWorkerID = nil
             }
             translatingSegmentID = nil
-            streamingChinese = ""
+            clearTranslationPreview()
             for index in segments.indices where segments[index].translationState == .translating {
                 segments[index].deferTranslation()
             }
@@ -1512,6 +1514,7 @@ final class AppModel: ObservableObject {
                                         candidateText: String? = nil) {
         let previous = segments[index]
         guard previous != replacement else { return }
+        if streamingDependencyIDs.contains(previous.id) { clearTranslationPreview() }
         let nextRevision = (sessionSnapshot?.inputRevision ?? segments.map(\.inputRevision).max() ?? 0) + 1
         var next = replacement
         next.inputRevision = nextRevision
@@ -1552,7 +1555,7 @@ final class AppModel: ObservableObject {
         volatileEnglish = ""
         liveChinese = ""
         translatingSegmentID = nil
-        streamingChinese = ""
+        clearTranslationPreview()
         segments = []
         lectureSummary = ""
         latestSummaryUpdate = ""
@@ -1729,7 +1732,7 @@ final class AppModel: ObservableObject {
             volatileEnglish = ""
             liveChinese = ""
             translatingSegmentID = nil
-            streamingChinese = ""
+            clearTranslationPreview()
             segments = []
             resetLearningNotes()
             lectureSummary = ""
@@ -2252,6 +2255,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func clearTranslationPreview() {
+        streamingChinese = ""
+        streamingDependencyIDs.removeAll()
+    }
+
     private func drainTranslationQueue() {
         guard !processingPaused, !manualRequestInFlight,
               (summaryTask == nil || summaryConcurrencyAllowed),
@@ -2265,7 +2273,7 @@ final class AppModel: ObservableObject {
             defer {
                 if currentGeneration == self.generation, self.translationWorkerID == workerID {
                     self.translatingSegmentID = nil
-                    self.streamingChinese = ""
+                    self.clearTranslationPreview()
                     self.translationWorker = nil
                     self.translationWorkerID = nil
                 }
@@ -2300,7 +2308,7 @@ final class AppModel: ObservableObject {
                 let enqueued = self.translationEnqueuedAt[id] ?? started
                 Self.traceTranslation("request", id: id, elapsed: started - enqueued)
                 self.translatingSegmentID = id
-                self.streamingChinese = ""
+                self.clearTranslationPreview()
                 self.liveChinese = "翻译中…"
                 do {
                     let response: String
@@ -2317,7 +2325,21 @@ final class AppModel: ObservableObject {
                             previousInput.endTime - previousInput.startTime >= 9.5
                                 || !".!?".contains(previousInput.english.last ?? " ")
                                 || english.first?.isLowercase == true,
-                            hints)
+                            hints, { [weak self] current in
+                                guard let self, !Task.isCancelled,
+                                      self.translatingSegmentID == input.id,
+                                      self.translationInputIndex(input, session: currentSession,
+                                          epoch: currentGeneration, worker: workerID) != nil,
+                                      let previousIndex = self.translationInputIndex(previousInput,
+                                          session: currentSession, epoch: currentGeneration, worker: workerID),
+                                      self.segments[previousIndex].chinese == previousInput.chinese,
+                                      let accepted = try? TranslationAcceptance.validatedCaption(
+                                          SimplifiedChineseNormalizer.normalize(current), source: normalizedInput) else { return }
+                                self.streamingDependencyIDs = [input.id, previousInput.id]
+                                self.streamingChinese = accepted
+                                Self.traceTranslation("current_preview", id: input.id,
+                                    elapsed: ProcessInfo.processInfo.systemUptime - started)
+                            })
                         try Task.checkCancellation()
                         guard currentGeneration == self.generation, currentSession == self.sessionID,
                               self.translationWorkerID == workerID, !self.processingPaused else { return }
@@ -2393,6 +2415,7 @@ final class AppModel: ObservableObject {
                                 Self.traceTranslation("first_text", id: id,
                                                       elapsed: ProcessInfo.processInfo.systemUptime - started)
                             }
+                            self.streamingDependencyIDs = [input.id]
                             self.streamingChinese = draft
                         }
                     )
@@ -2469,12 +2492,12 @@ final class AppModel: ObservableObject {
                 }
                 guard !Task.isCancelled, currentGeneration == self.generation else { return }
                 self.translatingSegmentID = nil
-                self.streamingChinese = ""
+                self.clearTranslationPreview()
                 self.startStopOverlapIfUseful()
             }
             guard currentGeneration == self.generation else { return }
             self.translatingSegmentID = nil
-            self.streamingChinese = ""
+            self.clearTranslationPreview()
             self.translationWorker = nil
             guard !Task.isCancelled else { return }
             self.markCaptionActivity()

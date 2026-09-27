@@ -929,6 +929,7 @@ enum QwenTranslationClient {
     static func translateAdjacent(previous: String, previousChinese: String, current: String,
                                   context: String, modelName: String, repairPrevious: Bool = true,
                                   currentHints: [AuxiliaryTranslationHint] = [],
+                                  onCurrent: (@MainActor @Sendable (String) async -> Void)? = nil,
                                   request: AdjacentRequest? = nil) async throws -> AdjacentTranslation {
         // Use the standard translation task for each target. A multi-output JSON task
         // made this local model conflate meanings across the two chunks.
@@ -978,9 +979,16 @@ enum QwenTranslationClient {
         let currentLengthRejection: String? = currentPlausible ? nil : "译文长度与原文不成比例（疑似混入上下文）"
         let currentRejection = protectedCurrent.restorationFailure(in: currentOutput)
             ?? TranslationAcceptance.rejection(candidate: currentTranslation, source: boundaryInput)?.reason
+        let acceptedCurrent = (currentRejection == nil && currentLengthRejection == nil) ? currentTranslation : nil
+        if let acceptedCurrent {
+            // Show a validated current line before waiting for optional repair.
+            // Publication is a preview; the App still owns final identity checks.
+            await onCurrent?(acceptedCurrent)
+            try Task.checkCancellation()
+        }
         guard repairPrevious else {
             return AdjacentTranslation(previous: nil,
-                current: (currentRejection == nil && currentLengthRejection == nil) ? currentTranslation : nil,
+                current: acceptedCurrent,
                 previousRejection: nil, currentRejection: currentRejection ?? currentLengthRejection)
         }
         let prefix = stableTranslationPrefix(previousChinese)
@@ -992,7 +1000,7 @@ enum QwenTranslationClient {
         // English tail, the previous result could never be applied.
         guard prefix.isEmpty || split != nil else {
             return AdjacentTranslation(previous: nil,
-                current: (currentRejection == nil && currentLengthRejection == nil) ? currentTranslation : nil,
+                current: acceptedCurrent,
                 previousRejection: nil, currentRejection: currentRejection ?? currentLengthRejection)
         }
         // Only map a tail when both languages contain an earlier sentence.
@@ -1009,7 +1017,7 @@ enum QwenTranslationClient {
             // Repair is optional. Its runtime failure must not discard a
             // completed current sentence and trigger another generation of it.
             return AdjacentTranslation(previous: nil,
-                current: (currentRejection == nil && currentLengthRejection == nil) ? currentTranslation : nil,
+                current: acceptedCurrent,
                 previousRejection: "前句补全失败：\(error.localizedDescription)",
                 currentRejection: currentRejection ?? currentLengthRejection)
         }
@@ -1045,7 +1053,7 @@ enum QwenTranslationClient {
         }
         return AdjacentTranslation(
             previous: revisedPrevious,
-            current: (currentRejection == nil && currentLengthRejection == nil) ? currentTranslation : nil,
+            current: acceptedCurrent,
             previousRejection: previousRejection,
             currentRejection: currentRejection ?? currentLengthRejection)
     }

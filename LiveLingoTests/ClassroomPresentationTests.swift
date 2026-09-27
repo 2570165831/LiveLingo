@@ -9,7 +9,7 @@ import XCTest
 final class ClassroomPresentationTests: XCTestCase {
     private var presentationDefaults: UserDefaults?
 
-    private func fixture() throws -> (AppModel, [TranscriptSegment], LearningNotebook) {
+    private func fixture(translation: CaptionTranslationDependencies? = nil) throws -> (AppModel, [TranscriptSegment], LearningNotebook) {
         XCTAssertTrue(AppRuntimeEnvironment.isUnitTesting)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ClassroomPresentation-\(UUID().uuidString)")
@@ -25,7 +25,7 @@ final class ClassroomPresentationTests: XCTestCase {
             await queue.shutdownForTesting()
             UserDefaults().removePersistentDomain(forName: suite)
         }
-        let model = AppModel(reviewQueue: queue, backgroundServices: false, defaults: defaults)
+        let model = AppModel(reviewQueue: queue, translation: translation, backgroundServices: false, defaults: defaults)
         let evidence = (0..<8).map { index in
             TranscriptSegment(startTime: Double(index * 10), endTime: Double(index * 10 + 9),
                 english: "Synthetic classroom \(index + 1): compare the quantities and keep the stated conditions with the formula.",
@@ -39,6 +39,48 @@ final class ClassroomPresentationTests: XCTestCase {
             ], sourceVersion: 2))
         }
         return (model, evidence, notebook)
+    }
+
+    func testCurrentTranslationIsVisibleBeforePreviousRepairFinishes() async throws {
+        var repair: CheckedContinuation<QwenTranslationClient.AdjacentTranslation, Error>?
+        let (model, _, _) = try fixture(translation: .init(
+            translate: { _, _, _, _, _ in "合成课堂：系统吸收热能。" },
+            adjacent: { _, _, _, _, _, _, _, onCurrent in
+                await onCurrent?("合成课堂：温度随之升高。")
+                return try await withCheckedThrowingContinuation { repair = $0 }
+            }))
+        defer { repair?.resume(throwing: CancellationError()) }
+        model.resetTranslationSessionForTesting()
+        model.receiveCaptionForTesting("The synthetic lecture describes thermal energy.", start: 0, end: 10)
+        await model.translationTaskForTesting?.value
+        model.receiveCaptionForTesting("and the temperature rises in this synthetic example.", start: 10, end: 18)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while repair == nil, ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertNotNil(repair)
+        let (window, view) = try window(model: model, width: 1000)
+        defer { window.close() }
+        try await settle(view)
+        let labels = elements(view).flatMap { node in
+            ["accessibilityValue", "accessibilityLabel"].compactMap { key -> String? in
+                let value = node.value(key)
+                return value as? String ?? (value as? NSAttributedString)?.string
+            }
+        }
+        // Some native test hosts render SwiftUI but expose no AX descendants.
+        // Keep the screenshot for visual inspection; do not call that an AX pass.
+        if labels.isEmpty {
+            print("PREVIEW_AX_UNAVAILABLE: inspect accepted-current-before-repair attachment")
+        } else {
+            XCTAssertTrue(labels.contains { $0.contains("合成课堂：温度随之升高。") }, "Missing accepted preview in accessibility text: \(labels)")
+        }
+        XCTAssertEqual(model.streamingChinese, "合成课堂：温度随之升高。")
+        XCTAssertEqual(model.translatingSegmentID, model.segments[1].id)
+        XCTAssertFalse(model.segments[1].hasUsableTranslation)
+        try capture(view, name: "accepted-current-before-repair")
+        let pending = repair; repair = nil
+        pending?.resume(returning: .init(previous: nil, current: "合成课堂：温度随之升高。", previousRejection: nil, currentRejection: nil))
+        await model.translationTaskForTesting?.value
+        XCTAssertTrue(model.segments[1].hasUsableTranslation)
     }
 
     private func window(model: AppModel, width: CGFloat, height: CGFloat = 820,

@@ -5,6 +5,7 @@ private actor AdjacentRequestProbe {
     enum Response: Sendable {
         case text(String), failure(QwenRuntimeError), cancelled
         case cancelThenText(String), cancelThenFailure(QwenRuntimeError)
+        case held(CaptionIdentityGate<String>)
     }
     struct Request: Sendable {
         let input: String
@@ -16,12 +17,13 @@ private actor AdjacentRequestProbe {
 
     init(_ responses: [Response]) { self.responses = responses }
 
-    func request(_ input: String, _ prompt: String, _ budget: Int) throws -> String {
+    func request(_ input: String, _ prompt: String, _ budget: Int) async throws -> String {
         requests.append(.init(input: input, prompt: prompt, budget: budget))
         guard !responses.isEmpty else { throw QwenRuntimeError.requestFailed("Unexpected extra generation") }
         switch responses.removeFirst() {
         case .text(let value): return value
         case .failure(let error): throw error
+        case .held(let gate): return try await gate.wait()
         case .cancelled: throw CancellationError()
         case .cancelThenText(let value):
             withUnsafeCurrentTask { $0?.cancel() }
@@ -96,7 +98,7 @@ final class CaptionIdentityTests: XCTestCase {
         var adjacentCalls = 0
         let model = try makeModel(.init(
             translate: { _, _, _, _, _ in "准备好样品。" },
-            adjacent: { _, _, current, _, _, _, receivedHints in
+            adjacent: { _, _, current, _, _, _, receivedHints, _ in
                 adjacentCalls += 1
                 XCTAssertEqual(current, source)
                 XCTAssertEqual(receivedHints, [.init(kind: .unit, value: "2 mL")])
@@ -124,7 +126,7 @@ final class CaptionIdentityTests: XCTestCase {
                 XCTAssertEqual(text, "Compare ZXQCHEM0QXZ with ZXQCHEM1QXZ.")
                 await update?(broken)
                 return calls == 2 && retrySucceeds ? "比较 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ。" : broken
-            }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+            }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
             let caption = TranscriptSegment(startTime: 0, endTime: 8,
                                             english: "Compare Na⁺ with Cl⁻.")
             model.receiveIdentifiedCaptionForTesting(caption)
@@ -150,7 +152,7 @@ final class CaptionIdentityTests: XCTestCase {
             let output = "称它为 ZXQCHEM0QXZ。"
             await update?(output)
             return output
-        }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+        }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
         let source = #"Call it "S N two"."#
         model.receiveCaptionForTesting(source, start: 0, end: 8)
         await model.translationTaskForTesting?.value
@@ -166,7 +168,7 @@ final class CaptionIdentityTests: XCTestCase {
             attempts.append(attempt)
             XCTAssertEqual(text, #"Call it "ZXQCHEM0QXZ"."#)
             return attempts.count == 1 ? #""ZXQCHEM0QXZ"。"# : "称其为 ZXQCHEM0QXZ。"
-        }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+        }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
         model.receiveCaptionForTesting(#"Call it "N two"."#, start: 0, end: 8)
         await model.translationTaskForTesting?.value
         XCTAssertEqual(attempts, [.standard, .repairContent])
@@ -181,7 +183,7 @@ final class CaptionIdentityTests: XCTestCase {
                 calls += 1
                 if calls == 1 && firstIsRuntimeFailure { throw QwenRuntimeError.invalidResponse }
                 return String(repeating: "这是其他段落的内容。", count: 60)
-            }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+            }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
             let source = "The temperature increases when we add thermal energy."
             model.receiveCaptionForTesting(source, start: 0, end: 8)
             await model.translationTaskForTesting?.value
@@ -200,7 +202,7 @@ final class CaptionIdentityTests: XCTestCase {
                 calls += 1
                 if calls == 1 && firstIsRuntimeFailure { throw QwenRuntimeError.invalidResponse }
                 return String(repeating: "这是别的段落的内容。", count: 8)
-            }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+            }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
             model.receiveCaptionForTesting("No net force.", start: 0, end: 8)
             await model.translationTaskForTesting?.value
             XCTAssertEqual(calls, 2)
@@ -244,7 +246,7 @@ final class CaptionIdentityTests: XCTestCase {
                 XCTAssertEqual(text, "Compare ZXQCHEM0QXZ with ZXQCHEM1QXZ.")
                 if attempts.count == 1 { throw failure }
                 return "比较 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ。"
-            }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+            }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
             model.receiveCaptionForTesting("Compare Na⁺ with Cl⁻.", start: 0, end: 8)
             await model.translationTaskForTesting?.value
             XCTAssertEqual(attempts, recovery.map { [.standard, $0] } ?? [.standard])
@@ -259,7 +261,7 @@ final class CaptionIdentityTests: XCTestCase {
         let model = try makeModel(.init(translate: { _, _, _, attempt, _ in
             attempts.append(attempt)
             throw QwenRuntimeError.translationRejected("still incomplete")
-        }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+        }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
         model.receiveCaptionForTesting("The system gains energy.", start: 0, end: 8)
         await model.translationTaskForTesting?.value
         XCTAssertEqual(attempts, [.standard, .repairContent])
@@ -274,7 +276,7 @@ final class CaptionIdentityTests: XCTestCase {
             if calls == 1 { return "之前的译文。" }
             XCTAssertEqual(attempt, .repairContent)
             throw QwenRuntimeError.translationRejected("still invalid")
-        }, adjacent: { _, _, _, _, _, _, _ in
+        }, adjacent: { _, _, _, _, _, _, _, _ in
             .init(previous: "根据后文修正的前句。", current: nil,
                   previousRejection: nil, currentRejection: "当前句未翻译")
         }))
@@ -288,6 +290,35 @@ final class CaptionIdentityTests: XCTestCase {
         XCTAssertEqual(calls, 2)
     }
 
+    func testAcceptedCurrentAppearsWhilePreviousRepairIsSuspended() async throws {
+        let gate = CaptionIdentityGate<String>()
+        addTeardownBlock { await gate.finish(.failure(CancellationError())) }
+        let probe = AdjacentRequestProbe([.text("温度随之升高。"), .held(gate)])
+        let model = try makeModel(.init(translate: { _, _, _, _, _ in "系统吸收热能。" },
+            adjacent: { previous, chinese, current, context, name, repair, hints, onCurrent in
+                try await QwenTranslationClient.translateAdjacent(previous: previous,
+                    previousChinese: chinese, current: current, context: context, modelName: name,
+                    repairPrevious: repair, currentHints: hints, onCurrent: onCurrent,
+                    request: { try await probe.request($0, $1, $2) })
+            }))
+        model.receiveCaptionForTesting("The system absorbs thermal energy.", start: 0, end: 10)
+        await model.translationTaskForTesting?.value
+        model.receiveCaptionForTesting("and its temperature rises.", start: 10, end: 18)
+        try await eventually { gate.entered }
+        XCTAssertEqual(model.streamingChinese, "温度随之升高。",
+                       "The accepted current caption must be readable before optional previous repair returns")
+        XCTAssertEqual(model.translatingSegmentID, model.segments[1].id)
+        XCTAssertFalse(model.segments[1].hasUsableTranslation, "Preview must not bypass the final identity checks")
+        XCTAssertTrue(model.segments[1].chinese.isEmpty)
+        gate.finish(.success("系统吸收了热能。"))
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(model.segments[0].chinese, "系统吸收了热能。")
+        XCTAssertEqual(model.segments[1].chinese, "温度随之升高。")
+        XCTAssertTrue(model.streamingChinese.isEmpty)
+        let requests = await probe.requests
+        XCTAssertEqual(requests.count, 2, "Publishing a preview must not add another model request")
+    }
+
     func testPreviousRepairFailureDoesNotRetranslateCompletedCurrent() async throws {
         let failures: [QwenRuntimeError] = [
             .outputLimitReached("repair budget"), .generationInterrupted("repair worker exited"),
@@ -299,11 +330,11 @@ final class CaptionIdentityTests: XCTestCase {
             let model = try makeModel(.init(translate: { _, _, _, _, _ in
                 ordinaryCalls += 1
                 return ordinaryCalls == 1 ? "系统吸收热能。" : "重算后的另一份译文。"
-            }, adjacent: { previous, chinese, current, context, name, repair, hints in
+            }, adjacent: { previous, chinese, current, context, name, repair, hints, onCurrent in
                 XCTAssertTrue(repair)
                 return try await QwenTranslationClient.translateAdjacent(previous: previous,
                     previousChinese: chinese, current: current, context: context, modelName: name,
-                    repairPrevious: repair, currentHints: hints,
+                    repairPrevious: repair, currentHints: hints, onCurrent: onCurrent,
                     request: { try await probe.request($0, $1, $2) })
             }))
             model.receiveCaptionForTesting("The system absorbs thermal energy.", start: 0, end: 10)
@@ -317,6 +348,106 @@ final class CaptionIdentityTests: XCTestCase {
             XCTAssertEqual(model.segments[1].chinese, "温度随之升高。")
             XCTAssertTrue(model.segments.allSatisfy(\.hasUsableTranslation))
         }
+    }
+
+    func testRejectedCurrentIsNotPublishedWhileRepairWaits() async throws {
+        for raw in ["Compare Na⁺ with Cl⁻.", "比较 ZXQCHEM0QXZ。", String(repeating: "无关的其他段落。", count: 60)] {
+            let gate = CaptionIdentityGate<String>()
+            addTeardownBlock { await gate.finish(.failure(CancellationError())) }
+            let probe = AdjacentRequestProbe([.text(raw), .held(gate)])
+            var updates: [String] = []
+            let task = Task {
+                try await QwenTranslationClient.translateAdjacent(
+                    previous: "Prepare the sample.", previousChinese: "准备样品。",
+                    current: "Compare Na⁺ with Cl⁻.", context: "", modelName: "test",
+                    onCurrent: { updates.append($0) }, request: { try await probe.request($0, $1, $2) })
+            }
+            try await eventually { gate.entered }
+            XCTAssertTrue(updates.isEmpty)
+            gate.finish(.success("准备好样品。"))
+            let result = try await task.value
+            XCTAssertNil(result.current)
+            XCTAssertTrue(updates.isEmpty)
+        }
+    }
+
+    func testAdjacentPreviewIsClearedWhenEitherInputChanges() async throws {
+        for revisePrevious in [false, true] {
+            let gate = CaptionIdentityGate<QwenTranslationClient.AdjacentTranslation>()
+            addTeardownBlock { await gate.finish(.failure(CancellationError())) }
+            var oldUpdate: CaptionTranslationDependencies.Update?
+            var pairCalls = 0
+            let model = try makeModel(.init(translate: { text, _, _, _, _ in
+                text.contains("revised") ? "修订后的译文。" : "系统吸收热能。"
+            }, adjacent: { _, _, _, _, _, _, _, onCurrent in
+                pairCalls += 1
+                if pairCalls == 1 {
+                    oldUpdate = onCurrent
+                    await onCurrent?("温度随之升高。")
+                    return try await gate.wait()
+                }
+                return .init(previous: nil, current: "采用新原文的译文。", previousRejection: nil, currentRejection: nil)
+            }))
+            model.receiveCaptionForTesting("The system absorbs thermal energy.", start: 0, end: 10)
+            await model.translationTaskForTesting?.value
+            model.receiveCaptionForTesting("and its temperature rises.", start: 10, end: 18)
+            try await eventually { gate.entered }
+            XCTAssertEqual(model.streamingChinese, "温度随之升高。")
+            let changedID = model.segments[revisePrevious ? 0 : 1].id
+            model.reviseCaptionForTesting(id: changedID, english: "The revised system loses thermal energy.")
+            XCTAssertTrue(model.streamingChinese.isEmpty, "Previously visible text must vanish as soon as its input changes")
+            await oldUpdate?("失效回调不能重新显示。")
+            XCTAssertTrue(model.streamingChinese.isEmpty)
+            gate.finish(.success(.init(previous: "失效的前句。", current: "失效的当前句。", previousRejection: nil, currentRejection: nil)))
+            await model.translationTaskForTesting?.value
+            XCTAssertEqual(pairCalls, 2)
+            XCTAssertEqual(model.segments[1].chinese, "采用新原文的译文。")
+            XCTAssertFalse(model.segments.contains { $0.chinese.contains("失效") })
+        }
+    }
+
+    func testOldAdjacentPreviewCannotEnterNewSession() async throws {
+        let gate = CaptionIdentityGate<QwenTranslationClient.AdjacentTranslation>()
+        addTeardownBlock { await gate.finish(.failure(CancellationError())) }
+        var update: CaptionTranslationDependencies.Update?
+        let model = try makeModel(.init(translate: { text, _, _, _, _ in
+            text.contains("new session") ? "新课堂的译文。" : "原课堂的前句。"
+        }, adjacent: { _, _, _, _, _, _, _, onCurrent in
+            update = onCurrent
+            await onCurrent?("原课堂正在预览的译文。")
+            return try await gate.wait()
+        }))
+        model.receiveCaptionForTesting("The previous lecture describes thermal energy.", start: 0, end: 10)
+        await model.translationTaskForTesting?.value
+        model.receiveCaptionForTesting("and the temperature increases.", start: 10, end: 18)
+        try await eventually { gate.entered }
+        XCTAssertFalse(model.streamingChinese.isEmpty)
+        let oldTask = model.resetTranslationSessionForTesting()
+        model.receiveCaptionForTesting("The new session has a different topic.", start: 0, end: 8)
+        await model.translationTaskForTesting?.value
+        await update?("旧课堂的迟到预览。")
+        XCTAssertTrue(model.streamingChinese.isEmpty)
+        gate.finish(.success(.init(previous: nil, current: "旧课堂的最终结果。", previousRejection: nil, currentRejection: nil)))
+        await oldTask?.value
+        XCTAssertEqual(model.segments.count, 1)
+        XCTAssertEqual(model.segments[0].chinese, "新课堂的译文。")
+    }
+
+    func testCancellationDuringPublicationDoesNotStartRepair() async throws {
+        let probe = AdjacentRequestProbe([.text("温度随之升高。"), .text("不应生成的前句修复。")])
+        var published = 0
+        let task = Task {
+            try await QwenTranslationClient.translateAdjacent(
+                previous: "The system absorbs thermal energy.", previousChinese: "系统吸收热能。",
+                current: "and its temperature rises.", context: "", modelName: "test",
+                onCurrent: { _ in published += 1; withUnsafeCurrentTask { $0?.cancel() } },
+                request: { try await probe.request($0, $1, $2) })
+        }
+        do { _ = try await task.value; XCTFail("Cancellation during publication must propagate") }
+        catch is CancellationError { }
+        XCTAssertEqual(published, 1)
+        let requests = await probe.requests
+        XCTAssertEqual(requests.count, 1)
     }
 
     func testPreviousRepairWithoutMappableTailSkipsUnusedGeneration() async throws {
@@ -424,13 +555,16 @@ final class CaptionIdentityTests: XCTestCase {
 
     func testAdjacentWithoutRepairRestoresFormulasAndKeepsHintsSeparate() async throws {
         let probe = AdjacentRequestProbe([.text("向样品 A 加入 2 mL ZXQCHEM0QXZ。")])
+        var published: [String] = []
         let pair = try await QwenTranslationClient.translateAdjacent(
             previous: "Prepare the sample.", previousChinese: "准备样品。",
             current: "Add 2 mL H2O to sample A.", context: "Do not include this earlier sentence.",
             modelName: QwenModelProfile.highQuality.translationModel, repairPrevious: false,
             currentHints: [.init(kind: .formula, value: "H2O"), .init(kind: .unit, value: "2 mL")],
+            onCurrent: { published.append($0) },
             request: { try await probe.request($0, $1, $2) })
         XCTAssertEqual(pair.current, "向样品 A 加入 2 mL H2O。")
+        XCTAssertEqual(published, ["向样品 A 加入 2 mL H2O。"])
         XCTAssertNil(pair.previous)
         XCTAssertNil(pair.currentRejection)
         let requests = await probe.requests
@@ -487,12 +621,17 @@ final class CaptionIdentityTests: XCTestCase {
                                         english: "This earlier sentence was recovered later.")
         let model = try makeModel(.init(
             translate: { text, _, _, _, _ in text.contains("earlier") ? "较早补转的译文。" : "先前句子的译文。" },
-            adjacent: { _, _, _, _, _, _, _ in try await gate.wait() }))
+            adjacent: { _, _, _, _, _, _, _, onCurrent in
+                await onCurrent?("加热时温度也发生变化。")
+                return try await gate.wait()
+            }))
         model.receiveIdentifiedCaptionForTesting(first)
         await model.translationTaskForTesting?.value
         model.receiveIdentifiedCaptionForTesting(current)
         try await eventually { gate.entered }
         model.receiveIdentifiedCaptionForTesting(earlier)
+        XCTAssertEqual(model.streamingChinese, "加热时温度也发生变化。")
+        XCTAssertEqual(model.translatingSegmentID, current.id)
         gate.finish(.success(.init(previous: "加热使气体压力发生变化。", current: "加热时温度也发生变化。",
                                   previousRejection: nil, currentRejection: nil)))
         await model.translationTaskForTesting?.value
@@ -512,7 +651,7 @@ final class CaptionIdentityTests: XCTestCase {
             if text.contains("revised") { return "确认修订后的译文。" }
             oldUpdate = update
             return try await gate.wait()
-        }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+        }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
         let caption = TranscriptSegment(startTime: 0, endTime: 8,
                                         english: "The original sentence says that pressure increases.")
         model.receiveIdentifiedCaptionForTesting(caption)
@@ -542,7 +681,7 @@ final class CaptionIdentityTests: XCTestCase {
                     return String(repeating: "这是过长的中文译文。", count: 60)
                 }
                 return try await gate.wait()
-            }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+            }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
             let caption = TranscriptSegment(startTime: 0, endTime: 8,
                 english: "The system gains energy and its temperature increases.")
             model.receiveIdentifiedCaptionForTesting(caption)
@@ -563,7 +702,7 @@ final class CaptionIdentityTests: XCTestCase {
         var pairCalls = 0
         let model = try makeModel(.init(translate: { text, _, _, _, _ in
             text.contains("revised") ? "确认后的前句译文。" : "前句原有译文。"
-        }, adjacent: { _, _, _, _, _, _, _ in
+        }, adjacent: { _, _, _, _, _, _, _, _ in
             pairCalls += 1
             if pairCalls == 1 { return try await gate.wait() }
             return .init(previous: nil, current: "根据新上下文翻译当前句。",
@@ -608,7 +747,7 @@ final class CaptionIdentityTests: XCTestCase {
             calls += 1
             if calls == 1 { return try await gate.wait() }
             return "恢复后完成的译文。"
-        }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+        }, adjacent: { _, _, _, _, _, _, _, _ in throw CancellationError() }))
         model.loadPresentationForTesting(phase: .idle, evidence: [])
         try await model.openSavedSession(root)
         XCTAssertTrue(model.savedProcessingIsPaused)
@@ -625,6 +764,52 @@ final class CaptionIdentityTests: XCTestCase {
         XCTAssertEqual(calls, 2)
         let restored = try XCTUnwrap(SessionStore(directory: root).load())
         XCTAssertEqual(restored.segments.first?.chinese, "恢复后完成的译文。")
+    }
+
+    func testSavedPauseClearsAdjacentPreviewWithoutPersistingIt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-PreviewPause-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        var snapshot = SessionSnapshot()
+        let previous = TranscriptSegment(startTime: 0, endTime: 10,
+            english: "The system absorbs thermal energy.", chinese: "系统吸收热能。", sessionID: snapshot.sessionID)
+        let current = TranscriptSegment(startTime: 10, endTime: 18,
+            english: "and its temperature rises.", sessionID: snapshot.sessionID)
+        snapshot.segments = [previous, current]
+        snapshot.processing.paused = true
+        snapshot.processing.phase = .paused
+        snapshot.processing.pendingSegmentIDs = [current.id]
+        _ = try SessionStore(directory: root).save(snapshot)
+        let gate = CaptionIdentityGate<QwenTranslationClient.AdjacentTranslation>()
+        addTeardownBlock { await gate.finish(.failure(CancellationError())) }
+        var update: CaptionTranslationDependencies.Update?
+        let model = try makeModel(.init(translate: { _, _, _, _, _ in
+            XCTFail("A cancelled preview must not cause a new translation")
+            throw CancellationError()
+        }, adjacent: { _, _, _, _, _, _, _, onCurrent in
+            update = onCurrent
+            await onCurrent?("温度随之升高。")
+            return try await gate.wait()
+        }))
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root)
+        model.resumeSavedProcessing()
+        try await eventually { gate.entered }
+        XCTAssertEqual(model.streamingChinese, "温度随之升高。")
+        let pending = model.translationTaskForTesting
+        model.pauseSavedProcessing()
+        try await eventually { model.savedProcessingIsPaused }
+        XCTAssertTrue(model.streamingChinese.isEmpty)
+        await update?("暂停后的迟到预览。")
+        XCTAssertTrue(model.streamingChinese.isEmpty)
+        gate.finish(.success(.init(previous: nil, current: "温度随之升高。", previousRejection: nil, currentRejection: nil)))
+        await pending?.value
+        try await eventually { model.segments[1].translationState == .pending }
+        await model.savedProcessingTaskForTesting?.value
+        let restored = try XCTUnwrap(SessionStore(directory: root).load())
+        XCTAssertEqual(restored.segments[0].chinese, "系统吸收热能。")
+        XCTAssertTrue(restored.segments[1].chinese.isEmpty)
+        XCTAssertFalse(restored.segments[1].hasUsableTranslation)
     }
 
     func testSavedWriteRetryRebuildsExportsAndRetainsCaptureInterruption() async throws {
