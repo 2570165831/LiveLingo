@@ -21,6 +21,10 @@ from outlines_core.kernels.mlx import allocate_token_bitmask, fill_next_token_bi
 PREFILL_STEP = 256
 
 
+class OutputBudgetExceeded(ValueError):
+    code = 'output_budget_exhausted'
+
+
 class PromptPrefixCache:
     """One bounded, immutable prefill snapshot owned by one loaded model.
 
@@ -204,7 +208,7 @@ class Generation:
             if self.guide:
                 self.guide.advance(token, return_tokens=False)
             if self.final_count >= self.spec['final_budget']:
-                raise ValueError('Final output budget exhausted; incomplete output is not committable')
+                raise OutputBudgetExceeded('Final output budget exhausted; incomplete output is not committable')
         return 'token'
 
     def save(self, path):

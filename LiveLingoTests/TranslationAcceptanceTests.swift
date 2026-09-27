@@ -5,6 +5,21 @@ import XCTest
 /// These tests pin the acceptance rules that must stop it, and the technical
 /// exceptions that must keep working.
 final class TranslationAcceptanceTests: XCTestCase {
+    func testRecoveryRequestBudgetsAccountForProtectedIDsAndStayBounded() {
+        let plain = "The temperature rises."
+        let dense = (0..<24).map { "ZXQCHEM\($0)QXZ" }.joined(separator: ", ")
+        XCTAssertEqual(CaptionTranslationAttempt.standard.outputTokenBudget(for: plain), 160)
+        XCTAssertEqual(CaptionTranslationAttempt.standard.outputTokenBudget(for: dense), 352)
+        XCTAssertEqual(CaptionTranslationAttempt.expandedBudget.outputTokenBudget(for: dense), 704)
+        let many = String(repeating: "ZXQCHEM0QXZ ", count: 1000)
+        XCTAssertEqual(CaptionTranslationAttempt.standard.outputTokenBudget(for: many), 640)
+        XCTAssertEqual(CaptionTranslationAttempt.expandedBudget.outputTokenBudget(for: many), 1280)
+        XCTAssertEqual(CaptionTranslationAttempt.standard.promptSuffix, "")
+        XCTAssertEqual(CaptionTranslationAttempt.expandedBudget.promptSuffix, "")
+        XCTAssertFalse(CaptionTranslationAttempt.repairContent.promptSuffix.isEmpty)
+        XCTAssertNil(CaptionTranslationAttempt.recovery(for: CancellationError()))
+    }
+
     private let echoSource = "Do you know what? I don't think that these summaries at the moment do contain"
 
     func testExactSourceEchoIsRejected() {

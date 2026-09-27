@@ -430,7 +430,9 @@ def main():
                     memory.log_event('generating')
             except Exception as error:
                 finished='error'
-                send('error',request_id,message=describe_request_error(request_id,error),recoverable=not isinstance(error,(ValueError,KeyError,TypeError)))
+                send('error',request_id,message=describe_request_error(request_id,error),
+                     code='output_budget_exhausted' if getattr(error,'code',None)=='output_budget_exhausted' else None,
+                     recoverable=not isinstance(error,(ValueError,KeyError,TypeError)))
             finally:
                 if request_id not in active:
                     last_checkpoint.pop(request_id,None);last_emit.pop(request_id,None)

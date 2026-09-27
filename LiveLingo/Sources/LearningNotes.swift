@@ -1365,7 +1365,7 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
         switch qwen {
         case .serviceUnavailable:
             return ReviewFailure(stage: .generation, code: "service_unavailable", detail: sanitized(qwen.errorDescription ?? ""))
-        case .transcriptionTimedOut:
+        case .transcriptionTimedOut, .requestTimedOut:
             return ReviewFailure(stage: .generation, code: "request_failed", detail: sanitized(qwen.errorDescription ?? ""))
         case .lmStudioUnavailable:
             return ReviewFailure(stage: .generation, code: "generation_failed", detail: sanitized(qwen.errorDescription ?? ""))
@@ -1373,7 +1373,8 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
             return ReviewFailure(stage: .generation, code: "model_unavailable", detail: "离线包缺少模型 \(name.prefix(64))")
         case .invalidResponse:
             return ReviewFailure(stage: .generation, code: "invalid_response", detail: "本机模型返回了无法识别的数据")
-        case .requestFailed(let message), .generationInterrupted(let message):
+        case .requestFailed(let message), .generationInterrupted(let message),
+             .translationRejected(let message), .outputLimitReached(let message):
             if let parsed = parseWorkerMessage(message) { return parsed }
             return ReviewFailure(stage: defaultStage,
                                  code: qwen.preservesGenerationProgress ? "generation_interrupted" : "request_failed",

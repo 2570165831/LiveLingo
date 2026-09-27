@@ -10,7 +10,7 @@ import mlx.core as mx
 from mlx_lm.models.cache import ArraysCache, KVCache, save_prompt_cache
 from safetensors import safe_open
 
-from engine import Generation
+from engine import Generation, OutputBudgetExceeded
 
 
 class Detokenizer:
@@ -31,6 +31,15 @@ class Tokenizer:
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_final_budget_has_a_structured_error_and_never_commits_partial_text(self):
+        generation = Generation(self.engine, 'test', seed=42, final_budget=1)
+        self.engine.model.return_value = mx.array([[[0.0, 1.0]]])
+        with self.assertRaises(OutputBudgetExceeded) as caught:
+            generation.step()
+        self.assertEqual(caught.exception.code, 'output_budget_exhausted')
+        self.assertFalse(generation.done)
+        self.assertEqual(generation.final_count, 1)
+
     def setUp(self):
         model = Mock()
         model.make_cache.return_value = []

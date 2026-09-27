@@ -108,6 +108,28 @@ final class MLXOwnershipTests: XCTestCase {
         XCTAssertTrue(states.isEmpty)
     }
 
+    func testOutputLimitUsesStructuredCodeAndReleasesFailedRequest() async throws {
+        let (runtime, directory) = try makeRuntime()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for prompt in ["budget-error", "legacy-error"] {
+            do {
+                _ = try await generate(runtime, prompt: prompt)
+                XCTFail("An error event cannot complete a request")
+            } catch let error as QwenRuntimeError {
+                if prompt == "budget-error" {
+                    guard case .outputLimitReached = error else { return XCTFail("Lost structured output limit") }
+                    XCTAssertEqual(CaptionTranslationAttempt.recovery(for: error), .expandedBudget)
+                } else {
+                    guard case .requestFailed = error else { return XCTFail("Guessed a type from message text") }
+                    XCTAssertEqual(CaptionTranslationAttempt.recovery(for: error), .standard)
+                }
+            }
+            let states = await runtime.resourceStates()
+            XCTAssertEqual(states[model]?.outstandingRequests, 0)
+        }
+        await runtime.unload(model)
+    }
+
     func testClosedOutputKeepsRetiringProcessVisibleUntilActualExit() async throws {
         let (runtime, directory) = try makeRuntime(timeout: 0.5)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -141,6 +163,12 @@ while (my $line = <STDIN>) {
     if ($op eq 'generate') {
         $requests{$rid} = $command->{prompt};
         emit('model_state', loaded => JSON::PP::true);
+        if ($command->{prompt} eq 'budget-error' || $command->{prompt} eq 'legacy-error') {
+            my %code = $command->{prompt} eq 'budget-error' ? (code => 'output_budget_exhausted') : ();
+            emit('error', id => $rid, message => 'Final output budget exhausted',
+                 recoverable => JSON::PP::false, %code);
+            next;
+        }
         emit('snapshot', id => $rid, wire => 'progress');
         if ($command->{prompt} eq 'close-pipe') {
             $SIG{TERM} = 'IGNORE';

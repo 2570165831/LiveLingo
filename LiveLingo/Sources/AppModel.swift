@@ -26,16 +26,16 @@ enum AppRuntimeEnvironment {
 @MainActor
 struct CaptionTranslationDependencies {
     typealias Update = @MainActor @Sendable (String) async -> Void
-    var translate: (String, String, [AuxiliaryTranslationHint], Update?) async throws -> String
+    var translate: (String, String, [AuxiliaryTranslationHint], CaptionTranslationAttempt, Update?) async throws -> String
     var adjacent: (String, String, String, String, String, Bool, [AuxiliaryTranslationHint]) async throws -> QwenTranslationClient.AdjacentTranslation
 
     static let live = Self(
-        translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, onUpdate: $3) },
+        translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, attempt: $3, onUpdate: $4) },
         adjacent: { try await QwenTranslationClient.translateAdjacent(previous: $0, previousChinese: $1,
             current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6) }
     )
     static let unavailable = Self(
-        translate: { _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
+        translate: { _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
         adjacent: { _, _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
     )
 }
@@ -2372,7 +2372,7 @@ final class AppModel: ObservableObject {
                             Self.traceTranslation("rejected", id: id,
                                                   elapsed: ProcessInfo.processInfo.systemUptime - started,
                                                   detail: reason)
-                            throw QwenRuntimeError.requestFailed("译文未通过验收（\(reason)），已保留英文行等待重试。")
+                            throw QwenRuntimeError.translationRejected("译文未通过验收（\(reason)），已保留英文行等待重试。")
                         }
                         response = acceptedCurrent
                     } else {
@@ -2380,6 +2380,7 @@ final class AppModel: ObservableObject {
                         protectedInput.text,
                         translationModel,
                         hints,
+                        .standard,
                          { [weak self] partial in
                             guard let self, !Task.isCancelled,
                                   self.translatingSegmentID == id,
@@ -2398,39 +2399,22 @@ final class AppModel: ObservableObject {
                     }
                     try Task.checkCancellation()
                     let restored = previousIndex == nil ? try protectedInput.validatedRestore(in: response) : response
-                    let chinese = SimplifiedChineseNormalizer.normalize(restored)
                     // The restore step must not turn a technical answer into an
                     // English sentence after the model output was accepted.
-                    _ = try TranslationAcceptance.validated(chinese, source: normalizedInput)
+                    let chinese = try TranslationAcceptance.validatedCaption(
+                        SimplifiedChineseNormalizer.normalize(restored), source: normalizedInput)
                     guard currentGeneration == self.generation, currentSession == self.sessionID,
                           self.translationWorkerID == workerID, !self.processingPaused else { return }
                     guard self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) != nil else { continue }
                     self.reviewConcurrency.observe(elapsed: ProcessInfo.processInfo.systemUptime - enqueued, successful: true)
-                    // 2026-09-18：长度护栏（**只换不伤** ✓）。
-                    // 全库实测约 1% 的段落中文里混进了邻居内容 ✗（音频与英文都正常、只有中文异常长 ✗）。
-                    // 规则：原译文不可信 → 重试一次 → **只有重试结果可信才替换** ✓；否则保留原样 ✓。
-                    var finalChinese = chinese
-                    if !TranslationLengthGuard.isPlausible(chinese: chinese, english: normalizedInput),
-                       !Task.isCancelled, currentGeneration == self.generation,
-                       let retry = try? await self.captionTranslation.translate(
-                           protectedInput.text, translationModel, hints, nil) {
-                        if let restoredRetry = try? protectedInput.validatedRestore(in: retry),
-                           let validatedRetry = try? TranslationAcceptance.validated(
-                               SimplifiedChineseNormalizer.normalize(restoredRetry), source: normalizedInput),
-                           TranslationLengthGuard.isPlausible(chinese: validatedRetry, english: normalizedInput) {
-                            finalChinese = validatedRetry
-                            Self.traceTranslation("length_guard_replaced", id: id,
-                                                  elapsed: ProcessInfo.processInfo.systemUptime - started)
-                        }
-                    }
                     guard !Task.isCancelled, currentGeneration == self.generation,
                           currentSession == self.sessionID, self.translationWorkerID == workerID,
                           !self.processingPaused else { return }
                     guard let currentIndex = self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) else { continue }
-                    self.segments[currentIndex].completeTranslation(finalChinese)
-                    self.liveChinese = finalChinese
+                    self.segments[currentIndex].completeTranslation(chinese)
+                    self.liveChinese = chinese
                     Self.traceTranslation(previousIndex == nil ? "complete" : "complete_adjacent", id: id,
                                           elapsed: ProcessInfo.processInfo.systemUptime - started)
                 } catch is CancellationError {
@@ -2442,19 +2426,19 @@ final class AppModel: ObservableObject {
                     guard self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) != nil else { continue }
                     self.reviewConcurrency.observe(elapsed: 0, successful: false)
-                    let reason = (error as? QwenRuntimeError).flatMap { runtime -> String? in
-                        if case .requestFailed(let message) = runtime { return message }
-                        return nil
-                    } ?? error.localizedDescription
-                    // 2026-09-18：失败先**重试一次**再写占位符。
-                    // 起因：今天那节课第 209 段的字幕里出现了 [翻译失败：Final output budget exhausted…] ✗，
-                    // 而用同一素材复跑同一段却成功 ✓ → 属**间歇性**失败 ✓，重试一次的成本很低（约 1 秒）✓。
+                    var reason = error.localizedDescription
                     var recovered: String?
-                    if !Task.isCancelled, currentGeneration == self.generation {
-                        // 注意：必须和主路径一致 —— 传**受保护的**文本 ✓ 并在之后 restore ✓，
-                        // 否则重试会绕过化学/公式保护层 ✗（这一点是我自审时发现的 ✓）。
-                        recovered = try? await self.captionTranslation.translate(
-                            protectedInput.text, translationModel, hints, nil)
+                    // One bounded recovery, owned by the same caption revision.
+                    // Content failures change instructions; output-limit failures
+                    // increase the budget; transient or unclassified runtime errors
+                    // retain one ordinary retry.
+                    if let attempt = CaptionTranslationAttempt.recovery(for: error) {
+                        Self.traceTranslation("retry_\(attempt.rawValue)", id: id,
+                                              elapsed: ProcessInfo.processInfo.systemUptime - started)
+                        do {
+                            recovered = try await self.captionTranslation.translate(
+                                protectedInput.text, translationModel, hints, attempt, nil)
+                        } catch { reason = error.localizedDescription }
                     }
                     guard !Task.isCancelled, currentGeneration == self.generation,
                           currentSession == self.sessionID, self.translationWorkerID == workerID,
@@ -2462,12 +2446,12 @@ final class AppModel: ObservableObject {
                     guard let currentIndex = self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) else { continue }
                     var accepted: String?
-                    if let recovered, let restored = try? protectedInput.validatedRestore(in: recovered) {
-                        if let validated = try? TranslationAcceptance.validated(
-                            SimplifiedChineseNormalizer.normalize(restored), source: normalizedInput),
-                           !validated.isEmpty {
-                            accepted = validated
-                        }
+                    if let recovered {
+                        do {
+                            let restored = try protectedInput.validatedRestore(in: recovered)
+                            accepted = try TranslationAcceptance.validatedCaption(
+                                SimplifiedChineseNormalizer.normalize(restored), source: normalizedInput)
+                        } catch { reason = error.localizedDescription }
                     }
                     if let accepted {
                         Self.traceTranslation("complete_after_retry", id: id,
@@ -3323,7 +3307,7 @@ struct ProtectedChemistryTranslationInput: Sendable {
 
     func validatedRestore(in translatedText: String) throws -> String {
         if let reason = restorationFailure(in: translatedText) {
-            throw QwenRuntimeError.requestFailed("译文未通过验收：\(reason)。")
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason)。")
         }
         return restore(in: translatedText)
     }

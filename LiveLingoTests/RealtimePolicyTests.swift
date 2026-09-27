@@ -1622,7 +1622,7 @@ final class CaptionLifecycleTests: XCTestCase {
                     addTeardownBlock { await queue.shutdownForTesting() }
                     let gate = CaptionRetryGate(first)
                     let dependency = CaptionTranslationDependencies(
-                        translate: { _, _, _, update in try await gate.translate(update) },
+                        translate: { _, _, _, _, update in try await gate.translate(update) },
                         adjacent: { _, _, _, _, _, _, _ in
                             XCTFail("independent session cannot use adjacent translation")
                             throw CancellationError()

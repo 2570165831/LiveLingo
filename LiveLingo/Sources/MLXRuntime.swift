@@ -14,6 +14,7 @@ actor MLXRuntime {
         let message: String?
         let version: Int?
         let recoverable: Bool?
+        let code: String?
         let activeBytes: UInt64?
         let cacheBytes: UInt64?
         let peakBytes: UInt64?
@@ -286,8 +287,14 @@ actor MLXRuntime {
             requestActivity[id] = worker.lastActivity
             if event.event == "error" {
                 let message = event.message ?? "本机模型生成失败"
-                continuation.finish(throwing: event.recoverable == true
-                    ? QwenRuntimeError.generationInterrupted(message) : QwenRuntimeError.requestFailed(message))
+                let failure: QwenRuntimeError
+                if event.code == "output_budget_exhausted" {
+                    failure = .outputLimitReached(message)
+                } else {
+                    failure = event.recoverable == true
+                        ? .generationInterrupted(message) : .requestFailed(message)
+                }
+                continuation.finish(throwing: failure)
                 forget(id, worker: worker)
             } else {
                 continuation.yield(event)
@@ -383,7 +390,7 @@ actor MLXRuntime {
         let resumable = resumableRequests.contains(id)
         streams[id]?.finish(throwing: timedOut ? (resumable
             ? QwenRuntimeError.generationInterrupted("本机模型请求超时，已保留已有文字进度。")
-            : QwenRuntimeError.requestFailed("本机模型请求超时。")) : CancellationError())
+            : QwenRuntimeError.requestTimedOut) : CancellationError())
         streams[id] = nil
         requestActivity[id] = nil
         if stalled, ProcessInfo.processInfo.systemUptime - worker.lastActivity >= 30 {
