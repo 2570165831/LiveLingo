@@ -151,6 +151,12 @@ enum TranslationAcceptance {
         case .some(.prose): return .englishProse
         case .none: break
         }
+        // Even the short "Call it <name>" must translate its naming action.
+        // A bare protected term is valid only when the source itself is a term.
+        if ChemistryTranslationProtector.hasNamedProtectedTerm(in: source)
+            || ChemistryTranslationProtector.hasNamedProtectedTerm(in: ChemistryTranslationProtector.prepareLiterals(source).text) {
+            return .incompleteProse
+        }
         let proseSource = source.replacingOccurrences(of: "[Formula transcription uncertain]", with: "")
         let sourceWords = englishContentTokens(proseSource).map { $0.lowercased() }
         if sourceWords.count >= 3, sourceWords.contains(where: { !spokenTechnicalWords.contains($0) }) {

@@ -142,6 +142,38 @@ final class CaptionIdentityTests: XCTestCase {
         }
     }
 
+    func testNamedCaptionKeepsItsOriginalSpellingThroughCommit() async throws {
+        var calls = 0
+        let model = try makeModel(.init(translate: { text, _, _, _, update in
+            calls += 1
+            XCTAssertEqual(text, #"Call it "ZXQCHEM0QXZ"."#)
+            let output = "称它为 ZXQCHEM0QXZ。"
+            await update?(output)
+            return output
+        }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+        let source = #"Call it "S N two"."#
+        model.receiveCaptionForTesting(source, start: 0, end: 8)
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(model.segments[0].english, source)
+        XCTAssertEqual(model.segments[0].chinese, "称它为 S N two。")
+        XCTAssertTrue(model.segments[0].hasUsableTranslation)
+    }
+
+    func testNamingOmissionUsesContentRecoveryBeforeCommit() async throws {
+        var attempts: [CaptionTranslationAttempt] = []
+        let model = try makeModel(.init(translate: { text, _, _, attempt, _ in
+            attempts.append(attempt)
+            XCTAssertEqual(text, #"Call it "ZXQCHEM0QXZ"."#)
+            return attempts.count == 1 ? #""ZXQCHEM0QXZ"。"# : "称其为 ZXQCHEM0QXZ。"
+        }, adjacent: { _, _, _, _, _, _, _ in throw CancellationError() }))
+        model.receiveCaptionForTesting(#"Call it "N two"."#, start: 0, end: 8)
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(attempts, [.standard, .repairContent])
+        XCTAssertEqual(model.segments[0].chinese, "称其为 N two。")
+        XCTAssertTrue(model.segments[0].hasUsableTranslation)
+    }
+
     func testRejectedLengthNeverBecomesACompletedCaptionAfterRetry() async throws {
         for firstIsRuntimeFailure in [false, true] {
             var calls = 0

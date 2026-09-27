@@ -3393,9 +3393,15 @@ struct ProtectedChemistryTranslationInput: Sendable {
 
 enum ChemistryTranslationProtector {
     static let copyInstruction = "Text like ZXQCHEM0QXZ is an unchanged source term. Keep those tokens verbatim while translating the entire sentence, including all surrounding words and clauses. Do not output a list of tokens in place of the translation."
+    static let namingInstruction = "When the source assigns a name, translate the naming action as a complete sentence and use the protected term as the name being assigned."
 
     static func promptSuffix(for text: String) -> String {
-        text.range(of: #"ZXQCHEM[0-9]+QXZ"#, options: .regularExpression) == nil ? "" : copyInstruction
+        guard text.range(of: #"ZXQCHEM[0-9]+QXZ"#, options: .regularExpression) != nil else { return "" }
+        return copyInstruction + (hasNamedProtectedTerm(in: text) ? "\n" + namingInstruction : "")
+    }
+
+    static func hasNamedProtectedTerm(in text: String) -> Bool {
+        namedPlaceholderExpression?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 
     static func translationPrompt(base: String, text: String) -> String {
@@ -3434,6 +3440,39 @@ enum ChemistryTranslationProtector {
     private static let visibleTerms: Set<String> = ["FTIR", "NMR", "UV-Vis", "HPLC", "UPLC", "GC-MS",
         "LC-MS", "TLC", "IR", "MS", "SN1", "SN2", "E1", "E2", "sp2", "sp3"]
 
+    // These expressions are immutable and shared by the normalizer, request
+    // preparation and result checks instead of being compiled for every term.
+    private static let quotedLiteral = #"(?:[\"“]([^\"”\r\n]+)[\"”]|(?<![\p{L}\p{N}_])'([^'\r\n]+)'|‘([^’\r\n]+)’)"#
+    private static let literalExpressions: [NSRegularExpression] = [
+        #"`([^`\r\n]+)`"#,
+        #"(?i)\b(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\s+(?:is\s+)?"# + quotedLiteral,
+        quotedLiteral + #"(?i)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#,
+        #"(?i)\b(?:identifier|function|variable)\s+"# + quotedLiteral
+    ].compactMap { try? NSRegularExpression(pattern: $0) }
+    private static let quotedNameExpression = try? NSRegularExpression(pattern: quotedLiteral)
+    private static let namingIntroductionPattern: String = {
+        let verb = #"(?:call(?:s|ed|ing)?|nam(?:e[sd]?|ing)|renam(?:e[sd]?|ing)|label(?:s|led|ling|ed|ing)?)"#
+        let object = #"(?:it|this|that|them|these|those|(?:the|this|that|these|those|our)\s+(?:(?:first|second|new|old)\s+)?(?:matri(?:x|ces)|(?:variable|vector|function|label|identifier|array|node|sample|file|process)s?|branch(?:es)?))"#
+        return #"(?i)\b(?:"# + verb + #"\s+"# + object
+            + #"\s+(?:(?:as|to)\s+)?|(?:called|named|renamed|labelled|labeled)\s+(?:(?:as|to)\s+)?|(?:name|label|identifier)\s+(?:is|are|was|were)\s+)"#
+    }()
+    private static let namingIntroduction = try? NSRegularExpression(pattern: namingIntroductionPattern + "$")
+    private static let namedPlaceholderExpression = try? NSRegularExpression(pattern:
+        namingIntroductionPattern + #"[\"“'‘]?ZXQCHEM[0-9]+QXZ\b"#)
+    private static let spokenNumber = "(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)"
+    private static let spokenNumberSequence = "(?i:" + spokenNumber + "(?:[ -]+" + spokenNumber + ")*)"
+    private static let codeNameExpression = try? NSRegularExpression(pattern:
+        #"^(?:[A-Za-z]|(?=[A-Za-z0-9_]*[0-9_])[A-Za-z][A-Za-z0-9_]*|[A-Zb-z]\s+(?:[A-Za-z]\s+)*"#
+        + spokenNumberSequence + ")$")
+    private static let quotedNameConnector = try? NSRegularExpression(pattern: #"(?i)^\s*(?:,\s*(?:(?:and|or)\s+)?|(?:and|or)\s+)$"#)
+    private static let unquotedLiteralExpression = try? NSRegularExpression(pattern: #"(?i)\buse\s+([^\r\n]+?)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#)
+    private static let unquotedCodeExpression = try? NSRegularExpression(pattern: #"(?:\b[A-Z]\b|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[A-Za-z]+[0-9]+)"#)
+    private static let formulaExpression = try? NSRegularExpression(pattern: formulaPattern)
+    private static let elementExpression = try? NSRegularExpression(pattern: #"[A-Z][a-z]?"#)
+    private static let sentenceExpression = try? NSRegularExpression(pattern: #"[^.!?\r\n]+"#)
+    private static let spokenNameExpression = try? NSRegularExpression(pattern:
+        #"(?<![A-Za-z0-9_])([A-Za-z])\s+"# + spokenNumberSequence + #"(?![A-Za-z0-9_])"#)
+
     static func prepare(_ source: String) -> ProtectedChemistryTranslationInput {
         prepare(source, includeFormulas: true)
     }
@@ -3446,32 +3485,53 @@ enum ChemistryTranslationProtector {
     /// remains translatable and eligible for academic ASR correction.
     private static func literalRanges(in source: String) -> [NSRange] {
         let whole = NSRange(source.startIndex..<source.endIndex, in: source)
-        let quoted = #"(?:[\"“]([^\"”\r\n]+)[\"”]|'([^'\r\n]+)')"#
         var result: [NSRange] = []
-        let patterns = [
-            #"`([^`\r\n]+)`"#,
-            #"(?i)\b(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\s+(?:is\s+)?"# + quoted,
-            quoted + #"(?i)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#,
-            #"(?i)\b(?:identifier|function|variable)\s+"# + quoted
-        ]
-        for pattern in patterns {
-            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+        for expression in literalExpressions {
             for match in expression.matches(in: source, range: whole) {
                 for index in 1..<match.numberOfRanges where match.range(at: index).location != NSNotFound {
                     result.append(match.range(at: index))
                 }
             }
         }
+        // Naming verbs alone are insufficient: "call it activation energy"
+        // must still translate. Require a complete code-like quoted value.
+        if let quotes = quotedNameExpression, let shape = codeNameExpression,
+           let introduction = namingIntroduction {
+            let ns = source as NSString
+            var previousNameEnd: Int?
+            for match in quotes.matches(in: source, range: whole) {
+                guard let index = (1..<match.numberOfRanges).first(where: {
+                    match.range(at: $0).location != NSNotFound
+                }) else { continue }
+                let range = match.range(at: index)
+                let value = ns.substring(with: range)
+                guard shape.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else {
+                    previousNameEnd = nil
+                    continue
+                }
+                let before = ns.substring(to: match.range.location)
+                let direct = introduction.firstMatch(in: before, range: NSRange(before.startIndex..., in: before)) != nil
+                let linked = previousNameEnd.map { previous in
+                    let gap = ns.substring(with: NSRange(location: previous, length: match.range.location - previous))
+                    return quotedNameConnector?.firstMatch(in: gap, range: NSRange(gap.startIndex..., in: gap)) != nil
+                } ?? false
+                if direct || linked {
+                    result.append(range)
+                    previousNameEnd = NSMaxRange(match.range)
+                } else {
+                    previousNameEnd = nil
+                }
+            }
+        }
         // ASR often supplies no quote marks. Require both an explicit exact-name
         // construction and a code-like span, rather than treating "use it" as a name.
-        let unquoted = #"(?i)\buse\s+([^\r\n]+?)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#
-        if let expression = try? NSRegularExpression(pattern: unquoted) {
+        if let expression = unquotedLiteralExpression {
             for match in expression.matches(in: source, range: whole) {
                 let range = match.range(at: 1)
                 let value = (source as NSString).substring(with: range)
-                guard !value.contains("\"") && !value.contains("'") && !value.contains("“") && !value.contains("`") else { continue }
-                let codeLike = value.range(of: #"(?:\b[A-Z]\b|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[A-Za-z]+[0-9]+)"#,
-                                           options: .regularExpression) != nil
+                guard value.rangeOfCharacter(from: CharacterSet(charactersIn: "\"'“”‘’`")) == nil else { continue }
+                let codeLike = unquotedCodeExpression?.firstMatch(in: value,
+                    range: NSRange(value.startIndex..., in: value)) != nil
                 if codeLike { result.append(range) }
             }
         }
@@ -3482,7 +3542,7 @@ enum ChemistryTranslationProtector {
         let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
         var candidates = literalRanges(in: source) + spokenNameRanges(in: source)
 
-        if includeFormulas, let expression = try? NSRegularExpression(pattern: formulaPattern) {
+        if includeFormulas, let expression = formulaExpression {
             for match in expression.matches(in: source, range: fullRange) {
                 guard match.range.length > 0 else { continue }
                 let original = (source as NSString).substring(with: match.range)
@@ -3523,10 +3583,7 @@ enum ChemistryTranslationProtector {
     /// Preserve a spoken name when a vector/matrix/label/variable explicitly
     /// introduces it. The number is not enough evidence to invent an exponent.
     private static func spokenNameRanges(in source: String) -> [NSRange] {
-        let number = "(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)"
-        let name = #"(?<![A-Za-z0-9_])([A-Za-z])\s+(?i:"# + number + "(?:[ -]+" + number + #")*)(?![A-Za-z0-9_])"#
-        guard let sentences = try? NSRegularExpression(pattern: #"[^.!?\r\n]+"#),
-              let names = try? NSRegularExpression(pattern: name) else { return [] }
+        guard let sentences = sentenceExpression, let names = spokenNameExpression else { return [] }
         let ns = source as NSString
         var result: [NSRange] = []
         for sentence in sentences.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
@@ -3546,7 +3603,12 @@ enum ChemistryTranslationProtector {
                     ns.substring(with: NSRange(location: previous, length: match.range.location - previous))
                         .range(of: #"(?i)^\s*(?:,\s*)?(?:and|or)?\s*$"#, options: .regularExpression) != nil
                 } ?? false
-                if direct || linked {
+                // ASR often omits quotes. An explicit naming construction still
+                // identifies a spoken label; lower-case "a two" may be an article
+                // followed by a matrix dimension, so it is not new name evidence.
+                let named = ns.substring(with: match.range(at: 1)) != "a"
+                    && namingIntroduction?.firstMatch(in: before, range: NSRange(before.startIndex..., in: before)) != nil
+                if direct || linked || named {
                     introduced.insert(ns.substring(with: match.range(at: 1)))
                     previousIntroducedEnd = end
                 } else {
@@ -3562,7 +3624,7 @@ enum ChemistryTranslationProtector {
 
     private static func looksLikeChemicalFormula(_ range: NSRange, in source: String) -> Bool {
         let candidate = (source as NSString).substring(with: range)
-        guard let elementPattern = try? NSRegularExpression(pattern: #"[A-Z][a-z]?"#) else { return false }
+        guard let elementPattern = elementExpression else { return false }
         let candidateRange = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
         let matches = elementPattern.matches(in: candidate, range: candidateRange)
         let symbols = matches.map { (candidate as NSString).substring(with: $0.range) }

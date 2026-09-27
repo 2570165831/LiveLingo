@@ -332,6 +332,77 @@ final class TranslationAcceptanceTests: XCTestCase {
         XCTAssertEqual(AcademicInputNormalizer.normalize("The mechanism is S N two."), "The mechanism is SN2.")
     }
 
+    func testExplicitNamingKeepsCodeLikeLabelsBeforeAcademicCorrection() throws {
+        let cases: [(String, [String])] = [
+            (#"Call it "N two"."#, ["N two"]),
+            (#"We call this matrix "M three"."#, ["M three"]),
+            (#"Name the vector "x four"."#, ["x four"]),
+            (#"This variable is called "q one"."#, ["q one"]),
+            (#"Rename the variable to "sample_A"."#, ["sample_A"]),
+            (#"Call the label "S N two"."#, ["S N two"]),
+            (#"Name this node "node7"."#, ["node7"]),
+            (#"Call it "B"."#, ["B"]),
+            (#"Call them "N two" and "M three"."#, ["N two", "M three"]),
+            ("The matrix is named “N two”.", ["N two"]),
+            ("We label the vector 'v two'.", ["v two"]),
+            (#"Call it "N two", not "N squared"."#, ["N two"]),
+            ("The variable is named ‘p five’.", ["p five"]),
+            (#"Call it "data_set2"."#, ["data_set2"]),
+            ("Don't call it 'N two'.", ["N two"]),
+            ("Call it N two.", ["N two"]),
+            ("Call them N two and M three.", ["N two", "M three"])
+        ]
+        for (source, names) in cases {
+            var expected = source
+            for (index, name) in names.enumerated() {
+                expected = expected.replacingOccurrences(of: name, with: "ZXQCHEM\(index)QXZ")
+            }
+            let protected = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertEqual(protected.text, expected, source)
+            XCTAssertEqual(try protected.validatedRestore(in: protected.text), source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source,
+                           "Explicit names must survive before the SN2 correction runs")
+            XCTAssertTrue(ChemistryTranslationProtector.promptSuffix(for: protected.text)
+                .contains(ChemistryTranslationProtector.namingInstruction), source)
+        }
+    }
+
+    func testNamingRulesDoNotFreezeOrdinaryTermsQuotesOrDimensions() {
+        for source in [#"She said "The force is zero"."#,
+                       #"Call it "activation energy"."#, #"Call it "a day"."#,
+                       #"This effect is called "resonance"."#, #"Call this answer "incorrect"."#,
+                       #"We call it "a two by two matrix"."#, #"Call it "N squared"."#,
+                       #"She said "N two is not squared"."#, "We call it a two by two matrix.",
+                       #"Call it "a two" on the grading scale."#] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source, source)
+        }
+    }
+
+    func testNamedLabelDoesNotProtectUnrelatedLaterQuotation() {
+        let source = #"Call it "N two". She said "M three is larger"."#
+        XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text,
+                       #"Call it "ZXQCHEM0QXZ". She said "M three is larger"."#)
+        let intervening = #"Call it "N two" and then explain "M three"."#
+        XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(intervening).text,
+                       #"Call it "ZXQCHEM0QXZ" and then explain "M three"."#)
+    }
+
+    func testNamingCannotReturnOnlyTheProtectedName() throws {
+        for source in [#"Call it "N two"."#, #"Call it "B"."#, "Call it N two."] {
+            let prepared = ChemistryTranslationProtector.prepare(AcademicInputNormalizer.normalize(source))
+            XCTAssertThrowsError(try TranslationAcceptance.validated(#""ZXQCHEM0QXZ"。"#, source: prepared.text))
+            XCTAssertThrowsError(try TranslationAcceptance.validated(try prepared.validatedRestore(in: #""ZXQCHEM0QXZ"。"#), source: source))
+            XCTAssertEqual(try TranslationAcceptance.validated("称其为 ZXQCHEM0QXZ。", source: prepared.text),
+                           "称其为 ZXQCHEM0QXZ。")
+        }
+        // Formula/name-only inputs legitimately need no Chinese naming verb.
+        for source in ["ZXQCHEM0QXZ", "H2O", "N two"] {
+            XCTAssertEqual(try TranslationAcceptance.validated(source, source: source), source)
+            XCTAssertFalse(ChemistryTranslationProtector.promptSuffix(for: source)
+                .contains(ChemistryTranslationProtector.namingInstruction))
+        }
+    }
+
     func testLiteralAndFormulaUseSeparateMarkersAndRejectDroppedLiteral() throws {
         let source = #"Use "S N two" as the exact label next to H2O."#
         let protected = ChemistryTranslationProtector.prepare(AcademicInputNormalizer.normalize(source))
