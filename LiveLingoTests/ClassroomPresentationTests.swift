@@ -148,8 +148,8 @@ final class ClassroomPresentationTests: XCTestCase {
         try capture(frameView, name: name)
     }
 
-    /// Runs one item of the toolbar 更多 menu without system-wide input.
-    private func performMoreMenuItem(_ title: String, in window: NSWindow) throws {
+    /// Menus reachable from the bridged toolbar (the 更多 menu).
+    private func toolbarMenus(in window: NSWindow) throws -> [NSMenu] {
         let toolbar = try XCTUnwrap(window.toolbar, "The classroom toolbar must be bridged into the window")
         var menus = toolbar.items.compactMap { ($0 as? NSMenuToolbarItem)?.menu }
         for item in toolbar.items {
@@ -158,18 +158,21 @@ final class ClassroomPresentationTests: XCTestCase {
             }
             if let submenu = item.menuFormRepresentation?.submenu { menus.append(submenu) }
         }
+        menus.forEach { $0.update() }
+        return menus
+    }
+
+    /// Runs one item of the toolbar 更多 menu without system-wide input.
+    private func performMoreMenuItem(_ title: String, in window: NSWindow) throws {
+        let menus = try toolbarMenus(in: window)
         for menu in menus {
-            menu.update()
             let index = menu.indexOfItem(withTitle: title)
             if index >= 0 {
                 menu.performActionForItem(at: index)
                 return
             }
         }
-        let shape = toolbar.items.map { item in
-            "\(type(of: item)):\(item.label):" + (item.view.map { descendants($0).map { "\(type(of: $0))" }.joined(separator: ",") } ?? "-")
-        }
-        XCTFail("Missing menu item \(title); menus: \(menus.map { $0.items.map(\.title) }); toolbar: \(shape)")
+        XCTFail("Missing menu item \(title); menus: \(menus.map { $0.items.map(\.title) })")
     }
 
     private struct AccessibleNode {
@@ -315,18 +318,29 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertEqual(model.segments, evidence)
     }
 
-    func testSettingsEntryOpensAndClosesWithoutChangingRecording() async throws {
+    func testSettingsWindowRendersAndScrollsWithoutChangingRecording() async throws {
         let (model, evidence, notebook) = try fixture()
         model.loadPresentationForTesting(phase: .recording, evidence: evidence, notebook: notebook)
         let (window, view) = try window(model: model, width: 1260)
         defer { window.close() }
         try await settle(view)
-        try performMoreMenuItem("课堂设置…", in: window)
-        try await Task.sleep(for: .milliseconds(300))
-        let sheet = try XCTUnwrap(window.attachedSheet)
-        let content = try XCTUnwrap(sheet.contentView)
+        let titles = try toolbarMenus(in: window).flatMap { $0.items.map(\.title) }
+        XCTAssertTrue(titles.contains("课堂设置…"), "更多 must keep an entry to the Settings window: \(titles)")
+        // The Settings scene hosts this same view; render it in an isolated window.
+        let defaults = try XCTUnwrap(presentationDefaults)
+        let settings = NSHostingController(rootView: AnyView(ClassroomSettingsView()
+            .environmentObject(model)
+            .defaultAppStorage(defaults)))
+        let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
+                                      styleMask: [.titled], backing: .buffered, defer: false)
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.contentViewController = settings
+        settingsWindow.setContentSize(NSSize(width: 520, height: 480))
+        settingsWindow.makeKeyAndOrderFront(nil)
+        defer { settingsWindow.close() }
+        let content = settings.view
         try await settle(content)
-        try capture(content, name: "classroom-settings-sheet")
+        try capture(content, name: "classroom-settings-window")
         let form = try XCTUnwrap(descendants(content).compactMap { $0 as? NSScrollView }
             .first { ($0.documentView?.bounds.height ?? 0) > $0.contentView.bounds.height })
         let document = try XCTUnwrap(form.documentView)
@@ -335,8 +349,7 @@ final class ClassroomPresentationTests: XCTestCase {
         try await settle(content)
         XCTAssertGreaterThan(form.contentView.bounds.minY, 0, "The lower settings must be reachable by scrolling")
         try capture(content, name: "classroom-settings-scrolled")
-        try await closeSheet(sheet)
-        XCTAssertNil(window.attachedSheet)
+        XCTAssertNil(window.attachedSheet, "Settings no longer opens a sheet over the classroom")
         XCTAssertEqual(model.phase, .recording)
         XCTAssertEqual(model.segments, evidence)
         XCTAssertFalse(model.noteReviewQueue.hasWork)

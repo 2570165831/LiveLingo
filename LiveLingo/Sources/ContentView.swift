@@ -24,14 +24,13 @@ struct ContentView: View {
     }
 
     enum ClassroomSheet: String, Identifiable {
-        case settings, translation, review, processing
+        case translation, review, processing
         var id: Self { self }
         var title: String {
             switch self {
-            case .settings: return "课堂设置"
             case .translation: return "文字翻译"
             case .review: return "核对笔记"
-            case .processing: return "录音处理与补转"
+            case .processing: return "录音处理"
             }
         }
     }
@@ -83,7 +82,7 @@ struct ContentView: View {
         }
         ToolbarItem(placement: .primaryAction) {
             Button {
-                model.isPaused ? model.resume() : model.pause()
+                model.togglePause()
             } label: {
                 Label(model.isPaused ? "继续" : "暂停",
                       systemImage: model.isPaused ? "play.fill" : "pause.fill")
@@ -94,15 +93,15 @@ struct ContentView: View {
         }
         ToolbarItem(placement: .primaryAction) {
             Button {
-                model.hasActiveSession ? model.stop() : model.start()
+                model.toggleRecording()
             } label: {
-                Label(model.hasActiveSession ? stopTitle : "开始记录",
+                Label(model.hasActiveSession ? model.stopRecordingTitle : "开始记录",
                       systemImage: model.hasActiveSession ? "stop.circle.fill" : "record.circle")
                     .labelStyle(.titleAndIcon)
             }
             .buttonStyle(.borderedProminent)
             .tint(model.hasActiveSession ? .red : .accentColor)
-            .disabled(!model.hasActiveSession && (!model.canStart || model.phase.isBusy))
+            .disabled(!model.canToggleRecording)
             .accessibilityIdentifier("classroom-record-stop")
         }
     }
@@ -112,12 +111,12 @@ struct ContentView: View {
             Button { model.chooseSavedSession() } label: {
                 Label("打开课程…", systemImage: "folder")
             }
-            .disabled(model.phase.isBusy || model.archiveLoading || model.isImportingFile)
+            .disabled(!model.canOpenLesson)
             .accessibilityIdentifier("classroom-open-session")
             Button { model.chooseAndImportMediaFile() } label: {
                 Label("导入音频或视频…", systemImage: "square.and.arrow.down")
             }
-            .disabled(model.phase.isBusy || !model.translationReady || model.isImportingFile)
+            .disabled(!model.canImportMedia)
             .accessibilityIdentifier("classroom-import")
             if model.isLiveOnly && model.hasActiveSession {
                 Button { model.convertCurrentSessionToRecording() } label: {
@@ -148,7 +147,7 @@ struct ContentView: View {
                     Button("在访达中显示") { model.revealSavedSession() }
                 }
             }
-            Button { presentSheet(.settings) } label: {
+            SettingsLink {
                 Label("课堂设置…", systemImage: "slider.horizontal.3")
             }
             .accessibilityIdentifier("classroom-settings")
@@ -157,67 +156,6 @@ struct ContentView: View {
         }
         .help("打开课程、导入、文字翻译、字号与设置")
         .accessibilityIdentifier("classroom-more")
-    }
-
-    private var settingsControls: some View {
-        Form {
-            Section("录音与保存") {
-                Picker("音源", selection: $model.selectedInputMode) {
-                    Text("麦克风").tag(AudioInputMode.microphone)
-                    Text("系统内录").tag(AudioInputMode.systemAudio)
-                }
-                .disabled(model.phase.isBusy)
-                Picker("记录方式", selection: $model.selectedStorageMode) {
-                    Text("保存录音与笔记").tag(SessionStorageMode.saveSession)
-                    Text("实时暂存").tag(SessionStorageMode.liveOnly)
-                }
-                .disabled(model.phase.isBusy)
-                Text("实时暂存会在停止后删除临时录音并清空内容；录音期间可用“转为录音”保留这次课堂。")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if !model.isLiveOnly {
-                    LabeledContent("保存位置", value: model.outputDirectory?.lastPathComponent ?? "尚未选择")
-                    Button("选择保存位置…") { model.chooseOutputDirectory() }
-                        .disabled(model.phase.isBusy)
-                }
-            }
-            Section("字幕与处理") {
-                Picker("质量模式", selection: $model.selectedMode) {
-                    ForEach(ModelMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .disabled(model.phase.isBusy)
-                Toggle("同步初译", isOn: $model.previewTranslationEnabled)
-                    .disabled(!model.supportsPreviewTranslation)
-                Text(model.supportsPreviewTranslation
-                     ? "初译用于及时阅读；正式译文随后保存在字幕中。"
-                     : "同步初译需要 macOS 15 或更新版本；正式翻译仍可使用。")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Toggle("专注模式", isOn: $model.processingFocusEnabled)
-                Text("优先处理录音与字幕，后台核对等待空闲。")
-                    .font(.callout).foregroundStyle(.secondary)
-                Toggle("录音期间防止空闲睡眠", isOn: $model.preventIdleSleepWhileRecording)
-                DisclosureGroup("处理方式与模型详情") {
-                    Text(model.modelModeStatus)
-                    Text(model.focusExplanation)
-                    Text("防止空闲睡眠是独立选项，停止录音或关闭开关后释放。")
-                }
-                .font(.callout)
-            }
-            Section("笔记整理") {
-                Picker("每次整理的内容量", selection: $model.noteBatchCharacters) {
-                    Text("较少 · 约 2500 字").tag(2_500)
-                    Text("标准 · 约 4000 字").tag(4_000)
-                    Text("较多 · 约 6000 字").tag(6_000)
-                }
-                Text("只影响之后的笔记。内容量较少时单次处理更短，但需要处理的批次更多。")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .formStyle(.grouped)
     }
 
     @ViewBuilder
@@ -234,8 +172,6 @@ struct ContentView: View {
             .padding(20)
             Divider()
             switch sheet {
-            case .settings:
-                settingsControls
             case .translation:
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
@@ -256,7 +192,7 @@ struct ContentView: View {
                 SavedProcessingView(model: model)
             }
         }
-        .frame(width: sheet == .processing ? 700 : 560, height: sheet == .review ? 360 : 580)
+        .frame(width: sheet == .processing ? 700 : 560, height: sheet == .review ? 480 : 580)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -788,10 +724,6 @@ struct ContentView: View {
         }
     }
 
-    private var stopTitle: String {
-        model.isLiveOnly ? "结束记录" : "结束并保存"
-    }
-
     private var englishPlaceholder: String {
         switch model.currentInputMode {
         case .microphone:
@@ -848,6 +780,140 @@ private struct ReviewEntryButton: View {
         .buttonStyle(.borderless)
         .help("选择本课核对范围，或管理历史核对任务")
         .accessibilityIdentifier("classroom-review-notes")
+    }
+}
+
+/// The Settings window (⌘,). Changes apply to the next recording where a
+/// session is running; controls that would disturb it stay disabled.
+struct ClassroomSettingsView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Form {
+            Section("录音与保存") {
+                Picker("音源", selection: $model.selectedInputMode) {
+                    Text("麦克风").tag(AudioInputMode.microphone)
+                    Text("系统内录").tag(AudioInputMode.systemAudio)
+                }
+                .disabled(model.phase.isBusy)
+                Picker("记录方式", selection: $model.selectedStorageMode) {
+                    Text("保存录音与笔记").tag(SessionStorageMode.saveSession)
+                    Text("实时暂存").tag(SessionStorageMode.liveOnly)
+                }
+                .disabled(model.phase.isBusy)
+                Text("实时暂存会在停止后删除临时录音并清空内容；录音期间可用“转为录音”保留这次课堂。")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !model.isLiveOnly {
+                    LabeledContent("保存位置", value: model.outputDirectory?.lastPathComponent ?? "尚未选择")
+                    Button("选择保存位置…") { model.chooseOutputDirectory() }
+                        .disabled(model.phase.isBusy)
+                }
+            }
+            Section("字幕与处理") {
+                Picker("质量模式", selection: $model.selectedMode) {
+                    ForEach(ModelMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .disabled(model.phase.isBusy)
+                Toggle("同步初译", isOn: $model.previewTranslationEnabled)
+                    .disabled(!model.supportsPreviewTranslation)
+                Text(model.supportsPreviewTranslation
+                     ? "初译用于及时阅读；正式译文随后保存在字幕中。"
+                     : "同步初译需要 macOS 15 或更新版本；正式翻译仍可使用。")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("专注模式", isOn: $model.processingFocusEnabled)
+                Text("优先处理录音与字幕，后台核对等待空闲。")
+                    .font(.callout).foregroundStyle(.secondary)
+                Toggle("录音期间防止空闲睡眠", isOn: $model.preventIdleSleepWhileRecording)
+                DisclosureGroup("处理方式与模型详情") {
+                    Text(model.modelModeStatus)
+                    Text(model.focusExplanation)
+                    Text("防止空闲睡眠是独立选项，停止录音或关闭开关后释放。")
+                }
+                .font(.callout)
+            }
+            Section("笔记整理") {
+                Picker("每次整理的内容量", selection: $model.noteBatchCharacters) {
+                    Text("较少 · 约 2500 字").tag(2_500)
+                    Text("标准 · 约 4000 字").tag(4_000)
+                    Text("较多 · 约 6000 字").tag(6_000)
+                }
+                Text("只影响之后的笔记。内容量较少时单次处理更短，但需要处理的批次更多。")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 520)
+        .frame(minHeight: 480)
+    }
+}
+
+// MARK: Commands
+
+extension AppModel {
+    var canToggleRecording: Bool { hasActiveSession || (canStart && !phase.isBusy) }
+    var canOpenLesson: Bool { !(phase.isBusy || archiveLoading || isImportingFile) }
+    var canImportMedia: Bool { !phase.isBusy && translationReady && !isImportingFile }
+    var stopRecordingTitle: String { isLiveOnly ? "结束记录" : "结束并保存" }
+
+    func toggleRecording() { hasActiveSession ? stop() : start() }
+    func togglePause() { isPaused ? resume() : pause() }
+}
+
+/// File › 打开课程…; replaces New Window so there is one classroom window.
+struct OpenLessonMenuItem: View {
+    let model: AppModel?
+
+    var body: some View {
+        if let model { Content(model: model) }
+    }
+
+    private struct Content: View {
+        @ObservedObject var model: AppModel
+        var body: some View {
+            Button("打开课程…") { model.chooseSavedSession() }
+                .keyboardShortcut("o", modifiers: .command)
+                .disabled(!model.canOpenLesson)
+        }
+    }
+}
+
+/// The 录音 menu: every toolbar action also has a menu command and shortcut.
+struct RecordingMenuItems: View {
+    let model: AppModel?
+
+    var body: some View {
+        if let model { Content(model: model) }
+    }
+
+    private struct Content: View {
+        @ObservedObject var model: AppModel
+        @Environment(\.openWindow) private var openWindow
+
+        var body: some View {
+            Button(model.hasActiveSession ? model.stopRecordingTitle : "开始记录") { model.toggleRecording() }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(!model.canToggleRecording)
+            Button(model.isPaused ? "继续" : "暂停") { model.togglePause() }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+                .disabled(!model.hasActiveSession)
+            Divider()
+            if model.isImportingFile {
+                Button("停止导入") { model.cancelMediaImport() }
+                    .disabled(model.phase == .stopping)
+            } else {
+                Button("导入音频或视频…") { model.chooseAndImportMediaFile() }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
+                    .disabled(!model.canImportMedia)
+            }
+            Divider()
+            Button("浮动字幕") { openWindow(id: "subtitles") }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+        }
     }
 }
 

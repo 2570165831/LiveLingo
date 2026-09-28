@@ -32,6 +32,23 @@ struct LiveLingoApp: App {
         }
         .defaultSize(width: 1_260, height: 820)
         .windowResizability(.contentMinSize)
+        .commands {
+            // One classroom window: File › New Window is replaced by 打开课程.
+            CommandGroup(replacing: .newItem) {
+                OpenLessonMenuItem(model: holder.model)
+            }
+            CommandMenu("录音") {
+                RecordingMenuItems(model: holder.model)
+            }
+        }
+
+        Settings {
+            if let model = holder.model {
+                ClassroomSettingsView().environmentObject(model)
+            } else {
+                EmptyView()
+            }
+        }
 
         Window("浮动字幕", id: "subtitles") {
             if let model = holder.model {
