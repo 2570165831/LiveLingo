@@ -26,40 +26,53 @@ class OutputBudgetExceeded(ValueError):
 
 
 class PromptPrefixCache:
-    """One bounded, immutable prefill snapshot owned by one loaded model.
+    """At most two exact prefill snapshots under one model's total byte limit.
 
-    Qwen3.5 includes recurrent state: a longer cache cannot be trimmed back to
-    an earlier prefix. Only exact token prefixes at existing prefill boundaries
-    are reusable. Deep copies isolate both recurrent and attention state from
-    every request, including requests interleaved by the worker.
+    Recurrent state cannot be trimmed to another prefix. Requests receive deep
+    copies of an exact stored boundary; ordinary decoding never mutates a stored
+    snapshot. Least recently used entries make room without growing the budget.
     """
-    def __init__(self, max_tokens=512, max_bytes=128 * 1024**2):
+    def __init__(self, max_tokens=512, max_bytes=128 * 1024**2, max_entries=2):
         self.max_tokens = max(0, max_tokens // PREFILL_STEP * PREFILL_STEP)
         self.max_bytes = max(0, max_bytes)
-        self.tokens = ()
-        self.cache = None
+        self.max_entries = max(0, max_entries)
+        self._entries = OrderedDict()
         self.nbytes = 0
 
+    @property
+    def tokens(self):
+        return next(reversed(self._entries), ())
+
     def fetch(self, tokens):
-        count = len(self.tokens)
-        # Leave at least one input token for the first output distribution.
-        if count and len(tokens) > count and tuple(tokens[:count]) == self.tokens:
-            return copy.deepcopy(self.cache), count
+        # Prefer the longest exact boundary; leave a token for the first logits.
+        for key in sorted(self._entries, key=len, reverse=True):
+            count = len(key)
+            if len(tokens) > count and tuple(tokens[:count]) == key:
+                snapshot = copy.deepcopy(self._entries[key][0])
+                self._entries.move_to_end(key)
+                return snapshot, count
         return None, 0
 
     def remember(self, tokens, cache):
         tokens = tuple(tokens)
-        if not tokens or len(tokens) % PREFILL_STEP or len(tokens) > self.max_tokens:
+        if (not tokens or len(tokens) % PREFILL_STEP or len(tokens) > self.max_tokens
+                or not self.max_entries):
             return False
         size = sum(item.nbytes for item in cache)
         if size > self.max_bytes:
             return False
-        if tokens != self.tokens:
-            self.cache = copy.deepcopy(cache)
-            self.tokens = tokens
-            self.nbytes = size
+        if tokens in self._entries:
+            self._entries.move_to_end(tokens)
+            return True
+        # Release old references before allocating a new snapshot. The limit
+        # covers retained snapshots, not the active request or model weights.
+        while self._entries and (len(self._entries) >= self.max_entries
+                                 or self.nbytes + size > self.max_bytes):
+            _, (_, removed_bytes) = self._entries.popitem(last=False)
+            self.nbytes -= removed_bytes
+        self._entries[tokens] = (copy.deepcopy(cache), size)
+        self.nbytes += size
         return True
-
 
 class Engine:
     def __init__(self, model_path):
