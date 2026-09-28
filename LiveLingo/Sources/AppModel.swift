@@ -3417,10 +3417,14 @@ struct ProtectedChemistryTranslationInput: Sendable {
 enum ChemistryTranslationProtector {
     static let copyInstruction = "Text like ZXQCHEM0QXZ is an unchanged source term. Keep those tokens verbatim while translating the entire sentence, including all surrounding words and clauses. Do not output a list of tokens in place of the translation."
     static let namingInstruction = "When the source assigns a name, translate the naming action as a complete sentence and use the protected term as the name being assigned. Preserve the stated placement of each label, including words such as beside, under, and above."
+    static let literalDefinitionInstruction = "In statements identifying literal wording, literal text means 字面文本 and literal string means 字面字符串. Translate the identification as its own complete clause, separate from any scientific statement that follows."
 
     static func promptSuffix(for text: String) -> String {
         guard text.range(of: #"ZXQCHEM[0-9]+QXZ"#, options: .regularExpression) != nil else { return "" }
+        let definition = literalDefinitionExpression?.firstMatch(in: text,
+            range: NSRange(text.startIndex..., in: text)) != nil
         return copyInstruction + (hasNamedProtectedTerm(in: text) ? "\n" + namingInstruction : "")
+            + (definition ? "\n" + literalDefinitionInstruction : "")
     }
 
     static func hasNamedProtectedTerm(in text: String) -> Bool {
@@ -3482,6 +3486,8 @@ enum ChemistryTranslationProtector {
     private static let namingIntroduction = try? NSRegularExpression(pattern: namingIntroductionPattern + "$")
     private static let namedPlaceholderExpression = try? NSRegularExpression(pattern:
         namingIntroductionPattern + #"[\"“'‘]?ZXQCHEM[0-9]+QXZ\b"#)
+    private static let literalDefinitionExpression = try? NSRegularExpression(pattern:
+        #"(?i)\b(?:literal|exact)\s+(?:texts?|strings?)\s+(?:is|are|was|were)\s+[\"“'‘]?ZXQCHEM[0-9]+QXZ\b"#)
     private static let spokenNumber = "(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)"
     private static let spokenNumberSequence = "(?i:" + spokenNumber + "(?:[ -]+" + spokenNumber + ")*)"
     private static let codeNameExpression = try? NSRegularExpression(pattern:

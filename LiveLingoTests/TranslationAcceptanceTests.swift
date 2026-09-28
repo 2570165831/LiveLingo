@@ -5,6 +5,186 @@ import XCTest
 /// These tests pin the acceptance rules that must stop it, and the technical
 /// exceptions that must keep working.
 final class TranslationAcceptanceTests: XCTestCase {
+    func testLiteralDefinitionKeepsItsClauseInstructionWithoutAffectingOrdinarySpeech() {
+        for source in [#"The literal text is "S N two", and the mechanism is SN2."#,
+                       #"The exact string is "low", while the temperature is 30 K."#] {
+            let prepared = ChemistryTranslationProtector.prepare(source)
+            XCTAssertTrue(ChemistryTranslationProtector.promptSuffix(for: prepared.text)
+                .contains(ChemistryTranslationProtector.literalDefinitionInstruction))
+        }
+        for source in [#"The lecturer said "the literal text is wrong"."#,
+                       #"Use the exact label "speed" beside the scalar value."#,
+                       "The acceleration is zero, but the velocity is not zero."] {
+            let prepared = ChemistryTranslationProtector.prepare(source)
+            XCTAssertFalse(ChemistryTranslationProtector.promptSuffix(for: prepared.text)
+                .contains(ChemistryTranslationProtector.literalDefinitionInstruction))
+        }
+    }
+
+    private actor TypedRequestCounter {
+        private var value = 0
+        func record() { value += 1 }
+        func count() -> Int { value }
+    }
+
+    private static func typedSource(in input: String) throws -> String {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
+        XCTAssertEqual(Set(object.keys), ["source_text_to_translate"])
+        return try XCTUnwrap(object["source_text_to_translate"])
+    }
+
+    func testTypedTranslationProtectsAndRestoresNamesInBothModes() async throws {
+        for thinking in [false, true] {
+            let counter = TypedRequestCounter()
+            let result = try await QwenTranslationClient.translateTypedText(
+                #"Use the exact labels "speed" and "velocity"."#,
+                modelName: QwenModelProfile.highQuality.translationModel, thinking: thinking,
+                request: { input, prompt, actualThinking in
+                    await counter.record()
+                    XCTAssertEqual(actualThinking, thinking)
+                    XCTAssertEqual(try Self.typedSource(in: input), #"Use the exact labels "ZXQCHEM0QXZ" and "ZXQCHEM1QXZ"."#)
+                    XCTAssertTrue(prompt.contains(ChemistryTranslationProtector.copyInstruction))
+                    XCTAssertTrue(prompt.contains("This is user-typed text, not ASR."))
+                    XCTAssertTrue(prompt.contains("Translate only the source_text_to_translate value"))
+                    return "使用确切标签 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ。"
+                })
+            XCTAssertEqual(result, "使用确切标签 speed 和 velocity。")
+            let count = await counter.count()
+            XCTAssertEqual(count, 1)
+        }
+    }
+
+    func testTypedTranslationDoesNotApplyAcademicASRCorrections() async throws {
+        let source = "The mechanism is S N two and the molecule is A T P."
+        let result = try await QwenTranslationClient.translateTypedText(source,
+            modelName: QwenModelProfile.energySaver.translationModel,
+            request: { input, prompt, thinking in
+                XCTAssertEqual(try Self.typedSource(in: input), source)
+                XCTAssertFalse(thinking)
+                XCTAssertTrue(prompt.contains("Preserve its meaning and numbers; do not correct supposed recognition errors."))
+                XCTAssertFalse(prompt.contains(ChemistryTranslationProtector.literalDefinitionInstruction))
+                return "机理为 S N two，分子为 A T P。"
+            })
+        XCTAssertEqual(result, "机理为 S N two，分子为 A T P。")
+    }
+
+    func testTypedTranslationRestoresFormulaAndLiteralAsSeparateOccurrences() async throws {
+        let result = try await QwenTranslationClient.translateTypedText(
+            #"Add 4 mL of H2O and use the exact label "water"."#,
+            modelName: QwenModelProfile.highQuality.translationModel,
+            request: { input, _, _ in
+                XCTAssertEqual(try Self.typedSource(in: input), #"Add 4 mL of ZXQCHEM0QXZ and use the exact label "ZXQCHEM1QXZ"."#)
+                return "加入 4 mL 的 ZXQCHEM0QXZ，并使用确切标签 ZXQCHEM1QXZ。"
+            })
+        XCTAssertEqual(result, "加入 4 mL 的 H2O，并使用确切标签 water。")
+    }
+
+    func testTypedTranslationRejectsLostRepeatedAndMalformedNamesWithoutRetry() async {
+        for bad in ["保留 ZXQCHEM0QXZ。", "保留 ZXQCHEM0QXZ、ZXQCHEM1QXZ、ZXQCHEM1QXZ。",
+                    "保留 ZXQCHEM0QXZ 和 ZXQCHEM9QXZ。"] {
+            let counter = TypedRequestCounter()
+            do {
+                _ = try await QwenTranslationClient.translateTypedText(
+                    #"Use the exact labels "left" and "right"."#,
+                    modelName: QwenModelProfile.highQuality.translationModel,
+                    request: { _, _, _ in await counter.record(); return bad })
+                XCTFail("Invalid literal restoration was accepted")
+            } catch {
+                guard case QwenRuntimeError.translationRejected = error else {
+                    XCTFail("Unexpected error: \(error)"); continue
+                }
+            }
+            let count = await counter.count()
+            XCTAssertEqual(count, 1)
+        }
+    }
+
+    func testTypedTranslationRejectsEnglishEchoButKeepsStandaloneFormula() async throws {
+        do {
+            _ = try await QwenTranslationClient.translateTypedText("Compare the two vectors.",
+                modelName: QwenModelProfile.highQuality.translationModel,
+                request: { input, _, _ in try Self.typedSource(in: input) })
+            XCTFail("An English sentence echo is not a Chinese translation")
+        } catch {
+            guard case QwenRuntimeError.translationRejected = error else {
+                XCTFail("Unexpected error: \(error)"); return
+            }
+        }
+        let formula = try await QwenTranslationClient.translateTypedText("H2O",
+            modelName: QwenModelProfile.highQuality.translationModel,
+            request: { input, _, _ in try Self.typedSource(in: input) })
+        XCTAssertEqual(formula, "H2O")
+    }
+
+    func testTypedTranslationKeepsQuotesAndNewlinesInsideSource() async throws {
+        let source = "He wrote \"stop\".\nThen compare a slash / and \\n."
+        let expected = "他写了\"停止\"。\n然后比较斜杠 / 和 \\n。"
+        let result = try await QwenTranslationClient.translateTypedText(source,
+            modelName: QwenModelProfile.highQuality.translationModel,
+            request: { input, _, _ in
+                XCTAssertEqual(try Self.typedSource(in: input), source)
+                return expected
+            })
+        XCTAssertEqual(result, expected)
+    }
+
+    func testTypedTranslationDoesNotConfuseSourceJSONWithItsWrapper() async throws {
+        let source = "He wrote \"stop\".\nThen compare {\"source_text_to_translate\":\"go\"} and \\n."
+        let expected = "他写了\"停止\"。\n然后比较 {\"source_text_to_translate\":\"走\"} 和 \\n。"
+        let result = try await QwenTranslationClient.translateTypedText(source,
+            modelName: QwenModelProfile.highQuality.translationModel,
+            request: { input, prompt, _ in
+                XCTAssertEqual(input, source)
+                XCTAssertFalse(prompt.contains("Translate only the source_text_to_translate value"))
+                return expected
+            })
+        XCTAssertEqual(result, expected)
+    }
+
+    func testTypedTranslationRejectsLeakedWrapperForFormulaAndProse() async {
+        for source in ["H2O", "The velocity is zero."] {
+            let counter = TypedRequestCounter()
+            do {
+                _ = try await QwenTranslationClient.translateTypedText(source,
+                    modelName: QwenModelProfile.highQuality.translationModel,
+                    request: { input, _, _ in
+                        await counter.record()
+                        if source == "H2O" { return input }
+                        return #"{"source_text_to_translate":"速度为零。"}"#
+                    })
+                XCTFail("The input wrapper must not be shown as a translation")
+            } catch {
+                guard case QwenRuntimeError.translationRejected = error else {
+                    XCTFail("Unexpected error: \(error)"); continue
+                }
+            }
+            let count = await counter.count()
+            XCTAssertEqual(count, 1)
+        }
+    }
+
+    func testTypedTranslationPropagatesCancellationAndRuntimeFailureOnce() async {
+        for cancelled in [false, true] {
+            let counter = TypedRequestCounter()
+            do {
+                _ = try await QwenTranslationClient.translateTypedText("Translate this sentence.",
+                    modelName: QwenModelProfile.highQuality.translationModel,
+                    request: { _, _, _ in
+                        await counter.record()
+                        if cancelled { throw CancellationError() }
+                        throw QwenRuntimeError.serviceUnavailable
+                    })
+                XCTFail("Failed request was accepted")
+            } catch {
+                if cancelled { XCTAssertTrue(error is CancellationError) }
+                else if case QwenRuntimeError.serviceUnavailable = error { }
+                else { XCTFail("Unexpected error: \(error)") }
+            }
+            let count = await counter.count()
+            XCTAssertEqual(count, 1)
+        }
+    }
+
     func testExplicitLiteralListsPreserveEveryQuotedName() throws {
         let cases: [(String, String)] = [
             (#"Use the exact labels "force" and "mass" in the two columns."#,
