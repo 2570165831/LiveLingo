@@ -125,6 +125,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     static let microphoneStallTimeout: TimeInterval = 3
     static let maximumMicrophoneRecoveryAttempts = 3
+    static let microphoneStableRecoveryDuration: TimeInterval = 30
 
     enum Event: Sendable {
         case audioLevel(Float)
@@ -266,6 +267,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private var microphoneNeedsRecovery = false
     private var microphoneHealthGraceStartedAt: TimeInterval?
     private var microphoneRecoveryAttempts = 0
+    private var microphoneHealthyWindow: (start: TimeInterval, end: TimeInterval, writtenFrames: Int64)?
     private var capturePaused = false
     private var isStopping = false
     private var previewSupportedLocale: Locale?
@@ -627,6 +629,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             // A delayed recovery can no longer own this input. Remember the
             // device change so resume can bind a fresh tap before accepting PCM.
             microphoneRecoveryRequest = nil
+            microphoneHealthyWindow = nil
             return inputMode == .microphone ? audioEngine : nil
         }
         if let engine, engine.isRunning { engine.pause() }
@@ -641,6 +644,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             lastAudioCallbackUptime = now
             microphoneHealthGraceStartedAt = now
             microphoneRecoveryAttempts = 0
+            microphoneHealthyWindow = nil
             return (mode, generation, audioEngine, microphoneNeedsRecovery || !microphoneTapInstalled)
         }
         guard let (mode, token, engine, needsRecovery) = context else { throw PipelineError.noActiveSession }
@@ -874,7 +878,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             capturedAudioDuration = Double(writtenFrames) / buffer.format.sampleRate
             if chunkCaptureStart == nil { chunkCaptureStart = capturedSpan?.observedStart }
             if let capturedSpan {
-                lastCaptureEnd = capturedSpan.observedStart + Double(capturedSpan.frames) / (ingress?.format.sampleRate ?? buffer.format.sampleRate)
+                let end = capturedSpan.observedStart + Double(capturedSpan.frames) / (ingress?.format.sampleRate ?? buffer.format.sampleRate)
+                lastCaptureEnd = end
+                noteHealthyMicrophoneInputLocked(start: capturedSpan.observedStart, end: end,
+                    frames: buffer.frameLength, sampleRate: buffer.format.sampleRate)
             } // Converter tail is already included in the last accepted input span.
 
             stateLock.unlock()
@@ -1296,6 +1303,34 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         failCapture("电脑进入休眠，音频采集已结束。", generation: token)
     }
 
+    /// Called under stateLock only after both audio writes succeeded. Engine
+    /// starts, brief PCM blips and buffered bursts cannot renew the retry budget.
+    private func noteHealthyMicrophoneInputLocked(start: TimeInterval, end: TimeInterval,
+                                                 frames: AVAudioFrameCount, sampleRate: Double) {
+        guard inputMode == .microphone, microphoneRecoveryAttempts > 0,
+              !capturePaused, !isStopping, !microphoneNeedsRecovery,
+              microphoneRecoveryRequest == nil, frames > 0 else { return }
+        guard start.isFinite, end.isFinite, end > start, sampleRate.isFinite, sampleRate > 0 else {
+            microphoneHealthyWindow = nil
+            return
+        }
+        var window = microphoneHealthyWindow ?? (start, end, 0)
+        if end <= window.end || start - window.end >= Self.microphoneStallTimeout {
+            window = (start, end, 0)
+        }
+        window.end = end
+        window.writtenFrames += Int64(frames)
+        // Count at the fixed recording rate, including valid silent PCM.
+        // Arrival timestamps may overlap slightly under ordinary callback jitter.
+        if Double(window.writtenFrames) / sampleRate >= Self.microphoneStableRecoveryDuration,
+           end - window.start >= Self.microphoneStableRecoveryDuration {
+            microphoneRecoveryAttempts = 0
+            microphoneHealthyWindow = nil
+        } else {
+            microphoneHealthyWindow = window
+        }
+    }
+
     private func startMicrophoneHealthMonitoring() {
         let context = stateLock.withLock { () -> (UUID, any MicrophoneCaptureEngine)? in
             guard !isStopping, let audioEngine else { return nil }
@@ -1303,6 +1338,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             lastAudioCallbackUptime = now
             microphoneHealthGraceStartedAt = now
             microphoneRecoveryAttempts = 0
+            microphoneHealthyWindow = nil
             microphoneRecoveryRequest = nil
             microphoneNeedsRecovery = false
             return (generation, audioEngine)
@@ -1349,6 +1385,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             microphoneRecoveryRequest = nil
             microphoneNeedsRecovery = false
             microphoneRecoveryAttempts = 0
+            microphoneHealthyWindow = nil
             return (observer, watchdog)
         }
         monitoring.1?.cancel()
@@ -1377,6 +1414,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                   expected == nil || generation == expected else { return nil }
             // A configuration notification during pause still matters on resume.
             microphoneNeedsRecovery = true
+            microphoneHealthyWindow = nil
             guard !capturePaused, microphoneRecoveryRequest == nil else { return nil }
             let request = UUID()
             microphoneRecoveryRequest = request

@@ -385,6 +385,155 @@ final class MicrophoneLifecycleTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    private func feedContinuousPCM(_ f: Fixture, seconds: Int, startingAt start: TimeInterval,
+                                   value: Float = 0.1) async {
+        let frames = Int(f.engine.installedFormat!.sampleRate)
+        for second in 1...seconds {
+            XCTAssertEqual(f.engine.send(frames: frames, value: value,
+                observedEnd: start + Double(second)), .accepted)
+            await f.engine.drain()
+        }
+    }
+
+    func testSustainedPCMReopensBudgetAfterThreeRecoveries() async throws {
+        let f = try await start()
+        for _ in 0..<3 { change(f); XCTAssertTrue(f.scheduler.runNext()) }
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 3)
+        await feedContinuousPCM(f, seconds: 30, startingAt: ceil(ProcessInfo.processInfo.systemUptime) + 10)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 0,
+                       "A stable recording must not retain failures from an earlier incident")
+        change(f)
+        XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertEqual(f.engine.startCount, 5, "A later incident gets a fresh recovery budget")
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 481_600)
+    }
+
+    func testRecoveryBlipsStillReachTheAttemptLimit() async throws {
+        let f = try await start()
+        for attempt in 1...3 {
+            change(f)
+            XCTAssertTrue(f.scheduler.runNext())
+            XCTAssertEqual(f.engine.send(), .accepted)
+            await f.engine.drain()
+            XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, attempt,
+                           "A successful start and one short callback are not sustained recovery")
+        }
+        change(f)
+        XCTAssertTrue(f.scheduler.runNext())
+        for _ in 0..<200 where f.events.failures.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(f.events.failures.count, 1)
+        XCTAssertTrue(f.events.failures.first?.contains("恢复次数") == true)
+        XCTAssertEqual(f.engine.startCount, 4)
+        XCTAssertEqual(f.scheduler.count, 0)
+        await f.pipeline.stop()
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 4_800)
+    }
+
+    func testSparsePCMDoesNotRenewBudgetFromElapsedTimeAlone() async throws {
+        let f = try await start()
+        change(f); XCTAssertTrue(f.scheduler.runNext())
+        let time = ceil(ProcessInfo.processInfo.systemUptime) + 10
+        for second in 1...31 {
+            XCTAssertEqual(f.engine.send(observedEnd: time + Double(second)), .accepted)
+            await f.engine.drain()
+        }
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 1,
+                       "Thirty wall seconds with only a few seconds of PCM must not clear the budget")
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 49_600)
+    }
+
+    func testBurstPCMDoesNotRenewBudgetBeforeCaptureTimeAdvances() async throws {
+        let f = try await start()
+        change(f); XCTAssertTrue(f.scheduler.runNext())
+        let time = ceil(ProcessInfo.processInfo.systemUptime) + 10
+        for packet in 1...31 {
+            XCTAssertEqual(f.engine.send(frames: 16_000, observedEnd: time + Double(packet) / 100), .accepted)
+            await f.engine.drain()
+        }
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 1,
+                       "Buffered PCM arriving in a burst must not prove sustained device health")
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 496_000)
+    }
+
+    func testStallSizedGapRestartsTheStableRecoveryWindow() async throws {
+        let f = try await start()
+        change(f); XCTAssertTrue(f.scheduler.runNext())
+        let time = ceil(ProcessInfo.processInfo.systemUptime) + 10
+        await feedContinuousPCM(f, seconds: 20, startingAt: time)
+        await feedContinuousPCM(f, seconds: 11, startingAt: time + 23)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 1,
+                       "PCM spans separated by the stall timeout must not share a healthy window")
+        await feedContinuousPCM(f, seconds: 19, startingAt: time + 34)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 0)
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 800_000)
+    }
+
+    func testSilentConvertedPCMRestoresRecoveryBudget() async throws {
+        let f = try await start()
+        change(f, sampleRate: 48_000); XCTAssertTrue(f.scheduler.runNext())
+        await feedContinuousPCM(f, seconds: 31, startingAt: ceil(ProcessInfo.processInfo.systemUptime) + 10, value: 0)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 0,
+                       "Silence is valid capture; count written frames at the original storage rate")
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        let file = try AVAudioFile(forReading: f.recording)
+        XCTAssertEqual(file.processingFormat.sampleRate, 16_000)
+        XCTAssertEqual(file.length, 496_000)
+        let samples = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
+        try file.read(into: samples)
+        XCTAssertTrue(UnsafeBufferPointer(start: samples.floatChannelData![0], count: Int(samples.frameLength)).allSatisfy { $0 == 0 })
+    }
+
+    func testCallbackJitterStillRequiresThirtySecondsOfWrittenPCM() async throws {
+        let f = try await start()
+        change(f); XCTAssertTrue(f.scheduler.runNext())
+        let time = ceil(ProcessInfo.processInfo.systemUptime) + 10
+        for packet in 1...299 {
+            let jitter = packet.isMultiple(of: 2) ? 0.003 : -0.003
+            XCTAssertEqual(f.engine.send(observedEnd: time + Double(packet) / 10 + jitter), .accepted)
+            await f.engine.drain()
+        }
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 1,
+                       "29.9 seconds of successfully written PCM cannot renew the budget")
+        XCTAssertEqual(f.engine.send(observedEnd: time + 30.003), .accepted)
+        await f.engine.drain()
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 0,
+                       "Ordinary overlap/jitter between callbacks must not erase sustained capture")
+        change(f); XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertEqual(f.engine.send(observedEnd: time + 30.103), .accepted)
+        await f.engine.drain()
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 1,
+                       "A new recovery cannot reuse the previous healthy window")
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 481_600)
+    }
+
+    func testDeviceChangesDoNotCombineSeparateHealthyWindows() async throws {
+        let f = try await start()
+        let time = ceil(ProcessInfo.processInfo.systemUptime) + 10
+        change(f); XCTAssertTrue(f.scheduler.runNext())
+        await feedContinuousPCM(f, seconds: 15, startingAt: time)
+        change(f); XCTAssertTrue(f.scheduler.runNext())
+        await feedContinuousPCM(f, seconds: 15, startingAt: time + 20)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 2)
+        await feedContinuousPCM(f, seconds: 15, startingAt: time + 35)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 0)
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 720_000)
+    }
+
     func testResumeGetsAFullGracePeriodDespiteOldAcceptedAudio() async throws {
         let f = try await start()
         XCTAssertEqual(f.engine.send(observedEnd: ProcessInfo.processInfo.systemUptime - 20), .accepted)
