@@ -843,7 +843,8 @@ enum QwenTranslationClient {
     - S N two = SN2
     - nucleophile = 亲核试剂
     Mathematics glossary: eigenvalue=特征值; eigenvector=特征向量; characteristic equation=特征方程; determinant=行列式; linearly independent=线性无关.
-    Physics glossary: special relativity=狭义相对论; time dilation=时间膨胀; proper time=固有时; rest frame=静止参考系; gamma=γ; electromotive force=电动势; Born rule=玻恩规则; absolute square=模平方.
+    Physics glossary: for physical motion, speed=速率; velocity=速度; average speed=平均速率; average velocity=平均速度; instantaneous speed=瞬时速率; instantaneous velocity=瞬时速度; special relativity=狭义相对论; time dilation=时间膨胀; proper time=固有时; rest frame=静止参考系; gamma=γ; electromotive force=电动势; Born rule=玻恩规则; absolute square=模平方.
+    - Use motion terms for physical quantities. Keep everyday verbs and fixed expressions natural (speed up=加快; speed of light=光速). Preserve questions and even incorrect stated claims; do not add definitions, solve problems, or correct values.
     Biology glossary: oxidative phosphorylation=氧化磷酸化; proton motive force=质子动力势; ATP synthase=ATP合酶; NADH stays NADH; Complex I=复合物 I; terminal electron acceptor=末端电子受体; DNA replication=DNA复制; helicase=解旋酶; DNA polymerase=DNA聚合酶; leading strand=前导链; lagging strand=滞后链; Michaelis-Menten equation=米氏方程.
     Computer science glossary: Dijkstra's algorithm=Dijkstra 算法; Bellman-Ford algorithm=Bellman-Ford 算法; binary search=二分查找; negative-weight cycle=负权环; time complexity=时间复杂度; O(VE) stays O(VE).
     Economics glossary: policy rate=政策利率; aggregate demand=总需求; monetary policy=货币政策; Phillips curve=菲利普斯曲线.
