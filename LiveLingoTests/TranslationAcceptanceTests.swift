@@ -46,6 +46,7 @@ final class TranslationAcceptanceTests: XCTestCase {
                     XCTAssertTrue(prompt.contains(ChemistryTranslationProtector.copyInstruction))
                     XCTAssertTrue(prompt.contains("This is user-typed text, not ASR."))
                     XCTAssertTrue(prompt.contains("Translate only the source_text_to_translate value"))
+                    XCTAssertEqual(prompt.contains("Quoted ordinary English is also source text"), thinking)
                     return "使用确切标签 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ。"
                 })
             XCTAssertEqual(result, "使用确切标签 speed 和 velocity。")
@@ -131,14 +132,17 @@ final class TranslationAcceptanceTests: XCTestCase {
     func testTypedTranslationDoesNotConfuseSourceJSONWithItsWrapper() async throws {
         let source = "He wrote \"stop\".\nThen compare {\"source_text_to_translate\":\"go\"} and \\n."
         let expected = "他写了\"停止\"。\n然后比较 {\"source_text_to_translate\":\"走\"} 和 \\n。"
-        let result = try await QwenTranslationClient.translateTypedText(source,
-            modelName: QwenModelProfile.highQuality.translationModel,
-            request: { input, prompt, _ in
-                XCTAssertEqual(input, source)
-                XCTAssertFalse(prompt.contains("Translate only the source_text_to_translate value"))
-                return expected
-            })
-        XCTAssertEqual(result, expected)
+        for thinking in [false, true] {
+            let result = try await QwenTranslationClient.translateTypedText(source,
+                modelName: QwenModelProfile.highQuality.translationModel, thinking: thinking,
+                request: { input, prompt, _ in
+                    XCTAssertEqual(input, source)
+                    XCTAssertFalse(prompt.contains("Translate only the source_text_to_translate value"))
+                    XCTAssertFalse(prompt.contains("Quoted ordinary English is also source text"))
+                    return expected
+                })
+            XCTAssertEqual(result, expected)
+        }
     }
 
     func testTypedTranslationRejectsLeakedWrapperForFormulaAndProse() async {

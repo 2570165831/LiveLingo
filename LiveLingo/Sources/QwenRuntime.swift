@@ -1120,16 +1120,19 @@ enum QwenTranslationClient {
             input = protected.text
             prompt = basePrompt
         }
+        let requestPrompt = prompt + (thinking && usesWrapper
+            ? "\nQuoted ordinary English is also source text and must be translated into Chinese. Only unchanged technical terms and protected ZXQCHEM tokens should be copied; quotation marks alone never make an English sentence a literal label. Example: Translate \"the door is closed\". must become 翻译“门关着”。; translate the outer command and the ordinary words inside its quotes."
+            : "")
         let output: String
         if let request {
-            output = try await request(input, prompt, thinking)
+            output = try await request(input, requestPrompt, thinking)
         } else {
             output = try await TranslationModelLifetime.shared.withModel(modelName) {
                 if thinking {
-                    return try await boundedThinkingTranslation(input, modelName: modelName, systemPrompt: prompt)
+                    return try await boundedThinkingTranslation(input, modelName: modelName, systemPrompt: requestPrompt)
                 }
                 return try await chat(input, modelName: modelName,
-                                      systemPrompt: prompt, maximumOutputTokens: 2048, timeout: 90)
+                                      systemPrompt: requestPrompt, maximumOutputTokens: 2048, timeout: 90)
             }
         }
         try Task.checkCancellation()
