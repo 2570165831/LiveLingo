@@ -3416,7 +3416,7 @@ struct ProtectedChemistryTranslationInput: Sendable {
 
 enum ChemistryTranslationProtector {
     static let copyInstruction = "Text like ZXQCHEM0QXZ is an unchanged source term. Keep those tokens verbatim while translating the entire sentence, including all surrounding words and clauses. Do not output a list of tokens in place of the translation."
-    static let namingInstruction = "When the source assigns a name, translate the naming action as a complete sentence and use the protected term as the name being assigned."
+    static let namingInstruction = "When the source assigns a name, translate the naming action as a complete sentence and use the protected term as the name being assigned. Preserve the stated placement of each label, including words such as beside, under, and above."
 
     static func promptSuffix(for text: String) -> String {
         guard text.range(of: #"ZXQCHEM[0-9]+QXZ"#, options: .regularExpression) != nil else { return "" }
@@ -3465,17 +3465,17 @@ enum ChemistryTranslationProtector {
 
     // These expressions are immutable and shared by the normalizer, request
     // preparation and result checks instead of being compiled for every term.
-    private static let quotedLiteral = #"(?:[\"“]([^\"”\r\n]+)[\"”]|(?<![\p{L}\p{N}_])'([^'\r\n]+)'|‘([^’\r\n]+)’)"#
+    private static let quotedLiteral = #"(?:[\"“]([^\"”\r\n]+)[\"”]|(?<![\p{L}\p{N}_])'((?:[^'\r\n]|(?<=[\p{L}\p{N}])'(?=[\p{L}\p{N}]))+)'(?![\p{L}\p{N}_])|‘((?:[^’\r\n]|(?<=[\p{L}\p{N}])’(?=[\p{L}\p{N}]))+)’)"#
     private static let literalExpressions: [NSRegularExpression] = [
         #"`([^`\r\n]+)`"#,
-        #"(?i)\b(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\s+(?:is\s+)?"# + quotedLiteral,
-        quotedLiteral + #"(?i)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#,
+        #"(?i)\b(?:literal|exact)\s+(?:code\s+)?(?:labels?|texts?|strings?|identifiers?|names?)\s+(?:(?:is|are|was|were)\s+)?"# + quotedLiteral,
+        quotedLiteral + #"(?i)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:labels?|texts?|strings?|identifiers?|names?)\b"#,
         #"(?i)\b(?:identifier|function|variable)\s+"# + quotedLiteral
     ].compactMap { try? NSRegularExpression(pattern: $0) }
     private static let quotedNameExpression = try? NSRegularExpression(pattern: quotedLiteral)
     private static let namingIntroductionPattern: String = {
         let verb = #"(?:call(?:s|ed|ing)?|nam(?:e[sd]?|ing)|renam(?:e[sd]?|ing)|label(?:s|led|ling|ed|ing)?)"#
-        let object = #"(?:it|this|that|them|these|those|(?:the|this|that|these|those|our)\s+(?:(?:first|second|new|old)\s+)?(?:matri(?:x|ces)|(?:variable|vector|function|label|identifier|array|node|sample|file|process)s?|branch(?:es)?))"#
+        let object = #"(?:it|this|that|them|these|those|(?:the|this|that|these|those|our)\s+(?:(?:first|second|lower|upper|new|old)\s+)?(?:matri(?:x|ces)|(?:variable|vector|function|label|identifier|array|node|sample|file|process)s?|branch(?:es)?))"#
         return #"(?i)\b(?:"# + verb + #"\s+"# + object
             + #"\s+(?:(?:as|to)\s+)?|(?:called|named|renamed|labelled|labeled)\s+(?:(?:as|to)\s+)?|(?:name|label|identifier)\s+(?:is|are|was|were)\s+)"#
     }()
@@ -3488,6 +3488,11 @@ enum ChemistryTranslationProtector {
         #"^(?:[A-Za-z]|(?=[A-Za-z0-9_]*[0-9_])[A-Za-z][A-Za-z0-9_]*|[A-Zb-z]\s+(?:[A-Za-z]\s+)*"#
         + spokenNumberSequence + ")$")
     private static let quotedNameConnector = try? NSRegularExpression(pattern: #"(?i)^\s*(?:,\s*(?:(?:and|or)\s+)?|(?:and|or)\s+)$"#)
+    // Explicit literal labels can continue into a parallel labeling action.
+    // Admit only an optional placement/comment and "and/or label ... as";
+    // ordinary reporting clauses, concept naming and new sentences do not inherit it.
+    private static let coordinatedLiteralLabelExpression = try? NSRegularExpression(pattern:
+        #"(?i)^\s*(?:(?:beside|next\s+to|above|below|under|on)\s+[^,;.!?\r\n()]+)?\s*(?:\([^()\r\n.!?]*\))?\s*,?\s*(?:and|or)\s+label\s+(?:it|this|that|(?:the|this|that|our)\s+(?:(?:first|second|third|other|new|old)\s+)?(?:axis|axes|graph|curve|column|row|variable|vector|matrix|array|node|sample|file|process))\s+as\s*$"#)
     private static let unquotedLiteralExpression = try? NSRegularExpression(pattern: #"(?i)\buse\s+([^\r\n]+?)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#)
     private static let unquotedCodeExpression = try? NSRegularExpression(pattern: #"(?:\b[A-Z]\b|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[A-Za-z]+[0-9]+)"#)
     private static let formulaExpression = try? NSRegularExpression(pattern: formulaPattern)
@@ -3504,6 +3509,49 @@ enum ChemistryTranslationProtector {
         prepare(source, includeFormulas: false)
     }
 
+    private static func coordinatedLiteralRanges(in source: String, anchored: [NSRange]) -> [NSRange] {
+        guard !anchored.isEmpty, let expression = quotedNameExpression else { return anchored }
+        let ns = source as NSString
+        let whole = NSRange(source.startIndex..., in: source)
+        typealias Quote = (full: NSRange, value: NSRange)
+        var groups: [[Quote]] = []
+        for match in expression.matches(in: source, range: whole) {
+            guard let index = (1..<match.numberOfRanges).first(where: {
+                match.range(at: $0).location != NSNotFound
+            }) else { continue }
+            let quote = (full: match.range, value: match.range(at: index))
+            if let last = groups.last?.last {
+                let gap = ns.substring(with: NSRange(location: NSMaxRange(last.full),
+                    length: quote.full.location - NSMaxRange(last.full)))
+                if gap.rangeOfCharacter(from: .newlines) == nil,
+                   quotedNameConnector?.firstMatch(in: gap, range: NSRange(gap.startIndex..., in: gap)) != nil {
+                    groups[groups.count - 1].append(quote)
+                    continue
+                }
+            }
+            groups.append([quote])
+        }
+        var ranges = Set(anchored)
+        var previousLiteralEnd: Int?
+        for group in groups {
+            let explicit = group.contains { ranges.contains($0.value) }
+            let coordinated = previousLiteralEnd.map { previous in
+                let gap = ns.substring(with: NSRange(location: previous,
+                    length: group[0].full.location - previous))
+                return gap.rangeOfCharacter(from: .newlines) == nil
+                    && coordinatedLiteralLabelExpression?.firstMatch(in: gap,
+                        range: NSRange(gap.startIndex..., in: gap)) != nil
+            } ?? false
+            if explicit || coordinated {
+                for quote in group { ranges.insert(quote.value) }
+                previousLiteralEnd = NSMaxRange(group[group.count - 1].full)
+            } else {
+                previousLiteralEnd = nil
+            }
+        }
+        return Array(ranges)
+    }
+
     /// Only explicit literal/code naming is eligible. Ordinary quoted speech
     /// remains translatable and eligible for academic ASR correction.
     private static func literalRanges(in source: String) -> [NSRange] {
@@ -3516,6 +3564,7 @@ enum ChemistryTranslationProtector {
                 }
             }
         }
+        result = coordinatedLiteralRanges(in: source, anchored: result)
         // Naming verbs alone are insufficient: "call it activation energy"
         // must still translate. Require a complete code-like quoted value.
         if let quotes = quotedNameExpression, let shape = codeNameExpression,

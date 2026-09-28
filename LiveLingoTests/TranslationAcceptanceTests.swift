@@ -5,6 +5,116 @@ import XCTest
 /// These tests pin the acceptance rules that must stop it, and the technical
 /// exceptions that must keep working.
 final class TranslationAcceptanceTests: XCTestCase {
+    func testExplicitLiteralListsPreserveEveryQuotedName() throws {
+        let cases: [(String, String)] = [
+            (#"Use the exact labels "force" and "mass" in the two columns."#,
+             #"Use the exact labels "ZXQCHEM0QXZ" and "ZXQCHEM1QXZ" in the two columns."#),
+            (#"The literal identifiers are "alpha", "beta", and "gamma"."#,
+             #"The literal identifiers are "ZXQCHEM0QXZ", "ZXQCHEM1QXZ", and "ZXQCHEM2QXZ"."#),
+            (#"Use "east" and "west" as the exact labels."#,
+             #"Use "ZXQCHEM0QXZ" and "ZXQCHEM1QXZ" as the exact labels."#),
+            (#"The exact names are "red", "green" or "blue"."#,
+             #"The exact names are "ZXQCHEM0QXZ", "ZXQCHEM1QXZ" or "ZXQCHEM2QXZ"."#),
+            ("Use the exact labels “position”, “speed”, and “time” on the chart.",
+             "Use the exact labels “ZXQCHEM0QXZ”, “ZXQCHEM1QXZ”, and “ZXQCHEM2QXZ” on the chart.")
+        ]
+        for (source, expected) in cases {
+            let prepared = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertEqual(prepared.text, expected, source)
+            XCTAssertEqual(try prepared.validatedRestore(in: expected), source)
+        }
+    }
+
+    func testExactLabelInstructionContinuesIntoParallelLabelAssignment() throws {
+        let cases: [(String, String)] = [
+            (#"Use the exact label "speed" beside the scalar value, and label the vector as "velocity"."#,
+             #"Use the exact label "ZXQCHEM0QXZ" beside the scalar value, and label the vector as "ZXQCHEM1QXZ"."#),
+            (#"Use the exact label "left" (not a direction), and label the other vector as "right"."#,
+             #"Use the exact label "ZXQCHEM0QXZ" (not a direction), and label the other vector as "ZXQCHEM1QXZ"."#),
+            (#"Use the exact label "mass", and label the graph as "energy" or "force"."#,
+             #"Use the exact label "ZXQCHEM0QXZ", and label the graph as "ZXQCHEM1QXZ" or "ZXQCHEM2QXZ"."#)
+        ]
+        for (source, expected) in cases {
+            let prepared = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertEqual(prepared.text, expected, source)
+            XCTAssertEqual(try prepared.validatedRestore(in: expected), source)
+        }
+    }
+
+    func testLiteralCoordinationDoesNotCrossNewLinesSentencesOrReportingClauses() {
+        let tails = [
+            #", but translate "energy"."#,
+            #", and call this effect "gravity"."#,
+            #", and the lecturer says "energy"."#,
+            #", then label the graph as "energy"."#,
+            #"; and label the graph as "energy"."#,
+            #". And label the graph as "energy"."#,
+            "\nand label the graph as \"energy\".",
+            "\r\nand label the graph as \"energy\".",
+            "\nand \"energy\".",
+            ", and explain why \"energy is conserved\"."
+        ]
+        for tail in tails {
+            let source = #"Use the exact label "mass""# + tail
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text,
+                           #"Use the exact label "ZXQCHEM0QXZ""# + tail, source)
+        }
+        for source in [#"The lecturer said "speed rises" and "velocity changes direction"."#,
+                       #"Call the process "diffusion" and the movement "Brownian motion"."#,
+                       #"Does "constant speed" imply "constant velocity"?"#,
+                       #"Translate "mass" and "energy" into Chinese."#] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source)
+        }
+    }
+
+    func testLiteralContractionsKeepTheirWholeQuotedSpelling() throws {
+        for (source, expected) in [
+            ("The exact label is 'can't'.", "The exact label is 'ZXQCHEM0QXZ'."),
+            ("The exact label is ‘won’t’.", "The exact label is ‘ZXQCHEM0QXZ’."),
+            ("The literal names are 'can't' and 'won’t'.", "The literal names are 'ZXQCHEM0QXZ' and 'ZXQCHEM1QXZ'."),
+            ("The literal strings were ‘can’t’ and ‘won’t’.", "The literal strings were ‘ZXQCHEM0QXZ’ and ‘ZXQCHEM1QXZ’.")
+        ] {
+            let prepared = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertEqual(prepared.text, expected, source)
+            XCTAssertEqual(try prepared.validatedRestore(in: expected), source)
+        }
+        let speech = "The lecturer said 'can't stop' and 'won't move'."
+        XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(speech).text, speech)
+    }
+
+    func testPositionalCodeNamesKeepTheNameAndSurroundingNegation() throws {
+        for position in ["lower", "upper"] {
+            let source = "We call the \(position) vector \"q seven\", not the other vector."
+            let expected = "We call the \(position) vector \"ZXQCHEM0QXZ\", not the other vector."
+            let prepared = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertEqual(prepared.text, expected)
+            XCTAssertEqual(try prepared.validatedRestore(in: prepared.text), source)
+        }
+        let concept = #"We call the lower process "diffusion"."#
+        XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(concept).text, concept)
+    }
+
+    func testCoordinatedLiteralNamesRemainStrictlyRestored() throws {
+        let source = #"The literal identifiers are "alpha" and "beta"."#
+        let prepared = ChemistryTranslationProtector.prepare(source)
+        XCTAssertEqual(try prepared.validatedRestore(in: "字面标识符为 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ。"),
+                       "字面标识符为 alpha 和 beta。")
+        XCTAssertThrowsError(try prepared.validatedRestore(in: "字面标识符为 ZXQCHEM0QXZ。"))
+        XCTAssertThrowsError(try prepared.validatedRestore(in: "ZXQCHEM0QXZ、ZXQCHEM1QXZ 和 ZXQCHEM1QXZ。"))
+        XCTAssertFalse(prepared.restorePartial(in: "字面标识符为 ZXQCHEM0QXZ 和 ZXQCH").contains("ZXQ"))
+    }
+
+    func testLiteralListsStaySeparateFromAcademicNormalizationAndFormulas() throws {
+        let source = #"The exact names are "N A D H" and "A T P"; the molecules are N A D H and A T P."#
+        let normalized = AcademicInputNormalizer.normalize(source)
+        XCTAssertEqual(normalized,
+            #"The exact names are "N A D H" and "A T P"; the molecules are NADH and ATP."#)
+        let prepared = ChemistryTranslationProtector.prepare(normalized)
+        XCTAssertEqual(try prepared.validatedRestore(in: prepared.text), normalized)
+        let mixed = #"Add 4 mL of H2O, and keep the exact label "water" on the sample."#
+        XCTAssertEqual(ChemistryTranslationProtector.prepare(mixed).text,
+            #"Add 4 mL of ZXQCHEM0QXZ, and keep the exact label "ZXQCHEM1QXZ" on the sample."#)
+    }
     func testShortCaptionLengthPreservesTermsButRejectsRunawayChinese() throws {
         let positive: [(String, String)] = [
             ("Okay.", "好的。"), ("Not yet.", "还没有。"),
