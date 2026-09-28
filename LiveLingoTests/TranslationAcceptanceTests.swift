@@ -5,6 +5,73 @@ import XCTest
 /// These tests pin the acceptance rules that must stop it, and the technical
 /// exceptions that must keep working.
 final class TranslationAcceptanceTests: XCTestCase {
+    func testNegationExamplesExcludeWordFragmentsAndProtectedNames() {
+        for source in ["Open the notebook beside the nozzle.", "The field is not_ready.",
+                       #"Use the exact labels "not good" and "no charge"."#] {
+            let prepared = ChemistryTranslationProtector.prepare(source)
+            let original = ChemistryTranslationProtector.translationPrompt(base: QwenTranslationClient.systemPrompt, text: prepared.text)
+            XCTAssertEqual(ChemistryTranslationProtector.translationPrompt(
+                base: QwenTranslationClient.systemPrompt, text: prepared.text,
+                modelName: QwenModelProfile.energySaver.translationModel), original, source)
+        }
+    }
+
+    func testNegationExamplesAreLimitedToTheExact4BProfile() {
+        for source in ["No samples are contaminated.", "Don't stop.", "It wasn’t empty.",
+                       "Neither sensor is faulty.", "The result cannot be correct."] {
+            let original = ChemistryTranslationProtector.translationPrompt(base: QwenTranslationClient.systemPrompt, text: source)
+            for model in [QwenModelProfile.highQuality.translationModel, "other-model",
+                          "prefix-" + QwenModelProfile.energySaver.translationModel] {
+                XCTAssertEqual(ChemistryTranslationProtector.translationPrompt(
+                    base: QwenTranslationClient.systemPrompt, text: source, modelName: model), original)
+            }
+            XCTAssertNotEqual(ChemistryTranslationProtector.translationPrompt(
+                base: QwenTranslationClient.systemPrompt, text: source, modelName: QwenModelProfile.energySaver.translationModel), original)
+        }
+    }
+
+    func testTypedNegationRoutingPreservesSourceModeAndOneRequest() async throws {
+        let source = "You must not stop the experiment."
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            for thinking in [false, true] {
+                let counter = TypedRequestCounter()
+                let result = try await QwenTranslationClient.translateTypedText(source,
+                    modelName: model, thinking: thinking, request: { input, prompt, actualThinking in
+                        await counter.record()
+                        XCTAssertEqual(try Self.typedSource(in: input), source)
+                        XCTAssertEqual(actualThinking, thinking)
+                        XCTAssertEqual(prompt.contains(ChemistryTranslationProtector.negationInstruction),
+                                       model == QwenModelProfile.energySaver.translationModel)
+                        return "你不得停止实验。"
+                    })
+                XCTAssertEqual(result, "你不得停止实验。")
+                let count = await counter.count()
+                XCTAssertEqual(count, 1)
+            }
+        }
+    }
+
+    func testCaptionNegationRoutingPreservesInputBudgetAndOneRequest() async throws {
+        let source = "You must not stop the experiment."
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            let counter = TypedRequestCounter()
+            let result = try await QwenTranslationClient.translateAdjacent(
+                previous: "", previousChinese: "", current: source, context: "",
+                modelName: model, repairPrevious: false, request: { input, prompt, budget in
+                    await counter.record()
+                    XCTAssertEqual(input, source)
+                    XCTAssertEqual(budget, CaptionTranslationAttempt.standard.outputTokenBudget(for: source))
+                    XCTAssertEqual(prompt.contains(ChemistryTranslationProtector.negationInstruction),
+                                   model == QwenModelProfile.energySaver.translationModel)
+                    return "你不得停止实验。"
+                })
+            XCTAssertEqual(result.current, "你不得停止实验。")
+            XCTAssertNil(result.currentRejection)
+            let count = await counter.count()
+            XCTAssertEqual(count, 1)
+        }
+    }
+
     func testLiteralDefinitionKeepsItsClauseInstructionWithoutAffectingOrdinarySpeech() {
         for source in [#"The literal text is "S N two", and the mechanism is SN2."#,
                        #"The exact string is "low", while the temperature is 30 K."#] {

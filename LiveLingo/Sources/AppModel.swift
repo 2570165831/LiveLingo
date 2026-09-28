@@ -3497,8 +3497,19 @@ enum ChemistryTranslationProtector {
         namedPlaceholderExpression?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 
-    static func translationPrompt(base: String, text: String) -> String {
-        let instruction = promptSuffix(for: text)
+    static let negationInstruction = "译文必须保留原文肯定或否定的具体状态及其范围。例：the set is not empty 表示集合至少有一个元素，而非一个也没有；need not leave 表示不必离开，must not leave 表示不得离开；not all 表示并非全部，而非全部都不。按原句保留情态、数量和条件方向，不加强或弱化断言。引语中的陈述及外层命令、保留要求都要完整翻译。不要照抄这些例子，只输出原文的完整译文。"
+    private static let negationExpression = try! NSRegularExpression(
+        pattern: #"(?i)(?<![\p{L}\p{N}_])(?:not|no|never|without|neither|nor|none|nothing|nobody|cannot|[a-z]+n['’]t)(?![\p{L}\p{N}_])"#)
+
+    static func negationSuffix(for text: String) -> String {
+        let range = NSRange(text.startIndex..., in: text)
+        return negationExpression.firstMatch(in: text, range: range) == nil ? "" : negationInstruction
+    }
+
+    static func translationPrompt(base: String, text: String, modelName: String? = nil) -> String {
+        let instruction = [promptSuffix(for: text),
+                           modelName == QwenModelProfile.energySaver.translationModel ? negationSuffix(for: text) : ""]
+            .filter { !$0.isEmpty }.joined(separator: "\n")
         guard !instruction.isEmpty else { return base }
         let ending = "Return only the complete Simplified Chinese translation. Do not use markdown."
         return base.replacingOccurrences(of: ending, with: instruction + "\n" + ending)
