@@ -54,6 +54,11 @@ def build_vocabulary(tokenizer):
             added[token['id']] = token['content']
 
     decoder = _byte_decoder()
+    translation = {ord(character): byte for character, byte in decoder.items()}
+    # Unknown Latin-1 characters must still fail, not silently become bytes.
+    # Other unknown Unicode characters already fail the strict Latin-1 encode.
+    for character in range(256):
+        translation.setdefault(character, 0xffff)
     formatted = {}
     for token, token_id in tokenizer.get_vocab().items():
         if token_id in special:
@@ -62,8 +67,8 @@ def build_vocabulary(tokenizer):
             raw = added[token_id].encode('utf-8')
         else:
             try:
-                raw = bytes(decoder[character] for character in token)
-            except KeyError:
+                raw = token.translate(translation).encode('latin-1')
+            except UnicodeEncodeError:
                 raise ValueError('Grammar vocabulary contains a non-ByteLevel BPE token') from None
         if raw:
             formatted.setdefault(raw, []).append(token_id)
