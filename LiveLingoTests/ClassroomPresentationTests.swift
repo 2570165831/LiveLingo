@@ -45,7 +45,7 @@ final class ClassroomPresentationTests: XCTestCase {
         var repair: CheckedContinuation<QwenTranslationClient.AdjacentTranslation, Error>?
         let (model, _, _) = try fixture(translation: .init(
             translate: { _, _, _, _, _ in "合成课堂：系统吸收热能。" },
-            adjacent: { _, _, _, _, _, _, _, onCurrent in
+            adjacent: { _, _, _, _, _, _, _, onCurrent, shouldDefer in
                 await onCurrent?("合成课堂：温度随之升高。")
                 return try await withCheckedThrowingContinuation { repair = $0 }
             }))

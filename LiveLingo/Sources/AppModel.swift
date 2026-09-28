@@ -26,17 +26,25 @@ enum AppRuntimeEnvironment {
 @MainActor
 struct CaptionTranslationDependencies {
     typealias Update = @MainActor @Sendable (String) async -> Void
+    typealias DeferRepair = @MainActor @Sendable () -> Bool
     var translate: (String, String, [AuxiliaryTranslationHint], CaptionTranslationAttempt, Update?) async throws -> String
-    var adjacent: (String, String, String, String, String, Bool, [AuxiliaryTranslationHint], Update?) async throws -> QwenTranslationClient.AdjacentTranslation
+    var adjacent: (String, String, String, String, String, Bool, [AuxiliaryTranslationHint], Update?, DeferRepair?) async throws -> QwenTranslationClient.AdjacentTranslation
+
+    var repair: (DeferredCaptionRepair) async throws -> QwenTranslationClient.PreviousRepair = { _ in
+        throw QwenRuntimeError.requestFailed("测试必须注入前句补修器")
+    }
 
     static let live = Self(
         translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, attempt: $3, onUpdate: $4) },
         adjacent: { try await QwenTranslationClient.translateAdjacent(previous: $0, previousChinese: $1,
-            current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6, onCurrent: $7) }
+            current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6, onCurrent: $7, deferRepair: $8) },
+        repair: { try await QwenTranslationClient.repairPreviousCaption(previous: $0.previous.english,
+            previousChinese: $0.previous.chinese, current: $0.normalizedCurrent,
+            context: $0.context.map(\.english).joined(separator: " "), modelName: $0.modelName) }
     )
     static let unavailable = Self(
         translate: { _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
-        adjacent: { _, _, _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
+        adjacent: { _, _, _, _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
     )
 }
 
@@ -609,6 +617,8 @@ final class AppModel: ObservableObject {
     private let preferences: UserDefaults
     private var translationWorkerID: UUID?
     private var translationQueue: [UUID] = []
+    private var pendingCaptionRepairs: [DeferredCaptionRepair] = []
+    private var hasPendingTranslationWork: Bool { !translationQueue.isEmpty || !pendingCaptionRepairs.isEmpty }
     private var translationEnqueuedAt: [UUID: TimeInterval] = [:]
     private static let latencyLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "TranslationLatency")
     /// 苹果初译（预览）的时序日志：只记毫秒/计数，绝不记正文。
@@ -1071,6 +1081,7 @@ final class AppModel: ObservableObject {
                 await oldTranslation?.value
                 translationWorker = nil
                 translationQueue = []
+                pendingCaptionRepairs = []
                 let pendingSummary = summaryTask
                 cancelSummaryTask()
                 await pendingSummary?.value
@@ -1215,7 +1226,7 @@ final class AppModel: ObservableObject {
         if let state = transcriptionProcessing, state.pendingCount > 0 {
             return "录音已停止 · \(processingPaused || state.isPaused ? "补转已暂停" : "正在补转") · 剩余 \(LearningTimeLabel.stamp(state.backlogSeconds))"
         }
-        if processingPaused, !(sessionSnapshot?.processing.pendingSegmentIDs.isEmpty ?? true) {
+        if processingPaused, !(sessionSnapshot?.processing.pendingSegmentIDs.isEmpty ?? true) || !pendingCaptionRepairs.isEmpty {
             return "录音已保存 · 译文与笔记处理已暂停"
         }
         if processingTask != nil { return "录音已保存 · 正在整理译文与笔记" }
@@ -1294,6 +1305,7 @@ final class AppModel: ObservableObject {
         snapshot.processing.reviewPaused = noteReviewQueue.userPaused
         snapshot.processing.pendingSegmentIDs = segments.filter { !$0.hasUsableTranslation }.map(\.id)
         snapshot.processing.pendingBatchIDs = learningDraft.map { [$0.id] } ?? []
+        snapshot.processing.pendingCaptionRepairs = pendingCaptionRepairs.isEmpty ? nil : pendingCaptionRepairs
         if isRecording || isPaused { snapshot.processing.phase = .capturing }
         else if processingPaused { snapshot.processing.phase = .paused }
         else if phase == .stopping || processingTask != nil || (transcriptionProcessing?.pendingCount ?? 0) > 0 {
@@ -1303,7 +1315,7 @@ final class AppModel: ObservableObject {
                 || segments.contains(where: { $0.translationState == .failed })
                 || snapshot.processing.lastError != nil {
                 snapshot.processing.phase = .failed
-            } else if !snapshot.processing.pendingSegmentIDs.isEmpty {
+            } else if !snapshot.processing.pendingSegmentIDs.isEmpty || !pendingCaptionRepairs.isEmpty {
                 snapshot.processing.phase = .draining
             } else {
                 snapshot.processing.phase = .completed
@@ -1431,6 +1443,7 @@ final class AppModel: ObservableObject {
         resetSessionStateForNewRun()
         sessionID = snapshot.sessionID
         sessionDirectory = directory
+        pendingCaptionRepairs = snapshot.processing.pendingCaptionRepairs ?? []
         segments = snapshot.segments
         for index in segments.indices where segments[index].translationState == .translating {
             segments[index].deferTranslation()
@@ -1572,6 +1585,7 @@ final class AppModel: ObservableObject {
         lastSummaryCycleStartedUptime = nil
         summaryRetryNotBefore = nil
         translationQueue = []
+        pendingCaptionRepairs = []
         translationEnqueuedAt = [:]
         translationHints = [:]
         sessionDirectory = nil
@@ -1741,6 +1755,7 @@ final class AppModel: ObservableObject {
             summaryCycleUpdate = ""
             summaryStatus = "等待课堂内容"
             translationQueue = []
+            pendingCaptionRepairs = []
             translationEnqueuedAt = [:]
             translationHints = [:]
             transcriptionCandidates = []
@@ -1814,7 +1829,7 @@ final class AppModel: ObservableObject {
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
         drainTranslationQueue()
         startStopOverlapIfUseful()
-        while translationWorker != nil || summaryTask != nil || !translationQueue.isEmpty {
+        while translationWorker != nil || summaryTask != nil || hasPendingTranslationWork {
             if let summaryTask { await summaryTask.value }
             guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
             drainTranslationQueue()
@@ -2237,6 +2252,7 @@ final class AppModel: ObservableObject {
         replaceExistingSegment(at: index, with: revised, reason: "测试确认原文修订")
     }
     var savedProcessingTaskForTesting: Task<Void, Never>? { processingTask }
+    var savedPauseTaskForTesting: Task<Void, Error>? { processingPauseTask }
     func generateSummaryForTesting() async {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         processingPaused = false
@@ -2260,10 +2276,76 @@ final class AppModel: ObservableObject {
         streamingDependencyIDs.removeAll()
     }
 
+    private func applyPreviousRepair(_ result: QwenTranslationClient.PreviousRepair,
+                                     at previousIndex: Int, started: TimeInterval) {
+        if let revised = result.previous,
+           self.segments.indices.contains(previousIndex) {
+            let normalized = SimplifiedChineseNormalizer.normalize(revised)
+            // 2026-09-18：相邻修复**一次处理两段** ✗，模型多回半句就会把两段内容
+            // 塞进前一段 ✗（缺陷文档 round-359 的收敛结论 ✓）。
+            // 因此：修复结果若相对**前一段自己的英文**长得离谱 ✗，就**丢弃这次修复** ✓
+            // —— 保留原有中文 ✓（等价于从未修复 ✓），只会更保守 ✓，不会改坏 ✓。
+            let repairPlausible = TranslationLengthGuard.isPlausible(
+                chinese: normalized,
+                english: self.segments[previousIndex].english)
+            if !repairPlausible {
+                Self.traceTranslation("adjacent_repair", id: self.segments[previousIndex].id,
+                                      elapsed: ProcessInfo.processInfo.systemUptime - started,
+                                      detail: "skipped_length_guard")
+            }
+            if repairPlausible, !normalized.isEmpty, self.segments[previousIndex].chinese != normalized {
+                let previousID = self.segments[previousIndex].id
+                var revisedSegment = self.segments[previousIndex]
+                revisedSegment.completeTranslation(normalized)
+                self.replaceExistingSegment(at: previousIndex, with: revisedSegment,
+                    reason: "相邻语句补全译文")
+                Self.traceTranslation("adjacent_repair", id: previousID,
+                                      elapsed: ProcessInfo.processInfo.systemUptime - started,
+                                      detail: "applied")
+            }
+        } else if let reason = result.rejection {
+            Self.traceTranslation("adjacent_repair_kept", id: self.segments[previousIndex].id,
+                                  elapsed: ProcessInfo.processInfo.systemUptime - started,
+                                  detail: reason)
+        }
+    }
+
+    private func finishNextCaptionRepair(session: UUID, epoch: Int, worker: UUID) async {
+        guard let pending = pendingCaptionRepairs.first else { return }
+        guard pending.previousIndex(in: segments, session: session) != nil else {
+            pendingCaptionRepairs.removeFirst()
+            persistCurrentSession()
+            return
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            let result = try await captionTranslation.repair(pending)
+            try Task.checkCancellation()
+            guard sessionID == session, generation == epoch, translationWorkerID == worker,
+                  !processingPaused else { return }
+            // Keep the in-flight job in the saved queue until it has actually
+            // returned. Cancellation/parking therefore retains it for resume.
+            if let index = pending.previousIndex(in: segments, session: session) {
+                applyPreviousRepair(result, at: index, started: started)
+            }
+        } catch is CancellationError {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return
+        } catch {
+            guard !Task.isCancelled, sessionID == session, generation == epoch,
+                  translationWorkerID == worker, !processingPaused else { return }
+            Self.traceTranslation("adjacent_repair_kept", id: pending.previous.id,
+                elapsed: ProcessInfo.processInfo.systemUptime - started, detail: error.localizedDescription)
+        }
+        guard sessionID == session, generation == epoch, translationWorkerID == worker else { return }
+        pendingCaptionRepairs.removeAll { $0.current.id == pending.current.id }
+        persistCurrentSession()
+    }
+
     private func drainTranslationQueue() {
         guard !processingPaused, !manualRequestInFlight,
               (summaryTask == nil || summaryConcurrencyAllowed),
-              translationWorker == nil, !translationQueue.isEmpty else { return }
+              translationWorker == nil, hasPendingTranslationWork else { return }
         let currentGeneration = generation
         let currentSession = sessionID
         let workerID = UUID()
@@ -2278,9 +2360,13 @@ final class AppModel: ObservableObject {
                     self.translationWorkerID = nil
                 }
             }
-            while !self.translationQueue.isEmpty, !Task.isCancelled, !self.processingPaused,
+            while self.hasPendingTranslationWork, !Task.isCancelled, !self.processingPaused,
                   currentGeneration == self.generation, currentSession == self.sessionID,
                   self.translationWorkerID == workerID {
+                if self.translationQueue.isEmpty {
+                    await self.finishNextCaptionRepair(session: currentSession, epoch: currentGeneration, worker: workerID)
+                    continue
+                }
                 let id = self.translationQueue.removeFirst()
                 guard let index = self.segments.firstIndex(where: { $0.id == id }) else {
                     self.translationEnqueuedAt.removeValue(forKey: id)
@@ -2316,11 +2402,12 @@ final class AppModel: ObservableObject {
                         && self.segments[index - 1].hasUsableTranslation ? index - 1 : nil
                     if let previousIndex {
                         let previousInput = self.segments[previousIndex]
+                        let repairContext = Array(self.segments[..<previousIndex].suffix(2))
                         let pair = try await self.captionTranslation.adjacent(
                             previousInput.english,
                             previousInput.chinese,
                             normalizedInput,
-                            self.segments[..<previousIndex].suffix(2).map(\.english).joined(separator: " "),
+                            repairContext.map(\.english).joined(separator: " "),
                             translationModel,
                             previousInput.endTime - previousInput.startTime >= 9.5
                                 || !".!?".contains(previousInput.english.last ?? " ")
@@ -2339,6 +2426,9 @@ final class AppModel: ObservableObject {
                                 self.streamingChinese = accepted
                                 Self.traceTranslation("current_preview", id: input.id,
                                     elapsed: ProcessInfo.processInfo.systemUptime - started)
+                            }, { [weak self] in
+                                guard let self else { return true }
+                                return self.hasPendingTranslationWork
                             })
                         try Task.checkCancellation()
                         guard currentGeneration == self.generation, currentSession == self.sessionID,
@@ -2355,40 +2445,15 @@ final class AppModel: ObservableObject {
                             }
                             continue
                         }
-                        // A repair that passed acceptance is stored even when the
-                        // current sentence fails; a rejected repair never
-                        // overwrites the Chinese line already on screen.
-                        if let revised = pair.previous,
-                           currentGeneration == self.generation,
-                           self.segments.indices.contains(previousIndex) {
-                            let normalized = SimplifiedChineseNormalizer.normalize(revised)
-                            // 2026-09-18：相邻修复**一次处理两段** ✗，模型多回半句就会把两段内容
-                            // 塞进前一段 ✗（缺陷文档 round-359 的收敛结论 ✓）。
-                            // 因此：修复结果若相对**前一段自己的英文**长得离谱 ✗，就**丢弃这次修复** ✓
-                            // —— 保留原有中文 ✓（等价于从未修复 ✓），只会更保守 ✓，不会改坏 ✓。
-                            let repairPlausible = TranslationLengthGuard.isPlausible(
-                                chinese: normalized,
-                                english: self.segments[previousIndex].english)
-                            if !repairPlausible {
-                                Self.traceTranslation("adjacent_repair", id: self.segments[previousIndex].id,
-                                                      elapsed: ProcessInfo.processInfo.systemUptime - started,
-                                                      detail: "skipped_length_guard")
-                            }
-                            if repairPlausible, !normalized.isEmpty, self.segments[previousIndex].chinese != normalized {
-                                let previousID = self.segments[previousIndex].id
-                                var revisedSegment = self.segments[previousIndex]
-                                revisedSegment.completeTranslation(normalized)
-                                self.replaceExistingSegment(at: previousIndex, with: revisedSegment,
-                                    reason: "相邻语句补全译文")
-                                Self.traceTranslation("adjacent_repair", id: previousID,
-                                                      elapsed: ProcessInfo.processInfo.systemUptime - started,
-                                                      detail: "applied")
-                            }
-                        } else if let reason = pair.previousRejection {
-                            Self.traceTranslation("adjacent_repair_kept", id: self.segments[previousIndex].id,
-                                                  elapsed: ProcessInfo.processInfo.systemUptime - started,
-                                                  detail: reason)
+                        if pair.previousRepairDeferred {
+                            self.pendingCaptionRepairs.removeAll { $0.current.id == input.id }
+                            self.pendingCaptionRepairs.append(DeferredCaptionRepair(sessionID: currentSession,
+                                previous: previousInput, current: input, context: repairContext,
+                                normalizedCurrent: normalizedInput, modelName: translationModel))
+                            self.persistCurrentSession()
                         }
+                        self.applyPreviousRepair(.init(previous: pair.previous, rejection: pair.previousRejection),
+                            at: previousIndex, started: started)
                         guard let acceptedCurrent = pair.current else {
                             let reason = pair.currentRejection ?? "未知原因"
                             Self.traceTranslation("rejected", id: id,
@@ -2501,7 +2566,7 @@ final class AppModel: ObservableObject {
             self.translationWorker = nil
             guard !Task.isCancelled else { return }
             self.markCaptionActivity()
-            if !self.translationQueue.isEmpty {
+            if self.hasPendingTranslationWork {
                 self.drainTranslationQueue()
             } else {
                 let force = self.summaryRefreshRequested
@@ -2519,7 +2584,7 @@ final class AppModel: ObservableObject {
     private func startStopOverlapIfUseful() {
         guard backgroundServicesEnabled else { return }
         guard phase == .stopping, activeStorageMode?.persistsSession == true,
-              !stopOverlapStarted, summaryTask == nil,
+              !stopOverlapStarted, summaryTask == nil, pendingCaptionRepairs.isEmpty,
               translationWorker != nil, !translationQueue.isEmpty,
               !manualRequestInFlight, !isManualTranslating else { return }
         refreshSummaryConcurrency()
@@ -2610,7 +2675,8 @@ final class AppModel: ObservableObject {
             if force { summaryRefreshRequested = true }
             return
         }
-        guard summaryConcurrencyAllowed || (translationWorker == nil && translationQueue.isEmpty) else {
+        guard pendingCaptionRepairs.isEmpty,
+              summaryConcurrencyAllowed || (translationWorker == nil && !hasPendingTranslationWork) else {
             summaryStatus = "等待字幕翻译空隙"
             if force { summaryRefreshRequested = true }
             return
@@ -2838,7 +2904,7 @@ final class AppModel: ObservableObject {
         if hasCaptionBacklog { reviewConcurrency.reset() }
         let capable = reviewConcurrency.allows(mode: selectedMode)
         let available = SummaryResourcePolicy.estimatedAvailableBytes() ?? 0
-        let liveWorkPending = translationWorker != nil || !translationQueue.isEmpty
+        let liveWorkPending = translationWorker != nil || hasPendingTranslationWork
             || summaryTask != nil || manualRequestInFlight || isManualTranslating
         let decision = ProcessingFocusPolicy.decision(ProcessingFocusPolicy.Context(
             focusMode: processingFocusEnabled,
@@ -2866,7 +2932,7 @@ final class AppModel: ObservableObject {
     private func resourceContext(summaryRunning: Bool, continuingSummary: Bool,
                                  allowConcurrent: Bool? = nil) -> ResourceSchedulingPolicy.Context {
         .init(now: ProcessInfo.processInfo.systemUptime, memoryNormal: summaryMemoryPressureNormal,
-            captionBacklog: hasCaptionBacklog, captionPending: translationWorker != nil || !translationQueue.isEmpty,
+            captionBacklog: hasCaptionBacklog, captionPending: translationWorker != nil || hasPendingTranslationWork,
             recording: hasActiveSession || phase == .preparing || phase == .stopping,
             allowConcurrent: allowConcurrent ?? summaryConcurrencyAllowed, summaryRunning: summaryRunning,
             paused: processingPaused, lastSummaryStarted: lastSummaryCycleStartedUptime,
@@ -4009,7 +4075,7 @@ extension AppModel {
                         throw QwenRuntimeError.requestFailed("CLI notes timed out; saved progress is retained")
                     }
                     if let decision = lastResourceDecision, decision != .available, decision != .finishSummary,
-                       summaryTask == nil, translationWorker == nil, translationQueue.isEmpty {
+                       summaryTask == nil, translationWorker == nil, !hasPendingTranslationWork {
                         if blockedReason != decision.rawValue {
                             blockedReason = decision.rawValue
                             blockedSince = now
@@ -4101,7 +4167,7 @@ extension AppModel {
                 summarizedCount: lastSummarizedSegmentCount,
                 translatedCount: completedTranslationCount,
                 pendingWorkers: (processingTask != nil ? 1 : 0) + (translationWorker != nil ? 1 : 0)
-                    + (summaryTask != nil ? 1 : 0) + translationQueue.count,
+                    + (summaryTask != nil ? 1 : 0) + translationQueue.count + pendingCaptionRepairs.count,
                 archiveErrorPresent: archiveError != nil,
                 journalIncompleteTailBytes: loaded.incompleteTailBytes,
                 exportPaths: exported.map(\.path),
@@ -4120,7 +4186,7 @@ extension AppModel {
 
     private var cliSavedWorkPending: Bool {
         processingTask != nil || translationWorker != nil || summaryTask != nil
-            || !translationQueue.isEmpty
+            || hasPendingTranslationWork
             || (transcriptionProcessing?.pendingCount ?? 0) > 0
             || (transcriptionProcessing?.activeCount ?? 0) > 0
             || (transcriptionProcessing?.unresolvedCount ?? 0) > 0
