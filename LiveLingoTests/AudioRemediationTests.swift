@@ -571,6 +571,218 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testAutomaticASRReusesExactRequestsButKeepsContextSeparate() async throws {
+        let root = try directory(), session = UUID(), chunk = UUID()
+        let wav = try audio(root, name: "chunk.wav", seconds: 10)
+        let recording = try audio(root, name: "recording.wav", seconds: 12)
+        let calls = AudioTestBox<[String]>([]), events = AudioTestBox<[SpeechPipeline.Event]>([])
+        let queue = DurableTranscriptionQueue { url, model, enhanced in
+            let frames = try AVAudioFile(forReading: url).length
+            calls.update { $0.append("\(model):\(enhanced):\(frames)") }
+            return frames > 160_000 ? "A contextual candidate requires confirmation." : ""
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                  handler: { e in events.update { $0.append(e) } })
+        queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 10,
+                           appleEvidence: "", recordingURL: recording, id: chunk, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(calls.value.count, 4, "Only raw primary, enhanced primary/fallback, and a different context clip need inference")
+        XCTAssertEqual(calls.value.filter { $0 == "primary:true:160000" }.count, 1)
+        XCTAssertEqual(calls.value.filter { $0 == "fallback:true:160000" }.count, 1)
+        let record = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(record.status, .failed)
+        XCTAssertEqual(record.automaticRetryCount, 2)
+        XCTAssertNil(record.text)
+        XCTAssertEqual(record.candidateOrigin, "context")
+        XCTAssertEqual(record.candidateText, "A contextual candidate requires confirmation.")
+        XCTAssertFalse(events.value.contains { if case .identifiedFinal = $0 { return true }; return false })
+    }
+
+    func testAutomaticASRReuseKeepsDifferentModelsSeparate() async throws {
+        let root = try directory(), session = UUID(), wav = try audio(root)
+        let calls = AudioTestBox<[String]>([])
+        let queue = DurableTranscriptionQueue { _, model, enhanced in
+            calls.update { $0.append("\(model):\(enhanced)") }; return ""
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(calls.value, ["primary:false", "fallback:true", "primary:true"])
+        XCTAssertEqual(queue.records.first?.automaticRetryCount, 2)
+        XCTAssertEqual(queue.records.first?.status, .failed)
+    }
+
+    func testManualASRRetryStartsFreshAfterAutomaticExhaustion() async throws {
+        let root = try directory(), session = UUID(), chunk = UUID(), wav = try audio(root)
+        let calls = AudioTestBox(0), manual = AudioTestBox(false)
+        let queue = DurableTranscriptionQueue { _, _, _ in
+            calls.update { $0 += 1 }
+            return manual.value ? "A fresh manual recognition result." : ""
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: nil, start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, id: chunk, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(calls.value, 2)
+        manual.update { $0 = true }
+        try queue.retry(id: chunk); await queue.finish()
+        XCTAssertEqual(calls.value, 3)
+        XCTAssertEqual(queue.records.first?.text, "A fresh manual recognition result.")
+        XCTAssertEqual(queue.records.first?.manualRetryCount, 1)
+        XCTAssertEqual(queue.records.first?.automaticRetryCount, 2)
+    }
+
+    func testAutomaticASRReuseDoesNotCrossChunkIdentity() async throws {
+        let root = try directory(), session = UUID()
+        let calls = AudioTestBox(0)
+        let queue = DurableTranscriptionQueue { _, _, _ in calls.update { $0 += 1 }; return "" }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                  startPaused: true, handler: { _ in })
+        for ordinal in 0..<2 {
+            let wav = try audio(root, name: "chunk-\(ordinal).wav")
+            queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: nil,
+                               start: Double(ordinal), end: Double(ordinal+1), appleEvidence: "", recordingURL: nil,
+                               sessionID: session), handler: { _ in })
+        }
+        try queue.resume(); await queue.finish()
+        XCTAssertEqual(calls.value, 4)
+        XCTAssertEqual(queue.records.count, 2)
+        XCTAssertTrue(queue.records.allSatisfy { $0.status == .failed && $0.automaticRetryCount == 2 })
+    }
+
+    func testAutomaticASRReuseDoesNotRetainTransientErrors() async throws {
+        let root = try directory(), session = UUID(), wav = try audio(root)
+        let calls = AudioTestBox(0)
+        let queue = DurableTranscriptionQueue { _, _, _ in
+            calls.update { $0 += 1 }
+            if calls.value == 2 { throw URLError(.timedOut) }
+            return calls.value == 3 ? "A successful retry after a transient failure." : ""
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: nil, start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(calls.value, 3)
+        XCTAssertEqual(queue.records.first?.status, .completed)
+        XCTAssertEqual(queue.records.first?.text, "A successful retry after a transient failure.")
+    }
+
+    func testChangedAudioCannotReuseAnEarlierRecognition() async throws {
+        let root = try directory(), session = UUID(), wav = try audio(root)
+        let calls = AudioTestBox(0)
+        let queue = DurableTranscriptionQueue { url, _, _ in
+            calls.update { $0 += 1 }
+            if calls.value == 2 {
+                let file = try AVAudioFile(forWriting: url, settings: self.format().settings)
+                try file.write(from: self.buffer(16_000, value: 0.1))
+            }
+            return calls.value == 3 ? "The changed waveform needs a fresh result." : ""
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: nil, start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(calls.value, 3)
+        XCTAssertEqual(queue.records.first?.text, "The changed waveform needs a fresh result.")
+    }
+
+    func testCancelledAutomaticASRReturnIsNotReused() async throws {
+        let root = try directory(), session = UUID(), chunk = UUID()
+        let old = try audio(root, name: "old.wav"), next = try audio(root, name: "new.wav")
+        let gate = AudioTestGate(), entered = AudioTestBox(false), calls = AudioTestBox(0)
+        let queue = DurableTranscriptionQueue { url, _, _ in
+            if url.lastPathComponent == "new.wav" { return "The newly captured caption has priority." }
+            calls.update { $0 += 1 }
+            if calls.value == 2 { entered.update { $0 = true }; await gate.wait() }
+            return calls.value == 3 ? "The old interval now has a valid result." : ""
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: old, modelKey: "primary", fallbackModelKey: nil, start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, id: chunk, sessionID: session), handler: { _ in })
+        try await waitUntil { entered.value }
+        queue.submit(.init(audioURL: next, modelKey: "primary", fallbackModelKey: nil, start: 1, end: 2,
+                           appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await gate.release(); await queue.finish()
+        XCTAssertEqual(calls.value, 3)
+        XCTAssertEqual(queue.records.first { $0.id == chunk }?.text, "The old interval now has a valid result.")
+        XCTAssertEqual(queue.records.first { $0.id == chunk }?.automaticRetryCount, 2)
+        XCTAssertTrue(queue.records.allSatisfy { $0.status == .completed })
+    }
+
+    func testAutomaticASRReuseIsDiscardedWhenTheSessionChanges() async throws {
+        let oldRoot = try directory(), newRoot = try directory(), oldSession = UUID(), newSession = UUID(), chunk = UUID()
+        let gate = AudioTestGate(), entered = AudioTestBox(false), fallbackCalls = AudioTestBox(0)
+        let events = AudioTestBox<[TranscriptionCommit]>([])
+        let queue = DurableTranscriptionQueue { url, model, enhanced in
+            if model == "primary" {
+                if enhanced && url.path.hasPrefix(oldRoot.path + "/") {
+                    entered.update { $0 = true }; await gate.wait()
+                }
+                return ""
+            }
+            fallbackCalls.update { $0 += 1 }
+            return fallbackCalls.value == 1 ? "" : "A new session owns this result."
+        }
+        let handler: @Sendable (SpeechPipeline.Event) -> Void = { event in
+            if case .identifiedFinal(let commit) = event { events.update { $0.append(commit) } }
+        }
+        try await queue.configure(directory: oldRoot, sessionID: oldSession, persistent: true, identified: true, handler: handler)
+        queue.submit(.init(audioURL: try audio(oldRoot), modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, id: chunk, sessionID: oldSession), handler: handler)
+        try await waitUntil { entered.value }
+        try await queue.configure(directory: newRoot, sessionID: newSession, persistent: true, identified: true, handler: handler)
+        queue.submit(.init(audioURL: try audio(newRoot), modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, id: chunk, sessionID: newSession), handler: handler)
+        await gate.release(); await queue.finish()
+        XCTAssertEqual(fallbackCalls.value, 2)
+        XCTAssertEqual(events.value.count, 1)
+        XCTAssertEqual(events.value.first?.sessionID, newSession)
+        XCTAssertEqual(events.value.first?.text, "A new session owns this result.")
+    }
+
+    func testPauseDiscardsAutomaticASRReuseBeforeResuming() async throws {
+        let root = try directory(), session = UUID(), wav = try audio(root)
+        let fallbackCalls = AudioTestBox(0), paused = AudioTestBox(false)
+        let holder = AudioTestBox<DurableTranscriptionQueue?>(nil)
+        let queue = DurableTranscriptionQueue { _, model, _ in
+            guard model == "fallback" else { return "" }
+            fallbackCalls.update { $0 += 1 }
+            return fallbackCalls.value == 1 ? "" : "A fresh result after resuming."
+        }
+        holder.update { $0 = queue }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true) { event in
+            guard case .processing = event, !paused.value,
+                  let owner = holder.value, owner.records.first?.status == .retryWaiting else { return }
+            paused.update { $0 = true }
+            do { try owner.requestPause() } catch { XCTFail("Pause failed: \(error)") }
+        }
+        queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        try await waitUntil { paused.value }; await queue.finish()
+        XCTAssertEqual(fallbackCalls.value, 1)
+        XCTAssertEqual(queue.state?.isPaused, true)
+        try queue.resume(); await queue.finish()
+        XCTAssertEqual(fallbackCalls.value, 2)
+        XCTAssertEqual(queue.records.first?.text, "A fresh result after resuming.")
+        holder.update { $0 = nil }
+    }
+
+    func testOversizedASRResultsAreNotRetainedForRetry() async throws {
+        let root = try directory(), session = UUID(), wav = try audio(root)
+        let calls = AudioTestBox(0)
+        let queue = DurableTranscriptionQueue { _, _, _ in
+            calls.update { $0 += 1 }; return String(repeating: "?", count: 16_385)
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: nil, start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(calls.value, 3)
+        XCTAssertEqual(queue.records.first?.status, .failed)
+        XCTAssertNil(queue.records.first?.text)
+    }
+
     func testOldCaptureCallbackCannotWriteIntoANewSession() async throws {
         let first = try directory(), second = try directory()
         let pipeline = SpeechPipeline(transcriber: { _, _, _ in "The retained recording." }, enableAudioAnalysis: false)
