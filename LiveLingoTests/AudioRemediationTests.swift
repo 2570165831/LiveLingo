@@ -65,6 +65,51 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         return r
     }
 
+    func testSealedInputFinishesAfterAllFramesAndOnlyOnce() async throws {
+        let state = AudioTestBox((frames: 0, finishes: 0, framesAtFinish: 0))
+        let input = try OwnedAudioCaptureBuffer(format: format(), queue: DispatchQueue(label: UUID().uuidString),
+            consume: { pcm, _ in state.update { $0.frames += Int(pcm.frameLength) } }, failed: { _ in XCTFail("Unexpected input failure") },
+            finish: { state.update { $0.finishes += 1; $0.framesAtFinish = $0.frames } })
+        XCTAssertEqual(input.submit(buffer(8_000)), .accepted)
+        await input.drain()
+        XCTAssertEqual(state.value.finishes, 0)
+        input.seal()
+        await input.drain()
+        input.seal()
+        await input.drain()
+        XCTAssertEqual(state.value.frames, 8_000)
+        XCTAssertEqual(state.value.framesAtFinish, 8_000)
+        XCTAssertEqual(state.value.finishes, 1)
+    }
+
+    func testTailFailureIsReportedOnceWithoutReprocessingInput() async throws {
+        let state = AudioTestBox((frames: 0, finishes: 0, failures: 0))
+        let input = try OwnedAudioCaptureBuffer(format: format(), queue: DispatchQueue(label: UUID().uuidString),
+            consume: { pcm, _ in state.update { $0.frames += Int(pcm.frameLength) } },
+            failed: { _ in state.update { $0.failures += 1 } },
+            finish: { state.update { $0.finishes += 1 }; throw NSError(domain: "SyntheticTailFailure", code: 1) })
+        XCTAssertEqual(input.submit(buffer(1_600)), .accepted)
+        input.seal()
+        await input.drain()
+        await input.drain()
+        XCTAssertEqual(state.value.frames, 1_600)
+        XCTAssertEqual(state.value.finishes, 1)
+        XCTAssertEqual(state.value.failures, 1)
+        XCTAssertTrue(input.failureSnapshot?.reason.contains("尾部") == true)
+    }
+
+    func testFailedInputDoesNotFlushAdditionalConverterOutput() async throws {
+        let finishes = AudioTestBox(0)
+        let input = try OwnedAudioCaptureBuffer(format: format(), queue: DispatchQueue(label: UUID().uuidString),
+            consume: { _, _ in throw NSError(domain: "SyntheticWriteFailure", code: 1) },
+            failed: { _ in }, finish: { finishes.update { $0 += 1 } })
+        XCTAssertEqual(input.submit(buffer(1_600)), .accepted)
+        input.seal()
+        await input.drain()
+        XCTAssertNotNil(input.failureSnapshot)
+        XCTAssertEqual(finishes.value, 0)
+    }
+
     func testOwnedCapacityUsesActualInputFormat() throws {
         for f in [format(44_100), format(48_000, channels: 2), format(16_000)] {
             let ring = try OwnedAudioCaptureBuffer(format: f, queue: DispatchQueue(label: UUID().uuidString),

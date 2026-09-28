@@ -3,6 +3,403 @@ import AVFoundation
 import XCTest
 @testable import LiveLingo
 
+private final class ControlledAudioWriteFailure: @unchecked Sendable {
+    private let lock = NSLock()
+    private var enabled = false
+    func enable() { lock.withLock { enabled = true } }
+    func check() throws {
+        if lock.withLock({ enabled }) { throw NSError(domain: "SyntheticTailWriteFailure", code: 1) }
+    }
+}
+
+private final class ControlledMicrophoneScheduler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var operations: [@Sendable () -> Void] = []
+    var count: Int { lock.withLock { operations.count } }
+    func schedule(_ operation: @escaping @Sendable () -> Void) { lock.withLock { operations.append(operation) } }
+    @discardableResult func runNext() -> Bool {
+        let next = lock.withLock { operations.isEmpty ? nil : operations.removeFirst() }
+        next?()
+        return next != nil
+    }
+}
+
+private final class ControlledMicrophoneEngine: NSObject, MicrophoneCaptureEngine, @unchecked Sendable {
+    private let lock = NSLock()
+    private var format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+    private var input: OwnedAudioCaptureBuffer?
+    private var running = false
+    private var starts = 0
+    private var tapInstalls = 0
+    private var stopHook: (@Sendable () -> Void)?
+    private var installHook: (@Sendable () -> Void)?
+    private var startFailuresRemaining = 0
+    var notificationObject: AnyObject { self }
+    var outputFormat: AVAudioFormat { lock.withLock { format } }
+    var isRunning: Bool { lock.withLock { running } }
+    var startCount: Int { lock.withLock { starts } }
+    var tapInstallCount: Int { lock.withLock { tapInstalls } }
+    var installedFormat: AVAudioFormat? { lock.withLock { input?.format } }
+    func setStopHook(_ hook: (@Sendable () -> Void)?) { lock.withLock { stopHook = hook } }
+    func setInstallHook(_ hook: (@Sendable () -> Void)?) { lock.withLock { installHook = hook } }
+    func failNextStarts(_ count: Int) { lock.withLock { startFailuresRemaining = count } }
+    func changeFormat(to sampleRate: Double? = nil) {
+        lock.withLock {
+            running = false
+            if let sampleRate { format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)! }
+        }
+    }
+    func installTap(format: AVAudioFormat, input: OwnedAudioCaptureBuffer) throws {
+        let hook = lock.withLock { self.input = input; tapInstalls += 1; return installHook }
+        hook?()
+    }
+    func removeTap() { lock.withLock { input = nil } }
+    func prepare() {}
+    func start() throws {
+        let failed = lock.withLock {
+            starts += 1
+            if startFailuresRemaining > 0 { startFailuresRemaining -= 1; return true }
+            running = true
+            return false
+        }
+        if failed { throw NSError(domain: "SyntheticMicrophone", code: 1) }
+    }
+    func pause() { lock.withLock { running = false } }
+    func stop() {
+        let hook = lock.withLock { running = false; return stopHook }
+        hook?()
+    }
+    func send(frames: Int = 1_600, value: Float = 0.1,
+              observedEnd: TimeInterval = ProcessInfo.processInfo.systemUptime) -> OwnedAudioCaptureBuffer.Submission? {
+        let target = lock.withLock { input }
+        guard let target else { return nil }
+        let buffer = AVAudioPCMBuffer(pcmFormat: target.format, frameCapacity: AVAudioFrameCount(frames))!
+        buffer.frameLength = AVAudioFrameCount(frames)
+        for frame in 0..<frames { buffer.floatChannelData![0][frame] = value }
+        return target.submit(buffer, observedEnd: observedEnd)
+    }
+    func drain() async { await lock.withLock { input }?.drain() }
+}
+
+private final class ControlledMicrophoneNotifications: NotificationCenter, @unchecked Sendable {
+    private let lock = NSLock()
+    private var handlers: [@Sendable (Notification) -> Void] = []
+    var capturedHandlers: [@Sendable (Notification) -> Void] { lock.withLock { handlers } }
+    override func addObserver(forName name: NSNotification.Name?, object obj: Any?,
+                              queue: OperationQueue?, using block: @Sendable @escaping (Notification) -> Void) -> NSObjectProtocol {
+        if name == .AVAudioEngineConfigurationChange { lock.withLock { handlers.append(block) } }
+        return super.addObserver(forName: name, object: obj, queue: queue, using: block)
+    }
+}
+
+final class MicrophoneLifecycleTests: XCTestCase, @unchecked Sendable {
+    private typealias Fixture = (pipeline: SpeechPipeline, engine: ControlledMicrophoneEngine,
+        scheduler: ControlledMicrophoneScheduler, notifications: ControlledMicrophoneNotifications,
+        events: CaptureSleepEvents, recording: URL, sleepNotifications: NotificationCenter)
+    private func start(beforeAudioWrite: (@Sendable () throws -> Void)? = nil) async throws -> Fixture {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-MicLifecycle-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let engine = ControlledMicrophoneEngine()
+        let scheduler = ControlledMicrophoneScheduler()
+        let notifications = ControlledMicrophoneNotifications()
+        let events = CaptureSleepEvents()
+        let sleepNotifications = NotificationCenter()
+        let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Synthetic audio around a device lifecycle change." },
+            beforeAudioWrite: beforeAudioWrite, enableAudioAnalysis: false, captureSleepNotificationCenter: sleepNotifications,
+            microphoneEngineFactory: { engine }, microphoneNotifications: notifications,
+            microphoneRecoveryScheduler: scheduler.schedule, enableMicrophoneWatchdog: false)
+        let recording = directory.appendingPathComponent("recording.wav")
+        try await pipeline.start(inputMode: .microphone, recordingURL: recording, sessionID: UUID(), eventHandler: events.consume)
+        return (pipeline, engine, scheduler, notifications, events, recording, sleepNotifications)
+    }
+    private func change(_ f: Fixture, sampleRate: Double? = nil) {
+        f.engine.changeFormat(to: sampleRate)
+        f.notifications.post(name: .AVAudioEngineConfigurationChange, object: f.engine.notificationObject)
+    }
+
+    func testPauseBeforeQueuedRecoveryAllowsResumeAndLaterDeviceChanges() async throws {
+        let f = try await start()
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        change(f)
+        XCTAssertEqual(f.scheduler.count, 1)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 0,
+                       "Queued work is not an actual recovery attempt")
+        f.pipeline.pause()
+        XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertFalse(f.pipeline.syntheticMicrophoneRecoveryState.pending,
+                       "A paused delayed callback must not hold recovery admission forever")
+        XCTAssertEqual(f.engine.startCount, 1)
+        try f.pipeline.resume()
+        XCTAssertEqual(f.scheduler.count, 1, "Resume must finish the device change deferred by pause")
+        _ = f.scheduler.runNext()
+        XCTAssertEqual(f.engine.send(value: 0.2), .accepted)
+        await f.engine.drain()
+        change(f)
+        XCTAssertEqual(f.scheduler.count, 1, "A later device change must still be admitted")
+        _ = f.scheduler.runNext()
+        XCTAssertEqual(f.engine.send(value: 0.3), .accepted)
+        await f.engine.drain()
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 4_800)
+    }
+
+    func testPauseDuringRecoveryDoesNotLeaveASealedInputAfterResume() async throws {
+        let f = try await start()
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        change(f)
+        f.engine.setStopHook { f.pipeline.pause() }
+        XCTAssertTrue(f.scheduler.runNext())
+        f.engine.setStopHook(nil)
+        XCTAssertFalse(f.pipeline.syntheticMicrophoneRecoveryState.pending)
+        try f.pipeline.resume()
+        XCTAssertEqual(f.scheduler.count, 1)
+        _ = f.scheduler.runNext()
+        XCTAssertEqual(f.engine.send(value: 0.2), .accepted, "Resume must bind a usable replacement input")
+        await f.engine.drain()
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 3_200)
+    }
+
+    func testDeviceChangeWhilePausedIsAppliedBeforeAudioResumes() async throws {
+        let f = try await start()
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        f.pipeline.pause()
+        change(f, sampleRate: 48_000)
+        XCTAssertEqual(f.scheduler.count, 0)
+        try f.pipeline.resume()
+        XCTAssertEqual(f.scheduler.count, 1)
+        _ = f.scheduler.runNext()
+        XCTAssertEqual(f.engine.installedFormat?.sampleRate, 48_000)
+        XCTAssertEqual(f.engine.send(frames: 4_800, value: 0.2), .accepted)
+        await f.engine.drain()
+        await f.pipeline.stop()
+        let saved = try AVAudioFile(forReading: f.recording)
+        XCTAssertEqual(saved.processingFormat.sampleRate, 16_000, "Existing WAV storage format must remain fixed")
+        XCTAssertEqual(saved.length, 3_200, "All accepted input, including converter tail, must reach the WAV")
+        let samples = AVAudioPCMBuffer(pcmFormat: saved.processingFormat, frameCapacity: AVAudioFrameCount(saved.length))!
+        try saved.read(into: samples)
+        XCTAssertEqual(samples.floatChannelData![0][0], 0.1, accuracy: 0.0001)
+        XCTAssertEqual(samples.floatChannelData![0][2_000], 0.2, accuracy: 0.001)
+    }
+
+    func testCancelledDelayedCallbackCannotClearNewResumeRequest() async throws {
+        let f = try await start()
+        change(f)
+        f.pipeline.pause()
+        try f.pipeline.resume()
+        XCTAssertEqual(f.scheduler.count, 2)
+        XCTAssertTrue(f.scheduler.runNext()) // cancelled request
+        XCTAssertTrue(f.pipeline.syntheticMicrophoneRecoveryState.pending)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 0)
+        XCTAssertEqual(f.engine.startCount, 1)
+        XCTAssertTrue(f.scheduler.runNext()) // current request
+        XCTAssertFalse(f.pipeline.syntheticMicrophoneRecoveryState.pending)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 1)
+        XCTAssertEqual(f.engine.startCount, 2)
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        await f.pipeline.stop()
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 1_600)
+    }
+
+    func testNewTapHonorsPauseThatArrivesDuringInstallation() async throws {
+        let f = try await start()
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        f.engine.setInstallHook { f.pipeline.pause() }
+        change(f)
+        XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertEqual(f.engine.send(value: 0.9), .paused)
+        XCTAssertEqual(f.engine.startCount, 1)
+        XCTAssertFalse(f.pipeline.syntheticMicrophoneRecoveryState.pending)
+        f.engine.setInstallHook(nil)
+        try f.pipeline.resume()
+        XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertEqual(f.engine.send(value: 0.2), .accepted)
+        await f.engine.drain()
+        await f.pipeline.stop()
+        let file = try AVAudioFile(forReading: f.recording)
+        XCTAssertEqual(file.length, 3_200)
+        let pcm = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 3_200)!
+        try file.read(into: pcm)
+        for i in 0..<3_200 { XCTAssertEqual(pcm.floatChannelData![0][i], i < 1_600 ? 0.1 : 0.2) }
+    }
+
+    func testDuplicateNotificationsCoalesceAndSilentPCMIsHealthy() async throws {
+        let f = try await start()
+        for _ in 0..<5 { change(f) }
+        XCTAssertEqual(f.scheduler.count, 1)
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 0)
+        XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertEqual(f.pipeline.syntheticMicrophoneRecoveryState.attempts, 1)
+        let time = ProcessInfo.processInfo.systemUptime
+        for i in 0..<8 {
+            let end = time + Double(i)
+            XCTAssertEqual(f.engine.send(value: 0, observedEnd: end), .accepted)
+            await f.engine.drain()
+            f.pipeline.checkSyntheticMicrophoneHealth(now: end + 0.25)
+        }
+        XCTAssertEqual(f.scheduler.count, 0)
+        XCTAssertEqual(f.engine.startCount, 2)
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 12_800)
+    }
+
+    func testFailedStartsRemainBoundedAndPreserveRecordedPCM() async throws {
+        let f = try await start()
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        f.engine.failNextStarts(10)
+        change(f)
+        for _ in 0..<(SpeechPipeline.maximumMicrophoneRecoveryAttempts + 1) {
+            XCTAssertTrue(f.scheduler.runNext())
+        }
+        for _ in 0..<200 where f.events.failures.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(f.events.failures.count, 1)
+        XCTAssertTrue(f.events.failures.first?.contains("恢复次数") == true)
+        XCTAssertEqual(f.scheduler.count, 0)
+        XCTAssertEqual(f.engine.startCount, 1 + SpeechPipeline.maximumMicrophoneRecoveryAttempts)
+        XCTAssertEqual(f.pipeline.transcriptionState()?.isCapturing, false)
+        await f.pipeline.stop()
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 1_600)
+    }
+
+    func testPreviousSessionCallbacksCannotTouchTheReplacementCapture() async throws {
+        let f = try await start()
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        let oldNotification = try XCTUnwrap(f.notifications.capturedHandlers.first)
+        change(f)
+        await f.pipeline.stop()
+        let replacement = f.recording.deletingLastPathComponent().appendingPathComponent("second/recording.wav")
+        try await f.pipeline.start(inputMode: .microphone, recordingURL: replacement, sessionID: UUID(), eventHandler: f.events.consume)
+        oldNotification(Notification(name: .AVAudioEngineConfigurationChange, object: f.engine.notificationObject))
+        XCTAssertFalse(f.pipeline.syntheticMicrophoneRecoveryState.pending)
+        change(f)
+        XCTAssertEqual(f.scheduler.count, 2)
+        XCTAssertTrue(f.scheduler.runNext()) // old session
+        XCTAssertTrue(f.pipeline.syntheticMicrophoneRecoveryState.pending)
+        XCTAssertEqual(f.engine.startCount, 2)
+        XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertEqual(f.engine.startCount, 3)
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 1_600)
+        XCTAssertEqual(try AVAudioFile(forReading: replacement).length, 1_600)
+    }
+
+    func testSleepWhileRecoveryIsQueuedCannotRestartTheMicrophone() async throws {
+        let f = try await start()
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        change(f)
+        f.sleepNotifications.post(name: NSWorkspace.willSleepNotification, object: nil)
+        for _ in 0..<200 where f.events.failures.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(f.events.failures.count, 1)
+        XCTAssertTrue(f.events.failures.first?.contains("休眠") == true)
+        XCTAssertTrue(f.scheduler.runNext())
+        f.sleepNotifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        XCTAssertEqual(f.engine.startCount, 1)
+        XCTAssertFalse(f.engine.isRunning)
+        XCTAssertEqual(f.scheduler.count, 0)
+        XCTAssertEqual(f.pipeline.transcriptionState()?.isCapturing, false)
+        await f.pipeline.stop()
+        XCTAssertEqual(try AVAudioFile(forReading: f.recording).length, 1_600)
+    }
+
+    func testEveryRemovedDeviceFlushesItsTailBeforeTheNextInput() async throws {
+        let f = try await start()
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        change(f, sampleRate: 48_000)
+        XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertEqual(f.engine.send(frames: 4_800, value: 0.2), .accepted)
+        await f.engine.drain()
+        change(f, sampleRate: 44_100)
+        XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertEqual(f.engine.send(frames: 4_410, value: 0.3), .accepted)
+        await f.engine.drain()
+        await f.pipeline.stop()
+        XCTAssertTrue(f.events.failures.isEmpty)
+        let reader = try AVAudioFile(forReading: f.recording)
+        XCTAssertEqual(reader.processingFormat.sampleRate, 16_000)
+        XCTAssertEqual(reader.length, 4_800)
+        let samples = AVAudioPCMBuffer(pcmFormat: reader.processingFormat, frameCapacity: 4_800)!
+        try reader.read(into: samples)
+        XCTAssertEqual(samples.floatChannelData![0][0], 0.1, accuracy: 0.0001)
+        XCTAssertEqual(samples.floatChannelData![0][2_000], 0.2, accuracy: 0.001)
+        XCTAssertEqual(samples.floatChannelData![0][4_000], 0.3, accuracy: 0.001)
+    }
+
+    func testTailWriteFailureStopsRecoveryBeforeStartingAnotherInput() async throws {
+        let failure = ControlledAudioWriteFailure()
+        let f = try await start(beforeAudioWrite: failure.check)
+        XCTAssertEqual(f.engine.send(), .accepted)
+        await f.engine.drain()
+        change(f, sampleRate: 48_000)
+        XCTAssertTrue(f.scheduler.runNext())
+        XCTAssertEqual(f.engine.send(frames: 4_800, value: 0.2), .accepted)
+        await f.engine.drain()
+        failure.enable()
+        change(f, sampleRate: 44_100)
+        XCTAssertTrue(f.scheduler.runNext())
+        for _ in 0..<200 where f.events.failures.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(f.events.failures.count, 1)
+        XCTAssertTrue(f.events.failures.first?.contains("尾部") == true)
+        XCTAssertEqual(f.engine.startCount, 2, "A terminal write error must close the recovery gate synchronously")
+        XCTAssertEqual(f.scheduler.count, 0)
+        XCTAssertEqual(f.pipeline.transcriptionState()?.isCapturing, false)
+        await f.pipeline.stop()
+        let saved = try AVAudioFile(forReading: f.recording)
+        XCTAssertGreaterThanOrEqual(saved.length, 1_600)
+        XCTAssertLessThan(saved.length, 3_200)
+    }
+
+    func testConverterFinishesExactDurationAcrossCommonRatePairs() throws {
+        for (sourceRate, targetRate) in [(16_000.0, 48_000.0), (48_000.0, 16_000.0),
+                                         (44_100.0, 48_000.0), (48_000.0, 44_100.0)] {
+            let inputFormat = AVAudioFormat(standardFormatWithSampleRate: sourceRate, channels: 1)!
+            let targetFormat = AVAudioFormat(standardFormatWithSampleRate: targetRate, channels: 1)!
+            let bridge = CaptureFormatBridge(inputFormat: inputFormat, storageFormat: targetFormat)
+            let input = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(sourceRate / 100))!
+            input.frameLength = input.frameCapacity
+            for i in 0..<Int(input.frameLength) { input.floatChannelData![0][i] = 0.1 }
+            var frames = 0
+            for _ in 0..<7 { frames += Int(try bridge.convert(input).frameLength) }
+            let beforeFinish = frames
+            try bridge.finish { output in
+                frames += Int(output.frameLength)
+                for i in 0..<Int(output.frameLength) { XCTAssertTrue(output.floatChannelData![0][i].isFinite) }
+            }
+            XCTAssertEqual(frames, Int((targetRate * 0.07).rounded()), "\(sourceRate) → \(targetRate)")
+            XCTAssertGreaterThan(frames, beforeFinish)
+        }
+    }
+
+    func testResumeGetsAFullGracePeriodDespiteOldAcceptedAudio() async throws {
+        let f = try await start()
+        XCTAssertEqual(f.engine.send(observedEnd: ProcessInfo.processInfo.systemUptime - 20), .accepted)
+        await f.engine.drain()
+        f.pipeline.pause()
+        try f.pipeline.resume()
+        let resumed = ProcessInfo.processInfo.systemUptime
+        f.pipeline.checkSyntheticMicrophoneHealth(now: resumed + 0.5)
+        XCTAssertEqual(f.scheduler.count, 0, "Pre-pause callbacks must not bypass the resume grace period")
+        f.pipeline.checkSyntheticMicrophoneHealth(now: resumed + SpeechPipeline.microphoneStallTimeout + 0.5)
+        XCTAssertEqual(f.scheduler.count, 1, "The grace period must still expire if audio does not return")
+        await f.pipeline.stop()
+    }
+}
+
 private final class CaptureSleepEvents: @unchecked Sendable {
     private let lock = NSLock()
     private var messages: [String] = []
