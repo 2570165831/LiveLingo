@@ -144,6 +144,63 @@ final class MLXOwnershipTests: XCTestCase {
         XCTAssertNotEqual(Darwin.kill(retained.processIdentifier, 0), 0)
     }
 
+    func testImmediateAcknowledgementsCompleteWithoutChangingResultsOrWorker() async throws {
+        let (runtime, directory) = try makeRuntime()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try await generate(runtime, prompt: "fast")
+        let initial = await runtime.resourceStates()[model]?.workerID
+        var durations: [Double] = []
+        for _ in 0..<32 {
+            let start = ProcessInfo.processInfo.systemUptime
+            let result = try await generate(runtime, prompt: "fast")
+            durations.append(ProcessInfo.processInfo.systemUptime - start)
+            XCTAssertEqual(result, "complete")
+            let state = await runtime.resourceStates()[model]
+            XCTAssertEqual(state?.workerID, initial)
+            XCTAssertEqual(state?.outstandingRequests, 0)
+            XCTAssertEqual(state?.pendingControls, 0)
+        }
+        print("CONTROL_ACK_ROUND_TRIPS " + String(decoding: try JSONEncoder().encode(durations), as: UTF8.self))
+        await runtime.unload(model)
+    }
+
+    func testFirstMatchingAcknowledgementCannotBeOverwrittenByDuplicate() async throws {
+        let (runtime, directory) = try makeRuntime()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let result = try await generate(runtime, prompt: "duplicate-ack")
+        XCTAssertEqual(result, "complete")
+        let state = await runtime.resourceStates()[model]
+        XCTAssertEqual(state?.outstandingRequests, 0)
+        XCTAssertEqual(state?.pendingControls, 0)
+        await runtime.unload(model)
+    }
+
+    func testFailedAcknowledgementCannotBeOverwrittenByLaterSuccess() async throws {
+        let (runtime, directory) = try makeRuntime(timeout: 0.5)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            _ = try await generate(runtime, prompt: "failed-then-success-ack")
+            XCTFail("A failed checkpoint acknowledgement must not become success")
+        } catch let error as QwenRuntimeError {
+            guard case .generationInterrupted = error else {
+                return XCTFail("Lost failed acknowledgement error")
+            }
+        }
+        await runtime.unload(model)
+    }
+
+    func testWorkerExitResolvesOutstandingAcknowledgement() async throws {
+        let (runtime, directory) = try makeRuntime()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            _ = try await generate(runtime, prompt: "exit-on-ack")
+            XCTFail("A worker exit cannot confirm delivery")
+        } catch {
+            XCTAssertTrue(error is QwenRuntimeError)
+        }
+        await waitFor { await runtime.resourceStates().isEmpty }
+    }
+
     private static let worker = #"""
 use strict;
 use warnings;
@@ -185,8 +242,15 @@ while (my $line = <STDIN>) {
         select(undef, undef, undef, 0.2);
         emit('paused', id => $rid, controlID => $control, state => 'saved');
     } elsif ($op eq 'cancel' || $op eq 'ack') {
+        exit 3 if $op eq 'ack' && ($requests{$rid} // '') eq 'exit-on-ack';
         select(undef, undef, undef, 0.2) if ($requests{$rid} // '') eq 'complete';
+        if ($op eq 'ack' && ($requests{$rid} // '') eq 'failed-then-success-ack') {
+            emit('ack', id => $rid, controlID => $control, state => 'checkpoint_failed');
+        }
         emit($op, id => $rid, controlID => $control, state => 'released');
+        if ($op eq 'ack' && ($requests{$rid} // '') eq 'duplicate-ack') {
+            emit('ack', id => $rid, controlID => $control, state => 'checkpoint_failed');
+        }
     } elsif ($op eq 'shutdown') {
         select(undef, undef, undef, 0.1);
         emit('shutdown', controlID => $control, state => 'ready_to_exit');

@@ -60,6 +60,7 @@ actor MLXRuntime {
         let workerID: UUID
         let expected: String
         var result: Result<Void, Error>?
+        var waiter: CheckedContinuation<Void, Error>?
     }
     private var controls: [String: Control] = [:]
     private var requestControls: [String: String] = [:]
@@ -274,13 +275,12 @@ actor MLXRuntime {
                 worker.modelLoaded = loaded
                 continue
             }
-            if let token = event.controlID, var control = controls[token], control.workerID == workerID {
+            if let token = event.controlID, let control = controls[token], control.workerID == workerID {
                 if event.event == control.expected && event.state != "checkpoint_failed" {
-                    control.result = .success(())
+                    resolveControl(token, with: .success(()))
                 } else {
-                    control.result = .failure(QwenRuntimeError.generationInterrupted("模型未确认保存或释放请求；保留上次有效进度。"))
+                    resolveControl(token, with: .failure(QwenRuntimeError.generationInterrupted("模型未确认保存或释放请求；保留上次有效进度。")))
                 }
-                controls[token] = control
                 continue
             }
             guard let id = event.id, worker.requests.contains(id), let continuation = streams[id] else { continue }
@@ -324,7 +324,7 @@ actor MLXRuntime {
         }
         workers[model] = nil
         for token in Array(controls.keys) where controls[token]?.workerID == workerID && controls[token]?.result == nil {
-            controls[token]?.result = .failure(error ?? QwenRuntimeError.generationInterrupted("模型进程在确认请求前退出；保留上次有效进度。"))
+            resolveControl(token, with: .failure(error ?? QwenRuntimeError.generationInterrupted("模型进程在确认请求前退出；保留上次有效进度。")))
         }
         if worker.process.isRunning {
             retiringWorkers[model] = worker
@@ -358,6 +358,15 @@ actor MLXRuntime {
         try await worker.writer.write(data)
     }
 
+    private func resolveControl(_ token: String, with result: Result<Void, Error>) {
+        guard var control = controls[token], control.result == nil else { return }
+        control.result = result
+        let waiter = control.waiter
+        control.waiter = nil
+        controls[token] = control
+        waiter?.resume(with: result)
+    }
+
     private func control(_ operation: String, id: String?, worker: Worker) async throws {
         let token = UUID().uuidString
         controls[token] = Control(workerID: worker.id, expected: operation == "pause" ? "paused" : operation)
@@ -369,19 +378,24 @@ actor MLXRuntime {
         var command: [String: Any] = ["op": operation, "controlID": token]
         if let id { command["id"] = id }
         try await send(command, to: worker)
-        let deadline = ProcessInfo.processInfo.systemUptime + controlTimeout
-        while ProcessInfo.processInfo.systemUptime < deadline {
-            if let result = controls[token]?.result { return try result.get() }
-            // Cleanup acknowledgement must outlive cancellation of the caller.
-            // Dispatch sleep is independent of task cancellation and creates no
-            // chain of polling Tasks.
-            await withCheckedContinuation { continuation in
-                DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(20)) {
-                    continuation.resume()
-                }
-            }
+        // Unstructured timeout and checked continuation deliberately outlive
+        // caller cancellation: a pause still owns its worker until confirmed.
+        let timeout = Task {
+            do { try await Task.sleep(for: .seconds(controlTimeout)) }
+            catch { return }
+            resolveControl(token, with: .failure(QwenRuntimeError.generationInterrupted("模型暂停或退出未及时确认；保留上次有效进度。")))
         }
-        throw QwenRuntimeError.generationInterrupted("模型暂停或退出未及时确认；保留上次有效进度。")
+        defer { timeout.cancel() }
+        try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
+            // send() yields the actor, so a reply or exit may already be stored.
+            guard var control = controls[token] else {
+                waiter.resume(throwing: QwenRuntimeError.invalidResponse)
+                return
+            }
+            if let result = control.result { waiter.resume(with: result); return }
+            control.waiter = waiter
+            controls[token] = control
+        }
     }
 
     private func pause(_ id: String, timedOut: Bool = false, stalled: Bool = false) async {
