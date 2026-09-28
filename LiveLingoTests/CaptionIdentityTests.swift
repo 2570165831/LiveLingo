@@ -48,6 +48,12 @@ private actor RepairOrderProbe {
     }
 }
 
+private func captionSource(in input: String) throws -> String {
+    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
+    XCTAssertEqual(Set(object.keys), ["source_text_to_translate"])
+    return try XCTUnwrap(object["source_text_to_translate"])
+}
+
 @MainActor
 private final class CaptionIdentityGate<Value: Sendable> {
     var continuation: CheckedContinuation<Value, Error>?
@@ -324,8 +330,8 @@ final class CaptionIdentityTests: XCTestCase {
         await model.translationTaskForTesting?.value
         let inputs = await probe.inputs
         XCTAssertEqual(inputs.count, 4, "Prioritizing captions must retain both repairs without extra generation")
-        XCTAssertEqual(inputs.first, "and its temperature rises.")
-        XCTAssertEqual(inputs.dropFirst().first, "and the container expands slowly.",
+        XCTAssertEqual(try captionSource(in: XCTUnwrap(inputs.first)), "and its temperature rises.")
+        XCTAssertEqual(try captionSource(in: XCTUnwrap(inputs.dropFirst().first)), "and the container expands slowly.",
                        "An already queued caption must not wait for optional previous repair")
         XCTAssertTrue(model.segments.allSatisfy(\.hasUsableTranslation))
         XCTAssertEqual(model.segments.map(\.chinese), ["系统吸收了热能。", "它的温度随之升高。", "容器慢慢膨胀。"])
@@ -357,7 +363,7 @@ final class CaptionIdentityTests: XCTestCase {
         await model.translationTaskForTesting?.value
         let requests = await probe.requests
         XCTAssertEqual(requests.count, 4)
-        XCTAssertEqual(requests[1].input, "and the container expands slowly.")
+        XCTAssertEqual(try captionSource(in: requests[1].input), "and the container expands slowly.")
         XCTAssertEqual(model.segments.map(\.chinese), ["系统吸收了热能。", "它的温度随之升高。", "容器慢慢膨胀。"])
     }
 
@@ -788,6 +794,44 @@ final class CaptionIdentityTests: XCTestCase {
         }
     }
 
+    func testAdjacentLeakedWrapperRejectsCurrentButPreservesPreviousRepair() async throws {
+        for leak in [#"{"source_text_to_translate":"它使物体转向。"}"#,
+                     "SOURCE_TEXT_TO_TRANSLATE: 它使物体转向。"] {
+            let probe = AdjacentRequestProbe([.text(leak), .text("力指向中心。")])
+            var published = 0
+            let pair = try await QwenTranslationClient.translateAdjacent(
+                previous: "The force acts toward the center.", previousChinese: "力起作用。",
+                current: "and it turns the object.", context: "",
+                modelName: QwenModelProfile.highQuality.translationModel,
+                onCurrent: { _ in published += 1 },
+                request: { try await probe.request($0, $1, $2) })
+            XCTAssertNil(pair.current)
+            XCTAssertTrue(pair.currentRejection?.contains("输入包装字段") == true)
+            XCTAssertEqual(pair.previous, "力指向中心。")
+            XCTAssertNil(pair.previousRejection)
+            XCTAssertEqual(published, 0)
+            let requests = await probe.requests
+            XCTAssertEqual(requests.count, 2)
+        }
+    }
+
+    func testCancelledWrapperRejectionDoesNotStartPreviousRepair() async throws {
+        let probe = AdjacentRequestProbe([
+            .cancelThenText(#"{"source_text_to_translate":"它使物体转向。"}"#),
+            .text("不应生成的前句。")])
+        let task = Task {
+            try await QwenTranslationClient.translateAdjacent(
+                previous: "The force acts toward the center.", previousChinese: "力起作用。",
+                current: "and it turns the object.", context: "",
+                modelName: QwenModelProfile.highQuality.translationModel,
+                request: { try await probe.request($0, $1, $2) })
+        }
+        do { _ = try await task.value; XCTFail("Cancellation must precede content recovery") }
+        catch is CancellationError { }
+        let requests = await probe.requests
+        XCTAssertEqual(requests.count, 1)
+    }
+
     func testAdjacentRejectedFormulaOrOverlongRepairKeepsValidCurrent() async throws {
         let previous = "Compare the Na⁺ ions with the Cl⁻ ions in the solution."
         XCTAssertGreaterThanOrEqual(previous.count, TranslationLengthGuard.minimumEnglishCount)
@@ -833,7 +877,9 @@ final class CaptionIdentityTests: XCTestCase {
         XCTAssertEqual(requests.count, 1)
         XCTAssertTrue(requests[0].input.contains("Add 2 mL ZXQCHEM0QXZ to sample A."))
         XCTAssertFalse(requests[0].input.contains("H2O"))
-        XCTAssertTrue(requests[0].input.contains("Auxiliary token hints"))
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(requests[0].input.utf8)) as? [String: Any])
+        XCTAssertEqual(payload["source_text_to_translate"] as? String, "Add 2 mL ZXQCHEM0QXZ to sample A.")
+        XCTAssertEqual(payload["auxiliary_token_hints"] as? [String], ["- unit: 2 mL"])
         XCTAssertFalse(requests[0].input.contains("earlier sentence"))
         XCTAssertEqual(requests[0].budget, 168)
     }

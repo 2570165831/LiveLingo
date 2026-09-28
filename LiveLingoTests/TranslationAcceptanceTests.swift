@@ -59,7 +59,8 @@ final class TranslationAcceptanceTests: XCTestCase {
                 previous: "", previousChinese: "", current: source, context: "",
                 modelName: model, repairPrevious: false, request: { input, prompt, budget in
                     await counter.record()
-                    XCTAssertEqual(input, source)
+                    XCTAssertEqual(model == QwenModelProfile.highQuality.translationModel
+                        ? try Self.typedSource(in: input) : input, source)
                     XCTAssertEqual(budget, CaptionTranslationAttempt.standard.outputTokenBudget(for: source))
                     XCTAssertEqual(prompt.contains(ChemistryTranslationProtector.negationInstruction),
                                    model == QwenModelProfile.energySaver.translationModel)
@@ -98,6 +99,90 @@ final class TranslationAcceptanceTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
         XCTAssertEqual(Set(object.keys), ["source_text_to_translate"])
         return try XCTUnwrap(object["source_text_to_translate"])
+    }
+
+    func testCaptionDataBoundaryPreservesQuotesNewlinesAndUnicode() async throws {
+        let source = "He wrote \"stop\".\nThen compare a slash /, \\n and café."
+        let expected = "他写了\"停止\"。\n然后比较斜杠 /、\\n 和咖啡馆。"
+        let counter = TypedRequestCounter()
+        let result = try await QwenTranslationClient.translateAdjacent(
+            previous: "", previousChinese: "", current: source, context: "",
+            modelName: QwenModelProfile.highQuality.translationModel, repairPrevious: false,
+            request: { input, _, budget in
+                await counter.record()
+                XCTAssertEqual(try Self.typedSource(in: input), source)
+                XCTAssertEqual(budget, 160)
+                return expected
+            })
+        XCTAssertEqual(result.current, expected)
+        XCTAssertNil(result.currentRejection)
+        let count = await counter.count()
+        XCTAssertEqual(count, 1)
+    }
+
+    func testCaptionHintsStayOutsideSourceAndKeepTheExistingLimit() async throws {
+        let source = "The current is 2 A."
+        let hints = (1...10).map { AuxiliaryTranslationHint(kind: .unit, value: "\($0) A") }
+        let result = try await QwenTranslationClient.translateAdjacent(
+            previous: "", previousChinese: "", current: source, context: "",
+            modelName: QwenModelProfile.highQuality.translationModel, repairPrevious: false,
+            currentHints: hints, request: { input, _, budget in
+                let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+                XCTAssertEqual(payload["source_text_to_translate"] as? String, source)
+                XCTAssertEqual(payload["auxiliary_token_hints"] as? [String], (1...8).map { "- unit: \($0) A" })
+                XCTAssertEqual(Set(payload.keys), ["source_text_to_translate", "auxiliary_token_hints"])
+                XCTAssertEqual(budget, 160)
+                return "电流为 2 A。"
+            })
+        XCTAssertEqual(result.current, "电流为 2 A。")
+    }
+
+    func testCaptionDataBoundaryLeavesOtherModelProfilesUnchanged() async throws {
+        let source = #"Repeat "the switch is off" twice."#
+        for model in [QwenModelProfile.energySaver.translationModel, "other-model",
+                      "prefix-" + QwenModelProfile.highQuality.translationModel] {
+            let result = try await QwenTranslationClient.translateAdjacent(
+                previous: "", previousChinese: "", current: source, context: "",
+                modelName: model, repairPrevious: false,
+                currentHints: [.init(kind: .unit, value: "2 s")], request: { input, prompt, budget in
+                    XCTAssertEqual(input, source)
+                    XCTAssertFalse(prompt.contains("Translate only the source_text_to_translate value"))
+                    XCTAssertEqual(budget, 160)
+                    return "重复“开关是关着的”两次。"
+                })
+            XCTAssertEqual(result.current, "重复“开关是关着的”两次。")
+        }
+    }
+
+    func testCaptionReservedFieldInSourceKeepsLiteralFallback() async throws {
+        for field in ["source_text_to_translate", "SOURCE_TEXT_TO_TRANSLATE"] {
+            let source = "The field \(field) contains \"ready\"."
+            let expected = "字段 \(field) 包含\"就绪\"。"
+            let result = try await QwenTranslationClient.translateAdjacent(
+                previous: "", previousChinese: "", current: source, context: "",
+                modelName: QwenModelProfile.highQuality.translationModel, repairPrevious: false,
+                request: { input, prompt, _ in
+                    XCTAssertEqual(input, source)
+                    XCTAssertFalse(prompt.contains("Translate only the source_text_to_translate value"))
+                    return expected
+                })
+            XCTAssertEqual(result.current, expected)
+            XCTAssertNil(result.currentRejection)
+        }
+    }
+
+    func testCaptionProtectedReservedNameRestoresAfterWrapperCheck() async throws {
+        let result = try await QwenTranslationClient.translateAdjacent(
+            previous: "", previousChinese: "",
+            current: #"Keep the identifier "source_text_to_translate" unchanged."#, context: "",
+            modelName: QwenModelProfile.highQuality.translationModel, repairPrevious: false,
+            request: { input, _, budget in
+                XCTAssertEqual(try Self.typedSource(in: input), #"Keep the identifier "ZXQCHEM0QXZ" unchanged."#)
+                XCTAssertEqual(budget, 168)
+                return "保持标识符 ZXQCHEM0QXZ 不变。"
+            })
+        XCTAssertEqual(result.current, "保持标识符 source_text_to_translate 不变。")
+        XCTAssertNil(result.currentRejection)
     }
 
     func testTypedTranslationProtectsAndRestoresNamesInBothModes() async throws {
