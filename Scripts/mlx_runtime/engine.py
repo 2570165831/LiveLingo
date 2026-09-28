@@ -37,23 +37,28 @@ class PromptPrefixCache:
         self.max_bytes = max(0, max_bytes)
         self.max_entries = max(0, max_entries)
         self._entries = OrderedDict()
+        self._low_priority = set()
         self.nbytes = 0
 
     @property
     def tokens(self):
         return next(reversed(self._entries), ())
 
-    def fetch(self, tokens):
+    def fetch(self, tokens, *, low_priority=False):
         # Prefer the longest exact boundary; leave a token for the first logits.
         for key in sorted(self._entries, key=len, reverse=True):
             count = len(key)
             if len(tokens) > count and tuple(tokens[:count]) == key:
                 snapshot = copy.deepcopy(self._entries[key][0])
-                self._entries.move_to_end(key)
+                if not low_priority:
+                    self._low_priority.discard(key)
+                    self._entries.move_to_end(key)
+                elif key in self._low_priority:
+                    self._entries.move_to_end(key)
                 return snapshot, count
         return None, 0
 
-    def remember(self, tokens, cache):
+    def remember(self, tokens, cache, *, low_priority=False):
         tokens = tuple(tokens)
         if (not tokens or len(tokens) % PREFILL_STEP or len(tokens) > self.max_tokens
                 or not self.max_entries):
@@ -62,15 +67,32 @@ class PromptPrefixCache:
         if size > self.max_bytes:
             return False
         if tokens in self._entries:
-            self._entries.move_to_end(tokens)
+            if not low_priority:
+                self._low_priority.discard(tokens)
+                self._entries.move_to_end(tokens)
+            elif tokens in self._low_priority:
+                self._entries.move_to_end(tokens)
             return True
+        # Notes use spare capacity. They may replace another note snapshot,
+        # but cannot evict translation/ordinary-summary state or reorder it.
+        if low_priority:
+            preferred = [(key, value) for key, value in self._entries.items()
+                         if key not in self._low_priority]
+            if (len(preferred) >= self.max_entries
+                    or sum(value[1] for _, value in preferred) + size > self.max_bytes):
+                return False
         # Release old references before allocating a new snapshot. The limit
         # covers retained snapshots, not the active request or model weights.
         while self._entries and (len(self._entries) >= self.max_entries
                                  or self.nbytes + size > self.max_bytes):
-            _, (_, removed_bytes) = self._entries.popitem(last=False)
+            victim = next((key for key in self._entries if key in self._low_priority),
+                          next(iter(self._entries)))
+            _, removed_bytes = self._entries.pop(victim)
+            self._low_priority.discard(victim)
             self.nbytes -= removed_bytes
         self._entries[tokens] = (copy.deepcopy(cache), size)
+        if low_priority:
+            self._low_priority.add(tokens)
         self.nbytes += size
         return True
 
@@ -114,7 +136,7 @@ class Engine:
 class Generation:
     VERSION = 2
     def __init__(self, engine, prompt, schema=None, thinking=False, prefix='', seed=None,
-                 thinking_budget=16384, final_budget=4096):
+                 thinking_budget=16384, final_budget=4096, _use_prefix_cache=True):
         self.engine = engine
         self.spec = dict(prompt=prompt, schema=schema, thinking=thinking,
                          thinking_budget=thinking_budget, final_budget=final_budget)
@@ -125,17 +147,20 @@ class Generation:
         self.pending = engine.tokenizer.encode(prompt + prefix, add_special_tokens=False)
         self.reused_prefix_tokens = 0
         self.prefill_tokens = 0
-        # Resumable/grammar-constrained work keeps its existing checkpoint path.
-        # Ordinary translation reuses only input computation, never output.
+        # Reuse only exact input state, never output or a grammar's progress.
+        # Schema work stores one smaller chunk with lower admission priority.
+        # Restores and output-prefix continuations keep their checkpoint path.
+        self._low_priority_prefix = schema is not None
         self._prefix_cache = (getattr(engine, 'prefix_cache', None)
-                              if not thinking and schema is None and not prefix else None)
+                              if _use_prefix_cache and not thinking and not prefix else None)
         self._cache_tokens = ()
         self.cache = None
         if self._prefix_cache is not None:
-            count = min((len(self.pending) - 1) // PREFILL_STEP * PREFILL_STEP,
-                        self._prefix_cache.max_tokens)
+            limit = min(PREFILL_STEP, self._prefix_cache.max_tokens) if schema is not None else self._prefix_cache.max_tokens
+            count = min((len(self.pending) - 1) // PREFILL_STEP * PREFILL_STEP, limit)
             self._cache_tokens = tuple(self.pending[:max(0, count)])
-            self.cache, self.reused_prefix_tokens = self._prefix_cache.fetch(self.pending)
+            self.cache, self.reused_prefix_tokens = self._prefix_cache.fetch(
+                self.pending, low_priority=self._low_priority_prefix)
             self.pending = self.pending[self.reused_prefix_tokens:]
         if self.cache is None:
             self.cache = make_prompt_cache(engine.model)
@@ -174,7 +199,8 @@ class Generation:
             self.prefill_tokens += len(chunk)
             if (self._cache_tokens and self.prefill_tokens + self.reused_prefix_tokens
                     == len(self._cache_tokens)):
-                self._prefix_cache.remember(self._cache_tokens, self.cache)
+                self._prefix_cache.remember(self._cache_tokens, self.cache,
+                                            low_priority=self._low_priority_prefix)
             return 'prefill'
         logits = self.engine.model(mx.array([self.pending]), cache=self.cache)[:, -1, :]
         if self.phase == 'final' and self.guide:
@@ -258,7 +284,7 @@ class Generation:
             state = json.loads(metadata['generation'])
         if state['version'] != cls.VERSION or state['identity'] != expected_identity:
             raise ValueError('Checkpoint identity mismatch')
-        result = cls(engine, **state['spec'], prefix=state['prefix'])
+        result = cls(engine, **state['spec'], prefix=state['prefix'], _use_prefix_cache=False)
         if result.identity != expected_identity:
             raise ValueError('Model or request changed')
         # A restored cache may already contain an arbitrary part of the input.
