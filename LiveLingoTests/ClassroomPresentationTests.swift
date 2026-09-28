@@ -381,7 +381,7 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertFalse(model.noteReviewQueue.hasWork)
     }
 
-    func testReviewAndNestedQueueManagerRemainReachable() async throws {
+    func testReviewQueueManagerStaysInsideTheReviewSheet() async throws {
         let (model, evidence, notebook) = try fixture()
         model.loadPresentationForTesting(phase: .saved(URL(fileURLWithPath: "/synthetic-classroom")),
                                          evidence: evidence, notebook: notebook)
@@ -396,15 +396,19 @@ final class ClassroomPresentationTests: XCTestCase {
         let content = try XCTUnwrap(sheet.contentView)
         try await settle(content)
         try capture(content, name: "classroom-review-sheet")
+        let overview = try XCTUnwrap(content.bitmapImageRepForCachingDisplay(in: content.bounds))
+        content.cacheDisplay(in: content.bounds, to: overview)
         try click(sheet, content: content, x: content.bounds.width - 53, yFromTop: 88)
-        try await Task.sleep(for: .milliseconds(300))
-        let manager = try XCTUnwrap(sheet.attachedSheet)
-        let managerContent = try XCTUnwrap(manager.contentView)
-        try await settle(managerContent)
-        try capture(managerContent, name: "classroom-review-queue-manager")
-        try await closeSheet(manager)
+        try await settle(content)
+        // Queue management replaces the overview in place: no second modal.
         XCTAssertNil(sheet.attachedSheet)
-        XCTAssertNotNil(window.attachedSheet)
+        XCTAssertTrue(window.attachedSheet === sheet)
+        let managed = try XCTUnwrap(content.bitmapImageRepForCachingDisplay(in: content.bounds))
+        content.cacheDisplay(in: content.bounds, to: managed)
+        XCTAssertNotEqual(overview.representation(using: .png, properties: [:]),
+                          managed.representation(using: .png, properties: [:]),
+                          "管理队列 must switch the sheet to the queue manager")
+        try capture(content, name: "classroom-review-queue-manager")
         try await closeSheet(sheet)
         XCTAssertNil(window.attachedSheet)
         XCTAssertFalse(model.noteReviewQueue.hasWork)

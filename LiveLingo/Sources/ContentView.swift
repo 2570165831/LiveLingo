@@ -298,15 +298,10 @@ struct ContentView: View {
                     }
                     // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
                     // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
-                    previewReadingSlot(
-                        model.previewTranslationSource.isEmpty ? "等待英文语音…" : model.previewTranslationSource,
-                        size: transcriptTextSize - 2, weight: .regular)
-                    previewReadingSlot(
-                        !model.previewTranslationEnabled ? "初译已关闭" :
-                            !model.supportsPreviewTranslation ? "当前系统不支持初译；正式译文会在下方显示" :
-                            model.previewChinese.isEmpty
-                                ? "等待初译…" : "初译 · \(model.previewChinese)",
-                        size: transcriptTextSize, weight: .medium)
+                    previewReadingSlot(model.previewEnglishDisplay,
+                                       size: transcriptTextSize - 2, weight: .regular)
+                    previewReadingSlot(model.previewChineseDisplay,
+                                       size: transcriptTextSize, weight: .regular)
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -350,12 +345,6 @@ struct ContentView: View {
 
             Divider()
             HStack(spacing: 8) {
-                Circle()
-                    .fill(model.isRecording ? Color.accentColor : Color.secondary.opacity(0.5))
-                    .frame(width: 7, height: 7)
-                Text(model.isRecording ? "正在持续识别…" : model.phaseLabel)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
                 Spacer()
                 Text("\(model.segments.count) 段")
                     .font(.caption.monospacedDigit())
@@ -368,10 +357,10 @@ struct ContentView: View {
     }
 
     private func previewReadingSlot(_ text: String, size: Double, weight: Font.Weight) -> some View {
-        // Let SwiftUI measure three lines with the same font and spacing as the captions.
-        Text("Ag国\nAg国\nAg国")
+        // Let SwiftUI measure two lines with the same font and spacing as the captions.
+        Text("Ag国\nAg国")
             .font(.system(size: size, weight: weight))
-            .lineSpacing(5)
+            .lineSpacing(7)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .hidden()
@@ -382,7 +371,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             Text(text)
                                 .font(.system(size: size, weight: weight))
-                                .lineSpacing(5)
+                                .lineSpacing(7)
                                 .foregroundStyle(.primary)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -419,8 +408,8 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         if model.translatingSegmentID == segment.id, !model.streamingChinese.isEmpty {
                             Text(model.streamingChinese)
-                                .font(.system(size: transcriptTextSize, weight: .medium))
-                                .lineSpacing(5)
+                                .font(.system(size: transcriptTextSize))
+                                .lineSpacing(7)
                                 .foregroundStyle(.primary)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -428,8 +417,8 @@ struct ContentView: View {
                     }
                 } else {
                     Text(markdown: segment.displayChinese)
-                        .font(.system(size: transcriptTextSize, weight: .medium))
-                        .lineSpacing(5)
+                        .font(.system(size: transcriptTextSize))
+                        .lineSpacing(7)
                         .foregroundStyle(.primary)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -632,7 +621,8 @@ struct ContentView: View {
             Image(systemName: model.errorMessage == nil ? model.currentInputMode.statusIcon : "exclamationmark.triangle")
                 .foregroundStyle(model.errorMessage == nil ? Color.secondary : Color.orange)
                 .accessibilityHidden(true)
-            Text(model.errorMessage ?? model.savedProcessingStatus ?? model.archiveNotice ?? model.translationStatus)
+            Text(model.errorMessage ?? model.savedProcessingStatus ?? model.archiveNotice
+                 ?? (model.translationReady ? "本机模型已就绪" : model.translationStatus))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("classroom-status-message")
@@ -925,7 +915,7 @@ struct TypedTranslationView: View {
             HStack {
                 Text("英文 → 简体中文").font(.headline)
                 Spacer()
-                Text(model.effectiveProfile.shortLabel).font(.caption).foregroundStyle(.secondary)
+                Text("质量 · \(model.selectedMode.title)").font(.caption).foregroundStyle(.secondary)
             }
             Text("使用当前质量模式 · 不加入录音历史")
                 .font(.caption).foregroundStyle(.secondary)
@@ -1113,58 +1103,6 @@ private final class TranslationInputTextView: NSTextView {
     }
 }
 
-private struct SettingChip: View {
-    let icon: String
-    let title: String
-    let value: String
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: icon)
-                .foregroundStyle(Color.accentColor)
-            Text("\(title) · \(value)")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Color.primary.opacity(0.052), in: RoundedRectangle(cornerRadius: 9))
-        .fixedSize(horizontal: true, vertical: true)
-    }
-}
-
-private struct LanguageBadge: View {
-    let flag: String
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Text(flag)
-            Text(text)
-                .font(.caption.weight(.semibold))
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.05), in: Capsule())
-    }
-}
-
-private struct StatusToken: View {
-    let icon: String
-    let text: String
-
-    var body: some View {
-        Label(text, systemImage: icon)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-    }
-}
-
 private struct RecordingWaveform: View {
     let samples: [Float]
     let active: Bool
@@ -1229,7 +1167,17 @@ private struct LearningReviewControls: View {
         return !notice.isEmpty
     }
 
+    /// Queue management replaces the overview inside the same sheet; the app
+    /// never stacks a second modal over the review sheet.
     var body: some View {
+        if showingQueueManager {
+            queueManagerPane
+        } else {
+            overview
+        }
+    }
+
+    private var overview: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text("复查队列")
@@ -1268,7 +1216,7 @@ private struct LearningReviewControls: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .disabled(!model.canManuallyReview)
-                .help("选择复查范围：整课或某一批已完成笔记。9B 思考复查耗时随内容长度和设备变化（历史单机实测约 5 分钟/批，仅供参照），只给出核对意见。")
+                .help("选择复查范围：整课或某一批已完成笔记。复查耗时随内容长度和设备变化（历史单机实测约 5 分钟/批，仅供参照），只给出核对意见。")
                 // Queue management stays reachable in every state: it is never
                 // hidden behind the history disclosure or tied to the current recording.
                 Button("管理队列…") { showingQueueManager = true }
@@ -1288,7 +1236,7 @@ private struct LearningReviewControls: View {
                     Text("核对意见独立保存，原笔记保持不变。")
                         .font(.callout).foregroundStyle(.secondary)
                     DisclosureGroup("核对方式与耗时") {
-                        Text("使用本机 9B 模型检查所选内容。耗时随设备和内容变化；状态中的历史耗时仅供参考。局部报告单独保存，整课报告保留。")
+                        Text("使用本机模型检查所选内容。耗时随设备和内容变化；状态中的历史耗时仅供参考。局部报告单独保存，整课报告保留。")
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .font(.callout).foregroundStyle(.secondary)
@@ -1321,7 +1269,6 @@ private struct LearningReviewControls: View {
         .padding(.horizontal, 16)
         .padding(.bottom, 10)
         .onChange(of: currentDirectory) { _, _ in historyExpanded = false }
-        .sheet(isPresented: $showingQueueManager) { queueManagerSheet }
         .confirmationDialog("将这项任务移出复查队列？", isPresented: $confirmingRemoval) {
             Button("移出复查队列") { queue.removeFailedJob() }
         } message: {
@@ -1365,7 +1312,7 @@ private struct LearningReviewControls: View {
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
-    private var queueManagerSheet: some View {
+    private var queueManagerPane: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -1377,8 +1324,10 @@ private struct LearningReviewControls: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 12)
-                Button("关闭") { showingQueueManager = false }
-                    .keyboardShortcut(.cancelAction)
+                Button { showingQueueManager = false } label: {
+                    Label("返回", systemImage: "chevron.left")
+                }
+                .accessibilityIdentifier("review-queue-back")
             }
             .padding(16)
 
@@ -1425,7 +1374,7 @@ private struct LearningReviewControls: View {
                         .foregroundStyle(.secondary)
                     Text("复查队列为空")
                         .font(.callout)
-                    Text("保存课堂笔记后，关闭此窗口，在“核对笔记”中选择整课或一批内容开始。")
+                    Text("保存课堂笔记后，返回上一页，选择整课或一批内容开始复查。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -1694,7 +1643,7 @@ private struct ReviewChangeView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("原笔记").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             marked(original, against: proposed, removed: true)
-            Text("9B 建议 · 待核对").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text("复查建议 · 待核对").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             marked(proposed, against: original, removed: false)
         }
         .font(.system(size: 16))
