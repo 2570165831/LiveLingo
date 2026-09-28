@@ -1,6 +1,168 @@
+import AppKit
 import AVFoundation
 import XCTest
 @testable import LiveLingo
+
+private final class CaptureSleepEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+    func consume(_ event: SpeechPipeline.Event) {
+        if case .failure(let message) = event { lock.withLock { messages.append(message) } }
+    }
+    var failures: [String] { lock.withLock { messages } }
+}
+
+private final class CapturingSleepNotificationCenter: NotificationCenter, @unchecked Sendable {
+    private let lock = NSLock()
+    private var blocks: [@Sendable (Notification) -> Void] = []
+    var sleepHandlers: [@Sendable (Notification) -> Void] { lock.withLock { blocks } }
+    override func addObserver(forName name: NSNotification.Name?, object obj: Any?,
+                              queue: OperationQueue?, using block: @Sendable @escaping (Notification) -> Void) -> NSObjectProtocol {
+        if name == NSWorkspace.willSleepNotification { lock.withLock { blocks.append(block) } }
+        return super.addObserver(forName: name, object: obj, queue: queue, using: block)
+    }
+}
+
+final class CaptureSleepTests: XCTestCase, @unchecked Sendable {
+    private func beginCapture(center: NotificationCenter, mode: AudioInputMode? = .microphone,
+                              existing: SpeechPipeline? = nil) async throws
+        -> (pipeline: SpeechPipeline, events: CaptureSleepEvents, recording: URL) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-Sleep-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let events = CaptureSleepEvents()
+        let pipeline = existing ?? SpeechPipeline(transcriber: { _, _, _ in "Synthetic audio before a lifecycle event." },
+            enableAudioAnalysis: false, captureSleepNotificationCenter: center)
+        let recording = directory.appendingPathComponent("recording.wav")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        let input = try await pipeline.startSyntheticCapture(format: format, recordingURL: recording,
+            sessionID: UUID(), inputMode: mode, eventHandler: events.consume)
+        let audio = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 3_200)!
+        audio.frameLength = 3_200
+        for i in 0..<3_200 { audio.floatChannelData![0][i] = Float(i % 100) / 1_000 }
+        XCTAssertEqual(input.submit(audio), .accepted)
+        await input.drain()
+        return (pipeline, events, recording)
+    }
+
+    private func waitForSleepFailure(_ events: CaptureSleepEvents) async throws {
+        for _ in 0..<200 where events.failures.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(events.failures.count, 1)
+        XCTAssertTrue(events.failures.first?.contains("休眠") == true)
+    }
+
+    func testOnlyDisplaySleepKeepsBothAudioInputsCapturing() async throws {
+        for mode in [AudioInputMode.microphone, .systemAudio] {
+            let center = NotificationCenter()
+            let capture = try await beginCapture(center: center, mode: mode)
+            center.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+            try await Task.sleep(for: .milliseconds(30))
+            XCTAssertEqual(capture.pipeline.transcriptionState()?.isCapturing, true)
+            XCTAssertTrue(capture.events.failures.isEmpty)
+            await capture.pipeline.stop()
+            XCTAssertEqual(try AVAudioFile(forReading: capture.recording).length, 3_200)
+        }
+    }
+
+    func testSleepEndsPausedMicrophoneAndSystemAudioWithoutWakeRestart() async throws {
+        for mode in [AudioInputMode.microphone, .systemAudio] {
+            let center = NotificationCenter()
+            let capture = try await beginCapture(center: center, mode: mode)
+            capture.pipeline.pause()
+            center.post(name: NSWorkspace.willSleepNotification, object: nil)
+            try await waitForSleepFailure(capture.events)
+            center.post(name: NSWorkspace.didWakeNotification, object: nil)
+            try await Task.sleep(for: .milliseconds(30))
+            XCTAssertEqual(capture.pipeline.transcriptionState()?.isCapturing, false)
+            XCTAssertEqual(capture.events.failures.count, 1)
+            XCTAssertEqual(try AVAudioFile(forReading: capture.recording).length, 3_200)
+            await capture.pipeline.stop()
+        }
+    }
+
+    func testRepeatedSleepNotificationsFinalizeOnceAndLeaveOneDurableChunk() async throws {
+        let center = NotificationCenter()
+        let capture = try await beginCapture(center: center)
+        for _ in 0..<3 { center.post(name: NSWorkspace.willSleepNotification, object: nil) }
+        try await waitForSleepFailure(capture.events)
+        await capture.pipeline.stop()
+        center.post(name: NSWorkspace.willSleepNotification, object: nil)
+        center.post(name: NSWorkspace.didWakeNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(capture.events.failures.count, 1)
+        XCTAssertEqual(capture.pipeline.transcriptionWork().count, 1)
+        XCTAssertEqual(capture.pipeline.transcriptionWork().first?.endFrame, 3_200)
+        XCTAssertEqual(try AVAudioFile(forReading: capture.recording).length, 3_200)
+    }
+
+    func testOldSessionSleepCallbackCannotStopReplacementSession() async throws {
+        let center = CapturingSleepNotificationCenter()
+        let first = try await beginCapture(center: center)
+        let oldCallback = try XCTUnwrap(center.sleepHandlers.first)
+        await first.pipeline.stop()
+        let second = try await beginCapture(center: center, existing: first.pipeline)
+        oldCallback(Notification(name: NSWorkspace.willSleepNotification))
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(first.events.failures.isEmpty)
+        XCTAssertTrue(second.events.failures.isEmpty)
+        XCTAssertEqual(second.pipeline.transcriptionState()?.isCapturing, true)
+        center.post(name: NSWorkspace.willSleepNotification, object: nil)
+        try await waitForSleepFailure(second.events)
+        await second.pipeline.stop()
+        XCTAssertEqual(try AVAudioFile(forReading: first.recording).length, 3_200)
+        XCTAssertEqual(try AVAudioFile(forReading: second.recording).length, 3_200)
+    }
+
+    func testNonDeviceInputDoesNotSubscribeToCaptureSleepHandling() async throws {
+        let center = CapturingSleepNotificationCenter()
+        let capture = try await beginCapture(center: center, mode: nil)
+        XCTAssertTrue(center.sleepHandlers.isEmpty)
+        center.post(name: NSWorkspace.willSleepNotification, object: nil)
+        XCTAssertEqual(capture.pipeline.transcriptionState()?.isCapturing, true)
+        XCTAssertTrue(capture.events.failures.isEmpty)
+        await capture.pipeline.stop()
+    }
+
+    func testSleepFinalizesRecordedAudioBeforeReportingWhyCaptureStopped() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-Sleep-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let notificationCenter = NotificationCenter()
+        let events = CaptureSleepEvents()
+        let pipeline = SpeechPipeline(transcriber: { _, _, _ in "A synthetic sentence recorded before sleep." },
+            enableAudioAnalysis: false, captureSleepNotificationCenter: notificationCenter)
+        let recording = directory.appendingPathComponent("recording.wav")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        let input = try await pipeline.startSyntheticCapture(format: format, recordingURL: recording,
+            sessionID: UUID(), inputMode: .microphone, eventHandler: events.consume)
+        let audio = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_000)!
+        audio.frameLength = 8_000
+        for i in 0..<8_000 { audio.floatChannelData![0][i] = Float(i % 100) / 1_000 }
+        XCTAssertEqual(input.submit(audio), .accepted)
+        await input.drain()
+        XCTAssertEqual(pipeline.transcriptionState()?.isCapturing, true)
+
+        // Isolated notification center: no real sleep, device or permission.
+        notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+        for _ in 0..<200 where events.failures.isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(events.failures.count, 1, "System sleep must end capture with an explicit cause")
+        XCTAssertTrue(events.failures.first?.contains("休眠") == true)
+        XCTAssertEqual(pipeline.transcriptionState()?.isCapturing, false,
+                       "Failure delivery must follow durable capture finalization")
+        await pipeline.stop()
+        let reader = try AVAudioFile(forReading: recording)
+        XCTAssertEqual(reader.length, 8_000)
+        let readback = AVAudioPCMBuffer(pcmFormat: reader.processingFormat, frameCapacity: 8_000)!
+        try reader.read(into: readback)
+        XCTAssertEqual(readback.frameLength, audio.frameLength)
+        for i in 0..<8_000 { XCTAssertEqual(readback.floatChannelData![0][i], audio.floatChannelData![0][i]) }
+        let work = pipeline.transcriptionWork()
+        XCTAssertEqual(work.count, 1)
+        XCTAssertEqual(work.first?.endFrame, 8_000)
+    }
+}
 
 /// Two recording-continuity faults are covered here:
 /// 1. context retry could not read a recording that was still being written,

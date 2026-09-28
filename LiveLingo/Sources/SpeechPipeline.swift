@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CoreMedia
 import Foundation
@@ -277,12 +278,16 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private let beforeAudioWrite: (@Sendable () throws -> Void)?
     private let enableAudioAnalysis: Bool
+    private let captureSleepNotificationCenter: NotificationCenter
+    private var captureSleepObserver: NSObjectProtocol?
 
     init(transcriber: TranscriptionQueue.Transcriber? = nil,
          beforeAudioWrite: (@Sendable () throws -> Void)? = nil,
-         enableAudioAnalysis: Bool = true) {
+         enableAudioAnalysis: Bool = true,
+         captureSleepNotificationCenter: NotificationCenter? = nil) {
         self.beforeAudioWrite = beforeAudioWrite
         self.enableAudioAnalysis = enableAudioAnalysis
+        self.captureSleepNotificationCenter = captureSleepNotificationCenter ?? NSWorkspace.shared.notificationCenter
         transcriptionQueue = transcriber.map { TranscriptionQueue(transcriber: $0) } ?? TranscriptionQueue()
         super.init()
         boundarySignal = DispatchSource.makeUserDataAddSource(queue: audioProcessingQueue)
@@ -290,7 +295,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         boundarySignal.resume()
     }
 
-    deinit { boundarySignal?.cancel() }
+    deinit {
+        if let captureSleepObserver { captureSleepNotificationCenter.removeObserver(captureSleepObserver) }
+        boundarySignal?.cancel()
+    }
 
     func update(profile: QwenModelProfile) {
         stateLock.lock()
@@ -416,6 +424,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             throw error
         }
         if inputMode == .microphone { startMicrophoneHealthMonitoring() }
+        startCaptureSleepMonitoring()
     }
 
     private func startMicrophoneCapture(
@@ -685,6 +694,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private func finalizeCapture(generation token: UUID) async {
+        stopCaptureSleepMonitoring()
         stopMicrophoneHealthMonitoring()
         let source = stateLock.withLock { () -> (OwnedAudioCaptureBuffer?, SCStream?, Task<Void, Never>?) in
             let state = (ingress, systemAudioStream, systemRecoveryTask)
@@ -1176,6 +1186,52 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             previewAnalysisTask = nil
             previewResultTask = nil
         }
+    }
+
+    /// Sleep ends this recording through the ordinary durable finalizer. It is
+    /// not a broken microphone to restart during sleep or a maintenance wake.
+    /// A display sleeping alone is deliberately not observed here.
+    private func startCaptureSleepMonitoring() {
+        guard let token = stateLock.withLock({ () -> UUID? in
+            guard captureConfigured, inputMode != nil, !isStopping else { return nil }
+            return generation
+        }) else { return }
+        let observer = captureSleepNotificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            self?.endCaptureForSystemSleep(generation: token)
+        }
+        let binding = stateLock.withLock { () -> (Bool, NSObjectProtocol?) in
+            guard generation == token, captureConfigured, inputMode != nil, !isStopping else { return (false, nil) }
+            let old = captureSleepObserver
+            captureSleepObserver = observer
+            return (true, old)
+        }
+        if let old = binding.1 { captureSleepNotificationCenter.removeObserver(old) }
+        if !binding.0 { captureSleepNotificationCenter.removeObserver(observer) }
+    }
+
+    private func stopCaptureSleepMonitoring() {
+        let observer = stateLock.withLock { () -> NSObjectProtocol? in
+            let old = captureSleepObserver
+            captureSleepObserver = nil
+            return old
+        }
+        if let observer { captureSleepNotificationCenter.removeObserver(observer) }
+    }
+
+    private func endCaptureForSystemSleep(generation token: UUID) {
+        let shouldStop = stateLock.withLock {
+            guard generation == token, captureConfigured, inputMode != nil,
+                  !isStopping, !terminalFailureSent else { return false }
+            // Close the recovery gate synchronously, before the async drain.
+            // Queued microphone/system-audio retries must not restart input.
+            isStopping = true
+            ingress?.seal()
+            return true
+        }
+        guard shouldStop else { return }
+        failCapture("电脑进入休眠，音频采集已结束。", generation: token)
     }
 
     private func startMicrophoneHealthMonitoring() {
@@ -1774,6 +1830,7 @@ extension SpeechPipeline {
 extension SpeechPipeline {
     /// Test-only input: no audio device, permission, recognizer, or model startup.
     func startSyntheticCapture(format: AVAudioFormat, recordingURL: URL?, sessionID: UUID, persistsSession: Bool? = nil,
+                               inputMode: AudioInputMode? = nil,
                                eventHandler: @escaping @Sendable (Event) -> Void) async throws -> OwnedAudioCaptureBuffer {
         let directory = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
             persistsSession: persistsSession, eventHandler: eventHandler)
@@ -1781,8 +1838,9 @@ extension SpeechPipeline {
             commonFormat: format.commonFormat, interleaved: format.isInterleaved) }
         try configureSession(format: format, recordingFile: file, chunkDirectory: directory)
         let input = try makeIngress(format: format)
-        stateLock.withLock { ingress = input }
+        stateLock.withLock { ingress = input; self.inputMode = inputMode }
         try transcriptionQueue.setCapturing(true)
+        startCaptureSleepMonitoring()
         return input
     }
     var syntheticWorkDirectory: URL? { transcriptionQueue.journalDirectory }
