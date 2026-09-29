@@ -1297,6 +1297,36 @@ final class RealtimePolicyTests: XCTestCase {
         XCTAssertEqual(worker.localizedDetail, "复查输入缺少必需字段")
     }
 
+    func testLearningFailuresKeepSpecificMetadataOnlyReasons() throws {
+        // Review input problems are named instead of collapsing to unexpected_error.
+        let stale = ReviewFailure.classify(ReviewIdentityError.staleInput, defaultStage: .directory)
+        XCTAssertEqual(stale.stage, .directory)
+        XCTAssertEqual(stale.code, "input_stale")
+        XCTAssertTrue(stale.logLine.contains("code=input_stale"))
+        XCTAssertTrue(stale.localizedDetail.contains("新修订"))
+        XCTAssertEqual(ReviewFailure.classify(ReviewIdentityError.conflict("所选目录属于另一份课程"),
+                                              defaultStage: .directory).code, "input_conflict")
+        XCTAssertEqual(ReviewFailure.classify(SessionStoreError.incompleteJournalTail(bytes: 3),
+                                              defaultStage: .directory).code, "session_incompleteJournalTail")
+        let file = ReviewFailure.classify(NSError(domain: NSCocoaErrorDomain, code: 260), defaultStage: .directory)
+        XCTAssertEqual(file.code, "ns_NSCocoaErrorDomain_260")
+        XCTAssertEqual(LearningFailureCode.code(for: QwenRuntimeError.outputLimitReached("上限")), "output_limit")
+
+        // Note outputs report the broken rule without echoing the text.
+        XCTAssertEqual(LearningNote.failureCode(for: ""), "empty_output")
+        XCTAssertEqual(LearningNote.failureCode(for: "{\"topic\": \"未闭合"), "invalid_json")
+        let point = LearningPoint(kind: "核心结论", text: "合成要点用于检查数量上限。", sourceIDs: ["en0s0"])
+        let crowded = LearningNote(topic: "合成课堂", points: Array(repeating: point, count: 25))
+        let text = String(decoding: try JSONEncoder().encode(crowded), as: UTF8.self)
+        XCTAssertThrowsError(try LearningNote.decode(text))
+        XCTAssertEqual(LearningNote.failureCode(for: text), "too_many_points_25")
+        XCTAssertFalse(LearningNote.failureCode(for: text).contains("合成"))
+
+        XCTAssertEqual(LearningFailureCode.code(for: QwenRuntimeError.requestTimedOut), "timeout")
+        XCTAssertEqual(LearningFailureCode.label(for: "output_limit"), "输出超出长度上限")
+        XCTAssertEqual(LearningFailureCode.label(for: "too_many_points_25"), "请求失败")
+    }
+
     private func diagnosticSnapshot(index: Int, input: String?, response: String?) -> ReviewDiagnosticSnapshot {
         ReviewDiagnosticSnapshot(createdAt: "2026-09-15T00:00:0\(index)Z", jobID: UUID().uuidString,
                                  requestID: "abcdef0\(index)", requestCount: 1, batch: 0, batchCount: 1,

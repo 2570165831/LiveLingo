@@ -2844,7 +2844,11 @@ final class AppModel: ObservableObject {
                     })
                     guard !Task.isCancelled, !processingPaused, currentGeneration == generation,
                           sessionID == summarySession, summaryTaskGeneration == summaryOwner else { return }
-                    note = try LearningNote.decode(response)
+                    do { note = try LearningNote.decode(response) }
+                    catch {
+                        Self.latencyLog.notice("summary event=invalid_note model=\(modelName, privacy: .public) reason=\(LearningNote.failureCode(for: response), privacy: .public) response_bytes=\(response.utf8.count)")
+                        throw error
+                    }
                     if learningDraft?.id == draft.id { learningDraft?.completedNote = note }
                 }
                 guard !Task.isCancelled, !processingPaused, currentGeneration == generation,
@@ -2890,10 +2894,11 @@ final class AppModel: ObservableObject {
                 consecutiveSummaryFailures += 1
                 let retry = SummaryRefreshPolicy.failureRetryDelay(consecutiveFailures: consecutiveSummaryFailures)
                 summaryRetryNotBefore = ProcessInfo.processInfo.systemUptime + retry
-                Self.latencyLog.notice("summary event=failed retry_seconds=\(retry) failures=\(self.consecutiveSummaryFailures)")
+                let reason = LearningFailureCode.code(for: error)
+                Self.latencyLog.notice("summary event=failed model=\(modelName, privacy: .public) reason=\(reason, privacy: .public) retry_seconds=\(retry) failures=\(self.consecutiveSummaryFailures)")
                 summaryStatus = lectureSummary.isEmpty
                     ? "摘要暂不可用：\(error.localizedDescription)"
-                    : "保留上次摘要 · 本轮更新失败"
+                    : "保留上次摘要 · 本轮更新失败（\(LearningFailureCode.label(for: reason))）"
                 return
             }
         }

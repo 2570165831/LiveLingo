@@ -1359,8 +1359,12 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
             return ReviewFailure(stage: .cancelled, code: "cancelled", detail: "复查任务被取消")
         }
         guard let qwen = error as? QwenRuntimeError else {
-            return ReviewFailure(stage: defaultStage, code: "unexpected_error",
-                                 detail: String(describing: type(of: error)))
+            // Known app errors carry their own reason; keep it instead of a bare
+            // type name so a failed batch says what actually went wrong.
+            let known = error is ReviewIdentityError || error is SessionStoreError
+            return ReviewFailure(stage: defaultStage, code: LearningFailureCode.code(for: error),
+                                 detail: known ? sanitized((error as? LocalizedError)?.errorDescription ?? "")
+                                               : String(describing: type(of: error)))
         }
         switch qwen {
         case .serviceUnavailable:
@@ -1410,6 +1414,81 @@ struct ReviewQueueEvent: Codable, Equatable, Sendable {
 /// Local-only mirror of the journal trail. Uses `privacy: .public` because the
 /// strings passed here are built from codes and counts, never note/model text;
 /// `ReviewFailure.logLine` and `ReviewQueueEvent.logLine` guarantee that.
+/// Metadata-only codes for note and review failures: error cases, schema key
+/// kinds and counts, never lesson text or model output.
+enum LearningFailureCode {
+    static func code(for error: Error) -> String {
+        switch error {
+        case let error as QwenRuntimeError:
+            switch error {
+            case .serviceUnavailable, .lmStudioUnavailable: return "runtime_unavailable"
+            case .transcriptionTimedOut, .requestTimedOut: return "timeout"
+            case .modelUnavailable: return "model_unavailable"
+            case .invalidResponse: return "invalid_response"
+            case .requestFailed: return "request_failed"
+            case .generationInterrupted: return "generation_interrupted"
+            case .translationRejected: return "rejected"
+            case .outputLimitReached: return "output_limit"
+            }
+        case let error as ReviewIdentityError:
+            switch error {
+            case .conflict: return "input_conflict"
+            case .staleInput: return "input_stale"
+            case .unreadable: return "report_unreadable"
+            }
+        case let error as SessionStoreError:
+            return "session_" + String(String(describing: error).prefix(while: \.isLetter))
+        case let error as DecodingError:
+            switch error {
+            case .keyNotFound: return "missing_key"
+            case .typeMismatch: return "type_mismatch"
+            case .valueNotFound: return "null_value"
+            case .dataCorrupted: return "invalid_json"
+            @unknown default: return "invalid_json"
+            }
+        case is CancellationError: return "cancelled"
+        default:
+            let error = error as NSError
+            return "ns_" + error.domain.filter { $0.isLetter || $0.isNumber } + "_\(error.code)"
+        }
+    }
+
+    /// Short Chinese reason for the notes status line.
+    static func label(for code: String) -> String {
+        switch code {
+        case "timeout": return "超时"
+        case "output_limit": return "输出超出长度上限"
+        case "generation_interrupted": return "生成被中断"
+        case "runtime_unavailable", "model_unavailable": return "本机模型不可用"
+        case "invalid_json", "missing_key", "type_mismatch", "null_value": return "输出格式不合格"
+        case "invalid_response": return "笔记未通过校验"
+        default: return "请求失败"
+        }
+    }
+}
+
+extension LearningNote {
+    /// Which rule a finished note output broke. Counts and rule names only, so
+    /// the result may enter OSLog; the output itself never does.
+    static func failureCode(for text: String) -> String {
+        guard !text.isEmpty else { return "empty_output" }
+        let note: LearningNote
+        do { note = try JSONDecoder().decode(Self.self, from: Data(text.utf8)) }
+        catch { return LearningFailureCode.code(for: error) }
+        if note.topic.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "empty_topic" }
+        if note.topic.count > 80 || note.topic.contains("\n") || note.topic.contains("<|") {
+            return "invalid_topic_chars_\(note.topic.count)"
+        }
+        if note.points.count > 24 { return "too_many_points_\(note.points.count)" }
+        if let followUps = note.followUps, followUps.count > 8 { return "too_many_followups_\(followUps.count)" }
+        if (note.noNewKnowledge == true) != note.points.isEmpty { return "points_state_mismatch" }
+        for (index, point) in note.points.enumerated() {
+            do { try point.validate() } catch { return "invalid_point_\(index + 1)_of_\(note.points.count)" }
+        }
+        return "valid"
+    }
+}
+
 enum ReviewLog {
     private static let logger = Logger(subsystem: "com.jianhongli.LiveLingo", category: "LearningReview")
 
