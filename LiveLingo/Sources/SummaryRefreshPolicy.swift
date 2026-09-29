@@ -64,10 +64,30 @@ struct SummaryResourcePolicy {
         return (UInt64(statistics.free_count) + UInt64(statistics.inactive_count)) * UInt64(getpagesize())
     }
 
-    static func pressureIsNormal() -> Bool {
+    /// macOS memory pressure level: 1 normal, 2 warning, 4 critical.
+    static func pressureLevel() -> Int32? {
         var level: Int32 = 0
         var size = MemoryLayout<Int32>.size
-        return sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0) == 0 && level == 1
+        return sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0) == 0 ? level : nil
+    }
+
+    static let warningReserveBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
+
+    /// Normal pressure always allows notes and reviews. A warning still allows
+    /// them while enough memory is actually reclaimable: a large Mac with a busy
+    /// compressor can sit at "warning" for hours with half its RAM free, and must
+    /// not stall background work until someone quits another app. Critical, an
+    /// unknown level or a small reclaimable pool always waits.
+    static func pressureAllowsWork(level: Int32?, availableBytes: UInt64) -> Bool {
+        switch level {
+        case 1: return true
+        case 2: return availableBytes >= warningReserveBytes
+        default: return false
+        }
+    }
+
+    static func memoryAllowsWork() -> Bool {
+        pressureAllowsWork(level: pressureLevel(), availableBytes: estimatedAvailableBytes() ?? 0)
     }
 }
 
