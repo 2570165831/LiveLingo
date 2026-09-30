@@ -9,15 +9,18 @@ A CLI build runs outside the app bundle, so it has no bundled ASR service and no
 bundled MLX runtime of its own. Point it at local resources explicitly instead
 of relying on defaults:
 
-- `LIVELINGO_ASR_ENDPOINT` (with `LIVELINGO_ASR_TOKEN` when the service requires
-  a token) selects the loopback ASR service to reuse.
-- `LIVELINGO_MLX_PYTHON`, `LIVELINGO_MLX_WORKER`, `LIVELINGO_MLX_MODELS` and
-  `LIVELINGO_MLX_STATE` select the MLX language runtime.
+- Place `ASRRuntime/` and `Models/` beside the executable, or inside its isolated
+  bundle. The CLI starts and verifies its own loopback ASR child process.
+  External ASR endpoint/token overrides and resources inside `/Applications`
+  are rejected; do not use the installed app as a test runtime.
+- `LIVELINGO_MLX_PYTHON`, `LIVELINGO_MLX_WORKER` and `LIVELINGO_MLX_MODELS`
+  select local MLX language resources outside `/Applications`. Preferences,
+  data and MLX checkpoint state are isolated under each new output directory.
 
 The language runtime is MLX, one owned process per model; LM Studio is not used
-and no LM Studio service is required. Those model resources are shared with other
-clients, and the legacy `Scripts/run-qwen-service.sh` can serve the loopback ASR
-service for local development. Do not run it alongside a real recording.
+and no LM Studio service is required. Read-only model files may be reused, but
+test processes and their writable state belong to this run. Do not run a replay
+alongside a real recording or use the legacy service script for this CLI.
 
 Build into a new directory:
 
@@ -58,12 +61,17 @@ CLI claims macOS 14 preview support.
 
 The output directory must not already exist. A run saves recording.wav,
 transcripts, bilingual JSONL/SRT, manifest and available cumulative summary.
-JSON lines include elapsed time, caption/translation/summary coverage and
-preview text. Logs contain the input's content; keep them with the test data.
-`finished` means the existing export workflow finished: inspect coverage and
+JSON lines include elapsed time and caption/translation/summary counts. Routine
+events omit classroom text; exported transcripts and model diagnostic artifacts
+remain private classroom material. Keep them with the test data.
+`processing_finished` means the existing export workflow finished: inspect coverage and
 failure markers separately, because the production workflow can save an
 incomplete summary. Capture duration accepts finite values from 0 (exclusive)
 to 3600 seconds. Replay duration is the input file's duration.
+
+Only a zero exit status together with `run_verified` and confirmed runtime
+cleanup is a successful complete run. `--verify-saved` checks export integrity;
+it does not prove complete processing and accepts valid audio with zero captions.
 
 For cleanup, first ensure the CLI has exited, keep the result/required logs,
 and move only its explicit test output/build paths to Trash. Never remove
