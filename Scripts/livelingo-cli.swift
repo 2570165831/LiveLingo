@@ -3,6 +3,17 @@ import AppKit
 import AVFoundation
 import CryptoKit
 import Darwin
+#if LIVELINGO_CLI
+/// Headless commands use explicit paths. A UI-only path must cancel rather
+/// than opening a file chooser or blocking the CLI's cleanup and signal loop.
+@MainActor
+enum FilePanelPresentation {
+ static func begin(_ panel: NSSavePanel,
+                   completion: @escaping (NSApplication.ModalResponse) -> Void) {
+  completion(.cancel)
+ }
+}
+#endif
 #if !LIVELINGO_CLI_LIFECYCLE_TESTS
 @main
 #endif
