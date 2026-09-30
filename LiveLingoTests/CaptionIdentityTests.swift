@@ -115,25 +115,32 @@ final class CaptionIdentityTests: XCTestCase {
     }
 
     func testCaptionQueueFormatsSpokenQuantitiesWithoutChangingOriginalEnglish() async throws {
-        let original = "Meet at ten past two and add fifty parts per million."
-        let chinese = "在 2:10 集合，并添加 50 ppm。"
-        var inputs: [String] = []
-        let model = try makeModel(.init(translate: { input, _, _, _, _ in
-            inputs.append(input)
-            return chinese
-        }, adjacent: { _, _, _, _, _, _, _, _, _ in
-            XCTFail("An isolated first caption must not request adjacent repair")
-            throw CancellationError()
-        }))
-        model.receiveCaptionForTesting(original, start: 0, end: 8)
-        await model.translationTaskForTesting?.value
-        XCTAssertEqual(inputs, ["Meet at 2:10 and add 50 ppm."],
-                       "The real caption queue must apply formatting before generation, once")
-        let caption = try XCTUnwrap(model.segments.first)
-        XCTAssertEqual(model.segments.count, 1)
-        XCTAssertEqual(caption.english, original, "The original transcript remains the evidence")
-        XCTAssertEqual(caption.chinese, chinese)
-        XCTAssertTrue(caption.hasUsableTranslation)
+        for (original, normalized, chinese) in [
+            ("Meet at ten past two and add fifty parts per million.",
+             "Meet at 2:10 and add 50 ppm.", "在 2:10 集合，并添加 50 ppm。"),
+            ("Set the odds at ten to eight.", "Set the odds at 10:8.", "将赔率设为 10:8。"),
+            ("If the determinant is zero, the columns are not linearly independent.",
+             "If the determinant is zero, the columns are linearly dependent.",
+             "如果行列式为零，则列向量线性相关。")
+        ] {
+            var inputs: [String] = []
+            let model = try makeModel(.init(translate: { input, _, _, _, _ in
+                inputs.append(input)
+                return chinese
+            }, adjacent: { _, _, _, _, _, _, _, _, _ in
+                XCTFail("An isolated first caption must not request adjacent repair")
+                throw CancellationError()
+            }))
+            model.receiveCaptionForTesting(original, start: 0, end: 8)
+            await model.translationTaskForTesting?.value
+            XCTAssertEqual(inputs, [normalized],
+                           "The real caption queue must apply formatting before generation, once")
+            let caption = try XCTUnwrap(model.segments.first)
+            XCTAssertEqual(model.segments.count, 1)
+            XCTAssertEqual(caption.english, original, "The original transcript remains the evidence")
+            XCTAssertEqual(caption.chinese, chinese)
+            XCTAssertTrue(caption.hasUsableTranslation)
+        }
     }
 
     func testCaptureFailuresRetryFinalNotesWithoutAnotherCaptionOrPowerPoll() async throws {

@@ -1941,6 +1941,7 @@ enum AcademicInputNormalizer {
         }
 
         normalized = normalizePhysics(normalized, recentContext: recentContext)
+        normalized = MathematicalPredicateNormalizer.normalize(normalized)
         normalized = SpokenQuantityNormalizer.normalize(normalized, recentContext: recentContext)
 
         return literals.restore(in: normalized)
@@ -1994,6 +1995,92 @@ enum AcademicInputNormalizer {
 
 /// Format complete, unambiguous spoken quantities before translation. Call this
 /// after literal labels have been masked; never infer AM/PM, units or ASR words.
+/// Keep literal wording and unfinished quotations out of semantic rewrites.
+/// These ranges supplement the explicit labels already masked by the caller.
+private enum AcademicRewriteScope {
+    private static let literalCue = try! NSRegularExpression(
+        pattern: #"\b(?:words?|phrases?|wording|literal|verbatim|codes?|labels?|strings?|identifiers?|print|repeat|copy|spell|quote)\b"#,
+        options: [.caseInsensitive])
+
+    static func quotedRanges(in source: String) -> [NSRange]? {
+        let characters = Array(source)
+        var ranges: [NSRange] = []
+        var opening: Int?
+        var closing: Character?
+        var offset = 0
+        for index in characters.indices {
+            let character = characters[index]
+            let width = character.utf16.count
+            defer { offset += width }
+            let apostrophe = (character == "'" || character == "’") && index > 0
+                && index + 1 < characters.count
+                && (characters[index - 1].isLetter || characters[index - 1].isNumber)
+                && (characters[index + 1].isLetter || characters[index + 1].isNumber)
+            if apostrophe { continue }
+            if closing == nil, (character == "'" || character == "’"), index > 0,
+               index + 1 < characters.count, characters[index + 1].isWhitespace,
+               characters[index - 1] == "s" || characters[index - 1] == "S" {
+                continue // A plural possessive such as students' vectors.
+            }
+            var backslashes = 0
+            var previous = index
+            while previous > 0, characters[previous - 1] == "\\" {
+                backslashes += 1
+                previous -= 1
+            }
+            if backslashes % 2 == 1 { continue }
+            if let expected = closing {
+                if character == expected, let start = opening {
+                    ranges.append(NSRange(location: start, length: offset + width - start))
+                    opening = nil
+                    closing = nil
+                }
+                continue
+            }
+            switch character {
+            case "\"", "'", "`": closing = character
+            case "“": closing = "”"
+            case "‘": closing = "’"
+            case "”", "’": return nil // A quoted fragment may start in the previous caption.
+            default: continue
+            }
+            opening = offset
+        }
+        return closing == nil ? ranges : nil
+    }
+
+    static func permits(_ range: NSRange, in source: String, quoted: [NSRange]) -> Bool {
+        guard !quoted.contains(where: { NSIntersectionRange($0, range).length > 0 }),
+              let indices = Range(range, in: source) else { return false }
+        let separators = CharacterSet(charactersIn: ".;!?\r\n")
+        let prefix = String(source[..<indices.lowerBound]).components(separatedBy: separators).last ?? ""
+        let suffix = String(source[indices.upperBound...]).components(separatedBy: separators).first ?? ""
+        let clause = prefix + String(source[indices]) + suffix
+        return literalCue.firstMatch(in: clause, range: NSRange(clause.startIndex..., in: clause)) == nil
+    }
+}
+
+/// In a direct mathematical predicate, non-independence is dependence.
+/// Preserve scope/modality by leaving every other negation construction alone.
+enum MathematicalPredicateNormalizer {
+    private static let predicate = try! NSRegularExpression(
+        pattern: #"\b(is|are|was|were)\s+not\s+linearly\s+independent\b"#,
+        options: [.caseInsensitive])
+
+    static func normalize(_ source: String) -> String {
+        let matches = predicate.matches(in: source, range: NSRange(source.startIndex..., in: source))
+        guard !matches.isEmpty, let quoted = AcademicRewriteScope.quotedRanges(in: source) else { return source }
+        var result = source
+        for match in matches.reversed() {
+            guard AcademicRewriteScope.permits(match.range, in: source, quoted: quoted),
+                  let range = Range(match.range, in: result) else { continue }
+            let verb = (source as NSString).substring(with: match.range(at: 1))
+            result.replaceSubrange(range, with: verb + " linearly dependent")
+        }
+        return result
+    }
+}
+
 enum SpokenQuantityNormalizer {
     private static let smallWords = ["zero", "one", "two", "three", "four", "five", "six", "seven",
         "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
@@ -2028,6 +2115,17 @@ enum SpokenQuantityNormalizer {
     private static let ratioCueExpression = try! NSRegularExpression(
         pattern: #"\b(?:ratios?|odds|scores?|proportions?|powers?|exponents?|times)\b"#,
         options: [.caseInsensitive])
+    private static let ratioExpression = try! NSRegularExpression(pattern: leftBoundary
+        + "(" + numberPattern + #")[ \t]+to[ \t]+("# + numberPattern + ")" + rightBoundary,
+        options: [.caseInsensitive])
+    private static let ratioAnchorExpression = try! NSRegularExpression(
+        pattern: #"\b(ratios?|odds|scores?|proportions?)[ \t]+(?:(?:is|are|was|were|of|at|equals?|remains?|about|roughly|approximately|exactly)[ \t]+){0,3}$"#,
+        options: [.caseInsensitive])
+    private static let oddsAgainstExpression = try! NSRegularExpression(
+        pattern: #"^[ \t]+against\b"#, options: [.caseInsensitive])
+    private static let fractionalContinuationExpression = try! NSRegularExpression(
+        pattern: #"^[ \t]+(?:over\b|divided[ \t]+by\b|(?:and[ \t]+)?(?:a[ \t]+)?(?:half|quarter|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b|and[ \t]+(?:a[ \t]+)?(?:one|two|three|four|five|six|seven|eight|nine)[ \t]+(?:half|halves|quarters?|thirds?|fourths?|fifths?|sixths?|sevenths?|eighths?|ninths?|tenths?)\b)"#,
+        options: [.caseInsensitive])
     private static let clockAdverbExpression = try! NSRegularExpression(
         pattern: #"^\s*(?:we|you|I|he|she|they)(?:['’]ll|\s+(?:will|shall))\b"#,
         options: [.caseInsensitive])
@@ -2053,6 +2151,23 @@ enum SpokenQuantityNormalizer {
             guard completeNumber(at: match.range, in: value),
                   let amount = number(capture(1, match, value)) else { return nil }
             return amount + " ppm"
+        }
+        if let quoted = AcademicRewriteScope.quotedRanges(in: text) {
+            text = replacing(ratioExpression, in: text) { match, value in
+                let prefix = (value as NSString).substring(to: match.range.location)
+                let suffix = (value as NSString).substring(from: NSMaxRange(match.range))
+                guard let anchor = ratioAnchorExpression.firstMatch(in: prefix, range: NSRange(prefix.startIndex..., in: prefix)),
+                      !((prefix as NSString).substring(with: anchor.range(at: 1)).lowercased() == "odds"
+                        && oddsAgainstExpression.firstMatch(in: suffix, range: NSRange(suffix.startIndex..., in: suffix)) != nil),
+                      completeNumber(at: match.range, in: value),
+                      fractionalContinuationExpression.firstMatch(in: suffix, range: NSRange(suffix.startIndex..., in: suffix)) == nil,
+                      AcademicRewriteScope.permits(match.range, in: value, quoted: quoted),
+                      let first = number(capture(1, match, value)),
+                      let second = number(capture(2, match, value)) else { return nil }
+                // Keep the stated operand order; do not invert odds, reduce the
+                // ratio or convert it to a probability.
+                return first + ":" + second
+            }
         }
         text = replacing(clockExpression, in: text) { match, value in
             guard completeNumber(at: match.range, in: value),

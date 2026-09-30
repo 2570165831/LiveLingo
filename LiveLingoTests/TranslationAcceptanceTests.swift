@@ -69,13 +69,93 @@ final class TranslationAcceptanceTests: XCTestCase {
     }
 
     func testClockToRequiresTimeEvidenceInsteadOfRewritingRatiosOrPowers() {
-        for source in ["The ratio is ten to eight.", "Set the odds at ten to eight.",
-                       "Use three times ten to eight meters per second.",
+        for source in ["Use three times ten to eight meters per second.",
                        "The score changed from ten to eight.", "Ten to eight."] {
             XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
         }
         XCTAssertEqual(AcademicInputNormalizer.normalize("Meet at ten to eight."), "Meet at 7:50.")
         XCTAssertEqual(AcademicInputNormalizer.normalize("The clock reads ten to eight."), "The clock reads 7:50.")
+    }
+
+    func testNumericRatiosKeepTheirStatedOperandOrder() {
+        for (source, expected) in [
+            ("Set the odds at ten to eight.", "Set the odds at 10:8."),
+            ("Set the odds at eight to ten.", "Set the odds at 8:10."),
+            ("The ratio is ten to eight.", "The ratio is 10:8."),
+            ("The aspect ratio is sixteen to nine.", "The aspect ratio is 16:9."),
+            ("The ratio is 0.5 to 2.", "The ratio is 0.5:2."),
+            ("The ratio is exactly ten to eight.", "The ratio is exactly 10:8."),
+            ("Use a ratio of twenty-one to eight.", "Use a ratio of 21:8."),
+            ("The ratio is two to one, not one to two.", "The ratio is 2:1, not one to two."),
+            ("The ratio is one to two. Meet at ten to eight.", "The ratio is 1:2. Meet at 7:50.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(expected), expected)
+        }
+    }
+
+    func testRatiosDoNotRewriteRangesFractionsOrLiteralWording() {
+        for source in ["The score changed from ten to eight.",
+                       "The odds are ten to one against.",
+                       "The ratio is one hundred ten to eight.",
+                       "The ratio is one to eight hundred.",
+                       "The ratio is one to eight and a half.",
+                       "The ratio is one to eight and one quarter.",
+                       "The ratio is one to eight and two thirds.",
+                       "The ratio is one to eight over nine.",
+                       "The ratio is one to eight divided by nine.",
+                       "The ratio is minus one to eight.",
+                       "The ratio is one to minus eight.",
+                       "The ratio mentioned before does not tell us to meet at ten to eight.",
+                       #"Print "Set the odds at ten to eight." exactly."#,
+                       "Repeat the words the ratio is ten to eight.",
+                       #"The literal string is "the ratio is ten to eight"."#,
+                       "Use `the ratio is ten to eight` in code.",
+                       "Print \"the ratio is ten to eight."] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+    }
+
+    func testDirectMathematicalNonIndependencePreservesTheClaim() {
+        for (source, expected) in [
+            ("If the determinant is zero, the columns are not linearly independent.",
+             "If the determinant is zero, the columns are linearly dependent."),
+            ("The determinant is nonzero, but the columns are not linearly independent.",
+             "The determinant is nonzero, but the columns are linearly dependent."),
+            ("The vectors were not linearly independent.", "The vectors were linearly dependent."),
+            ("John's vectors are not linearly independent.", "John's vectors are linearly dependent."),
+            ("The students' vectors are not linearly independent.", "The students' vectors are linearly dependent."),
+            (#"The columns of "A" are not linearly independent."#,
+             #"The columns of "A" are linearly dependent."#),
+            ("The columns are not linearly independent, and the rank is not full.",
+             "The columns are linearly dependent, and the rank is not full.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(expected), expected)
+        }
+    }
+
+    func testMathematicalRewritingKeepsModalQuantifiedAndQuotedNegation() {
+        for source in ["The columns are not necessarily linearly independent.",
+                       "Not all columns are linearly independent.",
+                       "The columns might not be linearly independent.",
+                       "The columns need not be linearly independent.",
+                       "The columns cannot be linearly independent.",
+                       "The columns aren't linearly independent.",
+                       "The columns are not not linearly independent.",
+                       "The columns are not linearly dependent.",
+                       #"Print "The columns are not linearly independent." exactly."#,
+                       "Repeat the words the columns are not linearly independent.",
+                       "'The columns are not linearly independent' is a phrase.",
+                       #"The literal text is "The columns are not linearly independent"."#,
+                       "Use `the columns are not linearly independent` in code.",
+                       "The phrase the columns are not linearly independent contains seven words.",
+                       "Quote \"the columns are not linearly independent."] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+        let mixed = #"The exact string is "the columns are not linearly independent". The columns are not linearly independent."#
+        XCTAssertEqual(AcademicInputNormalizer.normalize(mixed),
+                       #"The exact string is "the columns are not linearly independent". The columns are linearly dependent."#)
     }
 
     func testSpokenQuantityNormalizationPreservesExactLiteralScope() {
