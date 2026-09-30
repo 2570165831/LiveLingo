@@ -3163,7 +3163,13 @@ final class AppModel: ObservableObject {
 
     private func refreshSummaryConcurrency() {
         refreshRuntimeResources()
-        summaryMemoryPressureNormal = SummaryResourcePolicy.pressureIsNormal()
+        let memoryAllowsWork = SummaryResourcePolicy.memoryAllowsWork()
+        if memoryAllowsWork != summaryMemoryPressureNormal {
+            let level = SummaryResourcePolicy.pressureLevel() ?? -1
+            let availableMiB = (SummaryResourcePolicy.estimatedAvailableBytes() ?? 0) / 1_048_576
+            Self.latencyLog.notice("memory gate allows_work=\(memoryAllowsWork) pressure_level=\(level) available_mib=\(availableMiB)")
+        }
+        summaryMemoryPressureNormal = memoryAllowsWork
         let allowed = SummaryResourcePolicy.allowsConcurrency(
             lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,
             pressureNormal: summaryMemoryPressureNormal,
@@ -3178,12 +3184,16 @@ final class AppModel: ObservableObject {
 
     private func startMemoryPressureMonitor() {
         let monitor = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
-        monitor.setEventHandler { [weak self] in
+        monitor.setEventHandler { [weak self, weak monitor] in
+            // Critical always yields; a warning re-checks reclaimable memory.
+            let critical = monitor?.data.contains(.critical) ?? true
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.summaryMemoryPressureNormal = false
-                self.summaryConcurrencyAllowed = false
-                self.yieldSummaryToCaptions(resourcePressure: true)
+                self.summaryMemoryPressureNormal = !critical && SummaryResourcePolicy.memoryAllowsWork()
+                if !self.summaryMemoryPressureNormal {
+                    self.summaryConcurrencyAllowed = false
+                    self.yieldSummaryToCaptions(resourcePressure: true)
+                }
                 self.updateReviewAvailability()
             }
         }

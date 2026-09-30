@@ -1119,6 +1119,16 @@ final class RealtimePolicyTests: XCTestCase {
                                                  lastCycleStarted: nil, allowConcurrent: true), 0)
     }
 
+    func testMemoryWarningStillAllowsWorkWithEnoughReclaimableMemory() {
+        let gib: UInt64 = 1_024 * 1_024 * 1_024
+        for available: UInt64 in [0, 7, 8, 32] {
+            XCTAssertTrue(SummaryResourcePolicy.pressureAllowsWork(level: 1, availableBytes: available * gib))
+            XCTAssertEqual(SummaryResourcePolicy.pressureAllowsWork(level: 2, availableBytes: available * gib), available >= 8)
+            XCTAssertFalse(SummaryResourcePolicy.pressureAllowsWork(level: 4, availableBytes: available * gib))
+            XCTAssertFalse(SummaryResourcePolicy.pressureAllowsWork(level: nil, availableBytes: available * gib))
+        }
+    }
+
     func testSummaryYieldsOnlyForSignificantCaptionBacklog() {
         XCTAssertFalse(SummaryRefreshPolicy.shouldYieldToCaptions(now: 100, pendingCount: 0, oldestEnqueuedAt: 0))
         XCTAssertFalse(SummaryRefreshPolicy.shouldYieldToCaptions(now: 100, pendingCount: 1, oldestEnqueuedAt: 100))
