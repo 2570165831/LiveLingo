@@ -34,6 +34,7 @@ struct ContentView: View {
     @State private var captionAnchor: UUID?
     @State private var showStatusDetails = false
     @State private var showSummaryDetails = false
+    @State private var showingReviewQueueManager = false
     @State private var sheetReturnFocus: ClassroomSheet?
     @FocusState private var focusedSheetButton: ClassroomSheet?
 
@@ -49,7 +50,7 @@ struct ContentView: View {
         var title: String {
             switch self {
             case .translation: return "文字翻译"
-            case .review: return "核对笔记"
+            case .review: return "复查笔记"
             case .processing: return "录音处理"
             }
         }
@@ -208,19 +209,21 @@ struct ContentView: View {
                 }
             case .review:
                 ScrollView {
-                    LearningReviewControls(model: model)
+                    LearningReviewControls(model: model, showingQueueManager: $showingReviewQueueManager)
                         .padding(.vertical, 16)
                 }
             case .processing:
                 SavedProcessingView(model: model)
             }
         }
-        .frame(width: sheet == .processing ? 700 : 560, height: sheet == .review ? 480 : 580)
+        .frame(width: sheet == .processing ? 700 : 560,
+               height: sheet == .review ? (showingReviewQueueManager ? 480 : 300) : 580)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func presentSheet(_ sheet: ClassroomSheet) {
         sheetReturnFocus = sheet
+        if sheet == .review { showingReviewQueueManager = false }
         activeSheet = sheet
     }
 
@@ -299,6 +302,10 @@ struct ContentView: View {
                         .help(model.previewTranslationStatus)
                 }
                 Spacer()
+                Text("\(model.segments.count) 段")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
                 Toggle("跟随最新", isOn: $followLatest)
                     .toggleStyle(.button)
                     .controlSize(.small)
@@ -365,16 +372,6 @@ struct ContentView: View {
                     }
                 }
             }
-
-            Divider()
-            HStack(spacing: 8) {
-                Spacer()
-                Text("\(model.segments.count) 段")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
         }
         .panelSurface()
     }
@@ -531,7 +528,7 @@ struct ContentView: View {
                     .accessibilityLabel("更新课堂笔记")
                     .accessibilityIdentifier("classroom-refresh-notes")
                 }
-                Text(model.exportStatus ?? "导出所选笔记；核对范围可另行选择")
+                Text(model.exportStatus ?? "导出所选笔记；复查范围可另行选择")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -737,11 +734,11 @@ private struct ReviewEntryButton: View {
                 if needsAttention {
                     Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
                 }
-                Text(needsAttention ? "核对需处理…" : queue.running ? "核对进行中…" : "核对笔记…")
+                Text(needsAttention ? "复查需处理…" : queue.running ? "复查进行中…" : "复查笔记…")
             }
         }
         .buttonStyle(.borderless)
-        .help("选择本课核对范围，或管理历史核对任务")
+        .help("选择本课复查范围，或管理历史复查任务")
         .accessibilityIdentifier("classroom-review-notes")
     }
 }
@@ -788,7 +785,7 @@ struct ClassroomSettingsView: View {
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("专注模式", isOn: $model.processingFocusEnabled)
-                Text("优先处理录音与字幕，后台核对等待空闲。")
+                Text("优先处理录音与字幕，后台复查等待空闲。")
                     .font(.callout).foregroundStyle(.secondary)
                 Toggle("录音期间防止空闲睡眠", isOn: $model.preventIdleSleepWhileRecording)
                 DisclosureGroup("处理方式与模型详情") {
@@ -882,6 +879,7 @@ struct RecordingMenuItems: View {
 
 struct TypedTranslationView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var showingKeyboardShortcuts = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -898,7 +896,9 @@ struct TypedTranslationView: View {
                 Text("\(model.manualTranslationInput.count) / 2000 字符").font(.caption)
                 PasteButton(payloadType: String.self) { values in
                     model.manualTranslationInput = values.joined(separator: "\n")
-                }.disabled(model.isManualTranslating)
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isManualTranslating)
             }
             TranslationTextEditor(
                 text: $model.manualTranslationInput,
@@ -912,12 +912,29 @@ struct TypedTranslationView: View {
             )
                 .frame(height: 90)
                 .border(Color.secondary.opacity(0.25))
-            Text("Enter 翻译 · Shift+Enter 换行 · ⌘Enter 提交多行文本")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text("⇧⌘Enter 精确翻译 · ⌘Delete 取消 · ⇧Delete 清空输入 · ⇧⌘Delete 取消并清空")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            HStack {
+                Text("Enter 翻译 · Shift+Enter 换行")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("快捷键") { showingKeyboardShortcuts.toggle() }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .font(.caption2)
+                    .help("查看全部翻译快捷键")
+                    .popover(isPresented: $showingKeyboardShortcuts) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("文字翻译快捷键").font(.headline)
+                            Text("Enter 翻译 · Shift+Enter 换行")
+                            Text("⌘Enter 提交多行文本")
+                            Text("⇧⌘Enter 精确翻译")
+                            Text("⌘Delete 取消 · ⇧Delete 清空输入")
+                            Text("⇧⌘Delete 取消并清空")
+                        }
+                        .font(.callout)
+                        .padding(16)
+                    }
+            }
             HStack {
                 Text(model.manualTranslationStatus).font(.caption).foregroundStyle(.secondary)
                 Spacer()
@@ -927,8 +944,10 @@ struct TypedTranslationView: View {
                         .keyboardShortcut(.delete, modifiers: .command)
                 } else {
                     Button("精确翻译") { model.translateTypedText(thinking: true) }
+                        .buttonStyle(.bordered)
                         .disabled(model.manualTranslationInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.manualTranslationInput.count > 2000)
                     Button("翻译") { model.translateTypedText() }
+                        .buttonStyle(.borderedProminent)
                         .disabled(model.manualTranslationInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.manualTranslationInput.count > 2000)
                 }
             }
@@ -1125,12 +1144,13 @@ private struct LearningReviewControls: View {
     @ObservedObject var queue: LearningReviewQueue
     @State private var historyExpanded = false
     @State private var confirmingRemoval = false
-    @State private var showingQueueManager = false
+    @Binding var showingQueueManager: Bool
     @State private var pendingQueueRemoval: UUID?
 
-    init(model: AppModel) {
+    init(model: AppModel, showingQueueManager: Binding<Bool>) {
         self.model = model
         self.queue = model.noteReviewQueue
+        self._showingQueueManager = showingQueueManager
     }
 
     private var currentDirectory: URL? { model.reviewDisplayDirectory }
@@ -1184,9 +1204,10 @@ private struct LearningReviewControls: View {
                     }
                 } label: {
                     Label("复查…", systemImage: "text.magnifyingglass")
-                        .font(.caption)
                 }
                 .menuStyle(.borderlessButton)
+                .controlSize(.small)
+                .font(.caption.weight(.regular))
                 .fixedSize()
                 .disabled(!model.canManuallyReview)
                 .help("选择复查范围：整课或某一批已完成笔记。复查耗时随内容长度和设备变化（历史单机实测约 5 分钟/批，仅供参照），只给出核对意见。")
@@ -1194,12 +1215,13 @@ private struct LearningReviewControls: View {
                 // hidden behind the history disclosure or tied to the current recording.
                 Button("管理队列…") { showingQueueManager = true }
                     .buttonStyle(.borderless)
-                    .font(.caption)
+                    .controlSize(.small)
+                    .font(.caption.weight(.regular))
                     .help("查看复查任务、重试失败项、调整顺序或重新定位录音文件夹；任何操作都不会删除文件")
             }
 
             if !model.canManuallyReview {
-                Text("课堂保存并生成笔记后，可选择整课或一批内容进行核对。历史任务仍可在“管理队列”中处理。")
+                Text("课堂保存并生成笔记后，可选择整课或一批内容进行复查。历史任务仍可在“管理队列”中处理。")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1208,7 +1230,7 @@ private struct LearningReviewControls: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("核对意见独立保存，原笔记保持不变。")
                         .font(.callout).foregroundStyle(.secondary)
-                    DisclosureGroup("核对方式与耗时") {
+                    DisclosureGroup("复查方式与耗时") {
                         Text("使用本机模型检查所选内容。耗时随设备和内容变化；状态中的历史耗时仅供参考。局部报告单独保存，整课报告保留。")
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -1245,7 +1267,7 @@ private struct LearningReviewControls: View {
         .confirmationDialog("将这项任务移出复查队列？", isPresented: $confirmingRemoval) {
             Button("移出复查队列") { queue.removeFailedJob() }
         } message: {
-            Text("只停止这项复查，不删除录音、原笔记或已保存的复查报告。")
+            Text("只停止这项复查，不删除录音、原笔记或已保存的核对意见。")
         }
     }
 
@@ -1291,7 +1313,7 @@ private struct LearningReviewControls: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("复查队列管理")
                         .font(.headline)
-                    Text("后台复查任务与当前录音无关；这里只调整复查队列，不会删除录音文件、原笔记或已保存的复查报告。")
+                    Text("后台复查任务与当前录音无关；这里只调整复查队列，不会删除录音文件、原笔记或已保存的核对意见。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1380,7 +1402,7 @@ private struct LearningReviewControls: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("共 \(queue.items.count) 项任务，按顺序处理；移动或移除正在运行的任务会先安全取消当前批次，已完成进度会保留。")
-                Text("“重新定位文件夹…”只在录音文件夹被移动或改名时使用，LiveLingo 会核对原笔记是否一致。")
+                Text("“重新定位文件夹…”只在录音文件夹被移动或改名时使用，LiveLingo 会检查原笔记是否一致。")
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -1396,7 +1418,7 @@ private struct LearningReviewControls: View {
                 pendingQueueRemoval = nil
             }
         } message: { id in
-            Text("只会把“\(queueItemName(id))”从复查队列中移除，不会删除录音文件、原笔记或已保存的复查报告。")
+            Text("只会把“\(queueItemName(id))”从复查队列中移除，不会删除录音文件、原笔记或已保存的核对意见。")
         }
     }
 
@@ -1495,7 +1517,7 @@ private struct LearningReviewControls: View {
                     Button("重新定位文件夹…") { relocateRecording(id: id, from: directory, name: name) }
                         .buttonStyle(.borderless)
                         .font(.caption)
-                        .help("选择录音文件夹的新位置；LiveLingo 会核对原笔记是否一致。")
+                        .help("选择录音文件夹的新位置；LiveLingo 会检查原笔记是否一致。")
                 }
                 Spacer(minLength: 8)
                 Button("移出队列…") { pendingQueueRemoval = id }
@@ -1512,7 +1534,7 @@ private struct LearningReviewControls: View {
     private func relocateRecording(id: UUID, from directory: URL, name: String) {
         let panel = NSOpenPanel()
         panel.title = "重新定位录音文件夹"
-        panel.message = "选择“\(name)”现在所在的文件夹。LiveLingo 会核对原笔记是否一致，不会移动或删除任何文件。"
+        panel.message = "选择“\(name)”现在所在的文件夹。LiveLingo 会检查原笔记是否一致，不会移动或删除任何文件。"
         panel.prompt = "选择文件夹"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -1711,7 +1733,7 @@ private struct ReviewChangeView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("原笔记").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             marked(original, against: proposed, removed: true)
-            Text("复查建议 · 待核对").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text("核对意见 · 待核对").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             marked(proposed, against: original, removed: false)
         }
         .font(.system(size: 16))

@@ -240,9 +240,9 @@
 			};
 			buildConfigurationList = A80000000000000000000001;
 			compatibilityVersion = "Xcode 14.0";
-			developmentRegion = en;
+			developmentRegion = "zh-Hans";
 			hasScannedForEncodings = 0;
-			knownRegions = (en, Base);
+			knownRegions = (en, Base, "zh-Hans");
 			mainGroup = A70000000000000000000001;
 			productRefGroup = A70000000000000000000006;
 			projectDirPath = "";
