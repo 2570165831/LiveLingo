@@ -17,10 +17,11 @@ enum ModelMode: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    func resolvedProfile(isOnBattery: Bool) -> QwenModelProfile {
+    func resolvedProfile(isOnBattery: Bool,
+                         physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> QwenModelProfile {
         switch self {
         case .automatic:
-            return isOnBattery ? .energySaver : .highQuality
+            return isOnBattery || physicalMemory <= 16 * 1_024 * 1_024 * 1_024 ? .energySaver : .highQuality
         case .energySaver:
             return .energySaver
         case .highQuality:
@@ -769,7 +770,8 @@ actor TranslationModelLifetime {
     static let shared = TranslationModelLifetime()
     private var selected: String?
     private var users: [String: Int] = [:]
-    private var unloading: [String: Task<Void, Never>] = [:]
+    private var unloading: [String: Task<Void, Error>] = [:]
+    private var potentiallyLoaded: Set<String> = []
     private let managed = ["qwen/qwen3.5-9b", "qwen3.5-4b-mlx"]
     private let unload: @Sendable (String) async throws -> Void
 
@@ -783,10 +785,29 @@ actor TranslationModelLifetime {
     }
 
     func withModel<T: Sendable>(_ model: String, operation: @Sendable () async throws -> T) async throws -> T {
-        // If a switch-back races an already issued unload, wait before inference.
-        while let task = unloading[model] { await task.value }
-        try Task.checkCancellation()
-        users[model, default: 0] += 1
+        while true {
+            try Task.checkCancellation()
+            // A switch-back cannot reuse a worker whose shutdown is in flight.
+            if let task = unloading[model] { try await task.value; continue }
+            let others = managed.filter { $0 != model }
+            if others.contains(where: { users[$0, default: 0] > 0 }) {
+                // Let the complete old request release its lease, including
+                // thinking/final stages and the runtime acknowledgement.
+                try await Task.sleep(for: .milliseconds(50))
+                continue
+            }
+            for old in others { retireIfIdle(old, forNextModel: model) }
+            let retirements = others.compactMap { unloading[$0] }
+            if !retirements.isEmpty {
+                for task in retirements { try await task.value }
+                // Actor reentrancy may have admitted another request while we
+                // waited. Re-check before claiming the new model's lease.
+                continue
+            }
+            users[model, default: 0] += 1
+            potentiallyLoaded.insert(model)
+            break
+        }
         do {
             let result = try await operation()
             release(model)
@@ -802,25 +823,34 @@ actor TranslationModelLifetime {
         retireIfIdle(model)
     }
 
-    private func retireIfIdle(_ model: String) {
-        guard selected != nil, model != selected, managed.contains(model),
+    private func retireIfIdle(_ model: String, forNextModel next: String? = nil) {
+        let switching = next != nil && next != model
+        guard (switching || selected != nil && model != selected), managed.contains(model),
+              potentiallyLoaded.contains(model),
               users[model, default: 0] == 0, unloading[model] == nil else { return }
         unloading[model] = Task {
+            defer { unloading[model] = nil }
             // Re-check after scheduling so a quick switch-back can cancel retirement.
-            if model != selected, users[model, default: 0] == 0 {
-                do { try await unload(model) }
+            if switching || model != selected, users[model, default: 0] == 0 {
+                do {
+                    try await unload(model)
+                    potentiallyLoaded.remove(model)
+                }
                 catch {
                     let code = (error as NSError).code
                     Logger(subsystem: "com.jianhongli.LiveLingo", category: "model-lifetime")
                         .error("event=model_unload_failed model=\(model, privacy: .public) code=\(code)")
+                    throw error
                 }
             }
-            unloading[model] = nil
         }
     }
 
     static func unloadInstance(_ model: String) async throws {
         await MLXRuntime.shared.unload(model)
+        guard await MLXRuntime.shared.resourceStates()[model] == nil else {
+            throw QwenRuntimeError.generationInterrupted("旧模型尚未退出，暂缓加载新模型以免同时占用内存。")
+        }
     }
 }
 

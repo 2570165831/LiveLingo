@@ -1358,6 +1358,17 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
         if error is CancellationError {
             return ReviewFailure(stage: .cancelled, code: "cancelled", detail: "复查任务被取消")
         }
+        let systemError = error as NSError
+        let missingFile = systemError.domain == NSCocoaErrorDomain
+            && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(systemError.code)
+            || systemError.domain == NSPOSIXErrorDomain && systemError.code == 2
+        if missingFile {
+            let path = (systemError.userInfo[NSFilePathErrorKey] as? String)
+                ?? (systemError.userInfo[NSURLErrorKey] as? URL)?.path
+            return ReviewFailure(stage: .directory, code: LearningFailureCode.code(for: error),
+                detail: "所需文件不存在" + (path.map { "：" + sanitized($0) } ?? "")
+                    + "；本任务已暂停，其他可用任务继续。")
+        }
         guard let qwen = error as? QwenRuntimeError else {
             // Known app errors carry their own reason; keep it instead of a bare
             // type name so a failed batch says what actually went wrong.
@@ -2404,7 +2415,8 @@ enum ReviewRetryPolicy {
     static let delays: [TimeInterval] = [30, 120]
 
     static func isRetryable(_ failure: ReviewFailure) -> Bool {
-        guard failure.code != "model_unavailable" else { return false }
+        guard !["model_unavailable", "file_missing", "ns_NSCocoaErrorDomain_4",
+                "ns_NSCocoaErrorDomain_260", "ns_NSPOSIXErrorDomain_2"].contains(failure.code) else { return false }
         switch failure.stage {
         case .generation, .decode, .schema, .promptBinding:
             return true
@@ -3628,9 +3640,12 @@ final class LearningReviewQueue: ObservableObject {
             // invalid) answer is discarded, while an interrupted generation may
             // resume from its checkpoint.
             let preservesProgress = (error as? QwenRuntimeError)?.preservesGenerationProgress == true
-            let failure = ReviewFailure.classify(error, defaultStage: phase)
+            var failure = ReviewFailure.classify(error, defaultStage: phase)
                 .decorated(batch: batchIndex, count: batchCount, requestID: identity.latest,
                            inputBytes: preparedInput?.utf8.count, responseBytes: finalResponse?.utf8.count)
+            if failure.stage == .directory {
+                failure.detail += "（任务录音目录：\(ReviewFailure.sanitized(accessURL.path))）"
+            }
             if jobs.first?.id == job.id {
                 if receivedCompleteResponse || (generationAttempted && !preservesProgress) {
                     jobs[0].prefix = ""

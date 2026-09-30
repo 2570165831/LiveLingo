@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 @testable import LiveLingo
 
 private actor AdjacentRequestProbe {
@@ -75,8 +76,9 @@ private final class CaptionIdentityGate<Value: Sendable> {
 
 @MainActor
 final class CaptionIdentityTests: XCTestCase {
-    private func eventually(_ condition: @escaping @MainActor () -> Bool) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    private func eventually(within timeout: Duration = .seconds(5),
+                            _ condition: @escaping @MainActor () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         while !condition() {
             guard ContinuousClock.now < deadline else {
                 XCTFail("等待测试任务到达指定阶段超时")
@@ -87,7 +89,8 @@ final class CaptionIdentityTests: XCTestCase {
     }
 
     private func makeModel(_ translation: CaptionTranslationDependencies,
-                           notes: LearningGenerationDependencies? = nil) throws -> AppModel {
+                           notes: LearningGenerationDependencies? = nil,
+                           scheduledNotes: Bool? = nil) throws -> AppModel {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveLingo-CaptionIdentity-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-CaptionIdentity-\(UUID())"
@@ -105,9 +108,49 @@ final class CaptionIdentityTests: XCTestCase {
             }
         }
         let model = AppModel(reviewQueue: queue, translation: translation,
-                             notes: notes, backgroundServices: false, defaults: preferences)
+                             notes: notes, backgroundServices: false,
+                             scheduledNotes: scheduledNotes, defaults: preferences)
         model.resetTranslationSessionForTesting()
         return model
+    }
+
+    func testCaptureFailuresRetryFinalNotesWithoutAnotherCaptionOrPowerPoll() async throws {
+        for failure in ["合成麦克风恢复次数已达上限", "合成电脑进入休眠"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-CaptureNotes-\(UUID())")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+            let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+            let pcm = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 256_000))
+            pcm.frameLength = pcm.frameCapacity
+            pcm.floatChannelData![0].initialize(repeating: 0, count: Int(pcm.frameLength))
+            let audio = try AVAudioFile(forWriting: root.appendingPathComponent("recording.wav"), settings: format.settings)
+            try audio.write(from: pcm)
+            var calls = 0
+            let model = try makeModel(.unavailable, notes: .init(generate: { _, _, _, _ in
+                calls += 1
+                if calls == 1 { throw QwenRuntimeError.invalidResponse }
+                return #"{"topic":"小车运动","points":[{"kind":"核心结论","text":"B 车全程保持每秒两米的速度。","sourceIDs":["en0s0","en1s0"]}]}"#
+            }), scheduledNotes: true)
+            let evidence = [
+                TranscriptSegment(startTime: 0, endTime: 8, english: "Cart B moves at two metres per second.", chinese: "B 车的速度为每秒两米。"),
+                TranscriptSegment(startTime: 8, endTime: 16, english: "Cart B keeps this speed for the whole journey.", chinese: "B 车全程保持该速度。")
+            ]
+            model.loadPresentationForTesting(phase: .recording, evidence: evidence)
+            try await model.stopCaptureForTesting(directory: root, failure: failure)
+            await model.savedProcessingTaskForTesting?.value
+            XCTAssertEqual(calls, 1)
+            XCTAssertTrue(model.errorMessage?.contains("后面的内容不会再录") == true)
+            try await eventually(within: .seconds(15)) { model.lectureSummary.contains("B 车全程保持每秒两米的速度。") }
+            XCTAssertEqual(calls, 2)
+            try await eventually {
+                (try? SessionStore(directory: root).load()?.batches.count) == 1
+            }
+            let saved = try XCTUnwrap(SessionStore(directory: root).load())
+            XCTAssertEqual(saved.processing.captureError, failure)
+            XCTAssertEqual(Set(saved.batches.flatMap(\.ids)), Set(evidence.map(\.id)))
+            XCTAssertEqual(saved.segments.map(\.english), evidence.map(\.english))
+            model.resetTranslationSessionForTesting()
+        }
     }
 
     func testAdjacentTargetKeepsAuxiliaryHintsSeparateFromTranscript() async throws {

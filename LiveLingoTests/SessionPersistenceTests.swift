@@ -119,6 +119,28 @@ struct SessionPersistenceTests {
                      input: input, prefix: "saved-prefix", evidenceIDs: evidence)
     }
 
+    @Test func firstTranslationAndItsRecordedRepairMayShareOneSave() async throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        let writer = SessionArchiveWriter(directory: fixture.directory)
+        let original = segment()
+        var desired = try await writer.commit(SessionSnapshot(segments: [original]))
+        var translated = original
+        translated.completeTranslation("第一份完整译文。")
+        var repaired = translated
+        repaired.completeTranslation("有修订记录的完整译文。")
+        repaired.inputRevision = 1
+        desired.inputRevision = 1
+        desired.segments = [repaired]
+        desired.revisionHistory = [
+            .init(fromRevision: 0, toRevision: 1, previousSegment: translated,
+                  replacementSegment: repaired, reason: "相邻语句补全译文")
+        ]
+        let saved = try await writer.commit(desired)
+        #expect(saved.segments == [repaired])
+        #expect(saved.revisionHistory[0].previousSegment == translated)
+        #expect(try fixture.store.load() == saved)
+    }
+
     @Test func coalescedCorrectionsPreserveTheirInterveningTranslation() async throws {
         let fixture = try Fixture(); defer { fixture.clean() }
         let writer = SessionArchiveWriter(directory: fixture.directory)

@@ -812,7 +812,9 @@ final class SessionStore: @unchecked Sendable {
                 && (next.chinese != segment.chinese || !next.hasUsableTranslation)
             if changedInput || changedTranslation {
                 guard new.inputRevision > old.inputRevision,
-                      new.revisionHistory.contains(where: { $0.previousSegment == segment && $0.toRevision > old.inputRevision }) else {
+                      new.revisionHistory.contains(where: {
+                          Self.samePreservedInput(segment, $0.previousSegment) && $0.toRevision > old.inputRevision
+                      }) else {
                     throw SessionStoreError.invalidState("正文改动缺少原文修订记录")
                 }
                 let changes = new.revisionHistory.filter { $0.previousSegment.id == segment.id && $0.toRevision > old.inputRevision }

@@ -149,6 +149,49 @@ struct ReviewRetryTests {
         #expect(ReviewRetryPolicy.maximumAttempts == 2)
     }
 
+    @Test func missingFilesKeepTheirLocationAndNeverRetryAsModelErrors() {
+        for code in [NSFileNoSuchFileError, NSFileReadNoSuchFileError] {
+            let error = NSError(domain: NSCocoaErrorDomain, code: code,
+                userInfo: [NSFilePathErrorKey: "/synthetic/course/session-snapshot.json"])
+            let failure = ReviewFailure.classify(error, defaultStage: .generation)
+            #expect(failure.stage == .directory)
+            #expect(failure.code == "ns_NSCocoaErrorDomain_\(code)")
+            #expect(failure.description.contains("session-snapshot.json"))
+            #expect(!ReviewRetryPolicy.isRetryable(failure))
+            #expect(!failure.logLine.contains("/synthetic"))
+        }
+        #expect(!ReviewRetryPolicy.isRetryable(.init(stage: .generation,
+            code: "ns_NSCocoaErrorDomain_4", detail: "legacy failure")))
+    }
+
+    @Test func missingFileFailureDoesNotBlockTheNextUsableCourse() async throws {
+        let first = try makeDirectory()
+        let second = try makeDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: first.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: second.deletingLastPathComponent())
+        }
+        let journal = first.deletingLastPathComponent().appendingPathComponent("queue.json")
+        var attempts = 0
+        let queue = makeQueue(journal: journal) { _, _, _, _ in
+            attempts += 1
+            if attempts == 1 {
+                throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
+                    userInfo: [NSFilePathErrorKey: first.appendingPathComponent("missing.json").path])
+            }
+            return Self.emptyV2Response
+        }
+        try queue.enqueue(directory: first, notebook: makeNotebook(label: "first"))
+        try queue.enqueue(directory: second, notebook: makeNotebook(label: "second"))
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor { attempts == 2 && !queue.running && queue.items.count == 1 })
+        #expect(queue.items.first?.directory.standardizedFileURL.path == first.standardizedFileURL.path)
+        #expect(queue.items.first?.failure?.contains("missing.json") == true)
+        #expect(queue.items.first?.stats?.retries == 0)
+        #expect(FileManager.default.fileExists(atPath: second.appendingPathComponent("summary-review.md").path))
+        await queue.shutdownForTesting()
+    }
+
     @Test func sessionStatsLineIsReadableAndComplete() {
         var stats = LearningReviewQueue.JobStats()
         stats.completedBatches = 6

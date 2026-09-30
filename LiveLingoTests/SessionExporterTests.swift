@@ -1,9 +1,47 @@
 import AVFoundation
+import Combine
 import Foundation
 import Testing
 @testable import LiveLingo
 
 struct SessionExporterTests {
+    @Test func automaticModelSelectionUsesMemoryWithoutOverridingExplicitQuality() {
+        let gib: UInt64 = 1_024 * 1_024 * 1_024
+        for memory in [8 * gib, 16 * gib] {
+            #expect(ModelMode.automatic.resolvedProfile(isOnBattery: false, physicalMemory: memory) == .energySaver)
+        }
+        #expect(ModelMode.automatic.resolvedProfile(isOnBattery: false, physicalMemory: 24 * gib) == .highQuality)
+        #expect(ModelMode.automatic.resolvedProfile(isOnBattery: true, physicalMemory: 24 * gib) == .energySaver)
+        #expect(ModelMode.highQuality.resolvedProfile(isOnBattery: true, physicalMemory: 8 * gib) == .highQuality)
+    }
+
+    @Test @MainActor func recordingDefaultsRespectExplicitSleepChoiceAndIsolateMeterUpdates() throws {
+        for choice: Bool? in [nil, false, true] {
+            let suite = "LiveLingoMeterTest-\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            if let choice { defaults.set(choice, forKey: "LiveLingo.preventIdleSleepWhileRecording") }
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
+                observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _ in throw CancellationError() })
+            let model = AppModel(reviewQueue: queue, backgroundServices: false, defaults: defaults)
+            #expect(model.preventIdleSleepWhileRecording == (choice ?? true))
+            var classroomChanges = 0
+            var meterChanges = 0
+            let parent = model.objectWillChange.sink { classroomChanges += 1 }
+            let meter = model.captureMeter.objectWillChange.sink { meterChanges += 1 }
+            model.captureMeter.elapsedSeconds = 42
+            model.captureMeter.lastAudioLevelAt = Date()
+            model.captureMeter.waveformSamples.append(0.5)
+            #expect(classroomChanges == 0)
+            #expect(meterChanges == 3)
+            #expect(model.elapsedSeconds == 42)
+            #expect(model.waveformSamples.last == 0.5)
+            withExtendedLifetime((parent, meter)) {}
+        }
+    }
+
     @Test func stableCaptionsKeepContextWhileEnglishPreviewStreamsSeparately() {
         #expect(SpeechPipeline.stableChunkDuration == 10)
     }

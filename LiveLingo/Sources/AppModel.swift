@@ -59,6 +59,15 @@ struct LearningGenerationDependencies {
     })
 }
 
+/// Meter updates belong to their small views, rather than invalidating notes
+/// and the entire classroom for every audio callback or clock tick.
+@MainActor
+final class CaptureMeterState: ObservableObject {
+    @Published var elapsedSeconds: TimeInterval = 0
+    @Published var lastAudioLevelAt: Date?
+    @Published var waveformSamples = Array(repeating: Float.zero, count: 24)
+}
+
 @MainActor
 enum ReviewExportSource {
     static func markdown(for directory: URL?, queue: LearningReviewQueue,
@@ -528,9 +537,19 @@ final class AppModel: ObservableObject {
     private var summaryCycleIDs: Set<UUID>?
     private var summaryCycleUpdate = ""
     @Published private(set) var summaryStatus = "等待课堂内容"
-    @Published private(set) var elapsedSeconds: TimeInterval = 0
-    @Published private(set) var lastAudioLevelAt: Date?
-    @Published private(set) var waveformSamples = Array(repeating: Float.zero, count: 24)
+    let captureMeter = CaptureMeterState()
+    private(set) var elapsedSeconds: TimeInterval {
+        get { captureMeter.elapsedSeconds }
+        set { captureMeter.elapsedSeconds = newValue }
+    }
+    private(set) var lastAudioLevelAt: Date? {
+        get { captureMeter.lastAudioLevelAt }
+        set { captureMeter.lastAudioLevelAt = newValue }
+    }
+    private(set) var waveformSamples: [Float] {
+        get { captureMeter.waveformSamples }
+        set { captureMeter.waveformSamples = newValue }
+    }
     private static let rejectedTranscriptNotice = "上一语段未获得可用转写，已跳过；正在继续识别。"
     @Published private(set) var sessionNotice: String?
     @Published var manualTranslationInput = ""
@@ -578,8 +597,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Independent option, off by default: keep the Mac awake only while a
-    /// recording session is running. Never implied by the focus switch.
+    /// On by default for new preferences. An explicit prior choice is retained.
+    /// Applies only to this application's recording, not display or lid sleep.
     @Published var preventIdleSleepWhileRecording: Bool {
         didSet {
             guard preventIdleSleepWhileRecording != oldValue else { return }
@@ -614,6 +633,7 @@ final class AppModel: ObservableObject {
     private let captionTranslation: CaptionTranslationDependencies
     private let learningGeneration: LearningGenerationDependencies
     private let backgroundServicesEnabled: Bool
+    private let scheduledNotesEnabled: Bool
     private let preferences: UserDefaults
     private var translationWorkerID: UUID?
     private var translationQueue: [UUID] = []
@@ -788,6 +808,7 @@ final class AppModel: ObservableObject {
          translation: CaptionTranslationDependencies? = nil,
          notes: LearningGenerationDependencies? = nil,
          backgroundServices: Bool = true,
+         scheduledNotes: Bool? = nil,
          defaults: UserDefaults = AppRuntimeEnvironment.preferences) {
         precondition(!AppRuntimeEnvironment.isUnitTesting || reviewQueue != nil,
                      "Tests must inject an isolated review queue")
@@ -795,6 +816,9 @@ final class AppModel: ObservableObject {
         self.captionTranslation = translation ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
         self.learningGeneration = notes ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
         self.backgroundServicesEnabled = backgroundServices && !AppRuntimeEnvironment.isUnitTesting
+        self.scheduledNotesEnabled = scheduledNotes ?? (backgroundServices && !AppRuntimeEnvironment.isUnitTesting)
+        precondition(!AppRuntimeEnvironment.isUnitTesting || !self.scheduledNotesEnabled || notes != nil,
+                     "Scheduled note tests must inject their generator")
         self.preferences = defaults
         noteReviewQueue = reviewQueue ?? LearningReviewQueue()
         let savedMode = preferences.string(forKey: Self.modelModeDefaultsKey)
@@ -806,7 +830,7 @@ final class AppModel: ObservableObject {
         let savedBatchCharacters = preferences.object(forKey: Self.noteBatchDefaultsKey) as? Int
         noteBatchCharacters = savedBatchCharacters ?? SummaryRefreshPolicy.automaticBatchCharacters
         let savedFocusMode = preferences.bool(forKey: Self.focusModeDefaultsKey)
-        let savedPreventIdleSleep = preferences.bool(forKey: Self.preventIdleSleepDefaultsKey)
+        let savedPreventIdleSleep = (preferences.object(forKey: Self.preventIdleSleepDefaultsKey) as? Bool) ?? true
         let onBattery = PowerSourceMonitor.isOnBattery()
         processingFocusEnabled = savedFocusMode
         preventIdleSleepWhileRecording = savedPreventIdleSleep
@@ -1821,6 +1845,11 @@ final class AppModel: ObservableObject {
             self.processingTask = nil
             self.processingTaskID = nil
             self.persistCurrentSession()
+            // A failed final note attempt must arrange its own retry. No new
+            // audio event is guaranteed after capture ends or fails.
+            if self.completedTranslationCount > self.lastSummarizedSegmentCount {
+                self.scheduleSummaryRefresh(force: true)
+            }
         }
     }
 
@@ -2258,6 +2287,19 @@ final class AppModel: ObservableObject {
         processingPaused = false
         await generateLectureSummary(force: true)
     }
+    func stopCaptureForTesting(directory: URL, failure: String) async throws {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        precondition(sessionSaver == nil && !noteReviewQueue.hasWork)
+        // The isolated host has no memory monitor; this fixture explicitly
+        // supplies a healthy resource condition for the note timer.
+        summaryMemoryPressureNormal = true
+        sessionDirectory = directory
+        activeStorageMode = .saveSession
+        phase = .recording
+        bindSessionArchive(to: directory)
+        try await flushSessionArchive()
+        await stopSession(failure: failure)
+    }
     #endif
 
     /// A suspended request owns a caption version, never its position in the
@@ -2651,7 +2693,7 @@ final class AppModel: ObservableObject {
         let savedCanContinue: Bool
         if case .saved = phase { savedCanContinue = processingTask == nil && !legacyProvenanceUnavailable }
         else { savedCanContinue = false }
-        guard backgroundServicesEnabled, hasActiveSession || savedCanContinue, !processingPaused else { return }
+        guard scheduledNotesEnabled, hasActiveSession || savedCanContinue, !processingPaused else { return }
         guard summaryTask == nil else {
             if force { summaryRefreshRequested = true }
             return
@@ -2660,7 +2702,7 @@ final class AppModel: ObservableObject {
             summaryRunning: false, continuingSummary: force || savedCanContinue || summaryCycleIDs != nil))
         // The interval is implemented by the wake-up timer below. Every other
         // refusal applies to all new model requests, including saved courses.
-        if !admission.allowed && admission.reason != .interval {
+        if backgroundServicesEnabled && !admission.allowed && admission.reason != .interval {
             summaryStatus = admission.reason.description
             recordResourceDecision(admission.reason)
             if force { summaryRefreshRequested = true }

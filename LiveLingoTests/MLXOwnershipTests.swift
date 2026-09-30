@@ -2,6 +2,92 @@ import XCTest
 import Darwin
 @testable import LiveLingo
 
+private actor ModelSwitchProbe {
+    private(set) var events: [String] = []
+    private var blocked: Set<String>
+    private var waiters: [String: CheckedContinuation<Void, Never>] = [:]
+    init(blocked: Set<String> = []) { self.blocked = blocked }
+    func record(_ event: String) async {
+        events.append(event)
+        if blocked.contains(event) {
+            await withCheckedContinuation { waiters[event] = $0 }
+        }
+    }
+    func release(_ event: String) {
+        blocked.remove(event)
+        waiters.removeValue(forKey: event)?.resume()
+    }
+}
+
+@MainActor
+final class TranslationModelLifetimeTests: XCTestCase {
+    private let old = QwenModelProfile.highQuality.translationModel
+    private let next = QwenModelProfile.energySaver.translationModel
+    private func waitFor(_ event: String, in probe: ModelSwitchProbe) async {
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if await probe.events.contains(event) { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Model lifecycle did not reach \(event)")
+    }
+
+    func testSwitchWaitsForOldRequestAndConfirmedRetirement() async throws {
+        let probe = ModelSwitchProbe(blocked: ["old_started", "unload_started"])
+        addTeardownBlock { await probe.release("old_started"); await probe.release("unload_started") }
+        let previousModel = old
+        let lifetime = TranslationModelLifetime(unload: { model in
+            guard model == previousModel else { return }
+            await probe.record("unload_started")
+            await probe.record("unload_finished")
+        })
+        await lifetime.select(old)
+        let previous = Task { try await lifetime.withModel(old) {
+            await probe.record("old_started")
+            await probe.record("old_finished")
+            return "old"
+        } }
+        await waitFor("old_started", in: probe)
+        await lifetime.select(next)
+        let replacement = Task { try await lifetime.withModel(next) {
+            await probe.record("new_started")
+            return "new"
+        } }
+        await probe.release("old_started")
+        _ = try await previous.value
+        await waitFor("unload_started", in: probe)
+        let beforeExit = await probe.events
+        XCTAssertFalse(beforeExit.contains("new_started"), "The new model cannot load before the old one exits")
+        await probe.release("unload_started")
+        _ = try await replacement.value
+        let events = await probe.events
+        XCTAssertEqual(events, ["old_started", "old_finished", "unload_started", "unload_finished", "new_started"])
+    }
+
+    func testUnconfirmedRetirementCannotAdmitNewModel() async throws {
+        let probe = ModelSwitchProbe()
+        let previousModel = old
+        let lifetime = TranslationModelLifetime(unload: { model in
+            guard model == previousModel else { return }
+            await probe.record("unload_failed")
+            throw QwenRuntimeError.requestFailed("Owned old model has not exited")
+        })
+        await lifetime.select(old)
+        _ = try await lifetime.withModel(old) { "old" }
+        await lifetime.select(next)
+        await waitFor("unload_failed", in: probe)
+        do {
+            _ = try await lifetime.withModel(next) {
+                await probe.record("new_started")
+                return "new"
+            }
+            XCTFail("Failed retirement must block loading another model")
+        } catch { XCTAssertTrue(error is QwenRuntimeError) }
+        let events = await probe.events
+        XCTAssertFalse(events.contains("new_started"))
+    }
+}
+
 /// Real pipes and owned child processes, with deterministic fake generations.
 /// No model, production preferences or real checkpoint directory is accessed.
 @MainActor

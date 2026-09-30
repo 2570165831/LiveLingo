@@ -207,14 +207,14 @@ struct ContentView: View {
         HStack(spacing: 12) {
             Circle().fill(phaseColor).frame(width: 8, height: 8)
                 .accessibilityHidden(true)
-            Text(Self.duration(model.elapsedSeconds))
+            RecordingElapsedText(meter: model.captureMeter)
                 .font(.system(size: 17, weight: .medium).monospacedDigit())
             Text(stripDetail)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             if model.hasActiveSession {
-                RecordingWaveform(samples: model.waveformSamples, active: model.isRecording, lastUpdate: model.lastAudioLevelAt)
+                RecordingMeterView(meter: model.captureMeter, active: model.isRecording)
                     .frame(width: 64, height: 20)
             }
             Spacer(minLength: 8)
@@ -821,7 +821,7 @@ struct ClassroomSettingsView: View {
                 DisclosureGroup("处理方式与模型详情") {
                     Text(model.modelModeStatus)
                     Text(model.focusExplanation)
-                    Text("防止空闲睡眠是独立选项，停止录音或关闭开关后释放。")
+                    Text("新设置默认防止录音期间的空闲睡眠，停止录音或关闭开关后释放；不能阻止合盖、手动休眠或断电。")
                 }
                 .font(.callout)
             }
@@ -1550,6 +1550,22 @@ private struct LearningReviewControls: View {
         if recordingDirectoryIsAvailable(parent) { panel.directoryURL = parent }
         guard panel.runModal() == .OK, let chosen = panel.url else { return }
         queue.relocateJob(id, to: chosen)
+    }
+}
+
+private struct RecordingElapsedText: View {
+    @ObservedObject var meter: CaptureMeterState
+    var body: some View {
+        let seconds = max(0, Int(meter.elapsedSeconds))
+        Text(String(format: "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60))
+    }
+}
+
+private struct RecordingMeterView: View {
+    @ObservedObject var meter: CaptureMeterState
+    let active: Bool
+    var body: some View {
+        RecordingWaveform(samples: meter.waveformSamples, active: active, lastUpdate: meter.lastAudioLevelAt)
     }
 }
 
