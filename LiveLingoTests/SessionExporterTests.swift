@@ -91,7 +91,7 @@ struct SessionExporterTests {
    ("Generation.","Solar panels produce power.","Generation."),
    ("The next generation shows signs of progress.",context,"The next generation shows signs of progress."),
    ("There are 30 signs 60 metres apart.","Road safety.","There are 30 signs 60 metres apart."),
-   ("The cause is unknown. Meet at half past four.",context,"The cause is unknown. Meet at half past four."),
+   ("The cause is unknown. Meet at half past four.",context,"The cause is unknown. Meet at 4:30."),
    ("Does this cause two collisions?",context,"Does this cause two collisions?"),
    ("There are 30 signs 60 metres apart.",context,"There are 30 signs 60 metres apart."),
    ("s = ut + 0.5at²",context,"s = ut + 0.5at²")

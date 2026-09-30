@@ -1941,6 +1941,7 @@ enum AcademicInputNormalizer {
         }
 
         normalized = normalizePhysics(normalized, recentContext: recentContext)
+        normalized = SpokenQuantityNormalizer.normalize(normalized, recentContext: recentContext)
 
         return literals.restore(in: normalized)
     }
@@ -1988,6 +1989,190 @@ enum AcademicInputNormalizer {
             range: range,
             withTemplate: replacement
         )
+    }
+}
+
+/// Format complete, unambiguous spoken quantities before translation. Call this
+/// after literal labels have been masked; never infer AM/PM, units or ASR words.
+enum SpokenQuantityNormalizer {
+    private static let smallWords = ["zero", "one", "two", "three", "four", "five", "six", "seven",
+        "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+        "sixteen", "seventeen", "eighteen", "nineteen"]
+    private static let tensWords = ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+    private static let values: [String: Int] = {
+        var result = Dictionary(uniqueKeysWithValues: smallWords.enumerated().map { ($0.element, $0.offset) })
+        for (index, word) in tensWords.enumerated() { result[word] = (index + 2) * 10 }
+        return result
+    }()
+    private static let numberPattern = #"(?:[0-9]+(?:\.[0-9]+)?|(?:"# + tensWords.joined(separator: "|")
+        + #")(?:[ -](?:"# + smallWords[1...9].joined(separator: "|") + #"))?|(?:"#
+        + smallWords.joined(separator: "|") + #"))"#
+    private static let ordinals = ["first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+        "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10]
+    private static let numericWords = Set(values.keys).union(["hundred", "thousand", "million", "billion",
+        "point", "and"]).union(ordinals.keys)
+    private static let leftBoundary = #"(?<![\p{L}\p{N}_])"#
+    private static let rightBoundary = #"(?![\p{L}\p{N}_])"#
+    private static let powerExpression = try! NSRegularExpression(pattern: leftBoundary + "(" + numberPattern
+        + #")\s+times\s+ten\s+to\s+(?:the\s+(?:power\s+of\s+)?|power\s+of\s+)(?:(minus|negative)\s+)?("#
+        + numberPattern + "|" + ordinals.keys.sorted().joined(separator: "|") + #")(?:\s+power)?"#
+        + rightBoundary + #"(?!\s+and\s+(?:a\s+)?(?:half|quarter)\b)"#, options: [.caseInsensitive])
+    private static let ppmExpression = try! NSRegularExpression(pattern: leftBoundary + "(" + numberPattern
+        + #")\s+parts?\s+per\s+million"# + rightBoundary, options: [.caseInsensitive])
+    private static let clockExpression = try! NSRegularExpression(pattern: leftBoundary
+        + #"(a\s+quarter|quarter|half|"# + numberPattern + #")\s+(past|to)\s+("# + numberPattern
+        + ")" + rightBoundary, options: [.caseInsensitive])
+    private static let clockCueExpression = try! NSRegularExpression(
+        pattern: #"\b(?:at|by|until|around|before|after)\s+$|\b(?:time|clock)\s+(?:is|says|reads)\s+$"#,
+        options: [.caseInsensitive])
+    private static let ratioCueExpression = try! NSRegularExpression(
+        pattern: #"\b(?:ratios?|odds|scores?|proportions?|powers?|exponents?|times)\b"#,
+        options: [.caseInsensitive])
+    private static let clockAdverbExpression = try! NSRegularExpression(
+        pattern: #"^\s*(?:we|you|I|he|she|they)(?:['’]ll|\s+(?:will|shall))\b"#,
+        options: [.caseInsensitive])
+    private static let primeExpression = try! NSRegularExpression(pattern: leftBoundary
+        + #"(three|five|3|5)\s+prime\b(?=\s*(?:[-–—]\s*)?(?:ends?\b|to\b|[,.;:!?]|$))"#,
+        options: [.caseInsensitive])
+    private static let nucleicExpression = try! NSRegularExpression(
+        pattern: #"\b(?:RNA|DNA|polymerase|nucleotide|nucleic|strand|transcription|replication)\b"#,
+        options: [.caseInsensitive])
+
+    static func normalize(_ source: String, recentContext: String = "") -> String {
+        var text = replacing(powerExpression, in: source) { match, value in
+            guard completeNumber(at: match.range, in: value),
+                  let coefficient = number(capture(1, match, value)),
+                  let exponent = integer(capture(3, match, value), allowOrdinal: true),
+                  (0...99).contains(exponent) else { return nil }
+            let sign = match.range(at: 2).location == NSNotFound ? "" : "−"
+            let superscripts: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+                "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "−": "⁻"]
+            return coefficient + " × 10" + String((sign + String(exponent)).compactMap { superscripts[$0] })
+        }
+        text = replacing(ppmExpression, in: text) { match, value in
+            guard completeNumber(at: match.range, in: value),
+                  let amount = number(capture(1, match, value)) else { return nil }
+            return amount + " ppm"
+        }
+        text = replacing(clockExpression, in: text) { match, value in
+            guard completeNumber(at: match.range, in: value),
+                  let hour = integer(capture(3, match, value)), (1...12).contains(hour) else { return nil }
+            let quantity = capture(1, match, value).lowercased()
+            let direction = capture(2, match, value).lowercased()
+            // 'Ten to eight' can also be a ratio or an ASR power fragment.
+            // Unlike 'past', 'to' needs explicit clock evidence in this clause.
+            if direction == "to" {
+                let prefix = (value as NSString).substring(to: match.range.location)
+                let clause = prefix.components(separatedBy: CharacterSet(charactersIn: ".;!?")).last ?? prefix
+                let range = NSRange(clause.startIndex..., in: clause)
+                guard ratioCueExpression.firstMatch(in: clause, range: range) == nil else { return nil }
+                let adjacentCue = clockCueExpression.firstMatch(in: clause, range: range) != nil
+                let earlierClock = clockExpression.matches(in: clause, range: range).contains { item in
+                    guard capture(2, item, clause).lowercased() == "past",
+                          let earlierHour = integer(capture(3, item, clause)), (1...12).contains(earlierHour) else { return false }
+                    let amount = capture(1, item, clause).lowercased()
+                    return amount == "half" || amount == "quarter" || amount == "a quarter"
+                        || integer(amount).map { (1...59).contains($0) } == true
+                }
+                guard adjacentCue || earlierClock else { return nil }
+            }
+            let minute: Int
+            if quantity == "half" {
+                guard direction == "past" else { return nil }
+                minute = 30
+            } else if quantity == "quarter" || quantity.split(whereSeparator: \.isWhitespace) == ["a", "quarter"] {
+                minute = 15
+            } else {
+                guard let parsed = integer(quantity), (1...59).contains(parsed) else { return nil }
+                minute = parsed
+            }
+            let shownHour = direction == "past" ? hour : (hour == 1 ? 12 : hour - 1)
+            let shownMinute = direction == "past" ? minute : 60 - minute
+            let time = String(shownHour) + ":" + String(format: "%02d", shownMinute)
+            let prefix = (value as NSString).substring(to: match.range.location)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = (value as NSString).substring(from: NSMaxRange(match.range))
+            // A leading time adverb remains a time adverb: 'A quarter past
+            // eleven we'll start' -> 'At 11:15 we'll start', not a bare label.
+            if prefix.isEmpty,
+               clockAdverbExpression.firstMatch(in: suffix, range: NSRange(suffix.startIndex..., in: suffix)) != nil {
+                return "At " + time
+            }
+            return time
+        }
+        let context = recentContext + " " + source
+        if nucleicExpression.firstMatch(in: context, range: NSRange(context.startIndex..., in: context)) != nil {
+            text = replacing(primeExpression, in: text) { match, value in
+                guard let digit = integer(capture(1, match, value)) else { return nil }
+                return "\(digit)′"
+            }
+        }
+        return text
+    }
+
+    private static func number(_ source: String) -> String? {
+        // All callers pass a complete match of numberPattern. Avoid compiling
+        // another regular expression for each quantity.
+        if source.utf8.first.map({ (48...57).contains($0) }) == true { return source }
+        let words = source.lowercased().split { $0.isWhitespace || $0 == "-" }.map(String.init)
+        if words.count == 1, let value = values[words[0]] { return String(value) }
+        guard words.count == 2, let tens = values[words[0]], tens >= 20, tens % 10 == 0,
+              let units = values[words[1]], (1...9).contains(units) else { return nil }
+        return String(tens + units)
+    }
+
+    private static func integer(_ source: String, allowOrdinal: Bool = false) -> Int? {
+        if allowOrdinal, let ordinal = ordinals[source.lowercased()] { return ordinal }
+        return number(source).flatMap(Int.init)
+    }
+
+    /// Do not rewrite a supported tail of an unsupported larger number, e.g.
+    /// 'one hundred fifty parts per million' or 'ten to the one hundred'.
+    private static func completeNumber(at range: NSRange, in source: String) -> Bool {
+        guard let swiftRange = Range(range, in: source) else { return false }
+        let before = source[..<swiftRange.lowerBound]
+        let after = source[swiftRange.upperBound...]
+        func word(_ value: Substring, last: Bool) -> String? {
+            let tokens = value.split { !$0.isLetter && !$0.isNumber }
+            return (last ? tokens.last : tokens.first).map { $0.lowercased() }
+        }
+        let trimmedBefore = before.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAfter = after.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previous = word(Substring(trimmedBefore), last: true)
+        let next = word(Substring(trimmedAfter), last: false)
+        // Only an adjacent word belongs to the same numeric phrase. A period,
+        // quote or comma separates it, even when whitespace follows that mark.
+        let previousContinues = trimmedBefore.last.map { $0.isLetter || $0.isNumber || $0 == "-" } ?? false
+        let nextContinues = trimmedAfter.first.map { $0.isLetter || $0.isNumber || $0 == "-" } ?? false
+        func isNumericWord(_ value: String) -> Bool {
+            numericWords.contains(value) || (!value.isEmpty && value.allSatisfy(\.isNumber))
+        }
+        // A sentence-level 'and' is not a numeric prefix; 'hundred and' is.
+        let previousIsNumeric: Bool
+        if previous == "and" {
+            let earlier = trimmedBefore.dropLast(3).trimmingCharacters(in: .whitespacesAndNewlines)
+            let ending = earlier.lowercased().split(whereSeparator: \.isWhitespace).suffix(3)
+            let completePPM = ending == ["parts", "per", "million"] || ending == ["part", "per", "million"]
+            previousIsNumeric = earlier.last.map { $0.isLetter || $0.isNumber } == true
+                && word(Substring(earlier), last: true).map(isNumericWord) == true && !completePPM
+        } else { previousIsNumeric = previous.map(isNumericWord) == true }
+        return !(previousContinues && previousIsNumeric)
+            && !(nextContinues && next != "and" && next.map(isNumericWord) == true)
+    }
+
+    private static func capture(_ group: Int, _ match: NSTextCheckingResult, _ source: String) -> String {
+        (source as NSString).substring(with: match.range(at: group))
+    }
+
+    private static func replacing(_ expression: NSRegularExpression, in source: String,
+                                  transform: (NSTextCheckingResult, String) -> String?) -> String {
+        let matches = expression.matches(in: source, range: NSRange(source.startIndex..., in: source))
+        var output = source
+        for match in matches.reversed() {
+            guard let replacement = transform(match, source), let range = Range(match.range, in: output) else { continue }
+            output.replaceSubrange(range, with: replacement)
+        }
+        return output
     }
 }
 

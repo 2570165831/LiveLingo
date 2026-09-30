@@ -5,6 +5,90 @@ import XCTest
 /// These tests pin the acceptance rules that must stop it, and the technical
 /// exceptions that must keep working.
 final class TranslationAcceptanceTests: XCTestCase {
+    func testSpokenClockQuantitiesKeepTheStatedTwelveHourTime() {
+        for (source, expected) in [
+            ("Come back at ten past two.", "Come back at 2:10."),
+            ("A quarter past eleven we'll start the lab.", "At 11:15 we'll start the lab."),
+            ("Half past two I will return.", "At 2:30 I will return."),
+            ("Finish by quarter to twelve.", "Finish by 11:45."),
+            ("At ten to one we stop.", "At 12:50 we stop."),
+            ("Start at half past twelve p.m.", "Start at 12:30 p.m."),
+            ("At twenty-five past nine we continue.", "At 9:25 we continue."),
+            ("Not five past three, but twenty to four.", "Not 3:05, but 3:40."),
+            ("At 15 past 2, then 5 to 12.", "At 2:15, then 11:55.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+        }
+    }
+
+    func testSpokenScientificQuantitiesPreserveEveryCoefficientAndExponent() {
+        for (source, expected) in [
+            ("Light travels at three times ten to the eight meters per second.",
+             "Light travels at 3 × 10⁸ meters per second."),
+            ("The rate is two times ten to the power of minus six.", "The rate is 2 × 10⁻⁶."),
+            ("It is 2.5 times ten to power of four.", "It is 2.5 × 10⁴."),
+            ("Use twenty five times ten to the third power.", "Use 25 × 10³."),
+            ("The concentration is fifty parts per million.", "The concentration is 50 ppm."),
+            ("Try twenty-one parts per million and 2.5 parts per million.", "Try 21 ppm and 2.5 ppm."),
+            ("Try one part per million and fifty parts per million.", "Try 1 ppm and 50 ppm."),
+            ("Read part two. Fifty parts per million is the limit.", "Read part two. 50 ppm is the limit."),
+            ("Mix well and fifty parts per million is enough.", "Mix well and 50 ppm is enough.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(expected), expected, "Normalization must be idempotent")
+        }
+    }
+
+    func testNucleicPrimeNotationRequiresDomainAndDirectionEvidence() {
+        let source = "RNA polymerase reads from three prime to five prime, and builds from five prime to three prime."
+        XCTAssertEqual(AcademicInputNormalizer.normalize(source),
+                       "RNA polymerase reads from 3′ to 5′, and builds from 5′ to 3′.")
+        XCTAssertEqual(AcademicInputNormalizer.normalize("The three prime-end group.", recentContext: "DNA strand"),
+                       "The 3′-end group.")
+        for source in ["We found three prime numbers and five prime factors.",
+                       "DNA was mentioned, then we found three prime numbers.",
+                       "Count from three prime to five prime.", "The three prime ministers arrived."] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+    }
+
+    func testIncompleteOrUnsupportedSpokenNumbersStayUnchanged() {
+        for source in ["Use one hundred fifty parts per million.",
+                       "Use twenty and five parts per million.",
+                       "Use one hundred and fifty parts per million.",
+                       "Use zero point five parts per million.",
+                       "Use three times ten to the one hundred.",
+                       "Use three times ten to the one and a half.",
+                       "Use one hundred three times ten to the eight.",
+                       "The clock says half to ten.", "At sixty past two we stop.",
+                       "At ten past thirteen we stop.", "At ten past two hundred students came.",
+                       "Use fifty parts per billion.", "Use quarter of eleven samples.",
+                       "This identifier is fifty_parts_per_million."] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+    }
+
+    func testClockToRequiresTimeEvidenceInsteadOfRewritingRatiosOrPowers() {
+        for source in ["The ratio is ten to eight.", "Set the odds at ten to eight.",
+                       "Use three times ten to eight meters per second.",
+                       "The score changed from ten to eight.", "Ten to eight."] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+        XCTAssertEqual(AcademicInputNormalizer.normalize("Meet at ten to eight."), "Meet at 7:50.")
+        XCTAssertEqual(AcademicInputNormalizer.normalize("The clock reads ten to eight."), "The clock reads 7:50.")
+    }
+
+    func testSpokenQuantityNormalizationPreservesExactLiteralScope() {
+        let source = #"The exact string is "fifty parts per million". Add fifty parts per million."#
+        XCTAssertEqual(AcademicInputNormalizer.normalize(source),
+                       #"The exact string is "fifty parts per million". Add 50 ppm."#)
+        for source in [#"The literal text is "a quarter past eleven"."#,
+                       #"Use `three times ten to the eight` in the code."#,
+                       #"The exact label is "three prime" beside the DNA strand."#] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+    }
+
     func testNegationExamplesExcludeWordFragmentsAndProtectedNames() {
         for source in ["Open the notebook beside the nozzle.", "The field is not_ready.",
                        #"Use the exact labels "not good" and "no charge"."#] {
