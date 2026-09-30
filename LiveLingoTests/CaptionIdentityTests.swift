@@ -119,6 +119,7 @@ final class CaptionIdentityTests: XCTestCase {
             ("Meet at ten past two and add fifty parts per million.",
              "Meet at 2:10 and add 50 ppm.", "在 2:10 集合，并添加 50 ppm。"),
             ("Set the odds at ten to eight.", "Set the odds at 10:8.", "将赔率设为 10:8。"),
+            ("The ratio is one to eight and a half.", "The ratio is 1:8.5.", "比例是 1:8.5。"),
             ("If the determinant is zero, the columns are not linearly independent.",
              "If the determinant is zero, the columns are linearly dependent.",
              "如果行列式为零，则列向量线性相关。")

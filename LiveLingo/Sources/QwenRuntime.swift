@@ -1993,8 +1993,6 @@ enum AcademicInputNormalizer {
     }
 }
 
-/// Format complete, unambiguous spoken quantities before translation. Call this
-/// after literal labels have been masked; never infer AM/PM, units or ASR words.
 /// Keep literal wording and unfinished quotations out of semantic rewrites.
 /// These ranges supplement the explicit labels already masked by the caller.
 private enum AcademicRewriteScope {
@@ -2081,6 +2079,8 @@ enum MathematicalPredicateNormalizer {
     }
 }
 
+/// Format complete, unambiguous spoken quantities before translation. Call this
+/// after literal labels have been masked; never infer AM/PM, units or ASR words.
 enum SpokenQuantityNormalizer {
     private static let smallWords = ["zero", "one", "two", "three", "four", "five", "six", "seven",
         "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
@@ -2115,8 +2115,14 @@ enum SpokenQuantityNormalizer {
     private static let ratioCueExpression = try! NSRegularExpression(
         pattern: #"\b(?:ratios?|odds|scores?|proportions?|powers?|exponents?|times)\b"#,
         options: [.caseInsensitive])
+    private static let fractionPattern = #"(?:half|quarter|(?:a|one)[ \t]+(?:half|quarter)|two[ \t]+quarters|three[ \t]+quarters)"#
+    private static let ratioOperandPattern = "(?:" + numberPattern
+        + #"(?:[ \t]+and[ \t]+"# + fractionPattern + ")?|" + fractionPattern + ")"
+    private static let fractionDecimals = ["half": "5", "a half": "5", "one half": "5",
+        "quarter": "25", "a quarter": "25", "one quarter": "25",
+        "two quarters": "5", "three quarters": "75"]
     private static let ratioExpression = try! NSRegularExpression(pattern: leftBoundary
-        + "(" + numberPattern + #")[ \t]+to[ \t]+("# + numberPattern + ")" + rightBoundary,
+        + "(" + ratioOperandPattern + #")[ \t]+to[ \t]+("# + ratioOperandPattern + ")" + rightBoundary,
         options: [.caseInsensitive])
     private static let ratioAnchorExpression = try! NSRegularExpression(
         pattern: #"\b(ratios?|odds|scores?|proportions?)[ \t]+(?:(?:is|are|was|were|of|at|equals?|remains?|about|roughly|approximately|exactly)[ \t]+){0,3}$"#,
@@ -2124,7 +2130,7 @@ enum SpokenQuantityNormalizer {
     private static let oddsAgainstExpression = try! NSRegularExpression(
         pattern: #"^[ \t]+against\b"#, options: [.caseInsensitive])
     private static let fractionalContinuationExpression = try! NSRegularExpression(
-        pattern: #"^[ \t]+(?:over\b|divided[ \t]+by\b|(?:and[ \t]+)?(?:a[ \t]+)?(?:half|quarter|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b|and[ \t]+(?:a[ \t]+)?(?:one|two|three|four|five|six|seven|eight|nine)[ \t]+(?:half|halves|quarters?|thirds?|fourths?|fifths?|sixths?|sevenths?|eighths?|ninths?|tenths?)\b)"#,
+        pattern: #"^[ \t]+(?:of\b|over\b|divided[ \t]+by\b|(?:and[ \t]+)?(?:a[ \t]+)?(?:half|quarter|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b|and[ \t]+(?:a[ \t]+)?(?:one|two|three|four|five|six|seven|eight|nine)[ \t]+(?:half|halves|quarters?|thirds?|fourths?|fifths?|sixths?|sevenths?|eighths?|ninths?|tenths?)\b|and[ \t]*(?:(?:a|one|two|three)[ \t]*)?(?:[.!?]|$))"#,
         options: [.caseInsensitive])
     private static let clockAdverbExpression = try! NSRegularExpression(
         pattern: #"^\s*(?:we|you|I|he|she|they)(?:['’]ll|\s+(?:will|shall))\b"#,
@@ -2152,8 +2158,9 @@ enum SpokenQuantityNormalizer {
                   let amount = number(capture(1, match, value)) else { return nil }
             return amount + " ppm"
         }
-        if let quoted = AcademicRewriteScope.quotedRanges(in: text) {
-            text = replacing(ratioExpression, in: text) { match, value in
+        let ratioMatches = ratioExpression.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        if !ratioMatches.isEmpty, let quoted = AcademicRewriteScope.quotedRanges(in: text) {
+            text = replacing(ratioMatches, in: text) { match, value in
                 let prefix = (value as NSString).substring(to: match.range.location)
                 let suffix = (value as NSString).substring(from: NSMaxRange(match.range))
                 guard let anchor = ratioAnchorExpression.firstMatch(in: prefix, range: NSRange(prefix.startIndex..., in: prefix)),
@@ -2162,8 +2169,8 @@ enum SpokenQuantityNormalizer {
                       completeNumber(at: match.range, in: value),
                       fractionalContinuationExpression.firstMatch(in: suffix, range: NSRange(suffix.startIndex..., in: suffix)) == nil,
                       AcademicRewriteScope.permits(match.range, in: value, quoted: quoted),
-                      let first = number(capture(1, match, value)),
-                      let second = number(capture(2, match, value)) else { return nil }
+                      let first = ratioNumber(capture(1, match, value)),
+                      let second = ratioNumber(capture(2, match, value)) else { return nil }
                 // Keep the stated operand order; do not invert odds, reduce the
                 // ratio or convert it to a probability.
                 return first + ":" + second
@@ -2241,6 +2248,19 @@ enum SpokenQuantityNormalizer {
         return number(source).flatMap(Int.init)
     }
 
+    private static func ratioNumber(_ source: String) -> String? {
+        let text = source.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if let fraction = fractionDecimals[text] { return "0." + fraction }
+        let parts = text.components(separatedBy: " and ")
+        if parts.count == 1 { return number(text) }
+        guard parts.count == 2, let whole = number(parts[0]),
+              whole.utf8.allSatisfy({ (48...57).contains($0) }),
+              let fraction = fractionDecimals[parts[1]] else { return nil }
+        // These fractions have exact finite decimals. Append to an integer
+        // string instead of rounding a large integer through floating point.
+        return whole + "." + fraction
+    }
+
     /// Do not rewrite a supported tail of an unsupported larger number, e.g.
     /// 'one hundred fifty parts per million' or 'ten to the one hundred'.
     private static func completeNumber(at range: NSRange, in source: String) -> Bool {
@@ -2281,7 +2301,12 @@ enum SpokenQuantityNormalizer {
 
     private static func replacing(_ expression: NSRegularExpression, in source: String,
                                   transform: (NSTextCheckingResult, String) -> String?) -> String {
-        let matches = expression.matches(in: source, range: NSRange(source.startIndex..., in: source))
+        replacing(expression.matches(in: source, range: NSRange(source.startIndex..., in: source)),
+                  in: source, transform: transform)
+    }
+
+    private static func replacing(_ matches: [NSTextCheckingResult], in source: String,
+                                  transform: (NSTextCheckingResult, String) -> String?) -> String {
         var output = source
         for match in matches.reversed() {
             guard let replacement = transform(match, source), let range = Range(match.range, in: output) else { continue }

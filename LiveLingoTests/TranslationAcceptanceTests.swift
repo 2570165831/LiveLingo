@@ -94,13 +94,53 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
-    func testRatiosDoNotRewriteRangesFractionsOrLiteralWording() {
+    func testRatioFractionsKeepBothOperandsWithoutRounding() {
+        for (source, expected) in [
+            ("The ratio is one to eight and a half.", "The ratio is 1:8.5."),
+            ("The ratio is three and a half to two.", "The ratio is 3.5:2."),
+            ("The ratio is two and a half to three and a quarter.", "The ratio is 2.5:3.25."),
+            ("The ratio is one to eight and one quarter.", "The ratio is 1:8.25."),
+            ("The ratio is one to eight and two quarters.", "The ratio is 1:8.5."),
+            ("Use a ratio of one to eight and three quarters.", "Use a ratio of 1:8.75."),
+            ("The ratio is a half to eight.", "The ratio is 0.5:8."),
+            ("The ratio is one quarter to two and a half.", "The ratio is 0.25:2.5."),
+            ("The ratio is twenty-one and a half to two.", "The ratio is 21.5:2."),
+            ("The ratio is 9007199254740993 and a half to two.", "The ratio is 9007199254740993.5:2."),
+            ("The ratio is one to eight and a half. Meet at ten to eight.",
+             "The ratio is 1:8.5. Meet at 7:50."),
+            ("The ratio is one to eight and we begin.", "The ratio is 1:8 and we begin.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(expected), expected)
+        }
+    }
+
+    func testRatioFractionsRejectIncompleteOrAmbiguousOperands() {
+        for source in ["The ratio is one to eight and a half and one quarter.",
+                       "The ratio is one to eight and a half of two.",
+                       "The ratio is one to 8.1 and a half.",
+                       "The ratio is one to eight and.",
+                       "The ratio is one to eight and a.",
+                       "The ratio is one to eight and three.",
+                       "The ratio is one to eight and four quarters.",
+                       "The ratio is one hundred and a half to two.",
+                       "The ratio is one to eight hundred and a half.",
+                       "The odds are one to eight and a half against.",
+                       "The score changed from one to eight and a half.",
+                       #"Print "the ratio is one to eight and a half" exactly."#,
+                       "Repeat the words the ratio is one to eight and a half.",
+                       "Use `the ratio is one to eight and a half` in code.",
+                       "Print \"the ratio is one to eight and a half."] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+        XCTAssertEqual(AcademicInputNormalizer.normalize("Meet at a quarter to eight."), "Meet at 7:45.")
+    }
+
+    func testRatiosDoNotRewriteRangesUnsupportedFractionsOrLiteralWording() {
         for source in ["The score changed from ten to eight.",
                        "The odds are ten to one against.",
                        "The ratio is one hundred ten to eight.",
                        "The ratio is one to eight hundred.",
-                       "The ratio is one to eight and a half.",
-                       "The ratio is one to eight and one quarter.",
                        "The ratio is one to eight and two thirds.",
                        "The ratio is one to eight over nine.",
                        "The ratio is one to eight divided by nine.",
