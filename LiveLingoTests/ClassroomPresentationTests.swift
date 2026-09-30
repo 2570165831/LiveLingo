@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import XCTest
 @testable import LiveLingo
@@ -8,6 +9,124 @@ import XCTest
 @MainActor
 final class ClassroomPresentationTests: XCTestCase {
     private var presentationDefaults: UserDefaults?
+
+    func testLiveDraftUpdatesStayInTheirReadingViews() async throws {
+        var update: CaptionTranslationDependencies.Update?
+        var pendingTranslation: CheckedContinuation<String, Error>?
+        var pendingAdjacent: CheckedContinuation<QwenTranslationClient.AdjacentTranslation, Error>?
+        let (model, evidence, notebook) = try fixture(translation: .init(
+            translate: { _, _, _, _, callback in
+                update = callback
+                return try await withCheckedThrowingContinuation { pendingTranslation = $0 }
+            },
+            adjacent: { _, _, _, _, _, _, _, callback, _ in
+                update = callback
+                return try await withCheckedThrowingContinuation { pendingAdjacent = $0 }
+            }))
+        defer {
+            pendingTranslation?.resume(throwing: CancellationError())
+            pendingAdjacent?.resume(throwing: CancellationError())
+        }
+        model.loadPresentationForTesting(phase: .recording, evidence: evidence, notebook: notebook)
+        let originalNotes = model.lectureSummary
+        let (window, view) = try window(model: model, width: 1260, notes: true)
+        defer { window.close() }
+        let floatingController = NSHostingController(rootView: FloatingSubtitleView().environmentObject(model)
+            .defaultAppStorage(try XCTUnwrap(presentationDefaults)))
+        let floatingWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 390),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        floatingWindow.isReleasedWhenClosed = false
+        floatingWindow.contentViewController = floatingController
+        let floating = floatingController.view
+        floatingWindow.setContentSize(floating.fittingSize)
+        floatingWindow.makeKeyAndOrderFront(nil)
+        defer { floatingWindow.close() }
+        try await settle(view)
+        try await settle(floating)
+
+        var notifications = 0
+        let observer = model.objectWillChange.sink { notifications += 1 }
+        defer { observer.cancel() }
+        SummaryRenderingDiagnostics.reset()
+        for index in 0..<12 {
+            model.receiveLivePreviewForTesting("Synthetic live preview update \(index).",
+                                               chinese: "合成初译更新：第 \(index) 次。")
+            try await Task.sleep(for: .milliseconds(25))
+            view.layoutSubtreeIfNeeded()
+            floating.layoutSubtreeIfNeeded()
+        }
+        try await settle(view)
+        try await settle(floating)
+        let preview = SummaryRenderingDiagnostics.counts
+        let previewNotifications = notifications
+        XCTAssertEqual(previewNotifications, 0)
+        XCTAssertEqual(preview.rootBodies, 0, "Live preview must not invalidate the whole classroom")
+        XCTAssertEqual(preview.summaryBodies, 0)
+        XCTAssertEqual(preview.inlineParses, 0)
+        XCTAssertGreaterThan(preview.previewBodies, 0, "The visible preview must still redraw")
+        XCTAssertGreaterThan(preview.floatingBodies, 0, "Floating subtitles must observe the same live state")
+        XCTAssertEqual(model.previewEnglishDisplay, "Synthetic live preview update 11.")
+        XCTAssertEqual(model.previewChineseDisplay, model.supportsPreviewTranslation
+            ? "初译 · 合成初译更新：第 11 次。" : "当前系统不支持初译；正式译文随后显示")
+        XCTAssertEqual(model.segments, evidence)
+        XCTAssertEqual(model.lectureSummary, originalNotes)
+        try capture(view, name: "live-draft-updated-preview")
+        try capture(floating, name: "live-draft-updated-floating")
+
+        model.receiveLivePreviewForTesting("Replacement preview after a source rewrite.")
+        try await settle(view)
+        XCTAssertEqual(model.previewChinese, "", "A source rewrite must clear its stale initial translation")
+
+        model.receiveCaptionForTesting("and the temperature rises in this synthetic example.", start: 80, end: 89)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while update == nil, ContinuousClock.now < deadline { await Task.yield() }
+        let callback = try XCTUnwrap(update, "The real caption worker must supply its streaming callback")
+        try await settle(view)
+        SummaryRenderingDiagnostics.reset()
+        notifications = 0
+        for index in 0..<12 {
+            await callback("合成课堂：温度随之升高" + String(repeating: "。", count: index + 1))
+            try await Task.sleep(for: .milliseconds(25))
+            view.layoutSubtreeIfNeeded()
+        }
+        try await settle(view)
+        let streaming = SummaryRenderingDiagnostics.counts
+        let streamingNotifications = notifications
+        XCTAssertEqual(streamingNotifications, 0)
+        XCTAssertEqual(streaming.rootBodies, 0, "Streaming a caption must not rebuild unrelated classroom regions")
+        XCTAssertEqual(streaming.summaryBodies, 0)
+        XCTAssertEqual(streaming.inlineParses, 0)
+        XCTAssertGreaterThan(streaming.streamingBodies, 0, "The active caption must still show streamed text")
+        XCTAssertEqual(model.translatingSegmentID, model.segments.last?.id)
+        XCTAssertFalse(try XCTUnwrap(model.segments.last).hasUsableTranslation)
+        XCTAssertTrue(model.streamingChinese.hasSuffix(String(repeating: "。", count: 12)))
+        XCTAssertEqual(model.lectureSummary, originalNotes)
+        try capture(view, name: "live-draft-updated-streaming-caption")
+        let probe = LiveDraftProbe(preview: preview, streaming: streaming,
+            previewModelNotifications: previewNotifications, streamingModelNotifications: streamingNotifications)
+        print("LIVE_DRAFT_RENDER_PROBE " + String(decoding: try JSONEncoder().encode(probe), as: UTF8.self))
+        SummaryRenderingDiagnostics.reset()
+        let finalText = "合成课堂：温度随之升高。"
+        let translation = pendingTranslation; pendingTranslation = nil
+        let adjacent = pendingAdjacent; pendingAdjacent = nil
+        translation?.resume(returning: finalText)
+        adjacent?.resume(returning: .init(previous: nil, current: finalText,
+                                        previousRejection: nil, currentRejection: nil))
+        await model.translationTaskForTesting?.value
+        try await settle(view)
+        XCTAssertTrue(try XCTUnwrap(model.segments.last).hasUsableTranslation)
+        XCTAssertEqual(model.segments.last?.displayChinese, finalText)
+        XCTAssertGreaterThan(SummaryRenderingDiagnostics.counts.rootBodies, 0,
+                             "Durable caption completion must still update the classroom")
+        try capture(view, name: "live-draft-completed-caption")
+    }
+
+    private struct LiveDraftProbe: Codable {
+        let preview: SummaryRenderingDiagnostics.Counts
+        let streaming: SummaryRenderingDiagnostics.Counts
+        let previewModelNotifications: Int
+        let streamingModelNotifications: Int
+    }
 
     func testFilePanelQuitCommandDoesNotConsumeOtherShortcutsOrClosedPanels() {
         XCTAssertTrue(FilePanelPresentation.shouldHandleQuit(characters: "q", modifiers: .command, hasOpenPanel: true))

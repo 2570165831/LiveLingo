@@ -68,6 +68,16 @@ final class CaptureMeterState: ObservableObject {
     @Published var waveformSamples = Array(repeating: Float.zero, count: 24)
 }
 
+/// Transient text has its own notifications; durable classroom changes stay on AppModel.
+@MainActor
+final class LiveCaptionState: ObservableObject {
+    @Published fileprivate(set) var volatileEnglish = ""
+    @Published fileprivate(set) var previewChinese = ""
+    @Published fileprivate(set) var previewTranslationStatus = "准备苹果初译…"
+    @Published fileprivate(set) var translatingSegmentID: UUID?
+    @Published fileprivate(set) var streamingChinese = ""
+}
+
 @MainActor
 enum ReviewExportSource {
     static func markdown(for directory: URL?, queue: LearningReviewQueue,
@@ -385,22 +395,31 @@ final class AppModel: ObservableObject {
     @Published private(set) var speechStatus = "等待检查"
     @Published private(set) var translationStatus = "正在检查本机翻译模型…"
     @Published private(set) var translationReady = false
-    @Published private(set) var volatileEnglish = "" {
-        didSet {
-            // 只有真正变化才算新的预览来源（重复写入同一文本不算）。
-            if volatileEnglish != oldValue { markPreviewSourceChanged() }
-            if oldValue.isEmpty || volatileEnglish.isEmpty || !volatileEnglish.hasPrefix(oldValue) {
+    let captionStream = LiveCaptionState()
+    private(set) var volatileEnglish: String {
+        get { captionStream.volatileEnglish }
+        set {
+            let oldValue = captionStream.volatileEnglish
+            captionStream.volatileEnglish = newValue
+            // Preserve source identity, stale-result clearing and wake-up semantics.
+            if newValue != oldValue { markPreviewSourceChanged() }
+            if oldValue.isEmpty || newValue.isEmpty || !newValue.hasPrefix(oldValue) {
                 resetPreviewTranslation()
             }
-            // 前缀增长同样是新的预览来源，必须立刻叫醒等待中的初译循环。
             previewWake?.signal()
         }
     }
     @Published var previewTranslationEnabled = true {
         didSet { resetPreviewTranslation() }
     }
-    @Published private(set) var previewChinese = ""
-    @Published private(set) var previewTranslationStatus = "准备苹果初译…"
+    private(set) var previewChinese: String {
+        get { captionStream.previewChinese }
+        set { captionStream.previewChinese = newValue }
+    }
+    private(set) var previewTranslationStatus: String {
+        get { captionStream.previewTranslationStatus }
+        set { captionStream.previewTranslationStatus = newValue }
+    }
     private var previewRevision = 0
     /// 当前预览循环的唤醒信号；同一时刻只服务最新一次会话。
     private var previewWake: PreviewWakeSignal?
@@ -511,8 +530,14 @@ final class AppModel: ObservableObject {
     }
     @Published private(set) var liveChinese = ""
     // Draft output belongs to one segment and never enters exported history.
-    @Published private(set) var translatingSegmentID: UUID?
-    @Published private(set) var streamingChinese = ""
+    private(set) var translatingSegmentID: UUID? {
+        get { captionStream.translatingSegmentID }
+        set { captionStream.translatingSegmentID = newValue }
+    }
+    private(set) var streamingChinese: String {
+        get { captionStream.streamingChinese }
+        set { captionStream.streamingChinese = newValue }
+    }
     private var streamingDependencyIDs: Set<UUID> = []
     @Published private(set) var segments: [TranscriptSegment] = [] {
         didSet { persistCurrentSession() }
@@ -2282,6 +2307,12 @@ final class AppModel: ObservableObject {
     }
     func receiveCaptionForTesting(_ text: String, start: TimeInterval, end: TimeInterval) {
         consume(.final(text: text, start: start, end: end, hints: []))
+    }
+    func receiveLivePreviewForTesting(_ text: String, chinese: String? = nil) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        consume(.volatile(text: text, start: 0, end: 0,
+                          observedAt: ProcessInfo.processInfo.systemUptime))
+        if let chinese { previewChinese = chinese }
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
     func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {

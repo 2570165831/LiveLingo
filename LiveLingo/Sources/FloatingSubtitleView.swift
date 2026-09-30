@@ -3,9 +3,21 @@ import SwiftUI
 struct FloatingSubtitleView: View {
     @EnvironmentObject private var model: AppModel
 
+    var body: some View {
+        FloatingSubtitleContent(model: model, stream: model.captionStream)
+    }
+}
+
+private struct FloatingSubtitleContent: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var stream: LiveCaptionState
+
     @AppStorage("floatingTextSize") private var textSize = 24.0
 
     var body: some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.record(\.floatingBodies)
+        #endif
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Circle().fill(model.isRecording ? .red : .gray).frame(width: 8, height: 8)

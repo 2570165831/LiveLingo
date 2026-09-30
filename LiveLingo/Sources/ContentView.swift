@@ -12,6 +12,9 @@ enum SummaryRenderingDiagnostics {
         var lineSplits = 0
         var inlineParses = 0
         var reviewDifferences = 0
+        var previewBodies = 0
+        var streamingBodies = 0
+        var floatingBodies = 0
     }
     static var counts = Counts()
     static func record(_ key: WritableKeyPath<Counts, Int>) {
@@ -294,12 +297,8 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("双语转写")
                         .font(.system(size: 18, weight: .semibold))
-                    Text(model.previewTranslationEnabled && model.supportsPreviewTranslation
-                         ? model.previewTranslationStatus : "最新内容在顶部")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help(model.previewTranslationStatus)
+                    ClassroomPreviewStatus(stream: model.captionStream,
+                        enabled: model.previewTranslationEnabled && model.supportsPreviewTranslation)
                 }
                 Spacer()
                 Text("\(model.segments.count) 段")
@@ -316,28 +315,7 @@ struct ContentView: View {
 
             Divider()
 
-            if model.hasActiveSession || model.phase == .stopping || !model.volatileEnglish.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .opacity(model.volatileEnglish.isEmpty ? 0 : 1)
-                        Text(model.volatileEnglish.isEmpty ? "等待下一句" : "正在识别")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
-                    }
-                    // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
-                    // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
-                    previewReadingSlot(model.previewEnglishDisplay,
-                                       size: transcriptTextSize - 2, weight: .regular)
-                    previewReadingSlot(model.previewChineseDisplay,
-                                       size: transcriptTextSize, weight: .regular)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(nsColor: .controlBackgroundColor))
-                Divider()
-            }
+            ClassroomLivePreview(model: model, stream: model.captionStream, textSize: transcriptTextSize)
 
             if model.segments.isEmpty {
                 ContentUnavailableView(
@@ -376,38 +354,8 @@ struct ContentView: View {
         .panelSurface()
     }
 
-    private func previewReadingSlot(_ text: String, size: Double, weight: Font.Weight) -> some View {
-        // Let SwiftUI measure two lines with the same font and spacing as the captions.
-        Text("Ag国\nAg国")
-            .font(.system(size: size, weight: weight))
-            .lineSpacing(7)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .hidden()
-            .accessibilityHidden(true)
-            .overlay {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(text)
-                                .font(.system(size: size, weight: weight))
-                                .lineSpacing(7)
-                                .foregroundStyle(.primary)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Color.clear.frame(height: 1).id("preview-tail")
-                        }
-                    }
-                    .onChange(of: text) { proxy.scrollTo("preview-tail", anchor: .bottom) }
-                }
-            }
-    }
-
     private func segmentRow(_ segment: TranscriptSegment) -> some View {
-        let pending = segment.translationState == .pending || segment.translationState == .translating
-        let translating = pending && model.translatingSegmentID == segment.id
-        return TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize,
-            isTranslating: translating, streamingChinese: translating ? model.streamingChinese : "")
+        TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize, stream: model.captionStream)
             .equatable()
     }
 
@@ -1552,12 +1500,116 @@ private struct LearningReviewControls: View {
     }
 }
 
+private struct ClassroomPreviewStatus: View {
+    @ObservedObject var stream: LiveCaptionState
+    let enabled: Bool
+    var body: some View {
+        Text(enabled ? stream.previewTranslationStatus : "最新内容在顶部")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .help(stream.previewTranslationStatus)
+    }
+}
+
+private struct ClassroomLivePreview: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var stream: LiveCaptionState
+    let textSize: Double
+    var body: some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.record(\.previewBodies)
+        #endif
+            if model.hasActiveSession || model.phase == .stopping || !stream.volatileEnglish.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .opacity(stream.volatileEnglish.isEmpty ? 0 : 1)
+                        Text(stream.volatileEnglish.isEmpty ? "等待下一句" : "正在识别")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
+                    // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
+                    previewReadingSlot(model.previewEnglishDisplay,
+                                       size: textSize - 2, weight: .regular)
+                    previewReadingSlot(model.previewChineseDisplay,
+                                       size: textSize, weight: .regular)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor))
+                Divider()
+            }
+    }
+
+    private func previewReadingSlot(_ text: String, size: Double, weight: Font.Weight) -> some View {
+        // Let SwiftUI measure two lines with the same font and spacing as the captions.
+        Text("Ag国\nAg国")
+            .font(.system(size: size, weight: weight))
+            .lineSpacing(7)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .hidden()
+            .accessibilityHidden(true)
+            .overlay {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(text)
+                                .font(.system(size: size, weight: weight))
+                                .lineSpacing(7)
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Color.clear.frame(height: 1).id("preview-tail")
+                        }
+                    }
+                    .onChange(of: text) { proxy.scrollTo("preview-tail", anchor: .bottom) }
+                }
+            }
+    }
+
+}
+
+private struct PendingCaptionTranslation: View {
+    @ObservedObject var stream: LiveCaptionState
+    let segmentID: UUID
+    let textSize: Double
+    private var isTranslating: Bool { stream.translatingSegmentID == segmentID }
+    var body: some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.record(\.streamingBodies)
+        #endif
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(isTranslating ? "翻译中…" : "等待翻译…")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if isTranslating, !stream.streamingChinese.isEmpty {
+                Text(stream.streamingChinese)
+                    .font(.system(size: textSize))
+                    .lineSpacing(7)
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
 /// Finished captions have no dependency on streaming text or unrelated app state.
 private struct TranscriptCaptionRow: View, Equatable {
     let segment: TranscriptSegment
     let textSize: Double
-    let isTranslating: Bool
-    let streamingChinese: String
+    let stream: LiveCaptionState
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.segment == rhs.segment && lhs.textSize == rhs.textSize && lhs.stream === rhs.stream
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -1575,22 +1627,7 @@ private struct TranscriptCaptionRow: View, Equatable {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 if segment.translationState == .pending || segment.translationState == .translating {
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.mini)
-                            Text(isTranslating ? "翻译中…" : "等待翻译…")
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        if isTranslating, !streamingChinese.isEmpty {
-                            Text(streamingChinese)
-                                .font(.system(size: textSize))
-                                .lineSpacing(7)
-                                .foregroundStyle(.primary)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
+                    PendingCaptionTranslation(stream: stream, segmentID: segment.id, textSize: textSize)
                 } else {
                     Text(markdown: segment.displayChinese)
                         .font(.system(size: textSize))
