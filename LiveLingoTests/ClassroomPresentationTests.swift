@@ -20,6 +20,72 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertFalse(FilePanelPresentation.shouldHandleQuit(characters: nil, modifiers: .command, hasOpenPanel: true))
     }
 
+    func testNotesRenderingDuringUnrelatedPublishedUpdates() async throws {
+        let (model, evidence, notebook) = try fixture()
+        model.loadPresentationForTesting(phase: .recording, evidence: evidence, notebook: notebook)
+        let originalNotes = model.lectureSummary
+        SummaryRenderingDiagnostics.reset()
+        let (window, view) = try window(model: model, width: 1260, notes: true)
+        defer { window.close() }
+        try await settle(view)
+        let initial = SummaryRenderingDiagnostics.counts
+        XCTAssertGreaterThan(initial.rootBodies, 0)
+        XCTAssertGreaterThan(initial.inlineParses, 0, "The probe must render actual notes")
+
+        SummaryRenderingDiagnostics.reset()
+        for index in 0..<12 {
+            model.manualTranslationInput = "Synthetic unrelated update \(index)"
+            try await Task.sleep(for: .milliseconds(25))
+            view.layoutSubtreeIfNeeded()
+        }
+        try await settle(view)
+        let unrelated = SummaryRenderingDiagnostics.counts
+        XCTAssertGreaterThan(unrelated.rootBodies, 0, "Updates must reach the real classroom root")
+        XCTAssertEqual(model.lectureSummary, originalNotes)
+        XCTAssertEqual(unrelated.inlineParses, 0, "Unchanged captions must not parse Markdown on unrelated updates")
+        XCTAssertEqual(unrelated.summaryBodies, 0)
+
+        SummaryRenderingDiagnostics.reset()
+        for index in 0..<12 {
+            model.captureMeter.elapsedSeconds = Double(index)
+            model.captureMeter.waveformSamples = Array(repeating: Float(index) / 12, count: 24)
+            try await Task.sleep(for: .milliseconds(25))
+            view.layoutSubtreeIfNeeded()
+        }
+        try await settle(view)
+        let meter = SummaryRenderingDiagnostics.counts
+        XCTAssertEqual(meter.rootBodies, 0)
+        XCTAssertEqual(meter.inlineParses, 0)
+
+        var correctedEvidence = evidence
+        correctedEvidence[correctedEvidence.count - 1].completeTranslation("修改后的合成字幕：保留 $v = 2\\,m/s$ 与 **条件**。")
+        SummaryRenderingDiagnostics.reset()
+        model.loadPresentationForTesting(phase: .recording, evidence: correctedEvidence, notebook: notebook)
+        try await settle(view)
+        let corrected = SummaryRenderingDiagnostics.counts
+        XCTAssertGreaterThan(corrected.inlineParses, 0, "Corrected text with the same caption ID must render")
+        XCTAssertLessThan(corrected.inlineParses, initial.inlineParses, "Unchanged neighboring captions must remain reusable")
+        XCTAssertEqual(model.lectureSummary, originalNotes)
+        try capture(view, name: "notes-rendering-corrected-caption")
+
+        let added = TranscriptSegment(startTime: 100, endTime: 109,
+            english: "An additional synthetic point changes the notebook.",
+            chinese: "新增的合成要点需要立即显示，不能复用过期笔记。")
+        var updatedNotebook = notebook
+        try updatedNotebook.append(evidence: [added], note: .init(topic: "新增合成笔记", points: [
+            .init(kind: "核心结论", text: "新增内容必须重新解析并显示。", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2))
+        SummaryRenderingDiagnostics.reset()
+        model.loadPresentationForTesting(phase: .recording, evidence: correctedEvidence + [added], notebook: updatedNotebook)
+        try await settle(view)
+        let changed = SummaryRenderingDiagnostics.counts
+        XCTAssertNotEqual(model.lectureSummary, originalNotes)
+        XCTAssertGreaterThan(changed.inlineParses, 0)
+        let counts = ["initial": initial, "unrelated": unrelated, "meter": meter, "captionCorrected": corrected, "notesChanged": changed]
+        print("SUMMARY_RENDER_PROBE " + String(decoding: try JSONEncoder().encode(counts), as: UTF8.self))
+        try capture(view, name: "notes-rendering-updated-content")
+    }
+
     private func fixture(translation: CaptionTranslationDependencies? = nil) throws -> (AppModel, [TranscriptSegment], LearningNotebook) {
         XCTAssertTrue(AppRuntimeEnvironment.isUnitTesting)
         let directory = FileManager.default.temporaryDirectory

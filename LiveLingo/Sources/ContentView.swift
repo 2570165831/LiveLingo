@@ -2,6 +2,26 @@ import Foundation
 import SwiftUI
 @preconcurrency import Translation
 
+#if DEBUG
+/// Counts work in isolated view tests; no classroom text is collected.
+@MainActor
+enum SummaryRenderingDiagnostics {
+    struct Counts: Codable, Equatable {
+        var rootBodies = 0
+        var summaryBodies = 0
+        var lineSplits = 0
+        var inlineParses = 0
+        var reviewDifferences = 0
+    }
+    static var counts = Counts()
+    static func record(_ key: WritableKeyPath<Counts, Int>) {
+        guard AppRuntimeEnvironment.isUnitTesting else { return }
+        counts[keyPath: key] += 1
+    }
+    static func reset() { counts = Counts() }
+}
+#endif
+
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
@@ -41,6 +61,9 @@ struct ContentView: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.record(\.rootBodies)
+        #endif
         VStack(spacing: 0) {
             recordingStrip
             workspace
@@ -384,56 +407,11 @@ struct ContentView: View {
     }
 
     private func segmentRow(_ segment: TranscriptSegment) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            Text(Self.clock(segment.startTime))
-                .font(.system(size: 13).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 54, alignment: .leading)
-                .padding(.top, 2)
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text(segment.english)
-                    .font(.system(size: transcriptTextSize - 2))
-                    .lineSpacing(4)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                if segment.translationState == .pending || segment.translationState == .translating {
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.mini)
-                            Text(model.translatingSegmentID == segment.id ? "翻译中…" : "等待翻译…")
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        if model.translatingSegmentID == segment.id, !model.streamingChinese.isEmpty {
-                            Text(model.streamingChinese)
-                                .font(.system(size: transcriptTextSize))
-                                .lineSpacing(7)
-                                .foregroundStyle(.primary)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                } else {
-                    Text(markdown: segment.displayChinese)
-                        .font(.system(size: transcriptTextSize))
-                        .lineSpacing(7)
-                        .foregroundStyle(.primary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 18)
-        #if DEBUG
-        .background {
-            if AppRuntimeEnvironment.isUnitTesting {
-                CaptionFrameProbe(segmentID: segment.id)
-            }
-        }
-        #endif
+        let pending = segment.translationState == .pending || segment.translationState == .translating
+        let translating = pending && model.translatingSegmentID == segment.id
+        return TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize,
+            isTranslating: translating, streamingChinese: translating ? model.streamingChinese : "")
+            .equatable()
     }
 
     private var summaryPanel: some View {
@@ -721,11 +699,6 @@ struct ContentView: View {
         case .systemAudio:
             return "开始后，本机播放的内容会先显示英文，再补上中文译文。"
         }
-    }
-
-    private static func clock(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds))
-        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
     private static func duration(_ seconds: TimeInterval) -> String {
@@ -1557,6 +1530,72 @@ private struct LearningReviewControls: View {
     }
 }
 
+/// Finished captions have no dependency on streaming text or unrelated app state.
+private struct TranscriptCaptionRow: View, Equatable {
+    let segment: TranscriptSegment
+    let textSize: Double
+    let isTranslating: Bool
+    let streamingChinese: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text(Self.clock(segment.startTime))
+                .font(.system(size: 13).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 54, alignment: .leading)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text(segment.english)
+                    .font(.system(size: textSize - 2))
+                    .lineSpacing(4)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if segment.translationState == .pending || segment.translationState == .translating {
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text(isTranslating ? "翻译中…" : "等待翻译…")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if isTranslating, !streamingChinese.isEmpty {
+                            Text(streamingChinese)
+                                .font(.system(size: textSize))
+                                .lineSpacing(7)
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                } else {
+                    Text(markdown: segment.displayChinese)
+                        .font(.system(size: textSize))
+                        .lineSpacing(7)
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 18)
+        #if DEBUG
+        .background {
+            if AppRuntimeEnvironment.isUnitTesting {
+                CaptionFrameProbe(segmentID: segment.id)
+            }
+        }
+        #endif
+    }
+
+    private static func clock(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds))
+        return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+}
+
 private struct RecordingElapsedText: View {
     @ObservedObject var meter: CaptureMeterState
     var body: some View {
@@ -1577,10 +1616,16 @@ private struct SummaryMarkdownView: View {
     let text: String
 
     private var lines: [String] {
-        text.components(separatedBy: .newlines)
+        #if DEBUG
+        SummaryRenderingDiagnostics.record(\.lineSplits)
+        #endif
+        return text.components(separatedBy: .newlines)
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.record(\.summaryBodies)
+        #endif
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                 let content = line.trimmingCharacters(in: .whitespaces)
@@ -1635,6 +1680,9 @@ private struct ReviewChangeView: View {
     let proposed: String
 
     private func marked(_ value: String, against other: String, removed: Bool) -> Text {
+        #if DEBUG
+        SummaryRenderingDiagnostics.record(\.reviewDifferences)
+        #endif
         func tokens(_ text: String) -> [String] {
             let expression = try! NSRegularExpression(pattern: #"[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[A-Za-z]+|\X"#)
             return expression.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
@@ -1675,7 +1723,11 @@ private struct ReviewChangeView: View {
 }
 
 private extension Text {
+    @MainActor
     init(markdown source: String) {
+        #if DEBUG
+        SummaryRenderingDiagnostics.record(\.inlineParses)
+        #endif
         self = FormulaDisplay.runs(source).reduce(Text("")) { result, run in
             let part: Text
             if run.script != 0 {
