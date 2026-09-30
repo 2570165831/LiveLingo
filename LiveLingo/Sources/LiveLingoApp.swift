@@ -8,6 +8,7 @@ import SwiftUI
 enum FilePanelPresentation {
     private static var panels: [UUID: NSSavePanel] = [:]
     private static var quitMonitor: Any?
+    private static var pendingTermination: (@MainActor @Sendable () -> Void)?
     private static let logger = Logger(subsystem: "com.jianhongli.LiveLingo", category: "FilePanel")
 
     nonisolated static func shouldHandleQuit(characters: String?, modifiers: NSEvent.ModifierFlags,
@@ -18,6 +19,13 @@ enum FilePanelPresentation {
 
     static func begin(_ panel: NSSavePanel,
                       completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        guard pendingTermination == nil else {
+            completion(.cancel)
+            return
+        }
+        // A chooser has no unsaved document to protect. Allow the app's quit
+        // command to reach its cancellation/termination path while it is open.
+        panel.preventsApplicationTerminationWhenModal = false
         let id = UUID()
         panels[id] = panel
         if quitMonitor == nil {
@@ -28,7 +36,7 @@ enum FilePanelPresentation {
                                            hasOpenPanel: !panels.isEmpty) else { return false }
                     logger.info("file_panel event=quit_command")
                     // Finish dispatching this event before cancelling the chooser.
-                    DispatchQueue.main.async { NSApp.terminate(nil) }
+                    DispatchQueue.main.async { requestTermination() }
                     return true
                 }
                 return handled ? nil : event
@@ -36,12 +44,18 @@ enum FilePanelPresentation {
         }
         let finish: (NSApplication.ModalResponse) -> Void = { response in
             Task { @MainActor in
+                let quitting = pendingTermination != nil
                 panels[id] = nil
+                if quitting { panel.orderOut(nil) }
                 if panels.isEmpty, let monitor = quitMonitor {
                     NSEvent.removeMonitor(monitor)
                     quitMonitor = nil
                 }
-                completion(response)
+                completion(quitting ? .cancel : response)
+                if panels.isEmpty, let terminate = pendingTermination {
+                    pendingTermination = nil
+                    DispatchQueue.main.async { terminate() }
+                }
             }
         }
         if let window = NSApp.keyWindow ?? NSApp.mainWindow {
@@ -53,6 +67,21 @@ enum FilePanelPresentation {
 
     static func cancelAll() {
         for panel in Array(panels.values) { panel.cancel(nil) }
+    }
+
+    /// Dismiss owned choosers before asking AppKit to quit. AppKit can reject
+    /// termination while a sheet is still active, before reaching the delegate.
+    static func requestTermination(
+        _ terminate: @escaping @MainActor @Sendable () -> Void = { NSApp.terminate(nil) }
+    ) {
+        guard pendingTermination == nil else { return }
+        guard !panels.isEmpty else {
+            terminate()
+            return
+        }
+        logger.info("file_panel event=quit_requested open_panels=\(panels.count, privacy: .public)")
+        pendingTermination = terminate
+        cancelAll()
     }
 }
 
@@ -94,6 +123,10 @@ struct LiveLingoApp: App {
         .defaultSize(width: 1_260, height: 820)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button("退出 LiveLingo") { FilePanelPresentation.requestTermination() }
+                    .keyboardShortcut("q", modifiers: .command)
+            }
             // One classroom window: File › New Window is replaced by 打开课程.
             CommandGroup(replacing: .newItem) {
                 OpenLessonMenuItem(model: holder.model)

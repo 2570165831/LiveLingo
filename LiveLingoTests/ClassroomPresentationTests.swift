@@ -139,6 +139,40 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertFalse(FilePanelPresentation.shouldHandleQuit(characters: nil, modifiers: .command, hasOpenPanel: true))
     }
 
+    @MainActor private final class FilePanelQuitProbe {
+        var events: [String] = []
+    }
+
+    func testFilePanelQuitWithoutChoosersUsesNormalTerminationImmediately() {
+        let probe = FilePanelQuitProbe()
+        FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+        XCTAssertEqual(probe.events, ["terminate"])
+    }
+
+    func testFilePanelQuitCancelsChooserBeforeTermination() async throws {
+        let probe = FilePanelQuitProbe()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        let panel = NSOpenPanel()
+        panel.title = "Synthetic quit test — no file is selected"
+        defer { panel.cancel(nil); panel.orderOut(nil) }
+        FilePanelPresentation.begin(panel) { response in
+            XCTAssertEqual(response, .cancel)
+            probe.events.append("cancelled")
+        }
+        XCTAssertFalse(panel.preventsApplicationTerminationWhenModal)
+        FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while probe.events.last != "terminate", ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        XCTAssertEqual(probe.events, ["cancelled", "terminate"])
+        XCTAssertNil(window.attachedSheet)
+    }
+
     func testNotesRenderingDuringUnrelatedPublishedUpdates() async throws {
         let (model, evidence, notebook) = try fixture()
         model.loadPresentationForTesting(phase: .recording, evidence: evidence, notebook: notebook)
