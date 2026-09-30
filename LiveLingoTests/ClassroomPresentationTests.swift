@@ -9,6 +9,17 @@ import XCTest
 final class ClassroomPresentationTests: XCTestCase {
     private var presentationDefaults: UserDefaults?
 
+    func testFilePanelQuitCommandDoesNotConsumeOtherShortcutsOrClosedPanels() {
+        XCTAssertTrue(FilePanelPresentation.shouldHandleQuit(characters: "q", modifiers: .command, hasOpenPanel: true))
+        XCTAssertTrue(FilePanelPresentation.shouldHandleQuit(characters: "Q", modifiers: [.command, .capsLock], hasOpenPanel: true))
+        XCTAssertFalse(FilePanelPresentation.shouldHandleQuit(characters: "q", modifiers: .command, hasOpenPanel: false))
+        for modifiers: NSEvent.ModifierFlags in [.shift, .control, [], [.command, .shift], [.command, .option], [.command, .control]] {
+            XCTAssertFalse(FilePanelPresentation.shouldHandleQuit(characters: "q", modifiers: modifiers, hasOpenPanel: true))
+        }
+        XCTAssertFalse(FilePanelPresentation.shouldHandleQuit(characters: "w", modifiers: .command, hasOpenPanel: true))
+        XCTAssertFalse(FilePanelPresentation.shouldHandleQuit(characters: nil, modifiers: .command, hasOpenPanel: true))
+    }
+
     private func fixture(translation: CaptionTranslationDependencies? = nil) throws -> (AppModel, [TranscriptSegment], LearningNotebook) {
         XCTAssertTrue(AppRuntimeEnvironment.isUnitTesting)
         let directory = FileManager.default.temporaryDirectory

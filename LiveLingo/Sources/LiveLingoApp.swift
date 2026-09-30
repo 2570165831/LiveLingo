@@ -1,21 +1,68 @@
 import AppKit
+import OSLog
 import SwiftUI
 
 /// Keep file-panel keyboard commands in the owning application window.
 /// A detached open-panel service can consume Command-Q even when modeless.
 @MainActor
 enum FilePanelPresentation {
+    private static var panels: [UUID: NSSavePanel] = [:]
+    private static var quitMonitor: Any?
+    private static let logger = Logger(subsystem: "com.jianhongli.LiveLingo", category: "FilePanel")
+
+    nonisolated static func shouldHandleQuit(characters: String?, modifiers: NSEvent.ModifierFlags,
+                                            hasOpenPanel: Bool) -> Bool {
+        hasOpenPanel && characters?.lowercased() == "q"
+            && modifiers.intersection([.command, .control, .option, .shift]) == .command
+    }
+
     static func begin(_ panel: NSSavePanel,
                       completion: @escaping (NSApplication.ModalResponse) -> Void) {
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
-            panel.beginSheetModal(for: window, completionHandler: completion)
-        } else {
-            panel.begin(completionHandler: completion)
+        let id = UUID()
+        panels[id] = panel
+        if quitMonitor == nil {
+            quitMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                let handled = MainActor.assumeIsolated {
+                    guard shouldHandleQuit(characters: event.charactersIgnoringModifiers,
+                                           modifiers: event.modifierFlags,
+                                           hasOpenPanel: !panels.isEmpty) else { return false }
+                    logger.info("file_panel event=quit_command")
+                    // Finish dispatching this event before cancelling the chooser.
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
+                    return true
+                }
+                return handled ? nil : event
+            }
         }
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            Task { @MainActor in
+                panels[id] = nil
+                if panels.isEmpty, let monitor = quitMonitor {
+                    NSEvent.removeMonitor(monitor)
+                    quitMonitor = nil
+                }
+                completion(response)
+            }
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            panel.begin(completionHandler: finish)
+        }
+    }
+
+    static func cancelAll() {
+        for panel in Array(panels.values) { panel.cancel(nil) }
     }
 }
 
+@MainActor
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        FilePanelPresentation.cancelAll()
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         guard !AppRuntimeEnvironment.isUnitTesting else { return }
         ASRRuntime.shared.stopBeforeApplicationExit()
