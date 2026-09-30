@@ -114,6 +114,28 @@ final class CaptionIdentityTests: XCTestCase {
         return model
     }
 
+    func testCaptionQueueFormatsSpokenQuantitiesWithoutChangingOriginalEnglish() async throws {
+        let original = "Meet at ten past two and add fifty parts per million."
+        let chinese = "在 2:10 集合，并添加 50 ppm。"
+        var inputs: [String] = []
+        let model = try makeModel(.init(translate: { input, _, _, _, _ in
+            inputs.append(input)
+            return chinese
+        }, adjacent: { _, _, _, _, _, _, _, _, _ in
+            XCTFail("An isolated first caption must not request adjacent repair")
+            throw CancellationError()
+        }))
+        model.receiveCaptionForTesting(original, start: 0, end: 8)
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(inputs, ["Meet at 2:10 and add 50 ppm."],
+                       "The real caption queue must apply formatting before generation, once")
+        let caption = try XCTUnwrap(model.segments.first)
+        XCTAssertEqual(model.segments.count, 1)
+        XCTAssertEqual(caption.english, original, "The original transcript remains the evidence")
+        XCTAssertEqual(caption.chinese, chinese)
+        XCTAssertTrue(caption.hasUsableTranslation)
+    }
+
     func testCaptureFailuresRetryFinalNotesWithoutAnotherCaptionOrPowerPoll() async throws {
         for failure in ["合成麦克风恢复次数已达上限", "合成电脑进入休眠"] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-CaptureNotes-\(UUID())")
