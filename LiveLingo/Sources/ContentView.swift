@@ -308,6 +308,7 @@ struct ContentView: View {
                 Toggle("跟随最新", isOn: $followLatest)
                     .toggleStyle(.button)
                     .controlSize(.small)
+                    .tint(.gray)
                     .help("关闭后可阅读先前字幕，新内容不会自动滚动到顶部")
                     .accessibilityIdentifier("classroom-follow-latest")
             }
@@ -537,15 +538,14 @@ struct ContentView: View {
         .frame(width: 380)
     }
 
-    /// One line: the current message, then details and dismissal. Save
-    /// location and saved-lesson actions live in the 更多 menu.
+    /// One line: the current message or save destination, then details and dismissal.
     private var statusBar: some View {
         HStack(spacing: 10) {
             Image(systemName: model.errorMessage == nil ? model.currentInputMode.statusIcon : "exclamationmark.triangle")
                 .foregroundStyle(model.errorMessage == nil ? Color.secondary : Color.orange)
                 .accessibilityHidden(true)
             Text(model.errorMessage ?? model.savedProcessingStatus ?? model.archiveNotice
-                 ?? (model.translationReady ? "本机模型已就绪" : model.translationStatus))
+                 ?? (model.translationReady ? saveDestinationStatus : model.translationStatus))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("classroom-status-message")
@@ -577,6 +577,12 @@ struct ContentView: View {
         .overlay(alignment: .top) { Divider() }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("classroom-status-bar")
+    }
+
+    private var saveDestinationStatus: String {
+        if model.isLiveOnly { return "实时暂存 · 结束后不保留录音" }
+        if let directory = model.outputDirectory { return "保存到 \(directory.lastPathComponent)" }
+        return "尚未选择保存位置"
     }
 
     private var statusDetails: some View {
@@ -1151,9 +1157,18 @@ private struct LearningReviewControls: View {
                         }
                     }
                 } label: {
-                    Label("复查…", systemImage: "text.magnifyingglass")
+                    HStack(spacing: 3) {
+                        Text("复查…")
+                        Image(systemName: "chevron.down").imageScale(.small)
+                    }
+                    .font(.caption.weight(.regular))
+                    .foregroundStyle(.secondary)
                 }
-                .menuStyle(.borderlessButton)
+                // The plain button style draws the label as written, matching
+                // 管理队列…; the borderless menu style ignores label fonts.
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
                 .controlSize(.small)
                 .font(.caption.weight(.regular))
                 .fixedSize()
@@ -1165,6 +1180,7 @@ private struct LearningReviewControls: View {
                     .buttonStyle(.borderless)
                     .controlSize(.small)
                     .font(.caption.weight(.regular))
+                    .foregroundStyle(.secondary)
                     .help("查看复查任务、重试失败项、调整顺序或重新定位录音文件夹；任何操作都不会删除文件")
             }
 
@@ -1562,6 +1578,7 @@ private struct ClassroomLivePreview: View {
                                 .lineSpacing(7)
                                 .foregroundStyle(.primary)
                                 .textSelection(.enabled)
+                                .frame(maxWidth: 760, alignment: .leading)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             Color.clear.frame(height: 1).id("preview-tail")
                         }
@@ -1637,6 +1654,8 @@ private struct TranscriptCaptionRow: View, Equatable {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 18)

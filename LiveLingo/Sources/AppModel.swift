@@ -482,7 +482,7 @@ final class AppModel: ObservableObject {
             try Task.checkCancellation()
             // prepare 期间可能已经有更新的会话接替：旧会话直接退出，不改状态。
             guard previewRunToken == runToken else { return }
-            previewTranslationStatus = "苹果初译 · 定稿后由 Qwen 替换"
+            previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
             let wake = PreviewWakeSignal()
             installPreviewWake(wake)
             defer { releasePreviewWake(wake) }
@@ -502,7 +502,7 @@ final class AppModel: ObservableObject {
                 translate: { try await session.translate($0).targetText },
                 deliver: { source, translated, timing in
                     self.previewChinese = SimplifiedChineseNormalizer.normalize(translated)
-                    self.previewTranslationStatus = "苹果初译 · 定稿后由 Qwen 替换"
+                    self.previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
                     Self.tracePreview("delivered", characters: source.text.count, timing: timing)
                 },
                 reportFailure: { source, timing, backoff, failures in
