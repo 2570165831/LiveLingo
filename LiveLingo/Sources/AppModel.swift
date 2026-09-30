@@ -923,7 +923,7 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func chooseOutputDirectory() -> URL? {
+    func chooseOutputDirectory() async -> URL? {
         let panel = NSOpenPanel()
         panel.title = "选择会话保存目录"
         panel.prompt = "选择"
@@ -931,16 +931,28 @@ final class AppModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK {
-            outputDirectory = panel.url
-            return panel.url
+        // runModal blocks the normal application event loop, including Quit.
+        return await withCheckedContinuation { continuation in
+            panel.begin { [weak self] response in
+                Task { @MainActor in
+                    guard response == .OK, let directory = panel.url, let self else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    self.outputDirectory = directory
+                    continuation.resume(returning: directory)
+                }
+            }
         }
-        return nil
     }
 
-    func convertCurrentSessionToRecording() {
+    func convertCurrentSessionToRecording() async {
         guard hasActiveSession, activeStorageMode == .liveOnly else { return }
-        guard let directory = chooseOutputDirectory() else { return }
+        let identity = sessionID
+        let epoch = generation
+        guard let directory = await chooseOutputDirectory(),
+              sessionID == identity, generation == epoch,
+              hasActiveSession, activeStorageMode == .liveOnly else { return }
         do { try pipeline.updatePersistence(persistsSession: true) }
         catch {
             archiveError = "未能保留当前录音：\(error.localizedDescription)"
@@ -1012,7 +1024,8 @@ final class AppModel: ObservableObject {
 
     private func importMediaFile(_ fileURL: URL) async {
         guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
-        if outputDirectory == nil { chooseOutputDirectory() }
+        if outputDirectory == nil { await chooseOutputDirectory() }
+        guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
         guard let outputDirectory else { return }
         let previousPhase = phase
         phase = .preparing
@@ -1430,10 +1443,12 @@ final class AppModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let directory = panel.url else { return }
-        Task {
-            do { try await openSavedSession(directory) }
-            catch { archiveError = "课程未打开：\(error.localizedDescription)" }
+        panel.begin { [weak self] response in
+            Task { @MainActor in
+                guard response == .OK, let directory = panel.url, let self else { return }
+                do { try await self.openSavedSession(directory) }
+                catch { self.archiveError = "课程未打开：\(error.localizedDescription)" }
+            }
         }
     }
 
@@ -1639,7 +1654,9 @@ final class AppModel: ObservableObject {
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
             var selectedOutputDirectory: URL?
             if storageMode.requiresOutputDirectoryBeforeStart {
-                if outputDirectory == nil { chooseOutputDirectory() }
+                if outputDirectory == nil { await chooseOutputDirectory() }
+                guard sessionID == startingSession, generation == startingEpoch,
+                      finalizationOwner == nil else { return }
                 guard let outputDirectory else {
                     activeStorageMode = nil
                     phase = .idle

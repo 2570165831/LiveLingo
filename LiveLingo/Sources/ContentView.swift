@@ -119,7 +119,7 @@ struct ContentView: View {
             .disabled(!model.canImportMedia)
             .accessibilityIdentifier("classroom-import")
             if model.isLiveOnly && model.hasActiveSession {
-                Button { model.convertCurrentSessionToRecording() } label: {
+                Button { Task { await model.convertCurrentSessionToRecording() } } label: {
                     Label("转为录音…", systemImage: "folder.badge.plus")
                 }
                 .help("选择目录；当前录音会继续，结束后再移动到所选目录")
@@ -139,7 +139,7 @@ struct ContentView: View {
             .accessibilityIdentifier("classroom-caption-size")
             Divider()
             if !model.isLiveOnly {
-                Button("保存位置…") { model.chooseOutputDirectory() }
+                Button("保存位置…") { Task { await model.chooseOutputDirectory() } }
                     .disabled(model.phase.isBusy)
                 if case .saved = model.phase {
                     Button("录音处理…") { presentSheet(.processing) }
@@ -796,7 +796,7 @@ struct ClassroomSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if !model.isLiveOnly {
                     LabeledContent("保存位置", value: model.outputDirectory?.lastPathComponent ?? "尚未选择")
-                    Button("选择保存位置…") { model.chooseOutputDirectory() }
+                    Button("选择保存位置…") { Task { await model.chooseOutputDirectory() } }
                         .disabled(model.phase.isBusy)
                 }
             }
@@ -1548,8 +1548,12 @@ private struct LearningReviewControls: View {
         panel.resolvesAliases = true
         let parent = directory.deletingLastPathComponent()
         if recordingDirectoryIsAvailable(parent) { panel.directoryURL = parent }
-        guard panel.runModal() == .OK, let chosen = panel.url else { return }
-        queue.relocateJob(id, to: chosen)
+        panel.begin { response in
+            Task { @MainActor in
+                guard response == .OK, let chosen = panel.url else { return }
+                queue.relocateJob(id, to: chosen)
+            }
+        }
     }
 }
 
