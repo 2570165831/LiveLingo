@@ -1,6 +1,20 @@
 import AppKit
 import SwiftUI
 
+/// Keep file-panel keyboard commands in the owning application window.
+/// A detached open-panel service can consume Command-Q even when modeless.
+@MainActor
+enum FilePanelPresentation {
+    static func begin(_ panel: NSSavePanel,
+                      completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            panel.begin(completionHandler: completion)
+        }
+    }
+}
+
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         guard !AppRuntimeEnvironment.isUnitTesting else { return }

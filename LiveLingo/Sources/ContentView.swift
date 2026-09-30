@@ -1548,7 +1548,7 @@ private struct LearningReviewControls: View {
         panel.resolvesAliases = true
         let parent = directory.deletingLastPathComponent()
         if recordingDirectoryIsAvailable(parent) { panel.directoryURL = parent }
-        panel.begin { response in
+        FilePanelPresentation.begin(panel) { response in
             Task { @MainActor in
                 guard response == .OK, let chosen = panel.url else { return }
                 queue.relocateJob(id, to: chosen)

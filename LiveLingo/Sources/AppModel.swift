@@ -933,7 +933,7 @@ final class AppModel: ObservableObject {
         panel.allowsMultipleSelection = false
         // runModal blocks the normal application event loop, including Quit.
         return await withCheckedContinuation { continuation in
-            panel.begin { [weak self] response in
+            FilePanelPresentation.begin(panel) { [weak self] response in
                 Task { @MainActor in
                     guard response == .OK, let directory = panel.url, let self else {
                         continuation.resume(returning: nil)
@@ -1003,7 +1003,7 @@ final class AppModel: ObservableObject {
             UTType(filenameExtension: "flac") ?? .audio,
             UTType(filenameExtension: "caf") ?? .audio,
         ]
-        panel.begin { [weak self] response in
+        FilePanelPresentation.begin(panel) { [weak self] response in
             Task { @MainActor in
                 guard response == .OK, let url = panel.url, let self else { return }
                 self.importTask?.cancel()
@@ -1195,7 +1195,7 @@ final class AppModel: ObservableObject {
         panel.allowedContentTypes = [format.contentType]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        panel.begin { [weak self] response in
+        FilePanelPresentation.begin(panel) { [weak self] response in
             Task { @MainActor in
                 guard response == .OK, let url = panel.url, let self else { return }
                 self.performNotesExport(snapshot, format: format, to: url)
@@ -1443,7 +1443,7 @@ final class AppModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.begin { [weak self] response in
+        FilePanelPresentation.begin(panel) { [weak self] response in
             Task { @MainActor in
                 guard response == .OK, let directory = panel.url, let self else { return }
                 do { try await self.openSavedSession(directory) }
