@@ -760,6 +760,84 @@ final class TranslationAcceptanceTests: XCTestCase {
         ))
     }
 
+    func testChineseContentDoesNotHideAnUntranslatedEnglishClause() {
+        for (source, output) in [
+            ("The range sits inside the codomain, sometimes strictly inside it.",
+             "The range sits inside the 陪域，有时严格位于其内部。"),
+            ("The body lies outside the boundary.", "这个物体 The body lies outside the boundary。"),
+            ("The pressure is increasing while the temperature stays constant.",
+             "压力增加；the temperature stays constant。"),
+            ("It is not positive.", "这里 it is not positive。"),
+            ("We can't measure it yet.", "我们 We can’t measure it yet。"),
+            ("The sample contains no water.", "样品 The sample contains no water。"),
+            ("The result was not what we expected.", "结果是 the result was not what we expected。"),
+            ("It increases.", "这里 it increases。"),
+            ("Do not change the domain.", "请 Do not change the domain。"),
+            ("The force is zero.", "【公式待核对】该力 The force is zero。"),
+            ("The values are different.", "数值 Ｔｈｅ ｖａｌｕｅｓ ａｒｅ ｄｉｆｆｅｒｅｎｔ。")
+        ] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: source), .mixedEnglishProse, output)
+            XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(output, source: source))
+        }
+    }
+
+    func testMixedTechnicalTermsAndSpokenFormulasStillPass() {
+        for (source, output) in [
+            ("We use the law of mass action.", "我们使用 law of mass action。"),
+            ("The textbook is published by Oxford University Press.", "教材由 Oxford University Press 出版。"),
+            ("Discuss returns to scale.", "讨论 returns to scale。"),
+            ("Inspect the remains of the specimen.", "检查 the remains of the specimen。"),
+            ("We write x squared equals five.", "我们写成 x squared equals five。"),
+            ("Use metres per second for velocity.", "速度单位用 metres per second。"),
+            ("The codomain is a target set.", "陪域 codomain 是目标集合。"),
+            ("The first law concerns energy.", "第一定律 first law 讨论能量。"),
+            ("The CAN bus carries data.", "数据通过 the CAN bus 传输。")
+        ] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+        }
+    }
+
+    func testExplicitLiteralEnglishClausesDoNotBecomeProseRejections() throws {
+        for (source, output) in [
+            (#"Use the exact label "the range sits inside the codomain"."#,
+             "使用确切标签 the range sits inside the codomain。"),
+            (#"The literal string is "it is not positive"."#, "字面字符串是 it is not positive。"),
+            ("Print `we cannot measure it` beside the symbol.", "在符号旁打印 we cannot measure it。")
+        ] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+            let protected = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertFalse(protected.withoutLiteralValues(in: output).contains(" is not "))
+        }
+        let source = #"Use the exact label "we cannot measure it". The sample contains no water."#
+        let output = "使用确切标签 we cannot measure it；The sample contains no water。"
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: source), .mixedEnglishProse)
+        let shortLiteral = #"Use the exact label "is". The sample is wet."#
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "使用确切标签 is；The sample is wet。", source: shortLiteral), .mixedEnglishProse)
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: "使用确切标签 is；样品是湿的。", source: shortLiteral))
+    }
+
+    func testOrdinaryQuotedEnglishStillNeedsTranslationInMixedOutput() {
+        let source = #"Translate "the door is closed" into French."#
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "把 the door is closed 译成法语。", source: source), .mixedEnglishProse)
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: "把“门关着”译成法语。", source: source))
+    }
+
+    @MainActor func testTypedTranslationRejectsMixedProseButRestoresExplicitLiteralClause() async throws {
+        do {
+            _ = try await QwenTranslationClient.translateTypedText("The range sits inside the codomain.",
+                modelName: QwenModelProfile.highQuality.translationModel,
+                request: { _, _, _ in "The range sits inside the 陪域。" })
+            XCTFail("Mixed English clause escaped typed translation acceptance")
+        } catch QwenRuntimeError.translationRejected(let reason) {
+            XCTAssertTrue(reason.contains("未翻译的英文语句"))
+        }
+        let source = #"Use the exact label "it is not positive"."#
+        let output = try await QwenTranslationClient.translateTypedText(source,
+            modelName: QwenModelProfile.energySaver.translationModel,
+            request: { _, _, _ in "使用确切标签 ZXQCHEM0QXZ。" })
+        XCTAssertEqual(output, "使用确切标签 it is not positive。")
+    }
+
     func testFormulasNumbersUnitsAndAcronymsAreAccepted() {
         let accepted: [(candidate: String, source: String)] = [
             ("2H2 + O2 → 2H2O", "two H two plus O two gives two H two O"),

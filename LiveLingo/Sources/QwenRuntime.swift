@@ -70,6 +70,7 @@ enum TranslationAcceptance {
         case promptLeak
         case sourceEcho
         case englishProse
+        case mixedEnglishProse
         case nonChineseText
         case incompleteProse
 
@@ -80,6 +81,7 @@ enum TranslationAcceptance {
             case .promptLeak: return "返回内容含提示词或结构泄漏"
             case .sourceEcho: return "返回内容为英文原样复述"
             case .englishProse: return "返回内容为纯英文句子"
+            case .mixedEnglishProse: return "返回内容含未翻译的英文语句"
             case .nonChineseText: return "返回内容不是中文译文"
             case .incompleteProse: return "返回内容只保留术语，遗漏了原文语句"
             }
@@ -120,6 +122,48 @@ enum TranslationAcceptance {
         "meters", "seconds", "joules", "volts", "amperes", "the"
     ]
 
+    private static let latinSpanExpression = try! NSRegularExpression(
+        pattern: #"[A-Za-z]+(?:['’][A-Za-z]+)?(?:[ \t]+[A-Za-z]+(?:['’][A-Za-z]+)?)*"#)
+    private static let clauseAuxiliaries: Set<String> = [
+        "is", "are", "was", "were", "be", "been", "has", "have", "had", "do", "does", "did",
+        "can", "cannot", "will", "would", "should", "must", "may", "might", "could",
+        "isn't", "aren't", "wasn't", "weren't", "don't", "doesn't", "didn't", "can't",
+        "won't", "wouldn't", "shouldn't", "mustn't", "couldn't", "hasn't", "haven't", "hadn't"
+    ]
+    private static let clauseActions: Set<String> = [
+        "sit", "sits", "lie", "lies", "remain", "remains", "stay", "stays", "contain", "contains",
+        "increase", "increases", "decrease", "decreases", "reach", "reaches", "produce", "produces",
+        "become", "becomes", "move", "moves", "send", "sends", "equal", "equals", "keep", "keeps"
+    ]
+    private static let clauseSubjects: Set<String> = ["i", "it", "we", "you", "they", "he", "she", "this", "that"]
+
+    /// Keep English terms and names eligible, but do not treat a Chinese prefix
+    /// or suffix as a translation of an English clause. Literal values are
+    /// excluded with the same source protection used by normal translation.
+    private static func containsUntranslatedClause(_ text: String) -> Bool {
+        let range = NSRange(text.startIndex..., in: text)
+        for match in latinSpanExpression.matches(in: text, range: range) {
+            let span = (text as NSString).substring(with: match.range)
+            let tokens = englishTokens(span)
+            let words = tokens.map { $0.lowercased().replacingOccurrences(of: "’", with: "'") }
+            guard words.count >= 2 else { continue }
+            let content = englishContentTokens(span).map { $0.lowercased() }
+            if !content.isEmpty && content.allSatisfy({ spokenTechnicalWords.contains($0) }) { continue }
+            let pronounSubject = words.first.map { clauseSubjects.contains($0) } ?? false
+            guard words.count >= 3 || pronounSubject else { continue }
+            if let first = words.first, clauseAuxiliaries.contains(first),
+               !isAcronym(tokens[0]) { return true }
+            for index in words.indices.dropFirst() {
+                if clauseAuxiliaries.contains(words[index]), !isAcronym(tokens[index]) { return true }
+                if clauseActions.contains(words[index]), index >= 2 || pronounSubject,
+                   words.contains(where: { englishFunctionWords.contains($0) }) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     static func rejection(candidate: String, source: String) -> Rejection? {
         // Application status text is not evidence that the model translated the
         // body. This also applies when restored/retried captions are revalidated.
@@ -138,7 +182,15 @@ enum TranslationAcceptance {
         if echoForm(trimmed) == sourceForm, englishContentTokens(source).count >= 3 {
             return .sourceEcho
         }
-        guard !containsHan(trimmed) else { return nil }
+        if containsHan(trimmed) {
+            if containsUntranslatedClause(trimmed) {
+                let protected = ChemistryTranslationProtector.prepareLiterals(source)
+                if containsUntranslatedClause(protected.withoutLiteralValues(in: trimmed)) {
+                    return .mixedEnglishProse
+                }
+            }
+            return nil
+        }
         if containsKanaOrHangul(trimmed) { return .nonChineseText }
         // Punctuation by itself is not a translation. Mathematical symbols,
         // digits, units and names remain eligible for the technical exceptions.

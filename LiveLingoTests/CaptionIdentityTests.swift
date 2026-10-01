@@ -49,7 +49,9 @@ private actor RepairOrderProbe {
     }
 }
 
-private func captionSource(in input: String) throws -> String {
+private func captionSource(in input: String, mode: ModelMode) throws -> String {
+    if mode == .energySaver { return input }
+    XCTAssertEqual(mode, .highQuality)
     let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
     XCTAssertEqual(Set(object.keys), ["source_text_to_translate"])
     return try XCTUnwrap(object["source_text_to_translate"])
@@ -383,61 +385,67 @@ final class CaptionIdentityTests: XCTestCase {
     }
 
     func testQueuedCurrentCaptionsRunBeforePreviousRepairs() async throws {
-        let probe = RepairOrderProbe()
-        let model = try makeModel(.init(translate: { _, _, _, _, _ in "系统吸收热能。" },
-            adjacent: { previous, chinese, current, context, name, repair, hints, onCurrent, shouldDefer in
-                try await QwenTranslationClient.translateAdjacent(previous: previous,
-                    previousChinese: chinese, current: current, context: context, modelName: name,
-                    repairPrevious: repair, currentHints: hints, onCurrent: onCurrent, deferRepair: shouldDefer,
-                    request: { try await probe.request($0, $1, $2) })
-            }, repair: { pending in
-                try await QwenTranslationClient.repairPreviousCaption(previous: pending.previous.english,
-                    previousChinese: pending.previous.chinese, current: pending.normalizedCurrent,
-                    context: pending.context.map(\.english).joined(separator: " "), modelName: pending.modelName,
-                    request: { try await probe.request($0, $1, $2) })
-            }))
-        model.receiveCaptionForTesting("The system absorbs thermal energy.", start: 0, end: 10)
-        await model.translationTaskForTesting?.value
-        model.receiveCaptionForTesting("and its temperature rises.", start: 10, end: 20)
-        model.receiveCaptionForTesting("and the container expands slowly.", start: 20, end: 28)
-        await model.translationTaskForTesting?.value
-        let inputs = await probe.inputs
-        XCTAssertEqual(inputs.count, 4, "Prioritizing captions must retain both repairs without extra generation")
-        XCTAssertEqual(try captionSource(in: XCTUnwrap(inputs.first)), "and its temperature rises.")
-        XCTAssertEqual(try captionSource(in: XCTUnwrap(inputs.dropFirst().first)), "and the container expands slowly.",
-                       "An already queued caption must not wait for optional previous repair")
-        XCTAssertTrue(model.segments.allSatisfy(\.hasUsableTranslation))
-        XCTAssertEqual(model.segments.map(\.chinese), ["系统吸收了热能。", "它的温度随之升高。", "容器慢慢膨胀。"])
+        for mode in [ModelMode.energySaver, .highQuality] {
+            let probe = RepairOrderProbe()
+            let model = try makeModel(.init(translate: { _, _, _, _, _ in "系统吸收热能。" },
+                adjacent: { previous, chinese, current, context, name, repair, hints, onCurrent, shouldDefer in
+                    try await QwenTranslationClient.translateAdjacent(previous: previous,
+                        previousChinese: chinese, current: current, context: context, modelName: name,
+                        repairPrevious: repair, currentHints: hints, onCurrent: onCurrent, deferRepair: shouldDefer,
+                        request: { try await probe.request($0, $1, $2) })
+                }, repair: { pending in
+                    try await QwenTranslationClient.repairPreviousCaption(previous: pending.previous.english,
+                        previousChinese: pending.previous.chinese, current: pending.normalizedCurrent,
+                        context: pending.context.map(\.english).joined(separator: " "), modelName: pending.modelName,
+                        request: { try await probe.request($0, $1, $2) })
+                }))
+            model.selectedMode = mode
+            model.receiveCaptionForTesting("The system absorbs thermal energy.", start: 0, end: 10)
+            await model.translationTaskForTesting?.value
+            model.receiveCaptionForTesting("and its temperature rises.", start: 10, end: 20)
+            model.receiveCaptionForTesting("and the container expands slowly.", start: 20, end: 28)
+            await model.translationTaskForTesting?.value
+            let inputs = await probe.inputs
+            XCTAssertEqual(inputs.count, 4, "Prioritizing captions must retain both repairs without extra generation")
+            XCTAssertEqual(try captionSource(in: XCTUnwrap(inputs.first), mode: mode), "and its temperature rises.")
+            XCTAssertEqual(try captionSource(in: XCTUnwrap(inputs.dropFirst().first), mode: mode), "and the container expands slowly.",
+                           "An already queued caption must not wait for optional previous repair")
+            XCTAssertTrue(model.segments.allSatisfy(\.hasUsableTranslation))
+            XCTAssertEqual(model.segments.map(\.chinese), ["系统吸收了热能。", "它的温度随之升高。", "容器慢慢膨胀。"])
+        }
     }
 
     func testCaptionArrivingDuringTranslationPrecedesOptionalRepair() async throws {
-        let gate = CaptionIdentityGate<String>()
-        addTeardownBlock { await gate.finish(.failure(CancellationError())) }
-        let probe = AdjacentRequestProbe([.held(gate), .text("容器慢慢膨胀。"),
-                                          .text("系统吸收了热能。"), .text("它的温度随之升高。")])
-        let model = try makeModel(.init(translate: { _, _, _, _, _ in "系统吸收热能。" },
-            adjacent: { previous, chinese, current, context, name, repair, hints, update, shouldDefer in
-                try await QwenTranslationClient.translateAdjacent(previous: previous,
-                    previousChinese: chinese, current: current, context: context, modelName: name,
-                    repairPrevious: repair, currentHints: hints, onCurrent: update, deferRepair: shouldDefer,
-                    request: { try await probe.request($0, $1, $2) })
-            }, repair: { pending in
-                try await QwenTranslationClient.repairPreviousCaption(previous: pending.previous.english,
-                    previousChinese: pending.previous.chinese, current: pending.normalizedCurrent,
-                    context: pending.context.map(\.english).joined(separator: " "), modelName: pending.modelName,
-                    request: { try await probe.request($0, $1, $2) })
-            }))
-        model.receiveCaptionForTesting("The system absorbs thermal energy.", start: 0, end: 10)
-        await model.translationTaskForTesting?.value
-        model.receiveCaptionForTesting("and its temperature rises.", start: 10, end: 20)
-        try await eventually { gate.entered }
-        model.receiveCaptionForTesting("and the container expands slowly.", start: 20, end: 28)
-        gate.finish(.success("温度随之升高。"))
-        await model.translationTaskForTesting?.value
-        let requests = await probe.requests
-        XCTAssertEqual(requests.count, 4)
-        XCTAssertEqual(try captionSource(in: requests[1].input), "and the container expands slowly.")
-        XCTAssertEqual(model.segments.map(\.chinese), ["系统吸收了热能。", "它的温度随之升高。", "容器慢慢膨胀。"])
+        for mode in [ModelMode.energySaver, .highQuality] {
+            let gate = CaptionIdentityGate<String>()
+            addTeardownBlock { await gate.finish(.failure(CancellationError())) }
+            let probe = AdjacentRequestProbe([.held(gate), .text("容器慢慢膨胀。"),
+                                              .text("系统吸收了热能。"), .text("它的温度随之升高。")])
+            let model = try makeModel(.init(translate: { _, _, _, _, _ in "系统吸收热能。" },
+                adjacent: { previous, chinese, current, context, name, repair, hints, update, shouldDefer in
+                    try await QwenTranslationClient.translateAdjacent(previous: previous,
+                        previousChinese: chinese, current: current, context: context, modelName: name,
+                        repairPrevious: repair, currentHints: hints, onCurrent: update, deferRepair: shouldDefer,
+                        request: { try await probe.request($0, $1, $2) })
+                }, repair: { pending in
+                    try await QwenTranslationClient.repairPreviousCaption(previous: pending.previous.english,
+                        previousChinese: pending.previous.chinese, current: pending.normalizedCurrent,
+                        context: pending.context.map(\.english).joined(separator: " "), modelName: pending.modelName,
+                        request: { try await probe.request($0, $1, $2) })
+                }))
+            model.selectedMode = mode
+            model.receiveCaptionForTesting("The system absorbs thermal energy.", start: 0, end: 10)
+            await model.translationTaskForTesting?.value
+            model.receiveCaptionForTesting("and its temperature rises.", start: 10, end: 20)
+            try await eventually { gate.entered }
+            model.receiveCaptionForTesting("and the container expands slowly.", start: 20, end: 28)
+            gate.finish(.success("温度随之升高。"))
+            await model.translationTaskForTesting?.value
+            let requests = await probe.requests
+            XCTAssertEqual(requests.count, 4)
+            XCTAssertEqual(try captionSource(in: requests[1].input, mode: mode), "and the container expands slowly.")
+            XCTAssertEqual(model.segments.map(\.chinese), ["系统吸收了热能。", "它的温度随之升高。", "容器慢慢膨胀。"])
+        }
     }
 
     func testDeferredRepairFailureDoesNotRepeatCompletedCaptions() async throws {

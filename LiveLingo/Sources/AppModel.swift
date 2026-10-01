@@ -3514,6 +3514,33 @@ struct ProtectedChemistryTranslationInput: Sendable {
         }
     }
 
+    /// Literal names may themselves be complete English clauses. Hide only
+    /// values the source explicitly protects when inspecting restored prose.
+    func withoutLiteralValues(in translatedText: String) -> String {
+        var result = translatedText
+        func continuesLatinText(_ scalar: Unicode.Scalar?) -> Bool {
+            guard let scalar, scalar.value < 128 else { return false }
+            return CharacterSet.alphanumerics.contains(scalar) || scalar == "_"
+        }
+        for replacement in replacements {
+            let value = replacement.original.folding(options: [.widthInsensitive, .diacriticInsensitive], locale: nil)
+            var start = result.startIndex
+            while start < result.endIndex,
+                  let range = result.range(of: value, options: [.caseInsensitive], range: start..<result.endIndex) {
+                let before = result[..<range.lowerBound].unicodeScalars.last(where: { !CharacterSet.whitespacesAndNewlines.contains($0) })
+                let after = result[range.upperBound...].unicodeScalars.first(where: { !CharacterSet.whitespacesAndNewlines.contains($0) })
+                if !continuesLatinText(before) && !continuesLatinText(after) {
+                    let offset = result.distance(from: result.startIndex, to: range.lowerBound)
+                    result.replaceSubrange(range, with: replacement.placeholder)
+                    start = result.index(result.startIndex, offsetBy: offset + replacement.placeholder.count)
+                } else {
+                    start = range.upperBound
+                }
+            }
+        }
+        return result
+    }
+
     /// Contextual repair sees original terms so their meaning is not hidden.
     /// If spelling or count changes, preserve the previous caption. This strict
     /// check does not establish that each formula has the correct subject.
