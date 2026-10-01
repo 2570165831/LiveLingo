@@ -3646,9 +3646,24 @@ enum ChemistryTranslationProtector {
         return negationExpression.firstMatch(in: text, range: range) == nil ? "" : negationInstruction
     }
 
+    private static let sourcePhraseRules: [(NSRegularExpression, String)] = [
+        // Callers supply the already protected source, so exact labels and
+        // identifiers do not receive an instruction to translate their contents.
+        (try! NSRegularExpression(pattern: #"(?i)(?<![\p{L}\p{N}_])calcium[ \t]+carbonate(?![\p{L}\p{N}_])"#), "calcium carbonate=碳酸钙")
+    ]
+
+    static func sourcePhraseSuffix(for text: String) -> String {
+        let range = NSRange(text.startIndex..., in: text)
+        let meanings = sourcePhraseRules.compactMap { expression, meaning in
+            expression.firstMatch(in: text, range: range) == nil ? nil : meaning
+        }
+        return meanings.isEmpty ? "" : "Meaning of source phrases: " + meanings.joined(separator: "; ") + "."
+    }
+
     static func translationPrompt(base: String, text: String, modelName: String? = nil) -> String {
         let instruction = [promptSuffix(for: text),
-                           modelName == QwenModelProfile.energySaver.translationModel ? negationSuffix(for: text) : ""]
+                           modelName == QwenModelProfile.energySaver.translationModel ? negationSuffix(for: text) : "",
+                           sourcePhraseSuffix(for: text)]
             .filter { !$0.isEmpty }.joined(separator: "\n")
         guard !instruction.isEmpty else { return base }
         let ending = "Return only the complete Simplified Chinese translation. Do not use markdown."

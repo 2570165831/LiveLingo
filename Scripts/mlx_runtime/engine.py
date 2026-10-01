@@ -96,11 +96,39 @@ class PromptPrefixCache:
         self.nbytes += size
         return True
 
+def prefix_cache_for_model(model_path):
+    """Use the measured longer boundary only for the tested 9B configuration.
+
+    A 768-token translation snapshot and a 256-token low-priority notes
+    snapshot need about 130 MiB together on this model. A 144 MiB cap keeps
+    both available; the two-entry bound and note admission priority still apply.
+    Other models retain the original 512-token / 128 MiB policy.
+    """
+    try:
+        config = json.loads((Path(model_path) / 'config.json').read_text())
+        text = config.get('text_config', {})
+        quantization = config.get('quantization', {})
+        tested_9b = (
+            config.get('model_type') == 'qwen3_5'
+            and text.get('hidden_size') == 4096
+            and text.get('num_hidden_layers') == 32
+            and text.get('head_dim') == 256
+            and text.get('num_key_value_heads') == 4
+            and text.get('linear_num_value_heads') == 32
+            and quantization.get('bits') == 4
+            and quantization.get('group_size') == 64
+        )
+    except (OSError, ValueError, AttributeError):
+        tested_9b = False
+    return (PromptPrefixCache(max_tokens=768, max_bytes=144 * 1024**2)
+            if tested_9b else PromptPrefixCache())
+
+
 class Engine:
     def __init__(self, model_path):
         self.model_path = str(Path(model_path).resolve())
         self.model, self.tokenizer = load(self.model_path)
-        self.prefix_cache = PromptPrefixCache()
+        self.prefix_cache = prefix_cache_for_model(self.model_path)
         self.vocabulary = build_vocabulary(self.tokenizer)
         self.indices = OrderedDict()
         self.end_think = self.tokenizer.encode('</think>', add_special_tokens=False)

@@ -1050,6 +1050,40 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
+    func testFirstPersonASRFragmentCannotHideInsideChineseTranslation() {
+        let source = "gets turned into kinetic because of I am so"
+        let output = "由于 I am so，它被转化为动能。"
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: source), .mixedEnglishProse)
+        XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(output, source: source))
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: "由于我是如此，它被转化为动能。", source: source))
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "他说 I am。", source: "He said I am."), .mixedEnglishProse)
+    }
+
+    func testFirstPersonGateKeepsElementSymbolsAcronymsAndLiteralWording() {
+        for (source, output) in [
+            ("Compare Am isotope spectra.", "比较 Am isotope spectra。"),
+            ("Inspect the AM radio signal.", "检查 AM radio signal。"),
+            (#"Use the exact label "I am so"."#, "使用确切标签 I am so。")
+        ] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+        }
+    }
+
+    func testSourcePhraseMeaningsOnlyApplyToPresentUnprotectedPhrases() {
+        let chemistry = "First tell me how many moles you are getting. Whatever is the calcium carbonate moles."
+        let suffix = ChemistryTranslationProtector.sourcePhraseSuffix(for: chemistry)
+        XCTAssertTrue(suffix.contains("calcium carbonate=碳酸钙"))
+        XCTAssertFalse(suffix.contains("I am="))
+        XCTAssertEqual(ChemistryTranslationProtector.sourcePhraseSuffix(for: "because I am so"), "")
+        for source in ["calcium carbonate_count", "calcium bicarbonate", "calciumCarbonate", "I Am isotope spectra", "I AM radio", "I ammonia"] {
+            XCTAssertEqual(ChemistryTranslationProtector.sourcePhraseSuffix(for: source), "", source)
+        }
+        let literal = ChemistryTranslationProtector.prepare(#"Use the exact labels "I am so" and "calcium carbonate"."#)
+        XCTAssertEqual(ChemistryTranslationProtector.sourcePhraseSuffix(for: literal.text), "")
+        let unrelated = "The energy remains constant."
+        XCTAssertEqual(ChemistryTranslationProtector.translationPrompt(base: QwenTranslationClient.systemPrompt, text: unrelated), QwenTranslationClient.systemPrompt)
+    }
+
     func testShortNegatedStatesCannotHideInsideChineseTranslations() {
         for (source, output) in [
             (#"The result was {"status":"not valid","number":4}."#,

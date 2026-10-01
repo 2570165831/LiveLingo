@@ -157,7 +157,7 @@ enum TranslationAcceptance {
     private static let latinSpanExpression = try! NSRegularExpression(
         pattern: #"[A-Za-z]+(?:['’][A-Za-z]+)?(?:[ \t]+[A-Za-z]+(?:['’][A-Za-z]+)?)*"#)
     private static let clauseAuxiliaries: Set<String> = [
-        "is", "are", "was", "were", "be", "been", "has", "have", "had", "do", "does", "did",
+        "am", "is", "are", "was", "were", "be", "been", "has", "have", "had", "do", "does", "did",
         "can", "cannot", "will", "would", "should", "must", "may", "might", "could",
         "isn't", "aren't", "wasn't", "weren't", "don't", "doesn't", "didn't", "can't",
         "won't", "wouldn't", "shouldn't", "mustn't", "couldn't", "hasn't", "haven't", "hadn't"
@@ -660,6 +660,14 @@ enum TranslationAcceptance {
     /// Keep English terms and names eligible, but do not treat a Chinese prefix
     /// or suffix as a translation of an English clause. Literal values are
     /// excluded with the same source protection used by normal translation.
+    private static func isClauseAuxiliary(_ token: String) -> Bool {
+        let word = token.lowercased().replacingOccurrences(of: "’", with: "'")
+        guard clauseAuxiliaries.contains(word) else { return false }
+        // Am is the element symbol; AM may be an acronym. Lower-case "am"
+        // in ordinary prose is an auxiliary, as in the real ASR fragment I am so.
+        return word == "am" ? token == "am" : !isAcronym(token)
+    }
+
     private static func containsUntranslatedClause(_ text: String) -> Bool {
         let range = NSRange(text.startIndex..., in: text)
         for match in latinSpanExpression.matches(in: text, range: range) {
@@ -672,10 +680,9 @@ enum TranslationAcceptance {
             if words[0] == "not", !isAcronym(tokens[0]), negatedStatusWords.contains(words[1]) { return true }
             let pronounSubject = words.first.map { clauseSubjects.contains($0) } ?? false
             guard words.count >= 3 || pronounSubject else { continue }
-            if let first = words.first, clauseAuxiliaries.contains(first),
-               !isAcronym(tokens[0]) { return true }
+            if isClauseAuxiliary(tokens[0]) { return true }
             for index in words.indices.dropFirst() {
-                if clauseAuxiliaries.contains(words[index]), !isAcronym(tokens[index]) { return true }
+                if isClauseAuxiliary(tokens[index]) { return true }
                 if clauseActions.contains(words[index]), index >= 2 || pronounSubject,
                    words.contains(where: { englishFunctionWords.contains($0) }) {
                     return true
