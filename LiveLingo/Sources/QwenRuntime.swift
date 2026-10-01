@@ -68,6 +68,7 @@ enum TranslationAcceptance {
         case empty
         case controlMarker
         case promptLeak
+        case modelReply
         case sourceEcho
         case englishProse
         case mixedEnglishProse
@@ -79,6 +80,7 @@ enum TranslationAcceptance {
             case .empty: return "返回内容为空"
             case .controlMarker: return "返回内容含模型控制标记"
             case .promptLeak: return "返回内容含提示词或结构泄漏"
+            case .modelReply: return "返回模型自身的回复，而非原文译文"
             case .sourceEcho: return "返回内容为英文原样复述"
             case .englishProse: return "返回内容为纯英文句子"
             case .mixedEnglishProse: return "返回内容含未翻译的英文语句"
@@ -94,12 +96,23 @@ enum TranslationAcceptance {
     private static let leakMarkers = [
         "target_translate_only", "context_before_do_not_translate", "context_after_do_not_translate",
         "primary asr transcript", "auxiliary token hints", "translate only",
-        "as an ai language model", "```", "here is the translation:"
+        "```", "here is the translation:"
     ]
 
     private static let controlMarkers = [
         "<think>", "</think>", "<|im_start|>", "<|im_end|>", "<|endoftext|>"
     ]
+
+    // Refusals can be fluent Chinese and shorter than the length limit. Reject
+    // an added model self-description, but keep it when the lecture itself
+    // quotes or discusses that wording. Ordinary "I cannot" is not a marker.
+    private static let modelSelfDescriptionExpression = try! NSRegularExpression(pattern:
+        #"(?i)(?:(?:作为|我是)\s*(?:一(?:个|名)\s*)?(?:(?:人工智能|AI)\s*(?:语言\s*)?(?:助手|模型)|(?:大型\s*)?语言\s*模型)|(?<![\p{L}\p{N}_])(?:as|being|i\s+am|i['’]m)\s+(?:(?:an?|the)\s+)?(?:(?:ai|artificial\s+intelligence)\s+(?:language\s+)?(?:assistant|model)|(?:large\s+)?language\s+model))"#)
+
+    private static func containsModelSelfDescription(_ text: String) -> Bool {
+        modelSelfDescriptionExpression.firstMatch(in: text,
+            range: NSRange(text.startIndex..., in: text)) != nil
+    }
 
     static let formulaNotice = "【公式待核对】"
 
@@ -174,6 +187,11 @@ enum TranslationAcceptance {
         let lowercased = trimmed.lowercased()
         if controlMarkers.contains(where: lowercased.contains) { return .controlMarker }
         if leakMarkers.contains(where: lowercased.contains) { return .promptLeak }
+        if containsModelSelfDescription(trimmed),
+           !containsModelSelfDescription(source.folding(
+                options: [.widthInsensitive, .diacriticInsensitive], locale: nil)) {
+            return .modelReply
+        }
 
         let sourceForm = echoForm(source)
         // An exact copy is only an echo when the source really is an English
