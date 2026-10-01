@@ -56,6 +56,7 @@ struct ContentView: View {
     @State private var wholeLessonNotes = false
     @State private var showExportOptions = false
     @State private var activeSheet: ClassroomSheet?
+    @State private var sheetPresentationID = UUID()
     @State private var compactPane: ReadingPane = .subtitles
     @State private var followLatest = true
     @State private var captionAnchor: UUID?
@@ -104,10 +105,16 @@ struct ContentView: View {
         .sheet(item: $activeSheet, onDismiss: {
             model.stopCandidatePlayback()
             focusedSheetButton = sheetReturnFocus
+            FilePanelPresentation.sheetDidDismiss(id: sheetPresentationID)
         }) { sheet in
             classroomSheet(sheet)
                 .environmentObject(model)
                 .tint(ClassroomPalette.accent)
+                .onAppear {
+                    FilePanelPresentation.registerSheet(id: sheetPresentationID) {
+                        activeSheet = nil
+                    }
+                }
         }
         .modifier(ApplePreviewTranslationHost())
         .tint(ClassroomPalette.accent)

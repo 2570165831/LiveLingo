@@ -149,6 +149,59 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertEqual(probe.events, ["terminate"])
     }
 
+    func testSwiftUISheetQuitWaitsForDismissalAndCoalescesRepeatedRequests() async throws {
+        let probe = FilePanelQuitProbe()
+        let id = UUID()
+        FilePanelPresentation.registerSheet(id: id) { probe.events.append("dismiss") }
+        defer { FilePanelPresentation.sheetDidDismiss(id: id) }
+        FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+        FilePanelPresentation.requestTermination { probe.events.append("duplicate") }
+        XCTAssertEqual(probe.events, ["dismiss"])
+        FilePanelPresentation.sheetDidDismiss(id: UUID())
+        XCTAssertEqual(probe.events, ["dismiss"], "An unrelated dismissal cannot release an open sheet")
+        FilePanelPresentation.sheetDidDismiss(id: id)
+        FilePanelPresentation.sheetDidDismiss(id: id)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while probe.events.last != "terminate", ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        XCTAssertEqual(probe.events, ["dismiss", "terminate"])
+    }
+
+    func testSwiftUISheetQuitWaitsForEveryOwnerAndRejectsNewSheets() async throws {
+        let probe = FilePanelQuitProbe()
+        let first = UUID(), second = UUID(), late = UUID()
+        FilePanelPresentation.registerSheet(id: first) { probe.events.append("first") }
+        FilePanelPresentation.registerSheet(id: second) { probe.events.append("second") }
+        defer {
+            FilePanelPresentation.sheetDidDismiss(id: first)
+            FilePanelPresentation.sheetDidDismiss(id: second)
+            FilePanelPresentation.sheetDidDismiss(id: late)
+        }
+        FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+        XCTAssertEqual(Set(probe.events), Set(["first", "second"]))
+        FilePanelPresentation.registerSheet(id: late) { probe.events.append("late-dismissed") }
+        FilePanelPresentation.sheetDidDismiss(id: first)
+        try await Task.sleep(for: .milliseconds(10))
+        XCTAssertFalse(probe.events.contains("terminate"))
+        FilePanelPresentation.sheetDidDismiss(id: second)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while probe.events.last != "terminate", ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        XCTAssertEqual(probe.events.last, "terminate")
+        XCTAssertEqual(probe.events.filter { $0 == "late-dismissed" }.count, 1)
+    }
+
+    func testNormallyClosedSwiftUISheetDoesNotDelayLaterQuit() {
+        let probe = FilePanelQuitProbe()
+        let id = UUID()
+        FilePanelPresentation.registerSheet(id: id) { probe.events.append("unexpected-dismiss") }
+        FilePanelPresentation.sheetDidDismiss(id: id)
+        FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+        XCTAssertEqual(probe.events, ["terminate"])
+    }
+
     func testFilePanelQuitCancelsChooserBeforeTermination() async throws {
         let probe = FilePanelQuitProbe()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
