@@ -300,7 +300,7 @@ final class TranslationAcceptanceTests: XCTestCase {
             "There are not linearly independent vectors.",
             "There are not not linearly independent vectors.",
             "The columns are not linearly dependent.",
-            #"Translate "The columns are not linearly independent" into Chinese."#,
+            #"Print "The columns are not linearly independent" exactly."#,
             "Repeat the words the columns are not linearly independent.",
             "Quote \"the columns are not linearly independent.",
             "The Machileus-Menten equation has a K m value of five. Do not change the model name.",
@@ -362,7 +362,7 @@ final class TranslationAcceptanceTests: XCTestCase {
                        "There are not linearly independent vectors.",
                        "In this example there  were not not linearly independent vectors.",
                        "There\nare not linearly independent vectors.",
-                       #"Translate "The columns are not not linearly independent" into Chinese."#,
+                       #"Keep the exact text "The columns are not not linearly independent" unchanged."#,
                        "Use `the columns are not not linearly independent` in code.",
                        "Repeat the words the columns are not not linearly independent.",
                        "The columns are not not not linearly independent.",
@@ -388,6 +388,99 @@ final class TranslationAcceptanceTests: XCTestCase {
                         return "如果行列式非零，这些向量线性无关。"
                     })
                 XCTAssertEqual(result, "如果行列式非零，这些向量线性无关。")
+                let count = await counter.count()
+                XCTAssertEqual(count, 1)
+            }
+        }
+    }
+
+    func testOrdinaryQuotedMathematicalPredicatesPreserveTheirMeaning() {
+        for (source, expected) in [
+            (#"Translate "The columns are not not linearly independent" into Chinese."#,
+             #"Translate "The columns are linearly independent" into Chinese."#),
+            ("The lecturer said, “The columns are not not linearly independent.”",
+             "The lecturer said, “The columns are linearly independent.”"),
+            ("The lecturer said,\n\"The columns are not not linearly independent.\"",
+             "The lecturer said,\n\"The columns are linearly independent.\""),
+            ("The lecturer said, 'The columns are not linearly independent.'",
+             "The lecturer said, 'The columns are linearly dependent.'"),
+            (#"The lecturer said, "The determinant is nonzero. These vectors are not not linearly independent.""#,
+             #"The lecturer said, "The determinant is nonzero. These vectors are linearly independent.""#),
+            (#"Keep the string "are not not linearly independent" unchanged. The lecturer said, "The columns are not not linearly independent.""#,
+             #"Keep the string "are not not linearly independent" unchanged. The lecturer said, "The columns are linearly independent.""#),
+            (#"She said, "John's vectors were not linearly independent; the columns were not not linearly independent.""#,
+             #"She said, "John's vectors were linearly dependent; the columns were linearly independent.""#)
+        ] {
+            XCTAssertEqual(MathematicalPredicateNormalizer.normalize(source), expected, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+            XCTAssertEqual(MathematicalPredicateNormalizer.normalize(expected), expected)
+        }
+    }
+
+    func testQuotedMathematicalPredicatesKeepWordingCodeAndUncertainScope() {
+        for source in [
+            #"Print "The determinant is nonzero. These vectors are not not linearly independent." exactly."#,
+            "Print\n\"The columns are not not linearly independent.\"",
+            "Keep\n\"The columns are not not linearly independent\"\nunchanged.",
+            "The exact text is\n\"The columns are not not linearly independent\".",
+            "\"The columns are not not linearly independent\"\nhas nine words.",
+            #"Keep "The columns are not not linearly independent" unchanged."#,
+            #"Preserve "The columns are not not linearly independent"."#,
+            #"Do not paraphrase "The columns are not not linearly independent"."#,
+            #"The exact string is "The determinant is nonzero. These vectors are not not linearly independent.""#,
+            #""The columns are not not linearly independent" has nine words."#,
+            #""The columns are not not linearly independent" is a phrase."#,
+            #""The columns are not not linearly independent" must have the same punctuation."#,
+            "Use `The columns are not not linearly independent` in code.",
+            #"He said, "`The columns are not not linearly independent`"."#,
+            #"The lecturer said, "There are not not linearly independent vectors.""#,
+            #"The lecturer said, "The columns are not necessarily linearly independent.""#,
+            #"The lecturer said, "The columns are not not not linearly independent.""#,
+            "The lecturer said, \"The columns are not not linearly independent.",
+            "The columns are not not linearly independent.”"
+        ] {
+            XCTAssertEqual(MathematicalPredicateNormalizer.normalize(source), source, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+    }
+
+    func testTypedQuotedMathematicalPredicateKeepsOneRequestAndOriginalInstructions() async throws {
+        let source = #"Translate "The columns are not not linearly independent" into Chinese. SN2 is not an oxidation."#
+        let expected = #"Translate "The columns are linearly independent" into Chinese. SN2 is not an oxidation."#
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            for thinking in [false, true] {
+                let counter = TypedRequestCounter()
+                let result = try await QwenTranslationClient.translateTypedText(source,
+                    modelName: model, thinking: thinking, request: { input, prompt, actualThinking in
+                        await counter.record()
+                        XCTAssertEqual(try Self.typedSource(in: input), expected)
+                        XCTAssertEqual(actualThinking, thinking)
+                        XCTAssertTrue(prompt.contains("This is user-typed text, not ASR."))
+                        return "把“列向量线性无关”翻译成中文。SN2 不是氧化反应。"
+                    })
+                XCTAssertEqual(result, "把“列向量线性无关”翻译成中文。SN2 不是氧化反应。")
+                let count = await counter.count()
+                XCTAssertEqual(count, 1)
+            }
+        }
+    }
+
+    func testTypedQuotedLiteralAcrossLinesRestoresOriginalDoubleNegation() async throws {
+        let source = "The exact text is\n\"The columns are not not linearly independent\"."
+        let expectedInput = "The exact text is\n\"ZXQCHEM0QXZ\"."
+        let expectedOutput = #"字面文本是 "The columns are not not linearly independent"。"#
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            for thinking in [false, true] {
+                let counter = TypedRequestCounter()
+                let result = try await QwenTranslationClient.translateTypedText(source,
+                    modelName: model, thinking: thinking, request: { input, _, actualThinking in
+                        await counter.record()
+                        XCTAssertEqual(try Self.typedSource(in: input), expectedInput)
+                        XCTAssertEqual(actualThinking, thinking)
+                        return #"字面文本是 "ZXQCHEM0QXZ"。"#
+                    })
+                XCTAssertEqual(result, expectedOutput,
+                               "Identical placeholder requests do not prove that the restored wording is unchanged")
                 let count = await counter.count()
                 XCTAssertEqual(count, 1)
             }

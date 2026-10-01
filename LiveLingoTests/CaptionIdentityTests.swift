@@ -126,7 +126,9 @@ final class CaptionIdentityTests: XCTestCase {
              "If the determinant is zero, the columns are linearly dependent.",
              "如果行列式为零，则列向量线性相关。"),
             ("The columns are not not linearly independent.",
-             "The columns are linearly independent.", "列向量线性无关。")
+             "The columns are linearly independent.", "列向量线性无关。"),
+            ("The lecturer said, “The columns are not not linearly independent.”",
+             "The lecturer said, “The columns are linearly independent.”", "老师说：“列向量线性无关。”")
         ] {
             var inputs: [String] = []
             let model = try makeModel(.init(translate: { input, _, _, _, _ in
