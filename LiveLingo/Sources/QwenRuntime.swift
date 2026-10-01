@@ -65,7 +65,7 @@ enum PowerSourceMonitor {
 /// repair. A caption must never store an English echo, a prompt leak or an
 /// unfinished answer as if it were the Chinese translation.
 enum TranslationAcceptance {
-    enum Rejection: Equatable {
+    enum Rejection: Error, Equatable {
         case empty
         case controlMarker
         case promptLeak
@@ -76,6 +76,7 @@ enum TranslationAcceptance {
         case nonChineseText
         case incompleteProse
         case jsonStructure
+        case jsonQuantity
 
         var reason: String {
             switch self {
@@ -89,6 +90,7 @@ enum TranslationAcceptance {
             case .nonChineseText: return "返回内容不是中文译文"
             case .incompleteProse: return "返回内容只保留术语，遗漏了原文语句"
             case .jsonStructure: return "返回内容改变了原文 JSON 的字段、层级或数据"
+            case .jsonQuantity: return "返回内容的 JSON 数量与原文不符，或无法核实数值和单位"
             }
         }
     }
@@ -270,6 +272,277 @@ enum TranslationAcceptance {
         return original.map { JSONStructure($0.fields) } == translated.map { JSONStructure($0.fields) }
     }
 
+    private enum JSONPathComponent: Hashable {
+        case key(String), index(Int)
+    }
+
+    /// Foundation has already validated the object. Locate its string leaves
+    /// without serializing the entire translation or collapsing duplicate keys.
+    private struct JSONStringLocations {
+        struct Leaf {
+            let path: [JSONPathComponent]
+            let value: String
+            let quotedRange: NSRange
+        }
+
+        let text: NSString
+        let units: [UInt16]
+        var offset = 0
+        var leaves: [Leaf] = []
+        var fields: Set<[JSONPathComponent]> = []
+        var hasDuplicateFields = false
+
+        init(_ text: String) {
+            self.text = text as NSString
+            units = Array(text.utf16)
+        }
+
+        mutating func skipWhitespace() {
+            while offset < units.count, [0x20, 0x09, 0x0A, 0x0D].contains(units[offset]) { offset += 1 }
+        }
+
+        mutating func quoted() -> (value: String, range: NSRange)? {
+            guard offset < units.count, units[offset] == 0x22 else { return nil }
+            let start = offset
+            offset += 1
+            var escaped = false
+            while offset < units.count {
+                let unit = units[offset]
+                offset += 1
+                if escaped { escaped = false }
+                else if unit == 0x5C { escaped = true }
+                else if unit == 0x22 {
+                    let range = NSRange(location: start, length: offset - start)
+                    let literal = text.substring(with: range)
+                    guard let decoded = try? JSONSerialization.jsonObject(with: Data("[\(literal)]".utf8)) as? [String],
+                          let value = decoded.first else { return nil }
+                    return (value, range)
+                }
+            }
+            return nil
+        }
+
+        mutating func walk(_ path: [JSONPathComponent] = []) -> Bool {
+            skipWhitespace()
+            guard offset < units.count else { return false }
+            switch units[offset] {
+            case 0x7B:
+                offset += 1
+                skipWhitespace()
+                if offset < units.count, units[offset] == 0x7D { offset += 1; return true }
+                while offset < units.count {
+                    skipWhitespace()
+                    guard let key = quoted() else { return false }
+                    skipWhitespace()
+                    guard offset < units.count, units[offset] == 0x3A else { return false }
+                    offset += 1
+                    let child = path + [.key(key.value)]
+                    if !fields.insert(child).inserted { hasDuplicateFields = true }
+                    guard walk(child) else { return false }
+                    skipWhitespace()
+                    guard offset < units.count else { return false }
+                    if units[offset] == 0x7D { offset += 1; return true }
+                    guard units[offset] == 0x2C else { return false }
+                    offset += 1
+                }
+                return false
+            case 0x5B:
+                offset += 1
+                skipWhitespace()
+                if offset < units.count, units[offset] == 0x5D { offset += 1; return true }
+                var index = 0
+                while offset < units.count {
+                    guard walk(path + [.index(index)]) else { return false }
+                    index += 1
+                    skipWhitespace()
+                    guard offset < units.count else { return false }
+                    if units[offset] == 0x5D { offset += 1; return true }
+                    guard units[offset] == 0x2C else { return false }
+                    offset += 1
+                }
+                return false
+            case 0x22:
+                guard let string = quoted() else { return false }
+                leaves.append(Leaf(path: path, value: string.value, quotedRange: string.range))
+                return true
+            default:
+                let start = offset
+                while offset < units.count, ![0x20, 0x09, 0x0A, 0x0D, 0x2C, 0x7D, 0x5D].contains(units[offset]) {
+                    offset += 1
+                }
+                return offset > start
+            }
+        }
+    }
+
+    private static let quantityExpression = try! NSRegularExpression(pattern:
+        #"^([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)\s*(\S(?:.*\S)?)$"#)
+    private static let quantityUnitFamilies: [String: String] = {
+        // The notes' broad alias "度" could also mean an angle; it is not
+        // sufficient evidence to restore Celsius in an immutable data value.
+        var aliases = Dictionary(LearningNumericProvenance.unitAliases.filter { $0.0 != "度" },
+                                 uniquingKeysWith: { first, _ in first })
+        aliases["公克"] = "g"
+        return aliases
+    }()
+    private static let symbolicQuantityUnits = Set(LearningNumericProvenance.unitAliases
+        .filter { $0.0 == $0.1 }.map { $0.0 }).union(["°C", "℃", "mol/l"])
+    private static let quantityUnitSuffixes = quantityUnitFamilies.keys.sorted {
+        $0.count == $1.count ? $0 < $1 : $0.count > $1.count
+    }
+    private static let chineseQuantityDigits = Array("零一二三四五六七八九")
+
+    /// Accept explicit digit readings and canonical Chinese cardinals below
+    /// 10,000. Ambiguous abbreviations such as 一百二 are not guessed.
+    private static func chineseQuantityNumber(_ text: String) -> String? {
+        var body = text.replacingOccurrences(of: "〇", with: "零")
+            .replacingOccurrences(of: "兩", with: "二").replacingOccurrences(of: "两", with: "二")
+            .replacingOccurrences(of: "點", with: "点")
+        var sign = ""
+        if let first = body.first, "+-−负負".contains(first) {
+            sign = "+" == String(first) ? "" : "-"
+            body.removeFirst()
+        }
+        let parts = body.split(separator: "点", omittingEmptySubsequences: false)
+        guard (1...2).contains(parts.count), !parts[0].isEmpty else { return nil }
+        func digits(_ value: Substring) -> String? {
+            var result = ""
+            for char in value {
+                guard let digit = chineseQuantityDigits.firstIndex(of: char) else { return nil }
+                result += String(digit)
+            }
+            return result.isEmpty ? nil : result
+        }
+        let integer: String
+        if let reading = digits(parts[0]) {
+            integer = reading
+        } else {
+            var total = 0
+            var pending: Int?
+            var previousScale = 10_000
+            for char in parts[0] {
+                if let digit = chineseQuantityDigits.firstIndex(of: char) {
+                    if digit == 0 { pending = nil }
+                    else { guard pending == nil else { return nil }; pending = digit }
+                } else {
+                    let scale = char == "千" ? 1000 : char == "百" ? 100 : char == "十" ? 10 : 0
+                    guard scale > 0, scale < previousScale,
+                          pending != nil || (scale == 10 && total == 0) else { return nil }
+                    total += (pending ?? 1) * scale
+                    pending = nil
+                    previousScale = scale
+                }
+            }
+            total += pending ?? 0
+            var canonical = ""
+            var needsZero = false
+            for scale in [1000, 100, 10, 1] {
+                let digit = total / scale % 10
+                if digit == 0 {
+                    if !canonical.isEmpty { needsZero = true }
+                    continue
+                }
+                if needsZero { canonical += "零"; needsZero = false }
+                if !(scale == 10 && digit == 1 && canonical.isEmpty) {
+                    canonical.append(chineseQuantityDigits[digit])
+                }
+                if scale > 1 { canonical += scale == 1000 ? "千" : scale == 100 ? "百" : "十" }
+            }
+            guard canonical == String(parts[0]) else { return nil }
+            integer = String(total)
+        }
+        if parts.count == 1 { return sign + integer }
+        guard let fraction = digits(parts[1]) else { return nil }
+        return sign + integer + "." + fraction
+    }
+
+    /// Compare coefficients and decimal powers exactly, without converting to
+    /// Double (which could silently accept a changed integer above 2^53).
+    private static func quantityNumberIdentity(_ number: String) -> String? {
+        let parts = number.lowercased().split(separator: "e", omittingEmptySubsequences: false)
+        guard parts.count <= 2, let exponent = parts.count == 2 ? Int(parts[1]) : 0 else { return nil }
+        let mantissa = String(parts[0])
+        let negative = mantissa.hasPrefix("-")
+        let unsigned = mantissa.hasPrefix("-") || mantissa.hasPrefix("+") ? String(mantissa.dropFirst()) : mantissa
+        let decimals = unsigned.split(separator: ".", omittingEmptySubsequences: false)
+        let fractionCount = decimals.count == 2 ? decimals[1].count : 0
+        let digits = String(unsigned.filter { $0 != "." }.drop(while: { $0 == "0" }))
+        guard !digits.isEmpty else { return "0" }
+        let zeros = digits.reversed().prefix(while: { $0 == "0" }).count
+        let (fractionPower, overflow1) = exponent.subtractingReportingOverflow(fractionCount)
+        let (power, overflow2) = fractionPower.addingReportingOverflow(zeros)
+        guard !overflow1, !overflow2 else { return nil }
+        return (negative ? "-" : "") + digits.dropLast(zeros) + "e" + String(power)
+    }
+
+    private static func jsonQuantity(_ value: String, symbolicOnly: Bool) -> (number: String, unit: String)? {
+        var folded = value.folding(options: .widthInsensitive, locale: nil)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !symbolicOnly { folded = folded.replacingOccurrences(of: "−", with: "-") }
+        if let match = quantityExpression.firstMatch(in: folded, range: NSRange(folded.startIndex..., in: folded)) {
+            let text = folded as NSString
+            let unit = text.substring(with: match.range(at: 2))
+            let lookupUnit = symbolicOnly || quantityUnitFamilies[unit] != nil
+                ? unit : SimplifiedChineseNormalizer.normalize(unit)
+            guard !symbolicOnly || symbolicQuantityUnits.contains(unit), let family = quantityUnitFamilies[lookupUnit],
+                  let number = quantityNumberIdentity(text.substring(with: match.range(at: 1))) else { return nil }
+            return (number, family)
+        }
+        guard !symbolicOnly else { return nil }
+        // Longest unit first: 四千克 is four kg, not four thousand g.
+        // Normalize this lookup copy only; replacements use the source token.
+        let lookup = SimplifiedChineseNormalizer.normalize(folded)
+        for unit in quantityUnitSuffixes where lookup.hasSuffix(unit) {
+            let numeral = String(lookup.dropLast(unit.count)).trimmingCharacters(in: .whitespaces)
+            if let arabic = chineseQuantityNumber(numeral), let number = quantityNumberIdentity(arabic) {
+                return (number, quantityUnitFamilies[unit]!)
+            }
+        }
+        return nil
+    }
+
+    private static func restoringJSONQuantities(in candidate: String, source: String) throws -> String {
+        let originals = jsonObjects(in: source).filter { !$0.fields.isEmpty }
+        guard !originals.isEmpty else { return candidate }
+        let outputs = jsonObjects(in: candidate).filter { !$0.fields.isEmpty }
+        guard originals.count == outputs.count else { throw Rejection.jsonStructure }
+        var literalRanges: [NSRange]?
+        var replacements: [(range: NSRange, text: String)] = []
+        for (original, output) in zip(originals, outputs) {
+            var sourceStrings = JSONStringLocations(original.text)
+            guard sourceStrings.walk(), !sourceStrings.hasDuplicateFields else { continue }
+            let quantities = sourceStrings.leaves.compactMap { leaf -> (JSONStringLocations.Leaf, String, String)? in
+                guard let quantity = jsonQuantity(leaf.value, symbolicOnly: true) else { return nil }
+                return (leaf, quantity.number, quantity.unit)
+            }
+            guard !quantities.isEmpty else { continue }
+            if literalRanges == nil { literalRanges = ChemistryTranslationProtector.literalRanges(in: source) }
+            let ordinary = quantities.filter { leaf, _, _ in
+                let range = NSRange(location: original.location + leaf.quotedRange.location, length: leaf.quotedRange.length)
+                return !(literalRanges ?? []).contains { NSIntersectionRange(range, $0).length > 0 }
+            }
+            guard !ordinary.isEmpty else { continue }
+            var candidateStrings = JSONStringLocations(output.text)
+            guard candidateStrings.walk(), !candidateStrings.hasDuplicateFields else { throw Rejection.jsonStructure }
+            let leaves = Dictionary(uniqueKeysWithValues: candidateStrings.leaves.map { ($0.path, $0) })
+            for (leaf, number, unit) in ordinary {
+                guard let translated = leaves[leaf.path], let quantity = jsonQuantity(translated.value, symbolicOnly: false),
+                      quantity.number == number, quantity.unit == unit else { throw Rejection.jsonQuantity }
+                if translated.value != leaf.value {
+                    replacements.append((NSRange(location: output.location + translated.quotedRange.location,
+                                                 length: translated.quotedRange.length),
+                                         (original.text as NSString).substring(with: leaf.quotedRange)))
+                }
+            }
+        }
+        guard !replacements.isEmpty else { return candidate }
+        let restored = NSMutableString(string: candidate)
+        for replacement in replacements.sorted(by: { $0.range.location > $1.range.location }) {
+            restored.replaceCharacters(in: replacement.range, with: replacement.text)
+        }
+        return restored as String
+    }
+
     private static func withoutSourceJSONKeys(in candidate: String, source: String) -> String {
         let sourceKeys = Set(jsonKeys(in: source.folding(
             options: [.widthInsensitive, .diacriticInsensitive], locale: nil)).map(\.value))
@@ -310,9 +583,19 @@ enum TranslationAcceptance {
     }
 
     static func rejection(candidate: String, source: String) -> Rejection? {
-        if let rejection = contentRejection(candidate: candidate, source: source) { return rejection }
-        return preservesSourceJSON(in: bodyWithoutApplicationNotice(candidate), source: source)
-            ? nil : .jsonStructure
+        if case .failure(let rejection) = checked(candidate: candidate, source: source) { return rejection }
+        return nil
+    }
+
+    private static func checked(candidate: String, source: String) -> Result<String, Rejection> {
+        if let rejection = contentRejection(candidate: candidate, source: source) { return .failure(rejection) }
+        guard source.contains("{") else { return .success(candidate) }
+        guard preservesSourceJSON(in: bodyWithoutApplicationNotice(candidate), source: source) else {
+            return .failure(.jsonStructure)
+        }
+        do { return .success(try restoringJSONQuantities(in: candidate, source: source)) }
+        catch let reason as Rejection { return .failure(reason) }
+        catch { return .failure(.jsonQuantity) }
     }
 
     private static func contentRejection(candidate: String, source: String) -> Rejection? {
@@ -374,10 +657,12 @@ enum TranslationAcceptance {
     }
 
     static func validated(_ candidate: String, source: String) throws -> String {
-        if let rejection = rejection(candidate: candidate, source: source) {
+        switch checked(candidate: candidate, source: source) {
+        case .failure(let rejection):
             throw QwenRuntimeError.translationRejected("译文未通过验收：\(rejection.reason)。")
+        case .success(let restored):
+            return restored
         }
-        return candidate
     }
 
     static func validatedCaption(_ candidate: String, source: String) throws -> String {

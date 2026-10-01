@@ -1227,6 +1227,108 @@ final class TranslationAcceptanceTests: XCTestCase {
         XCTAssertNil(TranslationAcceptance.rejection(candidate: final, source: source))
     }
 
+    func testJSONQuantityRestoresSourceUnitSpellingInObservedOutput() throws {
+        let source = #"She wrote {"status":"not ready","formula":"H2O","dose":"4 g","count":16}."#
+        let output = #"她写道{"status":"未就绪","formula":"H2O","dose":"4 克","count":16}。"#
+        XCTAssertEqual(try TranslationAcceptance.validatedCaption(output, source: source),
+                       #"她写道{"status":"未就绪","formula":"H2O","dose":"4 g","count":16}。"#)
+    }
+
+    func testJSONQuantityRejectsChangedValueUnitAndCase() {
+        let source = #"He wrote {"dose":"4 g","count":2}."#
+        for value in ["5 克", "4 kg", "4 G", "4 mL", "-4 g", "五克", "四千克"] {
+            let output = #"他写了{"dose":""# + value + #"","count":2}。"#
+            XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(output, source: source), value)
+        }
+    }
+
+    func testJSONQuantityComparesDecimalAndScientificNumbersWithoutRounding() throws {
+        for (original, translated) in [
+            ("4 g", "4.00 克"), ("3e2 m/s", "300 米每秒"), ("-0.50 V", "-5e-1 伏特"),
+            ("9007199254740993 g", "9007199254740993 克"), ("1e-300 s", "0.1e-299 秒")
+        ] {
+            let source = #"The record is {"value":""# + original + #""}."#
+            let output = #"记录是{"value":""# + translated + #""}。"#
+            XCTAssertEqual(try TranslationAcceptance.validated(output, source: source),
+                           #"记录是{"value":""# + original + #""}。"#)
+        }
+        let precise = #"The record is {"value":"9007199254740993 g"}."#
+        XCTAssertThrowsError(try TranslationAcceptance.validated(
+            #"记录是{"value":"9007199254740992 克"}。"#, source: precise))
+    }
+
+    func testJSONQuantityRestoresUnambiguousChineseAndTraditionalReadings() throws {
+        for (original, translated) in [
+            ("4 g", "四克"), ("12 g", "十二克"), ("104 g", "一百零四克"),
+            ("273.15 K", "二百七十三点一五開爾文"), ("-0.5 V", "負零點五伏特"),
+            ("-0.5 V", "−0.5 伏特"), ("2.5 kg", "兩點五千克"), ("1010 s", "一千零一十秒"),
+            ("9999 g", "九千九百九十九克"), ("273 K", "二七三開爾文")
+        ] {
+            let source = #"The record is {"value":""# + original + #""}."#
+            let output = #"记录是{"value":""# + translated + #""}。"#
+            XCTAssertEqual(try TranslationAcceptance.validated(output, source: source),
+                           #"记录是{"value":""# + original + #""}。"#, translated)
+        }
+        let source = #"The record is {"value":"102 g"}."#
+        for uncertain in ["一百二克", "一百零零二克", "二百一百克", "一百零克"] {
+            XCTAssertThrowsError(try TranslationAcceptance.validated(
+                #"记录是{"value":""# + uncertain + #""}。"#, source: source), uncertain)
+        }
+    }
+
+    func testJSONQuantityKeepsNestedPathsArrayPositionsAndOtherBytes() throws {
+        let source = #"She wrote {"outer":{"dose":"4 g"},"samples":["10 s","2 mL"],"text":"a brace } and \"quote\"","count":8}."#
+        let output = #"她写了 { "count":8, "text":"花括号 } 和 \"引号\"", "samples":["10 秒","2 毫升"], "outer":{"dose":"4 克"} }。"#
+        let expected = #"她写了 { "count":8, "text":"花括号 } 和 \"引号\"", "samples":["10 s","2 mL"], "outer":{"dose":"4 g"} }。"#
+        XCTAssertEqual(try TranslationAcceptance.validated(output, source: source), expected)
+        XCTAssertThrowsError(try TranslationAcceptance.validated(
+            output.replacingOccurrences(of: "10 秒", with: "2 毫升"), source: source))
+    }
+
+    func testJSONQuantityKeepsLiteralSpansAndNormalizesOnlyOrdinaryLeaves() throws {
+        let source = #"Use the exact label "4 g"; he wrote `{"dose":"4 g","count":9}`, then {"dose":"4 g","state":"ready"}."#
+        let output = #"使用确切标签"4 g"；他写了 `{"dose":"4 g","count":9}`，然后写了{"dose":"4 克","state":"就绪"}。"#
+        XCTAssertEqual(try TranslationAcceptance.validated(output, source: source),
+                       #"使用确切标签"4 g"；他写了 `{"dose":"4 g","count":9}`，然后写了{"dose":"4 g","state":"就绪"}。"#)
+    }
+
+    func testJSONQuantityPreservesEscapedSourceValueAndLiteralKeys() throws {
+        let source = #"He wrote {"4 g":"ready","dose":"\u0034\u0020g","count":10}."#
+        let output = #"他写了{"4 g":"就绪","dose":"4 克","count":10}。"#
+        XCTAssertEqual(try TranslationAcceptance.validated(output, source: source),
+                       #"他写了{"4 g":"就绪","dose":"\u0034\u0020g","count":10}。"#)
+    }
+
+    func testJSONQuantityDoesNotRewriteOrdinaryProseWordsOrUnknownUnits() throws {
+        for (source, output) in [
+            ("Add 2 mL H2O and wait 10 s.", "加入 2 毫升 H2O，等待 10 秒。"),
+            (#"He wrote {"description":"four grams","count":11}."#,
+             #"他写了{"description":"四克","count":11}。"#),
+            (#"She wrote {"length":"3 widgets","result":"stable"}."#,
+             #"她写了{"length":"三个小工具","result":"稳定"}。"#)
+        ] {
+            XCTAssertEqual(try TranslationAcceptance.validated(output, source: source), output)
+        }
+    }
+
+    func testJSONQuantityDoesNotGatePseudoJSONOrEmptySetSource() throws {
+        for (source, output) in [
+            ("He wrote {dose: 4 g}.", #"他写了{"dose":"4 克"}。"#),
+            ("The set is {}.", #"集合是{}，记录是{"dose":"4 克"}。"#)
+        ] {
+            XCTAssertEqual(try TranslationAcceptance.validated(output, source: source), output)
+        }
+    }
+
+    func testJSONQuantityDoesNotCollapseAmbiguousDuplicateFields() throws {
+        let source = #"He wrote {"dose":"4 g","count":2}."#
+        let ambiguous = #"他写了{"dose":99,"dose":"4 克","count":2}。"#
+        XCTAssertThrowsError(try TranslationAcceptance.validated(ambiguous, source: source))
+        let repeatedSource = #"He wrote {"dose":"4 g","dose":"5 g"}."#
+        let repeatedOutput = #"他写了{"dose":"4 克","dose":"5 克"}。"#
+        XCTAssertEqual(try TranslationAcceptance.validated(repeatedOutput, source: repeatedSource), repeatedOutput)
+    }
+
     func testMixedTechnicalTermsAndSpokenFormulasStillPass() {
         for (source, output) in [
             ("We use the law of mass action.", "我们使用 law of mass action。"),

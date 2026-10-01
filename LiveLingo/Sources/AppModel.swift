@@ -3782,7 +3782,7 @@ enum ChemistryTranslationProtector {
 
     /// Only explicit literal/code naming is eligible. Ordinary quoted speech
     /// remains translatable and eligible for academic ASR correction.
-    private static func literalRanges(in source: String) -> [NSRange] {
+    static func literalRanges(in source: String) -> [NSRange] {
         let whole = NSRange(source.startIndex..<source.endIndex, in: source)
         var result: [NSRange] = []
         for expression in literalExpressions {
