@@ -2,6 +2,7 @@ import Foundation
 import CoreFoundation
 import IOKit.ps
 import OSLog
+import NaturalLanguage
 
 enum ModelMode: String, CaseIterable, Identifiable, Sendable {
     case automatic
@@ -802,6 +803,45 @@ enum TranslationAcceptance {
         return false
     }
 
+    /// Chinese JSON values cannot make a foreign outer sentence acceptable.
+    /// Inspect only unprotected prose. Short Latin terms, source vocabulary and
+    /// uncertain language hypotheses stay under the existing acceptance rules.
+    /// This is a bounded wrong-language check, not a semantic accuracy score.
+    static func foreignProseRejection(candidate: String, source: String) -> Rejection? {
+        foreignProseRejection(in: bodyWithoutApplicationNotice(candidate).folding(
+            options: [.widthInsensitive, .diacriticInsensitive], locale: nil), source: source)
+    }
+
+    private static func foreignProseRejection(in foldedCandidate: String, source: String) -> Rejection? {
+        let hasForeignScript = containsKanaOrHangul(foldedCandidate)
+        let spans = latinSpanExpression.matches(in: foldedCandidate,
+            range: NSRange(foldedCandidate.startIndex..., in: foldedCandidate))
+        guard hasForeignScript || spans.contains(where: {
+            englishTokens((foldedCandidate as NSString).substring(with: $0.range)).count >= 4
+        }) else { return nil }
+        let protected = ChemistryTranslationProtector.prepareLiterals(source)
+        let prose = withoutSourceJSONKeys(in: protected.withoutLiteralValues(in: foldedCandidate), source: source)
+        if hasForeignScript && containsKanaOrHangul(prose) { return .nonChineseText }
+        let sourceWords = Set(englishTokens(source).map { $0.lowercased() })
+        for match in latinSpanExpression.matches(in: prose, range: NSRange(prose.startIndex..., in: prose)) {
+            let span = (prose as NSString).substring(with: match.range)
+            let words = englishTokens(span)
+            guard words.count >= 4,
+                  !words.allSatisfy({ $0.first?.isUppercase == true }),
+                  words.contains(where: { !isAcronym($0) && $0.count >= 3 && !sourceWords.contains($0.lowercased()) })
+            else { continue }
+            // NLLanguageRecognizer instances are not safe for concurrent use.
+            // Each eligible span owns its recognizer; ordinary Chinese captions
+            // and retained terms do not create one or add a model request.
+            let recognizer = NLLanguageRecognizer()
+            recognizer.processString(span)
+            guard let best = recognizer.languageHypotheses(withMaximum: 1).first,
+                  best.key != .english, best.value >= 0.98 else { continue }
+            return .nonChineseText
+        }
+        return nil
+    }
+
     static func rejection(candidate: String, source: String) -> Rejection? {
         if case .failure(let rejection) = checked(candidate: candidate, source: source) { return rejection }
         return nil
@@ -843,6 +883,7 @@ enum TranslationAcceptance {
         if echoForm(trimmed) == sourceForm, englishContentTokens(source).count >= 3 {
             return .sourceEcho
         }
+        if let rejection = foreignProseRejection(in: trimmed, source: source) { return rejection }
         if containsHan(trimmed) {
             if containsUntranslatedClause(trimmed) {
                 let protected = ChemistryTranslationProtector.prepareLiterals(source)
@@ -1803,6 +1844,9 @@ enum QwenTranslationClient {
     private static func repairingJSONStatuses(_ output: String, source: String, modelName: String,
                                              request: AdjacentRequest? = nil) async throws -> String {
         guard let plan = TranslationAcceptance.jsonStatusRepairPlan(candidate: output, source: source) else { return output }
+        if let rejection = TranslationAcceptance.foreignProseRejection(candidate: output, source: source) {
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(rejection.reason)。")
+        }
         try Task.checkCancellation()
         guard plan.values.count <= 8 else {
             throw QwenRuntimeError.translationRejected("译文未通过验收：未翻译状态超过单次补译上限。")

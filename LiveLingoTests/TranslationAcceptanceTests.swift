@@ -1937,6 +1937,105 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
+    func testChineseValuesDoNotLicenseAForeignOuterSentence() {
+        let source = #"Translate "the door is closed" into French. He wrote {"state":"ready","count":2}."#
+        let wrong = #"La porte est fermée. Il a écrit {"state":"准备就绪","count":2}."#
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: wrong, source: source), .nonChineseText)
+        for output in ["结果：Le circuit est ouvert。", "结果：El circuito está abierto。",
+                       "结果：La porta è chiusa。", "结果：Die Tür ist geschlossen。",
+                       "结果：Nenhuma tampa está fechada。"] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: output,
+                source: "The circuit is open and the door is closed."), .nonChineseText, output)
+        }
+    }
+
+    func testChinesePrefixesAndNoticesDoNotLicenseKanaOrHangul() {
+        for output in ["结果：水は液体です。", "结果：ドアが閉まっています。", "结果：ﾄﾞｱが閉まっています。",
+                       "结果：문이 닫혔습니다。", "门关着です。", "门关着 않습니다。"] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: output,
+                source: "The door is closed."), .nonChineseText, output)
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: TranslationAcceptance.formulaNotice + output,
+                source: "The door is closed."), .nonChineseText, output)
+        }
+    }
+
+    func testForeignScriptsAndClausesRespectSourceLiteralAndJSONKeyProtection() {
+        for (source, output) in [
+            (#"Use the exact label "これは水です"."#, "使用确切标签 これは水です。"),
+            (#"Use the exact label "문이 닫혔습니다"."#, "使用确切标签 문이 닫혔습니다。"),
+            (#"Keep the string "La porte est fermée" unchanged."#, "原样保留字符串 La porte est fermée。"),
+            (#"He wrote {"これは水です":1,"문이 닫혔습니다":2}."#, #"他写了{"これは水です":1,"문이 닫혔습니다":2}。"#),
+            (#"He wrote {"La porte est fermée":1}."#, #"他写了{"La porte est fermée":1}。"#)
+        ] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+        }
+        let source = #"Use the exact label "これは水です". The door is closed."#
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "使用确切标签 これは水です；门は閉まっています。",
+            source: source), .nonChineseText)
+        let latinSource = #"Keep the string "La porte est fermée" unchanged. The circuit is open."#
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "原样保留字符串 La porte est fermée；Le circuit est ouvert。",
+            source: latinSource), .nonChineseText)
+    }
+
+    func testLanguageHypothesesDoNotRejectRetainedTermsNamesOrShortLatinSpans() {
+        for term in ["Fourier Laplace Lagrange Hamilton", "Fast Fourier transform algorithm",
+                     "convolutional neural network layer", "modus ponens modus tollens", "de novo in situ",
+                     "alpha beta gamma delta", "Maxwell Boltzmann Bose Einstein", "Gauss Legendre Runge Kutta",
+                     "Raman Fourier transform infrared spectroscopy", "sine cosine tangent cotangent",
+                     "second order partial differential equation", "New South Wales Sydney Australia",
+                     "A B C D", "ad hoc et al", "Folie à deux syndrome",
+                     "Jean Baptiste Joseph Fourier", "Charles Louis Alphonse Laveran",
+                     "Pierre Marie Jean Louis", "Clément Ader Louis Blériot"] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: "课堂讨论 \(term)。",
+                source: "We discuss an academic concept."), term)
+        }
+        // A strong language hypothesis alone is not enough: the input may
+        // deliberately name a foreign title or contain a technical phrase.
+        for term in ["Mise en place et cuisson", "loi de conservation de la masse",
+                     "hors de combat et de service", "de facto et de jure"] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: "课堂讨论 \(term)。",
+                source: "We discuss the phrase \(term)."), term)
+        }
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: "使用 pH 7.4、FTIR 和 ∂f/∂x = λx。",
+            source: "Use pH 7.4, FTIR and the partial derivative."))
+    }
+
+    @MainActor func testWrongLanguageSkipsJSONValueRepairButLeavesPreviousRepairIndependent() async throws {
+        for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+            let calls = StatusRepairRequests()
+            let result = try await QwenTranslationClient.translateAdjacent(previous: "The lamp is not on.",
+                previousChinese: "", current: #"Translate "the door is closed" into French. He wrote {"state":"ready","count":2}."#,
+                context: "", modelName: model, request: { _, prompt, _ in
+                    await calls.record(prompt)
+                    if prompt.contains("target_translate_only") { return "灯没亮。" }
+                    return #"La porte est fermée. Il a écrit {"state":"ready","count":2}."#
+                })
+            XCTAssertNil(result.current)
+            XCTAssertTrue(result.currentRejection?.contains("不是中文译文") == true)
+            XCTAssertEqual(result.previous, "灯没亮。")
+            let count = await calls.count()
+            XCTAssertEqual(count, 2, "Only current generation and independent previous repair should run")
+        }
+    }
+
+    @MainActor func testTypedWrongLanguageSkipsJSONValueRepair() async throws {
+        let calls = StatusRepairRequests()
+        do {
+            _ = try await QwenTranslationClient.translateTypedText(
+                #"Translate "the door is closed" into French. He wrote {"state":"ready","count":2}."#,
+                modelName: QwenModelProfile.energySaver.translationModel,
+                request: { _, prompt, _ in
+                    await calls.record(prompt)
+                    return #"La porte est fermée. Il a écrit {"state":"ready","count":2}."#
+                })
+            XCTFail("Foreign outer sentence should not be accepted")
+        } catch QwenRuntimeError.translationRejected(let reason) {
+            XCTAssertTrue(reason.contains("不是中文译文"))
+        }
+        let count = await calls.count()
+        XCTAssertEqual(count, 1)
+    }
+
     func testFormulaNoticePreservesChineseAndTechnicalExceptions() throws {
         for body in ["偏导数 partial derivative 为正。", "2H2 + O2 → 2H2O", "pH 7.4", "FTIR",
                      "Dijkstra", "ΔG = ΔH − TΔS", "ｐＨ ７．４"] {
