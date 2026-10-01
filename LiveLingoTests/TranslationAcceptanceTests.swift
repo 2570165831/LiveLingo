@@ -1764,6 +1764,53 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
+    func testBareElementSymbolsUseExplicitChemicalContext() throws {
+        for (source, expected) in [
+            ("Compare Am isotope spectra and the AM radio signal.", "Compare ZXQCHEM0QXZ isotope spectra and the ZXQCHEM1QXZ radio signal."),
+            ("Am atoms differ from the FM radio signal.", "ZXQCHEM0QXZ atoms differ from the ZXQCHEM1QXZ radio signal."),
+            ("Am atoms and Cm ions have different spectra.", "ZXQCHEM0QXZ atoms and ZXQCHEM1QXZ ions have different spectra."),
+            ("The chemical symbol is No.", "The chemical symbol is ZXQCHEM0QXZ."),
+            ("The element He appears in this spectrum.", "The element ZXQCHEM0QXZ appears in this spectrum."),
+            ("Compare isotopes of In and atoms of As.", "Compare isotopes of ZXQCHEM0QXZ and atoms of ZXQCHEM1QXZ."),
+            ("Ca nuclei are shown here.", "ZXQCHEM0QXZ nuclei are shown here.")
+        ] {
+            let protected = ChemistryTranslationProtector.prepare(source)
+            XCTAssertEqual(protected.text, expected, source)
+            XCTAssertEqual(try protected.validatedRestore(in: protected.text), source)
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source)
+        }
+    }
+
+    func testBareElementsDoNotMaskEnglishWordsOrIdentifierFragments() {
+        for source in ["No isotope is stable.", "In isotope spectra, the peak moves.",
+                       "As atoms move, collisions occur.", "He measures isotope spectra.",
+                       "Am I ready to measure isotope spectra?", "I am not ready.",
+                       "AM radio is active.", "Compare Am_count isotope data.",
+                       "Compare ammonia isotopes.", "The element is in the block.",
+                       "Count N atoms and keep 24 samples.", "FM radio is active."] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepare(source).text, source, source)
+        }
+        let source = #"Use the exact label "Am isotope spectra"."#
+        XCTAssertEqual(ChemistryTranslationProtector.prepare(source).text,
+                       #"Use the exact label "ZXQCHEM0QXZ"."#)
+    }
+
+    func testBareElementContextualRepairCountsSourceSpellingsAfterTranslation() throws {
+        let protected = ChemistryTranslationProtector.prepare("Compare Am isotope spectra.")
+        XCTAssertEqual(try protected.validatedRestore(in: "比较 ZXQCHEM0QXZ 的同位素光谱。"),
+                       "比较 Am 的同位素光谱。")
+        XCTAssertNil(protected.unmaskedFailure(in: "比较 Am 的同位素光谱。"))
+        XCTAssertNil(protected.unmaskedFailure(in: "同位素光谱来自 Am。"))
+        for changed in ["比较锕的同位素光谱。", "比较 AM 的同位素光谱。", "比较 Am 和 Am。",
+                        "比较 Am 和 Cm atoms。"] {
+            XCTAssertNotNil(protected.unmaskedFailure(in: changed), changed)
+        }
+        XCTAssertThrowsError(try protected.validatedRestore(in: "比较锕的同位素光谱。"))
+        let mixed = ChemistryTranslationProtector.prepare("Compare Am isotope spectra and the AM radio signal.")
+        XCTAssertNil(mixed.unmaskedFailure(in: "比较 Am 同位素光谱与 AM 无线电信号。"))
+        XCTAssertNotNil(mixed.unmaskedFailure(in: "比较 Am 同位素光谱与调幅无线电信号。"))
+    }
+
     func testAlreadyProtectedFormulasDoNotReappearAsAuxiliaryHints() {
         let protected = ChemistryTranslationProtector.prepare("[FeSCN]²⁺ forms from Fe³⁺ and SCN⁻.")
         let hints: [AuxiliaryTranslationHint] = [.init(kind: .formula, value: "Fe³⁺"),

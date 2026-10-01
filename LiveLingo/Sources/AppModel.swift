@@ -3557,7 +3557,8 @@ struct ProtectedChemistryTranslationInput: Sendable {
         func inventory(_ items: [(placeholder: String, original: String)]) -> [String: Int] {
             items.reduce(into: [:]) { $0[$1.original, default: 0] += 1 }
         }
-        let actual = ChemistryTranslationProtector.prepare(translatedText)
+        let actual = ChemistryTranslationProtector.prepareForRestorationCheck(
+            translatedText, protectedOriginals: Set(replacements.map { $0.original }))
         return inventory(replacements) == inventory(actual.replacements)
             ? nil : "重译的化学式写法或数量与原文不一致"
     }
@@ -3740,6 +3741,16 @@ enum ChemistryTranslationProtector {
     private static let unquotedCodeExpression = try? NSRegularExpression(pattern: #"(?:\b[A-Z]\b|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[A-Za-z]+[0-9]+)"#)
     private static let formulaExpression = try? NSRegularExpression(pattern: formulaPattern)
     private static let elementExpression = try? NSRegularExpression(pattern: #"[A-Z][a-z]?"#)
+    private static let elementIntroductionExpression = try! NSRegularExpression(pattern:
+        #"(?i)\b(?:element(?:\s+symbol)?|chemical\s+symbol|isotopes?\s+of|atoms?\s+of|ions?\s+of)\s+(?:(?:is|was)\s+)?$"#)
+    private static let elementSpeciesExpression = try! NSRegularExpression(pattern:
+        #"(?i)^\s+(?:isotopes?|atoms?|ions?|nuclei)\b"#)
+    // These exact spellings are also ordinary English words. A nearby noun
+    // alone cannot distinguish "No isotope" or "As atoms move" from elements.
+    private static let ordinaryWordElementSymbols: Set<String> = ["I", "He", "Be", "In", "As", "At", "No"]
+    private static let radioAcronyms: Set<String> = ["AM", "FM"]
+    private static let radioAcronymExpression = try! NSRegularExpression(pattern:
+        #"(?<![A-Za-z0-9_])(?:AM|FM)(?=\s+(?i:radio)\b)"#)
     private static let sentenceExpression = try? NSRegularExpression(pattern: #"[^.!?\r\n]+"#)
     private static let spokenNameExpression = try? NSRegularExpression(pattern:
         #"(?<![A-Za-z0-9_])([A-Za-z])\s+"# + spokenNumberSequence + #"(?![A-Za-z0-9_])"#)
@@ -3750,6 +3761,13 @@ enum ChemistryTranslationProtector {
 
     static func prepareLiterals(_ source: String) -> ProtectedChemistryTranslationInput {
         prepare(source, includeFormulas: false)
+    }
+
+    /// A translated sentence can move or translate the identifying noun. Keep
+    /// counting only element spellings already admitted by the original source.
+    static func prepareForRestorationCheck(_ source: String, protectedOriginals: Set<String>) -> ProtectedChemistryTranslationInput {
+        prepare(source, includeFormulas: true,
+                knownSymbols: protectedOriginals.intersection(elementSymbols.union(radioAcronyms)))
     }
 
     private static func coordinatedLiteralRanges(in source: String, anchored: [NSRange]) -> [NSRange] {
@@ -3862,17 +3880,33 @@ enum ChemistryTranslationProtector {
         return result
     }
 
-    private static func prepare(_ source: String, includeFormulas: Bool) -> ProtectedChemistryTranslationInput {
+    private static func prepare(_ source: String, includeFormulas: Bool,
+                                knownSymbols: Set<String> = []) -> ProtectedChemistryTranslationInput {
         let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
-        var candidates = literalRanges(in: source) + spokenNameRanges(in: source)
+        let literals = literalRanges(in: source) + spokenNameRanges(in: source)
+        var candidates = literals
+        var hasContextualElement = false
 
         if includeFormulas, let expression = formulaExpression {
             for match in expression.matches(in: source, range: fullRange) {
                 guard match.range.length > 0 else { continue }
                 let original = (source as NSString).substring(with: match.range)
-                guard !visibleTerms.contains(original), looksLikeChemicalFormula(match.range, in: source) else { continue }
+                guard !visibleTerms.contains(original),
+                      knownSymbols.contains(original) || looksLikeChemicalFormula(match.range, in: source) else { continue }
                 candidates.append(match.range)
+                if knownSymbols.isEmpty, elementSymbols.contains(original),
+                   !literals.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) {
+                    hasContextualElement = true
+                }
             }
+        }
+
+        // In mixed element/radio text, introducing a protected element made
+        // both models translate the unmasked AM acronym into its Chinese name.
+        // Preserve the nearby radio acronym with the existing token mechanism;
+        // standalone radio captions keep their original request and prompt.
+        if hasContextualElement {
+            candidates += radioAcronymExpression.matches(in: source, range: fullRange).map { $0.range }
         }
 
         let selected = nonOverlappingRanges(from: candidates)
@@ -3957,7 +3991,15 @@ enum ChemistryTranslationProtector {
         let numbers = CharacterSet.decimalDigits.union(CharacterSet(charactersIn: "₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹"))
         if candidate.rangeOfCharacter(from: numbers) != nil { return true }
         if candidate.rangeOfCharacter(from: CharacterSet(charactersIn: "()[]+−-^⁺⁻")) != nil { return true }
-        return symbols.count >= 2
+        if symbols.count >= 2 { return true }
+        let before = NSRange(location: 0, length: range.location)
+        if elementIntroductionExpression.firstMatch(in: source, range: before) != nil { return true }
+        // One-letter names can be counts or variables, as in "count N atoms".
+        // They need the explicit introduction above rather than a species noun.
+        guard candidate.count == 2, !ordinaryWordElementSymbols.contains(candidate) else { return false }
+        let end = NSMaxRange(range)
+        let after = NSRange(location: end, length: (source as NSString).length - end)
+        return elementSpeciesExpression.firstMatch(in: source, range: after) != nil
     }
 
     private static func nonOverlappingRanges(from candidates: [NSRange]) -> [NSRange] {
