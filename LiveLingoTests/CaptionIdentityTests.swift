@@ -312,6 +312,25 @@ final class CaptionIdentityTests: XCTestCase {
         }
     }
 
+    func testShortNegatedStateUsesOnlyExistingRecoveryAndKeepsEnglishOnFailure() async throws {
+        let source = #"The result was {"status":"not valid","number":4}."#
+        let untranslated = #"结果是 {"status":"not valid","number":4}。"#
+        let translation = #"结果是 {"status":"无效","number":4}。"#
+        for recoverySucceeds in [true, false] {
+            var attempts: [CaptionTranslationAttempt] = []
+            let model = try makeModel(.init(translate: { _, _, _, attempt, _ in
+                attempts.append(attempt)
+                return attempts.count == 2 && recoverySucceeds ? translation : untranslated
+            }, adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() }))
+            model.receiveCaptionForTesting(source, start: 0, end: 8)
+            await model.translationTaskForTesting?.value
+            XCTAssertEqual(attempts, [.standard, .repairContent])
+            XCTAssertEqual(model.segments[0].english, source)
+            XCTAssertEqual(model.segments[0].chinese, recoverySucceeds ? translation : "")
+            XCTAssertEqual(model.segments[0].hasUsableTranslation, recoverySucceeds)
+        }
+    }
+
     func testSingleCaptionModelReplyNeverAppearsInStreamingPreview() async throws {
         let gate = CaptionIdentityGate<String>()
         addTeardownBlock { await gate.finish(.failure(CancellationError())) }

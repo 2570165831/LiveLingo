@@ -1050,6 +1050,81 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
+    func testShortNegatedStatesCannotHideInsideChineseTranslations() {
+        for (source, output) in [
+            (#"The result was {"status":"not valid","number":4}."#,
+             #"结果是 {"status":"not valid","number":4}。"#),
+            (#"He wrote {"first":"not ready","second":"not allowed"}."#,
+             #"他写了 {"first":"not ready","second":"not allowed"}。"#),
+            (#"The screen says "not available"."#, "屏幕显示 not available。"),
+            (#"The warning reads "not safe"."#, "警告写着 not safe。"),
+            (#"She said, "Not yet"."#, "她说 Not yet。"),
+            (#"The screen says "not active"."#, "屏幕显示 Ｎｏｔ ａｃｔｉｖｅ。")
+        ] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: source), .mixedEnglishProse, output)
+            XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(output, source: source))
+        }
+    }
+
+    func testShortNegatedStateGuardKeepsExactLabelsAndTechnicalExpressions() {
+        for (source, output) in [
+            (#"Keep the exact label "not ready" unchanged."#, #"保持标签"not ready"完全不变。"#),
+            (#"Keep the title "Not Safe" unchanged."#, #"保持标题"Not Safe"不变。"#),
+            (#"The literal string is "not possible"."#, #"字面字符串是"not possible"。"#),
+            ("Print `not available` beside the measurement.", "在测量旁打印 not available。"),
+            ("The textbook uses the term NOT gate.", "教材使用术语 NOT gate。"),
+            ("A not gate inverts the signal.", "not gate 会反转信号。"),
+            ("We write NOT TRUE in the Boolean expression.", "布尔表达式中写成 NOT TRUE。"),
+            ("We use the not equal operator.", "我们使用 not equal 运算符。"),
+            ("The event is called May Day.", "活动称为 May Day。"),
+            ("We use the law of mass action.", "我们使用 law of mass action。")
+        ] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+        }
+        let source = #"Use the exact label "not". The result is not valid."#
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "使用标签 not；结果是 not valid。", source: source), .mixedEnglishProse)
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: "使用标签 not；结果无效。", source: source))
+    }
+
+    func testSourceJSONKeysStayLiteralWithoutMaskingOrdinaryValuesOrSpeech() {
+        for (source, output) in [
+            (#"He wrote {"not ready":2}."#, #"他写了 {"not ready":2}。"#),
+            (#"He wrote {"not complete":{"not valid":4}}."#, #"他写了 {"not complete":{"not valid":4}}。"#),
+            (#"He wrote {"not \u0072eady":2}."#, #"他写了 {"not ready":2}。"#),
+            (#"He wrote {"the sample is not ready":2}."#, #"他写了 {"the sample is not ready":2}。"#)
+        ] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+        }
+        for (source, output) in [
+            (#"He wrote {"not ready":"not ready"}."#, #"他写了 {"not ready":"not ready"}。"#),
+            (#"He wrote {"not ready":2}, and the status is not ready."#, #"他写了 {"not ready":2}；状态 not ready。"#),
+            (#"He wrote {"status":"not ready"}."#, #"他写了 {"not ready":2}。"#),
+            (#"He said "not ready": wait."#, #"他说 "not ready": 等待。"#),
+            (#"He said {"not ready": wait}."#, #"他说 {"not ready": wait}。"#)
+        ] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: source), .mixedEnglishProse, output)
+        }
+    }
+
+    func testDirectUnchangedTitleIsProtectedWithoutExtendingIntoOtherSpeech() throws {
+        for source in [#"Keep the title "Not Ready" unchanged."#,
+                       #"Please keep this title "Not Safe" unchanged."#] {
+            let prepared = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertTrue(prepared.text.contains("ZXQCHEM0QXZ"), source)
+            XCTAssertFalse(prepared.text.contains("ZXQCHEM1QXZ"), source)
+            XCTAssertEqual(try prepared.validatedRestore(in: prepared.text), source)
+        }
+        for source in [#"Do not keep the title "Not Ready" unchanged."#,
+                       #"The lecturer said to keep the title "Not Ready" unchanged."#,
+                       #"Translate "not ready" as a status."#] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source)
+        }
+        let source = #"Keep the title "Not Ready" unchanged. The screen says "not ready"."#
+        let prepared = ChemistryTranslationProtector.prepareLiterals(source)
+        XCTAssertEqual(prepared.text, #"Keep the title "ZXQCHEM0QXZ" unchanged. The screen says "not ready"."#)
+        XCTAssertTrue(prepared.text.contains(#"The screen says "not ready"."#))
+    }
+
     func testMixedTechnicalTermsAndSpokenFormulasStillPass() {
         for (source, output) in [
             ("We use the law of mass action.", "我们使用 law of mass action。"),

@@ -3697,7 +3697,7 @@ enum ChemistryTranslationProtector {
     // A direct request to keep a named string unchanged is explicit literal
     // wording too. Do not infer this from negated requests or quoted speech.
     private static let keepQuotedLiteralExpression = try? NSRegularExpression(pattern:
-        #"(?i)(?:^|[.!?\r\n])\s*(?:please\s+)?keep\s+(?:(?:the|this)\s+)?(?:string|text|label|identifier|name)\s+"#
+        #"(?i)(?:^|[.!?\r\n])\s*(?:please\s+)?keep\s+(?:(?:the|this)\s+)?(?:string|text|label|identifier|name|title)\s+"#
         + quotedLiteral + #"\s+unchanged\b"#)
     private static let namingIntroductionPattern: String = {
         let verb = #"(?:call(?:s|ed|ing)?|nam(?:e[sd]?|ing)|renam(?:e[sd]?|ing)|label(?:s|led|ling|ed|ing)?)"#

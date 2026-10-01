@@ -164,6 +164,68 @@ enum TranslationAcceptance {
     ]
     private static let clauseSubjects: Set<String> = ["i", "it", "we", "you", "they", "he", "she", "this", "that"]
 
+    // Short status values have no subject or auxiliary ("not valid"). They
+    // still need translation when a Chinese sentence surrounds them. Keep
+    // mathematical/operator names out of this bounded status vocabulary.
+    private static let negatedStatusWords: Set<String> = [
+        "ready", "valid", "available", "allowed", "permitted", "possible", "safe", "complete",
+        "completed", "finished", "started", "required", "necessary", "applicable", "defined",
+        "known", "present", "active", "empty", "yet"
+    ]
+
+    private static let jsonKeyExpression = try! NSRegularExpression(
+        pattern: #"(?:\{|,)\s*("(?:[^"\\]|\\.)*")\s*:"#)
+
+    /// Inspect complete, valid embedded objects; punctuation resembling JSON
+    /// in ordinary speech is not enough to declare a quoted phrase a key.
+    private static func jsonKeys(in text: String) -> [(value: String, range: NSRange)] {
+        guard text.contains("{") else { return [] }
+        let nsText = text as NSString
+        var start = 0, depth = 0
+        var inString = false, escaped = false
+        var keys: [(value: String, range: NSRange)] = []
+        for (offset, unit) in text.utf16.enumerated() {
+            if depth == 0 {
+                if unit == 0x7B { start = offset; depth = 1; inString = false; escaped = false }
+                continue
+            }
+            if inString {
+                if escaped { escaped = false }
+                else if unit == 0x5C { escaped = true }
+                else if unit == 0x22 { inString = false }
+                continue
+            }
+            if unit == 0x22 { inString = true }
+            else if unit == 0x7B { depth += 1 }
+            else if unit == 0x7D {
+                depth -= 1
+                guard depth == 0 else { continue }
+                let object = nsText.substring(with: NSRange(location: start, length: offset - start + 1))
+                guard (try? JSONSerialization.jsonObject(with: Data(object.utf8))) != nil else { continue }
+                let objectText = object as NSString
+                for match in jsonKeyExpression.matches(in: object, range: NSRange(location: 0, length: objectText.length)) {
+                    let range = match.range(at: 1)
+                    let quoted = objectText.substring(with: range)
+                    guard let decoded = try? JSONSerialization.jsonObject(with: Data("[\(quoted)]".utf8)) as? [String],
+                          let value = decoded.first else { continue }
+                    keys.append((value, NSRange(location: start + range.location, length: range.length)))
+                }
+            }
+        }
+        return keys
+    }
+
+    private static func withoutSourceJSONKeys(in candidate: String, source: String) -> String {
+        let sourceKeys = Set(jsonKeys(in: source.folding(
+            options: [.widthInsensitive, .diacriticInsensitive], locale: nil)).map(\.value))
+        guard !sourceKeys.isEmpty else { return candidate }
+        let body = NSMutableString(string: candidate)
+        for key in jsonKeys(in: candidate).reversed() where sourceKeys.contains(key.value) {
+            body.replaceCharacters(in: key.range, with: "ZXQJSONKEYQXZ")
+        }
+        return body as String
+    }
+
     /// Keep English terms and names eligible, but do not treat a Chinese prefix
     /// or suffix as a translation of an English clause. Literal values are
     /// excluded with the same source protection used by normal translation.
@@ -176,6 +238,7 @@ enum TranslationAcceptance {
             guard words.count >= 2 else { continue }
             let content = englishContentTokens(span).map { $0.lowercased() }
             if !content.isEmpty && content.allSatisfy({ spokenTechnicalWords.contains($0) }) { continue }
+            if words[0] == "not", !isAcronym(tokens[0]), negatedStatusWords.contains(words[1]) { return true }
             let pronounSubject = words.first.map { clauseSubjects.contains($0) } ?? false
             guard words.count >= 3 || pronounSubject else { continue }
             if let first = words.first, clauseAuxiliaries.contains(first),
@@ -215,7 +278,8 @@ enum TranslationAcceptance {
         if containsHan(trimmed) {
             if containsUntranslatedClause(trimmed) {
                 let protected = ChemistryTranslationProtector.prepareLiterals(source)
-                if containsUntranslatedClause(protected.withoutLiteralValues(in: trimmed)) {
+                let prose = withoutSourceJSONKeys(in: protected.withoutLiteralValues(in: trimmed), source: source)
+                if containsUntranslatedClause(prose) {
                     return .mixedEnglishProse
                 }
             }
