@@ -20,7 +20,7 @@ private struct FloatingSubtitleContent: View {
         #endif
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Circle().fill(model.isRecording ? .red : .gray).frame(width: 8, height: 8)
+                Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
                 Text(model.isRecording ? "实时字幕 · 初译" : model.phaseLabel)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color(white: 0.8))

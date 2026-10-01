@@ -2,6 +2,26 @@ import Foundation
 import SwiftUI
 @preconcurrency import Translation
 
+/// Fixed colors from the tools design baseline (2026-09-27). The accent is
+/// graphite and ignores the system accent; red marks recording and failures,
+/// coral marks something the user needs to handle. Color sits on dots and
+/// icons only; text keeps its normal color.
+enum ClassroomPalette {
+    static let accent = dynamic(light: 0x636366, dark: 0x747479)
+    static let recording = dynamic(light: 0xDE2910, dark: 0xDE2910)
+    static let failure = recording
+    static let attention = dynamic(light: 0xD9603A, dark: 0xF48A61)
+
+    private static func dynamic(light: UInt32, dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let hex = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255,
+                           green: CGFloat(hex >> 8 & 0xFF) / 255,
+                           blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+        })
+    }
+}
+
 #if DEBUG
 /// Counts work in isolated view tests; no classroom text is collected.
 @MainActor
@@ -83,8 +103,10 @@ struct ContentView: View {
         }) { sheet in
             classroomSheet(sheet)
                 .environmentObject(model)
+                .tint(ClassroomPalette.accent)
         }
         .modifier(ApplePreviewTranslationHost())
+        .tint(ClassroomPalette.accent)
     }
 
     /// The window title names the current lesson; the app name stays in the menu bar.
@@ -127,7 +149,7 @@ struct ContentView: View {
                     .labelStyle(.titleAndIcon)
             }
             .buttonStyle(.borderedProminent)
-            .tint(model.hasActiveSession ? .red : .accentColor)
+            .tint(ClassroomPalette.accent)
             .disabled(!model.canToggleRecording)
             .accessibilityIdentifier("classroom-record-stop")
         }
@@ -542,7 +564,7 @@ struct ContentView: View {
     private var statusBar: some View {
         HStack(spacing: 10) {
             Image(systemName: model.errorMessage == nil ? model.currentInputMode.statusIcon : "exclamationmark.triangle")
-                .foregroundStyle(model.errorMessage == nil ? Color.secondary : Color.orange)
+                .foregroundStyle(model.errorMessage == nil ? Color.secondary : ClassroomPalette.failure)
                 .accessibilityHidden(true)
             Text(model.errorMessage ?? model.savedProcessingStatus ?? model.archiveNotice
                  ?? (model.translationReady ? saveDestinationStatus : model.translationStatus))
@@ -619,9 +641,8 @@ struct ContentView: View {
     }
 
     private var phaseColor: Color {
-        if model.isRecording { return .red }
-        if model.isPaused { return .orange }
-        if model.errorMessage != nil { return .orange }
+        if model.errorMessage != nil { return ClassroomPalette.failure }
+        if model.isRecording { return ClassroomPalette.recording }
         return .secondary
     }
 
@@ -686,7 +707,7 @@ private struct ReviewEntryButton: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 if needsAttention {
-                    Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(ClassroomPalette.attention)
                 }
                 Text(needsAttention ? "复查需处理…" : queue.running ? "复查进行中…" : "复查笔记…")
             }
@@ -761,6 +782,7 @@ struct ClassroomSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .tint(ClassroomPalette.accent)
         .frame(width: 520)
         .frame(minHeight: 480)
     }
@@ -1080,7 +1102,7 @@ private struct RecordingWaveform: View {
                 ForEach(samples.indices, id: \.self) { index in
                     let level = receiving ? min(1, max(0, samples[index])) : 0
                     Capsule()
-                        .fill(receiving ? Color.accentColor : Color.secondary.opacity(0.45))
+                        .fill(receiving ? Color.primary.opacity(0.7) : Color.secondary.opacity(0.45))
                         .frame(width: width, height: 2 + CGFloat(level) * max(0, geometry.size.height - 2))
                 }
             }
@@ -1312,7 +1334,7 @@ private struct LearningReviewControls: View {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(ClassroomPalette.failure)
                     Text(managementError)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1321,7 +1343,7 @@ private struct LearningReviewControls: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
-                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
             }
@@ -1444,7 +1466,7 @@ private struct LearningReviewControls: View {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(ClassroomPalette.failure)
                     Text(failure.isEmpty ? "复查已中断，等待重试。" : failure)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1456,7 +1478,7 @@ private struct LearningReviewControls: View {
             HStack(spacing: 6) {
                 Image(systemName: available ? "folder" : "folder.badge.questionmark")
                     .font(.caption2)
-                    .foregroundStyle(available ? Color.secondary : Color.orange)
+                    .foregroundStyle(available ? Color.secondary : ClassroomPalette.attention)
                 Text(available ? directory.path : "录音文件夹已移动或不可用")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -1487,7 +1509,6 @@ private struct LearningReviewControls: View {
                 Button("移出队列…") { pendingQueueRemoval = id }
                     .buttonStyle(.borderless)
                     .font(.caption)
-                    .foregroundStyle(.red)
                     .help("只从复查队列移除这项任务，不会删除任何文件。")
             }
         }
@@ -1544,7 +1565,7 @@ private struct ClassroomLivePreview: View {
                             .opacity(stream.volatileEnglish.isEmpty ? 0 : 1)
                         Text(stream.volatileEnglish.isEmpty ? "等待下一句" : "正在识别")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(.secondary)
                     }
                     // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
                     // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
@@ -1731,7 +1752,7 @@ private struct SummaryMarkdownView: View {
                 } else if content.hasPrefix("- ") {
                     HStack(alignment: .top, spacing: 9) {
                         Circle()
-                            .fill(Color.accentColor)
+                            .fill(Color.secondary)
                             .frame(width: 6, height: 6)
                             .padding(.top, 7)
                         Text(markdown: String(content.dropFirst(2)))

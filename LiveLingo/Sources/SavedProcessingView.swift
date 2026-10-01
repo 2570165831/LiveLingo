@@ -44,10 +44,13 @@ struct SavedProcessingView: View {
                 }
 
                 if let error = model.archiveError {
-                    Text(error)
-                        .foregroundStyle(.orange)
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("saved-processing-error")
+                    Label {
+                        Text(error).textSelection(.enabled)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(ClassroomPalette.failure)
+                    }
+                    .accessibilityIdentifier("saved-processing-error")
                     Button("重试保存课程进度") { model.retrySavedSessionWrite() }
                         .disabled(model.archiveLoading)
                         .accessibilityIdentifier("saved-processing-retry-save")
