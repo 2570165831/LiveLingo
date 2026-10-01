@@ -1,6 +1,6 @@
 #!/bin/zsh
 # LEGACY installer for the historical `Payload/` transfer layout. The current
-# pipeline produces a self-contained DMG instead (see README.md); this script is
+# pipeline produces a self-contained DMG instead (see docs/BUILDING.md); this script is
 # retained for reference and for validating or installing an older package.
 set -euo pipefail
 

@@ -1,6 +1,6 @@
 # 参与 LiveLingo 开发
 
-本文件只说明最短路径；功能说明、构建细节与验收边界见 [README.md](README.md)。
+本文件只说明最短路径；功能说明见 [README.md](README.md)，构建细节与验收边界见 [docs/BUILDING.md](docs/BUILDING.md)。
 
 ## 许可证与提交约定
 
@@ -13,8 +13,8 @@
 
 - macOS 14 或更高版本，Apple 芯片；Xcode 27.0 或更高版本（当前使用 Xcode 27.0 Beta 4 验证）。
 - 不需要 LM Studio。语言运行库是应用自有的 MLX / MLX-LM 进程；转写由应用内置的 `ASRRuntime` 在本机启动。
-- 只跑 Xcode 构建不会包含运行库与模型；ASR 只从 App 包内的 `Contents/Resources/ASRRuntime` 与 `Models` 加载。需要完整功能时按 README 组装离线候选。
-- 便携运行库目前**不能**一条命令重现，详见 README 的“便携运行库的复现状态”。不要声称已复现。
+- 只跑 Xcode 构建不会包含运行库与模型；ASR 只从 App 包内的 `Contents/Resources/ASRRuntime` 与 `Models` 加载。需要完整功能时按 [docs/BUILDING.md](docs/BUILDING.md) 组装离线候选。
+- 便携运行库目前**不能**一条命令重现，详见 [docs/BUILDING.md](docs/BUILDING.md) 的“验证记录”。不要声称已复现。
 
 ## 构建与测试
 
