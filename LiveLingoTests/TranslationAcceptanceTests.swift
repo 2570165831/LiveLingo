@@ -5,6 +5,105 @@ import XCTest
 /// These tests pin the acceptance rules that must stop it, and the technical
 /// exceptions that must keep working.
 final class TranslationAcceptanceTests: XCTestCase {
+    private func captionTransport(_ input: String, model: String = QwenModelProfile.highQuality.translationModel,
+                                  attempt: CaptionTranslationAttempt = .standard) -> CaptionFormulaTransport {
+        QwenTranslationClient.captionFormulaTransport(input: input,
+            systemPrompt: ChemistryTranslationProtector.copyInstruction, modelName: model, attempt: attempt)
+    }
+
+    func testShortCaptionTransportPreservesReactionCoefficientsAndRepeatedSpecies() throws {
+        let source = "2H₂ + O₂ → 2H₂O; H₂O is not O₂."
+        let protected = ChemistryTranslationProtector.prepare(source)
+        let transport = captionTransport(protected.text)
+        XCTAssertEqual(transport.input, "2ZX0QXZ + ZX1QXZ → 2ZX2QXZ; ZX3QXZ is not ZX4QXZ.")
+        XCTAssertEqual(transport.systemPrompt, ChemistryTranslationProtector.copyInstruction)
+        let restored = try transport.restore("2ZX0QXZ + ZX1QXZ → 2ZX2QXZ；ZX3QXZ 不是 ZX4QXZ。")
+        XCTAssertEqual(try protected.validatedRestore(in: restored), "2H₂ + O₂ → 2H₂O；H₂O 不是 O₂。")
+    }
+
+    func testShortCaptionTransportSeparatesSingleAndDoubleDigitIDs() throws {
+        let source = Array(repeating: "H2O", count: 13).joined(separator: " ")
+        let protected = ChemistryTranslationProtector.prepare(source)
+        let transport = captionTransport(protected.text)
+        XCTAssertTrue(transport.input.contains("ZX1QXZ"))
+        XCTAssertTrue(transport.input.contains("ZX11QXZ"))
+        XCTAssertEqual(try protected.validatedRestore(in: transport.restore(transport.input)), source)
+        XCTAssertEqual(try transport.restore("ZX11QXZ ZX1QXZ"), "ZXQCHEM11QXZ ZXQCHEM1QXZ")
+    }
+
+    func testShortCaptionTransportNeverPublishesIncompleteOrMalformedWireIDs() throws {
+        let protected = ChemistryTranslationProtector.prepare("2H₂ + O₂ → 2H₂O.")
+        let transport = captionTransport(protected.text)
+        let raw = "反应为 2ZX0QXZ + ZX1QXZ → 2ZX2QXZ。"
+        var partial = ""
+        for character in raw {
+            partial.append(character)
+            let shown = protected.restorePartial(in: transport.restorePartial(partial))
+            XCTAssertFalse(shown.lowercased().contains("zx"), shown)
+            XCTAssertFalse(shown.lowercased().contains("qxz"), shown)
+        }
+        XCTAssertEqual(protected.restorePartial(in: transport.restorePartial(raw)), "反应为 2H₂ + O₂ → 2H₂O。")
+        for bad in ["ZX0", "ZX0Q", "ZX0QX", "Zn0QXZ", "XZX0QXZ", "ZX0QXX", "ZX99QXZ", "ZXQ99QXZ"] {
+            var wire = "已完成。"
+            for character in bad + "后续内容" {
+                wire.append(character)
+                XCTAssertEqual(transport.restorePartial(wire), wire == "已完成。X" ? wire : "已完成。", bad)
+            }
+            XCTAssertThrowsError(try transport.restore("ZX0QXZ ZX1QXZ ZX2QXZ " + bad), bad)
+        }
+    }
+
+    func testShortCaptionTransportKeepsNativeOmissionAndDuplicationChecks() throws {
+        let protected = ChemistryTranslationProtector.prepare("Na⁺ is not K⁺; Cl⁻ stays here.")
+        let transport = captionTransport(protected.text)
+        XCTAssertThrowsError(try protected.validatedRestore(in: transport.restore("ZX0QXZ 不是 ZX1QXZ。")))
+        XCTAssertThrowsError(try protected.validatedRestore(in: transport.restore("ZX0QXZ 不是 ZX1QXZ；ZX2QXZ 和 ZX2QXZ 留在这里。")))
+        XCTAssertThrowsError(try transport.restore("ZX0QXZ 不是 ZX1QXZ；ZX2QXZ 留在这里。ZX42QXZ"))
+        XCTAssertEqual(try protected.validatedRestore(in: transport.restore("zx0qxz 不是 zx1qxz；zx2qxz 留在这里。")),
+                       "Na⁺ 不是 K⁺；Cl⁻ 留在这里。")
+    }
+
+    func testShortCaptionTransportKeepsLiteralNativeIDsDistinct() throws {
+        let protected = ChemistryTranslationProtector.prepare("The literal ZXQCHEM0QXZ is not H2O.")
+        let transport = captionTransport(protected.text)
+        XCTAssertTrue(transport.input.contains("ZX0QXZ is not ZX1QXZ"))
+        XCTAssertEqual(try protected.validatedRestore(in: transport.restore("字面 ZX0QXZ 不是 ZX1QXZ。")),
+                       "字面 ZXQCHEM0QXZ 不是 H2O。")
+        XCTAssertThrowsError(try transport.restore("字面 ZX42QXZ 不是 ZX1QXZ。"))
+    }
+
+    func testShortCaptionTransportFallsBackOnLiteralWireFamilyCollisions() throws {
+        for literal in ["ZX0QXZ", "zx12qxz", "ZX12", "Zn0QXZ", "XZX0QXZ"] {
+            let protected = ChemistryTranslationProtector.prepare("The literal \(literal) is not H2O.")
+            let transport = captionTransport(protected.text)
+            XCTAssertEqual(transport.input, protected.text, literal)
+            XCTAssertEqual(transport.systemPrompt, ChemistryTranslationProtector.copyInstruction, literal)
+            XCTAssertEqual(try transport.restore(literal), literal)
+            XCTAssertEqual(transport.restorePartial(literal), literal)
+        }
+    }
+
+    func testShortCaptionTransportDoesNotHoldAnOrdinarySourceWord() throws {
+        let transport = captionTransport("Zinc reacts with ZXQCHEM0QXZ; Z is a label.")
+        XCTAssertEqual(transport.restorePartial("Zinc"), "Zinc")
+        XCTAssertEqual(transport.restorePartial("Z"), "Z")
+        XCTAssertEqual(try transport.restore("Zinc 和 ZX0QXZ；Z 是标签。"), "Zinc 和 ZXQCHEM0QXZ；Z 是标签。")
+    }
+
+    func testShortCaptionTransportPreservesJSONAndModelTaskScope() throws {
+        let input = #"{"source_text_to_translate":"ZXQCHEM0QXZ is not ZXQCHEM1QXZ.","auxiliary_token_hints":["unit: 2 s"]}"#
+        let transport = captionTransport(input)
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(transport.input.utf8)) as? [String: Any])
+        XCTAssertEqual(fields["source_text_to_translate"] as? String, "ZX0QXZ is not ZX1QXZ.")
+        XCTAssertEqual(fields["auxiliary_token_hints"] as? [String], ["unit: 2 s"])
+        for attempt in [CaptionTranslationAttempt.repairContent, .expandedBudget] {
+            XCTAssertEqual(captionTransport(input, attempt: attempt).input, input)
+        }
+        XCTAssertEqual(captionTransport(input, model: QwenModelProfile.energySaver.translationModel).input, input)
+        XCTAssertEqual(captionTransport("AM radio is active.").input, "AM radio is active.")
+        XCTAssertEqual(captionTransport("ZXQJSONKEYQXZ").input, "ZXQJSONKEYQXZ")
+    }
+
     func testSpokenClockQuantitiesKeepTheStatedTwelveHourTime() {
         for (source, expected) in [
             ("Come back at ten past two.", "Come back at 2:10."),

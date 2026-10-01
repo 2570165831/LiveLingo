@@ -1460,6 +1460,91 @@ actor TranslationModelLifetime {
     }
 }
 
+/// Short IDs exist only in the model transport. Native formula identity,
+/// restoration, output budgets and acceptance continue to use the original IDs.
+struct CaptionFormulaTransport: Sendable {
+    let input: String
+    let systemPrompt: String
+    private let originalInput: String
+    private let originals: Set<String>
+    private let decodedMarkers: [String: String]
+    private static let nativeMarker = try! NSRegularExpression(pattern: #"(?i)ZXQCHEM([0-9]+)QXZ"#)
+    private static let suspectMarker = try! NSRegularExpression(pattern: #"(?i)[A-Za-z_]*(?:ZX[A-Za-z]*[0-9]+[A-Za-z0-9_]*|Z[A-Za-z]*[0-9]+Q[A-Za-z0-9_]*)"#)
+    private static let unfinishedWord = try! NSRegularExpression(pattern: #"(?i)[A-Za-z_]*Z[A-Za-z0-9_]*$"#)
+
+    init(input: String, systemPrompt: String, enabled: Bool) {
+        originalInput = input
+        let range = NSRange(input.startIndex..., in: input)
+        let matches = Self.nativeMarker.matches(in: input, range: range)
+        let unmasked = Self.nativeMarker.stringByReplacingMatches(in: input, range: range, withTemplate: "")
+        // A literal that resembles the shorter family must never acquire a new
+        // meaning. Keep the old transport for the entire request in that case.
+        guard enabled, !matches.isEmpty,
+              Self.suspectMarker.firstMatch(in: unmasked, range: NSRange(unmasked.startIndex..., in: unmasked)) == nil else {
+            self.input = input; self.systemPrompt = systemPrompt
+            originals = []; decodedMarkers = [:]
+            return
+        }
+        var decoded: [String: String] = [:]
+        for match in matches {
+            let index = (input as NSString).substring(with: match.range(at: 1))
+            decoded["zx\(index)qxz"] = (input as NSString).substring(with: match.range)
+        }
+        decodedMarkers = decoded
+        originals = Set(decoded.values.map { $0.lowercased() })
+        self.input = Self.nativeMarker.stringByReplacingMatches(in: input, range: range, withTemplate: "ZX$1QXZ")
+        // Keep the fixed prompt byte-for-byte. Altering its example created a
+        // third cache variant on collision fallback and lost the token savings.
+        self.systemPrompt = systemPrompt
+    }
+
+    private func known(_ word: String) -> Bool {
+        decodedMarkers[word.lowercased()] != nil || originals.contains(word.lowercased())
+    }
+
+    private func decodeKnown(in text: String) -> String {
+        var result = text
+        for match in Self.suspectMarker.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let range = Range(match.range, in: result),
+                  let original = decodedMarkers[String(result[range]).lowercased()] else { continue }
+            result.replaceSubrange(range, with: original)
+        }
+        return result
+    }
+
+    func restore(_ output: String) throws -> String {
+        guard !decodedMarkers.isEmpty else { return output }
+        for match in Self.suspectMarker.matches(in: output, range: NSRange(output.startIndex..., in: output)) {
+            guard known((output as NSString).substring(with: match.range)) else {
+                throw QwenRuntimeError.translationRejected("译文含有无法还原的公式传输标记。")
+            }
+        }
+        // This layer checks transport spelling, not term counts or meaning.
+        // The existing native acceptance must still reject omissions/duplicates.
+        return decodeKnown(in: output)
+    }
+
+    func restorePartial(_ output: String) -> String {
+        guard !decodedMarkers.isEmpty else { return output }
+        var end = output.endIndex
+        for match in Self.suspectMarker.matches(in: output, range: NSRange(output.startIndex..., in: output)) {
+            guard let range = Range(match.range, in: output) else { continue }
+            if !known(String(output[range])) { end = range.lowerBound; break }
+        }
+        let prefix = String(output[..<end])
+        if let match = Self.unfinishedWord.firstMatch(in: prefix, range: NSRange(prefix.startIndex..., in: prefix)),
+           let range = Range(match.range, in: prefix) {
+            let word = String(prefix[range])
+            let literal = #"(?i)(?<![A-Za-z0-9_])"# + NSRegularExpression.escapedPattern(for: word)
+                + #"(?![A-Za-z0-9_])"#
+            if !known(word), originalInput.range(of: literal, options: .regularExpression) == nil {
+                return decodeKnown(in: String(prefix[..<range.lowerBound]))
+            }
+        }
+        return decodeKnown(in: prefix)
+    }
+}
+
 enum QwenTranslationClient {
 
     static let systemPrompt = """
@@ -1532,6 +1617,12 @@ enum QwenTranslationClient {
 
     typealias AdjacentRequest = @Sendable (_ input: String, _ systemPrompt: String, _ maximumOutputTokens: Int) async throws -> String
 
+    static func captionFormulaTransport(input: String, systemPrompt: String, modelName: String,
+                                        attempt: CaptionTranslationAttempt) -> CaptionFormulaTransport {
+        CaptionFormulaTransport(input: input, systemPrompt: systemPrompt,
+            enabled: modelName == QwenModelProfile.highQuality.translationModel && attempt == .standard)
+    }
+
     private static func requestTranslation(
         _ text: String, modelName: String, hints: [AuxiliaryTranslationHint],
         attempt: CaptionTranslationAttempt = .standard,
@@ -1565,7 +1656,9 @@ enum QwenTranslationClient {
         else {
             output = try await TranslationModelLifetime.shared.withModel(modelName) {
                 try await chat(input, modelName: modelName, systemPrompt: prompt,
-                    maximumOutputTokens: budget, timeout: 30, streaming: true, onUpdate: onUpdate)
+                    maximumOutputTokens: budget, timeout: 30, streaming: true,
+                    formulaTransport: captionFormulaTransport(input: input, systemPrompt: prompt,
+                        modelName: modelName, attempt: attempt), onUpdate: onUpdate)
             }
         }
         if usesWrapper, output.range(of: field, options: .caseInsensitive) != nil {
@@ -1942,21 +2035,28 @@ enum QwenTranslationClient {
         maximumOutputTokens: Int,
         timeout: TimeInterval,
         streaming: Bool = false,
+        formulaTransport: CaptionFormulaTransport? = nil,
         onUpdate: (@MainActor @Sendable (String) async -> Void)? = nil
     ) async throws -> String {
+        let transport = formulaTransport ?? CaptionFormulaTransport(input: input, systemPrompt: systemPrompt, enabled: false)
+        let update: (@MainActor @Sendable (String) async -> Void)?
+        if let onUpdate { update = { partial in await onUpdate(transport.restorePartial(partial)) } }
+        else { update = nil }
         if modelName == QwenModelProfile.highQuality.translationModel
             || modelName == QwenModelProfile.energySaver.translationModel {
             if streaming {
-                return try await streamingCompletion(
-                    input, modelName: modelName, systemPrompt: systemPrompt,
+                let output = try await streamingCompletion(
+                    transport.input, modelName: modelName, systemPrompt: transport.systemPrompt,
                     maximumOutputTokens: maximumOutputTokens, timeout: timeout,
-                    onUpdate: onUpdate
+                    onUpdate: update
                 )
+                return try transport.restore(output)
             }
-            return try await nonThinkingCompletion(
-                input, modelName: modelName, systemPrompt: systemPrompt,
+            let output = try await nonThinkingCompletion(
+                transport.input, modelName: modelName, systemPrompt: transport.systemPrompt,
                 maximumOutputTokens: maximumOutputTokens, timeout: timeout
             )
+            return try transport.restore(output)
         }
         throw QwenRuntimeError.modelUnavailable(modelName)
     }
