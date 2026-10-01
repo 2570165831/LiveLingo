@@ -124,7 +124,9 @@ final class CaptionIdentityTests: XCTestCase {
             ("The ratio is one to eight and a half.", "The ratio is 1:8.5.", "比例是 1:8.5。"),
             ("If the determinant is zero, the columns are not linearly independent.",
              "If the determinant is zero, the columns are linearly dependent.",
-             "如果行列式为零，则列向量线性相关。")
+             "如果行列式为零，则列向量线性相关。"),
+            ("The columns are not not linearly independent.",
+             "The columns are linearly independent.", "列向量线性无关。")
         ] {
             var inputs: [String] = []
             let model = try makeModel(.init(translate: { input, _, _, _, _ in

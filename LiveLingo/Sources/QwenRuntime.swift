@@ -2112,12 +2112,14 @@ enum AcademicRewriteScope {
     }
 }
 
-/// In a direct mathematical predicate, non-independence is dependence.
-/// Preserve scope/modality by leaving every other negation construction alone.
+/// In a direct mathematical predicate, one negation means dependence and two
+/// mean independence. Preserve modality, literal wording and existential scope.
 enum MathematicalPredicateNormalizer {
     private static let predicate = try! NSRegularExpression(
-        pattern: #"\b(is|are|was|were)\s+not\s+linearly\s+independent\b"#,
+        pattern: #"\b(is|are|was|were)\s+(not\s+)?not\s+linearly\s+independent\b"#,
         options: [.caseInsensitive])
+    private static let existentialPrefix = try! NSRegularExpression(
+        pattern: #"\bthere\s+$"#, options: [.caseInsensitive])
 
     static func normalize(_ source: String) -> String {
         let matches = predicate.matches(in: source, range: NSRange(source.startIndex..., in: source))
@@ -2126,8 +2128,14 @@ enum MathematicalPredicateNormalizer {
         for match in matches.reversed() {
             guard AcademicRewriteScope.permits(match.range, in: source, quoted: quoted),
                   let range = Range(match.range, in: result) else { continue }
+            // Negating "there are independent vectors" negates existence;
+            // it does not assert that dependent vectors exist instead.
+            let prefix = (source as NSString).substring(to: match.range.location)
+            guard existentialPrefix.firstMatch(in: prefix,
+                range: NSRange(prefix.startIndex..., in: prefix)) == nil else { continue }
             let verb = (source as NSString).substring(with: match.range(at: 1))
-            result.replaceSubrange(range, with: verb + " linearly dependent")
+            let property = match.range(at: 2).location == NSNotFound ? "dependent" : "independent"
+            result.replaceSubrange(range, with: verb + " linearly " + property)
         }
         return result
     }

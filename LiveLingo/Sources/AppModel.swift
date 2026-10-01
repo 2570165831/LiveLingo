@@ -3784,9 +3784,9 @@ enum ChemistryTranslationProtector {
                 }
             }
         }
-        if let expression = keepQuotedLiteralExpression,
-           let quoted = AcademicRewriteScope.quotedRanges(in: source) {
-            for match in expression.matches(in: source, range: whole)
+        let keepMatches = keepQuotedLiteralExpression?.matches(in: source, range: whole) ?? []
+        if !keepMatches.isEmpty, let quoted = AcademicRewriteScope.quotedRanges(in: source) {
+            for match in keepMatches
                 where !quoted.contains(where: { NSLocationInRange(match.range.location, $0) }) {
                 for index in 1..<match.numberOfRanges where match.range(at: index).location != NSNotFound {
                     result.append(match.range(at: index))

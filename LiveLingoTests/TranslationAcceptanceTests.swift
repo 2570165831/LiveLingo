@@ -182,7 +182,9 @@ final class TranslationAcceptanceTests: XCTestCase {
                        "The columns need not be linearly independent.",
                        "The columns cannot be linearly independent.",
                        "The columns aren't linearly independent.",
-                       "The columns are not not linearly independent.",
+                       "The columns are not not not linearly independent.",
+                       "There are not linearly independent vectors.",
+                       "There are not not linearly independent vectors.",
                        "The columns are not linearly dependent.",
                        #"Print "The columns are not linearly independent." exactly."#,
                        "Repeat the words the columns are not linearly independent.",
@@ -294,7 +296,9 @@ final class TranslationAcceptanceTests: XCTestCase {
             "The columns might not be linearly independent.",
             "The columns need not be linearly independent.",
             "The columns aren’t linearly independent.",
-            "The columns are not not linearly independent.",
+            "The columns are not not not linearly independent.",
+            "There are not linearly independent vectors.",
+            "There are not not linearly independent vectors.",
             "The columns are not linearly dependent.",
             #"Translate "The columns are not linearly independent" into Chinese."#,
             "Repeat the words the columns are not linearly independent.",
@@ -332,6 +336,58 @@ final class TranslationAcceptanceTests: XCTestCase {
                         return #"保留字符串 "ZXQCHEM0QXZ" 不变。列向量线性相关。SN2 不是氧化反应。加入 4 mL ZXQCHEM1QXZ。"#
                     })
                 XCTAssertEqual(result, expectedOutput)
+                let count = await counter.count()
+                XCTAssertEqual(count, 1)
+            }
+        }
+    }
+
+    func testDirectMathematicalDoubleNegationPreservesIndependenceAndScope() {
+        for (source, expected) in [
+            ("The columns are not not linearly independent.", "The columns are linearly independent."),
+            ("The basis vectors were not not linearly independent in the previous example.",
+             "The basis vectors were linearly independent in the previous example."),
+            ("The students’ vectors ARE NOT NOT linearly independent.",
+             "The students’ vectors ARE linearly independent."),
+            (#"Keep the string "are not not linearly independent" unchanged. These columns are not not linearly independent."#,
+             #"Keep the string "are not not linearly independent" unchanged. These columns are linearly independent."#)
+        ] {
+            XCTAssertEqual(MathematicalPredicateNormalizer.normalize(source), expected)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected)
+            XCTAssertEqual(MathematicalPredicateNormalizer.normalize(expected), expected)
+        }
+        for source in ["The columns are not necessarily not linearly independent.",
+                       "The columns are not not necessarily linearly independent.",
+                       "The columns might not not be linearly independent.",
+                       "There are not linearly independent vectors.",
+                       "In this example there  were not not linearly independent vectors.",
+                       "There\nare not linearly independent vectors.",
+                       #"Translate "The columns are not not linearly independent" into Chinese."#,
+                       "Use `the columns are not not linearly independent` in code.",
+                       "Repeat the words the columns are not not linearly independent.",
+                       "The columns are not not not linearly independent.",
+                       "Quote \"the columns are not not linearly independent."] {
+            XCTAssertEqual(MathematicalPredicateNormalizer.normalize(source), source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source)
+        }
+    }
+
+    func testTypedDoubleNegationUsesOneRequestAcrossBothModesAndModels() async throws {
+        let source = "If the determinant is nonzero, these vectors are not not linearly independent."
+        let expected = "If the determinant is nonzero, these vectors are linearly independent."
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            for thinking in [false, true] {
+                let counter = TypedRequestCounter()
+                let result = try await QwenTranslationClient.translateTypedText(source,
+                    modelName: model, thinking: thinking, request: { input, prompt, actualThinking in
+                        await counter.record()
+                        XCTAssertEqual(try Self.typedSource(in: input), expected)
+                        XCTAssertEqual(actualThinking, thinking)
+                        XCTAssertTrue(prompt.contains("This is user-typed text, not ASR."))
+                        XCTAssertFalse(prompt.contains(ChemistryTranslationProtector.negationInstruction))
+                        return "如果行列式非零，这些向量线性无关。"
+                    })
+                XCTAssertEqual(result, "如果行列式非零，这些向量线性无关。")
                 let count = await counter.count()
                 XCTAssertEqual(count, 1)
             }
