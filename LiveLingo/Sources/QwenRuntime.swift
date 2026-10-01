@@ -548,6 +548,116 @@ enum TranslationAcceptance {
         return restored as String
     }
 
+    struct QuotedTranslationRepairPlan: Sendable {
+        struct Value: Sendable {
+            let id: String
+            let source: String
+            let range: NSRange
+        }
+        let source: String
+        let candidate: String
+        let values: [Value]
+        static let prompt = JSONStatusRepairPlan.prompt
+        static let outputBudget = 192
+
+        func input() throws -> String {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "values_to_translate": Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0.source) })
+            ], options: [.sortedKeys, .withoutEscapingSlashes])
+            return String(decoding: data, as: UTF8.self)
+        }
+
+        func applying(_ response: String) throws -> String {
+            func fail() -> QwenRuntimeError {
+                .translationRejected("译文未通过验收：引语补译格式无效，或仍有未译内容。")
+            }
+            guard let object = try? JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: String],
+                  Set(object.keys) == Set(values.map(\.id)) else { throw fail() }
+            var locations = JSONStringLocations(response)
+            guard locations.walk(), !locations.hasDuplicateFields else { throw fail() }
+            let result = NSMutableString(string: candidate)
+            for value in values.sorted(by: { $0.range.location > $1.range.location }) {
+                guard let raw = object[value.id] else { throw fail() }
+                let text = SimplifiedChineseNormalizer.normalize(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard containsHan(text), !containsKanaOrHangul(text), text.count <= 160,
+                      text.rangeOfCharacter(from: CharacterSet(charactersIn: "\"'“”‘’`\r\n")) == nil
+                else { throw fail() }
+                _ = try validated(text, source: value.source)
+                // A surface safeguard, not proof of semantic negation scope.
+                if value.source.range(of: #"(?i)\b(?:not|no|never|neither|nor|none|nothing|without|cannot|[a-z]+n['’]t)\b"#,
+                                      options: .regularExpression) != nil,
+                   !text.contains(where: { "不没未无非勿别否禁".contains($0) }) { throw fail() }
+                result.replaceCharacters(in: value.range, with: text)
+            }
+            return try validated(result as String, source: source)
+        }
+    }
+
+    /// Repair an untranslated operand of an explicit translation request, not
+    /// every English quotation. Source/output pairing is positional and exact;
+    /// ambiguous repeated wording and literal/code content remain untouched.
+    static func quotedTranslationRepairPlan(candidate: String, source: String) -> QuotedTranslationRepairPlan? {
+        guard rejection(candidate: candidate, source: source) == .mixedEnglishProse,
+              !source.contains("{"), !source.contains("}"),
+              let sourceQuotes = AcademicRewriteScope.quotedRanges(in: source),
+              let outputQuotes = AcademicRewriteScope.quotedRanges(in: candidate),
+              !sourceQuotes.isEmpty, !outputQuotes.isEmpty else { return nil }
+        let ns = source as NSString
+        let out = candidate as NSString
+        let literals = ChemistryTranslationProtector.literalRanges(in: source)
+        func inner(_ range: NSRange) -> NSRange { NSRange(location: range.location + 1, length: range.length - 2) }
+        func matches(_ text: String, _ pattern: String) -> Bool { text.range(of: pattern, options: .regularExpression) != nil }
+        var selected: [NSRange] = []
+        var index = 0
+        while index < sourceQuotes.count {
+            let first = sourceQuotes[index]
+            let prefix = ns.substring(to: first.location)
+            guard matches(prefix, #"(?i)\btranslate[ \t]+$"#),
+                  !matches(prefix, #"(?i)\b(?:not(?:\s+to)?|never|cannot|don['’]t|do not|doesn['’]t|didn['’]t)\s+translate[ \t]+$"#)
+            else { index += 1; continue }
+            var end = index
+            while end + 1 < sourceQuotes.count {
+                let start = NSMaxRange(sourceQuotes[end])
+                let gap = ns.substring(with: NSRange(location: start, length: sourceQuotes[end + 1].location - start))
+                guard matches(gap, #"(?i)^\s*(?:,\s*(?:(?:and|or)\s+)?|(?:and|or)\s+)$"#) else { break }
+                end += 1
+            }
+            let tail = ns.substring(from: NSMaxRange(sourceQuotes[end]))
+            let clause = tail.components(separatedBy: CharacterSet(charactersIn: ".!?;\r\n")).first ?? ""
+            if matches(tail, #"(?i)^\s+(?:from\s+[a-z-]+\s+)?(?:into|to)\s+[a-z-]+\b"#),
+               !matches(clause, #"(?i)\b(?:keep|preserve|retain|leave|unchanged|verbatim|exactly)\b"#) {
+                selected.append(contentsOf: sourceQuotes[index...end])
+            }
+            index = end + 1
+        }
+        var values: [QuotedTranslationRepairPlan.Value] = []
+        for range in selected {
+            let body = inner(range)
+            let text = ns.substring(with: body)
+            guard englishContentTokens(text).count >= 3, text.count <= 160,
+                  !text.contains("ZXQCHEM"), !text.contains("`"),
+                  !literals.contains(where: { NSIntersectionRange($0, body).length > 0 }),
+                  sourceQuotes.filter({ ns.substring(with: inner($0)) == text }).allSatisfy({ selected.contains($0) })
+            else { continue }
+            let originals = selected.filter { ns.substring(with: inner($0)) == text }
+            let outputs = outputQuotes.filter { out.substring(with: inner($0)) == text }
+            guard originals.count == outputs.count else { return nil }
+            for output in outputs where !values.contains(where: { $0.range == inner(output) }) {
+                values.append(.init(id: "q\(values.count)", source: text, range: inner(output)))
+            }
+        }
+        guard !values.isEmpty, values.count <= 4,
+              values.reduce(0, { $0 + $1.source.count }) <= 400 else { return nil }
+        let trial = NSMutableString(string: candidate)
+        for value in values.sorted(by: { $0.range.location > $1.range.location }) {
+            trial.replaceCharacters(in: value.range, with: "译文")
+        }
+        // Do not spend an extra request when some other untranslated clause or
+        // structural error would still prevent accepting the complete caption.
+        guard rejection(candidate: trial as String, source: source) == nil else { return nil }
+        return QuotedTranslationRepairPlan(source: source, candidate: candidate, values: values)
+    }
+
     struct JSONStatusRepairPlan: Sendable {
         struct Value: Sendable {
             let id: String
@@ -1664,9 +1774,30 @@ enum QwenTranslationClient {
         if usesWrapper, output.range(of: field, options: .caseInsensitive) != nil {
             throw QwenRuntimeError.translationRejected("译文未通过验收：返回内容含输入包装字段。")
         }
-        return attempt == .standard
-            ? try await repairingJSONStatuses(output, source: text, modelName: modelName, request: request)
-            : output
+        guard attempt == .standard else { return output }
+        let statuses = try await repairingJSONStatuses(output, source: text, modelName: modelName, request: request)
+        return try await repairingQuotedTranslation(statuses, source: text, modelName: modelName, request: request)
+    }
+
+    private static func repairingQuotedTranslation(_ output: String, source: String, modelName: String,
+                                                   request: AdjacentRequest? = nil) async throws -> String {
+        guard let plan = TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: source) else { return output }
+        try Task.checkCancellation()
+        let input = try plan.input()
+        let response: String
+        if let request {
+            response = try await request(input, TranslationAcceptance.QuotedTranslationRepairPlan.prompt,
+                                         TranslationAcceptance.QuotedTranslationRepairPlan.outputBudget)
+        } else {
+            response = try await TranslationModelLifetime.shared.withModel(modelName) {
+                try await streamingCompletion(input, modelName: modelName,
+                    systemPrompt: TranslationAcceptance.QuotedTranslationRepairPlan.prompt,
+                    maximumOutputTokens: TranslationAcceptance.QuotedTranslationRepairPlan.outputBudget,
+                    timeout: 15, usePrefixCache: false)
+            }
+        }
+        try Task.checkCancellation()
+        return try plan.applying(response)
     }
 
     private static func repairingJSONStatuses(_ output: String, source: String, modelName: String,
@@ -2746,6 +2877,11 @@ enum AcademicRewriteScope {
 
     static func quotedRanges(in source: String) -> [NSRange]? {
         let characters = Array(source)
+        func wordCharacter(_ character: Character) -> Bool {
+            character.unicodeScalars.allSatisfy {
+                (65...90).contains($0.value) || (97...122).contains($0.value) || (48...57).contains($0.value)
+            }
+        }
         var ranges: [NSRange] = []
         var opening: Int?
         var closing: Character?
@@ -2756,8 +2892,8 @@ enum AcademicRewriteScope {
             defer { offset += width }
             let apostrophe = (character == "'" || character == "’") && index > 0
                 && index + 1 < characters.count
-                && (characters[index - 1].isLetter || characters[index - 1].isNumber)
-                && (characters[index + 1].isLetter || characters[index + 1].isNumber)
+                && wordCharacter(characters[index - 1])
+                && wordCharacter(characters[index + 1])
             if apostrophe { continue }
             if closing == nil, (character == "'" || character == "’"), index > 0,
                index + 1 < characters.count, characters[index + 1].isWhitespace,

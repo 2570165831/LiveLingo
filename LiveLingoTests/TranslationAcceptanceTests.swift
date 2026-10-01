@@ -1618,6 +1618,141 @@ final class TranslationAcceptanceTests: XCTestCase {
         XCTAssertNil(TranslationAcceptance.rejection(candidate: "把“门关着”译成法语。", source: source))
     }
 
+    func testQuotedTranslationRepairsOnlyOperandsAndKeepsTheOuterSentence() throws {
+        let source = #"Translate "the door is closed" into French, then compare Na⁺ and K⁺."#
+        let protected = ChemistryTranslationProtector.prepare(source)
+        let output = #"将"the door is closed"译成法语，然后比较 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ。"#
+        let plan = try XCTUnwrap(TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: protected.text))
+        XCTAssertEqual(plan.values.map(\.source), ["the door is closed"])
+        let merged = try plan.applying(#"{"q0":"门关着"}"#)
+        XCTAssertEqual(try protected.validatedRestore(in: merged), #"将"门关着"译成法语，然后比较 Na⁺ 和 K⁺。"#)
+    }
+
+    func testQuotedTranslationHandlesListsRepeatedOperandsAndContractions() throws {
+        for (source, output, response, expected) in [
+            (#"Translate "Not every container is empty" and "Neither lid is closed" into Portuguese."#,
+             #"将"Not every container is empty"和"Neither lid is closed"译成葡萄牙语。"#,
+             #"{"q0":"并非每个容器都是空的","q1":"两个盖子都没关上"}"#,
+             #"将"并非每个容器都是空的"和"两个盖子都没关上"译成葡萄牙语。"#),
+            (#"Translate "The circuit is open" and "The circuit is open" into Japanese."#,
+             #"将"The circuit is open"和"The circuit is open"译成日语。"#,
+             #"{"q0":"电路断开","q1":"电路断开"}"#,
+             #"将"电路断开"和"电路断开"译成日语。"#),
+            ("Translate 'The lamp isn't on' into Korean.",
+             "将‘The lamp isn't on’译成韩语。",
+             #"{"q0":"灯没开"}"#, "将‘灯没开’译成韩语。")
+        ] {
+            let plan = try XCTUnwrap(TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: source), source)
+            XCTAssertEqual(try plan.applying(response), expected)
+        }
+    }
+
+    func testClosingSingleQuoteBesideChineseDoesNotBecomeAContraction() throws {
+        for sentence in ["将‘The lamp isn't on’译成韩语。", "将'The lamp isn’t on'译成韩语。"] {
+            let ranges = try XCTUnwrap(AcademicRewriteScope.quotedRanges(in: sentence))
+            XCTAssertEqual(ranges.count, 1)
+            let range = try XCTUnwrap(ranges.first)
+            XCTAssertTrue((sentence as NSString).substring(with: range).contains("The lamp"))
+        }
+        XCTAssertEqual(AcademicRewriteScope.quotedRanges(in: "The students' vectors don't change."), [])
+    }
+
+    func testQuotedTranslationDoesNotTouchTitlesLiteralWordingOrAmbiguousCopies() {
+        for (source, output) in [
+            (#"Translate the introduction, but preserve the title "Neither sensor is active" exactly."#,
+             #"翻译引言，但完全保留标题"Neither sensor is active"。"#),
+            (#"Translate the surrounding explanation, but leave "The sample is not contaminated" in English."#,
+             #"翻译周围的解释，但保留"The sample is not contaminated"为英文。"#),
+            (#"The lecturer said "the door is closed"."#, #"老师说"the door is closed"。"#),
+            (#"Don't translate "the door is closed" into French."#, #"不要把"the door is closed"译成法语。"#),
+            ("Don’t translate ‘the door is closed’ into French.", "不要把‘the door is closed’译成法语。"),
+            (#"Try not to translate "the door is closed" into French."#, #"尽量不要把"the door is closed"译成法语。"#),
+            (#"Translate "the door is closed" into French, but keep it unchanged."#,
+             #"把"the door is closed"译成法语，但保留原样。"#),
+            (#"Translate "the door is closed" into French. The title is "the door is closed"."#,
+             #"把"the door is closed"译成法语。标题是"the door is closed"。"#),
+            (#"Translate "the door is closed" into French. The flag is {"state":"ready"}."#,
+             #"把"the door is closed"译成法语。标记是{"state":"ready"}。"#)
+        ] {
+            XCTAssertNil(TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: source), source)
+        }
+    }
+
+    func testQuotedTranslationSkipsAcceptedIncompleteOrUnrelatedFailedOutput() {
+        let source = #"Translate "the door is closed" into French."#
+        for output in [#"把"门关着"译成法语。"#, #"把"the door is closed译成法语。"#,
+                       #"把"the door is closed"译成法语。this extra sentence is untranslated"#,
+                       #"将"the door is closed"翻译成法语。<think>"#] {
+            XCTAssertNil(TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: source), output)
+        }
+        XCTAssertNil(TranslationAcceptance.quotedTranslationRepairPlan(
+            candidate: #"把"ZXQCHEM0QXZ is not ready"译成法语。"#,
+            source: #"Translate "ZXQCHEM0QXZ is not ready" into French."#))
+    }
+
+    func testQuotedTranslationRejectsWrongSchemaEnglishNegationLossAndQuoteInjection() throws {
+        let source = #"Translate "The lamp is not on" into French."#
+        let plan = try XCTUnwrap(TranslationAcceptance.quotedTranslationRepairPlan(
+            candidate: #"把"The lamp is not on"译成法语。"#, source: source))
+        XCTAssertFalse(try plan.input().contains("source_sentence"))
+        XCTAssertFalse(try plan.input().contains("French"))
+        for response in [#"{"q0":"灯亮着"}"#, #"{"q0":"The lamp is not on"}"#,
+                         #"{"q0":"灯没亮","extra":"多余"}"#, #"{}"#,
+                         #"{"q0":"灯没亮","q0":"灯没开"}"#,
+                         #"{"q0":"灯は点いていない"}"#, #"{"q0":"灯没开です"}"#,
+                         #"{"q0":"灯没开 않습니다"}"#,
+                         #"{"q0":"灯没开\"。额外的句子"}"#, #"{"q0":"灯没开\n解释"}"#] {
+            XCTAssertThrowsError(try plan.applying(response), response)
+        }
+        XCTAssertEqual(try plan.applying(#"{"q0":"灯没开"}"#), #"把"灯没开"译成法语。"#)
+    }
+
+    @MainActor func testQuotedTranslationRunsOneBoundedRepairInTheCaptionRoute() async throws {
+        for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+            let calls = StatusRepairRequests()
+            let result = try await QwenTranslationClient.translateAdjacent(previous: "", previousChinese: "",
+                current: #"Translate "the door is closed" into French."#, context: "", modelName: model,
+                repairPrevious: false, request: { input, prompt, budget in
+                    await calls.record(prompt)
+                    if prompt == TranslationAcceptance.QuotedTranslationRepairPlan.prompt {
+                        XCTAssertEqual(budget, 192)
+                        XCTAssertTrue(input.contains("values_to_translate"))
+                        return #"{"q0":"门关着"}"#
+                    }
+                    return #"把"the door is closed"译成法语。"#
+                })
+            XCTAssertEqual(result.current, #"把"门关着"译成法语。"#)
+            let count = await calls.count()
+            XCTAssertEqual(count, 2)
+        }
+    }
+
+    @MainActor func testQuotedTranslationDoesNotRepeatAfterBadRepairOrCancellation() async throws {
+        for cancelled in [false, true] {
+            let calls = StatusRepairRequests()
+            do {
+                let result = try await QwenTranslationClient.translateAdjacent(previous: "", previousChinese: "",
+                    current: #"Translate "the door is closed" into French."#, context: "",
+                    modelName: QwenModelProfile.highQuality.translationModel, repairPrevious: false,
+                    request: { _, prompt, _ in
+                        await calls.record(prompt)
+                        if prompt == TranslationAcceptance.QuotedTranslationRepairPlan.prompt {
+                            if cancelled { throw CancellationError() }
+                            return #"{"q0":"the door is closed"}"#
+                        }
+                        return #"把"the door is closed"译成法语。"#
+                    })
+                XCTAssertFalse(cancelled)
+                XCTAssertNil(result.current)
+                XCTAssertNotNil(result.currentRejection)
+            } catch {
+                XCTAssertTrue(cancelled && error is CancellationError)
+            }
+            let count = await calls.count()
+            XCTAssertEqual(count, 2)
+        }
+    }
+
     @MainActor func testTypedTranslationRejectsMixedProseButRestoresExplicitLiteralClause() async throws {
         do {
             _ = try await QwenTranslationClient.translateTypedText("The range sits inside the codomain.",
