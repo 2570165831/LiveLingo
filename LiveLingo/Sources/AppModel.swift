@@ -2509,9 +2509,13 @@ final class AppModel: ObservableObject {
                                           epoch: currentGeneration, worker: workerID) != nil,
                                       let previousIndex = self.translationInputIndex(previousInput,
                                           session: currentSession, epoch: currentGeneration, worker: workerID),
-                                      self.segments[previousIndex].chinese == previousInput.chinese,
-                                      let accepted = try? TranslationAcceptance.validatedCaption(
-                                          SimplifiedChineseNormalizer.normalize(current), source: normalizedInput) else { return }
+                                      self.segments[previousIndex].chinese == previousInput.chinese else { return }
+                                if TranslationAcceptance.isModelReply(current, source: normalizedInput) {
+                                    self.clearTranslationPreview()
+                                    return
+                                }
+                                guard let accepted = try? TranslationAcceptance.validatedCaption(
+                                    SimplifiedChineseNormalizer.normalize(current), source: normalizedInput) else { return }
                                 self.streamingDependencyIDs = [input.id, previousInput.id]
                                 self.streamingChinese = accepted
                                 Self.traceTranslation("current_preview", id: input.id,
@@ -2566,6 +2570,10 @@ final class AppModel: ObservableObject {
                             let draft = SimplifiedChineseNormalizer.normalize(
                                 protectedInput.restorePartial(in: partial)
                             )
+                            if TranslationAcceptance.isModelReply(draft, source: normalizedInput) {
+                                self.clearTranslationPreview()
+                                return
+                            }
                             if self.streamingChinese.isEmpty, !draft.isEmpty {
                                 Self.traceTranslation("first_text", id: id,
                                                       elapsed: ProcessInfo.processInfo.systemUptime - started)

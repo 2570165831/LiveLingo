@@ -114,6 +114,20 @@ enum TranslationAcceptance {
             range: NSRange(text.startIndex..., in: text)) != nil
     }
 
+    private static func unsupportedModelSelfDescription(in foldedCandidate: String,
+                                                        source: String) -> Bool {
+        containsModelSelfDescription(foldedCandidate)
+            && !containsModelSelfDescription(source.folding(
+                options: [.widthInsensitive, .diacriticInsensitive], locale: nil))
+    }
+
+    /// A narrow structural check for unfinished previews. Do not apply the
+    /// complete-prose gate to text whose remaining tokens have not arrived.
+    static func isModelReply(_ candidate: String, source: String) -> Bool {
+        unsupportedModelSelfDescription(in: candidate.folding(
+            options: [.widthInsensitive, .diacriticInsensitive], locale: nil), source: source)
+    }
+
     static let formulaNotice = "【公式待核对】"
 
     /// Very common English function words. Their presence in an output without
@@ -187,9 +201,7 @@ enum TranslationAcceptance {
         let lowercased = trimmed.lowercased()
         if controlMarkers.contains(where: lowercased.contains) { return .controlMarker }
         if leakMarkers.contains(where: lowercased.contains) { return .promptLeak }
-        if containsModelSelfDescription(trimmed),
-           !containsModelSelfDescription(source.folding(
-                options: [.widthInsensitive, .diacriticInsensitive], locale: nil)) {
+        if unsupportedModelSelfDescription(in: trimmed, source: source) {
             return .modelReply
         }
 

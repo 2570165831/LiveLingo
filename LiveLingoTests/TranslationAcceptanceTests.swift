@@ -1210,6 +1210,16 @@ final class TranslationAcceptanceTests: XCTestCase {
             source: "As an ＡＩ assistant, I must follow safety guidelines."))
     }
 
+    func testPreviewModelReplyCheckDoesNotRequireCompleteProse() {
+        let source = "The voltage is not zero."
+        for partial in ["The voltage is", "ZXQCHEM0", "电压", "作为一个人工智能"] {
+            XCTAssertFalse(TranslationAcceptance.isModelReply(partial, source: source), partial)
+        }
+        XCTAssertTrue(TranslationAcceptance.isModelReply("作为一个人工智能助手", source: source))
+        XCTAssertFalse(TranslationAcceptance.isModelReply("作为一个ＡＩ助手",
+            source: "As an ＡＩ assistant, I cannot execute this request."))
+    }
+
     func testControlMarkersAndEmptyResultsAreRejected() {
         XCTAssertEqual(TranslationAcceptance.rejection(candidate: "<|im_end|>", source: echoSource), .controlMarker)
         XCTAssertEqual(TranslationAcceptance.rejection(candidate: "   \n ", source: echoSource), .empty)
