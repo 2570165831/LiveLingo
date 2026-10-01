@@ -1119,6 +1119,16 @@ final class RealtimePolicyTests: XCTestCase {
                                                  lastCycleStarted: nil, allowConcurrent: true), 0)
     }
 
+    func testMemoryWarningStillAllowsWorkWithEnoughReclaimableMemory() {
+        let gib: UInt64 = 1_024 * 1_024 * 1_024
+        for available: UInt64 in [0, 7, 8, 32] {
+            XCTAssertTrue(SummaryResourcePolicy.pressureAllowsWork(level: 1, availableBytes: available * gib))
+            XCTAssertEqual(SummaryResourcePolicy.pressureAllowsWork(level: 2, availableBytes: available * gib), available >= 8)
+            XCTAssertFalse(SummaryResourcePolicy.pressureAllowsWork(level: 4, availableBytes: available * gib))
+            XCTAssertFalse(SummaryResourcePolicy.pressureAllowsWork(level: nil, availableBytes: available * gib))
+        }
+    }
+
     func testSummaryYieldsOnlyForSignificantCaptionBacklog() {
         XCTAssertFalse(SummaryRefreshPolicy.shouldYieldToCaptions(now: 100, pendingCount: 0, oldestEnqueuedAt: 0))
         XCTAssertFalse(SummaryRefreshPolicy.shouldYieldToCaptions(now: 100, pendingCount: 1, oldestEnqueuedAt: 100))
@@ -1295,6 +1305,36 @@ final class RealtimePolicyTests: XCTestCase {
         XCTAssertEqual(worker.stage, .schema)
         XCTAssertEqual(worker.field, "note.points[0].text")
         XCTAssertEqual(worker.localizedDetail, "复查输入缺少必需字段")
+    }
+
+    func testLearningFailuresKeepSpecificMetadataOnlyReasons() throws {
+        // Review input problems are named instead of collapsing to unexpected_error.
+        let stale = ReviewFailure.classify(ReviewIdentityError.staleInput, defaultStage: .directory)
+        XCTAssertEqual(stale.stage, .directory)
+        XCTAssertEqual(stale.code, "input_stale")
+        XCTAssertTrue(stale.logLine.contains("code=input_stale"))
+        XCTAssertTrue(stale.localizedDetail.contains("新修订"))
+        XCTAssertEqual(ReviewFailure.classify(ReviewIdentityError.conflict("所选目录属于另一份课程"),
+                                              defaultStage: .directory).code, "input_conflict")
+        XCTAssertEqual(ReviewFailure.classify(SessionStoreError.incompleteJournalTail(bytes: 3),
+                                              defaultStage: .directory).code, "session_incompleteJournalTail")
+        let file = ReviewFailure.classify(NSError(domain: NSCocoaErrorDomain, code: 260), defaultStage: .directory)
+        XCTAssertEqual(file.code, "ns_NSCocoaErrorDomain_260")
+        XCTAssertEqual(LearningFailureCode.code(for: QwenRuntimeError.outputLimitReached("上限")), "output_limit")
+
+        // Note outputs report the broken rule without echoing the text.
+        XCTAssertEqual(LearningNote.failureCode(for: ""), "empty_output")
+        XCTAssertEqual(LearningNote.failureCode(for: "{\"topic\": \"未闭合"), "invalid_json")
+        let point = LearningPoint(kind: "核心结论", text: "合成要点用于检查数量上限。", sourceIDs: ["en0s0"])
+        let crowded = LearningNote(topic: "合成课堂", points: Array(repeating: point, count: 25))
+        let text = String(decoding: try JSONEncoder().encode(crowded), as: UTF8.self)
+        XCTAssertThrowsError(try LearningNote.decode(text))
+        XCTAssertEqual(LearningNote.failureCode(for: text), "too_many_points_25")
+        XCTAssertFalse(LearningNote.failureCode(for: text).contains("合成"))
+
+        XCTAssertEqual(LearningFailureCode.code(for: QwenRuntimeError.requestTimedOut), "timeout")
+        XCTAssertEqual(LearningFailureCode.label(for: "output_limit"), "输出超出长度上限")
+        XCTAssertEqual(LearningFailureCode.label(for: "too_many_points_25"), "请求失败")
     }
 
     private func diagnosticSnapshot(index: Int, input: String?, response: String?) -> ReviewDiagnosticSnapshot {
@@ -1622,8 +1662,8 @@ final class CaptionLifecycleTests: XCTestCase {
                     addTeardownBlock { await queue.shutdownForTesting() }
                     let gate = CaptionRetryGate(first)
                     let dependency = CaptionTranslationDependencies(
-                        translate: { _, _, _, update in try await gate.translate(update) },
-                        adjacent: { _, _, _, _, _, _ in
+                        translate: { _, _, _, _, update in try await gate.translate(update) },
+                        adjacent: { _, _, _, _, _, _, _, _, shouldDefer in
                             XCTFail("independent session cannot use adjacent translation")
                             throw CancellationError()
                         })

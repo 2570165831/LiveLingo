@@ -1,9 +1,47 @@
 import AVFoundation
+import Combine
 import Foundation
 import Testing
 @testable import LiveLingo
 
 struct SessionExporterTests {
+    @Test func automaticModelSelectionUsesMemoryWithoutOverridingExplicitQuality() {
+        let gib: UInt64 = 1_024 * 1_024 * 1_024
+        for memory in [8 * gib, 16 * gib] {
+            #expect(ModelMode.automatic.resolvedProfile(isOnBattery: false, physicalMemory: memory) == .energySaver)
+        }
+        #expect(ModelMode.automatic.resolvedProfile(isOnBattery: false, physicalMemory: 24 * gib) == .highQuality)
+        #expect(ModelMode.automatic.resolvedProfile(isOnBattery: true, physicalMemory: 24 * gib) == .energySaver)
+        #expect(ModelMode.highQuality.resolvedProfile(isOnBattery: true, physicalMemory: 8 * gib) == .highQuality)
+    }
+
+    @Test @MainActor func recordingDefaultsRespectExplicitSleepChoiceAndIsolateMeterUpdates() throws {
+        for choice: Bool? in [nil, false, true] {
+            let suite = "LiveLingoMeterTest-\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            if let choice { defaults.set(choice, forKey: "LiveLingo.preventIdleSleepWhileRecording") }
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
+                observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _ in throw CancellationError() })
+            let model = AppModel(reviewQueue: queue, backgroundServices: false, defaults: defaults)
+            #expect(model.preventIdleSleepWhileRecording == (choice ?? true))
+            var classroomChanges = 0
+            var meterChanges = 0
+            let parent = model.objectWillChange.sink { classroomChanges += 1 }
+            let meter = model.captureMeter.objectWillChange.sink { meterChanges += 1 }
+            model.captureMeter.elapsedSeconds = 42
+            model.captureMeter.lastAudioLevelAt = Date()
+            model.captureMeter.waveformSamples.append(0.5)
+            #expect(classroomChanges == 0)
+            #expect(meterChanges == 3)
+            #expect(model.elapsedSeconds == 42)
+            #expect(model.waveformSamples.last == 0.5)
+            withExtendedLifetime((parent, meter)) {}
+        }
+    }
+
     @Test func stableCaptionsKeepContextWhileEnglishPreviewStreamsSeparately() {
         #expect(SpeechPipeline.stableChunkDuration == 10)
     }
@@ -53,7 +91,7 @@ struct SessionExporterTests {
    ("Generation.","Solar panels produce power.","Generation."),
    ("The next generation shows signs of progress.",context,"The next generation shows signs of progress."),
    ("There are 30 signs 60 metres apart.","Road safety.","There are 30 signs 60 metres apart."),
-   ("The cause is unknown. Meet at half past four.",context,"The cause is unknown. Meet at half past four."),
+   ("The cause is unknown. Meet at half past four.",context,"The cause is unknown. Meet at 4:30."),
    ("Does this cause two collisions?",context,"Does this cause two collisions?"),
    ("There are 30 signs 60 metres apart.",context,"There are 30 signs 60 metres apart."),
    ("s = ut + 0.5at²",context,"s = ut + 0.5at²")
@@ -266,15 +304,16 @@ struct SessionExporterTests {
         #expect(QwenTranslationClient.summarySystemPrompt.contains("Simplified Chinese"))
     }
 
-    @Test func chemistryTranslationProtectsFormulasUnitsAndInstrumentNames() {
+    @Test func chemistryTranslationProtectsSpeciesAndKeepsUnitMeaningVisible() {
         let source = "Dissolve 5.0 mmol of NaCl in 10 mL H2O at pH 7.4, then analyze by LC-MS."
         let prepared = ChemistryTranslationProtector.prepare(source)
 
         #expect(!prepared.text.contains("NaCl"))
-        #expect(!prepared.text.contains("10 mL"))
+        #expect(prepared.text.contains("5.0 mmol"))
+        #expect(prepared.text.contains("10 mL"))
         #expect(!prepared.text.contains("H2O"))
-        #expect(!prepared.text.contains("pH 7.4"))
-        #expect(!prepared.text.contains("LC-MS"))
+        #expect(prepared.text.contains("pH 7.4"))
+        #expect(prepared.text.contains("LC-MS"))
         #expect(prepared.restore(in: "译文：\(prepared.text)") == "译文：\(source)")
     }
 
@@ -461,6 +500,44 @@ struct SessionExporterTests {
         #expect(
             AcademicInputNormalizer.normalize(source)
                 == "Ferric ions Fe³⁺ react with thiocyanate ions SCN⁻ to form [FeSCN]²⁺ in an SN2 reaction."
+        )
+    }
+
+    @Test(arguments: [
+        "This N two matrix has nonzero entries.",
+        "Compare the vectors N two and N three separately.",
+        "Use labels N two and N three for the branches.",
+        "The numerator is alpha T plus beta.",
+        "In this formula, theta T plus phi is the numerator.",
+        "Use S N twofold as the exact label in the source code.",
+        "Use prefix_S N two and S N two_suffix as literal labels.",
+        "Keep βS N two and 2S N two unchanged."
+    ])
+    func academicInputNormalizerDoesNotJoinPartsOfOtherWords(_ source: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == source)
+    }
+
+    @Test(arguments: [
+        "Ferric ions Fe³⁺ and ferrous ions Fe²⁺ are different. SCN⁻ is the ligand.",
+        "Ferrous ions are in sample A; ferric ions Fe³⁺ react with SCN⁻ in sample B.",
+        "SCN⁻ reacts with Fe³⁺. Do not call ferrous ions ferric ions.",
+        "We compare ferrous ions with ferric ions Fe³⁺ before adding SCN⁻.",
+        "A ferrous ion is different from a ferric ion Fe³⁺. Consider the SCN⁻ experiment.",
+        "Ferrous ions are oxidised to Fe³⁺ in the SCN⁻ experiment.",
+        "Ferrous ions and Fe³⁺ are both present in the SCN⁻ solution."
+    ])
+    func academicInputNormalizerPreservesOtherIonNames(_ source: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == source)
+    }
+
+    @Test func academicInputNormalizerKeepsSingularWhenCorrectingDirectChargeLabel() {
+        #expect(
+            AcademicInputNormalizer.normalize("A ferrous ion Fe 3 + interacts with SCN -.")
+                == "A Ferric ion Fe³⁺ interacts with SCN⁻."
+        )
+        #expect(
+            AcademicInputNormalizer.normalize("(s n two), N A D H and A T P.")
+                == "(SN2), NADH and ATP."
         )
     }
 
@@ -742,8 +819,9 @@ struct ASRRecoveryTests {
         #expect(!TranslationLengthGuard.isPlausible(chinese: String(repeating: "中", count: 200), english: longEnglish))
         // 正常比例（0.3–0.5）✓ 应判可信
         #expect(TranslationLengthGuard.isPlausible(chinese: String(repeating: "中", count: 40), english: longEnglish))
-        // 英文过短时不判 ✓（"Okay." 这类噪声）
-        #expect(TranslationLengthGuard.isPlausible(chinese: String(repeating: "中", count: 80), english: "Okay."))
+        // 短句保留固定容差，但不允许附带长篇无关正文。
+        #expect(TranslationLengthGuard.isPlausible(chinese: "好的。", english: "Okay."))
+        #expect(!TranslationLengthGuard.isPlausible(chinese: String(repeating: "中", count: 80), english: "Okay."))
         // 纯英文/无中文不判 ✓
         #expect(TranslationLengthGuard.isPlausible(chinese: "plain english", english: longEnglish))
     }
@@ -925,7 +1003,7 @@ struct ASRRecoveryTests {
         // 契约：会话目录可用性判定（2026-09-18 今天这节的复查正是卡在 `.Trash` 上 ✗）。
         // 这条规则此前只写在批处理内部 ✗、没有测试 ✗；抽成纯函数后逐状态验 ✓。
         let manager = FileManager.default
-        #expect(LearningReviewQueue.directoryIssue(for: URL(fileURLWithPath: "/Users/li/.Trash/x")) == "directory_in_trash")
+        #expect(LearningReviewQueue.directoryIssue(for: URL(fileURLWithPath: "/Users/example/.Trash/x")) == "directory_in_trash")
         #expect(LearningReviewQueue.directoryIssue(for: URL(fileURLWithPath: "/Volumes/Backup/.Trashes/501/x")) == "directory_in_trash")
 
         // 不存在的目录 → 不可写 → directory_unavailable ✓

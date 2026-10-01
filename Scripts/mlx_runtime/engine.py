@@ -1,5 +1,6 @@
 """Isolated candidate: explicit token boundaries, per-request RNG and grammar state."""
 import hashlib
+import copy
 import json
 import os
 import secrets
@@ -11,15 +12,95 @@ from mlx_lm import load
 from mlx_lm.models.cache import make_prompt_cache, save_prompt_cache, load_prompt_cache
 from mlx_lm.sample_utils import apply_top_k, apply_top_p
 from outlines_core import Guide, Index
+from safetensors import safe_open
 from outlines_core.json_schema import build_regex_from_schema
 from grammar_vocabulary import build_vocabulary
 from review_diagnostics import grammar_error
 from outlines_core.kernels.mlx import allocate_token_bitmask, fill_next_token_bitmask, apply_token_bitmask
 
+PREFILL_STEP = 256
+
+
+class OutputBudgetExceeded(ValueError):
+    code = 'output_budget_exhausted'
+
+
+class PromptPrefixCache:
+    """At most two exact prefill snapshots under one model's total byte limit.
+
+    Recurrent state cannot be trimmed to another prefix. Requests receive deep
+    copies of an exact stored boundary; ordinary decoding never mutates a stored
+    snapshot. Least recently used entries make room without growing the budget.
+    """
+    def __init__(self, max_tokens=512, max_bytes=128 * 1024**2, max_entries=2):
+        self.max_tokens = max(0, max_tokens // PREFILL_STEP * PREFILL_STEP)
+        self.max_bytes = max(0, max_bytes)
+        self.max_entries = max(0, max_entries)
+        self._entries = OrderedDict()
+        self._low_priority = set()
+        self.nbytes = 0
+
+    @property
+    def tokens(self):
+        return next(reversed(self._entries), ())
+
+    def fetch(self, tokens, *, low_priority=False):
+        # Prefer the longest exact boundary; leave a token for the first logits.
+        for key in sorted(self._entries, key=len, reverse=True):
+            count = len(key)
+            if len(tokens) > count and tuple(tokens[:count]) == key:
+                snapshot = copy.deepcopy(self._entries[key][0])
+                if not low_priority:
+                    self._low_priority.discard(key)
+                    self._entries.move_to_end(key)
+                elif key in self._low_priority:
+                    self._entries.move_to_end(key)
+                return snapshot, count
+        return None, 0
+
+    def remember(self, tokens, cache, *, low_priority=False):
+        tokens = tuple(tokens)
+        if (not tokens or len(tokens) % PREFILL_STEP or len(tokens) > self.max_tokens
+                or not self.max_entries):
+            return False
+        size = sum(item.nbytes for item in cache)
+        if size > self.max_bytes:
+            return False
+        if tokens in self._entries:
+            if not low_priority:
+                self._low_priority.discard(tokens)
+                self._entries.move_to_end(tokens)
+            elif tokens in self._low_priority:
+                self._entries.move_to_end(tokens)
+            return True
+        # Notes use spare capacity. They may replace another note snapshot,
+        # but cannot evict translation/ordinary-summary state or reorder it.
+        if low_priority:
+            preferred = [(key, value) for key, value in self._entries.items()
+                         if key not in self._low_priority]
+            if (len(preferred) >= self.max_entries
+                    or sum(value[1] for _, value in preferred) + size > self.max_bytes):
+                return False
+        # Release old references before allocating a new snapshot. The limit
+        # covers retained snapshots, not the active request or model weights.
+        while self._entries and (len(self._entries) >= self.max_entries
+                                 or self.nbytes + size > self.max_bytes):
+            victim = next((key for key in self._entries if key in self._low_priority),
+                          next(iter(self._entries)))
+            _, removed_bytes = self._entries.pop(victim)
+            self._low_priority.discard(victim)
+            self.nbytes -= removed_bytes
+        self._entries[tokens] = (copy.deepcopy(cache), size)
+        if low_priority:
+            self._low_priority.add(tokens)
+        self.nbytes += size
+        return True
+
 class Engine:
     def __init__(self, model_path):
         self.model_path = str(Path(model_path).resolve())
         self.model, self.tokenizer = load(self.model_path)
+        self.prefix_cache = PromptPrefixCache()
         self.vocabulary = build_vocabulary(self.tokenizer)
         self.indices = OrderedDict()
         self.end_think = self.tokenizer.encode('</think>', add_special_tokens=False)
@@ -55,7 +136,7 @@ class Engine:
 class Generation:
     VERSION = 2
     def __init__(self, engine, prompt, schema=None, thinking=False, prefix='', seed=None,
-                 thinking_budget=16384, final_budget=4096):
+                 thinking_budget=16384, final_budget=4096, _use_prefix_cache=True):
         self.engine = engine
         self.spec = dict(prompt=prompt, schema=schema, thinking=thinking,
                          thinking_budget=thinking_budget, final_budget=final_budget)
@@ -64,7 +145,25 @@ class Generation:
         self.spec['seed'] = seed
         self.initial_prefix = prefix
         self.pending = engine.tokenizer.encode(prompt + prefix, add_special_tokens=False)
-        self.cache = make_prompt_cache(engine.model)
+        self.reused_prefix_tokens = 0
+        self.prefill_tokens = 0
+        # Reuse only exact input state, never output or a grammar's progress.
+        # Schema work stores one smaller chunk with lower admission priority.
+        # Restores and output-prefix continuations keep their checkpoint path.
+        self._low_priority_prefix = schema is not None
+        self._prefix_cache = (getattr(engine, 'prefix_cache', None)
+                              if _use_prefix_cache and not thinking and not prefix else None)
+        self._cache_tokens = ()
+        self.cache = None
+        if self._prefix_cache is not None:
+            limit = min(PREFILL_STEP, self._prefix_cache.max_tokens) if schema is not None else self._prefix_cache.max_tokens
+            count = min((len(self.pending) - 1) // PREFILL_STEP * PREFILL_STEP, limit)
+            self._cache_tokens = tuple(self.pending[:max(0, count)])
+            self.cache, self.reused_prefix_tokens = self._prefix_cache.fetch(
+                self.pending, low_priority=self._low_priority_prefix)
+            self.pending = self.pending[self.reused_prefix_tokens:]
+        if self.cache is None:
+            self.cache = make_prompt_cache(engine.model)
         self.ids = []
         self.final_ids = []
         self.key = mx.random.key(seed)
@@ -93,10 +192,15 @@ class Generation:
     def step(self):
         if self.done:
             return 'done'
-        if len(self.pending) > 256:
-            chunk, self.pending = self.pending[:256], self.pending[256:]
+        if len(self.pending) > PREFILL_STEP:
+            chunk, self.pending = self.pending[:PREFILL_STEP], self.pending[PREFILL_STEP:]
             self.engine.model(mx.array([chunk]), cache=self.cache)
             mx.eval([c.state for c in self.cache])
+            self.prefill_tokens += len(chunk)
+            if (self._cache_tokens and self.prefill_tokens + self.reused_prefix_tokens
+                    == len(self._cache_tokens)):
+                self._prefix_cache.remember(self._cache_tokens, self.cache,
+                                            low_priority=self._low_priority_prefix)
             return 'prefill'
         logits = self.engine.model(mx.array([self.pending]), cache=self.cache)[:, -1, :]
         if self.phase == 'final' and self.guide:
@@ -143,7 +247,7 @@ class Generation:
             if self.guide:
                 self.guide.advance(token, return_tokens=False)
             if self.final_count >= self.spec['final_budget']:
-                raise ValueError('Final output budget exhausted; incomplete output is not committable')
+                raise OutputBudgetExceeded('Final output budget exhausted; incomplete output is not committable')
         return 'token'
 
     def save(self, path):
@@ -154,18 +258,39 @@ class Generation:
             key=self.key.tolist(), phase=self.phase, thinking_count=self.thinking_count,
             final_count=self.final_count, done=self.done)
         temporary = path.with_name(path.stem+'.pending.safetensors')
-        save_prompt_cache(str(temporary), self.cache, {'generation':json.dumps(metadata, ensure_ascii=False)})
+        serialized = json.dumps(metadata, ensure_ascii=False)
+        if self.done:
+            # A completed request only replays its result while awaiting ACK.
+            # Persist its exact tokens/RNG/spec atomically, without writing KV
+            # tensors that will never be used for another model step.
+            mx.save_safetensors(str(temporary), {}, {'livelingo.completed': serialized})
+        else:
+            save_prompt_cache(str(temporary), self.cache, {'generation': serialized})
         os.replace(temporary, path)
 
     @classmethod
     def restore(cls, engine, path, expected_identity):
-        cache, metadata = load_prompt_cache(str(path), return_metadata=True)
-        state = json.loads(metadata['generation'])
+        # Read only the header to distinguish result-only records from legacy
+        # and unfinished tensor checkpoints. Do not load a large cache twice.
+        with safe_open(str(path), framework='numpy') as checkpoint:
+            completed = (checkpoint.metadata() or {}).get('livelingo.completed')
+        if completed is not None:
+            state = json.loads(completed)
+            if state.get('done') is not True:
+                raise ValueError('Result-only checkpoint is not complete')
+            cache = []
+        else:
+            cache, metadata = load_prompt_cache(str(path), return_metadata=True)
+            state = json.loads(metadata['generation'])
         if state['version'] != cls.VERSION or state['identity'] != expected_identity:
             raise ValueError('Checkpoint identity mismatch')
-        result = cls(engine, **state['spec'], prefix=state['prefix'])
+        result = cls(engine, **state['spec'], prefix=state['prefix'], _use_prefix_cache=False)
         if result.identity != expected_identity:
             raise ValueError('Model or request changed')
+        # A restored cache may already contain an arbitrary part of the input.
+        # It must never be recorded under a fresh request's prefix boundary.
+        result._prefix_cache = None
+        result._cache_tokens = ()
         result.cache = cache
         result.pending = state['pending']
         result.ids = state['ids']

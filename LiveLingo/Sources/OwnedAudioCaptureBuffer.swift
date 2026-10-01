@@ -30,6 +30,7 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
     private let source: DispatchSourceUserDataAdd
     private let consume: @Sendable (AVAudioPCMBuffer, Span) throws -> Void
     private let failed: @Sendable (Failure) -> Void
+    private let finish: @Sendable () throws -> Void
     private let readList: UnsafeMutableAudioBufferListPointer
     private let copyList: UnsafeMutableAudioBufferListPointer
     private let bytesPerFrame: Int
@@ -45,11 +46,13 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
     private var paused = false
     private var failure: Failure?
     private var failureDelivered = false
+    private var finishDelivered = false
     private var lastAcceptedEnd: TimeInterval?
 
     init(format: AVAudioFormat, queue: DispatchQueue,
          consume: @escaping @Sendable (AVAudioPCMBuffer, Span) throws -> Void,
-         failed: @escaping @Sendable (Failure) -> Void) throws {
+         failed: @escaping @Sendable (Failure) -> Void,
+         finish: @escaping @Sendable () throws -> Void = {}) throws {
         let frames = Int((format.sampleRate * 2).rounded(.down))
         let bpf = Int(format.streamDescription.pointee.mBytesPerFrame)
         guard frames > 0, frames <= Int(UInt32.max), bpf > 0,
@@ -67,7 +70,7 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
         copyList = Self.allocateList(count: buffers)
         readList.unsafeMutablePointer.pointee.mNumberBuffers = UInt32(buffers)
         copyList.unsafeMutablePointer.pointee.mNumberBuffers = UInt32(buffers)
-        self.consume = consume; self.failed = failed
+        self.consume = consume; self.failed = failed; self.finish = finish
         source = DispatchSource.makeUserDataAddSource(queue: queue)
         source.setEventHandler { [weak self] in self?.drainAvailable() }
         source.resume()
@@ -225,6 +228,23 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
                     occupiedFrames = 0; spanCount = 0
                 }
                 break
+            }
+        }
+        // A sealed stream must flush its format converter before the caller
+        // closes the WAV or replaces this tap. The serial consumer owns both.
+        let shouldFinish = lock.withLock { () -> Bool in
+            guard !accepting, failure == nil, occupiedFrames == 0, !finishDelivered else { return false }
+            finishDelivered = true
+            return true
+        }
+        if shouldFinish {
+            do { try finish() }
+            catch {
+                lock.withLock {
+                    let end = lastAcceptedEnd ?? ProcessInfo.processInfo.systemUptime
+                    failure = Failure(reason: "音频尾部转换或写入失败：\(error.localizedDescription)",
+                        observedStart: end, observedEnd: end, rejectedFrames: 0, processedFrames: processedFrames)
+                }
             }
         }
         let notification = lock.withLock { () -> Failure? in

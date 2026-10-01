@@ -33,7 +33,6 @@ DEFAULT_CACHE_LIMIT_MB = 2048
 DEFAULT_MEMORY_LOG_SECONDS = 15.0
 DEFAULT_IDLE_RELEASE_SECONDS = 30.0
 DEFAULT_IDLE_MODEL_SECONDS = 120.0
-IDLE_TICK_SECONDS = 5.0
 
 
 def environment_number(name, cast, default):
@@ -68,11 +67,6 @@ class MlxMemory:
         self.cache_limit_bytes = None if cache_limit_mb is None else max(0,int(cache_limit_mb))*MEBIBYTE
         self.log_seconds = max(0.0,float(log_seconds))
         self.idle_seconds = max(0.0,float(idle_seconds))
-        # Bounded waits let an idle worker reclaim cache without delaying a
-        # requested release noticeably.
-        self.idle_tick_seconds = IDLE_TICK_SECONDS
-        if 0 < self.idle_seconds < IDLE_TICK_SECONDS:
-            self.idle_tick_seconds = max(0.05,self.idle_seconds)
         self._clock = clock
         self._write = write or (lambda line: print(line, file=sys.stderr))
         self._report = report
@@ -146,9 +140,38 @@ class MlxMemory:
 
     def idle(self):
         """Reclaim cache once per quiet period; never on the token path."""
-        if self._released or self.idle_seconds <= 0: return False
-        if self._clock()-self._last_activity < self.idle_seconds: return False
+        delay = self.seconds_until_idle_release()
+        if delay is None or delay > 0: return False
         return self.release('idle-release')
+
+    def seconds_until_idle_release(self):
+        """None means there is no allocator maintenance to wake up for."""
+        if self._released or self.idle_seconds <= 0: return None
+        return max(0.0, self._last_activity + self.idle_seconds - self._clock())
+
+
+def read_commands(input_fd, stop_fd, stopping, commands):
+    """Wait for input or explicit shutdown, without periodic stdin polling."""
+    try:
+        pending = b''
+        while not stopping.is_set():
+            ready = select.select([input_fd, stop_fd], [], [])[0]
+            if stop_fd in ready or stopping.is_set(): return
+            if input_fd not in ready: continue
+            chunk = os.read(input_fd, 65536)
+            if not chunk:
+                commands.put({'op': 'shutdown'}); return
+            pending += chunk
+            while b'\n' in pending and not stopping.is_set():
+                line, pending = pending.split(b'\n', 1)
+                if len(line) > 2_097_152: raise ValueError('Oversized protocol request')
+                command = json.loads(line)
+                if not isinstance(command, dict): raise ValueError('Expected request object')
+                commands.put(command)
+            if len(pending) > 2_097_152:
+                raise ValueError('Oversized protocol request')
+    except Exception as error:
+        commands.put({'op': 'reader_error', 'message': str(error)})
 
 
 def send(kind, request_id=None, **fields):
@@ -179,30 +202,6 @@ def main():
     state_directory = Path(args.state_directory)
     state_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     commands = queue.Queue()
-    stopping = threading.Event()
-
-    def read():
-        try:
-            pending = b''
-            while not stopping.is_set():
-                if not select.select([sys.stdin.fileno()], [], [], 0.2)[0]:
-                    continue
-                chunk = os.read(sys.stdin.fileno(), 65536)
-                if not chunk:
-                    commands.put({'op':'shutdown'}); return
-                pending += chunk
-                while b'\n' in pending:
-                    line, pending = pending.split(b'\n', 1)
-                    if len(line) > 2_097_152: raise ValueError('Oversized protocol request')
-                    command = json.loads(line)
-                    if not isinstance(command, dict): raise ValueError('Expected request object')
-                    commands.put(command)
-                if len(pending) > 2_097_152:
-                    raise ValueError('Oversized protocol request')
-        except Exception as error:
-            commands.put({'op':'reader_error','message':str(error)})
-    reader = threading.Thread(target=read, daemon=True)
-    reader.start()
     from engine import Engine, Generation
     from schemas import note_schema, review_schema
     # The cache ceiling is in place before Engine() loads the first weight.
@@ -235,7 +234,10 @@ def main():
         generation.save(state_directory/(generation.identity+'.safetensors'))
         # Tensor caches are replaceable accelerators; the app owns the durable
         # text journal. Bound cold caches so paused jobs cannot fill the disk.
-        protected={generation.identity, *[g.identity for g in active.values()], *paused.keys()}
+        # A done event is not a delivery receipt. Protect completed records
+        # until ACK/CANCEL, just like active and hot paused generations.
+        protected={generation.identity, *[g.identity for g in active.values()],
+                   *paused.keys(), *completed.values()}
         files=[p for p in state_directory.iterdir() if not p.is_symlink() and p.is_file()
                and re.fullmatch(r'[0-9a-f]{64}\.safetensors',p.name)]
         total=sum(p.stat().st_size for p in files)
@@ -372,13 +374,25 @@ def main():
         send('snapshot',request_id,wire=generation.wire,recovered=recovered is generation)
         return True
 
+    stopping = threading.Event()
+    stop_read, stop_write = os.pipe()
+    reader = threading.Thread(target=read_commands,
+        args=(sys.stdin.fileno(), stop_read, stopping, commands), daemon=True)
     try:
+        reader.start()
         keep_running=True
         while keep_running:
-            # Bounded wait: an idle worker still ticks so unused allocator
-            # buffers can be returned after the quiet period.
-            try: command=commands.get(timeout=memory.idle_tick_seconds) if not active else None
-            except queue.Empty: command=None
+            command = None
+            if not active:
+                # Wake only for an actual maintenance deadline or a command.
+                # Queue.put wakes an indefinite wait immediately, including EOF.
+                timeout = memory.seconds_until_idle_release()
+                if engine is not None and args.idle_model_seconds > 0:
+                    model_delay = max(0.0, last_model_use + args.idle_model_seconds - time.monotonic())
+                    timeout = model_delay if timeout is None else min(timeout, model_delay)
+                if timeout is not None: timeout = min(timeout, threading.TIMEOUT_MAX)
+                try: command = commands.get(timeout=timeout)
+                except queue.Empty: pass
             while command is not None:
                 try: keep_running=handle(command)
                 except Exception as error: send('error',command.get('id'),message=str(error),controlID=command.get('controlID'),recoverable=not isinstance(error,(ValueError,KeyError,TypeError)))
@@ -427,7 +441,9 @@ def main():
                     memory.log_event('generating')
             except Exception as error:
                 finished='error'
-                send('error',request_id,message=describe_request_error(request_id,error),recoverable=not isinstance(error,(ValueError,KeyError,TypeError)))
+                send('error',request_id,message=describe_request_error(request_id,error),
+                     code='output_budget_exhausted' if getattr(error,'code',None)=='output_budget_exhausted' else None,
+                     recoverable=not isinstance(error,(ValueError,KeyError,TypeError)))
             finally:
                 if request_id not in active:
                     last_checkpoint.pop(request_id,None);last_emit.pop(request_id,None)
@@ -453,6 +469,17 @@ def main():
         pass
     finally:
         stopping.set()
-        reader.join(timeout=1)
+        # stdin may stay open after a shutdown command or a broken output pipe.
+        # Wake the reader before joining; do not trade polling for a stuck exit.
+        try:
+            os.write(stop_write, b'\0')
+            if reader.ident is not None: reader.join(timeout=1)
+            if reader.is_alive(): raise RuntimeError('Command reader did not stop')
+        finally:
+            # Do not recycle descriptors still owned by a live reader on error.
+            # Process exit will close them in that exceptional path.
+            if not reader.is_alive():
+                os.close(stop_write)
+                os.close(stop_read)
 
 if __name__=='__main__': main()

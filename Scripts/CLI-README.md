@@ -9,21 +9,29 @@ A CLI build runs outside the app bundle, so it has no bundled ASR service and no
 bundled MLX runtime of its own. Point it at local resources explicitly instead
 of relying on defaults:
 
-- `LIVELINGO_ASR_ENDPOINT` (with `LIVELINGO_ASR_TOKEN` when the service requires
-  a token) selects the loopback ASR service to reuse.
-- `LIVELINGO_MLX_PYTHON`, `LIVELINGO_MLX_WORKER`, `LIVELINGO_MLX_MODELS` and
-  `LIVELINGO_MLX_STATE` select the MLX language runtime.
+- Place `ASRRuntime/` and `Models/` beside the executable, or inside its isolated
+  bundle. The CLI starts and verifies its own loopback ASR child process.
+  External ASR endpoint/token overrides and resources inside `/Applications`
+  are rejected; do not use the installed app as a test runtime.
+- `LIVELINGO_MLX_PYTHON`, `LIVELINGO_MLX_WORKER` and `LIVELINGO_MLX_MODELS`
+  select local MLX language resources outside `/Applications`. Preferences,
+  data and MLX checkpoint state are isolated under each new output directory.
 
 The language runtime is MLX, one owned process per model; LM Studio is not used
-and no LM Studio service is required. Those model resources are shared with other
-clients, and the legacy `Scripts/run-qwen-service.sh` can serve the loopback ASR
-service for local development. Do not run it alongside a real recording.
+and no LM Studio service is required. Read-only model files may be reused, but
+test processes and their writable state belong to this run. Do not run a replay
+alongside a real recording or use the legacy service script for this CLI.
 
 Build into a new directory:
 
 ```sh
 bash Scripts/build-cli.sh /absolute/path/to/new-cli-build
 ```
+
+To reuse an existing compatible Swift module cache, pass
+`--module-cache /absolute/path/to/existing-cache`. The output directory must
+still be new. `--lifecycle-tests` can be combined with this option. Headless
+commands cancel any UI-only file chooser path without presenting a window.
 
 Silent real-time replay (no audio output device is opened):
 
@@ -58,12 +66,17 @@ CLI claims macOS 14 preview support.
 
 The output directory must not already exist. A run saves recording.wav,
 transcripts, bilingual JSONL/SRT, manifest and available cumulative summary.
-JSON lines include elapsed time, caption/translation/summary coverage and
-preview text. Logs contain the input's content; keep them with the test data.
-`finished` means the existing export workflow finished: inspect coverage and
+JSON lines include elapsed time and caption/translation/summary counts. Routine
+events omit classroom text; exported transcripts and model diagnostic artifacts
+remain private classroom material. Keep them with the test data.
+`processing_finished` means the existing export workflow finished: inspect coverage and
 failure markers separately, because the production workflow can save an
 incomplete summary. Capture duration accepts finite values from 0 (exclusive)
 to 3600 seconds. Replay duration is the input file's duration.
+
+Only a zero exit status together with `run_verified` and confirmed runtime
+cleanup is a successful complete run. `--verify-saved` checks export integrity;
+it does not prove complete processing and accepts valid audio with zero captions.
 
 For cleanup, first ensure the CLI has exited, keep the result/required logs,
 and move only its explicit test output/build paths to Trash. Never remove
@@ -84,3 +97,73 @@ continues through the input file. No device driver is installed by these tools.
 ### 跨段回归
 
 正式翻译使用前文上下文。硬切或明显未完的边界会顺序校对前段尾句，因此该边界最多使用两次翻译请求；普通断句只使用一次。前段中文改变时，包含该段的旧摘要批次撤回并重新生成。CLI 状态和结束事件包含 `summaryStatus`；验收时必须同时检查 `translated`、`summarized` 与 `segments`，不能仅凭 `phase=已保存` 判定完整通过。回放不播放声音，也不验证 ScreenCaptureKit 输入或悬浮窗口布局。
+
+## Classroom measurement reader
+
+`classroom-metrics.py` reads local artifacts and writes a **new** JSON report.
+It uses only Python's standard library, never starts models, never changes
+classroom files, and never promotes old machine captions to human ground truth.
+
+```sh
+python3 -B Scripts/classroom-metrics.py report \
+  --gold-manifest /absolute/path/to/benchmark/manifest.json \
+  --powermetrics /absolute/path/to/power-samples.plist \
+  --rss-jsonl /absolute/path/to/owned-rss.jsonl \
+  --output /absolute/path/to/new-metrics.json
+```
+
+Every input is optional; absent measurements are `null`. The report itself
+does not establish CLI success, which still requires exit status, `run_verified`
+and runtime cleanup. Existing output files are never replaced.
+
+Use normal NUL-separated **delta** plist samples from `powermetrics`, with
+`cpu_power,gpu_power,ane_power`. Powers are mW and each sample's `elapsed_ns`
+sets its integration interval. Cumulative/unmarked samples, missing rails,
+negative values and invalid samples are rejected. CPU/GPU/ANE components are
+added once; `combined_power` and duplicate GPU sections are not added again.
+This estimates those rails across **all host workloads**, excluding the display
+and other components. It is neither per-process energy nor battery discharge.
+The reader reports joules per **sampled** minute; classroom energy remains
+unknown until the measurement window and idle baseline are bound to a real run.
+
+For RSS, start the CLI first and bind its actual PID and executable:
+
+```sh
+python3 -B Scripts/classroom-metrics.py watch-rss \
+  --pid 12345 --executable /absolute/path/to/livelingo-cli \
+  --duration 1800 --interval 1 --output /absolute/path/to/new-owned-rss.jsonl
+```
+
+The watcher matches PID, user, start time and executable before adopting child
+processes. It retains observed orphaned children by identity, rejects PID reuse,
+and stops with an incomplete status if ownership changes or the duration limit
+is reached. It never signals or restarts a process. The peak is a sampled RSS
+sum. The reader also requires a consistent monotonic clock, ordered samples,
+and an empty final process sample before accepting the observed-exit status.
+It does not infer exit from a completion label alone. RSS includes possible
+shared-page duplication; unobserved child processes
+and between-sample peaks are not proven absent. It cannot replace CLI cleanup
+confirmation. On macOS, Python launchers may exec a framework binary: use the
+observed executable of the process you started, not a different guessed path.
+The report preserves the completion reason, including an identity change that
+can also occur during process exit; it does not turn that uncertainty into a
+confirmed release.
+
+`--latency-jsonl` accepts one row per segment with `segment_id`,
+`clock="host_monotonic_seconds"`, `audio_end_uptime`, and optional
+`first_translation_uptime` / `final_translation_uptime`. It reports mean,
+median, nearest-rank P95 and maximum, retaining slow outliers and the number
+of unmeasured segments. Existing CLI polling timestamps and model execution
+times **cannot** supply audio-end-to-caption latency; no conversion is assumed.
+These events measure pipeline observations, not the GUI's paint completion.
+
+`--snapshot` checks an encoded snapshot's payload checksum and counts distinct
+matching source IDs in completed batches. Missing or changed references are
+reported; knowledge-point coverage and factual correctness remain unknown.
+This reads only the snapshot checkpoint, without replaying its journal tail.
+
+Gold eligibility requires every row's declared human review, both verified
+texts, reviewer, a matching frozen `gold_sha256`, `gold_status="human_verified"`
+and the manifest's explicit `accuracy_comparison_allowed=true`. The tool checks
+those declarations, not who actually performed the review. The unreviewed CSVs
+prepared from real classrooms intentionally do not qualify.

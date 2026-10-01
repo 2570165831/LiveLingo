@@ -166,7 +166,7 @@ private struct TranscriptionCandidateEditor: View {
                         .accessibilityIdentifier("candidate-editor-\(candidate.id)")
                 }
             }
-            Text("确认后重做这段的译文和相关笔记；旧正文、笔记及复查意见继续保留。")
+            Text("确认后重做这段的译文和相关笔记；旧正文、笔记及核对意见继续保留。")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("保留原文") {

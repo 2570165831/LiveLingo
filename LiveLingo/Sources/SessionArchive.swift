@@ -127,6 +127,15 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
             }
         }
         try processing.validate()
+        for repair in processing.pendingCaptionRepairs ?? [] {
+            guard repair.sessionID == sessionID,
+                  repair.previous.id != repair.current.id,
+                  ([repair.previous, repair.current] + repair.context).allSatisfy({
+                      $0.inputRevision <= inputRevision && ($0.sessionID == nil || $0.sessionID == sessionID)
+                  }), !repair.normalizedCurrent.isEmpty, !repair.modelName.isEmpty else {
+                throw SessionStoreError.invalidState("待补修译文的会话或输入无效")
+            }
+        }
         for audio in audioFiles { try audio.validate() }
         for range in audioRanges {
             try range.validate()
@@ -180,6 +189,38 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+/// A queued optional repair retains exactly the source text used when its
+/// following caption was translated. Pausing or reopening must not lose it.
+struct DeferredCaptionRepair: Codable, Equatable, Sendable {
+    let sessionID: UUID
+    let previous: TranscriptSegment
+    let current: TranscriptSegment
+    let context: [TranscriptSegment]
+    let normalizedCurrent: String
+    let modelName: String
+
+    func previousIndex(in segments: [TranscriptSegment], session: UUID) -> Int? {
+        guard sessionID == session,
+              let index = segments.firstIndex(where: { $0.id == previous.id }),
+              segments[index].inputRevision == previous.inputRevision,
+              segments[index].english == previous.english,
+              segments[index].startTime == previous.startTime, segments[index].endTime == previous.endTime,
+              segments[index].chinese == previous.chinese,
+              segments[index].hasUsableTranslation,
+              let currentIndex = segments.firstIndex(where: { $0.id == current.id }),
+              currentIndex == index + 1,
+              segments[currentIndex].inputRevision == current.inputRevision,
+              segments[currentIndex].english == current.english,
+              segments[currentIndex].startTime == current.startTime, segments[currentIndex].endTime == current.endTime,
+              Array(segments[..<index].suffix(2)).count == context.count,
+              zip(segments[..<index].suffix(2), context).allSatisfy({ live, original in
+                  live.id == original.id && live.english == original.english
+                      && live.startTime == original.startTime && live.endTime == original.endTime
+              }) else { return nil }
+        return index
+    }
+}
+
 struct SessionProcessingState: Codable, Equatable, Sendable {
     enum Phase: String, Codable, Sendable { case idle, capturing, draining, paused, completed, failed }
     enum FailureSource: String, Codable, Sendable { case capture, storage }
@@ -187,6 +228,8 @@ struct SessionProcessingState: Codable, Equatable, Sendable {
     var paused: Bool = false
     var pendingSegmentIDs: [UUID] = []
     var pendingBatchIDs: [UUID] = []
+    /// Optional for archives written before repair scheduling was introduced.
+    var pendingCaptionRepairs: [DeferredCaptionRepair]?
     var summaryPaused: Bool = false
     var reviewPaused: Bool = true
     var lastError: String?
@@ -215,6 +258,7 @@ struct SessionProcessingState: Codable, Equatable, Sendable {
     func validate() throws {
         guard Set(pendingSegmentIDs).count == pendingSegmentIDs.count,
               Set(pendingBatchIDs).count == pendingBatchIDs.count,
+              Set((pendingCaptionRepairs ?? []).map { $0.current.id }).count == (pendingCaptionRepairs ?? []).count,
               lastErrorSource == nil || lastError != nil,
               lastCapturedTime.map({ $0.isFinite && $0 >= 0 }) ?? true else {
             throw SessionStoreError.invalidState("待处理任务或采集进度无效")
@@ -768,7 +812,9 @@ final class SessionStore: @unchecked Sendable {
                 && (next.chinese != segment.chinese || !next.hasUsableTranslation)
             if changedInput || changedTranslation {
                 guard new.inputRevision > old.inputRevision,
-                      new.revisionHistory.contains(where: { $0.previousSegment == segment && $0.toRevision > old.inputRevision }) else {
+                      new.revisionHistory.contains(where: {
+                          Self.samePreservedInput(segment, $0.previousSegment) && $0.toRevision > old.inputRevision
+                      }) else {
                     throw SessionStoreError.invalidState("正文改动缺少原文修订记录")
                 }
                 let changes = new.revisionHistory.filter { $0.previousSegment.id == segment.id && $0.toRevision > old.inputRevision }
