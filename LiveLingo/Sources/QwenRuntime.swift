@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import IOKit.ps
 import OSLog
 
@@ -74,6 +75,7 @@ enum TranslationAcceptance {
         case mixedEnglishProse
         case nonChineseText
         case incompleteProse
+        case jsonStructure
 
         var reason: String {
             switch self {
@@ -86,6 +88,7 @@ enum TranslationAcceptance {
             case .mixedEnglishProse: return "返回内容含未翻译的英文语句"
             case .nonChineseText: return "返回内容不是中文译文"
             case .incompleteProse: return "返回内容只保留术语，遗漏了原文语句"
+            case .jsonStructure: return "返回内容改变了原文 JSON 的字段、层级或数据"
             }
         }
     }
@@ -176,14 +179,20 @@ enum TranslationAcceptance {
     private static let jsonKeyExpression = try! NSRegularExpression(
         pattern: #"(?:\{|,)\s*("(?:[^"\\]|\\.)*")\s*:"#)
 
+    private struct EmbeddedJSONObject {
+        let text: String
+        let location: Int
+        let fields: [String: Any]
+    }
+
     /// Inspect complete, valid embedded objects; punctuation resembling JSON
     /// in ordinary speech is not enough to declare a quoted phrase a key.
-    private static func jsonKeys(in text: String) -> [(value: String, range: NSRange)] {
+    private static func jsonObjects(in text: String) -> [EmbeddedJSONObject] {
         guard text.contains("{") else { return [] }
         let nsText = text as NSString
         var start = 0, depth = 0
         var inString = false, escaped = false
-        var keys: [(value: String, range: NSRange)] = []
+        var objects: [EmbeddedJSONObject] = []
         for (offset, unit) in text.utf16.enumerated() {
             if depth == 0 {
                 if unit == 0x7B { start = offset; depth = 1; inString = false; escaped = false }
@@ -201,18 +210,64 @@ enum TranslationAcceptance {
                 depth -= 1
                 guard depth == 0 else { continue }
                 let object = nsText.substring(with: NSRange(location: start, length: offset - start + 1))
-                guard (try? JSONSerialization.jsonObject(with: Data(object.utf8))) != nil else { continue }
-                let objectText = object as NSString
-                for match in jsonKeyExpression.matches(in: object, range: NSRange(location: 0, length: objectText.length)) {
-                    let range = match.range(at: 1)
-                    let quoted = objectText.substring(with: range)
-                    guard let decoded = try? JSONSerialization.jsonObject(with: Data("[\(quoted)]".utf8)) as? [String],
-                          let value = decoded.first else { continue }
-                    keys.append((value, NSRange(location: start + range.location, length: range.length)))
-                }
+                guard let fields = try? JSONSerialization.jsonObject(with: Data(object.utf8)) as? [String: Any]
+                else { continue }
+                objects.append(EmbeddedJSONObject(text: object, location: start, fields: fields))
+            }
+        }
+        return objects
+    }
+
+    private static func jsonKeys(in text: String) -> [(value: String, range: NSRange)] {
+        var keys: [(value: String, range: NSRange)] = []
+        for object in jsonObjects(in: text) {
+            let objectText = object.text as NSString
+            for match in jsonKeyExpression.matches(in: object.text,
+                range: NSRange(location: 0, length: objectText.length)) {
+                let range = match.range(at: 1)
+                let quoted = objectText.substring(with: range)
+                guard let decoded = try? JSONSerialization.jsonObject(with: Data("[\(quoted)]".utf8)) as? [String],
+                      let value = decoded.first else { continue }
+                keys.append((value, NSRange(location: object.location + range.location, length: range.length)))
             }
         }
         return keys
+    }
+
+    /// String values may be translated. Field names, nesting, array order and
+    /// scalar data still carry source information and must not disappear into
+    /// prose merely because the result contains Chinese.
+    private indirect enum JSONStructure: Equatable {
+        case object([String: JSONStructure])
+        case array([JSONStructure])
+        case string
+        case number(String)
+        case boolean(Bool)
+        case null
+
+        init(_ value: Any) {
+            if let object = value as? [String: Any] {
+                self = .object(object.mapValues { JSONStructure($0) })
+            } else if let array = value as? [Any] {
+                self = .array(array.map { JSONStructure($0) })
+            } else if let number = value as? NSNumber {
+                self = CFGetTypeID(number) == CFBooleanGetTypeID()
+                    ? .boolean(number.boolValue) : .number(number.stringValue)
+            } else if value is NSNull {
+                self = .null
+            } else {
+                // JSONSerialization only permits strings in this remaining case.
+                self = .string
+            }
+        }
+    }
+
+    private static func preservesSourceJSON(in candidate: String, source: String) -> Bool {
+        let original = jsonObjects(in: source).filter { !$0.fields.isEmpty }
+        // Bare {} is also an empty set; it does not establish JSON source data.
+        guard !original.isEmpty else { return true }
+        let translated = jsonObjects(in: candidate).filter { !$0.fields.isEmpty }
+        return original.map { JSONStructure($0.fields) } == translated.map { JSONStructure($0.fields) }
     }
 
     private static func withoutSourceJSONKeys(in candidate: String, source: String) -> String {
@@ -255,6 +310,12 @@ enum TranslationAcceptance {
     }
 
     static func rejection(candidate: String, source: String) -> Rejection? {
+        if let rejection = contentRejection(candidate: candidate, source: source) { return rejection }
+        return preservesSourceJSON(in: bodyWithoutApplicationNotice(candidate), source: source)
+            ? nil : .jsonStructure
+    }
+
+    private static func contentRejection(candidate: String, source: String) -> Rejection? {
         // Application status text is not evidence that the model translated the
         // body. This also applies when restored/retried captions are revalidated.
         let trimmed = bodyWithoutApplicationNotice(candidate).folding(

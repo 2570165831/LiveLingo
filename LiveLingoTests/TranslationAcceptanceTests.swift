@@ -1125,6 +1125,108 @@ final class TranslationAcceptanceTests: XCTestCase {
         XCTAssertTrue(prepared.text.contains(#"The screen says "not ready"."#))
     }
 
+    func testEmbeddedJSONCannotDisappearOrRenameKeys() {
+        for (source, output) in [
+            (#"The record is {"status":"not valid","author":"Dijkstra","count":17}."#,
+             "该记录的状态为“无效”，作者为 Dijkstra，数量为 17。"),
+            (#"He wrote {"state":"not available","method":"SN2","rate":"Vmax","time":"10 s"}."#,
+             #"他写了{"状态":"不可用","方法":"SN2","速率":"Vmax","时间":"10 秒"}。"#),
+            (#"He wrote {"status":"ready","count":2}."#,
+             #"他写了{"status":"就绪"}。"#),
+            (#"He wrote {"status":"ready","count":2}."#,
+             #"他写了{"status":"就绪","count":2。"#)
+        ] {
+            XCTAssertNotNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+            XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(output, source: source))
+        }
+    }
+
+    func testEmbeddedJSONPreservesNestedKeysAndArrayShape() {
+        let source = #"The record is {"outer":{"status":"ready"},"items":[1,{"label":"wet"}],"count":2}."#
+        for output in [
+            #"记录是{"outer":{},"items":[1,{"label":"湿的"}],"count":2}。"#,
+            #"记录是{"outer":{"status":"就绪"},"items":[1],"count":2}。"#,
+            #"记录是{"outer":{"status":"就绪"},"items":[{"label":"湿的"},1],"count":2}。"#,
+            #"记录是{"outer":{"status":"就绪","label":"湿的"},"items":[1,{}],"count":2}。"#
+        ] {
+            XCTAssertNotNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+        }
+        XCTAssertNil(TranslationAcceptance.rejection(
+            candidate: #"记录是{"count":2,"items":[1,{"label":"湿的"}],"outer":{"status":"就绪"}}。"#,
+            source: source))
+    }
+
+    func testEmbeddedJSONPreservesNonStringScalars() {
+        let source = #"The record is {"status":"ready","count":2,"ratio":0.5,"enabled":true,"missing":null}."#
+        for output in [
+            #"记录是{"status":"就绪","count":3,"ratio":0.5,"enabled":true,"missing":null}。"#,
+            #"记录是{"status":"就绪","count":2,"ratio":5,"enabled":true,"missing":null}。"#,
+            #"记录是{"status":"就绪","count":2,"ratio":0.5,"enabled":false,"missing":null}。"#,
+            #"记录是{"status":"就绪","count":2,"ratio":0.5,"enabled":1,"missing":null}。"#,
+            #"记录是{"status":"就绪","count":2,"ratio":0.5,"enabled":true,"missing":"无"}。"#
+        ] {
+            XCTAssertNotNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+        }
+        XCTAssertNil(TranslationAcceptance.rejection(
+            candidate: #"记录是{"status":"就绪","count":2.0,"ratio":5e-1,"enabled":true,"missing":null}。"#,
+            source: source))
+    }
+
+    func testEmbeddedJSONAllowsTranslatedValuesAndReorderedKeys() {
+        for (source, output) in [
+            (#"He wrote {"not ready":"not possible","count":12}."#,
+             #"他写了{"count":12,"not ready":"不可能"}。"#),
+            (#"She wrote {"not \u0072eady":"not required","count":18}."#,
+             #"她写了{"count":18,"not ready":"不需要"}。"#),
+            (#"She wrote {"outer":{"status":"not complete"},"count":11}."#,
+             #"她写了{"count":11,"outer":{"status":"未完成"}}。"#),
+            (#"He wrote {"state":"ready","count":2}."#,
+             #"他写了 { "count" : 2, "state" : "就绪" }。"#)
+        ] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+        }
+    }
+
+    func testEmbeddedJSONScannerHandlesEscapesAndSeparateObjects() {
+        let source = #"He wrote {"text":"a brace } and \"quote\" belong here","count":2}, then {"state":"ready","count":3}."#
+        let output = #"他写了{"text":"花括号 } 和 \"引号\" 在这里","count":2}，然后写了{"state":"就绪","count":3}。"#
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source))
+        for missing in [
+            #"他写了{"text":"花括号 } 和 \"引号\" 在这里","count":2}，然后就绪。"#,
+            #"他写了{"text":"花括号 } 和 \"引号\" 在这里","count":2}，然后写了{"state":"就绪","count":4}。"#
+        ] {
+            XCTAssertNotNil(TranslationAcceptance.rejection(candidate: missing, source: source))
+        }
+    }
+
+    func testEmbeddedJSONRuleIgnoresMathematicalBracesAndInvalidJSON() {
+        for (source, output) in [
+            ("The set is {}.", "该集合是空集。"),
+            ("The set is {1, 2}.", "该集合包含 1 和 2。"),
+            (#"He said {"not ready": wait}."#, "他说尚未就绪，请等待。"),
+            (#"He wrote {status: ready}."#, "他写了状态为就绪。"),
+            ("The rate is Vmax.", "速率是 Vmax。")
+        ] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source), output)
+        }
+    }
+
+    func testEmbeddedJSONAcceptanceKeepsLiteralAndFormulaProtection() throws {
+        let literal = #"Print `{"status":"not ready","formula":"H2O","count":20}` exactly."#
+        let prepared = ChemistryTranslationProtector.prepare(literal)
+        let raw = "原样打印 ZXQCHEM0QXZ。"
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: raw, source: prepared.text))
+        let restored = try prepared.validatedRestore(in: raw)
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: restored, source: literal))
+
+        let source = #"She wrote {"status":"not ready","formula":"H2O","count":16}."#
+        let formula = ChemistryTranslationProtector.prepare(source)
+        let translated = #"她写了{"status":"未就绪","formula":"ZXQCHEM0QXZ","count":16}。"#
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: translated, source: formula.text))
+        let final = try formula.validatedRestore(in: translated)
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: final, source: source))
+    }
+
     func testMixedTechnicalTermsAndSpokenFormulasStillPass() {
         for (source, output) in [
             ("We use the law of mass action.", "我们使用 law of mass action。"),
