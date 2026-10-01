@@ -316,6 +316,9 @@ def main():
         if not isinstance(prompt,str) or not isinstance(prefix,str) or len((prompt+prefix).encode())>1_048_576:
             raise ValueError('Invalid input')
         purpose = command.get('purpose','text')
+        use_prefix_cache = command.get('usePrefixCache', True)
+        if not isinstance(use_prefix_cache, bool):
+            raise ValueError('usePrefixCache must be a boolean')
         schema = None
         # Check the request before any weight is loaded: a legacy or malformed
         # review input must fail with its structured compatibility error
@@ -347,7 +350,8 @@ def main():
         if not 1<=thinking_budget<=16384 or not 1<=final_budget<=4096:
             raise ValueError('Invalid token budget')
         generation=Generation(engine,prompt,schema,thinking=bool(command.get('thinking',False)),prefix=prefix,
-                              thinking_budget=thinking_budget,final_budget=final_budget)
+                              thinking_budget=thinking_budget,final_budget=final_budget,
+                              _use_prefix_cache=use_prefix_cache)
         if any(item.identity == generation.identity for item in active.values()):
             raise ValueError('Identical generation already active')
         for old_id, identity in list(identities.items()):

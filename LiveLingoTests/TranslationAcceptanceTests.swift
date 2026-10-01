@@ -1329,6 +1329,121 @@ final class TranslationAcceptanceTests: XCTestCase {
         XCTAssertEqual(try TranslationAcceptance.validated(repeatedOutput, source: repeatedSource), repeatedOutput)
     }
 
+    func testJSONStatusRepairChangesOnlyMatchedLeavesAndPreservesEveryOtherByte() throws {
+        let source = #"She wrote {"outer":{"state":"ready"},"samples":["not stable","wet"],"dose":"4 g","count":27}."#
+        let output = #"👩 她写了 { "count":27, "dose":"4 g", "samples":["not stable","wet"], "outer":{"state":"ready"} }。"#
+        let plan = try XCTUnwrap(TranslationAcceptance.jsonStatusRepairPlan(candidate: output, source: source))
+        XCTAssertEqual(plan.values.map(\.source), ["ready", "not stable", "wet"])
+        XCTAssertEqual(try plan.applying(#"{"0":"就绪","1":"不稳定","2":"湿润"}"#),
+            #"👩 她写了 { "count":27, "dose":"4 g", "samples":["不稳定","湿润"], "outer":{"state":"就绪"} }。"#)
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: source), .mixedEnglishProse)
+    }
+
+    func testJSONStatusRepairKeepsCodeLabelsAndIdentifierRolesSeparate() throws {
+        let source = #"Use the exact label "ready"; print `{"state":"ready"}`, then {"name":"ready","state":"ready","unit":"g","acronym":"DNA"}."#
+        let output = #"使用确切标签"ready"；打印 `{"state":"ready"}`，然后{"name":"ready","state":"ready","unit":"g","acronym":"DNA"}。"#
+        let plan = try XCTUnwrap(TranslationAcceptance.jsonStatusRepairPlan(candidate: output, source: source))
+        XCTAssertEqual(plan.values.count, 1)
+        XCTAssertEqual(try plan.applying(#"{"0":"就绪"}"#),
+            #"使用确切标签"ready"；打印 `{"state":"ready"}`，然后{"name":"ready","state":"就绪","unit":"g","acronym":"DNA"}。"#)
+    }
+
+    func testJSONStatusRepairSkipsUnsupportedOrAlreadyTranslatedContent() {
+        for (source, output) in [
+            (#"He wrote {"state":"READY","name":"Oxford","formula":"H2O","unit":"g"}."#,
+             #"他写了{"state":"READY","name":"Oxford","formula":"H2O","unit":"g"}。"#),
+            (#"He wrote {"state":"ready"}."#, #"他写了{"state":"就绪"}。"#),
+            (#"He wrote {"state":"not not ready"}."#, #"他写了{"state":"not not ready"}。"#),
+            (#"He wrote {"state":"ready","dose":"4 g"}."#, #"他写了{"state":"ready","dose":"5 g"}。"#),
+            (#"He wrote {"state":"ready"}."#, #"他写了{"状态":"ready"}。"#),
+            (#"He wrote {"state":"ready","state":"stable"}."#, #"他写了{"state":"ready","state":"stable"}。"#),
+            (#"He wrote {state: ready}."#, #"他写了{state: ready}。"#),
+            ("The sample is ready.", "样品已就绪。")
+        ] { XCTAssertNil(TranslationAcceptance.jsonStatusRepairPlan(candidate: output, source: source), source) }
+    }
+
+    func testJSONStatusRepairRejectsWrongResponseShapeEnglishAndMissingNegation() throws {
+        let source = #"He wrote {"state":"not ready"}."#
+        let output = #"他写了{"state":"not ready"}。"#
+        let plan = try XCTUnwrap(TranslationAcceptance.jsonStatusRepairPlan(candidate: output, source: source))
+        for response in [#"{}"#, #"{"0":"未就绪","1":"稳定"}"#, #"{"0":true}"#,
+                         #"{"0":"未就绪","0":"就绪"}"#, #"{"0":"not ready"}"#,
+                         #"{"0":"就绪"}"#, #"{"0":"未就绪 4"}"#,
+                         #"{"0":"未就绪ready"}"#, #"{"0":"未就绪レディ"}"#,
+                         #"{"0":"未就绪ZXQCHEM0QXZ"}"#, "已完成补译"] {
+            XCTAssertThrowsError(try plan.applying(response), response)
+        }
+        XCTAssertEqual(try plan.applying(#"{"0":"未就绪"}"#), #"他写了{"state":"未就绪"}。"#)
+    }
+
+    func testJSONStatusRepairEscapesOnlyTheReplacementValue() throws {
+        let source = #"He wrote {"state":"ready","text":"a } brace"}."#
+        let output = #"他写了 {"text":"一个 } 花括号","state":"\u0072eady"}。"#
+        let plan = try XCTUnwrap(TranslationAcceptance.jsonStatusRepairPlan(candidate: output, source: source))
+        XCTAssertEqual(try plan.applying(#"{"0":"已\"就绪\""}"#),
+                       #"他写了 {"text":"一个 } 花括号","state":"已\"就绪\""}。"#)
+    }
+
+    private actor StatusRepairRequests {
+        var prompts: [String] = []
+        func record(_ prompt: String) { prompts.append(prompt) }
+        func count() -> Int { prompts.count }
+    }
+
+    @MainActor func testJSONStatusRepairRunsInRealCaptionAndTypedRoutes() async throws {
+        let source = #"He wrote {"state":"ready","count":28}."#
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            let captionCalls = StatusRepairRequests()
+            let result = try await QwenTranslationClient.translateAdjacent(previous: "", previousChinese: "",
+                current: source, context: "", modelName: model, repairPrevious: false,
+                request: { input, prompt, budget in
+                    await captionCalls.record(prompt)
+                    if prompt == TranslationAcceptance.JSONStatusRepairPlan.prompt {
+                        XCTAssertEqual(budget, 128)
+                        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+                        XCTAssertEqual(object["values_to_translate"] as? [String: String], ["0":"ready"])
+                        return #"{"0":"就绪"}"#
+                    }
+                    return #"他写了{"state":"ready","count":28}。"#
+                })
+            XCTAssertEqual(result.current, #"他写了{"state":"就绪","count":28}。"#)
+            let captionCount = await captionCalls.count()
+            XCTAssertEqual(captionCount, 2)
+            let typedCalls = StatusRepairRequests()
+            let typed = try await QwenTranslationClient.translateTypedText(source, modelName: model,
+                request: { _, prompt, thinking in
+                    await typedCalls.record(prompt)
+                    if prompt == TranslationAcceptance.JSONStatusRepairPlan.prompt {
+                        XCTAssertFalse(thinking)
+                        return #"{"0":"就绪"}"#
+                    }
+                    return #"他写了{"state":"ready","count":28}。"#
+                })
+            XCTAssertEqual(typed, #"他写了{"state":"就绪","count":28}。"#)
+            let typedCount = await typedCalls.count()
+            XCTAssertEqual(typedCount, 2)
+        }
+    }
+
+    @MainActor func testJSONStatusRepairDoesNotIssueASecondValueRequestOnFailure() async throws {
+        let source = #"He wrote {"state":"ready"}."#
+        let calls = StatusRepairRequests()
+        let result = try await QwenTranslationClient.translateAdjacent(previous: "", previousChinese: "",
+            current: source, context: "", modelName: QwenModelProfile.energySaver.translationModel,
+            repairPrevious: false, request: { _, prompt, _ in
+                await calls.record(prompt)
+                return prompt == TranslationAcceptance.JSONStatusRepairPlan.prompt ? #"{"0":"ready"}"# : #"他写了{"state":"ready"}。"#
+            })
+        XCTAssertNil(result.current)
+        XCTAssertNotNil(result.currentRejection)
+        let count = await calls.count()
+        XCTAssertEqual(count, 2)
+        let many = #"He wrote {"states":["ready","ready","ready","ready","ready","ready","ready","ready","ready"]}."#
+        let manyOutput = #"他写了{"states":["ready","ready","ready","ready","ready","ready","ready","ready","ready"]}。"#
+        XCTAssertEqual(TranslationAcceptance.jsonStatusRepairPlan(candidate: manyOutput, source: many)?.values.count, 9)
+        XCTAssertNotNil(TranslationAcceptance.rejection(candidate: manyOutput, source: many))
+    }
+
     func testMixedTechnicalTermsAndSpokenFormulasStillPass() {
         for (source, output) in [
             ("We use the law of mass action.", "我们使用 law of mass action。"),

@@ -433,6 +433,7 @@ actor MLXRuntime {
                   thinking: Bool, purpose: String, finalBudget: Int, timeout: TimeInterval,
                   thinkingBudget: Int = 16384,
                   inactivityTimeout: TimeInterval? = nil,
+                  usePrefixCache: Bool = true,
                   onRequestIdentity: (@Sendable (String) -> Void)? = nil,
                   onUpdate: @escaping @MainActor @Sendable (String) async throws -> Void) async throws -> String {
         let id = UUID().uuidString
@@ -463,9 +464,11 @@ actor MLXRuntime {
             }
             defer { deadline.cancel() }
             do {
-                try await send(["op":"generate", "id":id, "prompt":prompt, "input":input, "prefix":prefix,
+                var command: [String: Any] = ["op":"generate", "id":id, "prompt":prompt, "input":input, "prefix":prefix,
                                 "thinking":thinking, "purpose":purpose, "thinkingBudget":thinkingBudget,
-                                "finalBudget":finalBudget], to: worker)
+                                "finalBudget":finalBudget]
+                if !usePrefixCache { command["usePrefixCache"] = false }
+                try await send(command, to: worker)
                 for try await event in pair.stream {
                     try Task.checkCancellation()
                     if let wire = event.wire { try await onUpdate(wire) }

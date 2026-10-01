@@ -26,6 +26,7 @@ class Engine:
 class Generation:
     def __init__(self,engine,prompt,schema=None,thinking=False,prefix='',**kwargs):
         self.engine=engine;self.prompt=prompt
+        trace('generation_cache_policy', enabled=kwargs.get('_use_prefix_cache', True))
         self.identity=hashlib.sha256(prompt.encode()).hexdigest()
         self.wire=prefix;self.text=prefix;self.thinking_count=0;self.final_count=len(prefix)
     def step(self):
@@ -158,6 +159,21 @@ class IdleWorkerTests(unittest.TestCase):
         worker.shutdown()
         self.assertEqual(sum(t['kind'] == 'reader_timeout' for t in worker.traces()), 0)
         self.assertTrue(all(t['timeout'] is None for t in worker.traces() if t['kind'] == 'main_wait'))
+
+    def test_value_repair_cache_opt_out_reaches_generation_and_default_stays_on(self):
+        worker = self.worker('--idle-cache-release-seconds', '0')
+        worker.send(op='generate', id='value', prompt='value-repair', usePrefixCache=False)
+        worker.until('done', 'value')
+        worker.send(op='ack', id='value', controlID='ack-value')
+        worker.until('ack', 'value')
+        worker.send(op='generate', id='ordinary', prompt='ordinary-caption')
+        worker.until('done', 'ordinary')
+        policies = [v['enabled'] for v in worker.traces() if v['kind']=='generation_cache_policy']
+        self.assertEqual(policies, [False, True])
+        worker.send(op='generate', id='bad-policy', prompt='bad', usePrefixCache='false')
+        worker.until('error', 'bad-policy')
+        self.assertEqual(len([v for v in worker.traces() if v['kind']=='generation_cache_policy']), 2)
+        worker.shutdown()
 
     def test_cache_deadline_then_indefinite_wait(self):
         worker = self.worker('--idle-cache-release-seconds', '.05')

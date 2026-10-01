@@ -77,10 +77,11 @@ class PrefixCacheTests(unittest.TestCase):
         plain = Generation(engine, 'translation')
         self.assertEqual(plain.reused_prefix_tokens, 256)
         self.assertEqual(plain.pending, [999])
-        for options in ({'thinking': True}, {'prefix': 'saved output'}):
+        for options in ({'thinking': True}, {'prefix': 'saved output'}, {'_use_prefix_cache': False}):
             generation = Generation(engine, 'translation', **options)
             self.assertEqual(generation.reused_prefix_tokens, 0)
             self.assertEqual(len(generation.pending), 257)
+        self.assertEqual(prefix.fetch(list(range(256)) + [999])[1], 256)
 
     def test_mid_prefill_checkpoint_cannot_publish_a_mislabeled_prefix(self):
         tokenizer = Mock()
