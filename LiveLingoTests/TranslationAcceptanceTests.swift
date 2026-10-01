@@ -255,6 +255,126 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
+    func testTypedMathematicalPredicateUsesEquivalentClaimAndOneRequest() async throws {
+        let cases = [
+            ("If the determinant is zero, the columns are not linearly independent. The ratio is one to eight and a half.",
+             "If the determinant is zero, the columns are linearly dependent. The ratio is one to eight and a half."),
+            ("If the determinant is nonzero, the columns are not linearly independent.",
+             "If the determinant is nonzero, the columns are linearly dependent."),
+            ("The vectors were not linearly independent in the previous example.",
+             "The vectors were linearly dependent in the previous example."),
+            ("The students’ columns are not linearly independent.",
+             "The students’ columns are linearly dependent.")
+        ]
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            for thinking in [false, true] {
+                for (source, expected) in cases {
+                    let counter = TypedRequestCounter()
+                    let result = try await QwenTranslationClient.translateTypedText(source,
+                        modelName: model, thinking: thinking, request: { input, prompt, actualThinking in
+                            await counter.record()
+                            XCTAssertEqual(try Self.typedSource(in: input), expected)
+                            XCTAssertTrue(prompt.contains("This is user-typed text, not ASR."))
+                            XCTAssertEqual(actualThinking, thinking)
+                            XCTAssertFalse(prompt.contains(ChemistryTranslationProtector.negationInstruction))
+                            return "列向量线性相关。"
+                        })
+                    XCTAssertEqual(result, "列向量线性相关。")
+                    let count = await counter.count()
+                    XCTAssertEqual(count, 1)
+                }
+            }
+        }
+    }
+
+    func testTypedMathematicalRoutingDoesNotCorrectASRWordsOrOtherNegations() async throws {
+        let sources = [
+            "The columns are not necessarily linearly independent.",
+            "Not all columns are linearly independent.",
+            "The columns might not be linearly independent.",
+            "The columns need not be linearly independent.",
+            "The columns aren’t linearly independent.",
+            "The columns are not not linearly independent.",
+            "The columns are not linearly dependent.",
+            #"Translate "The columns are not linearly independent" into Chinese."#,
+            "Repeat the words the columns are not linearly independent.",
+            "Quote \"the columns are not linearly independent.",
+            "The Machileus-Menten equation has a K m value of five. Do not change the model name.",
+            "The time is a quarter past eleven. The ratio is one to eight and a half."
+        ]
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            for source in sources {
+                let result = try await QwenTranslationClient.translateTypedText(source,
+                    modelName: model, request: { input, _, thinking in
+                        XCTAssertEqual(try Self.typedSource(in: input), source)
+                        XCTAssertFalse(thinking)
+                        return "验证完成。"
+                    })
+                XCTAssertEqual(result, "验证完成。")
+            }
+        }
+    }
+
+    func testTypedEquivalentPredicateKeepsLiteralAndFormulaRestoration() async throws {
+        let source = #"Keep the string "not linearly independent" unchanged. The columns are not linearly independent. SN2 is not an oxidation. Add 4 mL H2O."#
+        let expectedInput = #"Keep the string "ZXQCHEM0QXZ" unchanged. The columns are linearly dependent. SN2 is not an oxidation. Add 4 mL ZXQCHEM1QXZ."#
+        let expectedOutput = #"保留字符串 "not linearly independent" 不变。列向量线性相关。SN2 不是氧化反应。加入 4 mL H2O。"#
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            for thinking in [false, true] {
+                let counter = TypedRequestCounter()
+                let result = try await QwenTranslationClient.translateTypedText(source,
+                    modelName: model, thinking: thinking, request: { input, prompt, actualThinking in
+                        await counter.record()
+                        XCTAssertEqual(try Self.typedSource(in: input), expectedInput)
+                        XCTAssertEqual(actualThinking, thinking)
+                        XCTAssertEqual(prompt.contains(ChemistryTranslationProtector.negationInstruction),
+                                       model == QwenModelProfile.energySaver.translationModel)
+                        return #"保留字符串 "ZXQCHEM0QXZ" 不变。列向量线性相关。SN2 不是氧化反应。加入 4 mL ZXQCHEM1QXZ。"#
+                    })
+                XCTAssertEqual(result, expectedOutput)
+                let count = await counter.count()
+                XCTAssertEqual(count, 1)
+            }
+        }
+    }
+
+    func testTypedEquivalentPredicateAlsoUsesExistingPlainTextRoute() async throws {
+        let source = "The source_text_to_translate field is empty. The columns are not linearly independent."
+        let expected = "The source_text_to_translate field is empty. The columns are linearly dependent."
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            let result = try await QwenTranslationClient.translateTypedText(source,
+                modelName: model, request: { input, prompt, _ in
+                    XCTAssertEqual(input, expected)
+                    XCTAssertFalse(prompt.contains("Translate only the source_text_to_translate value"))
+                    return "字段为空。列向量线性相关。"
+                })
+            XCTAssertEqual(result, "字段为空。列向量线性相关。")
+        }
+    }
+
+    func testKeepStringUnchangedProtectsOnlyTheExplicitLiteralRequest() throws {
+        for source in [#"Keep the string "not linearly independent" unchanged."#,
+                       "Please keep this label ‘can’t’ unchanged.",
+                       "Keep the name 'won’t' unchanged.",
+                       #"The columns are linearly dependent. Keep the text "is not" unchanged."#] {
+            let protected = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertNotEqual(protected.text, source)
+            XCTAssertEqual(try protected.validatedRestore(in: protected.text), source)
+            XCTAssertThrowsError(try protected.validatedRestore(in: "保留字符串不变。"))
+        }
+        for source in [#"Do not keep the string "not linearly independent" unchanged."#,
+                       #"Keep the string "not linearly independent" changed."#,
+                       #"Keep the string "not linearly independent" not unchanged."#,
+                       #"Translate "not linearly independent" into Chinese."#,
+                       #"He said "Stop. Keep the string 'not linearly independent' unchanged.""#,
+                       "Keep the string \"not linearly independent unchanged."] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source)
+        }
+        let mixed = #"Keep the string "not linearly independent" unchanged. Translate "the door is closed" into Chinese."#
+        XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(mixed).text,
+                       #"Keep the string "ZXQCHEM0QXZ" unchanged. Translate "the door is closed" into Chinese."#)
+    }
+
     func testCaptionNegationRoutingPreservesInputBudgetAndOneRequest() async throws {
         let source = "You must not stop the experiment."
         for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {

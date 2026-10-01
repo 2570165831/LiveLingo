@@ -3686,6 +3686,11 @@ enum ChemistryTranslationProtector {
         #"(?i)\b(?:identifier|function|variable)\s+"# + quotedLiteral
     ].compactMap { try? NSRegularExpression(pattern: $0) }
     private static let quotedNameExpression = try? NSRegularExpression(pattern: quotedLiteral)
+    // A direct request to keep a named string unchanged is explicit literal
+    // wording too. Do not infer this from negated requests or quoted speech.
+    private static let keepQuotedLiteralExpression = try? NSRegularExpression(pattern:
+        #"(?i)(?:^|[.!?\r\n])\s*(?:please\s+)?keep\s+(?:(?:the|this)\s+)?(?:string|text|label|identifier|name)\s+"#
+        + quotedLiteral + #"\s+unchanged\b"#)
     private static let namingIntroductionPattern: String = {
         let verb = #"(?:call(?:s|ed|ing)?|nam(?:e[sd]?|ing)|renam(?:e[sd]?|ing)|label(?:s|led|ling|ed|ing)?)"#
         let object = #"(?:it|this|that|them|these|those|(?:the|this|that|these|those|our)\s+(?:(?:first|second|lower|upper|new|old)\s+)?(?:matri(?:x|ces)|(?:variable|vector|function|label|identifier|array|node|sample|file|process)s?|branch(?:es)?))"#
@@ -3774,6 +3779,15 @@ enum ChemistryTranslationProtector {
         var result: [NSRange] = []
         for expression in literalExpressions {
             for match in expression.matches(in: source, range: whole) {
+                for index in 1..<match.numberOfRanges where match.range(at: index).location != NSNotFound {
+                    result.append(match.range(at: index))
+                }
+            }
+        }
+        if let expression = keepQuotedLiteralExpression,
+           let quoted = AcademicRewriteScope.quotedRanges(in: source) {
+            for match in expression.matches(in: source, range: whole)
+                where !quoted.contains(where: { NSLocationInRange(match.range.location, $0) }) {
                 for index in 1..<match.numberOfRanges where match.range(at: index).location != NSNotFound {
                     result.append(match.range(at: index))
                 }
