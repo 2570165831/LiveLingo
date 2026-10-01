@@ -239,6 +239,60 @@ final class ClassroomPresentationTests: XCTestCase {
         try capture(view, name: "notes-rendering-updated-content")
     }
 
+    func testReviewReportRenderingSplitsOnceAndTokenizesEachSideOnce() async throws {
+        let report = """
+        ## 合成复查报告 · 用于渲染检查
+        - **原笔记 · 要点 1**：若 v = 2 m/s 且 t = 3 s，则 s = 6 m。
+        - **9B 建议（待核对）**：若 v = 2 m/s 且 t = 4 s，则 s = 8 m。
+        - **原笔记 · 要点 2**：反应温度为 20°C，不能超过上限。
+        - **9B 建议（待核对）**：反应温度为 25°C，不能超过上限。
+        - **原笔记 · 要点 3**：浓度为 1.0e-3 mol/L，SN2 不是氧化反应。
+        - **9B 建议（待核对）**：浓度为 1.5e-3 mol/L，SN2 不是氧化反应。
+        ## 原文依据
+          - 原文：保留 **否定** 和 $v = 2\\,m/s$；这是合成内容。
+        """
+        SummaryRenderingDiagnostics.reset()
+        let controller = NSHostingController(rootView: SummaryRenderingDiagnostics.summaryViewForTesting(text: report)
+            .padding(18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color(nsColor: .textBackgroundColor))
+            .environment(\.colorScheme, .light))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 720),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentViewController = controller
+        window.setContentSize(NSSize(width: 900, height: 720))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        let view = controller.view
+        try await settle(view)
+        let initial = SummaryRenderingDiagnostics.counts
+        XCTAssertGreaterThan(initial.summaryBodies, 0, "The actual summary view must render")
+        XCTAssertGreaterThan(initial.reviewDifferences, 0, "The report must include real paired comparisons")
+        XCTAssertEqual(initial.lineSplits, initial.summaryBodies, "Split the report once per body")
+        XCTAssertEqual(initial.reviewTokenizations, initial.reviewDifferences,
+                       "Tokenize original and proposed once each; still compute both marked directions")
+        try capture(view, name: "review-rendering-original-report")
+
+        SummaryRenderingDiagnostics.reset()
+        controller.rootView = SummaryRenderingDiagnostics.summaryViewForTesting(
+            text: report.replacingOccurrences(of: "25°C", with: "30°C"))
+            .padding(18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color(nsColor: .textBackgroundColor))
+            .environment(\.colorScheme, .light)
+        try await settle(view)
+        let corrected = SummaryRenderingDiagnostics.counts
+        XCTAssertGreaterThan(corrected.summaryBodies, 0, "A changed suggestion must update")
+        XCTAssertGreaterThan(corrected.reviewDifferences, 0)
+        XCTAssertEqual(corrected.lineSplits, corrected.summaryBodies)
+        XCTAssertEqual(corrected.reviewTokenizations, corrected.reviewDifferences)
+        try capture(view, name: "review-rendering-corrected-report")
+        print("REVIEW_RENDER_PROBE " + String(decoding: try JSONEncoder().encode(
+            ["initial": initial, "corrected": corrected]), as: UTF8.self))
+    }
+
     private func fixture(translation: CaptionTranslationDependencies? = nil) throws -> (AppModel, [TranscriptSegment], LearningNotebook) {
         XCTAssertTrue(AppRuntimeEnvironment.isUnitTesting)
         let directory = FileManager.default.temporaryDirectory

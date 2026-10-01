@@ -32,6 +32,7 @@ enum SummaryRenderingDiagnostics {
         var lineSplits = 0
         var inlineParses = 0
         var reviewDifferences = 0
+        var reviewTokenizations = 0
         var previewBodies = 0
         var streamingBodies = 0
         var floatingBodies = 0
@@ -42,6 +43,9 @@ enum SummaryRenderingDiagnostics {
         counts[keyPath: key] += 1
     }
     static func reset() { counts = Counts() }
+    static func summaryViewForTesting(text: String) -> some View {
+        SummaryMarkdownView(text: text)
+    }
 }
 #endif
 
@@ -1725,6 +1729,7 @@ private struct SummaryMarkdownView: View {
         #if DEBUG
         let _ = SummaryRenderingDiagnostics.record(\.summaryBodies)
         #endif
+        let lines = self.lines
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                 let content = line.trimmingCharacters(in: .whitespaces)
@@ -1778,18 +1783,23 @@ private struct ReviewChangeView: View {
     let original: String
     let proposed: String
 
-    private func marked(_ value: String, against other: String, removed: Bool) -> Text {
+    private static let tokenExpression = try! NSRegularExpression(
+        pattern: #"[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[A-Za-z]+|\X"#)
+
+    private static func tokens(_ text: String) -> [String] {
+        #if DEBUG
+        SummaryRenderingDiagnostics.record(\.reviewTokenizations)
+        #endif
+        return tokenExpression.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+            Range($0.range, in: text).map { String(text[$0]) }
+        }
+    }
+
+    private func marked(_ value: String, tokens characters: [String],
+                        against otherCharacters: [String], removed: Bool) -> Text {
         #if DEBUG
         SummaryRenderingDiagnostics.record(\.reviewDifferences)
         #endif
-        func tokens(_ text: String) -> [String] {
-            let expression = try! NSRegularExpression(pattern: #"[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[A-Za-z]+|\X"#)
-            return expression.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
-                Range($0.range, in: text).map { String(text[$0]) }
-            }
-        }
-        let characters = tokens(value)
-        let otherCharacters = tokens(other)
         // Bound comparison work for imported or unexpectedly long reports.
         guard characters.count <= 2_000, otherCharacters.count <= 2_000 else {
             return Text(verbatim: value)
@@ -1807,11 +1817,13 @@ private struct ReviewChangeView: View {
     }
 
     var body: some View {
+        let originalTokens = Self.tokens(original)
+        let proposedTokens = Self.tokens(proposed)
         VStack(alignment: .leading, spacing: 8) {
             Text("原笔记").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            marked(original, against: proposed, removed: true)
+            marked(original, tokens: originalTokens, against: proposedTokens, removed: true)
             Text("核对意见 · 待核对").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            marked(proposed, against: original, removed: false)
+            marked(proposed, tokens: proposedTokens, against: originalTokens, removed: false)
         }
         .font(.system(size: 16))
         .lineSpacing(5)
