@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import AVFoundation
 import CryptoKit
 import Darwin
@@ -44,6 +45,11 @@ import Darwin
             let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
             guard !FileManager.default.fileExists(atPath: root.path) else { throw Failure(name: "evidence_exists") }
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let panel = NSSavePanel()
+            var panelResponses: [NSApplication.ModalResponse] = []
+            FilePanelPresentation.begin(panel) { panelResponses.append($0) }
+            try expect(panelResponses == [.cancel] && !panel.isVisible, "headless_panel_cancels_once_without_window")
+            passed.append("headless_panel_cancellation")
             let secret = "PRIVATE_CLASSROOM_TEXT_不要写入常规日志"
             let safe = LiveLingoCLI.safeEvent("state", fields: ["summaryStatus": secret, "message": secret,
                 "phase": secret, "file": secret, "name": secret, "error": secret, "reason": secret,

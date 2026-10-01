@@ -26,17 +26,25 @@ enum AppRuntimeEnvironment {
 @MainActor
 struct CaptionTranslationDependencies {
     typealias Update = @MainActor @Sendable (String) async -> Void
-    var translate: (String, String, [AuxiliaryTranslationHint], Update?) async throws -> String
-    var adjacent: (String, String, String, String, String, Bool) async throws -> QwenTranslationClient.AdjacentTranslation
+    typealias DeferRepair = @MainActor @Sendable () -> Bool
+    var translate: (String, String, [AuxiliaryTranslationHint], CaptionTranslationAttempt, Update?) async throws -> String
+    var adjacent: (String, String, String, String, String, Bool, [AuxiliaryTranslationHint], Update?, DeferRepair?) async throws -> QwenTranslationClient.AdjacentTranslation
+
+    var repair: (DeferredCaptionRepair) async throws -> QwenTranslationClient.PreviousRepair = { _ in
+        throw QwenRuntimeError.requestFailed("测试必须注入前句补修器")
+    }
 
     static let live = Self(
-        translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, onUpdate: $3) },
+        translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, attempt: $3, onUpdate: $4) },
         adjacent: { try await QwenTranslationClient.translateAdjacent(previous: $0, previousChinese: $1,
-            current: $2, context: $3, modelName: $4, repairPrevious: $5) }
+            current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6, onCurrent: $7, deferRepair: $8) },
+        repair: { try await QwenTranslationClient.repairPreviousCaption(previous: $0.previous.english,
+            previousChinese: $0.previous.chinese, current: $0.normalizedCurrent,
+            context: $0.context.map(\.english).joined(separator: " "), modelName: $0.modelName) }
     )
     static let unavailable = Self(
-        translate: { _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
-        adjacent: { _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
+        translate: { _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
+        adjacent: { _, _, _, _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
     )
 }
 
@@ -49,6 +57,25 @@ struct LearningGenerationDependencies {
     static let unavailable = Self(generate: { _, _, _, _ in
         throw QwenRuntimeError.requestFailed("测试必须注入笔记生成器")
     })
+}
+
+/// Meter updates belong to their small views, rather than invalidating notes
+/// and the entire classroom for every audio callback or clock tick.
+@MainActor
+final class CaptureMeterState: ObservableObject {
+    @Published var elapsedSeconds: TimeInterval = 0
+    @Published var lastAudioLevelAt: Date?
+    @Published var waveformSamples = Array(repeating: Float.zero, count: 24)
+}
+
+/// Transient text has its own notifications; durable classroom changes stay on AppModel.
+@MainActor
+final class LiveCaptionState: ObservableObject {
+    @Published fileprivate(set) var volatileEnglish = ""
+    @Published fileprivate(set) var previewChinese = ""
+    @Published fileprivate(set) var previewTranslationStatus = "准备苹果初译…"
+    @Published fileprivate(set) var translatingSegmentID: UUID?
+    @Published fileprivate(set) var streamingChinese = ""
 }
 
 @MainActor
@@ -368,22 +395,31 @@ final class AppModel: ObservableObject {
     @Published private(set) var speechStatus = "等待检查"
     @Published private(set) var translationStatus = "正在检查本机翻译模型…"
     @Published private(set) var translationReady = false
-    @Published private(set) var volatileEnglish = "" {
-        didSet {
-            // 只有真正变化才算新的预览来源（重复写入同一文本不算）。
-            if volatileEnglish != oldValue { markPreviewSourceChanged() }
-            if oldValue.isEmpty || volatileEnglish.isEmpty || !volatileEnglish.hasPrefix(oldValue) {
+    let captionStream = LiveCaptionState()
+    private(set) var volatileEnglish: String {
+        get { captionStream.volatileEnglish }
+        set {
+            let oldValue = captionStream.volatileEnglish
+            captionStream.volatileEnglish = newValue
+            // Preserve source identity, stale-result clearing and wake-up semantics.
+            if newValue != oldValue { markPreviewSourceChanged() }
+            if oldValue.isEmpty || newValue.isEmpty || !newValue.hasPrefix(oldValue) {
                 resetPreviewTranslation()
             }
-            // 前缀增长同样是新的预览来源，必须立刻叫醒等待中的初译循环。
             previewWake?.signal()
         }
     }
     @Published var previewTranslationEnabled = true {
         didSet { resetPreviewTranslation() }
     }
-    @Published private(set) var previewChinese = ""
-    @Published private(set) var previewTranslationStatus = "准备苹果初译…"
+    private(set) var previewChinese: String {
+        get { captionStream.previewChinese }
+        set { captionStream.previewChinese = newValue }
+    }
+    private(set) var previewTranslationStatus: String {
+        get { captionStream.previewTranslationStatus }
+        set { captionStream.previewTranslationStatus = newValue }
+    }
     private var previewRevision = 0
     /// 当前预览循环的唤醒信号；同一时刻只服务最新一次会话。
     private var previewWake: PreviewWakeSignal?
@@ -446,7 +482,7 @@ final class AppModel: ObservableObject {
             try Task.checkCancellation()
             // prepare 期间可能已经有更新的会话接替：旧会话直接退出，不改状态。
             guard previewRunToken == runToken else { return }
-            previewTranslationStatus = "苹果初译 · 定稿后由 Qwen 替换"
+            previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
             let wake = PreviewWakeSignal()
             installPreviewWake(wake)
             defer { releasePreviewWake(wake) }
@@ -466,7 +502,7 @@ final class AppModel: ObservableObject {
                 translate: { try await session.translate($0).targetText },
                 deliver: { source, translated, timing in
                     self.previewChinese = SimplifiedChineseNormalizer.normalize(translated)
-                    self.previewTranslationStatus = "苹果初译 · 定稿后由 Qwen 替换"
+                    self.previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
                     Self.tracePreview("delivered", characters: source.text.count, timing: timing)
                 },
                 reportFailure: { source, timing, backoff, failures in
@@ -494,8 +530,15 @@ final class AppModel: ObservableObject {
     }
     @Published private(set) var liveChinese = ""
     // Draft output belongs to one segment and never enters exported history.
-    @Published private(set) var translatingSegmentID: UUID?
-    @Published private(set) var streamingChinese = ""
+    private(set) var translatingSegmentID: UUID? {
+        get { captionStream.translatingSegmentID }
+        set { captionStream.translatingSegmentID = newValue }
+    }
+    private(set) var streamingChinese: String {
+        get { captionStream.streamingChinese }
+        set { captionStream.streamingChinese = newValue }
+    }
+    private var streamingDependencyIDs: Set<UUID> = []
     @Published private(set) var segments: [TranscriptSegment] = [] {
         didSet { persistCurrentSession() }
     }
@@ -519,9 +562,19 @@ final class AppModel: ObservableObject {
     private var summaryCycleIDs: Set<UUID>?
     private var summaryCycleUpdate = ""
     @Published private(set) var summaryStatus = "等待课堂内容"
-    @Published private(set) var elapsedSeconds: TimeInterval = 0
-    @Published private(set) var lastAudioLevelAt: Date?
-    @Published private(set) var waveformSamples = Array(repeating: Float.zero, count: 24)
+    let captureMeter = CaptureMeterState()
+    private(set) var elapsedSeconds: TimeInterval {
+        get { captureMeter.elapsedSeconds }
+        set { captureMeter.elapsedSeconds = newValue }
+    }
+    private(set) var lastAudioLevelAt: Date? {
+        get { captureMeter.lastAudioLevelAt }
+        set { captureMeter.lastAudioLevelAt = newValue }
+    }
+    private(set) var waveformSamples: [Float] {
+        get { captureMeter.waveformSamples }
+        set { captureMeter.waveformSamples = newValue }
+    }
     private static let rejectedTranscriptNotice = "上一语段未获得可用转写，已跳过；正在继续识别。"
     @Published private(set) var sessionNotice: String?
     @Published var manualTranslationInput = ""
@@ -569,8 +622,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Independent option, off by default: keep the Mac awake only while a
-    /// recording session is running. Never implied by the focus switch.
+    /// On by default for new preferences. An explicit prior choice is retained.
+    /// Applies only to this application's recording, not display or lid sleep.
     @Published var preventIdleSleepWhileRecording: Bool {
         didSet {
             guard preventIdleSleepWhileRecording != oldValue else { return }
@@ -605,9 +658,12 @@ final class AppModel: ObservableObject {
     private let captionTranslation: CaptionTranslationDependencies
     private let learningGeneration: LearningGenerationDependencies
     private let backgroundServicesEnabled: Bool
+    private let scheduledNotesEnabled: Bool
     private let preferences: UserDefaults
     private var translationWorkerID: UUID?
     private var translationQueue: [UUID] = []
+    private var pendingCaptionRepairs: [DeferredCaptionRepair] = []
+    private var hasPendingTranslationWork: Bool { !translationQueue.isEmpty || !pendingCaptionRepairs.isEmpty }
     private var translationEnqueuedAt: [UUID: TimeInterval] = [:]
     private static let latencyLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "TranslationLatency")
     /// 苹果初译（预览）的时序日志：只记毫秒/计数，绝不记正文。
@@ -777,6 +833,7 @@ final class AppModel: ObservableObject {
          translation: CaptionTranslationDependencies? = nil,
          notes: LearningGenerationDependencies? = nil,
          backgroundServices: Bool = true,
+         scheduledNotes: Bool? = nil,
          defaults: UserDefaults = AppRuntimeEnvironment.preferences) {
         precondition(!AppRuntimeEnvironment.isUnitTesting || reviewQueue != nil,
                      "Tests must inject an isolated review queue")
@@ -784,6 +841,9 @@ final class AppModel: ObservableObject {
         self.captionTranslation = translation ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
         self.learningGeneration = notes ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
         self.backgroundServicesEnabled = backgroundServices && !AppRuntimeEnvironment.isUnitTesting
+        self.scheduledNotesEnabled = scheduledNotes ?? (backgroundServices && !AppRuntimeEnvironment.isUnitTesting)
+        precondition(!AppRuntimeEnvironment.isUnitTesting || !self.scheduledNotesEnabled || notes != nil,
+                     "Scheduled note tests must inject their generator")
         self.preferences = defaults
         noteReviewQueue = reviewQueue ?? LearningReviewQueue()
         let savedMode = preferences.string(forKey: Self.modelModeDefaultsKey)
@@ -795,7 +855,7 @@ final class AppModel: ObservableObject {
         let savedBatchCharacters = preferences.object(forKey: Self.noteBatchDefaultsKey) as? Int
         noteBatchCharacters = savedBatchCharacters ?? SummaryRefreshPolicy.automaticBatchCharacters
         let savedFocusMode = preferences.bool(forKey: Self.focusModeDefaultsKey)
-        let savedPreventIdleSleep = preferences.bool(forKey: Self.preventIdleSleepDefaultsKey)
+        let savedPreventIdleSleep = (preferences.object(forKey: Self.preventIdleSleepDefaultsKey) as? Bool) ?? true
         let onBattery = PowerSourceMonitor.isOnBattery()
         processingFocusEnabled = savedFocusMode
         preventIdleSleepWhileRecording = savedPreventIdleSleep
@@ -888,7 +948,7 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func chooseOutputDirectory() -> URL? {
+    func chooseOutputDirectory() async -> URL? {
         let panel = NSOpenPanel()
         panel.title = "选择会话保存目录"
         panel.prompt = "选择"
@@ -896,16 +956,28 @@ final class AppModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK {
-            outputDirectory = panel.url
-            return panel.url
+        // runModal blocks the normal application event loop, including Quit.
+        return await withCheckedContinuation { continuation in
+            FilePanelPresentation.begin(panel) { [weak self] response in
+                Task { @MainActor in
+                    guard response == .OK, let directory = panel.url, let self else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    self.outputDirectory = directory
+                    continuation.resume(returning: directory)
+                }
+            }
         }
-        return nil
     }
 
-    func convertCurrentSessionToRecording() {
+    func convertCurrentSessionToRecording() async {
         guard hasActiveSession, activeStorageMode == .liveOnly else { return }
-        guard let directory = chooseOutputDirectory() else { return }
+        let identity = sessionID
+        let epoch = generation
+        guard let directory = await chooseOutputDirectory(),
+              sessionID == identity, generation == epoch,
+              hasActiveSession, activeStorageMode == .liveOnly else { return }
         do { try pipeline.updatePersistence(persistsSession: true) }
         catch {
             archiveError = "未能保留当前录音：\(error.localizedDescription)"
@@ -956,7 +1028,7 @@ final class AppModel: ObservableObject {
             UTType(filenameExtension: "flac") ?? .audio,
             UTType(filenameExtension: "caf") ?? .audio,
         ]
-        panel.begin { [weak self] response in
+        FilePanelPresentation.begin(panel) { [weak self] response in
             Task { @MainActor in
                 guard response == .OK, let url = panel.url, let self else { return }
                 self.importTask?.cancel()
@@ -977,7 +1049,8 @@ final class AppModel: ObservableObject {
 
     private func importMediaFile(_ fileURL: URL) async {
         guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
-        if outputDirectory == nil { chooseOutputDirectory() }
+        if outputDirectory == nil { await chooseOutputDirectory() }
+        guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
         guard let outputDirectory else { return }
         let previousPhase = phase
         phase = .preparing
@@ -1070,6 +1143,7 @@ final class AppModel: ObservableObject {
                 await oldTranslation?.value
                 translationWorker = nil
                 translationQueue = []
+                pendingCaptionRepairs = []
                 let pendingSummary = summaryTask
                 cancelSummaryTask()
                 await pendingSummary?.value
@@ -1146,7 +1220,7 @@ final class AppModel: ObservableObject {
         panel.allowedContentTypes = [format.contentType]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        panel.begin { [weak self] response in
+        FilePanelPresentation.begin(panel) { [weak self] response in
             Task { @MainActor in
                 guard response == .OK, let url = panel.url, let self else { return }
                 self.performNotesExport(snapshot, format: format, to: url)
@@ -1214,7 +1288,7 @@ final class AppModel: ObservableObject {
         if let state = transcriptionProcessing, state.pendingCount > 0 {
             return "录音已停止 · \(processingPaused || state.isPaused ? "补转已暂停" : "正在补转") · 剩余 \(LearningTimeLabel.stamp(state.backlogSeconds))"
         }
-        if processingPaused, !(sessionSnapshot?.processing.pendingSegmentIDs.isEmpty ?? true) {
+        if processingPaused, !(sessionSnapshot?.processing.pendingSegmentIDs.isEmpty ?? true) || !pendingCaptionRepairs.isEmpty {
             return "录音已保存 · 译文与笔记处理已暂停"
         }
         if processingTask != nil { return "录音已保存 · 正在整理译文与笔记" }
@@ -1293,6 +1367,7 @@ final class AppModel: ObservableObject {
         snapshot.processing.reviewPaused = noteReviewQueue.userPaused
         snapshot.processing.pendingSegmentIDs = segments.filter { !$0.hasUsableTranslation }.map(\.id)
         snapshot.processing.pendingBatchIDs = learningDraft.map { [$0.id] } ?? []
+        snapshot.processing.pendingCaptionRepairs = pendingCaptionRepairs.isEmpty ? nil : pendingCaptionRepairs
         if isRecording || isPaused { snapshot.processing.phase = .capturing }
         else if processingPaused { snapshot.processing.phase = .paused }
         else if phase == .stopping || processingTask != nil || (transcriptionProcessing?.pendingCount ?? 0) > 0 {
@@ -1302,7 +1377,7 @@ final class AppModel: ObservableObject {
                 || segments.contains(where: { $0.translationState == .failed })
                 || snapshot.processing.lastError != nil {
                 snapshot.processing.phase = .failed
-            } else if !snapshot.processing.pendingSegmentIDs.isEmpty {
+            } else if !snapshot.processing.pendingSegmentIDs.isEmpty || !pendingCaptionRepairs.isEmpty {
                 snapshot.processing.phase = .draining
             } else {
                 snapshot.processing.phase = .completed
@@ -1344,6 +1419,7 @@ final class AppModel: ObservableObject {
         let translationID = translationWorkerID
         let summary = summaryTask
         processingPaused = true
+        clearTranslationPreview()
         oldProcessing?.cancel()
         translation?.cancel()
         cancelSummaryTask()
@@ -1367,7 +1443,7 @@ final class AppModel: ObservableObject {
                 translationWorkerID = nil
             }
             translatingSegmentID = nil
-            streamingChinese = ""
+            clearTranslationPreview()
             for index in segments.indices where segments[index].translationState == .translating {
                 segments[index].deferTranslation()
             }
@@ -1392,10 +1468,12 @@ final class AppModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let directory = panel.url else { return }
-        Task {
-            do { try await openSavedSession(directory) }
-            catch { archiveError = "课程未打开：\(error.localizedDescription)" }
+        FilePanelPresentation.begin(panel) { [weak self] response in
+            Task { @MainActor in
+                guard response == .OK, let directory = panel.url, let self else { return }
+                do { try await self.openSavedSession(directory) }
+                catch { self.archiveError = "课程未打开：\(error.localizedDescription)" }
+            }
         }
     }
 
@@ -1429,6 +1507,7 @@ final class AppModel: ObservableObject {
         resetSessionStateForNewRun()
         sessionID = snapshot.sessionID
         sessionDirectory = directory
+        pendingCaptionRepairs = snapshot.processing.pendingCaptionRepairs ?? []
         segments = snapshot.segments
         for index in segments.indices where segments[index].translationState == .translating {
             segments[index].deferTranslation()
@@ -1512,6 +1591,7 @@ final class AppModel: ObservableObject {
                                         candidateText: String? = nil) {
         let previous = segments[index]
         guard previous != replacement else { return }
+        if streamingDependencyIDs.contains(previous.id) { clearTranslationPreview() }
         let nextRevision = (sessionSnapshot?.inputRevision ?? segments.map(\.inputRevision).max() ?? 0) + 1
         var next = replacement
         next.inputRevision = nextRevision
@@ -1552,7 +1632,7 @@ final class AppModel: ObservableObject {
         volatileEnglish = ""
         liveChinese = ""
         translatingSegmentID = nil
-        streamingChinese = ""
+        clearTranslationPreview()
         segments = []
         lectureSummary = ""
         latestSummaryUpdate = ""
@@ -1569,6 +1649,7 @@ final class AppModel: ObservableObject {
         lastSummaryCycleStartedUptime = nil
         summaryRetryNotBefore = nil
         translationQueue = []
+        pendingCaptionRepairs = []
         translationEnqueuedAt = [:]
         translationHints = [:]
         sessionDirectory = nil
@@ -1598,7 +1679,9 @@ final class AppModel: ObservableObject {
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
             var selectedOutputDirectory: URL?
             if storageMode.requiresOutputDirectoryBeforeStart {
-                if outputDirectory == nil { chooseOutputDirectory() }
+                if outputDirectory == nil { await chooseOutputDirectory() }
+                guard sessionID == startingSession, generation == startingEpoch,
+                      finalizationOwner == nil else { return }
                 guard let outputDirectory else {
                     activeStorageMode = nil
                     phase = .idle
@@ -1729,7 +1812,7 @@ final class AppModel: ObservableObject {
             volatileEnglish = ""
             liveChinese = ""
             translatingSegmentID = nil
-            streamingChinese = ""
+            clearTranslationPreview()
             segments = []
             resetLearningNotes()
             lectureSummary = ""
@@ -1738,6 +1821,7 @@ final class AppModel: ObservableObject {
             summaryCycleUpdate = ""
             summaryStatus = "等待课堂内容"
             translationQueue = []
+            pendingCaptionRepairs = []
             translationEnqueuedAt = [:]
             translationHints = [:]
             transcriptionCandidates = []
@@ -1803,6 +1887,11 @@ final class AppModel: ObservableObject {
             self.processingTask = nil
             self.processingTaskID = nil
             self.persistCurrentSession()
+            // A failed final note attempt must arrange its own retry. No new
+            // audio event is guaranteed after capture ends or fails.
+            if self.completedTranslationCount > self.lastSummarizedSegmentCount {
+                self.scheduleSummaryRefresh(force: true)
+            }
         }
     }
 
@@ -1811,7 +1900,7 @@ final class AppModel: ObservableObject {
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
         drainTranslationQueue()
         startStopOverlapIfUseful()
-        while translationWorker != nil || summaryTask != nil || !translationQueue.isEmpty {
+        while translationWorker != nil || summaryTask != nil || hasPendingTranslationWork {
             if let summaryTask { await summaryTask.value }
             guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
             drainTranslationQueue()
@@ -2219,10 +2308,16 @@ final class AppModel: ObservableObject {
     func receiveCaptionForTesting(_ text: String, start: TimeInterval, end: TimeInterval) {
         consume(.final(text: text, start: start, end: end, hints: []))
     }
-    var translationTaskForTesting: Task<Void, Never>? { translationWorker }
-    func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment) {
+    func receiveLivePreviewForTesting(_ text: String, chinese: String? = nil) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
-        appendConfirmedCaption(segment, hints: [])
+        consume(.volatile(text: text, start: 0, end: 0,
+                          observedAt: ProcessInfo.processInfo.systemUptime))
+        if let chinese { previewChinese = chinese }
+    }
+    var translationTaskForTesting: Task<Void, Never>? { translationWorker }
+    func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        appendConfirmedCaption(segment, hints: hints)
     }
     func reviseCaptionForTesting(id: UUID, english: String) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
@@ -2234,10 +2329,24 @@ final class AppModel: ObservableObject {
         replaceExistingSegment(at: index, with: revised, reason: "测试确认原文修订")
     }
     var savedProcessingTaskForTesting: Task<Void, Never>? { processingTask }
+    var savedPauseTaskForTesting: Task<Void, Error>? { processingPauseTask }
     func generateSummaryForTesting() async {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         processingPaused = false
         await generateLectureSummary(force: true)
+    }
+    func stopCaptureForTesting(directory: URL, failure: String) async throws {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        precondition(sessionSaver == nil && !noteReviewQueue.hasWork)
+        // The isolated host has no memory monitor; this fixture explicitly
+        // supplies a healthy resource condition for the note timer.
+        summaryMemoryPressureNormal = true
+        sessionDirectory = directory
+        activeStorageMode = .saveSession
+        phase = .recording
+        bindSessionArchive(to: directory)
+        try await flushSessionArchive()
+        await stopSession(failure: failure)
     }
     #endif
 
@@ -2252,10 +2361,81 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func clearTranslationPreview() {
+        streamingChinese = ""
+        streamingDependencyIDs.removeAll()
+    }
+
+    private func applyPreviousRepair(_ result: QwenTranslationClient.PreviousRepair,
+                                     at previousIndex: Int, started: TimeInterval) {
+        if let revised = result.previous,
+           self.segments.indices.contains(previousIndex) {
+            let normalized = SimplifiedChineseNormalizer.normalize(revised)
+            // 2026-09-18：相邻修复**一次处理两段** ✗，模型多回半句就会把两段内容
+            // 塞进前一段 ✗（缺陷文档 round-359 的收敛结论 ✓）。
+            // 因此：修复结果若相对**前一段自己的英文**长得离谱 ✗，就**丢弃这次修复** ✓
+            // —— 保留原有中文 ✓（等价于从未修复 ✓），只会更保守 ✓，不会改坏 ✓。
+            let repairPlausible = TranslationLengthGuard.isPlausible(
+                chinese: normalized,
+                english: self.segments[previousIndex].english)
+            if !repairPlausible {
+                Self.traceTranslation("adjacent_repair", id: self.segments[previousIndex].id,
+                                      elapsed: ProcessInfo.processInfo.systemUptime - started,
+                                      detail: "skipped_length_guard")
+            }
+            if repairPlausible, !normalized.isEmpty, self.segments[previousIndex].chinese != normalized {
+                let previousID = self.segments[previousIndex].id
+                var revisedSegment = self.segments[previousIndex]
+                revisedSegment.completeTranslation(normalized)
+                self.replaceExistingSegment(at: previousIndex, with: revisedSegment,
+                    reason: "相邻语句补全译文")
+                Self.traceTranslation("adjacent_repair", id: previousID,
+                                      elapsed: ProcessInfo.processInfo.systemUptime - started,
+                                      detail: "applied")
+            }
+        } else if let reason = result.rejection {
+            Self.traceTranslation("adjacent_repair_kept", id: self.segments[previousIndex].id,
+                                  elapsed: ProcessInfo.processInfo.systemUptime - started,
+                                  detail: reason)
+        }
+    }
+
+    private func finishNextCaptionRepair(session: UUID, epoch: Int, worker: UUID) async {
+        guard let pending = pendingCaptionRepairs.first else { return }
+        guard pending.previousIndex(in: segments, session: session) != nil else {
+            pendingCaptionRepairs.removeFirst()
+            persistCurrentSession()
+            return
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            let result = try await captionTranslation.repair(pending)
+            try Task.checkCancellation()
+            guard sessionID == session, generation == epoch, translationWorkerID == worker,
+                  !processingPaused else { return }
+            // Keep the in-flight job in the saved queue until it has actually
+            // returned. Cancellation/parking therefore retains it for resume.
+            if let index = pending.previousIndex(in: segments, session: session) {
+                applyPreviousRepair(result, at: index, started: started)
+            }
+        } catch is CancellationError {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return
+        } catch {
+            guard !Task.isCancelled, sessionID == session, generation == epoch,
+                  translationWorkerID == worker, !processingPaused else { return }
+            Self.traceTranslation("adjacent_repair_kept", id: pending.previous.id,
+                elapsed: ProcessInfo.processInfo.systemUptime - started, detail: error.localizedDescription)
+        }
+        guard sessionID == session, generation == epoch, translationWorkerID == worker else { return }
+        pendingCaptionRepairs.removeAll { $0.current.id == pending.current.id }
+        persistCurrentSession()
+    }
+
     private func drainTranslationQueue() {
         guard !processingPaused, !manualRequestInFlight,
               (summaryTask == nil || summaryConcurrencyAllowed),
-              translationWorker == nil, !translationQueue.isEmpty else { return }
+              translationWorker == nil, hasPendingTranslationWork else { return }
         let currentGeneration = generation
         let currentSession = sessionID
         let workerID = UUID()
@@ -2265,14 +2445,18 @@ final class AppModel: ObservableObject {
             defer {
                 if currentGeneration == self.generation, self.translationWorkerID == workerID {
                     self.translatingSegmentID = nil
-                    self.streamingChinese = ""
+                    self.clearTranslationPreview()
                     self.translationWorker = nil
                     self.translationWorkerID = nil
                 }
             }
-            while !self.translationQueue.isEmpty, !Task.isCancelled, !self.processingPaused,
+            while self.hasPendingTranslationWork, !Task.isCancelled, !self.processingPaused,
                   currentGeneration == self.generation, currentSession == self.sessionID,
                   self.translationWorkerID == workerID {
+                if self.translationQueue.isEmpty {
+                    await self.finishNextCaptionRepair(session: currentSession, epoch: currentGeneration, worker: workerID)
+                    continue
+                }
                 let id = self.translationQueue.removeFirst()
                 guard let index = self.segments.firstIndex(where: { $0.id == id }) else {
                     self.translationEnqueuedAt.removeValue(forKey: id)
@@ -2295,12 +2479,12 @@ final class AppModel: ObservableObject {
                 let normalizedInput = AcademicInputNormalizer.normalize(english, recentContext: recentContext)
                 let protectedInput = ChemistryTranslationProtector.prepare(normalizedInput)
                 let translationModel = self.effectiveProfile.translationModel
-                let hints = self.translationHints.removeValue(forKey: id) ?? []
+                let hints = protectedInput.translationHints(from: self.translationHints.removeValue(forKey: id) ?? [])
                 let started = ProcessInfo.processInfo.systemUptime
                 let enqueued = self.translationEnqueuedAt[id] ?? started
                 Self.traceTranslation("request", id: id, elapsed: started - enqueued)
                 self.translatingSegmentID = id
-                self.streamingChinese = ""
+                self.clearTranslationPreview()
                 self.liveChinese = "翻译中…"
                 do {
                     let response: String
@@ -2308,15 +2492,34 @@ final class AppModel: ObservableObject {
                         && self.segments[index - 1].hasUsableTranslation ? index - 1 : nil
                     if let previousIndex {
                         let previousInput = self.segments[previousIndex]
+                        let repairContext = Array(self.segments[..<previousIndex].suffix(2))
                         let pair = try await self.captionTranslation.adjacent(
                             previousInput.english,
                             previousInput.chinese,
-                            QwenTranslationClient.translationInput(text: normalizedInput, modelName: translationModel, hints: hints),
-                            self.segments[..<previousIndex].suffix(2).map(\.english).joined(separator: " "),
+                            normalizedInput,
+                            repairContext.map(\.english).joined(separator: " "),
                             translationModel,
                             previousInput.endTime - previousInput.startTime >= 9.5
                                 || !".!?".contains(previousInput.english.last ?? " ")
-                                || english.first?.isLowercase == true)
+                                || english.first?.isLowercase == true,
+                            hints, { [weak self] current in
+                                guard let self, !Task.isCancelled,
+                                      self.translatingSegmentID == input.id,
+                                      self.translationInputIndex(input, session: currentSession,
+                                          epoch: currentGeneration, worker: workerID) != nil,
+                                      let previousIndex = self.translationInputIndex(previousInput,
+                                          session: currentSession, epoch: currentGeneration, worker: workerID),
+                                      self.segments[previousIndex].chinese == previousInput.chinese,
+                                      let accepted = try? TranslationAcceptance.validatedCaption(
+                                          SimplifiedChineseNormalizer.normalize(current), source: normalizedInput) else { return }
+                                self.streamingDependencyIDs = [input.id, previousInput.id]
+                                self.streamingChinese = accepted
+                                Self.traceTranslation("current_preview", id: input.id,
+                                    elapsed: ProcessInfo.processInfo.systemUptime - started)
+                            }, { [weak self] in
+                                guard let self else { return true }
+                                return self.hasPendingTranslationWork
+                            })
                         try Task.checkCancellation()
                         guard currentGeneration == self.generation, currentSession == self.sessionID,
                               self.translationWorkerID == workerID, !self.processingPaused else { return }
@@ -2332,46 +2535,21 @@ final class AppModel: ObservableObject {
                             }
                             continue
                         }
-                        // A repair that passed acceptance is stored even when the
-                        // current sentence fails; a rejected repair never
-                        // overwrites the Chinese line already on screen.
-                        if let revised = pair.previous,
-                           currentGeneration == self.generation,
-                           self.segments.indices.contains(previousIndex) {
-                            let normalized = SimplifiedChineseNormalizer.normalize(revised)
-                            // 2026-09-18：相邻修复**一次处理两段** ✗，模型多回半句就会把两段内容
-                            // 塞进前一段 ✗（缺陷文档 round-359 的收敛结论 ✓）。
-                            // 因此：修复结果若相对**前一段自己的英文**长得离谱 ✗，就**丢弃这次修复** ✓
-                            // —— 保留原有中文 ✓（等价于从未修复 ✓），只会更保守 ✓，不会改坏 ✓。
-                            let repairPlausible = TranslationLengthGuard.isPlausible(
-                                chinese: normalized,
-                                english: self.segments[previousIndex].english)
-                            if !repairPlausible {
-                                Self.traceTranslation("adjacent_repair", id: self.segments[previousIndex].id,
-                                                      elapsed: ProcessInfo.processInfo.systemUptime - started,
-                                                      detail: "skipped_length_guard")
-                            }
-                            if repairPlausible, !normalized.isEmpty, self.segments[previousIndex].chinese != normalized {
-                                let previousID = self.segments[previousIndex].id
-                                var revisedSegment = self.segments[previousIndex]
-                                revisedSegment.completeTranslation(normalized)
-                                self.replaceExistingSegment(at: previousIndex, with: revisedSegment,
-                                    reason: "相邻语句补全译文")
-                                Self.traceTranslation("adjacent_repair", id: previousID,
-                                                      elapsed: ProcessInfo.processInfo.systemUptime - started,
-                                                      detail: "applied")
-                            }
-                        } else if let reason = pair.previousRejection {
-                            Self.traceTranslation("adjacent_repair_kept", id: self.segments[previousIndex].id,
-                                                  elapsed: ProcessInfo.processInfo.systemUptime - started,
-                                                  detail: reason)
+                        if pair.previousRepairDeferred {
+                            self.pendingCaptionRepairs.removeAll { $0.current.id == input.id }
+                            self.pendingCaptionRepairs.append(DeferredCaptionRepair(sessionID: currentSession,
+                                previous: previousInput, current: input, context: repairContext,
+                                normalizedCurrent: normalizedInput, modelName: translationModel))
+                            self.persistCurrentSession()
                         }
+                        self.applyPreviousRepair(.init(previous: pair.previous, rejection: pair.previousRejection),
+                            at: previousIndex, started: started)
                         guard let acceptedCurrent = pair.current else {
                             let reason = pair.currentRejection ?? "未知原因"
                             Self.traceTranslation("rejected", id: id,
                                                   elapsed: ProcessInfo.processInfo.systemUptime - started,
                                                   detail: reason)
-                            throw QwenRuntimeError.requestFailed("译文未通过验收（\(reason)），已保留英文行等待重试。")
+                            throw QwenRuntimeError.translationRejected("译文未通过验收（\(reason)），已保留英文行等待重试。")
                         }
                         response = acceptedCurrent
                     } else {
@@ -2379,6 +2557,7 @@ final class AppModel: ObservableObject {
                         protectedInput.text,
                         translationModel,
                         hints,
+                        .standard,
                          { [weak self] partial in
                             guard let self, !Task.isCancelled,
                                   self.translatingSegmentID == id,
@@ -2391,44 +2570,29 @@ final class AppModel: ObservableObject {
                                 Self.traceTranslation("first_text", id: id,
                                                       elapsed: ProcessInfo.processInfo.systemUptime - started)
                             }
+                            self.streamingDependencyIDs = [input.id]
                             self.streamingChinese = draft
                         }
                     )
                     }
                     try Task.checkCancellation()
-                    let restored = previousIndex == nil ? protectedInput.restore(in: response) : response
-                    let chinese = SimplifiedChineseNormalizer.normalize(restored)
+                    let restored = previousIndex == nil ? try protectedInput.validatedRestore(in: response) : response
                     // The restore step must not turn a technical answer into an
                     // English sentence after the model output was accepted.
-                    _ = try TranslationAcceptance.validated(chinese, source: protectedInput.text)
+                    let chinese = try TranslationAcceptance.validatedCaption(
+                        SimplifiedChineseNormalizer.normalize(restored), source: normalizedInput)
                     guard currentGeneration == self.generation, currentSession == self.sessionID,
                           self.translationWorkerID == workerID, !self.processingPaused else { return }
                     guard self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) != nil else { continue }
                     self.reviewConcurrency.observe(elapsed: ProcessInfo.processInfo.systemUptime - enqueued, successful: true)
-                    // 2026-09-18：长度护栏（**只换不伤** ✓）。
-                    // 全库实测约 1% 的段落中文里混进了邻居内容 ✗（音频与英文都正常、只有中文异常长 ✗）。
-                    // 规则：原译文不可信 → 重试一次 → **只有重试结果可信才替换** ✓；否则保留原样 ✓。
-                    var finalChinese = chinese
-                    if !TranslationLengthGuard.isPlausible(chinese: chinese, english: protectedInput.text),
-                       !Task.isCancelled, currentGeneration == self.generation,
-                       let retry = try? await self.captionTranslation.translate(
-                           protectedInput.text, translationModel, hints, nil) {
-                        let restoredRetry = SimplifiedChineseNormalizer.normalize(protectedInput.restore(in: retry))
-                        if let validatedRetry = try? TranslationAcceptance.validated(restoredRetry, source: protectedInput.text),
-                           TranslationLengthGuard.isPlausible(chinese: validatedRetry, english: protectedInput.text) {
-                            finalChinese = validatedRetry
-                            Self.traceTranslation("length_guard_replaced", id: id,
-                                                  elapsed: ProcessInfo.processInfo.systemUptime - started)
-                        }
-                    }
                     guard !Task.isCancelled, currentGeneration == self.generation,
                           currentSession == self.sessionID, self.translationWorkerID == workerID,
                           !self.processingPaused else { return }
                     guard let currentIndex = self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) else { continue }
-                    self.segments[currentIndex].completeTranslation(finalChinese)
-                    self.liveChinese = finalChinese
+                    self.segments[currentIndex].completeTranslation(chinese)
+                    self.liveChinese = chinese
                     Self.traceTranslation(previousIndex == nil ? "complete" : "complete_adjacent", id: id,
                                           elapsed: ProcessInfo.processInfo.systemUptime - started)
                 } catch is CancellationError {
@@ -2440,19 +2604,19 @@ final class AppModel: ObservableObject {
                     guard self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) != nil else { continue }
                     self.reviewConcurrency.observe(elapsed: 0, successful: false)
-                    let reason = (error as? QwenRuntimeError).flatMap { runtime -> String? in
-                        if case .requestFailed(let message) = runtime { return message }
-                        return nil
-                    } ?? error.localizedDescription
-                    // 2026-09-18：失败先**重试一次**再写占位符。
-                    // 起因：今天那节课第 209 段的字幕里出现了 [翻译失败：Final output budget exhausted…] ✗，
-                    // 而用同一素材复跑同一段却成功 ✓ → 属**间歇性**失败 ✓，重试一次的成本很低（约 1 秒）✓。
+                    var reason = error.localizedDescription
                     var recovered: String?
-                    if !Task.isCancelled, currentGeneration == self.generation {
-                        // 注意：必须和主路径一致 —— 传**受保护的**文本 ✓ 并在之后 restore ✓，
-                        // 否则重试会绕过化学/公式保护层 ✗（这一点是我自审时发现的 ✓）。
-                        recovered = try? await self.captionTranslation.translate(
-                            protectedInput.text, translationModel, hints, nil)
+                    // One bounded recovery, owned by the same caption revision.
+                    // Content failures change instructions; output-limit failures
+                    // increase the budget; transient or unclassified runtime errors
+                    // retain one ordinary retry.
+                    if let attempt = CaptionTranslationAttempt.recovery(for: error) {
+                        Self.traceTranslation("retry_\(attempt.rawValue)", id: id,
+                                              elapsed: ProcessInfo.processInfo.systemUptime - started)
+                        do {
+                            recovered = try await self.captionTranslation.translate(
+                                protectedInput.text, translationModel, hints, attempt, nil)
+                        } catch { reason = error.localizedDescription }
                     }
                     guard !Task.isCancelled, currentGeneration == self.generation,
                           currentSession == self.sessionID, self.translationWorkerID == workerID,
@@ -2461,11 +2625,11 @@ final class AppModel: ObservableObject {
                         epoch: currentGeneration, worker: workerID) else { continue }
                     var accepted: String?
                     if let recovered {
-                        let restored = SimplifiedChineseNormalizer.normalize(protectedInput.restore(in: recovered))
-                        if let validated = try? TranslationAcceptance.validated(restored, source: protectedInput.text),
-                           !validated.isEmpty {
-                            accepted = validated
-                        }
+                        do {
+                            let restored = try protectedInput.validatedRestore(in: recovered)
+                            accepted = try TranslationAcceptance.validatedCaption(
+                                SimplifiedChineseNormalizer.normalize(restored), source: normalizedInput)
+                        } catch { reason = error.localizedDescription }
                     }
                     if let accepted {
                         Self.traceTranslation("complete_after_retry", id: id,
@@ -2483,16 +2647,16 @@ final class AppModel: ObservableObject {
                 }
                 guard !Task.isCancelled, currentGeneration == self.generation else { return }
                 self.translatingSegmentID = nil
-                self.streamingChinese = ""
+                self.clearTranslationPreview()
                 self.startStopOverlapIfUseful()
             }
             guard currentGeneration == self.generation else { return }
             self.translatingSegmentID = nil
-            self.streamingChinese = ""
+            self.clearTranslationPreview()
             self.translationWorker = nil
             guard !Task.isCancelled else { return }
             self.markCaptionActivity()
-            if !self.translationQueue.isEmpty {
+            if self.hasPendingTranslationWork {
                 self.drainTranslationQueue()
             } else {
                 let force = self.summaryRefreshRequested
@@ -2510,7 +2674,7 @@ final class AppModel: ObservableObject {
     private func startStopOverlapIfUseful() {
         guard backgroundServicesEnabled else { return }
         guard phase == .stopping, activeStorageMode?.persistsSession == true,
-              !stopOverlapStarted, summaryTask == nil,
+              !stopOverlapStarted, summaryTask == nil, pendingCaptionRepairs.isEmpty,
               translationWorker != nil, !translationQueue.isEmpty,
               !manualRequestInFlight, !isManualTranslating else { return }
         refreshSummaryConcurrency()
@@ -2577,7 +2741,7 @@ final class AppModel: ObservableObject {
         let savedCanContinue: Bool
         if case .saved = phase { savedCanContinue = processingTask == nil && !legacyProvenanceUnavailable }
         else { savedCanContinue = false }
-        guard backgroundServicesEnabled, hasActiveSession || savedCanContinue, !processingPaused else { return }
+        guard scheduledNotesEnabled, hasActiveSession || savedCanContinue, !processingPaused else { return }
         guard summaryTask == nil else {
             if force { summaryRefreshRequested = true }
             return
@@ -2586,7 +2750,7 @@ final class AppModel: ObservableObject {
             summaryRunning: false, continuingSummary: force || savedCanContinue || summaryCycleIDs != nil))
         // The interval is implemented by the wake-up timer below. Every other
         // refusal applies to all new model requests, including saved courses.
-        if !admission.allowed && admission.reason != .interval {
+        if backgroundServicesEnabled && !admission.allowed && admission.reason != .interval {
             summaryStatus = admission.reason.description
             recordResourceDecision(admission.reason)
             if force { summaryRefreshRequested = true }
@@ -2601,7 +2765,8 @@ final class AppModel: ObservableObject {
             if force { summaryRefreshRequested = true }
             return
         }
-        guard summaryConcurrencyAllowed || (translationWorker == nil && translationQueue.isEmpty) else {
+        guard pendingCaptionRepairs.isEmpty,
+              summaryConcurrencyAllowed || (translationWorker == nil && !hasPendingTranslationWork) else {
             summaryStatus = "等待字幕翻译空隙"
             if force { summaryRefreshRequested = true }
             return
@@ -2769,7 +2934,11 @@ final class AppModel: ObservableObject {
                     })
                     guard !Task.isCancelled, !processingPaused, currentGeneration == generation,
                           sessionID == summarySession, summaryTaskGeneration == summaryOwner else { return }
-                    note = try LearningNote.decode(response)
+                    do { note = try LearningNote.decode(response) }
+                    catch {
+                        Self.latencyLog.notice("summary event=invalid_note model=\(modelName, privacy: .public) reason=\(LearningNote.failureCode(for: response), privacy: .public) response_bytes=\(response.utf8.count)")
+                        throw error
+                    }
                     if learningDraft?.id == draft.id { learningDraft?.completedNote = note }
                 }
                 guard !Task.isCancelled, !processingPaused, currentGeneration == generation,
@@ -2815,10 +2984,11 @@ final class AppModel: ObservableObject {
                 consecutiveSummaryFailures += 1
                 let retry = SummaryRefreshPolicy.failureRetryDelay(consecutiveFailures: consecutiveSummaryFailures)
                 summaryRetryNotBefore = ProcessInfo.processInfo.systemUptime + retry
-                Self.latencyLog.notice("summary event=failed retry_seconds=\(retry) failures=\(self.consecutiveSummaryFailures)")
+                let reason = LearningFailureCode.code(for: error)
+                Self.latencyLog.notice("summary event=failed model=\(modelName, privacy: .public) reason=\(reason, privacy: .public) retry_seconds=\(retry) failures=\(self.consecutiveSummaryFailures)")
                 summaryStatus = lectureSummary.isEmpty
                     ? "摘要暂不可用：\(error.localizedDescription)"
-                    : "保留上次摘要 · 本轮更新失败"
+                    : "保留上次摘要 · 本轮更新失败（\(LearningFailureCode.label(for: reason))）"
                 return
             }
         }
@@ -2829,7 +2999,7 @@ final class AppModel: ObservableObject {
         if hasCaptionBacklog { reviewConcurrency.reset() }
         let capable = reviewConcurrency.allows(mode: selectedMode)
         let available = SummaryResourcePolicy.estimatedAvailableBytes() ?? 0
-        let liveWorkPending = translationWorker != nil || !translationQueue.isEmpty
+        let liveWorkPending = translationWorker != nil || hasPendingTranslationWork
             || summaryTask != nil || manualRequestInFlight || isManualTranslating
         let decision = ProcessingFocusPolicy.decision(ProcessingFocusPolicy.Context(
             focusMode: processingFocusEnabled,
@@ -2857,7 +3027,7 @@ final class AppModel: ObservableObject {
     private func resourceContext(summaryRunning: Bool, continuingSummary: Bool,
                                  allowConcurrent: Bool? = nil) -> ResourceSchedulingPolicy.Context {
         .init(now: ProcessInfo.processInfo.systemUptime, memoryNormal: summaryMemoryPressureNormal,
-            captionBacklog: hasCaptionBacklog, captionPending: translationWorker != nil || !translationQueue.isEmpty,
+            captionBacklog: hasCaptionBacklog, captionPending: translationWorker != nil || hasPendingTranslationWork,
             recording: hasActiveSession || phase == .preparing || phase == .stopping,
             allowConcurrent: allowConcurrent ?? summaryConcurrencyAllowed, summaryRunning: summaryRunning,
             paused: processingPaused, lastSummaryStarted: lastSummaryCycleStartedUptime,
@@ -3041,7 +3211,13 @@ final class AppModel: ObservableObject {
 
     private func refreshSummaryConcurrency() {
         refreshRuntimeResources()
-        summaryMemoryPressureNormal = SummaryResourcePolicy.pressureIsNormal()
+        let memoryAllowsWork = SummaryResourcePolicy.memoryAllowsWork()
+        if memoryAllowsWork != summaryMemoryPressureNormal {
+            let level = SummaryResourcePolicy.pressureLevel() ?? -1
+            let availableMiB = (SummaryResourcePolicy.estimatedAvailableBytes() ?? 0) / 1_048_576
+            Self.latencyLog.notice("memory gate allows_work=\(memoryAllowsWork) pressure_level=\(level) available_mib=\(availableMiB)")
+        }
+        summaryMemoryPressureNormal = memoryAllowsWork
         let allowed = SummaryResourcePolicy.allowsConcurrency(
             lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,
             pressureNormal: summaryMemoryPressureNormal,
@@ -3056,12 +3232,16 @@ final class AppModel: ObservableObject {
 
     private func startMemoryPressureMonitor() {
         let monitor = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
-        monitor.setEventHandler { [weak self] in
+        monitor.setEventHandler { [weak self, weak monitor] in
+            // Critical always yields; a warning re-checks reclaimable memory.
+            let critical = monitor?.data.contains(.critical) ?? true
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.summaryMemoryPressureNormal = false
-                self.summaryConcurrencyAllowed = false
-                self.yieldSummaryToCaptions(resourcePressure: true)
+                self.summaryMemoryPressureNormal = !critical && SummaryResourcePolicy.memoryAllowsWork()
+                if !self.summaryMemoryPressureNormal {
+                    self.summaryConcurrencyAllowed = false
+                    self.yieldSummaryToCaptions(resourcePressure: true)
+                }
                 self.updateReviewAvailability()
             }
         }
@@ -3284,6 +3464,15 @@ struct ProtectedChemistryTranslationInput: Sendable {
     let text: String
     fileprivate let replacements: [(placeholder: String, original: String)]
 
+    func contextualJSON(before: String, after: String, protectTarget: Bool = true) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "context_before_do_not_translate": String(before.suffix(1600)),
+            "target_translate_only": protectTarget ? text : restore(in: text),
+            "context_after_do_not_translate": after
+        ], options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
+
     func restore(in translatedText: String) -> String {
         replacements.reduce(translatedText) { result, replacement in
             result.replacingOccurrences(
@@ -3294,7 +3483,78 @@ struct ProtectedChemistryTranslationInput: Sendable {
         }
     }
 
+    func restorationFailure(in translatedText: String) -> String? {
+        guard !replacements.isEmpty else { return nil }
+        // Each occurrence has its own ID. Never guess which original formula
+        // a misspelled, missing or duplicated ID was supposed to refer to.
+        guard replacements.allSatisfy({
+            Self.occurrences(of: $0.placeholder, in: translatedText) == 1
+        }) else { return "译文没有完整保留原文的公式、单位或术语" }
+        let restored = restore(in: translatedText)
+        let source = restore(in: text)
+        for marker in ["zxq", "qchem", "qxz"] where
+            Self.occurrences(of: marker, in: restored) > Self.occurrences(of: marker, in: source) {
+            return "译文含有无法还原的公式标记"
+        }
+        return nil
+    }
+
+    func validatedRestore(in translatedText: String) throws -> String {
+        if let reason = restorationFailure(in: translatedText) {
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason)。")
+        }
+        return restore(in: translatedText)
+    }
+
+    func translationHints(from hints: [AuxiliaryTranslationHint]) -> [AuxiliaryTranslationHint] {
+        // The source already specifies these formulas exactly. Repeating their
+        // unmasked spelling as a hint made the model replace a protected ID.
+        hints.filter { hint in
+            hint.kind != .formula || !replacements.contains(where: { $0.original == hint.value })
+        }
+    }
+
+    /// Contextual repair sees original terms so their meaning is not hidden.
+    /// If spelling or count changes, preserve the previous caption. This strict
+    /// check does not establish that each formula has the correct subject.
+    func unmaskedFailure(in translatedText: String) -> String? {
+        guard !replacements.isEmpty else { return nil }
+        func inventory(_ items: [(placeholder: String, original: String)]) -> [String: Int] {
+            items.reduce(into: [:]) { $0[$1.original, default: 0] += 1 }
+        }
+        let actual = ChemistryTranslationProtector.prepare(translatedText)
+        return inventory(replacements) == inventory(actual.replacements)
+            ? nil : "重译的化学式写法或数量与原文不一致"
+    }
+
+    private static func occurrences(of value: String, in text: String) -> Int {
+        var count = 0
+        var start = text.startIndex
+        while start < text.endIndex,
+              let range = text.range(of: value, options: .caseInsensitive, range: start..<text.endIndex) {
+            count += 1
+            start = range.upperBound
+        }
+        return count
+    }
+
     func restorePartial(in translatedText: String) -> String {
+        guard !replacements.isEmpty else { return translatedText }
+        let restored = restore(in: translatedText)
+        let original = restore(in: text)
+        // Do not flash malformed markers such as ZnQCHEM0QXZ on screen.
+        // A complete literal marker already present in the source is allowed.
+        let markerPattern = #"(?i)[A-Za-z0-9_]*(?:ZXQ|QCHEM|QXZ)[A-Za-z0-9_]*"#
+        if let expression = try? NSRegularExpression(pattern: markerPattern) {
+            let range = NSRange(restored.startIndex..<restored.endIndex, in: restored)
+            for match in expression.matches(in: restored, range: range) {
+                guard let matchRange = Range(match.range, in: restored) else { continue }
+                let fragment = String(restored[matchRange])
+                if original.range(of: fragment, options: .caseInsensitive) == nil {
+                    return String(restored[..<matchRange.lowerBound])
+                }
+            }
+        }
         let lower = translatedText.lowercased()
         // A placeholder may arrive across several tokens. Hold its unfinished
         // suffix until the formula can be restored in full.
@@ -3308,11 +3568,58 @@ struct ProtectedChemistryTranslationInput: Sendable {
                 if lower.hasSuffix(placeholder.prefix(length)) { heldCount = length }
             }
         }
+        // Before a malformed marker has reached its distinctive QCHEM part,
+        // hold the unfinished Z-word. Ordinary words resume at their delimiter.
+        if let range = translatedText.range(of: #"(?i)(?<![A-Za-z0-9_])z[A-Za-z0-9_]*$"#,
+                                            options: .regularExpression) {
+            let word = String(translatedText[range])
+            let literalPattern = #"(?i)(?<![A-Za-z0-9_])"# + NSRegularExpression.escapedPattern(for: word)
+                + #"(?![A-Za-z0-9_])"#
+            if original.range(of: literalPattern, options: .regularExpression) == nil {
+                heldCount = max(heldCount, word.count)
+            } else {
+                heldCount = 0
+            }
+        }
         return restore(in: String(translatedText.dropLast(heldCount)))
     }
 }
 
 enum ChemistryTranslationProtector {
+    static let copyInstruction = "Text like ZXQCHEM0QXZ is an unchanged source term. Keep those tokens verbatim while translating the entire sentence, including all surrounding words and clauses. Do not output a list of tokens in place of the translation."
+    static let namingInstruction = "When the source assigns a name, translate the naming action as a complete sentence and use the protected term as the name being assigned. Preserve the stated placement of each label, including words such as beside, under, and above."
+    static let literalDefinitionInstruction = "In statements identifying literal wording, literal text means 字面文本 and literal string means 字面字符串. Translate the identification as its own complete clause, separate from any scientific statement that follows."
+
+    static func promptSuffix(for text: String) -> String {
+        guard text.range(of: #"ZXQCHEM[0-9]+QXZ"#, options: .regularExpression) != nil else { return "" }
+        let definition = literalDefinitionExpression?.firstMatch(in: text,
+            range: NSRange(text.startIndex..., in: text)) != nil
+        return copyInstruction + (hasNamedProtectedTerm(in: text) ? "\n" + namingInstruction : "")
+            + (definition ? "\n" + literalDefinitionInstruction : "")
+    }
+
+    static func hasNamedProtectedTerm(in text: String) -> Bool {
+        namedPlaceholderExpression?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
+    static let negationInstruction = "译文必须保留原文肯定或否定的具体状态及其范围。例：the set is not empty 表示集合至少有一个元素，而非一个也没有；need not leave 表示不必离开，must not leave 表示不得离开；not all 表示并非全部，而非全部都不。按原句保留情态、数量和条件方向，不加强或弱化断言。引语中的陈述及外层命令、保留要求都要完整翻译。不要照抄这些例子，只输出原文的完整译文。"
+    private static let negationExpression = try! NSRegularExpression(
+        pattern: #"(?i)(?<![\p{L}\p{N}_])(?:not|no|never|without|neither|nor|none|nothing|nobody|cannot|[a-z]+n['’]t)(?![\p{L}\p{N}_])"#)
+
+    static func negationSuffix(for text: String) -> String {
+        let range = NSRange(text.startIndex..., in: text)
+        return negationExpression.firstMatch(in: text, range: range) == nil ? "" : negationInstruction
+    }
+
+    static func translationPrompt(base: String, text: String, modelName: String? = nil) -> String {
+        let instruction = [promptSuffix(for: text),
+                           modelName == QwenModelProfile.energySaver.translationModel ? negationSuffix(for: text) : ""]
+            .filter { !$0.isEmpty }.joined(separator: "\n")
+        guard !instruction.isEmpty else { return base }
+        let ending = "Return only the complete Simplified Chinese translation. Do not use markdown."
+        return base.replacingOccurrences(of: ending, with: instruction + "\n" + ending)
+    }
+
     private static let elementSymbols: Set<String> = [
         "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar",
         "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr",
@@ -3323,24 +3630,183 @@ enum ChemistryTranslationProtector {
         "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og"
     ]
 
-    private static let patterns = [
-        #"(?<![A-Za-z])pH\s*\d+(?:\.\d+)?(?![A-Za-z])"#,
-        #"(?<![A-Za-z])(?:[A-Z][a-z]?\d*|\((?:[A-Z][a-z]?\d*)+\)\d*)+(?:\^\d*[+-]|\d*[+-])?(?![A-Za-z])"#,
-        #"(?<![A-Za-z0-9])(?:\d+(?:\.\d+)?\s*)?(?:μ|µ|u|m|c|d|k|M)?(?:mol|g|L|l|M|Pa|bar|atm|K|°C)(?:\s*/\s*(?:mol|L|l|g))?(?![A-Za-z])"#,
-        #"(?<![A-Za-z0-9])(?:FTIR|NMR|UV-Vis|HPLC|UPLC|GC-MS|LC-MS|TLC|IR|MS|SN1|SN2|E1|E2|sp2|sp3)(?![A-Za-z0-9])"#
-    ]
+    private static let formulaPattern: String = {
+        let atom = #"[A-Z][a-z]?[0-9₀-₉]*"#
+        let group = #"\((?:"# + atom + #")+\)[0-9₀-₉]*"#
+        let simple = "(?:" + atom + "|" + group + ")+"
+        let bracket = #"\["# + simple + #"\][0-9₀-₉]*"#
+        let body = "(?:" + atom + "|" + group + "|" + bracket + ")+"
+        let hydrate = "(?:[·⋅][0-9]*" + simple + ")*"
+        let charge = #"(?:\^[0-9]*[+−-]|[⁰¹²³⁴⁵⁶⁷⁸⁹]*[+⁺−⁻-])?"#
+        // Reaction coefficients stay visible: hiding the 2 in 2H2 made a
+        // model add a second coefficient while translating the surrounding prose.
+        return #"(?<![A-Za-z_])[⁰¹²³⁴⁵⁶⁷⁸⁹]*"# + body + hydrate + charge
+            + #"(?![A-Za-z0-9_₀-₉⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻^])"#
+    }()
+
+    // Units, pH and instrument names stay visible. Hiding their meaning made
+    // pH become a temperature, and "2 mL H2O" become two separate items.
+    private static let visibleTerms: Set<String> = ["FTIR", "NMR", "UV-Vis", "HPLC", "UPLC", "GC-MS",
+        "LC-MS", "TLC", "IR", "MS", "SN1", "SN2", "E1", "E2", "sp2", "sp3"]
+
+    // These expressions are immutable and shared by the normalizer, request
+    // preparation and result checks instead of being compiled for every term.
+    private static let quotedLiteral = #"(?:[\"“]([^\"”\r\n]+)[\"”]|(?<![\p{L}\p{N}_])'((?:[^'\r\n]|(?<=[\p{L}\p{N}])'(?=[\p{L}\p{N}]))+)'(?![\p{L}\p{N}_])|‘((?:[^’\r\n]|(?<=[\p{L}\p{N}])’(?=[\p{L}\p{N}]))+)’)"#
+    private static let literalExpressions: [NSRegularExpression] = [
+        #"`([^`\r\n]+)`"#,
+        #"(?i)\b(?:literal|exact)\s+(?:code\s+)?(?:labels?|texts?|strings?|identifiers?|names?)\s+(?:(?:is|are|was|were)\s+)?"# + quotedLiteral,
+        quotedLiteral + #"(?i)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:labels?|texts?|strings?|identifiers?|names?)\b"#,
+        #"(?i)\b(?:identifier|function|variable)\s+"# + quotedLiteral
+    ].compactMap { try? NSRegularExpression(pattern: $0) }
+    private static let quotedNameExpression = try? NSRegularExpression(pattern: quotedLiteral)
+    private static let namingIntroductionPattern: String = {
+        let verb = #"(?:call(?:s|ed|ing)?|nam(?:e[sd]?|ing)|renam(?:e[sd]?|ing)|label(?:s|led|ling|ed|ing)?)"#
+        let object = #"(?:it|this|that|them|these|those|(?:the|this|that|these|those|our)\s+(?:(?:first|second|lower|upper|new|old)\s+)?(?:matri(?:x|ces)|(?:variable|vector|function|label|identifier|array|node|sample|file|process)s?|branch(?:es)?))"#
+        return #"(?i)\b(?:"# + verb + #"\s+"# + object
+            + #"\s+(?:(?:as|to)\s+)?|(?:called|named|renamed|labelled|labeled)\s+(?:(?:as|to)\s+)?|(?:name|label|identifier)\s+(?:is|are|was|were)\s+)"#
+    }()
+    private static let namingIntroduction = try? NSRegularExpression(pattern: namingIntroductionPattern + "$")
+    private static let namedPlaceholderExpression = try? NSRegularExpression(pattern:
+        namingIntroductionPattern + #"[\"“'‘]?ZXQCHEM[0-9]+QXZ\b"#)
+    private static let literalDefinitionExpression = try? NSRegularExpression(pattern:
+        #"(?i)\b(?:literal|exact)\s+(?:texts?|strings?)\s+(?:is|are|was|were)\s+[\"“'‘]?ZXQCHEM[0-9]+QXZ\b"#)
+    private static let spokenNumber = "(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)"
+    private static let spokenNumberSequence = "(?i:" + spokenNumber + "(?:[ -]+" + spokenNumber + ")*)"
+    private static let codeNameExpression = try? NSRegularExpression(pattern:
+        #"^(?:[A-Za-z]|(?=[A-Za-z0-9_]*[0-9_])[A-Za-z][A-Za-z0-9_]*|[A-Zb-z]\s+(?:[A-Za-z]\s+)*"#
+        + spokenNumberSequence + ")$")
+    private static let quotedNameConnector = try? NSRegularExpression(pattern: #"(?i)^\s*(?:,\s*(?:(?:and|or)\s+)?|(?:and|or)\s+)$"#)
+    // Explicit literal labels can continue into a parallel labeling action.
+    // Admit only an optional placement/comment and "and/or label ... as";
+    // ordinary reporting clauses, concept naming and new sentences do not inherit it.
+    private static let coordinatedLiteralLabelExpression = try? NSRegularExpression(pattern:
+        #"(?i)^\s*(?:(?:beside|next\s+to|above|below|under|on)\s+[^,;.!?\r\n()]+)?\s*(?:\([^()\r\n.!?]*\))?\s*,?\s*(?:and|or)\s+label\s+(?:it|this|that|(?:the|this|that|our)\s+(?:(?:first|second|third|other|new|old)\s+)?(?:axis|axes|graph|curve|column|row|variable|vector|matrix|array|node|sample|file|process))\s+as\s*$"#)
+    private static let unquotedLiteralExpression = try? NSRegularExpression(pattern: #"(?i)\buse\s+([^\r\n]+?)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#)
+    private static let unquotedCodeExpression = try? NSRegularExpression(pattern: #"(?:\b[A-Z]\b|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[A-Za-z]+[0-9]+)"#)
+    private static let formulaExpression = try? NSRegularExpression(pattern: formulaPattern)
+    private static let elementExpression = try? NSRegularExpression(pattern: #"[A-Z][a-z]?"#)
+    private static let sentenceExpression = try? NSRegularExpression(pattern: #"[^.!?\r\n]+"#)
+    private static let spokenNameExpression = try? NSRegularExpression(pattern:
+        #"(?<![A-Za-z0-9_])([A-Za-z])\s+"# + spokenNumberSequence + #"(?![A-Za-z0-9_])"#)
 
     static func prepare(_ source: String) -> ProtectedChemistryTranslationInput {
-        let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
-        var candidates: [NSRange] = []
+        prepare(source, includeFormulas: true)
+    }
 
-        for pattern in patterns {
-            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
-            for match in expression.matches(in: source, range: fullRange) {
-                guard match.range.length > 0 else { continue }
-                if pattern == patterns[1], !looksLikeChemicalFormula(match.range, in: source) {
+    static func prepareLiterals(_ source: String) -> ProtectedChemistryTranslationInput {
+        prepare(source, includeFormulas: false)
+    }
+
+    private static func coordinatedLiteralRanges(in source: String, anchored: [NSRange]) -> [NSRange] {
+        guard !anchored.isEmpty, let expression = quotedNameExpression else { return anchored }
+        let ns = source as NSString
+        let whole = NSRange(source.startIndex..., in: source)
+        typealias Quote = (full: NSRange, value: NSRange)
+        var groups: [[Quote]] = []
+        for match in expression.matches(in: source, range: whole) {
+            guard let index = (1..<match.numberOfRanges).first(where: {
+                match.range(at: $0).location != NSNotFound
+            }) else { continue }
+            let quote = (full: match.range, value: match.range(at: index))
+            if let last = groups.last?.last {
+                let gap = ns.substring(with: NSRange(location: NSMaxRange(last.full),
+                    length: quote.full.location - NSMaxRange(last.full)))
+                if gap.rangeOfCharacter(from: .newlines) == nil,
+                   quotedNameConnector?.firstMatch(in: gap, range: NSRange(gap.startIndex..., in: gap)) != nil {
+                    groups[groups.count - 1].append(quote)
                     continue
                 }
+            }
+            groups.append([quote])
+        }
+        var ranges = Set(anchored)
+        var previousLiteralEnd: Int?
+        for group in groups {
+            let explicit = group.contains { ranges.contains($0.value) }
+            let coordinated = previousLiteralEnd.map { previous in
+                let gap = ns.substring(with: NSRange(location: previous,
+                    length: group[0].full.location - previous))
+                return gap.rangeOfCharacter(from: .newlines) == nil
+                    && coordinatedLiteralLabelExpression?.firstMatch(in: gap,
+                        range: NSRange(gap.startIndex..., in: gap)) != nil
+            } ?? false
+            if explicit || coordinated {
+                for quote in group { ranges.insert(quote.value) }
+                previousLiteralEnd = NSMaxRange(group[group.count - 1].full)
+            } else {
+                previousLiteralEnd = nil
+            }
+        }
+        return Array(ranges)
+    }
+
+    /// Only explicit literal/code naming is eligible. Ordinary quoted speech
+    /// remains translatable and eligible for academic ASR correction.
+    private static func literalRanges(in source: String) -> [NSRange] {
+        let whole = NSRange(source.startIndex..<source.endIndex, in: source)
+        var result: [NSRange] = []
+        for expression in literalExpressions {
+            for match in expression.matches(in: source, range: whole) {
+                for index in 1..<match.numberOfRanges where match.range(at: index).location != NSNotFound {
+                    result.append(match.range(at: index))
+                }
+            }
+        }
+        result = coordinatedLiteralRanges(in: source, anchored: result)
+        // Naming verbs alone are insufficient: "call it activation energy"
+        // must still translate. Require a complete code-like quoted value.
+        if let quotes = quotedNameExpression, let shape = codeNameExpression,
+           let introduction = namingIntroduction {
+            let ns = source as NSString
+            var previousNameEnd: Int?
+            for match in quotes.matches(in: source, range: whole) {
+                guard let index = (1..<match.numberOfRanges).first(where: {
+                    match.range(at: $0).location != NSNotFound
+                }) else { continue }
+                let range = match.range(at: index)
+                let value = ns.substring(with: range)
+                guard shape.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else {
+                    previousNameEnd = nil
+                    continue
+                }
+                let before = ns.substring(to: match.range.location)
+                let direct = introduction.firstMatch(in: before, range: NSRange(before.startIndex..., in: before)) != nil
+                let linked = previousNameEnd.map { previous in
+                    let gap = ns.substring(with: NSRange(location: previous, length: match.range.location - previous))
+                    return quotedNameConnector?.firstMatch(in: gap, range: NSRange(gap.startIndex..., in: gap)) != nil
+                } ?? false
+                if direct || linked {
+                    result.append(range)
+                    previousNameEnd = NSMaxRange(match.range)
+                } else {
+                    previousNameEnd = nil
+                }
+            }
+        }
+        // ASR often supplies no quote marks. Require both an explicit exact-name
+        // construction and a code-like span, rather than treating "use it" as a name.
+        if let expression = unquotedLiteralExpression {
+            for match in expression.matches(in: source, range: whole) {
+                let range = match.range(at: 1)
+                let value = (source as NSString).substring(with: range)
+                guard value.rangeOfCharacter(from: CharacterSet(charactersIn: "\"'“”‘’`")) == nil else { continue }
+                let codeLike = unquotedCodeExpression?.firstMatch(in: value,
+                    range: NSRange(value.startIndex..., in: value)) != nil
+                if codeLike { result.append(range) }
+            }
+        }
+        return result
+    }
+
+    private static func prepare(_ source: String, includeFormulas: Bool) -> ProtectedChemistryTranslationInput {
+        let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
+        var candidates = literalRanges(in: source) + spokenNameRanges(in: source)
+
+        if includeFormulas, let expression = formulaExpression {
+            for match in expression.matches(in: source, range: fullRange) {
+                guard match.range.length > 0 else { continue }
+                let original = (source as NSString).substring(with: match.range)
+                guard !visibleTerms.contains(original), looksLikeChemicalFormula(match.range, in: source) else { continue }
                 candidates.append(match.range)
             }
         }
@@ -3353,9 +3819,13 @@ enum ChemistryTranslationProtector {
 
         let mutable = NSMutableString(string: source)
         let sourceString = source as NSString
-        let replacements = selected.enumerated().map { index, range in
-            (
-                placeholder: "ZXQCHEM\(index)QXZ",
+        var index = 0
+        let replacements = selected.map { range in
+            while source.range(of: "ZXQCHEM\(index)QXZ", options: .caseInsensitive) != nil { index += 1 }
+            let placeholder = "ZXQCHEM\(index)QXZ"
+            index += 1
+            return (
+                placeholder: placeholder,
                 original: sourceString.substring(with: range)
             )
         }
@@ -3370,16 +3840,59 @@ enum ChemistryTranslationProtector {
         )
     }
 
+    /// Preserve a spoken name when a vector/matrix/label/variable explicitly
+    /// introduces it. The number is not enough evidence to invent an exponent.
+    private static func spokenNameRanges(in source: String) -> [NSRange] {
+        guard let sentences = sentenceExpression, let names = spokenNameExpression else { return [] }
+        let ns = source as NSString
+        var result: [NSRange] = []
+        for sentence in sentences.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
+            let matches = names.matches(in: source, range: sentence.range)
+            var introduced: Set<String> = []
+            var previousIntroducedEnd: Int?
+            for match in matches {
+                let before = ns.substring(with: NSRange(location: sentence.range.location,
+                    length: match.range.location - sentence.range.location))
+                let end = NSMaxRange(match.range)
+                let after = ns.substring(with: NSRange(location: end, length: NSMaxRange(sentence.range) - end))
+                let direct = before.range(of: #"(?i)\b(?:vectors?|matrices|matrix|labels?|variables?|branches)\s*$"#,
+                                          options: .regularExpression) != nil
+                    || after.range(of: #"(?i)^\s+(?:vectors?|matrices|matrix|labels?|variables?)\b"#,
+                                   options: .regularExpression) != nil
+                let linked = previousIntroducedEnd.map { previous in
+                    ns.substring(with: NSRange(location: previous, length: match.range.location - previous))
+                        .range(of: #"(?i)^\s*(?:,\s*)?(?:and|or)?\s*$"#, options: .regularExpression) != nil
+                } ?? false
+                // ASR often omits quotes. An explicit naming construction still
+                // identifies a spoken label; lower-case "a two" may be an article
+                // followed by a matrix dimension, so it is not new name evidence.
+                let named = ns.substring(with: match.range(at: 1)) != "a"
+                    && namingIntroduction?.firstMatch(in: before, range: NSRange(before.startIndex..., in: before)) != nil
+                if direct || linked || named {
+                    introduced.insert(ns.substring(with: match.range(at: 1)))
+                    previousIntroducedEnd = end
+                } else {
+                    previousIntroducedEnd = nil
+                }
+            }
+            for match in matches where introduced.contains(ns.substring(with: match.range(at: 1))) {
+                result.append(match.range)
+            }
+        }
+        return result
+    }
+
     private static func looksLikeChemicalFormula(_ range: NSRange, in source: String) -> Bool {
         let candidate = (source as NSString).substring(with: range)
-        guard let elementPattern = try? NSRegularExpression(pattern: #"[A-Z][a-z]?"#) else { return false }
+        guard let elementPattern = elementExpression else { return false }
         let candidateRange = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
         let matches = elementPattern.matches(in: candidate, range: candidateRange)
         let symbols = matches.map { (candidate as NSString).substring(with: $0.range) }
         guard !symbols.isEmpty, symbols.allSatisfy(elementSymbols.contains) else { return false }
 
-        if candidate.rangeOfCharacter(from: .decimalDigits) != nil { return true }
-        if candidate.rangeOfCharacter(from: CharacterSet(charactersIn: "()+-^")) != nil { return true }
+        let numbers = CharacterSet.decimalDigits.union(CharacterSet(charactersIn: "₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹"))
+        if candidate.rangeOfCharacter(from: numbers) != nil { return true }
+        if candidate.rangeOfCharacter(from: CharacterSet(charactersIn: "()[]+−-^⁺⁻")) != nil { return true }
         return symbols.count >= 2
     }
 
@@ -3678,7 +4191,7 @@ extension AppModel {
                         throw QwenRuntimeError.requestFailed("CLI notes timed out; saved progress is retained")
                     }
                     if let decision = lastResourceDecision, decision != .available, decision != .finishSummary,
-                       summaryTask == nil, translationWorker == nil, translationQueue.isEmpty {
+                       summaryTask == nil, translationWorker == nil, !hasPendingTranslationWork {
                         if blockedReason != decision.rawValue {
                             blockedReason = decision.rawValue
                             blockedSince = now
@@ -3770,7 +4283,7 @@ extension AppModel {
                 summarizedCount: lastSummarizedSegmentCount,
                 translatedCount: completedTranslationCount,
                 pendingWorkers: (processingTask != nil ? 1 : 0) + (translationWorker != nil ? 1 : 0)
-                    + (summaryTask != nil ? 1 : 0) + translationQueue.count,
+                    + (summaryTask != nil ? 1 : 0) + translationQueue.count + pendingCaptionRepairs.count,
                 archiveErrorPresent: archiveError != nil,
                 journalIncompleteTailBytes: loaded.incompleteTailBytes,
                 exportPaths: exported.map(\.path),
@@ -3789,7 +4302,7 @@ extension AppModel {
 
     private var cliSavedWorkPending: Bool {
         processingTask != nil || translationWorker != nil || summaryTask != nil
-            || !translationQueue.isEmpty
+            || hasPendingTranslationWork
             || (transcriptionProcessing?.pendingCount ?? 0) > 0
             || (transcriptionProcessing?.activeCount ?? 0) > 0
             || (transcriptionProcessing?.unresolvedCount ?? 0) > 0

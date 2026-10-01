@@ -3,9 +3,21 @@ import SwiftUI
 struct FloatingSubtitleView: View {
     @EnvironmentObject private var model: AppModel
 
+    var body: some View {
+        FloatingSubtitleContent(model: model, stream: model.captionStream)
+    }
+}
+
+private struct FloatingSubtitleContent: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var stream: LiveCaptionState
+
     @AppStorage("floatingTextSize") private var textSize = 24.0
 
     var body: some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.record(\.floatingBodies)
+        #endif
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Circle().fill(model.isRecording ? .red : .gray).frame(width: 8, height: 8)
@@ -52,17 +64,22 @@ struct FloatingSubtitleView: View {
         }
     }
 
-    private var english: String {
-        model.previewTranslationSource.isEmpty ? "等待英文语音…" : model.previewTranslationSource
+    private var english: String { model.previewEnglishDisplay }
+    private var chinese: String { model.previewChineseDisplay }
+}
+
+/// Preview wording shared by the classroom window and floating captions.
+extension AppModel {
+    var previewEnglishDisplay: String {
+        previewTranslationSource.isEmpty ? "等待英文语音…" : previewTranslationSource
     }
 
-    private var chinese: String {
-        guard model.previewTranslationEnabled else { return "初译已关闭" }
-        guard model.supportsPreviewTranslation else { return "此系统不支持苹果初译" }
-        if !model.previewChinese.isEmpty { return "初译 · \(model.previewChinese)" }
-        return model.previewTranslationSource.isEmpty ? "等待语音…" : "等待初译…"
+    var previewChineseDisplay: String {
+        guard previewTranslationEnabled else { return "初译已关闭" }
+        guard supportsPreviewTranslation else { return "当前系统不支持初译；正式译文随后显示" }
+        if !previewChinese.isEmpty { return "初译 · \(previewChinese)" }
+        return previewTranslationSource.isEmpty ? "等待语音…" : "等待初译…"
     }
-
 }
 
 private struct FloatingWindowLevel: NSViewRepresentable {

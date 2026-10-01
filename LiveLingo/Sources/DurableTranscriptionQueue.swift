@@ -1,4 +1,5 @@
 import AVFoundation
+import CryptoKit
 import Foundation
 
 struct TranscriptionCommit: Sendable {
@@ -37,6 +38,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         let persistent: Bool
         let identified: Bool
         let handler: @Sendable (SpeechPipeline.Event) -> Void
+        var attempts = TranscriptionAttemptCache()
     }
     private struct Outcome: Sendable {
         var text = ""
@@ -152,7 +154,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         lock.withLock {
             guard let context else { return }
             self.context = Context(generation: context.generation, journal: context.journal,
-                                   persistent: persistent, identified: context.identified, handler: context.handler)
+                                   persistent: persistent, identified: context.identified, handler: context.handler,
+                                   attempts: context.attempts)
         }
     }
 
@@ -205,6 +208,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 throw DurableTranscriptionJournal.JournalError.corrupt("只实时会话已结束，不能重试。")
             }
             try context?.journal.retry(id: id)
+            context?.attempts.remove(id: id)
         }
         publishState(); wake()
     }
@@ -433,7 +437,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     let recording = try context.journal.recordingURL(for: record)
                     let task = Task { [transcriber] in
                         try await Self.recognize(record, audioURL: url, recordingURL: recording,
-                                                 formulaContext: formulaContext, transcriber: transcriber)
+                                                 formulaContext: formulaContext, attempts: context.attempts,
+                                                 transcriber: transcriber)
                     }
                     active = task; activeRecord = record; activeWasPreempted = false
                     return (context, record, task)
@@ -450,6 +455,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     active = nil; activeRecord = nil
                     guard context?.generation == owner.generation else { return }
                     var record = owner.journal.record(id: claimed.id) ?? claimed
+                    defer { if !record.needsWork { owner.attempts.remove(id: record.id) } }
                     if activeWasPreempted || task.isCancelled {
                         record.status = record.automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries ? .retryWaiting : .failed
                         record.failure = "补转已让出资源，已用重试次数保留。"
@@ -535,17 +541,35 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         }
     }
     private static func recognize(_ record: TranscriptionWorkRecord, audioURL: URL, recordingURL: URL?,
-                                  formulaContext: String, transcriber: Transcriber) async throws -> Outcome {
+                                  formulaContext: String, attempts: TranscriptionAttemptCache,
+                                  transcriber: Transcriber) async throws -> Outcome {
         try Task.checkCancellation()
         if try DigitalSilenceGate.isSilent(audioURL) { return Outcome(silent: true) }
         let attemptNonce = UUID()
         func recognizeStage(_ url: URL, model: String, enhance: Bool, stage: String) async throws -> String {
+            try Task.checkCancellation()
+            // Only enhanced exact-range requests recur during automatic repair.
+            // Raw first-pass speech and final neighbour clips need no caching.
+            let reusable = enhance && stage != "context" && record.attempt != .manual
+            let fingerprint = reusable ? try? TranscriptionAttemptCache.fingerprint(url) : nil
+            let key = fingerprint.map { TranscriptionAttemptCache.Key(id: record.id, model: model,
+                                                                       enhanced: enhance, audio: $0) }
+            if let key, let text = attempts.text(for: key) {
+                try Task.checkCancellation()
+                return text
+            }
             let id = ASRRequestContext.identifier(sessionID: record.sessionID, chunkID: record.id,
                 automatic: record.automaticRetryCount, manual: record.manualRetryCount,
                 stage: stage, nonce: attemptNonce)
-            return try await ASRRequestContext.$requestID.withValue(id) {
+            let text = try await ASRRequestContext.$requestID.withValue(id) {
                 try await transcriber(url, model, enhance)
             }
+            try Task.checkCancellation()
+            if let key, text.utf8.count <= TranscriptionAttemptCache.maximumTextBytes,
+               (try? TranscriptionAttemptCache.fingerprint(url)) == key.audio {
+                attempts.store(text, for: key)
+            }
+            return text
         }
         var primary = ""
         var primaryError: Error?
@@ -590,5 +614,55 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         }
         if output.candidate == nil, let primaryError { throw primaryError }
         return output
+    }
+}
+
+/// Short-lived, bounded raw results for deterministic bundled recognizers.
+/// A new queue generation owns a new cache. No audio, error, or cancelled result
+/// is retained. Nothing is written to archives. Gate checks still run on hits.
+private final class TranscriptionAttemptCache: @unchecked Sendable {
+    struct Key: Hashable {
+        let id: UUID
+        let model: String
+        let enhanced: Bool
+        let audio: Data
+    }
+    static let maximumTextBytes = 16 * 1024
+    private let lock = NSLock()
+    private var entries: [Key: String] = [:]
+    private var order: [Key] = []
+
+    func text(for key: Key) -> String? { lock.withLock { entries[key] } }
+    func store(_ text: String, for key: Key) {
+        guard text.utf8.count <= Self.maximumTextBytes else { return }
+        lock.withLock {
+            if entries[key] == nil {
+                if order.count == 64 { entries.removeValue(forKey: order.removeFirst()) }
+                order.append(key)
+            }
+            entries[key] = text
+        }
+    }
+    func remove(id: UUID) {
+        lock.withLock {
+            for key in order where key.id == id { entries.removeValue(forKey: key) }
+            order.removeAll { $0.id == id }
+        }
+    }
+    static func fingerprint(_ url: URL) throws -> Data {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        let limit = 64 * 1024 * 1024
+        guard values.isRegularFile == true, let size = values.fileSize, size <= limit else {
+            throw CocoaError(.fileReadTooLarge)
+        }
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        var digest = SHA256(), count = 0
+        while let data = try file.read(upToCount: 64 * 1024), !data.isEmpty {
+            count += data.count
+            guard count <= limit else { throw CocoaError(.fileReadTooLarge) }
+            digest.update(data: data)
+        }
+        return Data(digest.finalize())
     }
 }
