@@ -109,6 +109,37 @@ class PrefixCacheTests(unittest.TestCase):
         self.assertTrue(cache.remember(tuple(range(3000, 3256)), self.states(), low_priority=True))
         self.assertEqual(cache.fetch(translation + (999,))[1], 768)
 
+    def test_measured_9b_policy_retains_both_translation_prompt_variants(self):
+        config = {
+            'model_type': 'qwen3_5',
+            'text_config': {'hidden_size': 4096, 'num_hidden_layers': 32,
+                            'head_dim': 256, 'num_key_value_heads': 4,
+                            'linear_num_value_heads': 32},
+            'quantization': {'bits': 4, 'group_size': 64},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'config.json').write_text(json.dumps(config))
+            cache = prefix_cache_for_model(directory)
+        plain = tuple(range(768))
+        protected = tuple(range(1000, 1768))
+        # Measured size of a real 768-token snapshot on the packaged 9B.
+        # The fixture exercises admission accounting without allocating weights.
+        for tokens, marker in [(plain, 'plain'), (protected, 'protected')]:
+            state = types.SimpleNamespace(nbytes=76_677_120, marker=marker)
+            self.assertTrue(cache.remember(tokens, [state]))
+        for tokens, marker in [(plain, 'plain'), (protected, 'protected')] * 3:
+            states, used = cache.fetch(tokens + (9999,))
+            self.assertEqual(used, 768)
+            self.assertEqual(states[0].marker, marker)
+        self.assertEqual(cache.nbytes, 2 * 76_677_120)
+        self.assertLessEqual(cache.nbytes, cache.max_bytes)
+        self.assertLessEqual(cache.max_bytes, 148 * 1024**2)
+        self.assertEqual(len(cache._entries), 2)
+        self.assertFalse(cache.remember(tuple(range(3000, 3256)),
+                         [types.SimpleNamespace(nbytes=59_899_904)], low_priority=True))
+        self.assertEqual(cache.fetch(plain + (9999,))[1], 768)
+        self.assertEqual(cache.fetch(protected + (9999,))[1], 768)
+
     def test_other_and_unreadable_model_configs_keep_the_original_cache_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'config.json'

@@ -100,8 +100,9 @@ def prefix_cache_for_model(model_path):
     """Use the measured longer boundary only for the tested 9B configuration.
 
     A 768-token translation snapshot and a 256-token low-priority notes
-    snapshot need about 130 MiB together on this model. A 144 MiB cap keeps
-    both available; the two-entry bound and note admission priority still apply.
+    snapshot need about 130 MiB together. Two 768-token translation variants
+    need 146.25 MiB: 148 MiB admits that pair without evicting one on every
+    prompt switch. The two-entry bound and note admission priority still apply.
     Other models retain the original 512-token / 128 MiB policy.
     """
     try:
@@ -120,7 +121,7 @@ def prefix_cache_for_model(model_path):
         )
     except (OSError, ValueError, AttributeError):
         tested_9b = False
-    return (PromptPrefixCache(max_tokens=768, max_bytes=144 * 1024**2)
+    return (PromptPrefixCache(max_tokens=768, max_bytes=148 * 1024**2)
             if tested_9b else PromptPrefixCache())
 
 
