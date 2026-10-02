@@ -3881,7 +3881,9 @@ enum ChemistryTranslationProtector {
                 if codeLike { result.append(range) }
             }
         }
-        return result
+        // JSON values follow field paths. Prose coordination must not
+        // turn the following JSON key into another literal label.
+        return result + TranslationAcceptance.literalJSONRanges(in: source)
     }
 
     private static func prepare(_ source: String, includeFormulas: Bool,

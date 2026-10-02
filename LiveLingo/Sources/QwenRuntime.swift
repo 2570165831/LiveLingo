@@ -178,7 +178,7 @@ enum TranslationAcceptance {
         "completed", "finished", "started", "required", "necessary", "applicable", "defined",
         "known", "present", "active", "empty", "yet"
     ]
-    private static let jsonStatusWords = negatedStatusWords.union(["stable", "wet", "comparison", "not"])
+    private static let jsonStatusWords = negatedStatusWords.union(["pending", "stable", "wet", "comparison", "not"])
     private static let identifierJSONFields: Set<String> = [
         "id", "name", "label", "identifier", "code", "variable", "function", "operator",
         "formula", "unit", "path", "filename", "enum"
@@ -224,6 +224,44 @@ enum TranslationAcceptance {
             }
         }
         return objects
+    }
+
+    // Whole JSON examples are literals only under a direct preservation
+    // request. Identifier fields are literal by their path, including escaped
+    // prose strings; ordinary status/string leaves remain translatable.
+    private static let preservedJSONPrefix = try! NSRegularExpression(pattern:
+        #"(?i)(?:^|[.!?;\r\n]|,[ \t]*(?:but|and)[ \t]+)[ \t]*(?:please[ \t]+)?(?:keep|preserve|retain)[ \t]+(?:(?:the|this)[ \t]+)?(?:(?:entire|whole)[ \t]+)?JSON(?:[ \t]+(?:example|object|string))?[ \t]*$"#)
+    private static let preservedJSONSuffix = try! NSRegularExpression(pattern:
+        #"(?i)^[ \t]+(?:unchanged\b|verbatim\b|exactly(?=[ \t]*(?:[.!?,;\r\n]|$)))"#)
+
+    static func literalJSONRanges(in source: String) -> [NSRange] {
+        guard source.contains("{") else { return [] }
+        let ns = source as NSString
+        let quotes = AcademicRewriteScope.quotedRanges(in: source)
+        var ranges: [NSRange] = []
+        for object in jsonObjects(in: source) {
+            let prefix = ns.substring(to: object.location)
+            let end = object.location + object.text.utf16.count
+            let suffix = ns.substring(from: end)
+            if let match = preservedJSONPrefix.firstMatch(in: prefix, range: NSRange(location: 0, length: (prefix as NSString).length)),
+               let quotes, !quotes.contains(where: { NSLocationInRange(match.range.location, $0) }),
+               preservedJSONSuffix.firstMatch(in: suffix, range: NSRange(location: 0, length: (suffix as NSString).length)) != nil {
+                ranges.append(NSRange(location: object.location, length: object.text.utf16.count))
+                continue
+            }
+            var strings = JSONStringLocations(object.text)
+            guard strings.walk(), !strings.hasDuplicateFields else { continue }
+            for leaf in strings.leaves where leaf.quotedRange.length > 2 {
+                guard leaf.path.contains(where: { if case .key(let key) = $0 {
+                    return identifierJSONFields.contains(key.lowercased())
+                }; return false }) else { continue }
+                // Keep the encoded bytes inside the JSON quotes. Replacing
+                // the complete quoted token would lose the JSON string type.
+                ranges.append(NSRange(location: object.location + leaf.quotedRange.location + 1,
+                                      length: leaf.quotedRange.length - 2))
+            }
+        }
+        return ranges
     }
 
     private static func jsonKeys(in text: String) -> [(value: String, range: NSRange)] {
@@ -620,6 +658,20 @@ enum TranslationAcceptance {
         guard let quotes = AcademicRewriteScope.quotedRanges(in: text) else { return nil }
         let objects = jsonObjects(in: text).map { NSRange(location: $0.location, length: $0.text.utf16.count) }
         return quotes.filter { quote in !objects.contains { NSIntersectionRange($0, quote).length > 0 } }
+    }
+
+    /// Frame a paired instruction override and response request as lecture
+    /// data. Ignore code/JSON and explicit literals; this is input treatment,
+    /// not proof that a resulting translation preserved the commands.
+    static func containsResponseOverride(in source: String) -> Bool {
+        let literals = ChemistryTranslationProtector.prepareLiterals(source)
+        let prose = NSMutableString(string: literals.withoutLiteralValues(in: source))
+        for object in jsonObjects(in: prose as String).reversed() {
+            prose.replaceCharacters(in: NSRange(location: object.location, length: object.text.utf16.count), with: " ")
+        }
+        return (prose as String).range(of:
+            #"(?i)\b(?:ignore|disregard)\s+(?:(?:all|any|the|this|that|these|those|your|my|our|their|previous|earlier|prior)\s+)*(?:instructions?|requests?|rules?|prompts?|messages?|directions?)\s*,?\s+(?:and(?:\s+then)?|then)\s+(?:(?:do\s+not|never)\s+)?(?:please\s+)?(?:answer|reply|respond|say|write)\b"#,
+            options: .regularExpression) != nil
     }
 
     /// Recognize quoted translate-into requests without interpreting their
@@ -1832,9 +1884,10 @@ enum QwenTranslationClient {
     ) async throws -> String {
         let field = "source_text_to_translate"
         let usesWrapper = (modelName == QwenModelProfile.highQuality.translationModel
-            || (modelName == QwenModelProfile.energySaver.translationModel && attempt == .repairContent
-                && text.range(of: "translate", options: .caseInsensitive) != nil
-                && TranslationAcceptance.quotedTranslationRequests(in: text)?.groups.isEmpty == false))
+            || (modelName == QwenModelProfile.energySaver.translationModel
+                && (TranslationAcceptance.containsResponseOverride(in: text)
+                    || (attempt == .repairContent && text.range(of: "translate", options: .caseInsensitive) != nil
+                        && TranslationAcceptance.quotedTranslationRequests(in: text)?.groups.isEmpty == false))))
             && text.range(of: field, options: .caseInsensitive) == nil
         let input: String
         if usesWrapper {
