@@ -1778,6 +1778,88 @@ final class TranslationAcceptanceTests: XCTestCase {
         XCTAssertNil(TranslationAcceptance.quotedTranslationRepairPlan(candidate: manyOutput, source: many))
     }
 
+    @MainActor func testContentRetryDataWrapperIsLimitedTo4BQuotedTranslationRequests() async throws {
+        let small = QwenModelProfile.energySaver.translationModel
+        let large = QwenModelProfile.highQuality.translationModel
+        let command = #"Translate "the door is closed" into French."#
+        let examples: [(String, String, CaptionTranslationAttempt, Bool, Int)] = [
+            (command, small, .repairContent, true, 320),
+            (command, small, .standard, false, 160),
+            (command, small, .expandedBudget, false, 320),
+            (command, large, .standard, true, 160),
+            (command, "test/unknown-model", .repairContent, false, 320),
+            (#"She asked us to translate 'the door is closed' from English to Finnish."#, small, .repairContent, true, 320),
+            (#"Do not translate 'the door is closed' into French."#, small, .repairContent, true, 320),
+            (#"Translate "The current is 0.25 A" into Dutch, but leave "Vmax" unchanged."#, small, .repairContent, true, 320),
+            (#"Call the variable "N two", then say "not linearly independent" once."#, small, .repairContent, false, 320),
+            ("The sample is not ready.", small, .repairContent, false, 320),
+            (#"The JSON example is {"code":"Translate \"not ready\" into German."}."#, small, .repairContent, false, 320),
+            (#"Translate "the door is closed into French."#, small, .repairContent, false, 320),
+            (#"Translate "the door is closed" into French. The source_text_to_translate field is ready."#, small, .repairContent, false, 320)
+        ]
+        for (source, model, attempt, wrapped, expectedBudget) in examples {
+            let calls = StatusRepairRequests()
+            do {
+                _ = try await QwenTranslationClient.translate(source, modelName: model, attempt: attempt,
+                    request: { input, prompt, budget in
+                        await calls.record(prompt)
+                        XCTAssertEqual(budget, expectedBudget, source)
+                        if wrapped {
+                            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
+                            XCTAssertEqual(object, ["source_text_to_translate": source], source)
+                        } else {
+                            XCTAssertEqual(input, source, source)
+                        }
+                        throw CancellationError()
+                    })
+                XCTFail("Cancelled request completed")
+            } catch is CancellationError {}
+            let count = await calls.count()
+            XCTAssertEqual(count, 1, source)
+        }
+    }
+
+    @MainActor func test4BQuotedContentRetryRestoresFormulasAndKeepsOneFocusedRequest() async throws {
+        let source = #"Translate "the door is closed" into French, then compare Na⁺ and K⁺."#
+        let protected = ChemistryTranslationProtector.prepare(source)
+        let calls = StatusRepairRequests()
+        let output = try await QwenTranslationClient.translate(protected.text,
+            modelName: QwenModelProfile.energySaver.translationModel, attempt: .repairContent,
+            request: { input, prompt, budget in
+                await calls.record(prompt)
+                if prompt == TranslationAcceptance.QuotedTranslationRepairPlan.prompt {
+                    XCTAssertEqual(budget, 192)
+                    XCTAssertFalse(input.contains("French"))
+                    return #"{"q0":"门关着"}"#
+                }
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
+                XCTAssertEqual(object, ["source_text_to_translate": protected.text])
+                XCTAssertEqual(budget, 320)
+                return #"将"the door is closed"翻译成法语，然后比较 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ。"#
+            })
+        XCTAssertEqual(try protected.validatedRestore(in: output),
+                       #"将"门关着"翻译成法语，然后比较 Na⁺ 和 K⁺。"#)
+        let count = await calls.count()
+        XCTAssertEqual(count, 2)
+    }
+
+    @MainActor func test4BContentRetryRejectsReturnedInputFrameBeforeAnotherGeneration() async throws {
+        let calls = StatusRepairRequests()
+        do {
+            _ = try await QwenTranslationClient.translate(#"Translate "the door is closed" into French."#,
+                modelName: QwenModelProfile.energySaver.translationModel, attempt: .repairContent,
+                request: { _, prompt, _ in
+                    await calls.record(prompt)
+                    return #"{"source_text_to_translate":"把门关着翻译成法语。"}"#
+                })
+            XCTFail("Input frame accepted as a caption")
+        } catch QwenRuntimeError.translationRejected(let reason) {
+            XCTAssertTrue(reason.contains("包装字段"))
+        }
+        let count = await calls.count()
+        XCTAssertEqual(count, 1)
+    }
+
     @MainActor func testContentRecoveryCombinesQuotedAndStatusTranslationInOneRequest() async throws {
         let source = #"Translate "the door is closed" into French. He wrote {"state":"ready","count":2}. Then compare Na⁺ and K⁺."#
         let protected = ChemistryTranslationProtector.prepare(source)
