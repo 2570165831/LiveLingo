@@ -3715,6 +3715,9 @@ enum ChemistryTranslationProtector {
     private static let keepQuotedLiteralExpression = try? NSRegularExpression(pattern:
         #"(?i)(?:^|[.!?\r\n])\s*(?:please\s+)?keep\s+(?:(?:the|this)\s+)?(?:string|text|label|identifier|name|title)\s+"#
         + quotedLiteral + #"\s+unchanged\b"#)
+    private static let preservedQuotedLiteralExpression = try? NSRegularExpression(pattern:
+        #"(?i)(?:^|[.!?;\r\n]|,[ \t]*(?:but|and)[ \t]+)[ \t]*(?:please[ \t]+)?(?:keep|preserve|retain)[ \t]+(?:(?:the|this)[ \t]+)?(?:string|text|label|identifier|name|title)[ \t]+"#
+        + quotedLiteral + #"[ \t]+(?:unchanged\b|verbatim\b|exactly(?=[ \t]*(?:[.!?,;\r\n]|$)))"#)
     private static let namingIntroductionPattern: String = {
         let verb = #"(?:call(?:s|ed|ing)?|nam(?:e[sd]?|ing)|renam(?:e[sd]?|ing)|label(?:s|led|ling|ed|ing)?)"#
         let object = #"(?:it|this|that|them|these|those|(?:the|this|that|these|those|our)\s+(?:(?:first|second|lower|upper|new|old)\s+)?(?:matri(?:x|ces)|(?:variable|vector|function|label|identifier|array|node|sample|file|process)s?|branch(?:es)?))"#
@@ -3825,7 +3828,8 @@ enum ChemistryTranslationProtector {
                 }
             }
         }
-        let keepMatches = keepQuotedLiteralExpression?.matches(in: source, range: whole) ?? []
+        let keepMatches = (keepQuotedLiteralExpression?.matches(in: source, range: whole) ?? [])
+            + (preservedQuotedLiteralExpression?.matches(in: source, range: whole) ?? [])
         if !keepMatches.isEmpty, let quoted = AcademicRewriteScope.quotedRanges(in: source) {
             for match in keepMatches
                 where !quoted.contains(where: { NSLocationInRange(match.range.location, $0) }) {

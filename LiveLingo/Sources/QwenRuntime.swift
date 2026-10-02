@@ -558,12 +558,14 @@ enum TranslationAcceptance {
         let source: String
         let candidate: String
         let values: [Value]
+        let statusValues: [JSONStatusRepairPlan.Value]
         static let prompt = JSONStatusRepairPlan.prompt
         static let outputBudget = 192
 
         func input() throws -> String {
+            let pairs = values.map { ($0.id, $0.source) } + statusValues.map { ($0.id, $0.source) }
             let data = try JSONSerialization.data(withJSONObject: [
-                "values_to_translate": Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0.source) })
+                "values_to_translate": Dictionary(uniqueKeysWithValues: pairs)
             ], options: [.sortedKeys, .withoutEscapingSlashes])
             return String(decoding: data, as: UTF8.self)
         }
@@ -573,11 +575,11 @@ enum TranslationAcceptance {
                 .translationRejected("译文未通过验收：引语补译格式无效，或仍有未译内容。")
             }
             guard let object = try? JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: String],
-                  Set(object.keys) == Set(values.map(\.id)) else { throw fail() }
+                  Set(object.keys) == Set(values.map(\.id) + statusValues.map(\.id)) else { throw fail() }
             var locations = JSONStringLocations(response)
             guard locations.walk(), !locations.hasDuplicateFields else { throw fail() }
-            let result = NSMutableString(string: candidate)
-            for value in values.sorted(by: { $0.range.location > $1.range.location }) {
+            var replacements: [(NSRange, String)] = []
+            for value in values {
                 guard let raw = object[value.id] else { throw fail() }
                 let text = SimplifiedChineseNormalizer.normalize(raw).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard containsHan(text), !containsKanaOrHangul(text), text.count <= 160,
@@ -588,7 +590,17 @@ enum TranslationAcceptance {
                 if value.source.range(of: #"(?i)\b(?:not|no|never|neither|nor|none|nothing|without|cannot|[a-z]+n['’]t)\b"#,
                                       options: .regularExpression) != nil,
                    !text.contains(where: { "不没未无非勿别否禁".contains($0) }) { throw fail() }
-                result.replaceCharacters(in: value.range, with: text)
+                replacements.append((value.range, text))
+            }
+            if !statusValues.isEmpty {
+                let selected = Dictionary(uniqueKeysWithValues: statusValues.map { ($0.id, object[$0.id]!) })
+                let data = try JSONSerialization.data(withJSONObject: selected, options: [.sortedKeys])
+                let statuses = JSONStatusRepairPlan(source: source, candidate: candidate, values: statusValues)
+                replacements += try statuses.replacements(String(decoding: data, as: UTF8.self))
+            }
+            let result = NSMutableString(string: candidate)
+            for (range, text) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
+                result.replaceCharacters(in: range, with: text)
             }
             return try validated(result as String, source: source)
         }
@@ -598,10 +610,14 @@ enum TranslationAcceptance {
     /// every English quotation. Source/output pairing is positional and exact;
     /// ambiguous repeated wording and literal/code content remain untouched.
     static func quotedTranslationRepairPlan(candidate: String, source: String) -> QuotedTranslationRepairPlan? {
+        func proseQuotes(in text: String) -> [NSRange]? {
+            guard let quotes = AcademicRewriteScope.quotedRanges(in: text) else { return nil }
+            let objects = jsonObjects(in: text).map { NSRange(location: $0.location, length: $0.text.utf16.count) }
+            return quotes.filter { quote in !objects.contains { NSIntersectionRange($0, quote).length > 0 } }
+        }
         guard rejection(candidate: candidate, source: source) == .mixedEnglishProse,
-              !source.contains("{"), !source.contains("}"),
-              let sourceQuotes = AcademicRewriteScope.quotedRanges(in: source),
-              let outputQuotes = AcademicRewriteScope.quotedRanges(in: candidate),
+              let sourceQuotes = proseQuotes(in: source),
+              let outputQuotes = proseQuotes(in: candidate),
               !sourceQuotes.isEmpty, !outputQuotes.isEmpty else { return nil }
         let ns = source as NSString
         let out = candidate as NSString
@@ -648,15 +664,22 @@ enum TranslationAcceptance {
             }
         }
         guard !values.isEmpty, values.count <= 4,
-              values.reduce(0, { $0 + $1.source.count }) <= 400 else { return nil }
+               values.reduce(0, { $0 + $1.source.count }) <= 400 else { return nil }
+        let statusValues = jsonStatusRepairPlan(candidate: candidate, source: source)?.values ?? []
+        guard values.count + statusValues.count <= 8 else { return nil }
+        let trialReplacements = values.map { ($0.range, "译文") }
+            + statusValues.map { ($0.range, "\"译文\"") }
+        let orderedRanges = trialReplacements.map(\.0).sorted { $0.location < $1.location }
+        guard zip(orderedRanges, orderedRanges.dropFirst()).allSatisfy({ NSMaxRange($0.0) <= $0.1.location })
+        else { return nil }
         let trial = NSMutableString(string: candidate)
-        for value in values.sorted(by: { $0.range.location > $1.range.location }) {
-            trial.replaceCharacters(in: value.range, with: "译文")
+        for (range, text) in trialReplacements.sorted(by: { $0.0.location > $1.0.location }) {
+            trial.replaceCharacters(in: range, with: text)
         }
         // Do not spend an extra request when some other untranslated clause or
         // structural error would still prevent accepting the complete caption.
         guard rejection(candidate: trial as String, source: source) == nil else { return nil }
-        return QuotedTranslationRepairPlan(source: source, candidate: candidate, values: values)
+        return QuotedTranslationRepairPlan(source: source, candidate: candidate, values: values, statusValues: statusValues)
     }
 
     struct JSONStatusRepairPlan: Sendable {
@@ -679,7 +702,7 @@ enum TranslationAcceptance {
             return String(decoding: data, as: UTF8.self)
         }
 
-        func applying(_ response: String) throws -> String {
+        func replacements(_ response: String) throws -> [(NSRange, String)] {
             func fail() -> QwenRuntimeError {
                 .translationRejected("译文未通过验收：状态补译格式无效，或无法核实中文和否定。")
             }
@@ -705,6 +728,11 @@ enum TranslationAcceptance {
                 let quoted = String(decoding: data, as: UTF8.self).dropFirst().dropLast()
                 replacements.append((value.range, String(quoted)))
             }
+            return replacements
+        }
+
+        func applying(_ response: String) throws -> String {
+            let replacements = try replacements(response)
             let result = NSMutableString(string: candidate)
             for (range, text) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
                 result.replaceCharacters(in: range, with: text)
@@ -1758,10 +1786,11 @@ enum QwenTranslationClient {
         modelName: String,
         hints: [AuxiliaryTranslationHint] = [],
         attempt: CaptionTranslationAttempt = .standard,
-        onUpdate: (@MainActor @Sendable (String) async -> Void)? = nil
+        onUpdate: (@MainActor @Sendable (String) async -> Void)? = nil,
+        request: AdjacentRequest? = nil
     ) async throws -> String {
         let output = try await requestTranslation(text, modelName: modelName, hints: hints,
-                                                  attempt: attempt, onUpdate: onUpdate)
+                                                  attempt: attempt, request: request, onUpdate: onUpdate)
         let accepted = try TranslationAcceptance.validated(output, source: text)
         return FormulaASRReview.uncertain(text) ? TranslationAcceptance.formulaNotice + accepted : accepted
     }
@@ -1815,9 +1844,12 @@ enum QwenTranslationClient {
         if usesWrapper, output.range(of: field, options: .caseInsensitive) != nil {
             throw QwenRuntimeError.translationRejected("译文未通过验收：返回内容含输入包装字段。")
         }
-        guard attempt == .standard else { return output }
-        let statuses = try await repairingJSONStatuses(output, source: text, modelName: modelName, request: request)
-        return try await repairingQuotedTranslation(statuses, source: text, modelName: modelName, request: request)
+        guard attempt == .standard || attempt == .repairContent else { return output }
+        // Combine eligible JSON statuses with quoted operands before their
+        // ranges change. The same bounded repair also applies after a content
+        // retry; unrelated failures still need the complete caption rejected.
+        let quotes = try await repairingQuotedTranslation(output, source: text, modelName: modelName, request: request)
+        return try await repairingJSONStatuses(quotes, source: text, modelName: modelName, request: request)
     }
 
     private static func repairingQuotedTranslation(_ output: String, source: String, modelName: String,
@@ -1850,6 +1882,16 @@ enum QwenTranslationClient {
         try Task.checkCancellation()
         guard plan.values.count <= 8 else {
             throw QwenRuntimeError.translationRejected("译文未通过验收：未翻译状态超过单次补译上限。")
+        }
+        // Spend a status-only request only when replacing these leaves could
+        // make the whole caption valid. Eligible quote/status combinations are
+        // handled together above; other untranslated clauses remain failures.
+        let trial = NSMutableString(string: output)
+        for value in plan.values.sorted(by: { $0.range.location > $1.range.location }) {
+            trial.replaceCharacters(in: value.range, with: "\"译文\"")
+        }
+        if let rejection = TranslationAcceptance.rejection(candidate: trial as String, source: source) {
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(rejection.reason)。")
         }
         let input = try plan.input()
         let response: String

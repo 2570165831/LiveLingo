@@ -1671,8 +1671,8 @@ final class TranslationAcceptanceTests: XCTestCase {
              #"把"the door is closed"译成法语，但保留原样。"#),
             (#"Translate "the door is closed" into French. The title is "the door is closed"."#,
              #"把"the door is closed"译成法语。标题是"the door is closed"。"#),
-            (#"Translate "the door is closed" into French. The flag is {"state":"ready"}."#,
-             #"把"the door is closed"译成法语。标记是{"state":"ready"}。"#)
+            (#"Translate "the door is closed" into French. The flag is {"state":"ready","count":2}."#,
+             #"把"the door is closed"译成法语。标记是{"state":"ready","count":3}。"#)
         ] {
             XCTAssertNil(TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: source), source)
         }
@@ -1725,6 +1725,167 @@ final class TranslationAcceptanceTests: XCTestCase {
             let count = await calls.count()
             XCTAssertEqual(count, 2)
         }
+    }
+
+    func testQuotedTranslationCombinesStatusAndQuoteRangesWithoutChangingOtherBytes() throws {
+        for (source, output, expected) in [
+            (#"Translate "The lamp is not on" into French. He wrote {"state":"not ready","count":2,"code":"ready"}."#,
+             #"将"The lamp is not on"译成法语。他写了{"state":"not ready","count":2,"code":"ready"}。"#,
+             #"将"灯没开"译成法语。他写了{"state":"尚未就绪","count":2,"code":"ready"}。"#),
+            (#"He wrote {"state":"not ready","count":2,"code":"ready"}. Translate "The lamp is not on" into French."#,
+             #"🔬 他写了{"state":"not ready","count":2,"code":"ready"}。将"The lamp is not on"译成法语。"#,
+             #"🔬 他写了{"state":"尚未就绪","count":2,"code":"ready"}。将"灯没开"译成法语。"#)
+        ] {
+            let plan = try XCTUnwrap(TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: source))
+            XCTAssertEqual(plan.values.map(\.source), ["The lamp is not on"])
+            XCTAssertEqual(plan.statusValues.map(\.source), ["not ready"])
+            let input = try plan.input()
+            XCTAssertFalse(input.contains("source_sentence"))
+            XCTAssertFalse(input.contains("French"))
+            XCTAssertEqual(try plan.applying(#"{"q0":"灯没开","0":"尚未就绪"}"#), expected)
+        }
+    }
+
+    func testQuotedTranslationCanRepairBesideAlreadyTranslatedJSON() throws {
+        let source = #"Translate "the door is closed" into French. He wrote {"state":"ready","count":2}."#
+        let output = #"将"the door is closed"译成法语。他写了{"state":"准备就绪","count":2}。"#
+        let plan = try XCTUnwrap(TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: source))
+        XCTAssertTrue(plan.statusValues.isEmpty)
+        XCTAssertEqual(try plan.applying(#"{"q0":"门关着"}"#),
+                       #"将"门关着"译成法语。他写了{"state":"准备就绪","count":2}。"#)
+    }
+
+    func testCombinedQuotedTranslationRejectsBadStatusNegationAndDuplicateFields() throws {
+        let source = #"Translate "The lamp is not on" into French. He wrote {"state":"not ready","count":2}."#
+        let output = #"将"The lamp is not on"译成法语。他写了{"state":"not ready","count":2}。"#
+        let plan = try XCTUnwrap(TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: source))
+        for response in [#"{"q0":"灯没开","0":"ready"}"#, #"{"q0":"灯没开","0":"就绪"}"#,
+                         #"{"q0":"灯开着","0":"未就绪"}"#, #"{"q0":"灯没开"}"#,
+                         #"{"q0":"灯没开","0":"未就绪","0":"尚未就绪"}"#,
+                         #"{"q0":"灯没开","0":"未就绪","extra":"解释"}"#,
+                         #"{"q0":"灯没开\n解释","0":"未就绪"}"#] {
+            XCTAssertThrowsError(try plan.applying(response), response)
+        }
+        for invalid in [output.replacingOccurrences(of: #""count":2"#, with: #""count":3"#),
+                        output + " another clause is still untranslated",
+                        #"La porte est fermée. 他写了{"state":"not ready","count":2}。"#] {
+            XCTAssertNil(TranslationAcceptance.quotedTranslationRepairPlan(candidate: invalid, source: source), invalid)
+        }
+        let many = #"Translate "The lamp is not on" into French. He wrote "#
+            + "{" + (0..<8).map { #""s\#($0)":"ready""# }.joined(separator: ",") + "}."
+        let manyOutput = #"将"The lamp is not on"译成法语。他写了"#
+            + "{" + (0..<8).map { #""s\#($0)":"ready""# }.joined(separator: ",") + "}。"
+        XCTAssertNil(TranslationAcceptance.quotedTranslationRepairPlan(candidate: manyOutput, source: many))
+    }
+
+    @MainActor func testContentRecoveryCombinesQuotedAndStatusTranslationInOneRequest() async throws {
+        let source = #"Translate "the door is closed" into French. He wrote {"state":"ready","count":2}. Then compare Na⁺ and K⁺."#
+        let protected = ChemistryTranslationProtector.prepare(source)
+        for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+            for attempt in [CaptionTranslationAttempt.standard, .repairContent] {
+                let calls = StatusRepairRequests()
+                let output = try await QwenTranslationClient.translate(protected.text, modelName: model,
+                    attempt: attempt, request: { input, prompt, budget in
+                        await calls.record(prompt)
+                        if prompt == TranslationAcceptance.QuotedTranslationRepairPlan.prompt {
+                            XCTAssertEqual(budget, 192)
+                            XCTAssertTrue(input.contains("q0"))
+                            XCTAssertTrue(input.contains("ready"))
+                            return #"{"q0":"门关着","0":"准备就绪"}"#
+                        }
+                        return #"将"the door is closed"译成法语。他写了{"state":"ready","count":2}。然后比较 ZXQCHEM0QXZ 和 ZXQCHEM1QXZ。"#
+                    })
+                XCTAssertEqual(try protected.validatedRestore(in: output),
+                    #"将"门关着"译成法语。他写了{"state":"准备就绪","count":2}。然后比较 Na⁺ 和 K⁺。"#)
+                let count = await calls.count()
+                XCTAssertEqual(count, 2)
+            }
+        }
+    }
+
+    @MainActor func testContentRecoveryKeepsOneRequestForAlreadyCompleteOrWrongLanguageOutput() async throws {
+        for (source, output, shouldAccept) in [
+            ("The sample is ready.", "样品准备好了。", true),
+            (#"Translate "the door is closed" into French."#, "La porte est fermée.", false)
+        ] {
+            let calls = StatusRepairRequests()
+            do {
+                _ = try await QwenTranslationClient.translate(source, modelName: QwenModelProfile.highQuality.translationModel,
+                    attempt: .repairContent, request: { _, prompt, _ in await calls.record(prompt); return output })
+                XCTAssertTrue(shouldAccept)
+            } catch QwenRuntimeError.translationRejected { XCTAssertFalse(shouldAccept) }
+            let count = await calls.count()
+            XCTAssertEqual(count, 1)
+        }
+    }
+
+    @MainActor func testContentRecoveryPropagatesFocusedFailureAndCancellationWithoutRepeating() async throws {
+        for cancelled in [false, true] {
+            let calls = StatusRepairRequests()
+            do {
+                _ = try await QwenTranslationClient.translate(#"Translate "the door is closed" into French."#,
+                    modelName: QwenModelProfile.highQuality.translationModel, attempt: .repairContent,
+                    request: { _, prompt, _ in
+                        await calls.record(prompt)
+                        if prompt == TranslationAcceptance.QuotedTranslationRepairPlan.prompt {
+                            if cancelled { throw CancellationError() }
+                            return #"{"q0":"the door is closed"}"#
+                        }
+                        return #"将"the door is closed"译成法语。"#
+                    })
+                XCTFail("Incomplete focused repair accepted")
+            } catch is CancellationError { XCTAssertTrue(cancelled) }
+            catch QwenRuntimeError.translationRejected { XCTAssertFalse(cancelled) }
+            let count = await calls.count()
+            XCTAssertEqual(count, 2)
+        }
+    }
+
+    func testPreservedTitleAndNamedStringClausesAreProtectedLiterally() throws {
+        for source in [
+            #"Translate the explanation, but preserve the title "Neither sensor is active" exactly."#,
+            #"Translate the explanation, and retain the name "Neither sensor is active" verbatim."#,
+            #"Preserve the title "Neither sensor is active" exactly."#,
+            #"Please retain the text "Neither sensor is active" unchanged."#,
+            "Keep the\n title \"Neither sensor is active\" unchanged."
+        ] {
+            let protected = ChemistryTranslationProtector.prepare(source)
+            XCTAssertEqual(protected.text, source.replacingOccurrences(of: "Neither sensor is active", with: "ZXQCHEM0QXZ"), source)
+            XCTAssertFalse(protected.text.contains("Neither sensor is active"))
+            let output = #"翻译解释，但原样保留标题"ZXQCHEM0QXZ"。"#
+            let restored = try protected.validatedRestore(in: output)
+            XCTAssertEqual(try TranslationAcceptance.validatedCaption(restored, source: source),
+                           #"翻译解释，但原样保留标题"Neither sensor is active"。"#)
+            XCTAssertThrowsError(try protected.validatedRestore(in: #"翻译解释，但保留标题"两个传感器均未激活"。"#))
+        }
+    }
+
+    func testPreservedTitleProtectionDoesNotSpreadIntoNegationConditionsOrQuotedSpeech() {
+        for source in [
+            #"Do not preserve the title "Neither sensor is active" exactly."#,
+            #"If you preserve the title "Neither sensor is active" exactly, explain why."#,
+            #"Keep the title "Neither sensor is active" exactly once."#,
+            #"Preserve the title "Neither sensor is active" by translating it."#,
+            #"She said, "Translate the explanation, but preserve the title 'Neither sensor is active' exactly.""#,
+            #"Translate "Neither sensor is active" into German."#
+        ] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source, source)
+        }
+    }
+
+    @MainActor func testStatusOnlyRepairSkipsAnUnrelatedUntranslatedClause() async throws {
+        let source = #"He wrote {"state":"ready"}. The lamp is not on."#
+        let calls = StatusRepairRequests()
+        do {
+            _ = try await QwenTranslationClient.translate(source, modelName: QwenModelProfile.highQuality.translationModel,
+                attempt: .repairContent, request: { _, prompt, _ in
+                    await calls.record(prompt)
+                    return #"他写了{"state":"ready"}。The lamp is not on."#
+                })
+            XCTFail("Incomplete clause accepted")
+        } catch QwenRuntimeError.translationRejected {}
+        let count = await calls.count()
+        XCTAssertEqual(count, 1)
     }
 
     @MainActor func testQuotedTranslationDoesNotRepeatAfterBadRepairOrCancellation() async throws {
