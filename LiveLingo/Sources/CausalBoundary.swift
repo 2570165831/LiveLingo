@@ -29,6 +29,7 @@ struct CausalBoundaryPolicy: Sendable {
         let end: TimeInterval
         let text: String
         let arrival: TimeInterval
+        let unchangedSince: TimeInterval
     }
 
     private struct Activity: Sendable {
@@ -41,8 +42,6 @@ struct CausalBoundaryPolicy: Sendable {
     private(set) var committedTime: TimeInterval = 0
     private var previews: [Preview] = []
     private var activities: [Activity] = []
-    private var fingerprint: String?
-    private var unchangedSince: TimeInterval = 0
 
     mutating func observePreview(
         text: String,
@@ -55,8 +54,20 @@ struct CausalBoundaryPolicy: Sendable {
         else { return }
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return }
-        let row = Preview(start: start, end: end, text: normalized, arrival: arrival)
-        if let index = previews.lastIndex(where: { abs($0.start - start) < 0.05 }) {
+        let index = previews.lastIndex(where: { abs($0.start - start) < 0.05 })
+        var unchangedSince = arrival
+        if let index {
+            let previous = previews[index]
+            if previous.start == start, previous.end == end, previous.text == normalized {
+                unchangedSince = previous.unchangedSince
+            }
+        }
+        // Callback wakeups can coalesce before decision runs. Track every
+        // revision here, including a change that later reverts to the old text.
+        // Identical observations retain the start of their stable interval.
+        let row = Preview(start: start, end: end, text: normalized, arrival: arrival,
+                          unchangedSince: unchangedSince)
+        if let index {
             previews[index] = row
         } else {
             previews.append(row)
@@ -96,18 +107,9 @@ struct CausalBoundaryPolicy: Sendable {
                 latest.text,
                 allowClausePunctuation: duration >= configuration.clauseSearchDuration
               )
-        else {
-            fingerprint = nil
-            unchangedSince = now
-            return nil
-        }
+        else { return nil }
 
-        let key = "\(latest.start):\(latest.end):\(latest.text)"
-        if key != fingerprint {
-            fingerprint = key
-            unchangedSince = latest.arrival
-        }
-        guard now - unchangedSince >= configuration.previewStabilityDuration,
+        guard now - latest.unchangedSince >= configuration.previewStabilityDuration,
               let quiet = quietTail(at: now),
               latest.end <= quiet.start + configuration.boundarySlackDuration,
               activities.contains(where: { $0.speech && $0.end > committedTime })
@@ -171,8 +173,6 @@ struct CausalBoundaryPolicy: Sendable {
     ) -> CausalBoundaryDecision {
         let result = CausalBoundaryDecision(start: committedTime, end: now, reason: reason)
         committedTime = now
-        fingerprint = nil
-        unchangedSince = now
         previews.removeAll { $0.end <= now }
         activities.removeAll { $0.end < now - 1 }
         return result
