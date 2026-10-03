@@ -672,6 +672,15 @@ final class AppModel: ObservableObject {
     private var summaryTask: Task<Void, Never>?
     private var stopOverlapStarted = false
     private var summaryScheduleTask: Task<Void, Never>?
+    private var summaryScheduleGeneration = 0
+    private var noteAdmission = CaptionNoteGate()
+    private var inlineCaptionRepairTargets: [UUID: UUID] = [:]
+    private var noteInputProducerDrained = false
+    private var noteSourceProducerDrained = false
+    private var summaryClock: @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    private var summarySleep: @MainActor (TimeInterval) async throws -> Void = {
+        try await Task.sleep(for: .seconds($0))
+    }
     @Published private(set) var summaryConcurrencyAllowed = false
     private var summaryMemoryPressureNormal = false
     @Published private(set) var runtimeResources: RuntimeResourceSnapshot?
@@ -1645,6 +1654,10 @@ final class AppModel: ObservableObject {
         resetLearningNotes()
         lastSummarizedSegmentCount = 0
         summaryRefreshRequested = false
+        noteAdmission = CaptionNoteGate()
+        inlineCaptionRepairTargets = [:]
+        noteInputProducerDrained = false
+        noteSourceProducerDrained = false
         lastCaptionActivityUptime = nil
         lastSummaryCycleStartedUptime = nil
         summaryRetryNotBefore = nil
@@ -1898,6 +1911,7 @@ final class AppModel: ObservableObject {
     private func finishSavedProcessing(session identity: UUID, epoch: Int) async {
         await pipeline.drainTranscription(sessionID: identity)
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
+        noteSourceProducerDrained = true
         drainTranslationQueue()
         startStopOverlapIfUseful()
         while translationWorker != nil || summaryTask != nil || hasPendingTranslationWork {
@@ -1908,6 +1922,8 @@ final class AppModel: ObservableObject {
         }
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch,
               let directory = sessionDirectory else { return }
+        // Receipt after the source producer and all translation/repair writers close.
+        noteInputProducerDrained = true
         cancelScheduledSummaryRefresh()
         await generateLectureSummary(force: true)
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
@@ -1956,6 +1972,8 @@ final class AppModel: ObservableObject {
                 guard sessionID == identity, generation == epoch else { return }
                 if let retryID { try pipeline.retryTranscription(id: retryID) }
                 try pipeline.resumeTranscription()
+                noteInputProducerDrained = false
+                noteSourceProducerDrained = false
                 processingPaused = false
                 for segment in segments where !segment.hasUsableTranslation && !translationQueue.contains(segment.id) {
                     translationQueue.append(segment.id)
@@ -2328,6 +2346,25 @@ final class AppModel: ObservableObject {
                                         inputRevision: old.inputRevision)
         replaceExistingSegment(at: index, with: revised, reason: "测试确认原文修订")
     }
+    func configureNoteSchedulingForTesting(
+        now: @escaping @MainActor () -> TimeInterval,
+        sleep: @escaping @MainActor (TimeInterval) async throws -> Void,
+        allowConcurrent: Bool = true
+    ) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        cancelScheduledSummaryRefresh()
+        summaryClock = now
+        summarySleep = sleep
+        summaryMemoryPressureNormal = true
+        summaryConcurrencyAllowed = allowConcurrent
+    }
+    func scheduleSummaryForTesting(force: Bool = false) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        scheduleSummaryRefresh(force: force)
+    }
+    var summaryTaskForTesting: Task<Void, Never>? { summaryTask }
+    var summaryWakeTaskForTesting: Task<Void, Never>? { summaryScheduleTask }
+    var learningNotebookForTesting: LearningNotebook { learningNotebook }
     var savedProcessingTaskForTesting: Task<Void, Never>? { processingTask }
     var savedPauseTaskForTesting: Task<Void, Error>? { processingPauseTask }
     func generateSummaryForTesting() async {
@@ -2402,6 +2439,11 @@ final class AppModel: ObservableObject {
 
     private func finishNextCaptionRepair(session: UUID, epoch: Int, worker: UUID) async {
         guard let pending = pendingCaptionRepairs.first else { return }
+        defer {
+            if sessionID == session, generation == epoch, translationWorkerID == worker, !processingPaused {
+                scheduleSummaryRefresh(force: summaryRefreshRequested)
+            }
+        }
         guard pending.previousIndex(in: segments, session: session) != nil else {
             pendingCaptionRepairs.removeFirst()
             persistCurrentSession()
@@ -2493,6 +2535,13 @@ final class AppModel: ObservableObject {
                     if let previousIndex {
                         let previousInput = self.segments[previousIndex]
                         let repairContext = Array(self.segments[..<previousIndex].suffix(2))
+                        self.inlineCaptionRepairTargets[workerID] = previousInput.id
+                        _ = self.noteAdmissionDecision()
+                        defer {
+                            if self.generation == currentGeneration, self.sessionID == currentSession {
+                                self.inlineCaptionRepairTargets.removeValue(forKey: workerID)
+                            }
+                        }
                         let pair = try await self.captionTranslation.adjacent(
                             previousInput.english,
                             previousInput.chinese,
@@ -2656,6 +2705,8 @@ final class AppModel: ObservableObject {
                 guard !Task.isCancelled, currentGeneration == self.generation else { return }
                 self.translatingSegmentID = nil
                 self.clearTranslationPreview()
+                self.markCaptionActivity()
+                self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
                 self.startStopOverlapIfUseful()
             }
             guard currentGeneration == self.generation else { return }
@@ -2682,7 +2733,7 @@ final class AppModel: ObservableObject {
     private func startStopOverlapIfUseful() {
         guard backgroundServicesEnabled else { return }
         guard phase == .stopping, activeStorageMode?.persistsSession == true,
-              !stopOverlapStarted, summaryTask == nil, pendingCaptionRepairs.isEmpty,
+              !stopOverlapStarted, summaryTask == nil,
               translationWorker != nil, !translationQueue.isEmpty,
               !manualRequestInFlight, !isManualTranslating else { return }
         refreshSummaryConcurrency()
@@ -2745,10 +2796,70 @@ final class AppModel: ObservableObject {
         previewHopWorst = 0
     }
 
+    private func noteAdmissionDecision() -> CaptionNoteGate.Decision {
+        let captions = segments.sorted {
+            $0.startTime == $1.startTime ? $0.id.uuidString < $1.id.uuidString : $0.startTime < $1.startTime
+        }.map {
+            CaptionNoteGate.Caption(id: $0.id, revision: $0.inputRevision, start: $0.startTime,
+                end: $0.endTime, english: $0.english.trimmingCharacters(in: .whitespacesAndNewlines),
+                chinese: $0.chinese, usable: $0.hasUsableTranslation)
+        }
+        var unsettled = Set(segments.filter { $0.translationState == .pending || $0.translationState == .translating }.map(\.id))
+        unsettled.formUnion(translationQueue)
+        if let translatingSegmentID { unsettled.insert(translatingSegmentID) }
+        let repairs = Set(pendingCaptionRepairs.filter {
+            $0.previousIndex(in: segments, session: sessionID) != nil
+        }.map { $0.previous.id }).union(inlineCaptionRepairTargets.values)
+        return noteAdmission.evaluate(.init(captions: captions, covered: summarizedSegmentIDs,
+            unsettledSuccessors: unsettled, repairTargets: repairs,
+            producerDrained: noteInputProducerDrained, paused: processingPaused), now: summaryClock())
+    }
+
+    private func waitForNoteAdmission(_ decision: CaptionNoteGate.Decision,
+                                      candidates: Set<UUID>, force: Bool) -> Bool {
+        guard segments.contains(where: { $0.hasUsableTranslation && !summarizedSegmentIDs.contains($0.id) }) else {
+            // Keep the completed status and do not wake just for a covered tail.
+            cancelScheduledSummaryRefresh()
+            return true
+        }
+        let now = summaryClock()
+        let bootstrap = lastSummaryCycleStartedUptime == nil && !decision.sealed
+            && candidates.count < 2 && now < (decision.oldestUncoveredDeadline ?? now)
+        guard candidates.isEmpty || bootstrap else { return false }
+        let deadlines = [decision.nextWake, bootstrap ? decision.oldestUncoveredDeadline : nil].compactMap { $0 }
+        if let wake = deadlines.min() { scheduleNoteWake(at: wake, force: force) }
+        summaryStatus = candidates.isEmpty ? "等待字幕稳定后整理" : "积累课堂内容后整理"
+        return true
+    }
+
+    private func scheduleNoteWake(at deadline: TimeInterval, force: Bool) {
+        guard scheduledNotesEnabled, !processingPaused else { return }
+        cancelScheduledSummaryRefresh()
+        let owner = summaryScheduleGeneration, epoch = generation, identity = sessionID
+        let sleep = summarySleep
+        let delay = max(0, deadline - summaryClock())
+        summaryScheduleTask = Task { @MainActor [weak self] in
+            do { try await sleep(delay) } catch { return }
+            guard let self, !Task.isCancelled, self.generation == epoch, self.sessionID == identity,
+                  self.summaryScheduleGeneration == owner, !self.processingPaused else { return }
+            self.summaryScheduleTask = nil
+            self.scheduleSummaryRefresh(force: force)
+        }
+    }
+
     private func scheduleSummaryRefresh(force: Bool = false) {
+        // Observe availability even while resources are occupied; queue activity must not slide deadlines.
+        let stability = noteAdmissionDecision()
         let savedCanContinue: Bool
-        if case .saved = phase { savedCanContinue = processingTask == nil && !legacyProvenanceUnavailable }
-        else { savedCanContinue = false }
+        if case .saved = phase {
+            // The final writer hands off to the sealed drain without starting a
+            // prefix-only round in between. Earlier stable sources may still
+            // run concurrently while a concrete producer/repair remains active.
+            let finalDrainOwnsNextNote = noteSourceProducerDrained
+                && !hasPendingTranslationWork && translatingSegmentID == nil
+            savedCanContinue = (processingTask == nil || (summaryConcurrencyAllowed && !finalDrainOwnsNextNote))
+                && !legacyProvenanceUnavailable
+        } else { savedCanContinue = false }
         guard scheduledNotesEnabled, hasActiveSession || savedCanContinue, !processingPaused else { return }
         guard summaryTask == nil else {
             if force { summaryRefreshRequested = true }
@@ -2773,8 +2884,7 @@ final class AppModel: ObservableObject {
             if force { summaryRefreshRequested = true }
             return
         }
-        guard pendingCaptionRepairs.isEmpty,
-              summaryConcurrencyAllowed || (translationWorker == nil && !hasPendingTranslationWork) else {
+        guard summaryConcurrencyAllowed || (translationWorker == nil && !hasPendingTranslationWork) else {
             summaryStatus = "等待字幕翻译空隙"
             if force { summaryRefreshRequested = true }
             return
@@ -2783,43 +2893,22 @@ final class AppModel: ObservableObject {
             if force { summaryRefreshRequested = true }
             return
         }
-        let completedCount = completedTranslationCount
-        guard completedCount >= 2 else {
-            summaryStatus = completedCount == 0 ? "等待课堂内容" : "再完成一段后开始总结"
-            return
-        }
-        let needsInitialSummary = lectureSummary.isEmpty && completedCount >= 2
-        guard force || completedCount > lastSummarizedSegmentCount else { return }
-
-        let now = ProcessInfo.processInfo.systemUptime
+        let available = stability.eligible.subtracting(summarizedSegmentIDs)
+        let candidates = summaryCycleIDs.map { available.intersection($0) } ?? available
+        guard !waitForNoteAdmission(stability, candidates: candidates, force: force) else { return }
+        let now = summaryClock()
         let retryDelay = max(0, (summaryRetryNotBefore ?? now) - now)
-        if !force || retryDelay > 0 {
-            let ordinaryDelay = (force || summaryCycleIDs != nil) ? 0 : SummaryRefreshPolicy.delay(
-                now: now,
-                lastCaptionActivity: lastCaptionActivityUptime,
-                lastCycleStarted: needsInitialSummary ? nil : lastSummaryCycleStartedUptime,
-                allowConcurrent: summaryConcurrencyAllowed
-            )
-            let delay = max(ordinaryDelay, retryDelay)
-            if delay > 0 {
-                if force { summaryRefreshRequested = true }
-                summaryScheduleTask?.cancel()
-                let currentGeneration = generation
-                summaryScheduleTask = Task { @MainActor [weak self] in
-                    do {
-                        try await Task.sleep(for: .seconds(delay))
-                    } catch {
-                        return
-                    }
-                    guard let self, currentGeneration == self.generation else { return }
-                    self.summaryScheduleTask = nil
-                    self.scheduleSummaryRefresh(force: force)
-                }
-                summaryStatus = retryDelay > 0
-                    ? "摘要将在 \(Int(ceil(delay))) 秒后重试"
-                    : "距下轮整理约 \(Int(ceil(delay))) 秒"
-                return
-            }
+        let ordinaryDelay = (force || summaryCycleIDs != nil) ? 0 : SummaryRefreshPolicy.delay(
+            now: now, lastCaptionActivity: lastCaptionActivityUptime,
+            lastCycleStarted: lastSummaryCycleStartedUptime, allowConcurrent: summaryConcurrencyAllowed)
+        let delay = max(ordinaryDelay, retryDelay)
+        if delay > 0 {
+            if force { summaryRefreshRequested = true }
+            scheduleNoteWake(at: now + delay, force: force)
+            summaryStatus = retryDelay > 0
+                ? "摘要将在 \(Int(ceil(delay))) 秒后重试"
+                : "距下轮整理约 \(Int(ceil(delay))) 秒"
+            return
         }
 
         cancelScheduledSummaryRefresh()
@@ -2836,7 +2925,7 @@ final class AppModel: ObservableObject {
             self.drainTranslationQueue()
             // Resume pending work after the retry/refresh interval, even if no
             // more captions arrive after a cancelled or bounded summary batch.
-            if self.translationWorker == nil {
+            if self.translationWorker == nil, self.summaryScheduleTask == nil {
                 let requested = self.summaryRefreshRequested
                 self.summaryRefreshRequested = false
                 self.scheduleSummaryRefresh(force: requested)
@@ -2845,21 +2934,25 @@ final class AppModel: ObservableObject {
     }
 
     private func generateLectureSummary(force: Bool) async {
-        guard !processingPaused, !Task.isCancelled, completedTranslationCount >= 2 else { return }
+        guard !processingPaused, !Task.isCancelled else { return }
+        let stability = noteAdmissionDecision()
+        if let retry = summaryRetryNotBefore, retry > summaryClock() {
+            scheduleNoteWake(at: retry, force: force)
+            return
+        }
         let summaryOwner = summaryTaskGeneration
         let summarySession = sessionID
-        let eligible = Set(segments.filter {
-            !$0.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                && $0.hasUsableTranslation
-        }.map(\.id)).subtracting(summarizedSegmentIDs)
+        let eligible = stability.eligible.subtracting(summarizedSegmentIDs)
+        let candidates = summaryCycleIDs.map { eligible.intersection($0) } ?? eligible
+        guard !waitForNoteAdmission(stability, candidates: candidates, force: force) else { return }
         if summaryCycleIDs == nil {
             guard !eligible.isEmpty else { return }
             // Freeze this round's boundary; incoming captions belong to the next round.
             summaryCycleIDs = eligible
             summaryCycleUpdate = ""
-            lastSummaryCycleStartedUptime = ProcessInfo.processInfo.systemUptime
+            lastSummaryCycleStartedUptime = summaryClock()
             Self.latencyLog.notice("summary event=cycle_start pending=\(eligible.count)")
-        } else if force, !hasActiveSession {
+        } else if force, stability.sealed {
             // Final export must also include captions completed since the interrupted round.
             summaryCycleIDs?.formUnion(eligible)
         }
@@ -2884,6 +2977,7 @@ final class AppModel: ObservableObject {
                 }
             }
             let boundary = summaryCycleIDs ?? []
+            let admission = noteAdmissionDecision()
             let reusableDraft = learningDraft.flatMap { draft -> LearningDraft? in
                 let ids = Set(draft.evidence.map(\.id))
                 guard ids.isDisjoint(with: summarizedSegmentIDs),
@@ -2891,12 +2985,20 @@ final class AppModel: ObservableObject {
                       sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName) }) ?? true else { return nil }
                 return draft
             }
+            if let draft = reusableDraft, !Set(draft.dependencyIDs).isSubset(of: admission.eligible) {
+                if let wake = admission.nextWake { scheduleNoteWake(at: wake, force: force) }
+                return
+            }
             let batchIDs = reusableDraft.map { Set($0.evidence.map(\.id)) }
                 ?? LectureSummaryInput.incremental(
-                    from: segments.filter { boundary.contains($0.id) },
+                    from: segments.filter { boundary.contains($0.id) && admission.eligible.contains($0.id) },
                     coveredIDs: summarizedSegmentIDs, previousSummary: "",
                     maximumCharacters: noteBatchCharacters).segmentIDs
             guard !batchIDs.isEmpty else {
+                if !boundary.isSubset(of: summarizedSegmentIDs) {
+                    if let wake = admission.nextWake { scheduleNoteWake(at: wake, force: force) }
+                    return
+                }
                 summaryCycleIDs = nil
                 summaryRetryNotBefore = nil
                 return
@@ -2904,9 +3006,15 @@ final class AppModel: ObservableObject {
             let inputSnapshot = segments.filter { batchIDs.contains($0.id) }
             do {
                 if reusableDraft == nil {
-                    let pending = learningNotebook.selectPendingPoints(for: inputSnapshot)
+                    var plannedNotebook = learningNotebook
+                    let pending = plannedNotebook.selectPendingPoints(for: inputSnapshot)
                     var dependencies = inputSnapshot.map(\.id)
                     for id in pending.flatMap(\.dependencyIDs) where !dependencies.contains(id) { dependencies.append(id) }
+                    guard Set(dependencies).isSubset(of: admission.eligible) else {
+                        if let wake = admission.nextWake { scheduleNoteWake(at: wake, force: force) }
+                        return
+                    }
+                    learningNotebook = plannedNotebook
                     learningDraft = LearningDraft(
                         evidence: inputSnapshot, model: modelName,
                         input: try LearningPrompts.input(evidence: inputSnapshot, topics: learningNotebook.topics, pending: pending),
@@ -2991,7 +3099,7 @@ final class AppModel: ObservableObject {
                 if (error as? QwenRuntimeError)?.preservesGenerationProgress != true { learningDraft = nil }
                 consecutiveSummaryFailures += 1
                 let retry = SummaryRefreshPolicy.failureRetryDelay(consecutiveFailures: consecutiveSummaryFailures)
-                summaryRetryNotBefore = ProcessInfo.processInfo.systemUptime + retry
+                summaryRetryNotBefore = summaryClock() + retry
                 let reason = LearningFailureCode.code(for: error)
                 Self.latencyLog.notice("summary event=failed model=\(modelName, privacy: .public) reason=\(reason, privacy: .public) retry_seconds=\(retry) failures=\(self.consecutiveSummaryFailures)")
                 summaryStatus = lectureSummary.isEmpty
@@ -3109,7 +3217,7 @@ final class AppModel: ObservableObject {
         guard let summaryTask, !summaryTask.isCancelled else { return }
         summaryTask.cancel()
         // A long summary should not repeatedly restart in every short gap.
-        summaryRetryNotBefore = ProcessInfo.processInfo.systemUptime
+        summaryRetryNotBefore = summaryClock()
             + SummaryRefreshPolicy.interruptedRetryInterval
         // Keep the task slot until the request has closed. Its existing cleanup
         // resumes the captions, so two requests cannot race this handoff.
@@ -3120,12 +3228,13 @@ final class AppModel: ObservableObject {
     }
 
     private func cancelScheduledSummaryRefresh() {
+        summaryScheduleGeneration += 1
         summaryScheduleTask?.cancel()
         summaryScheduleTask = nil
     }
 
     private func markCaptionActivity() {
-        lastCaptionActivityUptime = ProcessInfo.processInfo.systemUptime
+        lastCaptionActivityUptime = summaryClock()
         if !summaryConcurrencyAllowed { cancelScheduledSummaryRefresh() }
     }
 

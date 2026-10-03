@@ -7,6 +7,10 @@
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000020 /* CausalBoundaryRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* CausalBoundaryRegressionTests.swift */; };
+		A10000000000000000000025 /* CaptionStabilityDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000025 /* CaptionStabilityDraftTests.swift */; };
+		A10000000000000000000024 /* CaptionStabilitySchedulingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000024 /* CaptionStabilitySchedulingTests.swift */; };
+		A10000000000000000000023 /* CaptionStabilityLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000023 /* CaptionStabilityLifecycleTests.swift */; };
+		A10000000000000000000022 /* CaptionStabilityPublicationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000022 /* CaptionStabilityPublicationTests.swift */; };
 		A10000000000000000000016 /* LearningNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* LearningNotes.swift */; };
 		A10000000000000000000017 /* MLXRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* MLXRuntime.swift */; };
 		A10000000000000000000018 /* ASRRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* ASRRuntime.swift */; };
@@ -24,6 +28,7 @@
 		A10000000000000000000010 /* CausalBoundary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* CausalBoundary.swift */; };
 		A10000000000000000000011 /* SpeechActivityDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* SpeechActivityDetector.swift */; };
 		A10000000000000000000012 /* SummaryRefreshPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* SummaryRefreshPolicy.swift */; };
+		A10000000000000000000021 /* CaptionNoteGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000021 /* CaptionNoteGate.swift */; };
 		A10000000000000000000013 /* RealtimePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* RealtimePolicyTests.swift */; };
 		A10000000000000000000019 /* TranslationAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* TranslationAcceptanceTests.swift */; };
 		A1000000000000000000001A /* AudioContinuityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001A /* AudioContinuityTests.swift */; };
@@ -65,6 +70,10 @@
 
 /* Begin PBXFileReference section */
 		A20000000000000000000020 /* CausalBoundaryRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CausalBoundaryRegressionTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000025 /* CaptionStabilityDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionStabilityDraftTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000024 /* CaptionStabilitySchedulingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionStabilitySchedulingTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000023 /* CaptionStabilityLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionStabilityLifecycleTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000022 /* CaptionStabilityPublicationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionStabilityPublicationTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000016 /* LearningNotes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LearningNotes.swift; sourceTree = "<group>"; };
 		A20000000000000000000017 /* MLXRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLXRuntime.swift; sourceTree = "<group>"; };
 		A20000000000000000000018 /* ASRRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ASRRuntime.swift; sourceTree = "<group>"; };
@@ -86,6 +95,7 @@
 		A20000000000000000000010 /* CausalBoundary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CausalBoundary.swift; sourceTree = "<group>"; };
 		A20000000000000000000011 /* SpeechActivityDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechActivityDetector.swift; sourceTree = "<group>"; };
 		A20000000000000000000012 /* SummaryRefreshPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummaryRefreshPolicy.swift; sourceTree = "<group>"; };
+		A20000000000000000000021 /* CaptionNoteGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionNoteGate.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* RealtimePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimePolicyTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000019 /* TranslationAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationAcceptanceTests.swift; sourceTree = "<group>"; };
 		A2000000000000000000001A /* AudioContinuityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioContinuityTests.swift; sourceTree = "<group>"; };
@@ -155,6 +165,7 @@
 				A20000000000000000000007 /* SessionExporter.swift */,
 				A2000000000000000000000D /* QwenRuntime.swift */,
 				A20000000000000000000012 /* SummaryRefreshPolicy.swift */,
+				A20000000000000000000021 /* CaptionNoteGate.swift */,
 				A20000000000000000000016 /* LearningNotes.swift */,
 				A20000000000000000000017 /* MLXRuntime.swift */,
 				A20000000000000000000018 /* ASRRuntime.swift */,
@@ -179,6 +190,10 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000020 /* CausalBoundaryRegressionTests.swift */,
+				A20000000000000000000025 /* CaptionStabilityDraftTests.swift */,
+				A20000000000000000000024 /* CaptionStabilitySchedulingTests.swift */,
+				A20000000000000000000023 /* CaptionStabilityLifecycleTests.swift */,
+				A20000000000000000000022 /* CaptionStabilityPublicationTests.swift */,
 				3B3A361BF6A43DB2222C7A97 /* ReviewIdentityTests.swift */,
 				7B302D42994401027F0893B5 /* SessionPersistenceTests.swift */,
 				337292BF21D61DC3DF379BC0 /* ResourceSchedulingTests.swift */,0464AE938D0DA8BDFC01AC02 /* CaptionIdentityTests.swift */, A604E8F57B707990169FA517 /* SessionTreeMigrationTests.swift */, E3E7681F6F6509C442F83158 /* SessionStoreTests.swift */, 6B24813D3AB630C6B987A16C /* AudioRemediationTests.swift */, 8A7AEC88E07581EB6259A137 /* MLXOwnershipTests.swift */, 61481391EF47F304FE7C5586 /* TranscriptStateTests.swift */, A20000000000000000000008 /* SessionExporterTests.swift */, A20000000000000000000013 /* RealtimePolicyTests.swift */, A20000000000000000000019 /* TranslationAcceptanceTests.swift */, A2000000000000000000001A /* AudioContinuityTests.swift */, A2000000000000000000001B /* ExportAndPriorityTests.swift */, A2000000000000000000001C /* ReviewRetryTests.swift */, A2000000000000000000001D /* MediaImportTests.swift */, A2000000000000000000001E /* ClassroomPresentationTests.swift */, A2000000000000000000001F /* LearningFollowUpTests.swift */,);
@@ -283,6 +298,7 @@
 				A10000000000000000000007 /* SessionExporter.swift in Sources */,
 				A10000000000000000000009 /* QwenRuntime.swift in Sources */,
 				A10000000000000000000012 /* SummaryRefreshPolicy.swift in Sources */,
+				A10000000000000000000021 /* CaptionNoteGate.swift in Sources */,
 				A10000000000000000000016 /* LearningNotes.swift in Sources */,
 				A10000000000000000000017 /* MLXRuntime.swift in Sources */,
 				A10000000000000000000018 /* ASRRuntime.swift in Sources */,
@@ -299,6 +315,10 @@
 				F74C17E4B9DBAB4B17E9A433 /* ReviewIdentityTests.swift in Sources */,
 				0D3DFC0CF75D7D67AC572AD4 /* SessionPersistenceTests.swift in Sources */,
 				A10000000000000000000020 /* CausalBoundaryRegressionTests.swift in Sources */,
+				A10000000000000000000025 /* CaptionStabilityDraftTests.swift in Sources */,
+				A10000000000000000000024 /* CaptionStabilitySchedulingTests.swift in Sources */,
+				A10000000000000000000023 /* CaptionStabilityLifecycleTests.swift in Sources */,
+				A10000000000000000000022 /* CaptionStabilityPublicationTests.swift in Sources */,
 				892593BBED8FB1FC9C4B9892 /* ResourceSchedulingTests.swift in Sources */,
 				BA0F6204768C526F80F5FC3D /* CaptionIdentityTests.swift in Sources */,
 				B676BBD2DF14830C33164843 /* SessionTreeMigrationTests.swift in Sources */,

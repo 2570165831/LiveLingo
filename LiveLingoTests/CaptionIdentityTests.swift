@@ -1120,8 +1120,11 @@ final class CaptionIdentityTests: XCTestCase {
                 .init(kind: dependsOnEarlier ? "待确认" : "核心结论", text: earlier.chinese,
                       needsContext: dependsOnEarlier ? "速度属于哪辆车？" : nil, sourceIDs: ["en0s0"])
             ], sourceVersion: 2))
+            // A later live caption keeps the two tested sources off the mutable tail.
+            let tail = TranscriptSegment(startTime: 30, endTime: 38,
+                english: "Next the lecturer changes topic.", chinese: "老师接下来换一个话题。")
             model.loadPresentationForTesting(phase: .saved(FileManager.default.temporaryDirectory),
-                evidence: [earlier, current, next], notebook: notebook)
+                evidence: [earlier, current, next, tail], notebook: notebook)
             let task = Task { await model.generateSummaryForTesting() }
             try await eventually { gate.entered }
             model.reviseCaptionForTesting(id: earlier.id, english: "The earlier statement has been revised.")
