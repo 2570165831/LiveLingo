@@ -10,6 +10,98 @@ import XCTest
 final class ClassroomPresentationTests: XCTestCase {
     private var presentationDefaults: UserDefaults?
 
+    func testWaveformStopsRefreshingWithoutInputAndResumesForSamples() async throws {
+        // SwiftUI exposes this environment value as read-only. Exercise the
+        // actual host setting without changing the user's accessibility setup.
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        do {
+            let meter = CaptureMeterState()
+            func root(active: Bool) -> some View {
+                SummaryRenderingDiagnostics.meterViewForTesting(meter: meter, active: active)
+                    .frame(width: 300, height: 30)
+                    .padding(20)
+                    .background(Color.white)
+                    .environment(\.colorScheme, .light)
+            }
+            let controller = NSHostingController(rootView: root(active: true))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 70),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentViewController = controller
+            window.orderFront(nil)
+            defer { window.close() }
+            let view = controller.view
+            try await settle(view)
+            func pixels() throws -> Data {
+                let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            }
+            func attach(_ name: String) throws {
+                let attachment = XCTAttachment(data: try pixels(), uniformTypeIdentifier: "public.png")
+                attachment.name = name
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+            let empty = try pixels()
+            SummaryRenderingDiagnostics.reset()
+            try await Task.sleep(for: .milliseconds(450))
+            let coldBodies = SummaryRenderingDiagnostics.counts.waveformBodies
+            XCTAssertEqual(coldBodies, 0, "No audio has ever arrived; no periodic waveform work belongs here")
+
+            // A real event with zero amplitude is still input. Exercise the
+            // publisher's willSet ordering, exactly as AppModel consumes it.
+            meter.lastAudioLevelAt = Date()
+            meter.waveformSamples = Array(repeating: 0, count: 24)
+            try await settle(view)
+            let silentInput = try pixels()
+            XCTAssertNotEqual(silentInput, empty, "Fresh silence must use receiving colors, not waiting colors")
+            let labels = elements(view).compactMap { $0.value("accessibilityLabel") as? String }
+            if !labels.isEmpty {
+                XCTAssertTrue(labels.contains("正在接收音频"))
+            } else {
+                print("WAVEFORM_AX_UNAVAILABLE: pixel/state checks do not prove VoiceOver output")
+            }
+
+            SummaryRenderingDiagnostics.reset()
+            for index in 1...8 {
+                meter.lastAudioLevelAt = Date()
+                meter.waveformSamples = Array(repeating: Float(index) / 8, count: 24)
+                try await Task.sleep(for: .milliseconds(80))
+            }
+            try await settle(view)
+            let sampleBodies = SummaryRenderingDiagnostics.counts.waveformBodies
+            XCTAssertGreaterThan(sampleBodies, 0, "New samples must still reach the actual waveform")
+            XCTAssertNotEqual(try pixels(), silentInput)
+            try attach("waveform-receiving-motion-\(reduceMotion)")
+
+            // No callbacks after the last sample: the display must go flat
+            // at expiry, then remain quiet with the old non-nil timestamp.
+            try await Task.sleep(for: .milliseconds(650))
+            try await settle(view)
+            XCTAssertEqual(try pixels(), empty)
+            try attach("waveform-waiting-motion-\(reduceMotion)")
+            SummaryRenderingDiagnostics.reset()
+            try await Task.sleep(for: .milliseconds(450))
+            let staleBodies = SummaryRenderingDiagnostics.counts.waveformBodies
+            XCTAssertEqual(staleBodies, 0, "A stale timestamp must not keep a Timeline alive")
+
+            controller.rootView = root(active: false)
+            try await settle(view)
+            meter.lastAudioLevelAt = Date()
+            meter.waveformSamples = Array(repeating: 1, count: 24)
+            try await settle(view)
+            XCTAssertEqual(try pixels(), empty, "Paused views remain flat even when levels arrive")
+            controller.rootView = root(active: true)
+            try await settle(view)
+            XCTAssertNotEqual(try pixels(), empty, "Resume may use only the still-fresh event")
+            try await Task.sleep(for: .milliseconds(650))
+            try await settle(view)
+            XCTAssertEqual(try pixels(), empty)
+            print("WAVEFORM_RENDER_PROBE reduceMotion=\(reduceMotion) coldBodies=\(coldBodies) sampleBodies=\(sampleBodies) staleBodies=\(staleBodies)")
+        }
+    }
+
     func testStreamingDoesNotRedrawOtherWaitingCaptions() async throws {
         var callbacks: [CaptionTranslationDependencies.Update?] = []
         var pending: [Int: CheckedContinuation<String, Error>] = [:]

@@ -38,6 +38,7 @@ enum SummaryRenderingDiagnostics {
         var streamingBodies = 0
         var streamingRows: [String: Int] = [:]
         var floatingBodies = 0
+        var waveformBodies = 0
     }
     static var counts = Counts()
     static func record(_ key: WritableKeyPath<Counts, Int>) {
@@ -52,6 +53,9 @@ enum SummaryRenderingDiagnostics {
     }
     static func summaryViewForTesting(text: String) -> some View {
         SummaryMarkdownView(text: text)
+    }
+    static func meterViewForTesting(meter: CaptureMeterState, active: Bool) -> some View {
+        RecordingMeterView(meter: meter, active: active)
     }
 }
 #endif
@@ -1092,26 +1096,13 @@ private final class TranslationInputTextView: NSTextView {
 private struct RecordingWaveform: View {
     let samples: [Float]
     let active: Bool
-    let lastUpdate: Date?
+    let receiving: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        // 只在真的在收音时才挂 TimelineView：它每 0.1 秒唤醒一次布局，
-        // 空闲时挂着会白烧约 16% 的 CPU（实测：主线程持续 NSDisplayCycleFlush → layoutIfNeeded）。
-        if active {
-            TimelineView(.periodic(from: .now, by: 0.1)) { timeline in
-                bars(receiving: receiving(at: timeline.date))
-            }
-        } else {
-            bars(receiving: false)
-        }
-    }
-
-    private func receiving(at date: Date) -> Bool {
-        lastUpdate.map { date.timeIntervalSince($0) < 0.6 } == true
-    }
-
-    private func bars(receiving: Bool) -> some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.record(\.waveformBodies)
+        #endif
         GeometryReader { geometry in
             let gap: CGFloat = 1
             let count = max(1, samples.count)
@@ -1762,9 +1753,20 @@ private struct RecordingElapsedText: View {
 
 private struct RecordingMeterView: View {
     @ObservedObject var meter: CaptureMeterState
+    @StateObject private var freshness = WaveformFreshnessState()
     let active: Bool
     var body: some View {
-        RecordingWaveform(samples: meter.waveformSamples, active: active, lastUpdate: meter.lastAudioLevelAt)
+        RecordingWaveform(samples: meter.waveformSamples, active: active,
+                          receiving: active && freshness.isReceiving)
+            .onAppear { freshness.mount(active: active, lastUpdate: meter.lastAudioLevelAt) }
+            .onChange(of: active) { _, active in
+                freshness.update(active: active, lastUpdate: meter.lastAudioLevelAt)
+            }
+            .onReceive(meter.$lastAudioLevelAt) { timestamp in
+                // Published delivers the new value before meter stores it.
+                freshness.update(active: active, lastUpdate: timestamp)
+            }
+            .onDisappear { freshness.unmount() }
     }
 }
 

@@ -6,6 +6,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C4DB2CDE54194730B47985D8 /* WaveformFreshnessAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDBD81461CD14BB28D892236 /* WaveformFreshnessAcceptanceTests.swift */; };
+		4B1F01A936444537B3A68D72 /* WaveformFreshness.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA5F00F22FE54B509A3AB67B /* WaveformFreshness.swift */; };
 		A10000000000000000000026 /* SpeechPreviewAssets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000026 /* SpeechPreviewAssets.swift */; };
 		A10000000000000000000020 /* CausalBoundaryRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* CausalBoundaryRegressionTests.swift */; };
 		A10000000000000000000025 /* CaptionStabilityDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000025 /* CaptionStabilityDraftTests.swift */; };
@@ -70,6 +72,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		BDBD81461CD14BB28D892236 /* WaveformFreshnessAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaveformFreshnessAcceptanceTests.swift; sourceTree = "<group>"; };
+		CA5F00F22FE54B509A3AB67B /* WaveformFreshness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaveformFreshness.swift; sourceTree = "<group>"; };
 		A20000000000000000000026 /* SpeechPreviewAssets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPreviewAssets.swift; sourceTree = "<group>"; };
 		A20000000000000000000020 /* CausalBoundaryRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CausalBoundaryRegressionTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000025 /* CaptionStabilityDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionStabilityDraftTests.swift; sourceTree = "<group>"; };
@@ -173,6 +177,7 @@
 				A20000000000000000000018 /* ASRRuntime.swift */,
 				A20000000000000000000011 /* SpeechActivityDetector.swift */,
 				A20000000000000000000026 /* SpeechPreviewAssets.swift */,
+				CA5F00F22FE54B509A3AB67B /* WaveformFreshness.swift */,
 				A20000000000000000000010 /* CausalBoundary.swift */,
 				A20000000000000000000014 /* AcademicDomain.swift */,
 			);
@@ -194,6 +199,7 @@
 			children = (
 				A20000000000000000000020 /* CausalBoundaryRegressionTests.swift */,
 				A20000000000000000000025 /* CaptionStabilityDraftTests.swift */,
+				BDBD81461CD14BB28D892236 /* WaveformFreshnessAcceptanceTests.swift */,
 				A20000000000000000000024 /* CaptionStabilitySchedulingTests.swift */,
 				A20000000000000000000023 /* CaptionStabilityLifecycleTests.swift */,
 				A20000000000000000000022 /* CaptionStabilityPublicationTests.swift */,
@@ -307,6 +313,7 @@
 				A10000000000000000000018 /* ASRRuntime.swift in Sources */,
 				A10000000000000000000011 /* SpeechActivityDetector.swift in Sources */,
 				A10000000000000000000026 /* SpeechPreviewAssets.swift in Sources */,
+				4B1F01A936444537B3A68D72 /* WaveformFreshness.swift in Sources */,
 				A10000000000000000000010 /* CausalBoundary.swift in Sources */,
 				A10000000000000000000014 /* AcademicDomain.swift in Sources */,
 			);
@@ -320,6 +327,7 @@
 				0D3DFC0CF75D7D67AC572AD4 /* SessionPersistenceTests.swift in Sources */,
 				A10000000000000000000020 /* CausalBoundaryRegressionTests.swift in Sources */,
 				A10000000000000000000025 /* CaptionStabilityDraftTests.swift in Sources */,
+				C4DB2CDE54194730B47985D8 /* WaveformFreshnessAcceptanceTests.swift in Sources */,
 				A10000000000000000000024 /* CaptionStabilitySchedulingTests.swift in Sources */,
 				A10000000000000000000023 /* CaptionStabilityLifecycleTests.swift in Sources */,
 				A10000000000000000000022 /* CaptionStabilityPublicationTests.swift in Sources */,
