@@ -1649,7 +1649,13 @@ private struct PendingCaptionTranslation: View {
         #endif
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
-                ProgressView().controlSize(.mini)
+                if isTranslating {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "clock")
+                        .imageScale(.small)
+                        .accessibilityHidden(true)
+                }
                 Text(isTranslating ? "翻译中…" : "等待翻译…")
             }
             .font(.caption)
