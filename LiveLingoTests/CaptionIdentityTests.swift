@@ -988,6 +988,50 @@ final class CaptionIdentityTests: XCTestCase {
         XCTAssertTrue(requests[1].prompt.contains("Translate ONLY target_translate_only"))
     }
 
+    func testAdjacentCodeBooleanUsesExistingProtectionOnlyForFourB() async throws {
+        let current = "False. The alarm remains enabled."
+        for model in [QwenModelProfile.energySaver.translationModel,
+                      QwenModelProfile.highQuality.translationModel] {
+            let fourB = model == QwenModelProfile.energySaver.translationModel
+            let output = fourB ? "`ZXQCHEM0QXZ`。警报保持启用。" : "False。警报保持启用。"
+            let probe = AdjacentRequestProbe([.text(output)])
+            let pair = try await QwenTranslationClient.translateAdjacent(
+                previous: "The Boolean function returns", previousChinese: "布尔函数返回",
+                current: current, context: "Older unrelated context.", modelName: model,
+                repairPrevious: false, request: { try await probe.request($0, $1, $2) })
+            XCTAssertEqual(pair.current, fourB ? "`False`。警报保持启用。" : output)
+            XCTAssertNil(pair.currentRejection)
+            let calls = await probe.requests
+            XCTAssertEqual(calls.count, 1)
+            XCTAssertEqual(calls[0].budget, fourB ? 168 : 160)
+            XCTAssertFalse(calls[0].input.contains("Boolean function"))
+            XCTAssertFalse(calls[0].input.contains("Older unrelated"))
+            if fourB {
+                XCTAssertEqual(calls[0].input, "`ZXQCHEM0QXZ`. The alarm remains enabled.")
+            } else {
+                let payload = try XCTUnwrap(JSONSerialization.jsonObject(
+                    with: Data(calls[0].input.utf8)) as? [String: String])
+                XCTAssertEqual(payload, ["source_text_to_translate": current])
+            }
+        }
+    }
+
+    func testAdjacentCodeBooleanOmissionIsRejectedBeforePublication() async throws {
+        let probe = AdjacentRequestProbe([.text("错误。警报保持启用。")])
+        var published = 0
+        let pair = try await QwenTranslationClient.translateAdjacent(
+            previous: "The Boolean function returns", previousChinese: "布尔函数返回",
+            current: "False. The alarm remains enabled.", context: "",
+            modelName: QwenModelProfile.energySaver.translationModel,
+            repairPrevious: false, onCurrent: { _ in published += 1 },
+            request: { try await probe.request($0, $1, $2) })
+        XCTAssertNil(pair.current)
+        XCTAssertNotNil(pair.currentRejection)
+        XCTAssertEqual(published, 0)
+        let calls = await probe.requests
+        XCTAssertEqual(calls.count, 1)
+    }
+
     func testAdjacentCurrentValidationRemainsIndependentOfRepairOutcome() async throws {
         for repair in [AdjacentRequestProbe.Response.text("力指向中心。"), .failure(.invalidResponse)] {
             let probe = AdjacentRequestProbe([.text("and it turns the object."), repair])

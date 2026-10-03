@@ -2769,3 +2769,209 @@ final class TranslationAcceptanceTests: XCTestCase {
         XCTAssertTrue(threw, "超长行必须报错")
     }
 }
+
+// Code-literal disambiguation at an adjacent-caption boundary.
+extension TranslationAcceptanceTests {
+    private func assertBooleanBoundaryBytes(
+        _ current: String,
+        previous: String,
+        expected: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let actual = QwenTranslationClient.boundaryTranslationTarget(current, previous: previous)
+        // String equality permits canonical Unicode equivalence. Compare bytes
+        // so whitespace, normalization and every later clause stay protected.
+        XCTAssertEqual(Array(actual.utf8), Array(expected.utf8),
+                       "previous=\(String(reflecting: previous)); current=\(String(reflecting: current)); actual=\(String(reflecting: actual))",
+                       file: file, line: line)
+    }
+
+    func testBooleanBoundaryExplicitCodeContextsPermitBothReturnForms() {
+        let contexts = [
+            "The code should return",
+            "This function returns",
+            "The Boolean expression should return",
+            "The predicate returns",
+            "The pseudocode says return",
+            "THE FUNCTION RETURNS",
+            " \tThe function returns \r\n"
+        ]
+        for previous in contexts {
+            assertBooleanBoundaryBytes("False.", previous: previous, expected: "`False`.")
+            assertBooleanBoundaryBytes("True", previous: previous, expected: "`True`")
+        }
+    }
+
+    func testBooleanBoundaryLeadingTokenCaseWhitespaceAndASCIIPunctuation() {
+        let fixtures: [(current: String, expected: String)] = [
+            ("true", "`true`"),
+            ("false", "`false`"),
+            ("TRUE", "`TRUE`"),
+            ("FALSE", "`FALSE`"),
+            ("FaLsE", "`FaLsE`"),
+            ("tRuE", "`tRuE`"),
+            (" \tFalse \r\n", " \t`False` \r\n"),
+            ("\n\tTrue, then stop.", "\n\t`True`, then stop."),
+            ("False. Keep both clauses. Do not restart.", "`False`. Keep both clauses. Do not restart."),
+            ("TRUE; keep the result.", "`TRUE`; keep the result."),
+            ("false: the alarm remains enabled.", "`false`: the alarm remains enabled."),
+            ("True! Keep the explanation.", "`True`! Keep the explanation."),
+            ("False? Check it again.", "`False`? Check it again."),
+            ("\r\nFaLsE \t, next clause.\r\n", "\r\n`FaLsE` \t, next clause.\r\n")
+        ]
+        for fixture in fixtures {
+            assertBooleanBoundaryBytes(fixture.current, previous: "The function returns",
+                                       expected: fixture.expected)
+        }
+    }
+
+    func testBooleanBoundaryPreservesEveryOtherByteAndLaterBooleanWord() {
+        let current = " \tFaLsE  , cafe\u{0301} ☕️ says ‘True’.\r\nNot -0.5 mA; keep +0.5 mA.\nTrue love is unrelated.  "
+        let expected = " \t`FaLsE`  , cafe\u{0301} ☕️ says ‘True’.\r\nNot -0.5 mA; keep +0.5 mA.\nTrue love is unrelated.  "
+        assertBooleanBoundaryBytes(current, previous: "The predicate returns", expected: expected)
+    }
+
+    func testBooleanBoundaryRecordedReturnFalsePreservesAllCurrentClauses() {
+        // Frozen combined-cases.json, real-search-10; recorded ASR, not audio gold.
+        let previous = "So the first version of the code where there wasn't an else, but rather this implicit line of code at the very end of code at the very end that just says if you reach this line of code, return"
+        let current = "False, that addresses that problem. And to be clear, even though it's right after an indented return true, when you return a value, as in C, that's it. Like, execution's"
+        let expected = "`False`, that addresses that problem. And to be clear, even though it's right after an indented return true, when you return a value, as in C, that's it. Like, execution's"
+        assertBooleanBoundaryBytes(current, previous: previous, expected: expected)
+    }
+
+    func testBooleanBoundaryLeavesPhrasesAndNoninitialTokensUntouched() {
+        let currents = [
+            "False teeth are made from resin. The patient reports no pain.",
+            "True love matters. Do not omit this sentence.",
+            "FALSE\tteeth are artificial.",
+            "False if the latch is open. Do not restart the controller.",
+            "True and false are both values.",
+            "Falsehood is different.",
+            "False-positive results need review.",
+            "True_value stays literal.",
+            "The result is False. Keep the explanation.",
+            "", " \t\r\n"
+        ]
+        for current in currents {
+            assertBooleanBoundaryBytes(current, previous: "The function returns", expected: current)
+        }
+    }
+
+    func testBooleanBoundaryCompletePreviousCaptionsStayUnchanged() {
+        for ending in [".", "!", "?", "。", "！", "？"] {
+            let previous = " \tThe function returns" + ending + " \r\n"
+            for current in ["False. The claim is false.", "True, this is an ordinary assertion."] {
+                assertBooleanBoundaryBytes(current, previous: previous, expected: current)
+            }
+        }
+    }
+
+    func testBooleanBoundaryEarlierCodeSentenceCannotLicenseOrdinaryReturn() {
+        let previousCaptions = [
+            "The function is finished. At sunset we return",
+            "The code example is over! After lunch we return",
+            "Was the Boolean value logged? At sunset we return",
+            "The predicate was explained. Tomorrow the visitors return"
+        ]
+        for previous in previousCaptions {
+            assertBooleanBoundaryBytes("False. The claim is untrue.", previous: previous,
+                                       expected: "False. The claim is untrue.")
+            assertBooleanBoundaryBytes("True, the visitors arrive tomorrow.", previous: previous,
+                                       expected: "True, the visitors arrive tomorrow.")
+        }
+    }
+
+    func testBooleanBoundaryRequiresCodeWordAndReturnAtEndOfSameFragment() {
+        let previousCaptions = [
+            "", " \t\n", "We return", "The traveler returns",
+            "The function computes", "The function returns a value",
+            "The function returned", "The function returning",
+            "The codex returns", "The malfunction returns",
+            "The predicateValue returns", "The booleanish setting returns"
+        ]
+        for previous in previousCaptions {
+            assertBooleanBoundaryBytes("False.", previous: previous, expected: "False.")
+        }
+        assertBooleanBoundaryBytes("True. Keep the next sentence.",
+                                   previous: "The earlier story ended. The function returns",
+                                   expected: "`True`. Keep the next sentence.")
+    }
+
+    func testBooleanBoundaryExistingBackticksAreUnchangedAndAnnotationIsIdempotent() {
+        for current in ["`False`. Keep `True` too.", " \t`True`, no reformatting.\n",
+                        "\"False\" is a quoted word."] {
+            assertBooleanBoundaryBytes(current, previous: "The function returns", expected: current)
+        }
+        let once = QwenTranslationClient.boundaryTranslationTarget(
+            " \tFalse. True stays here.\n", previous: "The code returns")
+        XCTAssertEqual(Array(once.utf8), Array(" \t`False`. True stays here.\n".utf8))
+        assertBooleanBoundaryBytes(once, previous: "The code returns", expected: once)
+    }
+
+    func testBooleanBoundaryCapsTheUnfinishedSentenceWithoutCharacterTruncation() {
+        let prefix = "The function "
+        let suffix = " returns"
+        let atLimit = prefix + String(repeating: "x", count: 400 - prefix.count - suffix.count) + suffix
+        let overLimit = prefix + String(repeating: "x", count: 401 - prefix.count - suffix.count) + suffix
+        XCTAssertEqual(atLimit.count, 400)
+        XCTAssertEqual(overLimit.count, 401)
+        assertBooleanBoundaryBytes("False. Keep the next sentence.", previous: atLimit,
+                                   expected: "`False`. Keep the next sentence.")
+        assertBooleanBoundaryBytes("False. Keep the next sentence.", previous: overLimit,
+                                   expected: "False. Keep the next sentence.")
+        // The bound applies to the unfinished sentence, not completed history.
+        let longHistory = String(repeating: "The lecture ended. ", count: 30) + "The function returns"
+        XCTAssertGreaterThan(longHistory.count, 400)
+        assertBooleanBoundaryBytes("True.", previous: longHistory, expected: "`True`.")
+    }
+
+    func testBooleanBoundaryDoesNotPretendToRepairNegationOrNumericSigns() {
+        let negatedCurrent = "Return true before both checks pass. Afterward, store the result."
+        assertBooleanBoundaryBytes(negatedCurrent, previous: "The guard must not", expected: negatedCurrent)
+        let signedCurrent = "3 metres per second, not plus 3. The speed is 3 metres per second."
+        assertBooleanBoundaryBytes(signedCurrent, previous: "The final velocity is minus", expected: signedCurrent)
+        // Annotation adds no missing negation. This expected source target is
+        // deliberately NOT a claim that downstream translation preserves must not.
+        assertBooleanBoundaryBytes("False. Keep the alarm enabled.",
+                                   previous: "The function must not return",
+                                   expected: "`False`. Keep the alarm enabled.")
+        // A completed sentence's restriction is not carried into the target.
+        assertBooleanBoundaryBytes("False.",
+                                   previous: "The function must not return true. It may return",
+                                   expected: "False.")
+    }
+
+    func testBooleanBoundaryKeepsExistingStartingLineTravelContinuation() {
+        let fixtures: [(previous: String, current: String, expected: String)] = [
+            ("The runner returns to the starting position.",
+             "Line has traveled 400 metres. Its displacement is zero.",
+             "has traveled 400 metres. Its displacement is zero."),
+            ("The runner returns to the starting point!",
+             " \tline has travelled 400 metres. Do not change 400.\n",
+             "has travelled 400 metres. Do not change 400.\n"),
+            ("The runner returns to the starting",
+             "line has traveled 3 metres, not -3.",
+             "has traveled 3 metres, not -3.")
+        ]
+        for fixture in fixtures {
+            assertBooleanBoundaryBytes(fixture.current, previous: fixture.previous, expected: fixture.expected)
+        }
+    }
+
+    func testBooleanBoundaryDoesNotBroadenTheExistingLineRemoval() {
+        let fixtures: [(previous: String, current: String)] = [
+            ("The runner returns to the starting position.",
+             "Line 3 contains a minus sign. Line 4 does not."),
+            ("The runner returns to the starting position.",
+             "Line has a new label. Keep this clause."),
+            ("The runner returns to the finishing position.",
+             "Line has traveled 400 metres."),
+            ("The runner returns to the starting position. Then stops.",
+             "Line has traveled 400 metres.")
+        ]
+        for fixture in fixtures {
+            assertBooleanBoundaryBytes(fixture.current, previous: fixture.previous, expected: fixture.current)
+        }
+    }
+}

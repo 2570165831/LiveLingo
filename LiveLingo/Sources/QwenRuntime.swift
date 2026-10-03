@@ -2020,7 +2020,8 @@ enum QwenTranslationClient {
                                   onCurrent: (@MainActor @Sendable (String) async -> Void)? = nil,
                                   deferRepair: (@MainActor @Sendable () -> Bool)? = nil,
                                   request: AdjacentRequest? = nil) async throws -> AdjacentTranslation {
-        let boundaryInput = boundaryTranslationTarget(current, previous: previous)
+        let boundaryInput = boundaryTranslationTarget(current, previous: previous,
+            annotateCodeBoolean: modelName == QwenModelProfile.energySaver.translationModel)
         // Only the previous tail uses context for repair. Supplying earlier text
         // for the current target made that context reappear in the Chinese line.
         let protectedCurrent = ChemistryTranslationProtector.prepare(boundaryInput)
@@ -2170,7 +2171,27 @@ enum QwenTranslationClient {
         return PreviousRepair(previous: revisedPrevious, rejection: previousRejection)
     }
 
-    static func boundaryTranslationTarget(_ current: String, previous: String) -> String {
+    static func boundaryTranslationTarget(_ current: String, previous: String,
+                                          annotateCodeBoolean: Bool = true) -> String {
+        // A standalone Boolean can complete the preceding code's return statement.
+        // Protect only that existing token; sending the preceding prose caused
+        // the model to translate it again. Older completed sentences are not evidence.
+        if annotateCodeBoolean,
+           let match = leadingBoolean.firstMatch(in: current,
+                range: NSRange(current.startIndex..., in: current)),
+           let token = Range(match.range(at: 1), in: current) {
+            let trimmed = previous.trimmingCharacters(in: .whitespacesAndNewlines)
+            var fragment = ""
+            if let last = trimmed.last, !".!?。！？".contains(last) {
+                trimmed.enumerateSubstrings(in: trimmed.startIndex..., options: .bySentences) { sentence, _, _, _ in
+                    if let sentence { fragment = sentence.trimmingCharacters(in: .whitespacesAndNewlines) }
+                }
+            }
+            if !fragment.isEmpty, fragment.count <= 400,
+               codeReturn.firstMatch(in: fragment, range: NSRange(fragment.startIndex..., in: fragment)) != nil {
+                return current.replacingCharacters(in: token, with: "`" + current[token] + "`")
+            }
+        }
         // A recognizer may repeat "position" at a hard cut before the remaining word
         // "line". Only this explicit return-to-start + travel continuation is eligible.
         let ending = #"(?i)returns? to the starting(?: position| point)?[.!?]?\s*$"#
@@ -2179,6 +2200,11 @@ enum QwenTranslationClient {
               let range = current.range(of: continuation, options: .regularExpression) else { return current }
         return String(current[range.upperBound...])
     }
+
+    private static let codeReturn = try! NSRegularExpression(
+        pattern: #"(?is)\b(?:code|pseudocode|function|boolean|predicate)\b.*\breturns?\s*$"#)
+    private static let leadingBoolean = try! NSRegularExpression(
+        pattern: #"(?i)^\s*(true|false)(?=\s*(?:[,.;:!?]|$))"#)
 
     static func stableTranslationPrefix(_ chinese: String) -> String {
         let trimmed = chinese.trimmingCharacters(in: .whitespacesAndNewlines)
