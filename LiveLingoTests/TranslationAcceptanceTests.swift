@@ -2975,3 +2975,65 @@ extension TranslationAcceptanceTests {
         }
     }
 }
+
+// The first-pass and optional-repair prompts share the same 4B prefix policy.
+// Stub outputs verify transport and immutable prefix ownership, not model quality.
+extension TranslationAcceptanceTests {
+    @MainActor func testPreviousRepairSharesFourBFirstPassPrefixWithoutChangingTargetOwnership() async throws {
+        let calls = StatusRepairRequests()
+        let result = try await QwenTranslationClient.translateAdjacent(
+            previous: "Check the direction. The force acts.", previousChinese: "先检查方向。力起作用。",
+            current: "toward the center.", context: "Earlier lecture context.",
+            modelName: QwenModelProfile.energySaver.translationModel,
+            request: { input, prompt, budget in
+                await calls.record(prompt)
+                if let data = input.data(using: .utf8),
+                   let fields = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                   let target = fields["target_translate_only"] {
+                    XCTAssertEqual(target, "The force acts.")
+                    XCTAssertEqual(fields["context_before_do_not_translate"], "Earlier lecture context. Check the direction. ")
+                    XCTAssertEqual(fields["context_after_do_not_translate"], "toward the center.")
+                    XCTAssertEqual(fields.count, 3)
+                    XCTAssertEqual(budget, 320)
+                    return "力起作用。"
+                }
+                XCTAssertEqual(input, "toward the center.")
+                XCTAssertEqual(budget, CaptionTranslationAttempt.standard.outputTokenBudget(for: input))
+                return "朝向中心。"
+            })
+        let prompts = await calls.prompts
+        XCTAssertEqual(prompts.count, 2)
+        let first = try XCTUnwrap(prompts.first)
+        let repair = try XCTUnwrap(prompts.last)
+        let sharedBase = first.components(separatedBy: "Return only the complete Simplified Chinese translation. Do not use markdown.")[0]
+            + "Return only the complete Simplified Chinese translation. Do not use markdown."
+        XCTAssertTrue(repair.hasPrefix(sharedBase), "Repair must retain the existing first-pass prefix policy.")
+        XCTAssertTrue(repair.contains("Before/after fields are context to resolve references"))
+        XCTAssertEqual(result.previous, "先检查方向。力起作用。")
+        XCTAssertEqual(result.current, "朝向中心。")
+        XCTAssertNil(result.previousRejection)
+        XCTAssertNil(result.currentRejection)
+    }
+
+    @MainActor func testPreviousRepairKeepsOtherModelPromptPoliciesUnchanged() async throws {
+        for model in [QwenModelProfile.highQuality.translationModel, "other-model",
+                      "prefix-" + QwenModelProfile.energySaver.translationModel] {
+            let calls = TypedRequestCounter()
+            let result = try await QwenTranslationClient.repairPreviousCaption(
+                previous: "The force acts", previousChinese: "力起作用", current: "toward the center.",
+                context: "", modelName: model, request: { input, prompt, budget in
+                    await calls.record()
+                    XCTAssertTrue(prompt.hasPrefix(QwenTranslationClient.systemPrompt))
+                    let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
+                    XCTAssertEqual(fields["target_translate_only"], "The force acts")
+                    XCTAssertEqual(fields["context_after_do_not_translate"], "toward the center.")
+                    XCTAssertEqual(budget, 320)
+                    return "力起作用"
+                })
+            let count = await calls.count()
+            XCTAssertEqual(count, 1)
+            XCTAssertEqual(result.previous, "力起作用")
+            XCTAssertNil(result.rejection)
+        }
+    }
+}
