@@ -76,14 +76,140 @@ UNIT_ALIASES = [
 ]
 
 
-def numeric_mentions(text: str) -> list[tuple[str, str | None, str, str]]:
+COUNT_SUFFIXES = set("个份条项组种类名位次扇件张本枚颗台座间只瓶盒行列人")
+NUMBER_WORDS = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety").split()
+WORD_VALUES = {word: i if i < 20 else (i - 18) * 10 for i, word in enumerate(NUMBER_WORDS)}
+NUMBER_WORD = "(?:" + "|".join(NUMBER_WORDS + ["hundred", "thousand", "million", "billion"]) + ")"
+COUNT_NUMBER = re.compile(r"(?<![A-Za-z0-9.,])(?:[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?|[零〇一二两三四五六七八九十百千万]+|" + NUMBER_WORD + "(?:[ -]+(?:and[ -]+)?" + NUMBER_WORD + r")*)(?![A-Za-z0-9.,])", re.I)
+# Unsupported spoken decimals must not supply integer fragments as count evidence.
+SPOKEN_DECIMAL = re.compile("(?:(?:" + COUNT_NUMBER.pattern + r"[ \t]+)?(?<![A-Za-z0-9])point[ \t]+" + COUNT_NUMBER.pattern
+                            + r"|[0-9零〇一二两三四五六七八九十百千万]+点[0-9零〇一二两三四五六七八九]+)", re.I)
+COUNT_NOUNS = set("door locker item element object entry record sample student person people child children man men woman women option case group class type row column condition step question point byte bit digit bottle electron atom molecule resistor transistor vertex edge tree node term value channel layer cell measurement mark".split())
+COUNT_PLURALS = {{"vertex": "vertices", "entry": "entries", "class": "classes"}.get(noun, noun + "s") for noun in COUNT_NOUNS}
+COUNT_QUALIFIERS = set("red blue remaining other different possible available distinct valid invalid additional separate stated checked unchecked open closed total".split())
+
+
+def count_value(raw):
+    if raw[0].isascii() and raw[0].isdigit():
+        from decimal import Decimal
+        return format(Decimal(raw.replace(",", "")).normalize(), "f")
+    digits = {c: n for c, n in zip("零〇一二两三四五六七八九", [0, 0, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9])}
+    if raw[0] in digits or raw[0] in "十百千万":
+        if all(c in digits for c in raw):
+            return str(int("".join(str(digits[c]) for c in raw)))
+        total = section = digit = 0
+        for c in raw:
+            if c in digits:
+                digit = digits[c]
+                continue
+            scale = {"十": 10, "百": 100, "千": 1000, "万": 10000}.get(c, 0)
+            if not scale:
+                return None
+            if scale == 10000:
+                total += (section + digit) * scale
+                section = 0
+            else:
+                section += max(1, digit) * scale
+            digit = 0
+            if total + section > 1_000_000_000:
+                return None
+        return str(total + section + digit)
+    words = re.split(r"[ -]+", raw.lower())
+    def small(tokens):
+        if len(tokens) == 1:
+            return WORD_VALUES.get(tokens[0])
+        if len(tokens) == 2:
+            tens, ones = (WORD_VALUES.get(t, -1) for t in tokens)
+            if tens >= 20 and 1 <= ones <= 9:
+                return tens + ones
+        return None
+    def group(tokens):
+        if "hundred" not in tokens:
+            return small(tokens)
+        if tokens.index("hundred") != 1 or not 1 <= WORD_VALUES.get(tokens[0], -1) <= 9:
+            return None
+        tail = tokens[2:]
+        if tail[:1] == ["and"]:
+            tail = tail[1:]
+        if not tail:
+            return WORD_VALUES[tokens[0]] * 100
+        rest = small(tail)
+        return None if rest is None else WORD_VALUES[tokens[0]] * 100 + rest
+    total = start = 0
+    previous_scale = 10**15
+    for i, word in enumerate(words):
+        scale = {"thousand": 1000, "million": 1_000_000, "billion": 1_000_000_000}.get(word)
+        if scale is None:
+            continue
+        n = group(words[start:i])
+        if scale >= previous_scale or n is None or n <= 0 or n > (1_000_000_000 - total) // scale:
+            return None
+        total += n * scale
+        start, previous_scale = i + 1, scale
+    tail = words[start:]
+    if start and tail[:1] == ["and"]:
+        tail = tail[1:]
+    if not tail:
+        return str(total) if start else None
+    n = group(tail)
+    return str(total + n) if n is not None and total + n <= 1_000_000_000 else None
+
+
+def has_unit(after):
+    return any(after.startswith(alias) and not (
+        len(alias) == 1 and alias.isascii() and alias.isalpha()
+        and after[len(alias):len(alias)+1].isascii() and after[len(alias):len(alias)+1].isalpha()
+    ) for alias, _ in UNIT_ALIASES)
+
+
+def count_mentions(text):
     found = []
+    decimals = [match.span() for match in SPOKEN_DECIMAL.finditer(text)]
+    for match in COUNT_NUMBER.finditer(text):
+        if any(start < match.end() and end > match.start() for start, end in decimals):
+            continue
+        raw_before = text[max(0, match.start() - 12):match.start()]
+        before, after = raw_before.strip(" \t"), text[match.end():match.end()+80].strip(" \t")
+        if before.endswith(DESIGNATOR_PREFIXES) or raw_before[-1:].isupper() or (raw_before.endswith("-") and raw_before[-2:-1].isupper()):
+            continue
+        if has_unit(after) or has_unit(after.lower()):
+            continue
+        value = count_value(match.group())
+        if value is None:
+            continue
+        if after[:1] in COUNT_SUFFIXES:
+            first, rest = after[0], after[1:].strip(" \t")
+            if first == "个" and rest.startswith(("半", "月", "年", "小时", "钟头", "百分点")):
+                continue
+            if first == "次" and rest.startswith("方"):
+                continue
+            if first == "位" and rest.startswith("于"):
+                continue
+            found.append((match.span(), (value, None, "count", match.group()+first)))
+            continue
+        if raw_before.endswith(NUMERIC_ATTRIBUTES):
+            continue
+        words = [word for word in after.lower().split(" ") if word][:4]
+        while words and words[0] in COUNT_QUALIFIERS:
+            words.pop(0)
+        token = re.match(r"[A-Za-z]+", words[0]) if words else None
+        noun = token.group() if token else ""
+        if noun in COUNT_NOUNS or noun in COUNT_PLURALS:
+            found.append((match.span(), (value, None, "count", match.group()+" "+noun)))
+    return found
+
+
+def numeric_mentions(text: str, preserving_count_scalars: bool = False) -> list[tuple[str, str | None, str, str]]:
+    found = []
+    counts = count_mentions(text)
     for match in re.finditer(r"[0-9]+(?:\.[0-9]+)?", text):
+        if not preserving_count_scalars and any(start < match.end() and end > match.start() for (start, end), _ in counts):
+            continue
         value = match.group()
         before, after = text[max(0, match.start() - 8):match.start()], text[match.end():match.end() + 10]
         if ((before[-1:].isalpha() and before[-1:].isupper())
                 or (before.endswith("-") and before[-2:-1].isalpha() and before[-2:-1].isupper())
-                or before.endswith(DESIGNATOR_PREFIXES) or after[:1] in DESIGNATOR_SUFFIXES):
+                or before.rstrip().endswith(DESIGNATOR_PREFIXES) or after.lstrip()[:1] in DESIGNATOR_SUFFIXES):
             found.append((value, None, "designator", f"编号{value}"))
             continue
         unit = next(((alias, family) for alias, family in UNIT_ALIASES
@@ -95,13 +221,13 @@ def numeric_mentions(text: str) -> list[tuple[str, str | None, str, str]]:
         role = "measurement" if unit or attribute else "ambiguous"
         excerpt = value + unit[0] if unit else (before.strip() + value if attribute else value)
         found.append((value, unit[1] if unit else None, role, excerpt))
-    return found
+    return found + [mention for _, mention in counts]
 
 
 def numeric_report(claim: str, cited: list[str], segment_texts: list[str],
                    batch_texts: list[str]) -> tuple[bool, str | None]:
-    own = numeric_mentions("\n".join(cited + segment_texts))
-    batch = numeric_mentions("\n".join(batch_texts))
+    own = [mention for text in cited + segment_texts for mention in numeric_mentions(text, preserving_count_scalars=True)]
+    batch = [mention for text in batch_texts for mention in numeric_mentions(text, preserving_count_scalars=True)]
     gaps, decidable = [], False
     def push(message):
         if len(gaps) < 3 and message not in gaps:
@@ -109,8 +235,16 @@ def numeric_report(claim: str, cited: list[str], segment_texts: list[str],
     for value, unit, role, excerpt in numeric_mentions(claim):
         if role == "designator":
             continue
-        in_own = [m for m in own if m[0] == value and m[2] != "designator"]
-        in_batch = [m for m in batch if m[0] == value and m[2] != "designator"]
+        if role == "count":
+            if any(m[0] == value and m[2] == "count" for m in own):
+                continue
+            location = ("本次原文的其他句子出现过相同数量，请确认是否该把那一句也列为来源。"
+                        if any(m[0] == value and m[2] == "count" for m in batch)
+                        else "同样的数字不一定表示同样的数量，请核对它是数量、目标值还是编号。")
+            push(f"正文里的计数“{excerpt}”未在所引原句及同一字幕中找到计数支持；{location}")
+            continue
+        in_own = [m for m in own if m[0] == value and m[2] not in ("designator", "count")]
+        in_batch = [m for m in batch if m[0] == value and m[2] not in ("designator", "count")]
         def conflict(others):
             families = "、".join(sorted({m[1] for m in others if m[1]})) or "无单位"
             return f"正文里的“{excerpt}”与原文中同一数字的单位不同（原文为 {families}）；请人工确认是换算、推导还是引用错位。"

@@ -313,6 +313,126 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(point.numericGap).contains("没有单位或属性说明"))
     }
 
+    func testCountRoleCannotBorrowATargetValueFromItsQuote() throws {
+        let source = segment("If the number 50 is not behind the first door, the else returns false.",
+                             "如果数字50不在第一扇门后，else会返回false。")
+        let text = "遍历完所有储物柜（如50个）后仍未找到目标，返回false。"
+        let point = try XCTUnwrap(boundPoint(text, evidence: [source], ids: ["en0s0", "zh0s0"]))
+        XCTAssertEqual(point.text, text, "来源提示不能自行改写正文")
+        XCTAssertEqual(point.referenceState, .linked)
+        XCTAssertNil(point.needsContext)
+        XCTAssertFalse(point.hasOpenQuestion)
+        XCTAssertTrue(try XCTUnwrap(point.numericGap).contains("计数“50个”"))
+        XCTAssertTrue(try XCTUnwrap(LearningNotebook.sourceCheckReason(point)).contains("计数支持"))
+        var notebook = LearningNotebook()
+        try notebook.append(evidence: [source], note: LearningNote(topic: "搜索", points: [point], sourceVersion: 2, noNewKnowledge: false))
+        XCTAssertTrue(notebook.markdown().contains(text))
+        XCTAssertTrue(notebook.markdown().contains("计数支持"))
+        XCTAssertTrue(notebook.markdown(covering: [source.id]).contains("计数支持"))
+    }
+
+    func testCountSupportRecognizesWholeNumberWordsWithoutInventingCounts() {
+        for (claim, source) in [
+            ("共有50个储物柜。", "There are fifty lockers."),
+            ("共有五十个储物柜。", "There are 50 lockers."),
+            ("共有523个样品。", "There are five hundred and twenty-three samples."),
+            ("共有523个样品。", "共有五百二十三个样品。"),
+            ("共有1000个记录。", "There are 1,000 records."),
+            ("共有50个储物柜。", "THERE ARE 50 lockers."),
+            ("共有50个储物柜。", "There are 50 remaining lockers.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [source], batchTexts: [source])
+            XCTAssertFalse(report.isDecidable, source)
+            XCTAssertTrue(report.gaps.isEmpty, "\(source): \(report.gaps)")
+        }
+    }
+
+    func testCountsInSameSegmentAndOtherSegmentsHaveDifferentSourceHints() {
+        let source = "The target is the number 50."
+        let support = "There are fifty lockers."
+        let claim = "有50个储物柜。"
+        let sameSegment = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [source, support], batchTexts: [source, support])
+        XCTAssertTrue(sameSegment.gaps.isEmpty)
+        let otherSegment = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [source], batchTexts: [source, support])
+        XCTAssertFalse(otherSegment.isDecidable)
+        XCTAssertTrue(otherSegment.gaps.joined().contains("其他句子出现过相同数量"))
+        let absent = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [source], batchTexts: [source])
+        XCTAssertFalse(absent.isDecidable)
+        XCTAssertTrue(absent.gaps.joined().contains("数量、目标值还是编号"))
+    }
+
+    func testCountCheckKeepsOrdinalsLabelsDurationsAndPowersExempt() {
+        for claim in ["标签K7、V3。", "第3个对象。", "第 3 项。", "编号 50。", "3个小时。", "3次方。"] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: ["The example is shown."], segmentTexts: [], batchTexts: [])
+            XCTAssertFalse(report.isDecidable, claim)
+            XCTAssertTrue(report.gaps.isEmpty, "\(claim): \(report.gaps)")
+        }
+        let measure = LearningNumericProvenance.report(claim: "温度为18摄氏度。", cited: ["Pressure is 18 kilopascals."], segmentTexts: [], batchTexts: [])
+        XCTAssertTrue(measure.isDecidable)
+        XCTAssertTrue(measure.gaps.joined().contains("单位不同"))
+    }
+
+    func testCountSupportNeverJoinsANumberToAnotherFragmentsNoun() {
+        for cited in [["The target is 50", "lockers are searched."], ["The target is 50\nlockers are searched."]] {
+            let report = LearningNumericProvenance.report(claim: "共有50个柜子。", cited: cited, segmentTexts: [], batchTexts: cited)
+            XCTAssertFalse(report.isDecidable)
+            XCTAssertTrue(report.gaps.joined().contains("计数支持"))
+        }
+    }
+
+    func testCountAnnotationPreservesExistingScalarScoreSupport() {
+        let score = LearningNumericProvenance.report(claim: "得分50。", cited: ["The student earned 50 marks."], segmentTexts: [], batchTexts: [])
+        XCTAssertFalse(score.isDecidable)
+        XCTAssertTrue(score.gaps.isEmpty)
+        let english = LearningNumericProvenance.report(claim: "50 lockers", cited: ["There are fifty lockers."], segmentTexts: [], batchTexts: [])
+        XCTAssertTrue(english.gaps.isEmpty)
+    }
+
+    func testSpokenDecimalFragmentsCannotCertifyWholeCounts() {
+        for (claim, source) in [
+            ("共有5个样品。", "Each group averaged one point five samples."),
+            ("共有5个样品。", "Each group averaged point five samples."),
+            ("共有5个样品。", "平均每组一点五个样品。"),
+            ("共有1个样品。", "The length is one point five metres."),
+            ("共有5个样品。", "Each group averaged 1 point five samples."),
+            ("共有5个样品。", "平均每组1点5个样品。")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [source], batchTexts: [source])
+            XCTAssertFalse(report.isDecidable, source)
+            XCTAssertTrue(report.gaps.joined().contains("计数支持"), source)
+        }
+        for (claim, source) in [("共有1个点。", "Plot one point on the graph."), ("平均1.5个样品。", "Average 1.5 samples.")] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [], batchTexts: [])
+            XCTAssertTrue(report.gaps.isEmpty, source)
+        }
+    }
+
+    func testChineseLocationPredicateIsNotAPersonCount() {
+        let location = LearningNumericProvenance.report(claim: "数字50位于第3项。", cited: ["Value 50 is in item 3."], segmentTexts: [], batchTexts: [])
+        XCTAssertTrue(location.gaps.isEmpty)
+        XCTAssertFalse(location.isDecidable)
+        let unsupported = LearningNumericProvenance.report(claim: "共有50位学生。", cited: ["Student number 50 is here."], segmentTexts: [], batchTexts: [])
+        XCTAssertTrue(unsupported.gaps.joined().contains("计数“50位”"))
+        let supported = LearningNumericProvenance.report(claim: "共有50位学生。", cited: ["There are fifty students."], segmentTexts: [], batchTexts: [])
+        XCTAssertTrue(supported.gaps.isEmpty)
+    }
+
+    func testVerbsAndUnlistedUnitsDoNotBecomePluralCountNouns() {
+        let target = LearningNumericProvenance.report(claim: "共有50个储物柜。", cited: ["The target value 50 appears behind this door."], segmentTexts: [], batchTexts: [])
+        XCTAssertFalse(target.isDecidable)
+        XCTAssertTrue(target.gaps.joined().contains("计数支持"))
+        for (claim, source) in [("质量5 lbs。", "质量4 lbs。"), ("得分5 marks。", "得分4 marks。")] {
+            let measurement = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [], batchTexts: [])
+            XCTAssertTrue(measurement.isDecidable, claim)
+            XCTAssertFalse(measurement.gaps.isEmpty, claim)
+            XCTAssertFalse(measurement.gaps.joined().contains("计数支持"), claim)
+        }
+        for source in ["There are two measurements.", "There are two entries.", "There are two vertices.", "There are two classes."] {
+            let report = LearningNumericProvenance.report(claim: "共有2项。", cited: [source], segmentTexts: [], batchTexts: [])
+            XCTAssertTrue(report.gaps.isEmpty, source)
+        }
+    }
+
     // MARK: - ③ 兼容与断点绑定
 
     func testOldCodableDataWithoutFollowUpsStillDecodes() throws {

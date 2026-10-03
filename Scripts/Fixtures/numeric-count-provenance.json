@@ -1,0 +1,204 @@
+{
+  "cases": [
+    {
+      "id": "c01-target-value-is-not-a-count",
+      "claim": "共有50个储物柜。",
+      "cited": ["Search the lockers for the target value 50."],
+      "segmentTexts": ["Search the lockers for the target value 50."],
+      "batchTexts": ["Search the lockers for the target value 50."],
+      "expectedGap": true,
+      "expectedDecidable": false,
+      "reason": "50是要查找的目标值，原文没有给出储物柜总数。相同数字不能充当计数来源；提示50个缺少计数依据即可，不能由此断言实际柜数不是50。所有新增计数缺口均只作来源提示，不改写或删除正文，也不加入模型待确认问答。"
+    },
+    {
+      "id": "c02-identifier-is-not-a-count",
+      "claim": "共有50个储物柜。",
+      "cited": ["Open locker number 50."],
+      "segmentTexts": ["Open locker number 50."],
+      "batchTexts": ["Open locker number 50."],
+      "expectedGap": true,
+      "expectedDecidable": false,
+      "reason": "number 50标识一个储物柜，不能证明有50个储物柜。应提示计数来源缺口；不能假定编号连续或从1开始来推导总数。"
+    },
+    {
+      "id": "c03-designators-stay-exempt",
+      "claim": "第3项要求检查K7和样品V3。",
+      "cited": ["Item 3 asks us to inspect K7 and sample V3."],
+      "segmentTexts": ["Item 3 asks us to inspect K7 and sample V3."],
+      "batchTexts": ["Item 3 asks us to inspect K7 and sample V3."],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "第3项、K7、V3均为序号或标识，不是3项、7个或3个的数量断言。新增计数识别不得破坏既有编号免报行为。"
+    },
+    {
+      "id": "c04-explicit-english-digit-count",
+      "claim": "打开全部50个储物柜。",
+      "cited": ["Open all 50 lockers."],
+      "segmentTexts": ["Open all 50 lockers."],
+      "batchTexts": ["Open all 50 lockers."],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "50 lockers是明确的计数短语，足以支持50个储物柜。此例与目标值及编号的反例形成最小对照。"
+    },
+    {
+      "id": "c05-spelled-fifty-count",
+      "claim": "打开全部50个储物柜。",
+      "cited": ["Open all fifty lockers."],
+      "segmentTexts": ["Open all fifty lockers."],
+      "batchTexts": ["Open all fifty lockers."],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "fifty lockers明确给出50的计数。英文整数字词与阿拉伯数字表示不同，不构成来源缺口。"
+    },
+    {
+      "id": "c06-hyphenated-english-count",
+      "claim": "盒内有21个样品。",
+      "cited": ["The box contains twenty-one samples."],
+      "segmentTexts": ["The box contains twenty-one samples."],
+      "batchTexts": ["The box contains twenty-one samples."],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "twenty-one是常见、无歧义的整数21，连字符不应使真实计数来源丢失；不要求猜测模糊缩写或复杂推导。"
+    },
+    {
+      "id": "c07-chinese-spelled-source-count",
+      "claim": "盒内有6个样品。",
+      "cited": ["盒内有六个样品。"],
+      "segmentTexts": ["盒内有六个样品。"],
+      "batchTexts": ["盒内有六个样品。"],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "六个与6个是同一个明确计数，中文数词的等值写法不应产生提示。"
+    },
+    {
+      "id": "c08-chinese-liang-claim-count",
+      "claim": "本次实验进行了两次测量。",
+      "cited": ["The experiment included two measurements."],
+      "segmentTexts": ["The experiment included two measurements."],
+      "batchTexts": ["The experiment included two measurements."],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "two measurements支持两次测量；两作为计数2的常见中文写法应正常保留。这里的两次是次数，不是第2次的序号。"
+    },
+    {
+      "id": "c09-chinese-count-value-gap",
+      "claim": "本次实验进行了三次测量。",
+      "cited": ["本次实验进行了两次测量。"],
+      "segmentTexts": ["本次实验进行了两次测量。"],
+      "batchTexts": ["本次实验进行了两次测量。"],
+      "expectedGap": true,
+      "expectedDecidable": false,
+      "reason": "本批只有计数2，没有计数3。不能因claim使用中文三而跳过检查；本层仅提示三次没有对应计数来源，不升级为明确错误判决。"
+    },
+    {
+      "id": "c10-digit-count-value-gap",
+      "claim": "实验准备了7个样品。",
+      "cited": ["We prepared 6 samples."],
+      "segmentTexts": ["We prepared 6 samples."],
+      "batchTexts": ["We prepared 6 samples."],
+      "expectedGap": true,
+      "expectedDecidable": false,
+      "reason": "原文明确计数6，claim计数7没有本批计数来源。新增计数检查即使发现不同值，也保持来源提示级别，不自动更正为6。"
+    },
+    {
+      "id": "c11-measurement-is-not-a-count",
+      "claim": "共有6个样品。",
+      "cited": ["样品总质量为6千克。"],
+      "segmentTexts": ["样品总质量为6千克。"],
+      "batchTexts": ["样品总质量为6千克。"],
+      "expectedGap": true,
+      "expectedDecidable": false,
+      "reason": "6千克是物理量，不是6个样品的计数。相同数值不能跨类型支持计数；缺少每个样品质量，也不能通过换算推出样品数量。此新增计数缺口仍不可判定。"
+    },
+    {
+      "id": "c12-same-count-different-object-boundary",
+      "claim": "本组有6个样品。",
+      "cited": ["本组有6名学生，样品数量未说明。"],
+      "segmentTexts": ["本组有6名学生，样品数量未说明。"],
+      "batchTexts": ["本组有6名学生，样品数量未说明。"],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "边界对照：本定向检查区分计数、编号、物理量，不承担对象归属证明；本批确有计数6，故本层不强制提示。原文的6属于学生，claim的6属于样品，语义支持仍不足，必须另行人工判断。expectedGap=false绝不表示claim正确；不得将此例计为通用语义验收通过。"
+    },
+    {
+      "id": "c13-count-in-another-sentence-of-same-segment",
+      "claim": "实验准备了6个样品。",
+      "cited": ["Each sample was labelled before measurement."],
+      "segmentTexts": ["We prepared six samples. Each sample was labelled before measurement."],
+      "batchTexts": ["We prepared six samples. Each sample was labelled before measurement."],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "引用片段未含数量，但同一个被引用字幕段的上一句明确给出six samples。现有同段补足规则应保留，不要求所有数字都逐字出现在cited片段内。"
+    },
+    {
+      "id": "c14-count-only-in-another-segment-of-current-batch",
+      "claim": "实验准备了6个样品。",
+      "cited": ["Each sample was labelled before measurement."],
+      "segmentTexts": ["Each sample was labelled before measurement."],
+      "batchTexts": ["We prepared six samples.", "Each sample was labelled before measurement."],
+      "expectedGap": true,
+      "expectedDecidable": false,
+      "reason": "6的计数仅在本批另一个未被引用的字幕段。应明确提示计数见于本批其他原文，不能说整批没有计数，也不能判claim错误。与c13仅改变字幕段边界。"
+    },
+    {
+      "id": "c15-earlier-batch-count-is-not-current-source",
+      "claim": "实验准备了6个样品。",
+      "cited": ["Each sample was labelled before measurement."],
+      "segmentTexts": ["Each sample was labelled before measurement."],
+      "batchTexts": ["Each sample was labelled before measurement."],
+      "expectedGap": true,
+      "expectedDecidable": false,
+      "reason": "本请求整批没有计数6，应提示当前批来源不足；不能读取前一请求c13或c14的six samples来消除缺口。batchTexts只代表当前批，不把历史文本伪装成当前证据。本例固定输入边界；运行时跨批状态隔离仍需父runner以先c13后c15的独立请求验证。"
+    },
+    {
+      "id": "c16-two-conditions-and-same-segment-measurement",
+      "claim": "入口阀完全打开、水温恒为20摄氏度这两个条件须在整个测量时段内同时成立。",
+      "cited": ["These two conditions must hold throughout the measurement interval."],
+      "segmentTexts": ["The inlet valve is fully open and the water temperature stays at 20°C. These two conditions must hold throughout the measurement interval."],
+      "batchTexts": ["The inlet valve is fully open and the water temperature stays at 20°C. These two conditions must hold throughout the measurement interval."],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "two明确支持两个条件，20摄氏度由同一字幕段的上一句支持。新增计数识别不得把原有同段条件材料变成误报；这里仅验数值来源，不由机械结果证明条件逻辑普遍正确。"
+    },
+    {
+      "id": "c17-existing-measurement-alias",
+      "claim": "水温为20摄氏度。",
+      "cited": ["The water temperature is 20°C."],
+      "segmentTexts": ["The water temperature is 20°C."],
+      "batchTexts": ["The water temperature is 20°C."],
+      "expectedGap": false,
+      "expectedDecidable": false,
+      "reason": "保留既有物理量单位别名规则：°C与摄氏度属于同一单位，数值相同，不因表示方式变化提高提示强度。"
+    },
+    {
+      "id": "c18-existing-measurement-unit-conflict",
+      "claim": "温度为18摄氏度。",
+      "cited": ["压强为18千帕。"],
+      "segmentTexts": ["压强为18千帕。"],
+      "batchTexts": ["压强为18千帕。"],
+      "expectedGap": true,
+      "expectedDecidable": true,
+      "reason": "保留既有物理量检查：18的单位族不同，仍返回原有数值差异提示。expectedDecidable在本文件对应现有Report.isDecidable，表示机械可识别的数值来源差异，不表示已经证明正文事实错误。"
+    },
+    {
+      "id": "c19-correct-conversion-keeps-existing-advisory",
+      "claim": "换算后体积为1000毫升。",
+      "cited": ["体积为1升。"],
+      "segmentTexts": ["体积为1升。"],
+      "batchTexts": ["体积为1升。"],
+      "expectedGap": true,
+      "expectedDecidable": true,
+      "reason": "1升等于1000毫升，换算本身正确。现有数值来源检查没有量纲比例换算，只将原文未直接出现1000识别为数值差异，因此保留既有提示及isDecidable=true，不把它升级成错误、删文或待确认问答。这是防止计数补丁扩大惩罚的回归对照，不要求新增换算器。"
+    },
+    {
+      "id": "c20-existing-bare-number-gap",
+      "claim": "结果为7。",
+      "cited": ["The run completed without reporting a result value."],
+      "segmentTexts": ["The run completed without reporting a result value."],
+      "batchTexts": ["The run completed without reporting a result value."],
+      "expectedGap": true,
+      "expectedDecidable": false,
+      "reason": "保留既有无单位、无明确测量属性的裸数字行为：本批没有7，给具体来源缺口，但不把它猜成计数、测量值或可判定错误。"
+    }
+  ]
+}

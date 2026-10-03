@@ -307,6 +307,59 @@ class QualityScoreTests(unittest.TestCase):
                          ['压强为20千帕。'],['压强为20千帕。'])
         self.assertTrue(difference)
         self.assertIn('单位不同',gap)
+    def test_count_support_does_not_cross_fragment_or_line_boundaries(self):
+        for cited in [['The target is 50', 'lockers are searched.'], ['The target is 50\nlockers are searched.']]:
+            difference, gap = scorer.numeric_report('共有50个柜子。', cited, [], cited)
+            self.assertFalse(difference)
+            self.assertIn('计数支持', gap)
+
+    def test_count_annotation_preserves_existing_scalar_score_support(self):
+        self.assertEqual(scorer.numeric_report('得分50。', ['The student earned 50 marks.'], [], []), (False, None))
+        self.assertEqual(scorer.numeric_report('50 lockers', ['There are fifty lockers.'], [], []), (False, None))
+
+    def test_count_provenance_frozen_controls(self):
+        corpus = json.loads((HERE / 'Fixtures/numeric-count-provenance.json').read_text())
+        for row in corpus['cases']:
+            with self.subTest(case=row['id']):
+                decidable, gap = scorer.numeric_report(row['claim'], row['cited'], row['segmentTexts'], row['batchTexts'])
+                self.assertEqual(decidable, row['expectedDecidable'])
+                self.assertEqual(bool(gap), row['expectedGap'])
+
+    def test_spoken_decimal_fragments_do_not_certify_whole_counts(self):
+        for claim, source in [
+            ('共有5个样品。', 'Each group averaged one point five samples.'),
+            ('共有5个样品。', 'Each group averaged point five samples.'),
+            ('共有5个样品。', '平均每组一点五个样品。'),
+            ('共有1个样品。', 'The length is one point five metres.'),
+            ('共有5个样品。', 'Each group averaged 1 point five samples.'),
+            ('共有5个样品。', '平均每组1点5个样品。'),
+        ]:
+            with self.subTest(source=source):
+                decidable, gap = scorer.numeric_report(claim, [source], [source], [source])
+                self.assertFalse(decidable)
+                self.assertIn('计数支持', gap)
+        for claim, source in [('共有1个点。', 'Plot one point on the graph.'), ('平均1.5个样品。', 'Average 1.5 samples.')]:
+            self.assertEqual(scorer.numeric_report(claim, [source], [], []), (False, None))
+
+    def test_chinese_location_predicate_is_not_a_person_count(self):
+        self.assertEqual(scorer.numeric_report('数字50位于第3项。', ['Value 50 is in item 3.'], [], []), (False, None))
+        decidable, gap = scorer.numeric_report('共有50位学生。', ['Student number 50 is here.'], [], [])
+        self.assertFalse(decidable)
+        self.assertIn('计数“50位”', gap)
+        self.assertEqual(scorer.numeric_report('共有50位学生。', ['There are fifty students.'], [], []), (False, None))
+
+    def test_verbs_and_unlisted_units_are_not_plural_count_nouns(self):
+        decidable, gap = scorer.numeric_report('共有50个储物柜。', ['The target value 50 appears behind this door.'], [], [])
+        self.assertFalse(decidable)
+        self.assertIn('计数支持', gap)
+        for claim, source in [('质量5 lbs。', '质量4 lbs。'), ('得分5 marks。', '得分4 marks。')]:
+            decidable, gap = scorer.numeric_report(claim, [source], [], [])
+            self.assertTrue(decidable)
+            self.assertTrue(gap)
+            self.assertNotIn('计数支持', gap)
+        for source in ['There are two measurements.', 'There are two entries.', 'There are two vertices.', 'There are two classes.']:
+            self.assertEqual(scorer.numeric_report('共有2项。', [source], [], []), (False, None))
+
     def test_committed_followup_retires_only_bound_old_question(self):
         first=[{'kind':'待确认','text':'温度为20摄氏度，所属样品不明。',
                 'sourceIDs':['zh0s0'],'needsContext':'属于哪个样品？','clarifies':None}]

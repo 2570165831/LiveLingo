@@ -306,7 +306,9 @@ struct LearningNote: Codable, Equatable, Sendable {
 /// 2026-09-22（父任务整改第 2 点）：旧实现把正文和引文里的**裸数字集合**直接比较 ✗ ——
 /// 编号（K7、M2、样品 V3）和同一字幕里跨句复述的条件值都会被判成“数值差异” ✗。
 /// 现在的分级（只做**机械**判断，不假装懂语义 ✗）：
-///   · **编号/序号**（拉丁大写字母前缀、第 N、N 项/N 个…）一律不参与比对 ✓；
+///   · **编号/序号**（拉丁大写字母前缀、第 N、编号 N…）不参与比对；
+///   · 计数独立核对数量用途；相同的目标值或物理量不算计数支持。缺口只作提示，
+///     不证明正文错误，也不证明相同数量属于相同对象。
 ///   · 数字在本条要点**引用的原句 / 引用片段所属同一条字幕**里、单位族一致 → 不出声 ✓
 ///     （这就是“明确的多句来源支持” ✓）；
 ///   · 数字只在**本次生成的输入**（同一批原文）里出现、单位族一致 →
@@ -320,7 +322,7 @@ struct LearningNote: Codable, Equatable, Sendable {
 enum LearningNumericProvenance {
     /// 一个数值提及。`role` 是程序能确定的**最小**判断 ✓，不假装理解语义 ✗。
     struct Mention: Equatable, Sendable {
-        enum Role: String, Sendable { case designator, measurement, ambiguous }
+        enum Role: String, Sendable { case designator, measurement, count, ambiguous }
         let value: String
         /// 归一化后的单位族（`C`、`kPa`、`L`、`min`…）；没有单位时为 nil ✓。
         let unit: String?
@@ -344,6 +346,129 @@ enum LearningNumericProvenance {
     static let designatorSuffixes: Set<Character> = ["项", "个", "份", "条", "号", "组", "种", "类", "名", "位", "章", "节", "课", "次", "步", "版"]
     /// 数值前的编号词 ✓。
     static let designatorPrefixes = ["第", "编号", "序号", "图", "表", "式", "步骤", "阶段", "级别", "等级", "题号", "版本"]
+
+    private static let numberExpression = try! NSRegularExpression(pattern: #"[0-9]+(?:\.[0-9]+)?"#)
+    private static let countSuffixes = Set("个份条项组种类名位次扇件张本枚颗台座间只瓶盒行列人")
+    private static let numberWords = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                                      "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+                                      "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+    private static let wordValues = Dictionary(uniqueKeysWithValues: numberWords.enumerated().map {
+        ($0.element, $0.offset < 20 ? $0.offset : ($0.offset - 18) * 10)
+    })
+    private static let countNumberExpression: NSRegularExpression = {
+        let word = "(?:" + (numberWords + ["hundred", "thousand", "million", "billion"]).joined(separator: "|") + ")"
+        return try! NSRegularExpression(pattern: #"(?i)(?<![A-Za-z0-9.,])(?:[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?|[零〇一二两三四五六七八九十百千万]+|"#
+            + word + "(?:[ -]+(?:and[ -]+)?" + word + #")*)(?![A-Za-z0-9.,])"#)
+    }()
+    // Spoken decimals are outside the whole-number grammar. Exclude the entire
+    // expression so neither "one point" nor "five samples" can certify a count.
+    private static let spokenDecimalExpression: NSRegularExpression = {
+        let number = countNumberExpression.pattern.replacingOccurrences(of: "(?i)", with: "")
+        return try! NSRegularExpression(pattern: "(?i)(?:(?:" + number + #"[ \t]+)?(?<![A-Za-z0-9])point[ \t]+"# + number
+            + #"|[0-9零〇一二两三四五六七八九十百千万]+点[0-9零〇一二两三四五六七八九]+)"#)
+    }()
+    private static let countNouns = Set(["door", "locker", "item", "element", "object", "entry", "record", "sample", "student",
+        "person", "people", "child", "children", "man", "men", "woman", "women", "option", "case", "group", "class", "type",
+        "row", "column", "condition", "step", "question", "point", "byte", "bit", "digit", "bottle", "electron", "atom", "molecule",
+        "resistor", "transistor", "vertex", "edge", "tree", "node", "term", "value", "channel", "layer", "cell", "measurement", "mark"])
+    private static let countPlurals = Set(countNouns.map { noun -> String in
+        if noun == "vertex" { return "vertices" }
+        if noun == "entry" { return "entries" }
+        if noun == "class" { return "classes" }
+        return noun + "s"
+    })
+    private static let countQualifiers = Set(["red", "blue", "remaining", "other", "different", "possible", "available", "distinct",
+        "valid", "invalid", "additional", "separate", "stated", "checked", "unchecked", "open", "closed", "total"])
+
+    /// Normalize only bounded whole-number words in explicit count phrases.
+    /// This is not a transcript rewrite or a general spoken-number parser.
+    private static func countValue(_ raw: String) -> String? {
+        if raw.first?.isASCII == true, raw.first?.isNumber == true {
+            guard let value = Decimal(string: raw.replacingOccurrences(of: ",", with: ""), locale: Locale(identifier: "en_US_POSIX")) else { return nil }
+            return NSDecimalNumber(decimal: value).stringValue
+        }
+        let digits: [Character: Int] = ["零":0, "〇":0, "一":1, "二":2, "两":2, "三":3, "四":4, "五":5, "六":6, "七":7, "八":8, "九":9]
+        if let first = raw.first, digits[first] != nil || "十百千万".contains(first) {
+            if raw.allSatisfy({ digits[$0] != nil }) {
+                guard let value = Int(raw.compactMap { digits[$0].map(String.init) }.joined()) else { return nil }
+                return String(value)
+            }
+            var total = 0, section = 0, digit = 0
+            for character in raw {
+                if let n = digits[character] { digit = n; continue }
+                let scale = ["十":10, "百":100, "千":1000, "万":10000][String(character)] ?? 0
+                guard scale > 0 else { return nil }
+                if scale == 10000 { total += (section + digit) * scale; section = 0 }
+                else { section += max(1, digit) * scale }
+                digit = 0
+                guard total + section <= 1_000_000_000 else { return nil }
+            }
+            return String(total + section + digit)
+        }
+        let words = raw.lowercased().split(whereSeparator: { $0 == " " || $0 == "-" }).map(String.init)
+        func small(_ tokens: [String]) -> Int? {
+            if tokens.count == 1 { return wordValues[tokens[0]] }
+            if tokens.count == 2, let tens = wordValues[tokens[0]], tens >= 20,
+               let ones = wordValues[tokens[1]], (1...9).contains(ones) { return tens + ones }
+            return nil
+        }
+        func group(_ tokens: [String]) -> Int? {
+            guard let hundred = tokens.firstIndex(of: "hundred") else { return small(tokens) }
+            guard hundred == 1, let n = wordValues[tokens[0]], (1...9).contains(n) else { return nil }
+            var tail = Array(tokens.dropFirst(2))
+            if tail.first == "and" { tail.removeFirst() }
+            if tail.isEmpty { return n * 100 }
+            return small(tail).map { n * 100 + $0 }
+        }
+        var total = 0, start = 0, previousScale = Int.max
+        for (index, word) in words.enumerated() {
+            guard let scale = ["thousand":1000, "million":1_000_000, "billion":1_000_000_000][word] else { continue }
+            guard scale < previousScale, let n = group(Array(words[start..<index])), n > 0,
+                  n <= (1_000_000_000 - total) / scale else { return nil }
+            total += n * scale; start = index + 1; previousScale = scale
+        }
+        var tail = Array(words.dropFirst(start))
+        if start > 0, tail.first == "and" { tail.removeFirst() }
+        if tail.isEmpty { return start > 0 ? String(total) : nil }
+        guard let n = group(tail), total + n <= 1_000_000_000 else { return nil }
+        return String(total + n)
+    }
+
+    private static func counts(in text: String) -> [(NSRange, Mention)] {
+        let ns = text as NSString
+        let decimalRanges = spokenDecimalExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).map(\.range)
+        return countNumberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+            guard !decimalRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { return nil }
+            let start = match.range.location, end = NSMaxRange(match.range)
+            let rawBefore = ns.substring(with: NSRange(location: max(0, start - 12), length: min(12, start)))
+            let before = rawBefore.trimmingCharacters(in: .whitespaces)
+            // Explicit ordinal/label forms stay exempt, including 第 3 个 and K7.
+            guard !designatorPrefixes.contains(where: before.hasSuffix),
+                  !(rawBefore.last?.isUppercase == true),
+                  !(rawBefore.hasSuffix("-") && rawBefore.dropLast().last?.isUppercase == true) else { return nil }
+            let raw = ns.substring(with: match.range)
+            let after = ns.substring(from: end).prefix(80).trimmingCharacters(in: .whitespaces)
+            guard unitToken(after: after) == nil, unitToken(after: after.lowercased()) == nil,
+                  let value = countValue(raw) else { return nil }
+            if let first = after.first, countSuffixes.contains(first) {
+                let rest = String(after.dropFirst()).trimmingCharacters(in: .whitespaces)
+                // 三个月/三个小时/三次方 are durations or exponents, not this count check.
+                if first == "个", ["半", "月", "年", "小时", "钟头", "百分点"].contains(where: rest.hasPrefix) { return nil }
+                if first == "次", rest.hasPrefix("方") { return nil }
+                if first == "位", rest.hasPrefix("于") { return nil }
+                return (match.range, Mention(value: value, unit: nil, role: .count, excerpt: raw + String(first)))
+            }
+            // Preserve the existing attribute-based measurement path, even for
+            // an unfamiliar unit or a score expressed in marks.
+            guard !attributeMarkers.contains(where: rawBefore.hasSuffix) else { return nil }
+            var words = after.lowercased().split(separator: " ").prefix(4).map(String.init)
+            while let first = words.first, countQualifiers.contains(first) { words.removeFirst() }
+            guard let token = words.first else { return nil }
+            let noun = String(token.prefix(while: { $0.isASCII && $0.isLetter }))
+            guard countNouns.contains(noun) || countPlurals.contains(noun) else { return nil }
+            return (match.range, Mention(value: value, unit: nil, role: .count, excerpt: raw + " " + noun))
+        }
+    }
 
     /// 单位别名 → 单位族。同族才可能互相支持 ✓；跨族同数字**绝不**自动建立关系 ✗。
     /// 长别名在前 ✓（前缀匹配按顺序取第一个命中 ✓）；英中同族写法都列 ✓。
@@ -390,8 +515,8 @@ enum LearningNumericProvenance {
     static func isDesignator(value: String, before: String, after: String) -> Bool {
         if let last = before.last, last.isLetter, last.isUppercase { return true }              // K7 / 样品V3
         if before.hasSuffix("-"), let letter = before.dropLast().last, letter.isLetter, letter.isUppercase { return true }
-        if designatorPrefixes.contains(where: { before.hasSuffix($0) }) { return true }          // 第7 / 编号7 / 图7
-        if let first = after.first, designatorSuffixes.contains(first) { return true }           // 14项 / 3个 / 7号
+        if designatorPrefixes.contains(where: { before.trimmingCharacters(in: .whitespaces).hasSuffix($0) }) { return true }
+        if let first = after.trimmingCharacters(in: .whitespaces).first, designatorSuffixes.contains(first) { return true }
         return false
     }
 
@@ -411,10 +536,11 @@ enum LearningNumericProvenance {
         return nil
     }
 
-    static func mentions(in text: String) -> [Mention] {
-        let regex = try! NSRegularExpression(pattern: #"[0-9]+(?:\.[0-9]+)?"#)
+    static func mentions(in text: String, preservingCountScalars: Bool = false) -> [Mention] {
+        let counts = counts(in: text)
         let ns = text as NSString
-        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+        let other: [Mention] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+            if !preservingCountScalars, counts.contains(where: { NSIntersectionRange($0.0, match.range).length > 0 }) { return nil }
             let value = ns.substring(with: match.range)
             let start = match.range.location, end = match.range.location + match.range.length
             let beforeStart = max(0, start - 8)
@@ -429,6 +555,7 @@ enum LearningNumericProvenance {
             let excerpt = unit.map { "\(value)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(value)" : value)
             return Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt)
         }
+        return other + counts.map(\.1)
     }
 
     /// 这条要点正文里的数字，相对**它自己引用的原文**（含同一条字幕的多句支持）
@@ -437,12 +564,24 @@ enum LearningNumericProvenance {
                        batchTexts: [String] = []) -> Report {
         var report = Report()
         guard !claim.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return report }
-        let own = mentions(in: (cited + segmentTexts).joined(separator: "\n"))
-        let batch = mentions(in: batchTexts.joined(separator: "\n"))
+        // A number at one fragment's end must not borrow the next fragment's noun.
+        // Keep the old scalar representation for non-count claims. For example,
+        // "50 marks" must still support the existing unitless score rule.
+        let own = (cited + segmentTexts).flatMap { mentions(in: $0, preservingCountScalars: true) }
+        let batch = batchTexts.flatMap { mentions(in: $0, preservingCountScalars: true) }
         var seen = Set<String>()
         for mention in mentions(in: claim) where mention.role != .designator {
-            let inOwn = own.filter { $0.value == mention.value && $0.role != .designator }
-            let inBatch = batch.filter { $0.value == mention.value && $0.role != .designator }
+            if mention.role == .count {
+                if own.contains(where: { $0.value == mention.value && $0.role == .count }) { continue }
+                let location = batch.contains(where: { $0.value == mention.value && $0.role == .count })
+                    ? "本次原文的其他句子出现过相同数量，请确认是否该把那一句也列为来源。"
+                    : "同样的数字不一定表示同样的数量，请核对它是数量、目标值还是编号。"
+                push("正文里的计数“\(mention.excerpt)”未在所引原句及同一字幕中找到计数支持；\(location)",
+                     into: &report.gaps, seen: &seen)
+                continue
+            }
+            let inOwn = own.filter { $0.value == mention.value && $0.role != .designator && $0.role != .count }
+            let inBatch = batch.filter { $0.value == mention.value && $0.role != .designator && $0.role != .count }
             let isMeasurement = mention.role == .measurement
             if isMeasurement, let unit = mention.unit {
                 if inOwn.contains(where: { $0.unit == unit }) { continue }
