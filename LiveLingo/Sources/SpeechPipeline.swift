@@ -410,11 +410,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             let modules: [any SpeechModule] = [probe]
             // Preview is optional. Offline startup must never wait for an
             // operating-system speech model download; bundled ASR remains usable.
-            guard await AssetInventory.status(forModules: modules) == .installed else {
+            guard try await SpeechPreviewAssets.prepare(locale: locale, modules: modules) else {
                 stateLock.withLock { previewSupportedLocale = nil }
                 return false
             }
-            _ = try await AssetInventory.reserve(locale: locale)
             stateLock.withLock { previewSupportedLocale = locale }
             return true
         } catch {

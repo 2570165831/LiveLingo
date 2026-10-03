@@ -3,6 +3,73 @@ import XCTest
 @testable import LiveLingo
 
 final class RealtimePolicyTests: XCTestCase {
+    func testPreviewReservesSharedAssetsBeforeCheckingReadiness() async throws {
+        let state = PreviewAssetFixture(installedOnDevice: true)
+        let ready = try await SpeechPreviewAssets.prepare(wasReserved: false,
+            reserve: { try await state.reserve() }, isInstalled: { await state.isInstalled() },
+            release: { await state.release() })
+        let result = await state.snapshot()
+        XCTAssertTrue(ready)
+        XCTAssertTrue(result.reserved)
+        XCTAssertEqual(result.calls, ["reserve", "status"])
+    }
+
+    func testMissingPreviewAssetsRollBackOnlyANewReservation() async throws {
+        for wasReserved in [false, true] {
+            let state = PreviewAssetFixture(installedOnDevice: false, reserved: wasReserved)
+            let ready = try await SpeechPreviewAssets.prepare(wasReserved: wasReserved,
+                reserve: { try await state.reserve() }, isInstalled: { await state.isInstalled() },
+                release: { await state.release() })
+            let result = await state.snapshot()
+            XCTAssertFalse(ready)
+            XCTAssertEqual(result.reserved, wasReserved)
+            XCTAssertEqual(result.calls, wasReserved ? ["reserve", "status"] : ["reserve", "status", "release"])
+        }
+    }
+
+    func testFailedPreviewReservationDoesNotReleaseExistingAssets() async {
+        let state = PreviewAssetFixture(installedOnDevice: true, reserved: true, rejectReservation: true)
+        do {
+            _ = try await SpeechPreviewAssets.prepare(wasReserved: true,
+                reserve: { try await state.reserve() }, isInstalled: { await state.isInstalled() },
+                release: { await state.release() })
+            XCTFail("Expected the reservation error")
+        } catch {}
+        let result = await state.snapshot()
+        XCTAssertTrue(result.reserved)
+        XCTAssertEqual(result.calls, ["reserve"])
+    }
+
+    func testPreviewDoesNotReleaseAReservationAddedAfterItsSnapshot() async throws {
+        let state = PreviewAssetFixture(installedOnDevice: false, reserved: true)
+        let ready = try await SpeechPreviewAssets.prepare(wasReserved: false,
+            reserve: { try await state.reserve() }, isInstalled: { await state.isInstalled() },
+            release: { await state.release() })
+        let result = await state.snapshot()
+        XCTAssertFalse(ready)
+        XCTAssertTrue(result.reserved)
+        XCTAssertEqual(result.calls, ["reserve", "status"])
+    }
+
+    func testCancelledPreviewPreparationRollsBackOnlyItsOwnReservation() async {
+        for wasReserved in [false, true] {
+            let state = PreviewAssetFixture(installedOnDevice: true, reserved: wasReserved)
+            let task = Task {
+                try await SpeechPreviewAssets.prepare(wasReserved: wasReserved,
+                    reserve: { try await state.reserve() }, isInstalled: {
+                        let installed = await state.isInstalled()
+                        withUnsafeCurrentTask { $0?.cancel() }
+                        return installed
+                    }, release: { await state.release() })
+            }
+            do { _ = try await task.value; XCTFail("Cancelled preparation must not publish readiness") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            let result = await state.snapshot()
+            XCTAssertEqual(result.reserved, wasReserved)
+            XCTAssertEqual(result.calls, wasReserved ? ["reserve", "status"] : ["reserve", "status", "release"])
+        }
+    }
+
     func testSummaryCadenceDoesNotAddGenerationTimeToRefreshInterval() {
         // A round started at 100 and finished at 220. At 280 the next round
         // is due, instead of waiting another 180 seconds after completion.
@@ -1607,6 +1674,34 @@ final class RealtimePolicyTests: XCTestCase {
         XCTAssertTrue(rendered.contains("## 需要回听"))
         XCTAssertFalse(rendered.contains("## 来源检查"), "没有来源信息不等于来源有错")
     }
+}
+
+private actor PreviewAssetFixture {
+    enum Failure: Error { case reservationRejected }
+    let installedOnDevice: Bool
+    let rejectReservation: Bool
+    var reserved: Bool
+    var calls: [String] = []
+
+    init(installedOnDevice: Bool, reserved: Bool = false, rejectReservation: Bool = false) {
+        self.installedOnDevice = installedOnDevice
+        self.reserved = reserved
+        self.rejectReservation = rejectReservation
+    }
+
+    func reserve() throws -> Bool {
+        calls.append("reserve")
+        if rejectReservation { throw Failure.reservationRejected }
+        let added = !reserved
+        reserved = true
+        return added
+    }
+    func isInstalled() -> Bool {
+        calls.append("status")
+        return installedOnDevice && reserved
+    }
+    func release() { calls.append("release"); reserved = false }
+    func snapshot() -> (reserved: Bool, calls: [String]) { (reserved, calls) }
 }
 
 

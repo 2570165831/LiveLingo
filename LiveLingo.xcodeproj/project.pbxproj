@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10000000000000000000026 /* SpeechPreviewAssets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000026 /* SpeechPreviewAssets.swift */; };
 		A10000000000000000000020 /* CausalBoundaryRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* CausalBoundaryRegressionTests.swift */; };
 		A10000000000000000000025 /* CaptionStabilityDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000025 /* CaptionStabilityDraftTests.swift */; };
 		A10000000000000000000024 /* CaptionStabilitySchedulingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000024 /* CaptionStabilitySchedulingTests.swift */; };
@@ -69,6 +70,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A20000000000000000000026 /* SpeechPreviewAssets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPreviewAssets.swift; sourceTree = "<group>"; };
 		A20000000000000000000020 /* CausalBoundaryRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CausalBoundaryRegressionTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000025 /* CaptionStabilityDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionStabilityDraftTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000024 /* CaptionStabilitySchedulingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionStabilitySchedulingTests.swift; sourceTree = "<group>"; };
@@ -170,6 +172,7 @@
 				A20000000000000000000017 /* MLXRuntime.swift */,
 				A20000000000000000000018 /* ASRRuntime.swift */,
 				A20000000000000000000011 /* SpeechActivityDetector.swift */,
+				A20000000000000000000026 /* SpeechPreviewAssets.swift */,
 				A20000000000000000000010 /* CausalBoundary.swift */,
 				A20000000000000000000014 /* AcademicDomain.swift */,
 			);
@@ -303,6 +306,7 @@
 				A10000000000000000000017 /* MLXRuntime.swift in Sources */,
 				A10000000000000000000018 /* ASRRuntime.swift in Sources */,
 				A10000000000000000000011 /* SpeechActivityDetector.swift in Sources */,
+				A10000000000000000000026 /* SpeechPreviewAssets.swift in Sources */,
 				A10000000000000000000010 /* CausalBoundary.swift in Sources */,
 				A10000000000000000000014 /* AcademicDomain.swift in Sources */,
 			);
