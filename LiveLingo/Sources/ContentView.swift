@@ -389,7 +389,7 @@ struct ContentView: View {
     }
 
     private func segmentRow(_ segment: TranscriptSegment) -> some View {
-        TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize, stream: model.captionStream)
+        TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize, stream: model.finalCaptionStream)
             .equatable()
     }
 
@@ -1623,7 +1623,7 @@ private struct ClassroomLivePreview: View {
 }
 
 private struct PendingCaptionTranslation: View {
-    @ObservedObject var stream: LiveCaptionState
+    @ObservedObject var stream: FinalCaptionState
     let segmentID: UUID
     let textSize: Double
     private var isTranslating: Bool { stream.translatingSegmentID == segmentID }
@@ -1654,7 +1654,7 @@ private struct PendingCaptionTranslation: View {
 private struct TranscriptCaptionRow: View, Equatable {
     let segment: TranscriptSegment
     let textSize: Double
-    let stream: LiveCaptionState
+    let stream: FinalCaptionState
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.segment == rhs.segment && lhs.textSize == rhs.textSize && lhs.stream === rhs.stream

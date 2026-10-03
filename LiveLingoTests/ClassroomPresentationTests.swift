@@ -96,15 +96,67 @@ final class ClassroomPresentationTests: XCTestCase {
         XCTAssertEqual(streaming.rootBodies, 0, "Streaming a caption must not rebuild unrelated classroom regions")
         XCTAssertEqual(streaming.summaryBodies, 0)
         XCTAssertEqual(streaming.inlineParses, 0)
+        XCTAssertEqual(streaming.previewBodies, 0, "Formal-caption tokens must not rebuild the live preview")
+        XCTAssertEqual(streaming.floatingBodies, 0, "Formal-caption tokens must not rebuild floating preview subtitles")
         XCTAssertGreaterThan(streaming.streamingBodies, 0, "The active caption must still show streamed text")
         XCTAssertEqual(model.translatingSegmentID, model.segments.last?.id)
         XCTAssertFalse(try XCTUnwrap(model.segments.last).hasUsableTranslation)
         XCTAssertTrue(model.streamingChinese.hasSuffix(String(repeating: "。", count: 12)))
         XCTAssertEqual(model.lectureSummary, originalNotes)
         try capture(view, name: "live-draft-updated-streaming-caption")
+
+        let heldText = model.streamingChinese
+        let heldID = model.translatingSegmentID
+        SummaryRenderingDiagnostics.reset()
+        notifications = 0
+        for index in 0..<12 {
+            model.receiveLivePreviewForTesting("A new spoken sentence while translation is held: \(index).",
+                                               chinese: "正式翻译进行中，新一句初译：\(index)。")
+            try await Task.sleep(for: .milliseconds(25))
+            view.layoutSubtreeIfNeeded()
+            floating.layoutSubtreeIfNeeded()
+        }
+        try await settle(view)
+        try await settle(floating)
+        let previewDuringStream = SummaryRenderingDiagnostics.counts
+        XCTAssertEqual(notifications, 0)
+        XCTAssertEqual(previewDuringStream.rootBodies, 0)
+        XCTAssertEqual(previewDuringStream.summaryBodies, 0)
+        XCTAssertEqual(previewDuringStream.inlineParses, 0)
+        XCTAssertEqual(previewDuringStream.streamingBodies, 0,
+                       "A new spoken preview must not rebuild the held formal-caption row")
+        XCTAssertGreaterThan(previewDuringStream.previewBodies, 0)
+        XCTAssertGreaterThan(previewDuringStream.floatingBodies, 0)
+        XCTAssertEqual(model.streamingChinese, heldText)
+        XCTAssertEqual(model.translatingSegmentID, heldID)
+        XCTAssertEqual(model.previewEnglishDisplay, "A new spoken sentence while translation is held: 11.")
+        XCTAssertEqual(model.previewChineseDisplay, model.supportsPreviewTranslation
+            ? "初译 · 正式翻译进行中，新一句初译：11。" : "当前系统不支持初译；正式译文随后显示")
+        XCTAssertEqual(model.lectureSummary, originalNotes)
+        try capture(view, name: "live-draft-independent-preview-and-caption")
+        try capture(floating, name: "live-draft-independent-floating")
         let probe = LiveDraftProbe(preview: preview, streaming: streaming,
+            previewDuringStream: previewDuringStream,
             previewModelNotifications: previewNotifications, streamingModelNotifications: streamingNotifications)
         print("LIVE_DRAFT_RENDER_PROBE " + String(decoding: try JSONEncoder().encode(probe), as: UTF8.self))
+
+        model.receiveLivePreviewForTesting("")
+        try await settle(view)
+        try await settle(floating)
+        XCTAssertEqual(model.previewEnglishDisplay, model.segments.last?.english,
+                       "An empty live preview still falls back to the latest confirmed English")
+        XCTAssertTrue(model.previewChinese.isEmpty)
+        XCTAssertEqual(model.streamingChinese, heldText)
+        model.previewTranslationEnabled = false
+        try await settle(view)
+        try await settle(floating)
+        XCTAssertEqual(model.previewChineseDisplay, "初译已关闭")
+        XCTAssertEqual(model.streamingChinese, heldText)
+        model.previewTranslationEnabled = true
+        try await settle(view)
+        try await settle(floating)
+        XCTAssertEqual(model.previewChineseDisplay, model.supportsPreviewTranslation
+            ? "等待初译…" : "当前系统不支持初译；正式译文随后显示")
         SummaryRenderingDiagnostics.reset()
         let finalText = "合成课堂：温度随之升高。"
         let translation = pendingTranslation; pendingTranslation = nil
@@ -124,6 +176,7 @@ final class ClassroomPresentationTests: XCTestCase {
     private struct LiveDraftProbe: Codable {
         let preview: SummaryRenderingDiagnostics.Counts
         let streaming: SummaryRenderingDiagnostics.Counts
+        let previewDuringStream: SummaryRenderingDiagnostics.Counts
         let previewModelNotifications: Int
         let streamingModelNotifications: Int
     }

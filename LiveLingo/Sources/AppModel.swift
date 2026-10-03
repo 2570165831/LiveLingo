@@ -68,12 +68,18 @@ final class CaptureMeterState: ObservableObject {
     @Published var waveformSamples = Array(repeating: Float.zero, count: 24)
 }
 
-/// Transient text has its own notifications; durable classroom changes stay on AppModel.
+/// Recognition and initial-translation updates belong only to preview readers.
+/// Durable classroom changes stay on AppModel.
 @MainActor
 final class LiveCaptionState: ObservableObject {
     @Published fileprivate(set) var volatileEnglish = ""
     @Published fileprivate(set) var previewChinese = ""
     @Published fileprivate(set) var previewTranslationStatus = "准备苹果初译…"
+}
+
+/// Formal-caption drafts notify pending rows without invalidating preview readers.
+@MainActor
+final class FinalCaptionState: ObservableObject {
     @Published fileprivate(set) var translatingSegmentID: UUID?
     @Published fileprivate(set) var streamingChinese = ""
 }
@@ -396,6 +402,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var translationStatus = "正在检查本机翻译模型…"
     @Published private(set) var translationReady = false
     let captionStream = LiveCaptionState()
+    let finalCaptionStream = FinalCaptionState()
     private(set) var volatileEnglish: String {
         get { captionStream.volatileEnglish }
         set {
@@ -531,12 +538,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveChinese = ""
     // Draft output belongs to one segment and never enters exported history.
     private(set) var translatingSegmentID: UUID? {
-        get { captionStream.translatingSegmentID }
-        set { captionStream.translatingSegmentID = newValue }
+        get { finalCaptionStream.translatingSegmentID }
+        set { finalCaptionStream.translatingSegmentID = newValue }
     }
     private(set) var streamingChinese: String {
-        get { captionStream.streamingChinese }
-        set { captionStream.streamingChinese = newValue }
+        get { finalCaptionStream.streamingChinese }
+        set { finalCaptionStream.streamingChinese = newValue }
     }
     private var streamingDependencyIDs: Set<UUID> = []
     @Published private(set) var segments: [TranscriptSegment] = [] {
