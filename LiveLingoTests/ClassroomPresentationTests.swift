@@ -10,6 +10,89 @@ import XCTest
 final class ClassroomPresentationTests: XCTestCase {
     private var presentationDefaults: UserDefaults?
 
+    func testStreamingDoesNotRedrawOtherWaitingCaptions() async throws {
+        var callbacks: [CaptionTranslationDependencies.Update?] = []
+        var pending: [Int: CheckedContinuation<String, Error>] = [:]
+        let (model, _, _) = try fixture(translation: .init(
+            translate: { _, _, _, _, callback in
+                let index = callbacks.count
+                callbacks.append(callback)
+                return try await withCheckedThrowingContinuation { pending[index] = $0 }
+            },
+            adjacent: { _, _, _, _, _, _, _, _, _ in
+                XCTFail("Separated synthetic captions must not invoke adjacent repair")
+                throw CancellationError()
+            }))
+        defer {
+            model.resetTranslationSessionForTesting()
+            for continuation in pending.values { continuation.resume(throwing: CancellationError()) }
+        }
+        model.loadPresentationForTesting(phase: .recording, evidence: [])
+        let (window, view) = try window(model: model, width: 1260, height: 1000)
+        defer { window.close() }
+        let originals = ["The temperature is rising.", "Pressure stays constant.", "Volume is increasing."]
+        let translations = ["温度正在升高。", "压力保持不变。", "体积正在增大。"]
+        for (index, text) in originals.enumerated() {
+            let start = Double(index * 10)
+            model.receiveCaptionForTesting(text, start: start, end: start + 3)
+        }
+        let ids = model.segments.map(\.id)
+        XCTAssertEqual(ids.count, 3)
+        var previousCallback: CaptionTranslationDependencies.Update?
+        for active in originals.indices {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while pending[active] == nil, ContinuousClock.now < deadline { await Task.yield() }
+            XCTAssertNotNil(pending[active], "The real worker must advance to each queued caption")
+            guard callbacks.indices.contains(active) else { return XCTFail("Missing worker callback") }
+            let callback = try XCTUnwrap(callbacks[active])
+            try await settle(view)
+            XCTAssertEqual(model.translatingSegmentID, ids[active])
+            XCTAssertEqual(model.streamingChinese, "", "Handoff must clear the previous caption's draft")
+            for id in ids {
+                let row = try XCTUnwrap(descendants(view).first {
+                    $0.identifier?.rawValue == "classroom-caption-\(id)"
+                }, "Every measured caption must actually be mounted")
+                XCTAssertGreaterThan(row.bounds.height, 0)
+                XCTAssertTrue(view.bounds.intersects(view.convert(row.bounds, from: row)),
+                              "An offscreen caption is not evidence of avoided rendering")
+            }
+            SummaryRenderingDiagnostics.reset()
+            if let previousCallback {
+                await previousCallback("这条过期回调不应进入下一行。")
+                try await settle(view)
+                XCTAssertTrue(model.streamingChinese.isEmpty)
+                XCTAssertEqual(SummaryRenderingDiagnostics.counts.streamingBodies, 0)
+            }
+            for index in 0..<12 {
+                await callback(translations[active] + String(repeating: "。", count: index))
+                try await Task.sleep(for: .milliseconds(25))
+                view.layoutSubtreeIfNeeded()
+            }
+            try await settle(view)
+            let counts = SummaryRenderingDiagnostics.counts
+            let rows = ids.map { counts.streamingRows[$0.uuidString, default: 0] }
+            print("PENDING_ROW_RENDER_PROBE active=\(active) rows=\(rows) root=\(counts.rootBodies)")
+            XCTAssertGreaterThan(rows[active], 0, "The active row must keep showing new draft text")
+            for index in ids.indices where index != active {
+                XCTAssertEqual(rows[index], 0, "Draft tokens must not rebuild another waiting or finished row")
+            }
+            XCTAssertEqual(counts.rootBodies, 0)
+            XCTAssertEqual(counts.summaryBodies, 0)
+            XCTAssertEqual(counts.previewBodies, 0)
+            XCTAssertEqual(model.streamingChinese, translations[active] + String(repeating: "。", count: 11))
+            if active == 1 { try capture(view, name: "streaming-second-caption-with-waiting-third") }
+            previousCallback = callback
+            let continuation = try XCTUnwrap(pending.removeValue(forKey: active))
+            continuation.resume(returning: translations[active])
+        }
+        await model.translationTaskForTesting?.value
+        try await settle(view)
+        XCTAssertNil(model.translatingSegmentID)
+        XCTAssertTrue(model.streamingChinese.isEmpty)
+        XCTAssertEqual(model.segments.map(\.displayChinese), translations)
+        XCTAssertTrue(model.segments.allSatisfy(\.hasUsableTranslation))
+    }
+
     func testLiveDraftUpdatesStayInTheirReadingViews() async throws {
         var update: CaptionTranslationDependencies.Update?
         var pendingTranslation: CheckedContinuation<String, Error>?

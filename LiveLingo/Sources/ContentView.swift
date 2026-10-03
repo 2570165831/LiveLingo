@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 @preconcurrency import Translation
@@ -35,6 +36,7 @@ enum SummaryRenderingDiagnostics {
         var reviewTokenizations = 0
         var previewBodies = 0
         var streamingBodies = 0
+        var streamingRows: [String: Int] = [:]
         var floatingBodies = 0
     }
     static var counts = Counts()
@@ -43,6 +45,11 @@ enum SummaryRenderingDiagnostics {
         counts[keyPath: key] += 1
     }
     static func reset() { counts = Counts() }
+    static func recordStreaming(segmentID: UUID) {
+        guard AppRuntimeEnvironment.isUnitTesting else { return }
+        counts.streamingBodies += 1
+        counts.streamingRows[segmentID.uuidString, default: 0] += 1
+    }
     static func summaryViewForTesting(text: String) -> some View {
         SummaryMarkdownView(text: text)
     }
@@ -1623,13 +1630,22 @@ private struct ClassroomLivePreview: View {
 }
 
 private struct PendingCaptionTranslation: View {
-    @ObservedObject var stream: FinalCaptionState
+    let stream: FinalCaptionState
     let segmentID: UUID
     let textSize: Double
-    private var isTranslating: Bool { stream.translatingSegmentID == segmentID }
+    @State private var isTranslating: Bool
+
+    @MainActor
+    init(stream: FinalCaptionState, segmentID: UUID, textSize: Double) {
+        self.stream = stream
+        self.segmentID = segmentID
+        self.textSize = textSize
+        _isTranslating = State(initialValue: stream.translatingSegmentID == segmentID)
+    }
+
     var body: some View {
         #if DEBUG
-        let _ = SummaryRenderingDiagnostics.record(\.streamingBodies)
+        let _ = SummaryRenderingDiagnostics.recordStreaming(segmentID: segmentID)
         #endif
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
@@ -1638,14 +1654,38 @@ private struct PendingCaptionTranslation: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
-            if isTranslating, !stream.streamingChinese.isEmpty {
-                Text(stream.streamingChinese)
-                    .font(.system(size: textSize))
-                    .lineSpacing(7)
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            if isTranslating {
+                ActiveCaptionTranslation(stream: stream, segmentID: segmentID, textSize: textSize)
             }
+        }
+        .onReceive(stream.$translatingSegmentID
+            .map { $0 == segmentID }
+            .removeDuplicates()) { active in
+                // Published sends the new ID before the stored property changes.
+                // Use that value directly; repeated membership must not dirty the row.
+                if isTranslating != active { isTranslating = active }
+            }
+    }
+}
+
+/// Only the active caption mounts a reader of the streamed payload.
+private struct ActiveCaptionTranslation: View {
+    @ObservedObject var stream: FinalCaptionState
+    let segmentID: UUID
+    let textSize: Double
+
+    var body: some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.recordStreaming(segmentID: segmentID)
+        #endif
+        // Membership delivery and view removal need not happen in the same pass.
+        if stream.translatingSegmentID == segmentID, !stream.streamingChinese.isEmpty {
+            Text(stream.streamingChinese)
+                .font(.system(size: textSize))
+                .lineSpacing(7)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
