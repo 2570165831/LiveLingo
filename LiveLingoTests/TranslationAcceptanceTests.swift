@@ -3037,3 +3037,54 @@ extension TranslationAcceptanceTests {
         }
     }
 }
+
+// Append to TranslationAcceptanceTests.swift. Numeric veto only, not semantic approval.
+extension TranslationAcceptanceTests {
+    private func numericRepairJSON(target: String, before: String = "", after: String = "") throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "target_translate_only": target,
+            "context_before_do_not_translate": before,
+            "context_after_do_not_translate": after
+        ], options: [.sortedKeys])
+        return try XCTUnwrap(String(data: data, encoding: .utf8))
+    }
+
+    func testNumericRepairRejectsDistinctLargeIntegersAndSameUnitChanges() throws {
+        // Both large integers exceed 2^53 and round to the same binary64 value.
+        // Expected identity comes from the written integers, not floating point.
+        let examples = [
+            ("The count is 9007199254740995.", "数量为9007199254740995。",
+             "数量为9007199254740996。", "9007199254740996"),
+            ("The count is 9007199254740996.", "数量为9007199254740996。",
+             "数量为9007199254740995。", "9007199254740995"),
+            ("The mass is 4kg.", "质量为4kg。", "质量为5kg。", "5")
+        ]
+        for (target, old, candidate, unsupported) in examples {
+            let result = RepairNumericNovelty.assess(candidate: candidate, support: [target, old, "", ""])
+            XCTAssertEqual(result.unsupported, [unsupported], target)
+            XCTAssertFalse(result.undecidable, target)
+            XCTAssertNotNil(RepairNumericNovelty.rejection(candidate: candidate,
+                requestJSON: try numericRepairJSON(target: target), existingChinese: old), target)
+        }
+    }
+
+    func testNumericRepairAbstainsOnUnknownNotationAndUnitConversions() throws {
+        // The veto must not invent an interpretation for unfamiliar notation or
+        // calculate unit conversions. Abstention does not certify any candidate.
+        let examples = [
+            ("The population is 1.234.567.", "人口为1.234.567。", "人口为1234567。"),
+            ("The budget is $2.5M.", "预算为$2.5M。", "预算为$2500000。"),
+            ("The mass is 4kg.", "质量为4kg。", "质量为4000g。"),
+            ("The temperature is 0°C.", "温度为0°C。", "温度为32°F。"),
+            ("The value is 0xff.", "数值为0xff。", "数值为255。"),
+            ("The written amount is 壹佰贰拾.", "金额为壹佰贰拾。", "金额为120。")
+        ]
+        for (target, old, candidate) in examples {
+            let result = RepairNumericNovelty.assess(candidate: candidate, support: [target, old, "", ""])
+            XCTAssertTrue(result.unsupported.isEmpty, target)
+            XCTAssertTrue(result.undecidable, "Do not label an unparsed notation a new value: " + target)
+            XCTAssertNil(RepairNumericNovelty.rejection(candidate: candidate,
+                requestJSON: try numericRepairJSON(target: target), existingChinese: old), target)
+        }
+    }
+}

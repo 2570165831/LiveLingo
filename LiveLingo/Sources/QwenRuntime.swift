@@ -1797,6 +1797,189 @@ struct CaptionFormulaTransport: Sendable {
     }
 }
 
+/// A veto for newly introduced digit-written magnitudes, not a semantic verifier.
+/// Existing translation/context can license a value without proving its role.
+/// Signs, omission, ownership, units and Chinese-only output are separate checks.
+enum RepairNumericNovelty {
+    struct Assessment: Equatable {
+        let unsupported: [String]
+        let undecidable: Bool
+    }
+    private struct Inventory {
+        var values = Set<String>()
+        var raw: [String: String] = [:]
+        var units = Set<String>()
+        var uncertain = false
+    }
+    private static let number = try! NSRegularExpression(pattern:
+        #"[+−-]?(?:[0-9]+(?:,[0-9]{3})+(?![0-9])|[0-9]+)(?:\.[0-9]+)?(?:[eE][+−-]?[0-9]+)?|[+−-]?\.[0-9]+(?:[eE][+−-]?[0-9]+)?"#)
+    private static let words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+        "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "million", "billion", "trillion"]
+    private static let spoken = try! NSRegularExpression(pattern:
+        "(?i)\\b(?:" + words.joined(separator: "|") + ")(?:[ -]+(?:(?:and|point)[ -]+)?(?:" + words.joined(separator: "|") + "))*\\b")
+    private static let chinese = try! NSRegularExpression(pattern: #"[零〇一二两三四五六七八九十百千万亿点]+"#)
+    // These notations require a different parser. Abstain rather than label a
+    // legitimate re-expression as an invented magnitude.
+    private static let unknown = try! NSRegularExpression(pattern:
+        #"(?i)\b(?:half|halves|quarter|quarters|thirds|fourths|fifths|sixths|sevenths|eighths|ninths|tenths|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|dozen|dozens|couple|pair|twice|once|percent|percentage|noon|midnight|o'clock|hundreds|thousands|millions|billions|trillions)\b|[0-9][ \t]*[:/%][ \t]*[0-9]?|[\p{No}\p{Nl}]|(?-i:\b[IVXLCDM]{2,}\b)|(?i:\b(?:chapter|section|part|phase|type|level)\s+[ivxlcdm]+\b)|分之|百分|千分|点半|个半|[0-9]{2,4}-[0-9]{1,2}-[0-9]{1,2}|[0-9](?:十|百|千|万|亿)[零〇一二两三四五六七八九0-9]|[×*][ \t]*10|\^[+−-]?[0-9]|[0-9],[0-9]{1,2}(?![0-9])|[0-9]\.[0-9]+\.[0-9]|[0-9][’'][0-9]|[0-9][ \t]*[kmbt](?![a-z])|\b0[xob][0-9a-f]+\b|[壹贰叁肆伍陆柒捌玖拾佰仟萬億兩參陸]|(?:华氏|華氏|fahrenheit)|[0-9][ \t]*°[CF]"#)
+    private static let scales: [(String, Int)] = [
+        ("trillion", 12), ("billion", 9), ("million", 6), ("thousand", 3), ("hundred", 2),
+        ("千万", 7), ("百万", 6), ("十万", 5), ("万", 4), ("亿", 8), ("千", 3), ("百", 2)]
+    private static let monthNumbers = ["january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12]
+
+    private static func folded(_ text: String) -> String {
+        text.folding(options: [.widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .replacingOccurrences(of: "−", with: "-")
+    }
+
+    /// Exact coefficient/exponent identity, ignoring sign deliberately. No Double
+    /// conversion: adjacent large integers must never compare equal by rounding.
+    private static func identity(_ token: String, scale: Int = 0) -> String? {
+        let clean = token.replacingOccurrences(of: ",", with: "").lowercased()
+        let parts = clean.split(separator: "e", omittingEmptySubsequences: false)
+        guard parts.count <= 2, let exponent = parts.count == 2 ? Int(parts[1]) : 0 else { return nil }
+        let unsigned = parts[0].hasPrefix("-") || parts[0].hasPrefix("+") ? parts[0].dropFirst() : parts[0]
+        let decimals = unsigned.split(separator: ".", omittingEmptySubsequences: false)
+        guard decimals.count <= 2 else { return nil }
+        let digits = String(unsigned.filter { $0 != "." }.drop(while: { $0 == "0" }))
+        guard digits.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        if digits.isEmpty { return "0e0" }
+        let zeros = digits.reversed().prefix(while: { $0 == "0" }).count
+        let (a, x) = exponent.subtractingReportingOverflow(decimals.count == 2 ? decimals[1].count : 0)
+        let (b, y) = a.addingReportingOverflow(zeros)
+        let (c, z) = b.addingReportingOverflow(scale)
+        guard !x && !y && !z else { return nil }
+        return String(digits.dropLast(zeros)) + "e" + String(c)
+    }
+
+    private static func digitInventory(_ text: String) -> Inventory {
+        let text = folded(text), ns = text as NSString
+        var result = Inventory()
+        result.uncertain = unknown.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) != nil
+        for match in number.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let raw = ns.substring(with: match.range)
+            if raw.filter({ $0 == "," }).count == 1 { result.uncertain = true }
+            let suffix = ns.substring(from: NSMaxRange(match.range)).trimmingCharacters(in: .whitespaces)
+            let unit = LearningNumericProvenance.unitToken(after: suffix)
+            if let unit { result.units.insert(unit.family) }
+            let scaleSuffix = suffix.lowercased()
+            let power = unit != nil ? 0 : scales.first { term, _ in
+                guard scaleSuffix.hasPrefix(term) else { return false }
+                let rest = scaleSuffix.dropFirst(term.count)
+                return !term.first!.isASCII || rest.first.map({ !$0.isASCII || !$0.isLetter }) != false
+            }?.1 ?? 0
+            guard let value = identity(raw, scale: power) else { result.uncertain = true; continue }
+            result.values.insert(value); result.raw[value] = raw + (power == 0 ? "" : " ×10^\(power)")
+        }
+        return result
+    }
+
+    private static func wordKey(_ text: String) -> String {
+        text.lowercased().replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace }).filter { $0 != "and" }.joined(separator: " ")
+    }
+
+    private static func writtenValues(_ text: String) -> Inventory {
+        let text = folded(text), ns = text as NSString
+        var result = Inventory()
+        let en = NumberFormatter(); en.locale = Locale(identifier: "en_US")
+        en.numberStyle = .spellOut; en.isLenient = false; en.generatesDecimalNumbers = true
+        en.maximumFractionDigits = 30
+        for match in spoken.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let raw = ns.substring(with: match.range)
+            guard let n = en.number(from: raw), abs(n.doubleValue) < 1e15,
+                  let roundtrip = en.string(from: n), wordKey(raw) == wordKey(roundtrip),
+                  let value = identity(NSDecimalNumber(decimal: n.decimalValue).stringValue) else {
+                result.uncertain = true; continue
+            }
+            result.values.insert(value)
+        }
+        for word in text.lowercased().split(whereSeparator: { !$0.isLetter }) {
+            if let value = monthNumbers[String(word)], let key = identity(String(value)) { result.values.insert(key) }
+        }
+        let digits: [Character: Character] = ["零":"0", "〇":"0", "一":"1", "二":"2", "两":"2", "三":"3", "四":"4", "五":"5", "六":"6", "七":"7", "八":"8", "九":"9"]
+        let zh = NumberFormatter(); zh.locale = Locale(identifier: "zh_Hans_CN")
+        zh.numberStyle = .spellOut; zh.isLenient = false; zh.generatesDecimalNumbers = true
+        zh.maximumFractionDigits = 30
+        for match in chinese.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            var numericRange = match.range
+            // A scale-looking prefix can be part of a unit: 四千克 means 4 kg.
+            for index in match.range.location..<NSMaxRange(match.range) {
+                if LearningNumericProvenance.unitToken(after: ns.substring(from: index)) != nil {
+                    numericRange.length = index - match.range.location; break
+                }
+            }
+            guard numericRange.length > 0 else { continue }
+            let raw = ns.substring(with: numericRange)
+            if raw.allSatisfy({ digits[$0] != nil }), let key = identity(String(raw.compactMap { digits[$0] })) {
+                result.values.insert(key); continue
+            }
+            guard let n = zh.number(from: raw), abs(n.doubleValue) < 1e15,
+                  let rt = zh.string(from: n), raw.replacingOccurrences(of: "两", with: "二") == rt,
+                  let value = identity(NSDecimalNumber(decimal: n.decimalValue).stringValue) else {
+                result.uncertain = true; continue
+            }
+            result.values.insert(value)
+        }
+        return result
+    }
+
+    // A same-field run of separated digits may be a grouped value or a code.
+    // Treat its concatenation as unresolved, not as a certified scalar source.
+    private static let separatedDigits = try! NSRegularExpression(pattern:
+        #"[0-9]+(?:[ \t\u00a0\u202f()-]+[0-9]+){1,5}"#)
+    private static func possibleRegroupings(in texts: [String]) -> Set<String> {
+        var result = Set<String>()
+        for original in texts {
+            let text = folded(original), ns = text as NSString
+            for match in separatedDigits.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                let raw = ns.substring(with: match.range).filter { $0.isASCII && $0.isNumber }
+                if let value = identity(raw) { result.insert(value) }
+            }
+        }
+        return result
+    }
+
+    static func rejection(candidate: String, requestJSON: String, existingChinese: String) -> String? {
+        guard let fields = (try? JSONSerialization.jsonObject(with: Data(requestJSON.utf8))) as? [String: String],
+              let target = fields["target_translate_only"], let before = fields["context_before_do_not_translate"],
+              let after = fields["context_after_do_not_translate"] else { return nil }
+        let result = assess(candidate: candidate, support: [target, existingChinese, before, after])
+        return result.unsupported.isEmpty ? nil : "重译增加了没有依据的新数值，已保留原译文"
+    }
+
+    static func assess(candidate: String, support: [String]) -> Assessment {
+        let proposed = digitInventory(candidate)
+        guard !proposed.values.isEmpty else {
+            let hasChinese = chinese.firstMatch(in: candidate, range: NSRange(candidate.startIndex..., in: candidate)) != nil
+            return Assessment(unsupported: [], undecidable: hasChinese)
+        }
+        var known = Set<String>(), supportUnits = Set<String>(), uncertain = proposed.uncertain
+        for text in support {
+            let inventory = digitInventory(text)
+            known.formUnion(inventory.values); supportUnits.formUnion(inventory.units)
+            uncertain = uncertain || inventory.uncertain
+        }
+        // Different unit spellings may express a legitimate conversion. This
+        // veto does not calculate conversions or infer which object owns a unit.
+        if proposed.units != supportUnits { uncertain = true }
+        var missing = proposed.values.subtracting(known)
+        if missing.isEmpty { return Assessment(unsupported: [], undecidable: false) }
+        for text in support {
+            let inventory = writtenValues(text); known.formUnion(inventory.values); uncertain = uncertain || inventory.uncertain
+        }
+        missing = proposed.values.subtracting(known)
+        if missing.isEmpty { return Assessment(unsupported: [], undecidable: false) }
+        let regrouped = missing.intersection(possibleRegroupings(in: support))
+        missing.subtract(regrouped)
+        return Assessment(unsupported: uncertain ? [] : missing.sorted().map { proposed.raw[$0]! },
+                          undecidable: uncertain || !regrouped.isEmpty)
+    }
+}
+
+
 enum QwenTranslationClient {
 
     static let systemPrompt = """
@@ -2113,7 +2296,9 @@ enum QwenTranslationClient {
                                    maximumOutputTokens: 320, timeout: 30, streaming: true)
                 }
             }
-            return (output, protected.unmaskedFailure(in: output))
+            return (output, protected.unmaskedFailure(in: output)
+                ?? RepairNumericNovelty.rejection(candidate: output, requestJSON: input,
+                                                  existingChinese: previousChinese))
         }
         let prefix = stableTranslationPrefix(previousChinese)
         let source = previous.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -1420,3 +1420,204 @@ final class CaptionIdentityTests: XCTestCase {
                        snapshot.segments[0].chinese + "\n")
     }
 }
+
+// Append to CaptionIdentityTests.swift. No new target registration or production seam.
+// The first three sources are saved ASR text; the fourth is the archived synthetic
+// continuation. Replies below are the exact saved 9B generations, not corrected text.
+private enum NumericRepairAcceptanceFixture {
+    struct RecordedRequest: Sendable {
+        let input: String
+        let raw: String
+        let budget: Int
+    }
+    static let sources: [String] = [
+        "Set that person's name to, for instance, mine, David. Then let's do people bracket one dot number equals quote unquote, same as Kelly, because we're both in the directory. So plus one, six.",
+        "617-495-1000. And then lastly, people bracket2.name equals quote unquote John for John Harvard. People bracket2.",
+        "2.number equals plus 19494682750 in this case.",
+        "Now continue.",
+    ]
+    static let recorded: [RecordedRequest] = [
+        .init(input: "{\"source_text_to_translate\":\"Set that person's name to, for instance, mine, David. Then let's do people bracket one dot number equals quote unquote, same as Kelly, because we're both in the directory. So plus one, six.\"}",
+              raw: "将该人员的姓名设为，例如，我的，David。然后让我们执行 people 括号 1 点 number 等于 quote unquote，与 Kelly 相同，因为我们在同一个目录中。所以加 1，6。", budget: 160),
+        .init(input: "{\"source_text_to_translate\":\"617-495-1000. And then lastly, people bracket2.name equals quote unquote John for John Harvard. People bracket2.\"}",
+              raw: "617-495-1000。然后最后，people 的 bracket2.name 等于\"John\"，用于 John Harvard。People bracket2。", budget: 160),
+        .init(input: "{\"context_after_do_not_translate\":\"617-495-1000. And then lastly, people bracket2.name equals quote unquote John for John Harvard. People bracket2.\",\"context_before_do_not_translate\":\" Set that person's name to, for instance, mine, David. Then let's do people bracket one dot number equals quote unquote, same as Kelly, because we're both in the directory. \",\"target_translate_only\":\"So plus one, six.\"}",
+              raw: "所以加一，六。", budget: 320),
+        .init(input: "{\"source_text_to_translate\":\"2.number equals plus 19494682750 in this case.\"}",
+              raw: "2. 在这种情况下，数字等于加 19494682750。", budget: 160),
+        .init(input: "{\"context_after_do_not_translate\":\"2.number equals plus 19494682750 in this case.\",\"context_before_do_not_translate\":\"Set that person's name to, for instance, mine, David. Then let's do people bracket one dot number equals quote unquote, same as Kelly, because we're both in the directory. So plus one, six. 617-495-1000. And then lastly, people bracket2.name equals quote unquote John for John Harvard. \",\"target_translate_only\":\"People bracket2.\"}",
+              raw: "People[2]", budget: 320),
+        .init(input: "{\"source_text_to_translate\":\"Now continue.\"}",
+              raw: "现在继续。", budget: 160),
+        .init(input: "{\"context_after_do_not_translate\":\"Now continue.\",\"context_before_do_not_translate\":\"Set that person's name to, for instance, mine, David. Then let's do people bracket one dot number equals quote unquote, same as Kelly, because we're both in the directory. So plus one, six. 617-495-1000. And then lastly, people bracket2.name equals quote unquote John for John Harvard. People bracket2.\",\"target_translate_only\":\"2.number equals plus 19494682750 in this case.\"}",
+              raw: "2.number 等于 19494682750 加 1，即 19494682751，在本例中为 19494682750。", budget: 320),
+    ]
+    static let oldChinese = recorded[3].raw
+    static let badRepair = recorded[6].raw
+    static let before = sources[0] + " " + sources[1]
+    // New synthetic scheduling control, not another observed ASR/model sample.
+    static let laterSource = "Keep reading."
+    static let laterChinese = "继续阅读。"
+}
+
+extension CaptionIdentityTests {
+    private func numericRepairFields(_ input: String) throws -> [String: String] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
+    }
+
+    func testNumericRepairRejectsFrozenNovelValueThroughAdjacentRoute() async throws {
+        typealias F = NumericRepairAcceptanceFixture
+        for mode in [ModelMode.energySaver, .highQuality] {
+            // Reusing a saved 9B reply for the 4B route is deterministic injection,
+            // not evidence that 4B generated that reply.
+            let name = mode == .energySaver ? QwenModelProfile.energySaver.translationModel
+                : QwenModelProfile.highQuality.translationModel
+            let probe = AdjacentRequestProbe([.text(F.recorded[5].raw), .text(F.badRepair)])
+            let pair = try await QwenTranslationClient.translateAdjacent(
+                previous: F.sources[2], previousChinese: F.oldChinese,
+                current: F.sources[3], context: F.before, modelName: name,
+                request: { try await probe.request($0, $1, $2) })
+            XCTAssertNil(pair.previous)
+            XCTAssertNotNil(pair.previousRejection)
+            XCTAssertEqual(pair.current, F.recorded[5].raw)
+            XCTAssertNil(pair.currentRejection)
+            XCTAssertFalse(pair.previousRepairDeferred)
+            let calls = await probe.requests
+            XCTAssertEqual(calls.count, 2, "A rejected optional repair must not retry the current or repair")
+            let repair = try XCTUnwrap(calls.last)
+            XCTAssertEqual(try numericRepairFields(repair.input),
+                           try numericRepairFields(F.recorded[6].input))
+            XCTAssertEqual(repair.budget, 320)
+            XCTAssertEqual(try captionSource(in: XCTUnwrap(calls.first).input, mode: mode), F.sources[3])
+            let numericReason = RepairNumericNovelty.rejection(candidate: F.badRepair,
+                requestJSON: repair.input, existingChinese: F.oldChinese)
+            XCTAssertNotNil(numericReason)
+            XCTAssertEqual(pair.previousRejection, numericReason,
+                           "The intended numeric guard, not an unrelated gate, must reject this reply")
+        }
+        let assessment = RepairNumericNovelty.assess(candidate: F.badRepair,
+            support: [F.sources[2], F.oldChinese, F.before, F.sources[3]])
+        XCTAssertEqual(assessment.unsupported, ["19494682751"])
+        XCTAssertFalse(assessment.undecidable)
+        // The added '1' has a source in the provided before context; do not call
+        // it unsupported merely because the repair target itself lacks it.
+    }
+
+    func testNumericRepairQueueKeepsFrozenChineseInlineAndDeferred() async throws {
+        typealias F = NumericRepairAcceptanceFixture
+        for deferred in [false, true] {
+            let scenario = deferred ? "deferred" : "inline"
+            let gate = CaptionIdentityGate<String>()
+            addTeardownBlock { await gate.finish(.failure(CancellationError())) }
+            var replies: [AdjacentRequestProbe.Response] = F.recorded.prefix(5).map { .text($0.raw) }
+            if deferred {
+                replies += [.held(gate), .text(F.laterChinese), .text(F.badRepair)]
+            } else {
+                replies += [.text(F.recorded[5].raw), .text(F.badRepair), .text(F.laterChinese)]
+            }
+            let probe = AdjacentRequestProbe(replies)
+            var deferredRepairCalls = 0
+            let model = try makeModel(.init(
+                translate: { input, name, hints, attempt, update in
+                    try await QwenTranslationClient.translate(input, modelName: name, hints: hints,
+                        attempt: attempt, onUpdate: update,
+                        request: { try await probe.request($0, $1, $2) })
+                }, adjacent: { previous, chinese, current, context, name, repair, hints, update, shouldDefer in
+                    try await QwenTranslationClient.translateAdjacent(previous: previous,
+                        previousChinese: chinese, current: current, context: context, modelName: name,
+                        repairPrevious: repair, currentHints: hints, onCurrent: update, deferRepair: shouldDefer,
+                        request: { try await probe.request($0, $1, $2) })
+                }, repair: { pending in
+                    deferredRepairCalls += 1
+                    return try await QwenTranslationClient.repairPreviousCaption(
+                        previous: pending.previous.english, previousChinese: pending.previous.chinese,
+                        current: pending.normalizedCurrent,
+                        context: pending.context.map(\.english).joined(separator: " "),
+                        modelName: pending.modelName,
+                        request: { try await probe.request($0, $1, $2) })
+                }), notes: .unavailable, scheduledNotes: false)
+            model.selectedMode = .highQuality
+            let times: [(TimeInterval, TimeInterval)] = [(0, 10), (10, 20), (20, 29.9513125)]
+            for index in 0..<3 {
+                model.receiveCaptionForTesting(F.sources[index], start: times[index].0, end: times[index].1)
+                await model.translationTaskForTesting?.value
+            }
+            XCTAssertEqual(model.segments.count, 3, scenario)
+            let previous = try XCTUnwrap(model.segments.last)
+            XCTAssertEqual(previous.english, F.sources[2], scenario)
+            XCTAssertEqual(previous.chinese, F.oldChinese, scenario)
+            XCTAssertTrue(previous.hasUsableTranslation, scenario)
+            let preservedPrefix = model.segments.prefix(2).map(\.chinese)
+            let prepared = await probe.requests
+            XCTAssertEqual(prepared.count, 5, scenario)
+            guard prepared.count == 5 else { continue }
+            for index in 0..<5 {
+                XCTAssertEqual(try numericRepairFields(prepared[index].input),
+                               try numericRepairFields(F.recorded[index].input), scenario)
+                XCTAssertEqual(prepared[index].budget, F.recorded[index].budget, scenario)
+            }
+            model.receiveCaptionForTesting(F.sources[3], start: 29.9513125, end: 36)
+            if deferred {
+                try await eventually { gate.entered }
+                model.receiveCaptionForTesting(F.laterSource, start: 36, end: 42)
+                gate.finish(.success(F.recorded[5].raw))
+            } else {
+                await model.translationTaskForTesting?.value
+                model.receiveCaptionForTesting(F.laterSource, start: 36, end: 42)
+            }
+            await model.translationTaskForTesting?.value
+            XCTAssertEqual(model.segments.count, 5, scenario)
+            XCTAssertTrue(model.segments.allSatisfy(\.hasUsableTranslation), scenario)
+            XCTAssertTrue(model.segments.allSatisfy { $0.translationState == .completed }, scenario)
+            XCTAssertEqual(model.segments.map(\.english), F.sources + [F.laterSource], scenario)
+            let retained = try XCTUnwrap(model.segments.first { $0.id == previous.id })
+            XCTAssertEqual(retained.chinese, F.oldChinese, scenario)
+            XCTAssertEqual(retained.inputRevision, previous.inputRevision, scenario)
+            XCTAssertEqual(retained.sessionID, previous.sessionID, scenario)
+            XCTAssertEqual(model.segments.prefix(2).map(\.chinese), preservedPrefix, scenario)
+            XCTAssertEqual(model.segments.suffix(2).map(\.chinese),
+                           [F.recorded[5].raw, F.laterChinese], scenario)
+            XCTAssertFalse(model.segments.contains { $0.chinese.contains("19494682751") }, scenario)
+            XCTAssertEqual(deferredRepairCalls, deferred ? 1 : 0,
+                           "Use the real queue's scheduling decision, not a forced test repair flag")
+            let calls = await probe.requests
+            XCTAssertEqual(calls.count, 8, "Five setup requests + current + one repair + later; " + scenario)
+            guard calls.count == 8 else { continue }
+            XCTAssertEqual(try captionSource(in: calls[5].input, mode: .highQuality), F.sources[3])
+            let repairIndex = deferred ? 7 : 6
+            let laterIndex = deferred ? 6 : 7
+            XCTAssertEqual(try numericRepairFields(calls[repairIndex].input),
+                           try numericRepairFields(F.recorded[6].input), scenario)
+            XCTAssertEqual(calls[repairIndex].budget, 320, scenario)
+            XCTAssertEqual(try captionSource(in: calls[laterIndex].input, mode: .highQuality), F.laterSource)
+            XCTAssertEqual(calls[5].budget, 160, scenario)
+            XCTAssertEqual(calls[laterIndex].budget, 160, scenario)
+        }
+    }
+
+    func testNumericRepairAllowsEquivalentNumbersThroughRealRepairRoute() async throws {
+        // Human numeric equivalences. These expected values do not call the
+        // implementation's private tokenizer/canonicalizer to construct an oracle.
+        let examples = [
+            ("The count is twenty-one.", "数量为二十一。", "数量为21。"),
+            ("The value is -2.50e-3.", "数值为-2.50e-3。", "数值为-0.0025。"),
+            ("The count is 9.007199254740995e15.", "数量为9.007199254740995e15。", "数量为9007199254740995。")
+        ]
+        for name in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            for (source, old, equivalent) in examples {
+                let probe = AdjacentRequestProbe([.text(equivalent)])
+                let result = try await QwenTranslationClient.repairPreviousCaption(
+                    previous: source, previousChinese: old, current: "Keep reading.",
+                    context: "", modelName: name,
+                    request: { try await probe.request($0, $1, $2) })
+                XCTAssertNil(result.rejection, source)
+                XCTAssertEqual(result.previous, equivalent, source)
+                let calls = await probe.requests
+                XCTAssertEqual(calls.count, 1, source)
+                let call = try XCTUnwrap(calls.first)
+                XCTAssertEqual(call.budget, 320, source)
+                XCTAssertEqual(try numericRepairFields(call.input)["target_translate_only"], source)
+            }
+        }
+    }
+}
