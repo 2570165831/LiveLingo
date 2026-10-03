@@ -433,6 +433,69 @@ final class LearningFollowUpTests: XCTestCase {
         }
     }
 
+    // Parent acceptance: public binding behavior, independent of cache shape.
+    func testNumericEvidenceReuseCannotOutliveARevisedBinding() throws {
+        let identity = UUID()
+        let session = UUID()
+        let note = LearningNote(topic: "数量", points: [
+            LearningPoint(kind: "核心结论", text: "共有6个样品。", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false)
+        for (revision, english, hasGap) in [
+            (0, "There are six samples.", false),
+            (1, "Find the target value 6 among these samples.", true),
+            (2, "There are six samples.", false)
+        ] {
+            let evidence = TranscriptSegment(id: identity, startTime: 0, endTime: 10,
+                                             english: english, sessionID: session, inputRevision: revision)
+            let point = try XCTUnwrap(note.binding(evidence: [evidence]).points.first)
+            XCTAssertEqual(point.numericGap != nil, hasGap, "revision \(revision)")
+            XCTAssertEqual(point.text, note.points[0].text)
+            XCTAssertEqual(point.referenceState, .linked)
+            XCTAssertNil(point.needsContext)
+        }
+        XCTAssertNil(note.points[0].numericGap, "Binding must not annotate the input value in place")
+    }
+
+    func testSharedNumericEvidenceKeepsEachPointsCitationScope() throws {
+        let target = segment("Find the target value 50.")
+        let count = segment("There are fifty lockers.", at: 12)
+        let note = LearningNote(topic: "搜索", points: [
+            LearningPoint(kind: "核心结论", text: "共有50个储物柜。", sourceIDs: ["en0s0"]),
+            LearningPoint(kind: "例子", text: "共有50个储物柜。", sourceIDs: ["en1s0"]),
+            LearningPoint(kind: "易错点", text: "共计50个储物柜。", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false)
+        let bound = note.binding(evidence: [target, count])
+        XCTAssertTrue(try XCTUnwrap(bound.points[0].numericGap).contains("其他句子出现过相同数量"))
+        XCTAssertNil(bound.points[1].numericGap)
+        XCTAssertTrue(try XCTUnwrap(bound.points[2].numericGap).contains("其他句子出现过相同数量"))
+        XCTAssertEqual(bound.points.map(\.text), note.points.map(\.text))
+        XCTAssertEqual(bound.points.map(\.referenceState), [.linked, .linked, .linked])
+
+        var reversed = note
+        reversed.points.reverse()
+        XCTAssertEqual(reversed.binding(evidence: [target, count]).points, Array(bound.points.reversed()),
+                       "A prior point's own evidence must not leak to another point")
+    }
+
+    func testNumericBatchHintTracksUncitedEvidenceChangesAndNewSessions() throws {
+        let target = segment("Find the target value 50.")
+        let laterID = UUID()
+        let note = LearningNote(topic: "搜索", points: [
+            LearningPoint(kind: "核心结论", text: "共有50个储物柜。", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false)
+        for (english, expected) in [
+            ("There are fifty lockers.", "其他句子出现过相同数量"),
+            ("The target is the number 50.", "数量、目标值还是编号"),
+            ("There are fifty lockers.", "其他句子出现过相同数量")
+        ] {
+            let later = TranscriptSegment(id: laterID, startTime: 12, endTime: 22,
+                                          english: english, sessionID: UUID())
+            let point = try XCTUnwrap(note.binding(evidence: [target, later]).points.first)
+            XCTAssertTrue(try XCTUnwrap(point.numericGap).contains(expected), english)
+            XCTAssertEqual(point.referenceState, .linked)
+        }
+    }
+
     // MARK: - ③ 兼容与断点绑定
 
     func testOldCodableDataWithoutFollowUpsStillDecodes() throws {

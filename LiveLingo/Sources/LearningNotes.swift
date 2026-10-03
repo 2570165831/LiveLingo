@@ -232,6 +232,9 @@ struct LearningNote: Codable, Equatable, Sendable {
         var result = self
         guard sourceVersion != nil || points.contains(where: { $0.sources != nil || $0.sourceIDs != nil }) else { return result }
         let units = Dictionary(uniqueKeysWithValues: LearningSourceUnit.make(evidence).map { ($0.id, $0) })
+        // One frozen evidence snapshot, one binding call; never retained by the note/notebook.
+        var numericSources = LearningNumericProvenance.SourceIndex(
+            batchTexts: evidence.flatMap { [$0.english, $0.chinese] })
         for index in result.points.indices {
             var point = result.points[index]
             // Version 2 returns IDs, not copied quotes. Resolve against the frozen input only.
@@ -258,7 +261,7 @@ struct LearningNote: Codable, Equatable, Sendable {
                     guard evidence.indices.contains(sourceIndex) else { return [] }
                     return [evidence[sourceIndex].english, evidence[sourceIndex].chinese]
                 },
-                batchTexts: evidence.flatMap { [$0.english, $0.chinese] })
+                sources: &numericSources)
             point.numericGap = nil
             if supplied.isEmpty && point.kind == "补充理解" && !invalidIDs {
                 point.referenceState = nil
@@ -558,17 +561,51 @@ enum LearningNumericProvenance {
         return other + counts.map(\.1)
     }
 
+    /// Source-mode parses live only for one synchronous binding (or standalone report).
+    /// The batch snapshot cannot be replaced; start a new index for every new binding.
+    fileprivate struct SourceIndex {
+        private let batchTexts: [String]
+        // Byte keys avoid conflating canonically equivalent but differently encoded text.
+        private var parsedTexts: [Data: [Mention]] = [:]
+        private var parsedBatch: [Mention]?
+
+        init(batchTexts: [String]) { self.batchTexts = batchTexts }
+
+        mutating func mentions(in texts: [String]) -> [Mention] {
+            texts.flatMap { text in
+                let key = Data(text.utf8)
+                if let parsed = parsedTexts[key] { return parsed }
+                let parsed = LearningNumericProvenance.mentions(in: text, preservingCountScalars: true)
+                parsedTexts[key] = parsed
+                return parsed
+            }
+        }
+
+        mutating func batchMentions() -> [Mention] {
+            if let parsedBatch { return parsedBatch }
+            let parsed = mentions(in: batchTexts)
+            parsedBatch = parsed
+            return parsed
+        }
+    }
+
     /// 这条要点正文里的数字，相对**它自己引用的原文**（含同一条字幕的多句支持）
     /// 和**本次生成的整批输入**是否站得住 ✓（分级规则见类型文档 ✓）。
     static func report(claim: String, cited: [String], segmentTexts: [String],
                        batchTexts: [String] = []) -> Report {
+        var sources = SourceIndex(batchTexts: batchTexts)
+        return report(claim: claim, cited: cited, segmentTexts: segmentTexts, sources: &sources)
+    }
+
+    fileprivate static func report(claim: String, cited: [String], segmentTexts: [String],
+                                   sources: inout SourceIndex) -> Report {
         var report = Report()
         guard !claim.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return report }
         // A number at one fragment's end must not borrow the next fragment's noun.
         // Keep the old scalar representation for non-count claims. For example,
         // "50 marks" must still support the existing unitless score rule.
-        let own = (cited + segmentTexts).flatMap { mentions(in: $0, preservingCountScalars: true) }
-        let batch = batchTexts.flatMap { mentions(in: $0, preservingCountScalars: true) }
+        let own = sources.mentions(in: cited + segmentTexts)
+        let batch = sources.batchMentions()
         var seen = Set<String>()
         for mention in mentions(in: claim) where mention.role != .designator {
             if mention.role == .count {
