@@ -1003,7 +1003,7 @@ struct ASRRecoveryTests {
         // 契约：会话目录可用性判定（2026-09-18 今天这节的复查正是卡在 `.Trash` 上 ✗）。
         // 这条规则此前只写在批处理内部 ✗、没有测试 ✗；抽成纯函数后逐状态验 ✓。
         let manager = FileManager.default
-        #expect(LearningReviewQueue.directoryIssue(for: URL(fileURLWithPath: "/Users/li/.Trash/x")) == "directory_in_trash")
+        #expect(LearningReviewQueue.directoryIssue(for: URL(fileURLWithPath: "/Users/example/.Trash/x")) == "directory_in_trash")
         #expect(LearningReviewQueue.directoryIssue(for: URL(fileURLWithPath: "/Volumes/Backup/.Trashes/501/x")) == "directory_in_trash")
 
         // 不存在的目录 → 不可写 → directory_unavailable ✓
