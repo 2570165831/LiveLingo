@@ -331,6 +331,76 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(notebook.markdown(covering: [source.id]).contains("计数支持"))
     }
 
+    func testCapturedTraversalNoteKeepsItsTextWithoutAUniversalCountWarning() throws {
+        let evidence = [
+            segment("So for instance, with linear search from left to right, or equivalently right to left, we could document our pseudocode as follows. For each door from left to right,"),
+            segment("If the 50 is behind the door, well then we're done. Just return true. That's the Boolean value, which was the goal of this exercise, to say, yes, here is the 50.", at: 12)
+        ]
+        let text = "线性搜索（从左到右或从右到左）的伪代码逻辑为：遍历每一个元素（如“门”），若当前元素为目标值（如50），则立即返回布尔值 true，表示找到目标。"
+        let note = LearningNote(topic: "线性搜索伪代码逻辑", points: [
+            LearningPoint(kind: "核心结论", text: text, sourceIDs: ["en0s0", "en1s1"])
+        ], sourceVersion: 2, noNewKnowledge: false)
+        var notebook = LearningNotebook()
+        try notebook.append(evidence: evidence, note: note)
+        let point = try XCTUnwrap(notebook.batches.first?.note.points.first)
+        XCTAssertEqual(point.text, text)
+        XCTAssertEqual(point.referenceState, .linked)
+        XCTAssertEqual(point.sourceIDs, ["en0s0", "en1s1"])
+        XCTAssertNil(point.numericGap)
+        XCTAssertNil(point.needsContext)
+        XCTAssertFalse(point.hasOpenQuestion)
+        XCTAssertTrue(notebook.markdown().contains(text))
+        XCTAssertFalse(notebook.markdown().contains("计数支持"))
+    }
+
+    func testArabicUniversalUnitCannotBecomeCountOrMeasurementEvidence() {
+        let source = "遍历每1扇门。"
+        let universal = LearningNumericProvenance.report(claim: source, cited: ["Visit every door."], segmentTexts: [])
+        XCTAssertTrue(universal.gaps.isEmpty)
+        let total = LearningNumericProvenance.report(claim: "共有1扇门。", cited: [source], segmentTexts: [])
+        XCTAssertTrue(total.gaps.joined().contains("计数“1扇”"))
+        let reading = LearningNumericProvenance.report(claim: "测量值1。", cited: [source], segmentTexts: [])
+        XCTAssertTrue(reading.isDecidable, "逐项遍历的语法量词不能证明一个测量值")
+        XCTAssertFalse(reading.gaps.isEmpty)
+        let realReading = LearningNumericProvenance.report(claim: "测量值1。", cited: ["The measured value is 1."], segmentTexts: [])
+        XCTAssertFalse(realReading.isDecidable)
+        XCTAssertTrue(realReading.gaps.isEmpty)
+
+        let mixedClaim = "每1扇门检查1,000个样品，再登记3个对象。"
+        let complete = LearningNumericProvenance.report(
+            claim: mixedClaim, cited: ["For each door, inspect 1,000 samples and record three objects."], segmentTexts: [])
+        XCTAssertTrue(complete.gaps.isEmpty)
+        let incomplete = LearningNumericProvenance.report(
+            claim: mixedClaim, cited: ["For each door, inspect 1,000 samples."], segmentTexts: [])
+        XCTAssertEqual(incomplete.gaps.count, 1)
+        XCTAssertTrue(incomplete.gaps.joined().contains("计数“3个”"))
+    }
+
+    func testSpelledUnitsKeepTheirFullNameAndWordBoundary() {
+        for (claim, source) in [
+            ("体积2毫升。", "The volume is 2 millilitres."),
+            ("体积2毫升。", "The volume is 2    millilitres."),
+            ("密度2千克每立方米。", "The density is 2 kilograms per cubic metre."),
+            ("密度2克每立方厘米。", "The density is 2 grams per cubic centimetre."),
+            ("浓度2摩尔每升。", "The concentration is 2 moles per litre.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [])
+            XCTAssertFalse(report.isDecidable, source)
+            XCTAssertTrue(report.gaps.isEmpty, "\(source): \(report.gaps)")
+        }
+        for (claim, source) in [
+            ("体积2毫升。", "The label says 2 millilitresExtra."),
+            ("时间2毫秒。", "The label says 2 millisecondsExtra."),
+            ("压强2千帕。", "The label says 2 kilopascalsExtra."),
+            ("体积2毫升。", "The length is 2 millimetres."),
+            ("体积2毫升。", "The volume is 5 millilitres.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [])
+            XCTAssertTrue(report.isDecidable, source)
+            XCTAssertFalse(report.gaps.isEmpty, source)
+        }
+    }
+
     func testCountSupportRecognizesWholeNumberWordsWithoutInventingCounts() {
         for (claim, source) in [
             ("共有50个储物柜。", "There are fifty lockers."),

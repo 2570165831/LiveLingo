@@ -277,7 +277,7 @@ struct LearningNote: Codable, Equatable, Sendable {
                 point.referenceState = .linked
             }
             // 数值来源缺口逐条具体说明 ✓：明确可判的差异和无法判定的裸数字都给具体缺口 ✓，
-            // 只有“编号/序号”和“同一次引用已有原文依据”的数字才完全不出声 ✓。
+            // 编号/序号、语法量词和同一次引用已有依据的数字不产生数值缺口。
             // `unlinked`／`awaitingContext` 不叠加数值缺口 ✓（它们自己的提示已经够具体 ✓）。
             if !valid.isEmpty, !numeric.gaps.isEmpty,
                point.referenceState == .linked || point.referenceState == .numericDifference {
@@ -310,6 +310,7 @@ struct LearningNote: Codable, Equatable, Sendable {
 /// 编号（K7、M2、样品 V3）和同一字幕里跨句复述的条件值都会被判成“数值差异” ✗。
 /// 现在的分级（只做**机械**判断，不假装懂语义 ✗）：
 ///   · **编号/序号**（拉丁大写字母前缀、第 N、编号 N…）不参与比对；
+///   · “每一个”等语法量词不表示数量，也不能作为别的数值断言的来源；
 ///   · 计数独立核对数量用途；相同的目标值或物理量不算计数支持。缺口只作提示，
 ///     不证明正文错误，也不证明相同数量属于相同对象。
 ///   · 数字在本条要点**引用的原句 / 引用片段所属同一条字幕**里、单位族一致 → 不出声 ✓
@@ -325,7 +326,7 @@ struct LearningNote: Codable, Equatable, Sendable {
 enum LearningNumericProvenance {
     /// 一个数值提及。`role` 是程序能确定的**最小**判断 ✓，不假装理解语义 ✗。
     struct Mention: Equatable, Sendable {
-        enum Role: String, Sendable { case designator, measurement, count, ambiguous }
+        enum Role: String, Sendable { case designator, measurement, count, distributive, ambiguous }
         let value: String
         /// 归一化后的单位族（`C`、`kPa`、`L`、`min`…）；没有单位时为 nil ✓。
         let unit: String?
@@ -459,7 +460,12 @@ enum LearningNumericProvenance {
                 if first == "个", ["半", "月", "年", "小时", "钟头", "百分点"].contains(where: rest.hasPrefix) { return nil }
                 if first == "次", rest.hasPrefix("方") { return nil }
                 if first == "位", rest.hasPrefix("于") { return nil }
-                return (match.range, Mention(value: value, unit: nil, role: .count, excerpt: raw + String(first)))
+                // 每一个/每1个 means "each", not a total of one. Keep its span
+                // so source-mode scalar parsing cannot later reuse that 1 as
+                // numerical evidence. 每组一个 and 每10个 remain quantities.
+                let role: Mention.Role = before.hasSuffix("每") && (raw == "一" || raw == "1")
+                    ? .distributive : .count
+                return (match.range, Mention(value: value, unit: nil, role: role, excerpt: raw + String(first)))
             }
             // Preserve the existing attribute-based measurement path, even for
             // an unfamiliar unit or a score expressed in marks.
@@ -523,16 +529,19 @@ enum LearningNumericProvenance {
         return false
     }
 
-    /// 数值后紧跟的单位（允许一个空格）✓；没有就返回 nil ✓。
+    private static let unitLookahead = (unitAliases.map { $0.0.utf16.count }.max() ?? 0) + 1
+
+    /// 数值后紧跟的单位（允许空格）；没有就返回 nil。
     static func unitToken(after: String) -> (token: String, family: String)? {
         var text = after
         while text.hasPrefix(" ") { text.removeFirst() }
         guard !text.isEmpty else { return nil }
         for (alias, family) in unitAliases where text.hasPrefix(alias) {
-            // 单字母**拉丁**别名必须是完整词（"3 m"、"3 m/s" 是单位 ✓，"3 marks" 不算 ✗）。
+            // Latin unit names must end at a word boundary: neither "marks"
+            // nor "millilitresExtra" is a spelling of a supported unit.
             let rest = text.dropFirst(alias.count)
-            if alias.count == 1, let first = alias.first, first.isASCII, first.isLetter {
-                if let next = rest.first, next.isASCII, next.isLetter { continue }
+            if let last = alias.last, last.isASCII, last.isLetter {
+                if let next = rest.first, next.isASCII, next.isLetter || next.isNumber { continue }
             }
             return (alias, family)
         }
@@ -541,14 +550,27 @@ enum LearningNumericProvenance {
 
     static func mentions(in text: String, preservingCountScalars: Bool = false) -> [Mention] {
         let counts = counts(in: text)
+        // Both regex result sets are ordered and non-overlapping. Advance once
+        // through exclusions instead of searching every count for every scalar.
+        let scalarExclusions = counts.compactMap { entry -> NSRange? in
+            !preservingCountScalars || entry.1.role == .distributive ? entry.0 : nil
+        }
+        var exclusionIndex = 0
         let ns = text as NSString
         let other: [Mention] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
-            if !preservingCountScalars, counts.contains(where: { NSIntersectionRange($0.0, match.range).length > 0 }) { return nil }
+            while exclusionIndex < scalarExclusions.count,
+                  NSMaxRange(scalarExclusions[exclusionIndex]) <= match.range.location { exclusionIndex += 1 }
+            if exclusionIndex < scalarExclusions.count,
+               NSIntersectionRange(scalarExclusions[exclusionIndex], match.range).length > 0 { return nil }
             let value = ns.substring(with: match.range)
             let start = match.range.location, end = match.range.location + match.range.length
             let beforeStart = max(0, start - 8)
             let before = ns.substring(with: NSRange(location: beforeStart, length: start - beforeStart))
-            let after = ns.substring(with: NSRange(location: end, length: min(10, ns.length - end)))
+            var afterStart = end
+            while afterStart < ns.length, ns.character(at: afterStart) == 0x20 { afterStart += 1 }
+            // Include the longest supported spelling and its following boundary;
+            // ten characters would truncate units such as "millilitres".
+            let after = ns.substring(with: NSRange(location: afterStart, length: min(unitLookahead, ns.length - afterStart)))
             if isDesignator(value: value, before: before, after: after) {
                 return Mention(value: value, unit: nil, role: .designator, excerpt: "编号\(value)")
             }
@@ -558,7 +580,10 @@ enum LearningNumericProvenance {
             let excerpt = unit.map { "\(value)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(value)" : value)
             return Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt)
         }
-        return other + counts.map(\.1)
+        // A grammatical quantifier neither raises a numeric warning nor
+        // supplies a count/scalar for another claim. Other numbers in the
+        // sentence are still checked independently.
+        return other + counts.compactMap { $0.1.role == .distributive ? nil : $0.1 }
     }
 
     /// Source-mode parses live only for one synchronous binding (or standalone report).
