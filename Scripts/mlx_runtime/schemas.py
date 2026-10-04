@@ -13,12 +13,53 @@ once with one of the four states, so a missing or renamed entry cannot retire
 an earlier open question; ``后文补充`` binds its support with the same
 response's ``sourceIDs`` (same-ID enum as the points, never transcript text).
 """
+import json
+
 from review_diagnostics import review_input_problem
 
 KINDS=['核心结论','概念关系','例子','易错点','补充理解','待确认']
 FOLLOWUP_STATES=['缺信息','后文补充','前后冲突','关系不明']
 STRING={'type':'string'}
+# Swift String.contains("\n") rejects a standalone LF, but treats CRLF as
+# one Character. Keep that existing boundary; this is not a length/blank check.
+NOTE_TOPIC={'type':'string','not':{'pattern':'(^|[^\r])\n'}}
 REVIEW_VERSION=2
+
+
+def build_generation_regex(schema):
+ """Compile our decoded-value constraint without confusing JSON escapes.
+
+ Outlines inserts a string pattern directly into the JSON wire regex. Passing
+ the decoded-value pattern through would accept escaped LF (and can admit
+ malformed strings). Lower only the exact supported constraint, retaining the
+ library's ordinary string syntax plus CRLF. Literal backslash+n remains legal.
+ Like the existing generic-string grammar, this does not emit Unicode escapes.
+ """
+ from outlines_core.json_schema import build_regex_from_schema
+
+ def lower(node):
+  if not isinstance(node,dict):return node
+  if node == NOTE_TOPIC:
+   return {'type':'string','pattern':r'(?:[^"\\\x00-\x1F\x7F-\x9F]|\\["\\/bfrt]|\\r\\n)*'}
+  if 'not' in node:
+   raise ValueError('Unsupported negative constraint in generation schema')
+  # These applicators are outside our request schemas. Outlines may ignore
+  # them, so do not let a nested title constraint appear to be enforced.
+  for key in ('dependentSchemas','dependencies','unevaluatedProperties','unevaluatedItems','additionalItems'):
+   if key in node:raise ValueError(f'Unsupported generation schema keyword: {key}')
+  result=dict(node)
+  # Visit schema positions only. Objects inside const/enum are literal data.
+  for key in ('properties','patternProperties','$defs','definitions'):
+   if key in node:result[key]={name:lower(value) for name,value in node[key].items()}
+  for key in ('items','additionalProperties','contains','propertyNames','if','then','else'):
+   if key in node:result[key]=lower(node[key])
+  for key in ('oneOf','anyOf','allOf','prefixItems'):
+   if key in node:result[key]=[lower(value) for value in node[key]]
+  return result
+
+ return build_regex_from_schema(json.dumps(lower(schema),ensure_ascii=False))
+
+
 def obj(properties):return {'type':'object','properties':properties,'required':list(properties),'additionalProperties':False}
 def array(items,minimum=0):return {'type':'array','items':items,'minItems':minimum}
 def note_sources(ids):
@@ -35,7 +76,7 @@ def note_schema(data):
  followups=[p['id'] for p in data.get('pendingPoints',[])]
  sources=note_sources(ids)
  entries=followup_schema(followups,sources)
- normal=obj({'sourceVersion':{'const':2},'topic':STRING,'noNewKnowledge':{'const':False},'points':array(obj({'kind':{'enum':KINDS},'text':STRING,'sourceIDs':sources,'needsContext':{'type':['string','null']}}),1),'followUps':entries})
+ normal=obj({'sourceVersion':{'const':2},'topic':NOTE_TOPIC,'noNewKnowledge':{'const':False},'points':array(obj({'kind':{'enum':KINDS},'text':STRING,'sourceIDs':sources,'needsContext':{'type':['string','null']}}),1),'followUps':entries})
  empty=obj({'sourceVersion':{'const':2},'topic':{'const':'无新增学习知识'},'points':{'const':[]},'noNewKnowledge':{'const':True},'followUps':entries})
  return {'oneOf':[normal,empty]}
 def review_schema(data):

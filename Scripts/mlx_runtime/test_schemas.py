@@ -5,7 +5,7 @@ import unittest
 
 import jsonschema
 
-from schemas import note_schema, review_schema
+from schemas import build_generation_regex, note_schema, review_schema
 
 
 def quote(evidence_index, language='en', fragment=0, text=None):
@@ -77,9 +77,8 @@ class NoteSchemaTests(unittest.TestCase):
         if importlib.util.find_spec('outlines_core') is None:
             self.skipTest('outlines_core is not installed in this interpreter')
         from outlines_core import Index, Vocabulary
-        from outlines_core.json_schema import build_regex_from_schema
         schema = note_schema(note_input(unit_ids=['en0s0', 'zh0s0']))
-        regex = build_regex_from_schema(json.dumps(schema, ensure_ascii=False))
+        regex = build_generation_regex(schema)
         vocabulary = Vocabulary(0, {c: [i + 1] for i, c in enumerate(
             sorted(set(regex + ''.join(chr(i) for i in range(32, 127)))))})
         self.assertIsNotNone(Index(regex, vocabulary))
@@ -243,12 +242,11 @@ class ReviewSchemaTests(unittest.TestCase):
         if importlib.util.find_spec('outlines_core') is None:
             self.skipTest('outlines_core is not installed in this interpreter')
         from outlines_core import Index, Vocabulary
-        from outlines_core.json_schema import build_regex_from_schema
         units = [{'index': i, 'quotes': [quote(i, 'en', text='Source %d.' % i),
                                          quote(i, 'zh', text='原文%d。' % i)]} for i in range(6)]
         points = [{'index': i, 'text': '原笔记%d' % i} for i in range(3)]
         schema = review_schema(review_input(units=units, points=points))
-        regex = build_regex_from_schema(json.dumps(schema, ensure_ascii=False))
+        regex = build_generation_regex(schema)
         vocabulary = Vocabulary(0, {c: [i + 1] for i, c in enumerate(
             sorted(set(regex + ''.join(chr(i) for i in range(32, 127))))) })
         self.assertIsNotNone(Index(regex, vocabulary))

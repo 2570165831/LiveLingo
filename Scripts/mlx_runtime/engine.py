@@ -13,7 +13,7 @@ from mlx_lm.models.cache import make_prompt_cache, save_prompt_cache, load_promp
 from mlx_lm.sample_utils import apply_top_k, apply_top_p
 from outlines_core import Guide, Index
 from safetensors import safe_open
-from outlines_core.json_schema import build_regex_from_schema
+from schemas import build_generation_regex
 from grammar_vocabulary import build_vocabulary
 from review_diagnostics import grammar_error
 from outlines_core.kernels.mlx import allocate_token_bitmask, fill_next_token_bitmask, apply_token_bitmask
@@ -154,7 +154,7 @@ class Engine:
         key = json.dumps(schema, ensure_ascii=False)
         if key not in self.indices:
             try:
-                self.indices[key] = Index(build_regex_from_schema(key), self.vocabulary)
+                self.indices[key] = Index(build_generation_regex(schema), self.vocabulary)
             except Exception as error:
                 raise grammar_error(error) from None
         self.indices.move_to_end(key)
