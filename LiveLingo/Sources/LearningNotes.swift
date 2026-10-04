@@ -353,6 +353,61 @@ enum LearningNumericProvenance {
 
     private static let numberExpression = try! NSRegularExpression(pattern: #"[0-9]+(?:\.[0-9]+)?"#)
 
+    /// A rooted subscript is a reference, not a measurement or a count. Matching
+    /// it only establishes that the reference occurs, not its type or RHS value.
+    fileprivate struct CodeIndex {
+        let key: String
+        let range: NSRange
+    }
+    private static let codeIdentifier = #"[A-Za-z_][A-Za-z0-9_]*"#
+    private static let codeRootBoundary = #"(?<![\p{L}\p{N}_.$\]\[>])(?<!::)"#
+    private static let literalCodeIndex: NSRegularExpression = {
+        // A period followed by prose whitespace is not a member access: joining
+        // it would consume a preceding sentence (including a phone literal).
+        let member = #"\."# + codeIdentifier
+        let subscriptPattern = #"[ \t]*\[[ \t]*[+\-]?[0-9]+[ \t]*\]"#
+        return try! NSRegularExpression(pattern: codeRootBoundary + codeIdentifier
+            + "(?:" + member + "|" + subscriptPattern + ")*" + subscriptPattern
+            + #"(?![ \t]*\[)"#)
+    }()
+    private static let spokenCodeIndex: NSRegularExpression = {
+        let word = "(?:" + (numberWords + ["hundred", "thousand", "million", "billion"]).joined(separator: "|") + ")"
+        let words = #"(?i:(?:(?:plus|minus|positive|negative)[ \t]+)?"# + word
+            + "(?:[ -]+(?:and[ -]+)?" + word + ")*)"
+        return try! NSRegularExpression(pattern: codeRootBoundary + "(" + codeIdentifier
+            + "(?:\\." + codeIdentifier + #")*)[ \t]+(?i:bracket)(?:[ \t]*([+\-]?[0-9]+)|[ \t]+("# + words
+            + #"))(?![A-Za-z0-9_]|\.[0-9])"#)
+    }()
+
+    private static func codeIndexes(in text: String) -> [CodeIndex] {
+        let ns = text as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        let literal = literalCodeIndex.matches(in: text, range: range).map {
+            CodeIndex(key: ns.substring(with: $0.range).filter { !$0.isWhitespace }, range: $0.range)
+        }
+        let spoken = spokenCodeIndex.matches(in: text, range: range).compactMap { match -> CodeIndex? in
+            // Do not accept the prefix of a decimal, expression or another
+            // dimension, or invent a closing bracket across source fragments.
+            let tail = ns.substring(from: NSMaxRange(match.range))
+            guard tail.range(of: #"^(?:[ \t-]+(?i:point|plus|minus|times|divided|bracket)\b|[ \t]*[\[+*/=<>\-])"#,
+                             options: .regularExpression) == nil else { return nil }
+            let value: String
+            if match.range(at: 2).location != NSNotFound {
+                value = ns.substring(with: match.range(at: 2))
+            } else {
+                var raw = ns.substring(with: match.range(at: 3)).lowercased()
+                var sign = ""
+                for (word, symbol) in [("minus ", "-"), ("negative ", "-"), ("plus ", "+"), ("positive ", "+")] {
+                    if raw.hasPrefix(word) { sign = symbol; raw.removeFirst(word.count); break }
+                }
+                guard let parsed = countValue(raw) else { return nil }
+                value = sign + parsed
+            }
+            return CodeIndex(key: ns.substring(with: match.range(at: 1)) + "[" + value + "]", range: match.range)
+        }
+        return literal + spoken
+    }
+
     /// A phone/number-field literal is one value, not a bag of digit runs.
     /// Keep signs and leading zeroes; only display separators may differ.
     private struct NumberLiteral: Equatable {
@@ -371,7 +426,8 @@ enum LearningNumericProvenance {
     private static let literalField = try! NSRegularExpression(pattern:
         #"(?<![A-Za-z0-9_.\]])(?:[A-Za-z_][A-Za-z0-9_]*(?:\s*\[\s*[0-9]+\s*\])?|[0-9]+)(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\s*\[\s*[0-9]+\s*\])?)*\s*$"#)
 
-    private static func numberLiterals(in text: String, source: Bool = false) -> [NumberLiteral] {
+    private static func numberLiterals(in text: String, source: Bool = false,
+                                       excludingIndices: [CodeIndex] = []) -> [NumberLiteral] {
         let ns = text as NSString
         let cues = literalCue.matches(in: text, range: NSRange(location: 0, length: ns.length))
         var candidates: [(NSTextCheckingResult, Bool, String?)] = cues.compactMap { cue in
@@ -403,7 +459,8 @@ enum LearningNumericProvenance {
         }
         var seen = Set<NSRange>()
         return candidates.compactMap { value, isField, field in
-            guard seen.insert(value.range).inserted else { return nil }
+            guard seen.insert(value.range).inserted,
+                  !excludingIndices.contains(where: { NSIntersectionRange($0.range, value.range).length > 0 }) else { return nil }
             let raw = ns.substring(with: value.range)
             let body = ns.substring(with: value.range(at: 2))
             let digits = body.filter { $0.isASCII && $0.isNumber }
@@ -620,12 +677,20 @@ enum LearningNumericProvenance {
     }
 
     static func mentions(in text: String, preservingCountScalars: Bool = false) -> [Mention] {
-        let counts = counts(in: text)
+        numericMentions(in: text, preservingCountScalars: preservingCountScalars, indexes: codeIndexes(in: text))
+    }
+
+    private static func numericMentions(in text: String, preservingCountScalars: Bool,
+                                        indexes: [CodeIndex]) -> [Mention] {
+        let counts = counts(in: text).filter { count in
+            !indexes.contains { NSIntersectionRange($0.range, count.0).length > 0 }
+        }
         // Both regex result sets are ordered and non-overlapping. Advance once
         // through exclusions instead of searching every count for every scalar.
         let scalarExclusions = (counts.compactMap { entry -> NSRange? in
             !preservingCountScalars || entry.1.role == .distributive ? entry.0 : nil
-        } + (preservingCountScalars ? [] : numberLiterals(in: text).map(\.range))).sorted { $0.location < $1.location }
+        } + indexes.map(\.range)
+            + (preservingCountScalars ? [] : numberLiterals(in: text).map(\.range))).sorted { $0.location < $1.location }
         var exclusionIndex = 0
         let ns = text as NSString
         let other: [Mention] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
@@ -666,6 +731,8 @@ enum LearningNumericProvenance {
         private var parsedBatch: [Mention]?
         private var literalTexts: [Data: [NumberLiteral]] = [:]
         private var literalBatch: [NumberLiteral]?
+        private var indexTexts: [Data: [CodeIndex]] = [:]
+        private var indexBatch: Set<String>?
 
         init(batchTexts: [String]) { self.batchTexts = batchTexts }
 
@@ -673,7 +740,8 @@ enum LearningNumericProvenance {
             texts.flatMap { text in
                 let key = Data(text.utf8)
                 if let parsed = parsedTexts[key] { return parsed }
-                let parsed = LearningNumericProvenance.mentions(in: text, preservingCountScalars: true)
+                let parsed = LearningNumericProvenance.numericMentions(in: text, preservingCountScalars: true,
+                                                                      indexes: codeIndexes(in: text))
                 parsedTexts[key] = parsed
                 return parsed
             }
@@ -686,11 +754,39 @@ enum LearningNumericProvenance {
             return parsed
         }
 
+        private mutating func codeIndexes(in text: String) -> [CodeIndex] {
+            let key = Data(text.utf8)
+            if let cached = indexTexts[key] { return cached }
+            let parsed = LearningNumericProvenance.codeIndexes(in: text)
+            indexTexts[key] = parsed
+            return parsed
+        }
+
+        private mutating func indexes(in texts: [String]) -> Set<String> {
+            Set(texts.flatMap { codeIndexes(in: $0).map(\.key) })
+        }
+
+        fileprivate mutating func indexGaps(claims: [CodeIndex], cited: [String], segmentTexts: [String]) -> [String] {
+            guard !claims.isEmpty else { return [] }
+            let own = indexes(in: cited + segmentTexts)
+            var gaps: [String] = [], seen = Set<String>()
+            for claim in claims where !own.contains(claim.key) {
+                if indexBatch == nil { indexBatch = indexes(in: batchTexts) }
+                let detail = indexBatch?.contains(claim.key) == true
+                    ? "本批其他原文出现过相同写法，请核对是否漏引了来源。"
+                    : "请核对对象名、完整下标和来源；原文里单独出现相同数字不能证明这处引用。"
+                LearningNumericProvenance.push("正文里的代码引用“\(claim.key)”未在所引原句及同一字幕中找到；\(detail)",
+                                              into: &gaps, seen: &seen)
+            }
+            return gaps
+        }
+
         private mutating func literals(in texts: [String]) -> [NumberLiteral] {
             texts.flatMap { text in
                 let key = Data(text.utf8)
                 if let parsed = literalTexts[key] { return parsed }
-                let parsed = LearningNumericProvenance.numberLiterals(in: text, source: true)
+                let parsed = LearningNumericProvenance.numberLiterals(in: text, source: true,
+                                                                     excludingIndices: codeIndexes(in: text))
                 literalTexts[key] = parsed
                 return parsed
             }
@@ -737,13 +833,17 @@ enum LearningNumericProvenance {
         // Advisory only: an unmatched complete literal is not proof of a wrong
         // owner, false statement, or invalid calculation. Never rewrite the claim.
         report.gaps = sources.literalGaps(claim: claim, cited: cited, segmentTexts: segmentTexts)
+        var seen = Set(report.gaps)
+        let indexes = codeIndexes(in: claim)
+        for gap in sources.indexGaps(claims: indexes, cited: cited, segmentTexts: segmentTexts) {
+            push(gap, into: &report.gaps, seen: &seen)
+        }
         // A number at one fragment's end must not borrow the next fragment's noun.
         // Keep the old scalar representation for non-count claims. For example,
         // "50 marks" must still support the existing unitless score rule.
         let own = sources.mentions(in: cited + segmentTexts)
         let batch = sources.batchMentions()
-        var seen = Set(report.gaps)
-        for mention in mentions(in: claim) where mention.role != .designator {
+        for mention in numericMentions(in: claim, preservingCountScalars: false, indexes: indexes) where mention.role != .designator {
             if mention.role == .count {
                 if own.contains(where: { $0.value == mention.value && $0.role == .count }) { continue }
                 let location = batch.contains(where: { $0.value == mention.value && $0.role == .count })
