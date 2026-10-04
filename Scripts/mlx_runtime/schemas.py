@@ -45,15 +45,16 @@ def build_generation_regex(schema):
    raise ValueError('Unsupported negative constraint in generation schema')
   # These applicators are outside our request schemas. Outlines may ignore
   # them, so do not let a nested title constraint appear to be enforced.
-  for key in ('dependentSchemas','dependencies','unevaluatedProperties','unevaluatedItems','additionalItems'):
+  for key in ('dependentSchemas','dependencies','unevaluatedProperties','unevaluatedItems','additionalItems',
+              'contains','propertyNames','if','then','else','allOf'):
    if key in node:raise ValueError(f'Unsupported generation schema keyword: {key}')
   result=dict(node)
   # Visit schema positions only. Objects inside const/enum are literal data.
   for key in ('properties','patternProperties','$defs','definitions'):
    if key in node:result[key]={name:lower(value) for name,value in node[key].items()}
-  for key in ('items','additionalProperties','contains','propertyNames','if','then','else'):
+  for key in ('items','additionalProperties'):
    if key in node:result[key]=lower(node[key])
-  for key in ('oneOf','anyOf','allOf','prefixItems'):
+  for key in ('oneOf','anyOf','prefixItems'):
    if key in node:result[key]=[lower(value) for value in node[key]]
   return result
 

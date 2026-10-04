@@ -111,9 +111,12 @@ class NoteTitleGrammarTests(unittest.TestCase):
 
     def test_unsupported_applicators_cannot_hide_title_constraints(self):
         for key in ('dependentSchemas', 'dependencies', 'unevaluatedProperties',
-                    'unevaluatedItems', 'additionalItems'):
+                    'unevaluatedItems', 'additionalItems', 'contains', 'propertyNames',
+                    'if', 'then', 'else', 'allOf'):
             with self.subTest(key=key):
                 value = {'x': NOTE_TOPIC} if key in ('dependentSchemas', 'dependencies') else NOTE_TOPIC
+                if key == 'allOf':
+                    value = [NOTE_TOPIC, {'type': 'string'}]
                 with self.assertRaisesRegex(ValueError, 'Unsupported generation schema keyword'):
                     build_generation_regex({'type': 'object', key: value})
 
