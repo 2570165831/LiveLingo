@@ -352,6 +352,77 @@ enum LearningNumericProvenance {
     static let designatorPrefixes = ["第", "编号", "序号", "图", "表", "式", "步骤", "阶段", "级别", "等级", "题号", "版本"]
 
     private static let numberExpression = try! NSRegularExpression(pattern: #"[0-9]+(?:\.[0-9]+)?"#)
+
+    /// A phone/number-field literal is one value, not a bag of digit runs.
+    /// Keep signs and leading zeroes; only display separators may differ.
+    private struct NumberLiteral: Equatable {
+        let digits: String
+        let sign: String
+        let excerpt: String
+        let range: NSRange
+        let field: String?
+        func matches(_ other: Self) -> Bool { digits == other.digits && sign == other.sign }
+    }
+
+    private static let literalCue = try! NSRegularExpression(pattern:
+        #"(?i)(?:\.number(?![A-Za-z0-9_])|\bdot\s+number\b|(?<![A-Za-z])(?:phone(?:\s+number)?|telephone(?:\s+number)?|tel)(?![A-Za-z0-9_])(?:\s*号)?|电话号码|手机号码|手机号|电话|号码)\s*(?:(?:equals|is|was|设为|设置为|等于|为|是|号)\s*|[:：=]\s*)*[\"'“”‘’`]?\s*"#)
+    private static let literalValue = try! NSRegularExpression(pattern:
+        #"(?i)(?:(plus|positive|minus|negative|正|负|[+＋\-−])\s*)?(\(?[0-9](?:[0-9 \t\u00A0()\-‑–]*[0-9])?\)?)"#)
+    private static let literalField = try! NSRegularExpression(pattern:
+        #"(?<![A-Za-z0-9_.\]])(?:[A-Za-z_][A-Za-z0-9_]*(?:\s*\[\s*[0-9]+\s*\])?|[0-9]+)(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\s*\[\s*[0-9]+\s*\])?)*\s*$"#)
+
+    private static func numberLiterals(in text: String, source: Bool = false) -> [NumberLiteral] {
+        let ns = text as NSString
+        let cues = literalCue.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        var candidates: [(NSTextCheckingResult, Bool, String?)] = cues.compactMap { cue in
+            let start = NSMaxRange(cue.range)
+            guard start < ns.length,
+                  let value = literalValue.firstMatch(in: text, options: .anchored,
+                    range: NSRange(location: start, length: ns.length - start)) else { return nil }
+            let cueText = ns.substring(with: cue.range).lowercased()
+            var field: String?
+            if cueText.hasPrefix(".number") {
+                let prefix = ns.substring(to: cue.range.location)
+                if let owner = literalField.firstMatch(in: prefix, range: NSRange(location: 0, length: (prefix as NSString).length)) {
+                    field = (prefix as NSString).substring(with: owner.range).filter { !$0.isWhitespace }
+                        + String(ns.substring(with: cue.range).prefix(7))
+                }
+            }
+            return (value, cueText.hasPrefix(".number") || cueText.hasPrefix("dot"), field)
+        }
+        if source {
+            // A quoted fragment may contain only the value, without its label.
+            // Match the whole contiguous literal; never join separate fragments.
+            candidates += literalValue.matches(in: text, range: NSRange(location: 0, length: ns.length)).filter { value in
+                if value.range.location > 0,
+                   let scalar = UnicodeScalar(ns.character(at: value.range.location - 1)),
+                   CharacterSet.alphanumerics.contains(scalar) { return false }
+                let prior = value.range.location > 0 ? ns.character(at: value.range.location - 1) : 0
+                return prior != 0x5B && prior != 0x2E && prior != 0x5F
+            }.map { ($0, true, nil) }
+        }
+        var seen = Set<NSRange>()
+        return candidates.compactMap { value, isField, field in
+            guard seen.insert(value.range).inserted else { return nil }
+            let raw = ns.substring(with: value.range)
+            let body = ns.substring(with: value.range(at: 2))
+            let digits = body.filter { $0.isASCII && $0.isNumber }
+            guard !digits.isEmpty, digits.count <= 32 else { return nil }
+            // Short numeric fields remain under the ordinary scalar/quantity rules.
+            // Do not turn decimal, scientific or arithmetic expressions into phones.
+            let tail = ns.substring(from: NSMaxRange(value.range)).trimmingCharacters(in: .whitespaces)
+            if isField {
+                guard digits.count >= 7,
+                      body.range(of: #"\s[-‑–]\s|\s[-‑–]|[-‑–]\s"#, options: .regularExpression) == nil else { return nil }
+            }
+            guard tail.range(of: #"^(?:[+*/=<>]|\.[0-9]|[eE][+\-]?[0-9])"#, options: .regularExpression) == nil,
+                  unitToken(after: tail) == nil, unitToken(after: tail.lowercased()) == nil else { return nil }
+            let signText = value.range(at: 1).location == NSNotFound ? "" : ns.substring(with: value.range(at: 1)).lowercased()
+            let sign = ["minus", "negative", "负", "-", "−"].contains(signText) ? "-"
+                : signText.isEmpty ? "" : "+"
+            return NumberLiteral(digits: digits, sign: sign, excerpt: raw, range: value.range, field: field)
+        }
+    }
     private static let countSuffixes = Set("个份条项组种类名位次扇件张本枚颗台座间只瓶盒行列人")
     private static let numberWords = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
                                       "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
@@ -552,9 +623,9 @@ enum LearningNumericProvenance {
         let counts = counts(in: text)
         // Both regex result sets are ordered and non-overlapping. Advance once
         // through exclusions instead of searching every count for every scalar.
-        let scalarExclusions = counts.compactMap { entry -> NSRange? in
+        let scalarExclusions = (counts.compactMap { entry -> NSRange? in
             !preservingCountScalars || entry.1.role == .distributive ? entry.0 : nil
-        }
+        } + (preservingCountScalars ? [] : numberLiterals(in: text).map(\.range))).sorted { $0.location < $1.location }
         var exclusionIndex = 0
         let ns = text as NSString
         let other: [Mention] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
@@ -593,6 +664,8 @@ enum LearningNumericProvenance {
         // Byte keys avoid conflating canonically equivalent but differently encoded text.
         private var parsedTexts: [Data: [Mention]] = [:]
         private var parsedBatch: [Mention]?
+        private var literalTexts: [Data: [NumberLiteral]] = [:]
+        private var literalBatch: [NumberLiteral]?
 
         init(batchTexts: [String]) { self.batchTexts = batchTexts }
 
@@ -612,6 +685,41 @@ enum LearningNumericProvenance {
             parsedBatch = parsed
             return parsed
         }
+
+        private mutating func literals(in texts: [String]) -> [NumberLiteral] {
+            texts.flatMap { text in
+                let key = Data(text.utf8)
+                if let parsed = literalTexts[key] { return parsed }
+                let parsed = LearningNumericProvenance.numberLiterals(in: text, source: true)
+                literalTexts[key] = parsed
+                return parsed
+            }
+        }
+
+        fileprivate mutating func literalGaps(claim: String, cited: [String], segmentTexts: [String]) -> [String] {
+            let claims = LearningNumericProvenance.numberLiterals(in: claim)
+            guard !claims.isEmpty else { return [] }
+            let own = literals(in: cited + segmentTexts)
+            var gaps: [String] = [], seen = Set<String>()
+            for claim in claims {
+                let sameField = claim.field.map { field in own.filter { $0.field == field } } ?? []
+                if Set(sameField.map { $0.sign + $0.digits }).count > 1 {
+                    LearningNumericProvenance.push("正文里的完整数字片段“\(claim.excerpt)”对应字段 \(claim.field ?? "")；所引原句及同一字幕对该字段有不同写法，请核对时间、条件或中英文差异，不能任选一种当作已确认。",
+                                                  into: &gaps, seen: &seen)
+                    continue
+                }
+                guard !(sameField.isEmpty ? own : sameField).contains(where: claim.matches) else { continue }
+                if literalBatch == nil { literalBatch = literals(in: batchTexts) }
+                let detail = (literalBatch ?? []).contains(where: claim.matches)
+                    ? (sameField.isEmpty ? "本批其他原文出现过相同的完整写法，请核对是否漏引了来源。"
+                       : "本批原文有相同的完整写法，请核对它对应的字段、对象与引用来源。")
+                    : "请核对完整数字、前面的正负号及分隔符，不能用原文里分散出现的数字证明拼接后的号码。"
+                let scope = sameField.isEmpty ? "" : "与字段 \(claim.field ?? "") 对应的写法"
+                LearningNumericProvenance.push("正文里的完整数字片段“\(claim.excerpt)”未在所引原句及同一字幕中找到\(scope)；\(detail)",
+                                              into: &gaps, seen: &seen)
+            }
+            return gaps
+        }
     }
 
     /// 这条要点正文里的数字，相对**它自己引用的原文**（含同一条字幕的多句支持）
@@ -626,12 +734,15 @@ enum LearningNumericProvenance {
                                    sources: inout SourceIndex) -> Report {
         var report = Report()
         guard !claim.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return report }
+        // Advisory only: an unmatched complete literal is not proof of a wrong
+        // owner, false statement, or invalid calculation. Never rewrite the claim.
+        report.gaps = sources.literalGaps(claim: claim, cited: cited, segmentTexts: segmentTexts)
         // A number at one fragment's end must not borrow the next fragment's noun.
         // Keep the old scalar representation for non-count claims. For example,
         // "50 marks" must still support the existing unitless score rule.
         let own = sources.mentions(in: cited + segmentTexts)
         let batch = sources.batchMentions()
-        var seen = Set<String>()
+        var seen = Set(report.gaps)
         for mention in mentions(in: claim) where mention.role != .designator {
             if mention.role == .count {
                 if own.contains(where: { $0.value == mention.value && $0.role == .count }) { continue }
