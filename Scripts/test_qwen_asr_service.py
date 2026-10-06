@@ -255,16 +255,26 @@ class ServiceResponsivenessTests(unittest.TestCase):
             return json.load(response)
 
     def test_default_http_response_has_exactly_legacy_keys(self):
-        handler = self.synthetic_handler('model=1.7b')
-        model = SimpleNamespace(generate=Mock(return_value=SimpleNamespace(text='x')))
-        with patch.object(service, 'model_for', return_value=model):
-            handler.do_POST()
-        status, result = handler.send_json.call_args.args
-        self.assertEqual(status, 200)
-        self.assertEqual(set(result), {'text', 'model', 'request_id', 'audio_enhancement'})
-        self.assertEqual(model.generate.call_count, 1)
-        self.assertEqual(model.generate.call_args.kwargs,
-                         {'language': 'English', 'max_tokens': 256, 'temperature': 0.0, 'verbose': False})
+        # Blank legacy parameters retain parse_qs' original default handling.
+        for index, (query, expected_model) in enumerate((
+            ('model=1.7b', '1.7b'), ('model=&enhance=', '0.6b'),
+            ('model=&model=1.7b&enhance=&enhance=off', '1.7b'),
+            ('model=1.7b&language=English', '1.7b'),
+        )):
+            with self.subTest(query=query):
+                handler = self.synthetic_handler(query)
+                handler.headers['X-LiveLingo-Request-ID'] = f'synthetic-{index}'
+                model = SimpleNamespace(generate=Mock(return_value=SimpleNamespace(text='x')))
+                with patch.object(service, 'model_for', return_value=model) as load:
+                    handler.do_POST()
+                status, result = handler.send_json.call_args.args
+                self.assertEqual(status, 200)
+                self.assertEqual(set(result), {'text', 'model', 'request_id', 'audio_enhancement'})
+                self.assertEqual(result['model'], expected_model)
+                load.assert_called_once_with(expected_model)
+                self.assertEqual(model.generate.call_count, 1)
+                self.assertEqual(model.generate.call_args.kwargs,
+                                 {'language': 'English', 'max_tokens': 256, 'temperature': 0.0, 'verbose': False})
 
     def test_invalid_language_is_rejected_before_admission_or_loading(self):
         slots = Mock()

@@ -465,10 +465,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path != "/transcribe":
             self.send_error(404)
             return
-        query = parse_qs(parsed.query, keep_blank_values=True)
+        query = parse_qs(parsed.query)
         model_key = query.get("model", ["0.6b"])[0]
         should_enhance = query.get("enhance", ["off"])[0] == "speech"
-        languages = query.get("language", ["English"])
+        languages = parse_qs(parsed.query, keep_blank_values=True).get("language", ["English"])
         if len(languages) != 1 or languages[0] not in {"English", "auto"} or (
             languages[0] == "auto" and model_key not in {"0.6b", "1.7b"}
         ):
