@@ -50,11 +50,11 @@ enum ASRRequestContext {
 /// may release the inference lease. Each admitted request owns one delivery.
 private final class ASRCallerDelivery: @unchecked Sendable {
     private let lock = NSLock()
-    private var result: Result<String, Error>?
-    private var continuation: CheckedContinuation<String, Error>?
+    private var result: Result<ASRTranscription, Error>?
+    private var continuation: CheckedContinuation<ASRTranscription, Error>?
 
-    func resolve(_ result: Result<String, Error>) {
-        let waiting = lock.withLock { () -> CheckedContinuation<String, Error>? in
+    func resolve(_ result: Result<ASRTranscription, Error>) {
+        let waiting = lock.withLock { () -> CheckedContinuation<ASRTranscription, Error>? in
             guard self.result == nil else { return nil }
             self.result = result
             let waiting = continuation
@@ -64,9 +64,9 @@ private final class ASRCallerDelivery: @unchecked Sendable {
         waiting?.resume(with: result)
     }
 
-    func wait() async throws -> String {
+    func wait() async throws -> ASRTranscription {
         try await withCheckedThrowingContinuation { continuation in
-            let completed = lock.withLock { () -> Result<String, Error>? in
+            let completed = lock.withLock { () -> Result<ASRTranscription, Error>? in
                 if let result { return result }
                 self.continuation = continuation
                 return nil
@@ -90,6 +90,7 @@ actor ASRRequestCoordinator {
     }
     private struct Lease: Sendable {
         let model: String
+        let language: ASRLanguageMode
         var cancelled = false
         var unknown = false
     }
@@ -129,6 +130,13 @@ actor ASRRequestCoordinator {
 
     func transcribe(endpoint: ASRRuntime.Endpoint, audioURL: URL, modelKey: String,
                     enhanceSpeech: Bool = false, requestID suppliedID: String? = nil) async throws -> String {
+        try await transcribe(endpoint: endpoint, audioURL: audioURL, modelKey: modelKey,
+                             enhanceSpeech: enhanceSpeech, language: .english, requestID: suppliedID).text
+    }
+
+    func transcribe(endpoint: ASRRuntime.Endpoint, audioURL: URL, modelKey: String,
+                    enhanceSpeech: Bool = false, language: ASRLanguageMode,
+                    requestID suppliedID: String? = nil) async throws -> ASRTranscription {
         try Task.checkCancellation()
         let requestID = suppliedID ?? UUID().uuidString
         guard Self.validRequestID(requestID) else { throw QwenRuntimeError.requestFailed("转写请求编号无效") }
@@ -149,6 +157,7 @@ actor ASRRequestCoordinator {
         var components = URLComponents(url: endpoint.baseURL.appending(path: "transcribe"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "model", value: modelKey),
                                  URLQueryItem(name: "enhance", value: enhanceSpeech ? "speech" : "off")]
+        if language == .auto { components?.queryItems?.append(URLQueryItem(name: "language", value: "auto")) }
         guard let url = components?.url else { throw QwenRuntimeError.invalidResponse }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -158,7 +167,7 @@ actor ASRRequestCoordinator {
         Self.authorize(&request, endpoint)
         request.httpBody = try Data(contentsOf: audioURL, options: .mappedIfSafe)
         try Task.checkCancellation()
-        leases[key] = Lease(model: modelKey)
+        leases[key] = Lease(model: modelKey, language: language)
         let transport = self.transport
         let started = ProcessInfo.processInfo.systemUptime
         Self.log.notice("asr event=acquired id=\(requestID, privacy: .public) model=\(modelKey, privacy: .public)")
@@ -180,9 +189,10 @@ actor ASRRequestCoordinator {
     }
 
     private func finish(_ outcome: Result<ASRHTTPResult, Error>, key: Key,
-                        started: TimeInterval) async throws -> String {
+                        started: TimeInterval) async throws -> ASRTranscription {
         let requestID = key.id
-        guard let modelKey = leases[key]?.model else { throw CancellationError() }
+        guard let lease = leases[key] else { throw CancellationError() }
+        let modelKey = lease.model
         switch outcome {
         case .success(let response):
             let payload = (try? JSONSerialization.jsonObject(with: response.data)) as? [String: Any]
@@ -205,7 +215,7 @@ actor ASRRequestCoordinator {
                 throw QwenRuntimeError.requestFailed(payload?["error"] as? String ?? "本机转写请求失败")
             }
             guard matched, let text = payload?["text"] as? String else { throw QwenRuntimeError.invalidResponse }
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return try ASRTranscription.validated(text: text, data: response.data, requestedLanguage: lease.language)
         case .failure(let error):
             leases[key]?.unknown = true
             let confirmation = Task { await self.confirmCompletion(key) }
@@ -245,7 +255,7 @@ actor ASRRequestCoordinator {
             let response = try await transport(request)
             guard response.status == 200 else { throw QwenRuntimeError.serviceUnavailable }
             let health = try JSONDecoder().decode(Health.self, from: response.data)
-            guard health.ok, health.protocol == 1,
+            guard health.ok, health.protocol == 2,
                   endpoint.processIdentifier.map({ $0 == health.pid }) ?? true,
                   health.requests.allSatisfy({ Self.validRequestID($0.key)
                       && ["waiting", "running", "finished"].contains($0.value.state) }),

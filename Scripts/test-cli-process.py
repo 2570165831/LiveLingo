@@ -82,7 +82,7 @@ server = ThreadingHTTPServer((a.host, a.port), Handler)
 port = server.server_address[1]
 (evidence / 'asr-child.json').write_text(json.dumps({'pid': os.getpid(), 'ppid': os.getppid(), 'port': port}))
 threading.Thread(target=server.serve_forever, daemon=True).start()
-print('LIVELINGO_ASR_READY ' + json.dumps({'protocol': 1, 'host': a.host, 'port': port,
+print('LIVELINGO_ASR_READY ' + json.dumps({'protocol': 2, 'host': a.host, 'port': port,
       'pid': os.getpid(), 'auth': bool(token), 'supervised': a.supervised,
       'models_root': str(pathlib.Path(a.models_dir).resolve())}), flush=True)
 sys.stdin.read()

@@ -56,7 +56,7 @@ actor ASRRuntime {
     /// Must match `READY_PREFIX` in qwen_asr_service.py.
     private static let readyPrefix = "LIVELINGO_ASR_READY"
     /// Must match `PROTOCOL_VERSION` in qwen_asr_service.py.
-    private static let protocolVersion = 1
+    private static let protocolVersion = 2
     // A newly signed offline bundle can take longer to load its Python/MLX
     // runtime on first launch. Keep waiting while the supervised child is
     // alive; the failure path below still reports a bounded timeout.

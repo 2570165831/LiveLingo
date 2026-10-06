@@ -10,6 +10,7 @@ private actor ASRTransportFixture {
     var failRequests = false
     var invalidHealth = false
     var reportedPID: Int32 = 1234
+    var protocolVersion = 2
     var posts = 0
     var unloadingModels: [String] = []
     var suspendHealth = false
@@ -22,13 +23,13 @@ private actor ASRTransportFixture {
             struct Health: Encodable {
                 let ok = true
                 let pid: Int32
-                let `protocol` = 1
+                let `protocol`: Int
                 let loaded_models = ["0.6b"]
                 let unloading_models: [String]
                 let requests: [String: ASRRequestState]
                 let completed_requests: [String: ASRRequestState]
             }
-            return .init(data: try JSONEncoder().encode(Health(pid: reportedPID, unloading_models: unloadingModels,
+            return .init(data: try JSONEncoder().encode(Health(pid: reportedPID, protocol: protocolVersion, unloading_models: unloadingModels,
                                                                 requests: requests,
                                                                completed_requests: receipts)), status: 200)
         }
@@ -55,6 +56,7 @@ private actor ASRTransportFixture {
     func setFailRequests(_ value: Bool) { failRequests = value }
     func setInvalidHealth(_ value: Bool) { invalidHealth = value }
     func setPID(_ value: Int32) { reportedPID = value }
+    func setProtocol(_ value: Int) { protocolVersion = value }
     func setUnloading(_ models: [String]) { unloadingModels = models }
     func holdHealth() { suspendHealth = true }
     func releaseHealth() {
@@ -78,6 +80,102 @@ private actor ASRTransportFixture {
 
 @MainActor
 final class ResourceSchedulingTests: XCTestCase {
+    func testEnglishRequestURLIsByteIdenticalAndAutoIsExplicit() async throws {
+        let audio = try file()
+        for mode in [ASRLanguageMode.english, .auto] {
+            let expected = endpoint.baseURL.absoluteString + "/transcribe?model=1.7b&enhance=speech"
+                + (mode == .auto ? "&language=auto" : "")
+            let coordinator = ASRRequestCoordinator(transport: { request in
+                XCTAssertEqual(request.url?.absoluteString, expected)
+                var payload: [String: Any] = ["request_id": "url-check", "model": "1.7b", "text": " x "]
+                if mode == .auto {
+                    payload.merge(["language_mode": "auto", "language": "en", "decode": "forced",
+                                   "detected_label": NSNull(), "language_probability": NSNull(),
+                                   "english_probability": NSNull(), "generated_tokens": 1,
+                                   "truncated": false, "policy": 1]) { _, new in new }
+                }
+                return .init(data: try JSONSerialization.data(withJSONObject: payload), status: 200)
+            }, observeExit: { _ in false })
+            let result = try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+                modelKey: "1.7b", enhanceSpeech: true, language: mode, requestID: "url-check")
+            XCTAssertEqual(result.text, "x")
+            XCTAssertEqual(result.languageMode, mode)
+        }
+    }
+
+    func testAutoResponseValidationTable() throws {
+        let valid: [String: Any] = ["language_mode": "auto", "language": "zh", "decode": "detected",
+            "detected_label": "Chinese", "language_probability": 0.90, "english_probability": 0.05,
+            "generated_tokens": 2, "truncated": false, "policy": 1]
+        let accepted = try ASRTranscription.validated(text: "x", data: JSONSerialization.data(withJSONObject: valid),
+                                                    requestedLanguage: .auto)
+        XCTAssertEqual(accepted.language, "zh")
+        XCTAssertEqual(accepted.decode, .detected)
+        for (key, value) in [("language_mode", "english" as Any), ("language", "en"), ("language", "xx"),
+                             ("decode", "unknown"), ("detected_label", "English"), ("detected_label", "None"),
+                             ("detected_label", NSNull()), ("language_probability", -0.0001),
+                             ("language_probability", 1.0001), ("language_probability", true),
+                             ("english_probability", -0.0001), ("english_probability", 1.0001),
+                             ("english_probability", NSNull()), ("generated_tokens", -1),
+                             ("generated_tokens", 257), ("generated_tokens", true),
+                             ("truncated", "false"), ("policy", 2)] {
+            var invalid = valid
+            invalid[key] = value
+            XCTAssertThrowsError(try ASRTranscription.validated(text: "x",
+                data: JSONSerialization.data(withJSONObject: invalid), requestedLanguage: .auto), key)
+        }
+        for probability in [0.0, 1.0] {
+            var boundary = valid
+            boundary["language_probability"] = probability
+            boundary["english_probability"] = probability
+            XCTAssertNoThrow(try ASRTranscription.validated(text: "x",
+                data: JSONSerialization.data(withJSONObject: boundary), requestedLanguage: .auto))
+        }
+        var forced = valid
+        forced["decode"] = "forced"
+        XCTAssertThrowsError(try ASRTranscription.validated(text: "x",
+            data: JSONSerialization.data(withJSONObject: forced), requestedLanguage: .auto))
+        forced["language"] = "en"
+        XCTAssertNoThrow(try ASRTranscription.validated(text: "x",
+            data: JSONSerialization.data(withJSONObject: forced), requestedLanguage: .auto))
+        forced["detected_label"] = NSNull()
+        forced["language_probability"] = NSNull()
+        forced["english_probability"] = NSNull()
+        XCTAssertNoThrow(try ASRTranscription.validated(text: "x",
+            data: JSONSerialization.data(withJSONObject: forced), requestedLanguage: .auto))
+    }
+
+    func testMalformedAutoResponseReleasesMatchedLeaseAndThrowsInvalidResponse() async throws {
+        let audio = try file()
+        let coordinator = ASRRequestCoordinator(transport: { _ in
+            let payload = ["request_id": "malformed-auto", "model": "1.7b", "text": "x"]
+            return .init(data: try JSONSerialization.data(withJSONObject: payload), status: 200)
+        }, observeExit: { _ in false })
+        do {
+            _ = try await coordinator.transcribe(endpoint: endpoint, audioURL: audio, modelKey: "1.7b",
+                language: .auto, requestID: "malformed-auto")
+            XCTFail("Malformed auto response must be rejected")
+        } catch QwenRuntimeError.invalidResponse {} catch { XCTFail("Unexpected response error") }
+        let snapshot = await coordinator.resourceState(endpoint: endpoint)
+        XCTAssertEqual(snapshot.activeCount, 0)
+        XCTAssertTrue(snapshot.unresolvedRequests.isEmpty)
+    }
+
+    func testOldServiceProtocolIsRejected() async {
+        let fixture = ASRTransportFixture()
+        await fixture.setProtocol(1)
+        let snapshot = await coordinator(fixture).resourceState(endpoint: endpoint)
+        XCTAssertEqual(snapshot.status, .unavailable)
+    }
+
+    func testSpokenLanguageTableContainsThirtyUniqueCodes() {
+        XCTAssertEqual(SpokenLanguage.all.count, 30)
+        XCTAssertEqual(Set(SpokenLanguage.all.map(\.code)).count, 30)
+        XCTAssertEqual(Set(SpokenLanguage.all.map(\.qwenLabel)).count, 30)
+        XCTAssertEqual(SpokenLanguage.all.filter(\.avoidsTranslation).map(\.code), ["zh", "yue"])
+        XCTAssertTrue(SpokenLanguage.all.allSatisfy { !$0.chineseName.isEmpty })
+    }
+
     func testASRModelDirectoryIdentityIgnoresOnlyPathSpelling() throws {
         let manager = FileManager.default
         let root = manager.temporaryDirectory.appendingPathComponent("ASRDirectoryIdentity-\(UUID())", isDirectory: true)

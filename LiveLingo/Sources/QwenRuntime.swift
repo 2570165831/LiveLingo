@@ -1286,14 +1286,15 @@ enum QwenASRClient {
         audioURL: URL,
         modelKey: String,
         enhanceSpeech: Bool = false,
+        language: ASRLanguageMode = .english,
         requestID: String? = nil
-    ) async throws -> String {
+    ) async throws -> ASRTranscription {
         let service = try await resolveService()
         let sourceID = String(audioURL.deletingPathExtension().lastPathComponent.utf8.filter {
             (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
         }.prefix(60).map { Character(UnicodeScalar($0)) })
         return try await ASRRequestCoordinator.shared.transcribe(endpoint: service, audioURL: audioURL,
-            modelKey: modelKey, enhanceSpeech: enhanceSpeech,
+            modelKey: modelKey, enhanceSpeech: enhanceSpeech, language: language,
             requestID: requestID ?? ASRRequestContext.requestID ?? sourceID + "-" + UUID().uuidString)
     }
 

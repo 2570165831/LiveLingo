@@ -35,7 +35,7 @@ MODEL_RELATIVE_PATHS = {
     "0.6b": "mlx-community/Qwen3-ASR-0.6B-4bit",
     "1.7b": "mlx-community/Qwen3-ASR-1.7B-4bit",
 }
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 READY_PREFIX = "LIVELINGO_ASR_READY"
 TOKEN_HEADER = "X-LiveLingo-Token"
 BEARER_PREFIX = "bearer "

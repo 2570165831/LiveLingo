@@ -60,7 +60,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     private var storageFailure: String?
 
     init(transcriber: @escaping Transcriber = { url, model, enhance in
-        try await QwenASRClient.transcribe(audioURL: url, modelKey: model, enhanceSpeech: enhance)
+        try await QwenASRClient.transcribe(audioURL: url, modelKey: model, enhanceSpeech: enhance).text
     }) { self.transcriber = transcriber }
 
     /// Call before opening capture. A previous request is cancelled and joined
