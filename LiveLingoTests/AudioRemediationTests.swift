@@ -1215,6 +1215,701 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
     }
 }
 
+private struct MultilingualASRCall: Sendable {
+    let model: String
+    let enhanced: Bool
+    let mode: ASRLanguageMode
+    let requestID: String
+    var stage: String { requestID.components(separatedBy: "_").dropFirst(4).first ?? "" }
+    var legacySignature: String { "\(model):\(enhanced)" }
+    var legacyRequestSignature: String { "\(legacySignature):\(stage)" }
+}
+
+extension AudioRemediationTests {
+    private func detectedSource(_ text: String = "蓝色小车停在门边。", language: String = "zh") -> ASRTranscription {
+        ASRTranscription(text: text, languageMode: .auto, language: language, decode: .detected,
+            detectedLabel: SpokenLanguage.find(language)?.qwenLabel, languageProbability: 0.99,
+            englishProbability: 0.001, generatedTokens: 12, policy: 1)
+    }
+
+    private func asrCall(_ model: String, _ enhanced: Bool, _ mode: ASRLanguageMode) -> MultilingualASRCall {
+        .init(model: model, enhanced: enhanced, mode: mode, requestID: ASRRequestContext.requestID ?? "")
+    }
+
+    private func sortedBytes<T: Encodable>(_ value: T) throws -> Data {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(value)
+    }
+
+    private func commitEventBytes(_ events: [SpeechPipeline.Event]) throws -> Data {
+        // Processing notifications reflect scheduling, not committed captions.
+        // Keep every caption event and every field, including in-memory language
+        // (the journal encoder deliberately omits an English language code).
+        let commits = events.compactMap { event -> [String: Any]? in
+            switch event {
+            case .identifiedFinal(let commit):
+                return ["kind": "identifiedFinal", "id": commit.id.uuidString,
+                    "sessionID": commit.sessionID.uuidString, "text": commit.text,
+                    "start": commit.start, "end": commit.end, "startFrame": commit.startFrame,
+                    "endFrame": commit.endFrame, "sampleRate": commit.sampleRate, "isRepair": commit.isRepair,
+                    "language": commit.language as Any? ?? NSNull(),
+                    "hints": commit.hints.map { ["kind": $0.kind.rawValue, "value": $0.value] }]
+            case .final(let text, let start, let end, let hints, let language):
+                return ["kind": "final", "text": text, "start": start, "end": end,
+                    "language": language as Any? ?? NSNull(),
+                    "hints": hints.map { ["kind": $0.kind.rawValue, "value": $0.value] }]
+            default: return nil
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: commits, options: [.sortedKeys])
+    }
+
+    private func runSourceFixture(_ queue: DurableTranscriptionQueue, record: TranscriptionWorkRecord,
+                                  identified: Bool = true, evidence: String? = nil) async throws -> (TranscriptionWorkRecord, [SpeechPipeline.Event]) {
+        let root = try directory(), events = AudioTestBox<[SpeechPipeline.Event]>([])
+        let wav = try audio(root, name: record.audioFile, seconds: record.duration)
+        try await queue.configure(directory: root, sessionID: record.sessionID, persistent: true, identified: identified,
+                                  handler: { event in events.update { $0.append(event) } })
+        queue.submit(.init(audioURL: wav, modelKey: record.modelKey, fallbackModelKey: record.fallbackModelKey,
+            start: record.start, end: record.end, appleEvidence: evidence ?? record.appleEvidence, recordingURL: nil,
+            id: record.id, sessionID: record.sessionID), handler: { _ in })
+        await queue.finish()
+        return (try XCTUnwrap(queue.records.first), events.value)
+    }
+
+    private func assertOldBuildReads(_ queue: DurableTranscriptionQueue,
+                                    file: StaticString = #filePath, line: UInt = #line) throws {
+        let root = try XCTUnwrap(queue.journalDirectory, file: file, line: line)
+        let rows = try Data(contentsOf: root.appendingPathComponent("work.jsonl")).split(separator: 0x0a)
+        let oldRows = try rows.map {
+            let envelope = try JSONDecoder().decode(LegacyEnvelope.self, from: Data($0))
+            return try JSONDecoder().decode(LegacyMutation.self, from: envelope.payload)
+        }
+        let snapshot = try JSONDecoder().decode(LegacyEnvelope.self, from: Data(contentsOf: root.appendingPathComponent("snapshot.json")))
+        let oldState = try JSONDecoder().decode(LegacyState.self, from: snapshot.payload)
+        XCTAssertEqual(oldRows.compactMap(\.record).last?.text, queue.records.last?.text, file: file, line: line)
+        XCTAssertEqual(oldState.records.map(\.text), queue.records.map(\.text), file: file, line: line)
+        XCTAssertEqual(oldState.records.map(\.candidateText), queue.records.map(\.candidateText), file: file, line: line)
+    }
+
+    private func assertEnglishBytes(primary: String, autoResult: ASRTranscription? = nil,
+                                    expectedModes: [ASRLanguageMode], expectedStages: [String],
+                                    identified: Bool = true, evidence: String = "",
+                                    file: StaticString = #filePath, line: UInt = #line) async throws {
+        let root = try directory(), session = UUID()
+        let record = work(session, ordinal: 0, fallback: "fallback")
+        let wav = try audio(root, seconds: record.duration)
+        let secondary = "The blue cart stops beside the metal gate."
+        let calls = AudioTestBox<[MultilingualASRCall]>([]), legacyCalls = AudioTestBox<[MultilingualASRCall]>([])
+        let modern: DurableTranscriptionQueue.Transcriber = { _, model, enhanced, mode in
+            calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
+            if model == "primary" { return ASRTranscription(text: primary) }
+            if mode == .auto { return autoResult ?? ASRTranscription(text: secondary, languageMode: .auto) }
+            return ASRTranscription(text: secondary)
+        }
+        let legacy: DurableTranscriptionQueue.LegacyTranscriber = { _, model, enhanced in
+            legacyCalls.update { $0.append(self.asrCall(model, enhanced, .english)) }
+            return model == "primary" ? primary : secondary
+        }
+        // The reference executes the frozen pre-step-5 recognition function,
+        // not the new function with its language information removed.
+        let oldOutcome = try await Step5LegacyRecognition.recognize(record, audioURL: wav, recordingURL: nil,
+            formulaContext: "", attempts: Step5LegacyAttemptCache(), transcriber: legacy)
+        let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
+            formulaContext: "", attempts: TranscriptionAttemptCache(), transcriber: modern)
+        XCTAssertTrue(try sortedBytes(outcome) == sortedBytes(oldOutcome), "Outcome bytes changed", file: file, line: line)
+        XCTAssertNil(outcome.language, file: file, line: line)
+        let frozenCalls = legacyCalls.value.map(\.legacyRequestSignature)
+        XCTAssertEqual(calls.value.filter { $0.stage != "fallbackEn" }.map(\.legacyRequestSignature),
+                       frozenCalls, "Requests differ from frozen recognition", file: file, line: line)
+        calls.update { $0.removeAll() }; legacyCalls.update { $0.removeAll() }
+        let newQueue = DurableTranscriptionQueue(transcriber: modern)
+        let adaptedQueue = DurableTranscriptionQueue(transcriber: legacy)
+        let (newRecord, newEvents) = try await runSourceFixture(newQueue, record: record, identified: identified, evidence: evidence)
+        let (adaptedRecord, adaptedEvents) = try await runSourceFixture(adaptedQueue, record: record, identified: identified, evidence: evidence)
+        // This checks the legacy adapter; frozen recognition above is the
+        // independent reference for outcomes and actual request sequences.
+        XCTAssertTrue(try sortedBytes(newRecord) == sortedBytes(adaptedRecord), "Legacy adapter journal bytes changed", file: file, line: line)
+        XCTAssertTrue(try commitEventBytes(newEvents) == commitEventBytes(adaptedEvents), "Legacy adapter caption events changed", file: file, line: line)
+        XCTAssertEqual(newRecord.text, oldOutcome.text, file: file, line: line)
+        XCTAssertEqual(newRecord.candidateText, oldOutcome.candidate, file: file, line: line)
+        let hints = AuxiliaryTranslationHintExtractor.extract(from: evidence, primary: oldOutcome.text)
+        var commits = 0
+        for event in newEvents {
+            switch event {
+            case .identifiedFinal(let commit):
+                commits += 1; XCTAssertTrue(identified, file: file, line: line)
+                XCTAssertNil(commit.language, file: file, line: line)
+                XCTAssertEqual(commit.hints, hints, file: file, line: line)
+            case .final(_, _, _, let actualHints, let language):
+                commits += 1; XCTAssertFalse(identified, file: file, line: line)
+                XCTAssertNil(language, file: file, line: line)
+                XCTAssertEqual(actualHints, hints, file: file, line: line)
+            default: break
+            }
+        }
+        XCTAssertEqual(commits, 1, file: file, line: line)
+        XCTAssertEqual(calls.value.map(\.mode), expectedModes, file: file, line: line)
+        XCTAssertEqual(calls.value.map(\.stage), expectedStages, file: file, line: line)
+        XCTAssertEqual(calls.value.filter { $0.stage != "fallbackEn" }.map(\.legacyRequestSignature),
+                       frozenCalls, file: file, line: line)
+        XCTAssertEqual(legacyCalls.value.map(\.legacyRequestSignature), frozenCalls, file: file, line: line)
+        XCTAssertEqual(Set(calls.value.map(\.requestID)).count, calls.value.count, file: file, line: line)
+        XCTAssertTrue(calls.value.allSatisfy { !$0.requestID.isEmpty && $0.requestID.count <= 128 && $0.stage.count <= 21 },
+                      file: file, line: line)
+    }
+
+    func testMultilingualAcceptedPrimaryMatchesLegacyEnglishBytes() async throws {
+        try await assertEnglishBytes(primary: "The small cart rolls across the empty lab.",
+                                     expectedModes: [.english], expectedStages: ["primary"])
+    }
+
+    func testMultilingualEnglishCommitsKeepLanguageNilAndNonemptyHints() async throws {
+        let text = "The small cart rolls across the empty lab.", evidence = "NMR 5 mL"
+        XCTAssertFalse(AuxiliaryTranslationHintExtractor.extract(from: evidence, primary: text).isEmpty)
+        for identified in [true, false] {
+            try await assertEnglishBytes(primary: text, expectedModes: [.english], expectedStages: ["primary"],
+                                         identified: identified, evidence: evidence)
+        }
+    }
+
+    func testMultilingualFormulaReviewMatchesLegacyEnglishBytes() async throws {
+        let text = "The partial derivative points along the slope."
+        XCTAssertTrue(FormulaASRReview.needsReview(text))
+        XCTAssertNil(ASRQualityGate.fallbackReason(for: text, audioDuration: 10))
+        try await assertEnglishBytes(primary: text, expectedModes: [.english, .english], expectedStages: ["primary", "fallback"])
+    }
+
+    func testMultilingualShortUsablePrimaryMatchesLegacyEnglishBytes() async throws {
+        XCTAssertEqual(ASRQualityGate.fallbackReason(for: "Okay.", audioDuration: 10), .implausiblyShort)
+        try await assertEnglishBytes(primary: "Okay.", expectedModes: [.english, .english], expectedStages: ["primary", "fallback"])
+    }
+
+    func testMultilingualAcceptedChineseCommitsLanguageWithoutHints() async throws {
+        let source = detectedSource(), evidence = "NMR 5 mL"
+        XCTAssertFalse(AuxiliaryTranslationHintExtractor.extract(from: evidence, primary: source.text).isEmpty)
+        for identified in [true, false] {
+            let calls = AudioTestBox<[MultilingualASRCall]>([])
+            let queue = DurableTranscriptionQueue { _, model, enhanced, mode in
+                calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
+                return model == "primary" ? ASRTranscription(text: "") : source
+            }
+            let input = work(UUID(), ordinal: 0, fallback: "fallback")
+            let (record, events) = try await runSourceFixture(queue, record: input, identified: identified, evidence: evidence)
+            XCTAssertEqual(calls.value.map(\.mode), [.english, .auto])
+            XCTAssertEqual(calls.value.filter { $0.model == "fallback" }.count, 1)
+            XCTAssertEqual(record.status, .completed)
+            XCTAssertEqual(record.text, source.text)
+            XCTAssertEqual(record.textLanguage, "zh")
+            XCTAssertNil(record.failure)
+            XCTAssertNil(record.failureReason)
+            XCTAssertEqual(record.automaticRetryCount, 0)
+            var commits = 0
+            for event in events {
+                switch event {
+                case .identifiedFinal(let commit):
+                    commits += 1; XCTAssertEqual(commit.language, "zh"); XCTAssertEqual(commit.text, source.text)
+                    XCTAssertTrue(commit.hints.isEmpty)
+                case .final(let text, _, _, let hints, let language):
+                    commits += 1; XCTAssertEqual(language, "zh"); XCTAssertEqual(text, source.text); XCTAssertTrue(hints.isEmpty)
+                default: break
+                }
+            }
+            XCTAssertEqual(commits, 1)
+            try assertOldBuildReads(queue)
+        }
+    }
+
+    func testMultilingualAcceptedChineseClearsPrimaryError() async throws {
+        let root = try directory(), record = work(UUID(), ordinal: 0, fallback: "fallback"), source = detectedSource()
+        let transcriber: DurableTranscriptionQueue.Transcriber = { _, model, _, mode in
+            if model == "primary" { throw URLError(.timedOut) }
+            XCTAssertEqual(mode, .auto); return source
+        }
+        let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: audio(root, seconds: 10), recordingURL: nil,
+            formulaContext: "", attempts: TranscriptionAttemptCache(), transcriber: transcriber)
+        XCTAssertNil(outcome.failureReason)
+        XCTAssertEqual(outcome.language, "zh")
+        let (completed, _) = try await runSourceFixture(DurableTranscriptionQueue(transcriber: transcriber), record: record)
+        XCTAssertEqual(completed.status, .completed)
+        XCTAssertEqual(completed.textLanguage, "zh")
+        XCTAssertNil(completed.failure)
+        XCTAssertNil(completed.failureReason)
+    }
+
+    func testMultilingualCantoneseIsAcceptedAsSourceLanguage() async throws {
+        let source = detectedSource("架蓝色车停喺门口。", language: "yue"), calls = AudioTestBox<[ASRLanguageMode]>([])
+        let queue = DurableTranscriptionQueue { _, model, _, mode in
+            calls.update { $0.append(mode) }
+            return model == "primary" ? ASRTranscription(text: "") : source
+        }
+        let (record, events) = try await runSourceFixture(queue, record: work(UUID(), ordinal: 0, fallback: "fallback"))
+        XCTAssertEqual(calls.value, [.english, .auto])
+        XCTAssertEqual(record.status, .completed)
+        XCTAssertEqual(record.textLanguage, "yue")
+        XCTAssertEqual(events.compactMap { if case .identifiedFinal(let c) = $0 { return c.language }; return nil }, ["yue"])
+        XCTAssertFalse(try XCTUnwrap(SpokenLanguage.find("yue")).avoidsTranslation)
+        try assertOldBuildReads(queue)
+    }
+
+    func testMultilingualRejectedChineseMatchesLegacyEnglishBytes() async throws {
+        let rejected = detectedSource("The lab door is open.")
+        XCTAssertFalse(SourceLanguagePolicy.accepts(rejected, audioDuration: 10))
+        try await assertEnglishBytes(primary: "", autoResult: rejected,
+            expectedModes: [.english, .auto, .english], expectedStages: ["primary", "fallback", "fallbackEn"])
+    }
+
+    func testMultilingualForcedResultMatchesLegacyEnglishBytes() async throws {
+        try await assertEnglishBytes(primary: "", expectedModes: [.english, .auto], expectedStages: ["primary", "fallback"])
+    }
+
+    func testMultilingualForcedAutoCacheMatchesLegacyAcrossAutomaticRetry() async throws {
+        let root = try directory(), wav = try audio(root, seconds: 10)
+        var record = work(UUID(), ordinal: 0, fallback: "fallback")
+        let rejected = "这段保留音频。"
+        XCTAssertTrue(SpeechPipeline.preferredTranscript(primary: nil, fallback: rejected, audioDuration: 10).isEmpty)
+        XCTAssertEqual(ASRQualityGate.fallbackReason(for: "Okay.", audioDuration: 10), .implausiblyShort)
+        let forced = ASRTranscription(text: rejected, languageMode: .auto, detectedLabel: "English",
+            languageProbability: 0.95, englishProbability: 0.95, generatedTokens: 48, policy: 1)
+        let calls = AudioTestBox<[MultilingualASRCall]>([]), legacyCalls = AudioTestBox<[MultilingualASRCall]>([])
+        let cache = TranscriptionAttemptCache(), legacyCache = Step5LegacyAttemptCache()
+        let modern: DurableTranscriptionQueue.Transcriber = { _, model, enhanced, mode in
+            calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
+            if model == "primary" { return ASRTranscription(text: enhanced ? "Okay." : "") }
+            guard mode == .auto else {
+                XCTFail("Automatic retry must reuse the equivalent forced English result")
+                throw URLError(.timedOut)
+            }
+            return forced
+        }
+        let legacy: DurableTranscriptionQueue.LegacyTranscriber = { _, model, enhanced in
+            legacyCalls.update { $0.append(self.asrCall(model, enhanced, .english)) }
+            return model == "primary" ? (enhanced ? "Okay." : "") : rejected
+        }
+        for attempt in [TranscriptionWorkRecord.Attempt.initial, .automaticRetry] {
+            record.attempt = attempt; record.automaticRetryCount = attempt == .initial ? 0 : 1
+            let oldOutcome = try await Step5LegacyRecognition.recognize(record, audioURL: wav, recordingURL: nil,
+                formulaContext: "", attempts: legacyCache, transcriber: legacy)
+            let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
+                formulaContext: "", attempts: cache, transcriber: modern)
+            XCTAssertEqual(try sortedBytes(outcome), try sortedBytes(oldOutcome))
+            XCTAssertEqual(calls.value.map(\.legacyRequestSignature), legacyCalls.value.map(\.legacyRequestSignature))
+            let fingerprint = try TranscriptionAttemptCache.fingerprint(wav)
+            let englishKey = TranscriptionAttemptCache.Key(id: record.id, model: "fallback", enhanced: true,
+                                                           mode: .english, audio: fingerprint)
+            let autoKey = TranscriptionAttemptCache.Key(id: record.id, model: "fallback", enhanced: true,
+                                                        mode: .auto, audio: fingerprint)
+            XCTAssertEqual(cache.result(for: englishKey), ASRTranscription(text: rejected),
+                           "The reused reply must match every English reply field")
+            XCTAssertEqual(cache.result(for: autoKey), forced)
+        }
+        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "primary"])
+        XCTAssertEqual(calls.value.map(\.mode), [.english, .auto, .english])
+    }
+
+    func testMultilingualRetryCacheSeparatesModesAndKeepsContextEnglish() async throws {
+        let root = try directory(), session = UUID(), events = AudioTestBox<[SpeechPipeline.Event]>([])
+        let wav = try audio(root, seconds: 10), recording = try audio(root, name: "recording.wav", seconds: 12)
+        let calls = AudioTestBox<[MultilingualASRCall]>([]), rejected = detectedSource("The gate stays closed.")
+        let queue = DurableTranscriptionQueue { url, model, enhanced, mode in
+            calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
+            if mode == .auto { return rejected }
+            if try AVAudioFile(forReading: url).length > 160_000 { return ASRTranscription(text: "A nearby sentence needs confirmation.") }
+            return ASRTranscription(text: "")
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                  handler: { e in events.update { $0.append(e) } })
+        // The same model and enhanced waveform occur in both modes. Omitting
+        // the mode from the cache key would suppress fallbackEn or reuse it as auto.
+        queue.submit(.init(audioURL: wav, modelKey: "1.7b", fallbackModelKey: "1.7b", start: 0, end: 10,
+            appleEvidence: "", recordingURL: recording, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "fallbackEn", "context"])
+        XCTAssertEqual(calls.value.map(\.mode), [.english, .auto, .english, .english])
+        XCTAssertEqual(calls.value.filter { $0.mode == .auto }.count, 1)
+        let record = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(record.automaticRetryCount, 2)
+        XCTAssertEqual(record.status, .failed)
+        XCTAssertEqual(record.candidateOrigin, "context")
+        XCTAssertNil(record.candidateLanguage)
+        let diagnostics = try String(contentsOf: root.appendingPathComponent("transcription-issues.jsonl"), encoding: .utf8)
+        XCTAssertTrue(diagnostics.contains(record.candidateText!))
+        XCTAssertFalse(diagnostics.contains(rejected.text))
+        XCTAssertEqual(Set(calls.value.map(\.requestID)).count, calls.value.count)
+        XCTAssertTrue(calls.value.allSatisfy { $0.requestID.count <= 128 && $0.stage.count <= 21 })
+        try assertOldBuildReads(queue)
+    }
+
+    func testMultilingualRejectedDetectionKeepsUnswitchedOtherLanguage() async throws {
+        let calls = AudioTestBox<[MultilingualASRCall]>([]), rejected = detectedSource("The gate stays closed.")
+        let queue = DurableTranscriptionQueue { _, model, enhanced, mode in
+            calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
+            if model == "primary" { return ASRTranscription(text: "") }
+            return mode == .auto ? rejected : ASRTranscription(text: "这段保留音频。")
+        }
+        let (record, _) = try await runSourceFixture(queue, record: work(UUID(), ordinal: 0, fallback: "fallback"))
+        XCTAssertEqual(record.status, .otherLanguage)
+        XCTAssertEqual(record.failureReason, .englishGateHanDominant)
+        XCTAssertEqual(record.automaticRetryCount, 1)
+        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "fallbackEn", "primary"])
+        XCTAssertEqual(calls.value.filter { $0.mode == .auto }.count, 1)
+        XCTAssertNil(record.textLanguage)
+        try assertOldBuildReads(queue)
+    }
+
+    func testMultilingualManualRetryProducesChineseCandidateKeepsEnglishBody() async throws {
+        let root = try directory(), session = UUID(), chunk = UUID(), manual = AudioTestBox(false)
+        let events = AudioTestBox<[SpeechPipeline.Event]>([]), calls = AudioTestBox<[MultilingualASRCall]>([])
+        let source = detectedSource(), english = "The cart rolls past the quiet bench."
+        let queue = DurableTranscriptionQueue { _, model, enhanced, mode in
+            calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
+            if model == "primary" { return ASRTranscription(text: manual.value ? "" : english) }
+            return source
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                  handler: { e in events.update { $0.append(e) } })
+        queue.submit(.init(audioURL: try audio(root, seconds: 10), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 10, appleEvidence: "", recordingURL: nil, id: chunk, sessionID: session), handler: { _ in })
+        await queue.finish()
+        manual.update { $0 = true }; try queue.retry(id: chunk); await queue.finish()
+        let record = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(calls.value.map(\.mode), [.english, .english, .auto])
+        XCTAssertEqual(record.text, english)
+        XCTAssertNil(record.textLanguage)
+        XCTAssertEqual(record.candidateText, source.text)
+        XCTAssertEqual(record.candidateLanguage, "zh")
+        XCTAssertEqual(record.candidateOrigin, "sameRangeRevision")
+        XCTAssertEqual(record.manualRetryCount, 1)
+        XCTAssertEqual(events.value.filter { if case .identifiedFinal = $0 { return true }; return false }.count, 1)
+        let candidate = try XCTUnwrap(events.value.compactMap { if case .transcriptionCandidate(let c) = $0 { return c }; return nil }.last)
+        XCTAssertEqual(candidate.language, "zh")
+        XCTAssertEqual(candidate.originalText, english)
+        try assertOldBuildReads(queue)
+    }
+
+    func testMultilingualManualRetryWithOnlyLanguageChangeProducesCandidate() async throws {
+        let root = try directory(), session = UUID(), chunk = UUID(), manual = AudioTestBox(false)
+        let events = AudioTestBox<[SpeechPipeline.Event]>([])
+        let queue = DurableTranscriptionQueue { _, model, _, mode in
+            if model == "primary" { return ASRTranscription(text: "") }
+            XCTAssertEqual(mode, .auto)
+            return self.detectedSource(language: manual.value ? "yue" : "zh")
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                  handler: { e in events.update { $0.append(e) } })
+        queue.submit(.init(audioURL: try audio(root, seconds: 10), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 10, appleEvidence: "", recordingURL: nil, id: chunk, sessionID: session), handler: { _ in })
+        await queue.finish()
+        manual.update { $0 = true }; try queue.retry(id: chunk); await queue.finish()
+        let record = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(record.text, record.candidateText)
+        XCTAssertEqual(record.textLanguage, "zh")
+        XCTAssertEqual(record.candidateLanguage, "yue")
+        XCTAssertEqual(record.candidateOrigin, "sameRangeRevision")
+        XCTAssertEqual(events.value.filter { if case .identifiedFinal = $0 { return true }; return false }.count, 1,
+                       "A language-only candidate must not be committed over the existing body")
+        XCTAssertEqual(events.value.compactMap { if case .transcriptionCandidate(let c) = $0 { return c.language }; return nil }, ["yue"])
+        try assertOldBuildReads(queue)
+    }
+
+    func testMultilingualEnglishAlternateCandidateClearsPreviousChineseLanguage() async throws {
+        let root = try directory(), session = UUID(), chunk = UUID(), attempt = AudioTestBox(0)
+        let events = AudioTestBox<[TranscriptionCandidate]>([]), source = detectedSource()
+        let original = "The partial derivative points along the slope."
+        let alternate = "The blue cart stops beside the metal gate."
+        XCTAssertTrue(FormulaASRReview.needsReview(original))
+        let queue = DurableTranscriptionQueue { _, model, _, mode in
+            if model == "primary" { return ASRTranscription(text: attempt.value == 1 ? "" : original) }
+            if attempt.value == 1 { XCTAssertEqual(mode, .auto); return source }
+            XCTAssertEqual(mode, .english)
+            return ASRTranscription(text: attempt.value == 0 ? original : alternate)
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true) {
+            if case .transcriptionCandidate(let candidate) = $0 { events.update { $0.append(candidate) } }
+        }
+        queue.submit(.init(audioURL: try audio(root, seconds: 10), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 10, appleEvidence: "", recordingURL: nil, id: chunk, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertNil(queue.records.first?.candidateText)
+        attempt.update { $0 = 1 }; try queue.retry(id: chunk); await queue.finish()
+        XCTAssertEqual(queue.records.first?.candidateLanguage, "zh")
+        XCTAssertEqual(events.value.last?.language, "zh")
+        attempt.update { $0 = 2 }; try queue.retry(id: chunk); await queue.finish()
+        let record = try XCTUnwrap(queue.records.first), candidate = try XCTUnwrap(events.value.last)
+        XCTAssertEqual(record.text, original)
+        XCTAssertNil(record.textLanguage)
+        XCTAssertEqual(record.candidateText, alternate)
+        XCTAssertEqual(record.candidateOrigin, "alternateModel")
+        XCTAssertNil(record.candidateLanguage)
+        XCTAssertEqual(candidate.text, alternate)
+        XCTAssertEqual(candidate.origin, "alternateModel")
+        XCTAssertNil(candidate.language)
+        try queue.resolveCandidate(id: chunk, acceptedText: alternate)
+        XCTAssertEqual(queue.records.first?.text, alternate)
+        XCTAssertNil(queue.records.first?.textLanguage)
+        await queue.finish(); try assertOldBuildReads(queue)
+    }
+
+    func testMultilingualManualRetryRequestsFreshAutoAfterExhaustion() async throws {
+        let manual = AudioTestBox(false), calls = AudioTestBox<[ASRLanguageMode]>([]), source = detectedSource()
+        let queue = DurableTranscriptionQueue { _, model, _, mode in
+            calls.update { $0.append(mode) }
+            if model == "primary" { return ASRTranscription(text: "") }
+            return manual.value ? source : ASRTranscription(text: "", languageMode: .auto)
+        }
+        let input = work(UUID(), ordinal: 0, fallback: "fallback")
+        _ = try await runSourceFixture(queue, record: input)
+        XCTAssertEqual(queue.records.first?.status, .failed)
+        XCTAssertEqual(calls.value.filter { $0 == .auto }.count, 1)
+        manual.update { $0 = true }; try queue.retry(id: input.id); await queue.finish()
+        XCTAssertEqual(queue.records.first?.status, .completed)
+        XCTAssertEqual(queue.records.first?.textLanguage, "zh")
+        XCTAssertEqual(calls.value.filter { $0 == .auto }.count, 2)
+    }
+
+    func testMultilingualCancellationPropagatesThroughEveryStage() async throws {
+        for stage in ["primary", "fallback", "fallbackEn", "context"] {
+            let root = try directory(), wav = try audio(root, seconds: 10)
+            let recording = try audio(root, name: "recording.wav", seconds: 12)
+            var record = work(UUID(), ordinal: 0, fallback: "fallback")
+            record.attempt = .automaticRetry; record.automaticRetryCount = 2
+            let calls = AudioTestBox<[String]>([])
+            do {
+                _ = try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: recording,
+                    formulaContext: "", attempts: TranscriptionAttemptCache()) { _, model, enhanced, mode in
+                        let call = self.asrCall(model, enhanced, mode); calls.update { $0.append(call.stage) }
+                        if call.stage == stage { throw CancellationError() }
+                        if mode == .auto, stage == "fallbackEn" { return self.detectedSource("The gate stays closed.") }
+                        return ASRTranscription(text: "", languageMode: mode)
+                    }
+                XCTFail("Cancellation must escape the \(stage) stage")
+            } catch is CancellationError {} catch { XCTFail("Unexpected error type in \(stage)") }
+            let expected: [String]
+            switch stage {
+            case "primary": expected = ["primary"]
+            case "fallback": expected = ["primary", "fallback"]
+            case "fallbackEn": expected = ["primary", "fallback", "fallbackEn"]
+            default: expected = ["primary", "fallback", "context"]
+            }
+            XCTAssertEqual(calls.value, expected, "No later stage may run after cancellation")
+        }
+    }
+
+    func testMultilingualCancelledAutoReplyIsNotCached() async throws {
+        let root = try directory(), wav = try audio(root, seconds: 10), record = work(UUID(), ordinal: 0, fallback: "fallback")
+        let cache = TranscriptionAttemptCache(), gate = AudioTestGate(), entered = AudioTestBox(false), autoCalls = AudioTestBox(0)
+        let source = detectedSource()
+        let transcriber: DurableTranscriptionQueue.Transcriber = { _, model, _, _ in
+            if model == "primary" { return ASRTranscription(text: "") }
+            autoCalls.update { $0 += 1 }
+            if autoCalls.value == 1 { entered.update { $0 = true }; await gate.wait() }
+            return source
+        }
+        let task = Task {
+            try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
+                formulaContext: "", attempts: cache, transcriber: transcriber)
+        }
+        try await waitUntil { entered.value }
+        task.cancel(); await gate.release()
+        do { _ = try await task.value; XCTFail("A cancelled caller cannot accept the response") }
+        catch is CancellationError {} catch { XCTFail("Unexpected cancellation error") }
+        let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
+            formulaContext: "", attempts: cache, transcriber: transcriber)
+        XCTAssertEqual(autoCalls.value, 2)
+        XCTAssertEqual(outcome.language, "zh")
+    }
+
+    func testMultilingualCancelledEnglishFallbackReplyIsNotCached() async throws {
+        let root = try directory(), wav = try audio(root, seconds: 10), record = work(UUID(), ordinal: 0, fallback: "fallback")
+        let cache = TranscriptionAttemptCache(), gate = AudioTestGate(), entered = AudioTestBox(false)
+        let englishCalls = AudioTestBox(0), calls = AudioTestBox<[MultilingualASRCall]>([])
+        let rejected = detectedSource("The gate stays closed."), english = "The blue cart stops beside the metal gate."
+        let transcriber: DurableTranscriptionQueue.Transcriber = { _, model, enhanced, mode in
+            calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
+            if model == "primary" { return ASRTranscription(text: "") }
+            if mode == .auto { return rejected }
+            englishCalls.update { $0 += 1 }
+            if englishCalls.value == 1 { entered.update { $0 = true }; await gate.wait() }
+            return ASRTranscription(text: english)
+        }
+        let task = Task {
+            try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
+                formulaContext: "", attempts: cache, transcriber: transcriber)
+        }
+        try await waitUntil { entered.value }
+        task.cancel(); await gate.release()
+        do { _ = try await task.value; XCTFail("A cancelled fallbackEn reply must be discarded") }
+        catch is CancellationError {} catch { XCTFail("Unexpected cancellation error") }
+        let fingerprint = try TranscriptionAttemptCache.fingerprint(wav)
+        XCTAssertNil(cache.result(for: .init(id: record.id, model: "fallback", enhanced: true, mode: .english, audio: fingerprint)))
+        let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
+            formulaContext: "", attempts: cache, transcriber: transcriber)
+        XCTAssertEqual(englishCalls.value, 2)
+        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "fallbackEn", "primary", "fallbackEn"])
+        XCTAssertEqual(outcome.text, english)
+        XCTAssertNil(outcome.language)
+    }
+
+    private func assertChineseFormulaContext(priorEnglish: Bool) async throws {
+        let root = try directory(), session = UUID(), calls = AudioTestBox<[String]>([])
+        let source = detectedSource("这段中文说明 partial 的计算方法。")
+        XCTAssertTrue(SourceLanguagePolicy.accepts(source, audioDuration: 10))
+        let queue = DurableTranscriptionQueue { url, model, _, mode in
+            calls.update { $0.append("\(url.lastPathComponent):\(model):\(mode.rawValue)") }
+            if url.lastPathComponent == "han.wav" { return model == "primary" ? ASRTranscription(text: "") : source }
+            if url.lastPathComponent == "seed.wav" { return ASRTranscription(text: "The derivative points along the slope in this example.") }
+            return ASRTranscription(text: "The factorial notation fits this small example.")
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                  startPaused: true, handler: { _ in })
+        let names = (priorEnglish ? ["seed.wav"] : []) + ["han.wav", "tail.wav"]
+        for (ordinal, name) in names.enumerated() {
+            queue.submit(.init(audioURL: try audio(root, name: name, seconds: 10), modelKey: "primary", fallbackModelKey: "fallback",
+                start: Double(ordinal * 10), end: Double((ordinal + 1) * 10), appleEvidence: "", recordingURL: nil,
+                sessionID: session), handler: { _ in })
+        }
+        try queue.resume(); await queue.finish()
+        XCTAssertEqual(queue.records.map(\.status), Array(repeating: .completed, count: names.count))
+        XCTAssertEqual(calls.value.filter { $0 == "tail.wav:fallback:english" }.count, priorEnglish ? 1 : 0)
+        XCTAssertEqual(calls.value.filter { $0.hasSuffix(":auto") }, ["han.wav:fallback:auto"])
+    }
+
+    func testMultilingualChineseCannotEstablishFormulaContext() async throws {
+        try await assertChineseFormulaContext(priorEnglish: false)
+    }
+
+    func testMultilingualChineseKeepsPreviousEnglishFormulaContext() async throws {
+        try await assertChineseFormulaContext(priorEnglish: true)
+    }
+
+    func testMultilingualCandidateResolutionCarriesAndClearsLanguages() async throws {
+        for accept in [true, false] {
+            let root = try directory(), session = UUID()
+            let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+            var record = work(session, ordinal: 0, status: .completed, fallback: "fallback")
+            record.text = "The gate stays closed."; record.candidateText = detectedSource().text
+            record.candidateLanguage = "zh"; record.candidateOrigin = "sameRangeRevision"
+            try journal.put(record)
+            let queue = DurableTranscriptionQueue { _, _, _, _ in XCTFail("No recognition during resolution"); return ASRTranscription(text: "") }
+            try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                      restoring: true, startPaused: true, handler: { _ in })
+            try queue.resolveCandidate(id: record.id, acceptedText: accept ? record.candidateText : nil)
+            let resolved = try XCTUnwrap(queue.records.first)
+            XCTAssertEqual(resolved.textLanguage, accept ? "zh" : nil)
+            XCTAssertEqual(resolved.text, accept ? record.candidateText : record.text)
+            XCTAssertNil(resolved.candidateText)
+            XCTAssertNil(resolved.candidateLanguage)
+            await queue.finish(); try assertOldBuildReads(queue)
+        }
+    }
+
+    func testMultilingualRestoredConflictsPreserveBodyAndCandidateLanguages() async throws {
+        let source = detectedSource()
+        for languageOnly in [false, true] {
+            for accept in [false, true] {
+                let root = try directory(), session = UUID()
+                let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+                var record = work(session, ordinal: 0, status: .completed, fallback: "fallback")
+                record.text = source.text; record.textLanguage = source.language
+                _ = try audio(journal.directory, name: record.audioFile, seconds: 10)
+                try journal.put(record)
+                let original = TranscriptSegment(id: record.id, startTime: 0, endTime: 10,
+                    english: languageOnly ? source.text : "The archive keeps the confirmed sentence.",
+                    sessionID: session, sourceLanguage: languageOnly ? "yue" : nil)
+                let store = SessionStore(directory: root)
+                _ = try store.save(.init(sessionID: session, segments: [original]))
+                let replayed = AudioTestBox<[TranscriptionCommit]>([]), candidates = AudioTestBox<[TranscriptionCandidate]>([])
+                let queue = DurableTranscriptionQueue { _, _, _, _ in
+                    XCTFail("Restoring conflicts cannot invoke ASR"); return ASRTranscription(text: "")
+                }
+                try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                    restoring: true, startPaused: true) {
+                        if case .identifiedFinal(let commit) = $0 { replayed.update { $0.append(commit) } }
+                        if case .transcriptionCandidate(let candidate) = $0 { candidates.update { $0.append(candidate) } }
+                    }
+                let replay = try XCTUnwrap(replayed.value.last)
+                let archived = try XCTUnwrap(store.load()?.segments.first)
+                try queue.preserveConflictingTranscript(id: replay.id, sessionID: session,
+                    originalText: archived.english, originalLanguage: archived.sourceLanguage,
+                    candidateText: replay.text, candidateLanguage: replay.language)
+                XCTAssertEqual(queue.records.first?.text, archived.english)
+                XCTAssertEqual(queue.records.first?.textLanguage, archived.sourceLanguage)
+                XCTAssertEqual(queue.records.first?.candidateText, source.text)
+                XCTAssertEqual(queue.records.first?.candidateLanguage, "zh")
+                XCTAssertEqual(candidates.value.last?.language, "zh")
+                XCTAssertThrowsError(try queue.preserveConflictingTranscript(id: replay.id, sessionID: session,
+                    originalText: archived.english, originalLanguage: archived.sourceLanguage,
+                    candidateText: replay.text, candidateLanguage: "ja"), "A differently labelled pending candidate stays intact")
+                await queue.finish()
+
+                let restored = DurableTranscriptionQueue { _, _, _, _ in
+                    XCTFail("A second restore cannot invoke ASR"); return ASRTranscription(text: "")
+                }
+                replayed.update { $0.removeAll() }; candidates.update { $0.removeAll() }
+                try await restored.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                    restoring: true, startPaused: true) {
+                        if case .identifiedFinal(let commit) = $0 { replayed.update { $0.append(commit) } }
+                        if case .transcriptionCandidate(let candidate) = $0 { candidates.update { $0.append(candidate) } }
+                    }
+                XCTAssertEqual(replayed.value.last?.text, archived.english)
+                XCTAssertEqual(replayed.value.last?.language, archived.sourceLanguage)
+                XCTAssertEqual(candidates.value.last?.text, source.text)
+                XCTAssertEqual(candidates.value.last?.language, "zh")
+                try restored.resolveCandidate(id: record.id, acceptedText: accept ? source.text : nil)
+                XCTAssertEqual(restored.records.first?.text, accept ? source.text : archived.english)
+                XCTAssertEqual(restored.records.first?.textLanguage, accept ? "zh" : archived.sourceLanguage)
+                XCTAssertNil(restored.records.first?.candidateLanguage)
+                await restored.finish(); try assertOldBuildReads(restored)
+            }
+        }
+    }
+
+    func testMultilingualRestoredCandidateConsentKeepsCaptionLanguage() async throws {
+        let root = try directory(), session = UUID(), events = AudioTestBox<[TranscriptionCommit]>([])
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        let evidence = "NMR 5 mL"
+        var record = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 0, audioFile: "chunk-0.wav",
+            startFrame: 0, endFrame: 160_000, sampleRate: 16_000, start: 0, end: 10, captureStart: nil, captureEnd: nil,
+            modelKey: "primary", fallbackModelKey: "fallback", appleEvidence: evidence)
+        record.status = .completed
+        record.text = "The cart stops by the gate."; record.candidateText = detectedSource().text
+        record.candidateLanguage = "zh"; record.candidateOrigin = "sameRangeRevision"
+        XCTAssertFalse(AuxiliaryTranslationHintExtractor.extract(from: evidence, primary: record.candidateText!).isEmpty)
+        try journal.put(record)
+        let original = TranscriptSegment(id: record.id, startTime: 0, endTime: 10, english: record.text!, sessionID: session)
+        let replacement = TranscriptSegment(id: record.id, startTime: 0, endTime: 10, english: record.candidateText!,
+            sessionID: session, inputRevision: 1, sourceLanguage: "zh")
+        let store = SessionStore(directory: root)
+        _ = try store.save(.init(sessionID: session, segments: [original]))
+        _ = try store.append(.inputRevision(.init(fromRevision: 0, toRevision: 1, previousSegment: original,
+            replacementSegment: replacement, reason: "Synthetic confirmation", transcriptionCandidateText: record.candidateText)))
+        let queue = DurableTranscriptionQueue { _, _, _, _ in XCTFail("Restoration cannot run ASR"); return ASRTranscription(text: "") }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+            restoring: true, startPaused: true) { if case .identifiedFinal(let c) = $0 { events.update { $0.append(c) } } }
+        XCTAssertEqual(queue.records.first?.textLanguage, "zh")
+        XCTAssertNil(queue.records.first?.candidateLanguage)
+        XCTAssertEqual(events.value.map(\.language), ["zh"])
+        XCTAssertTrue(events.value.allSatisfy { $0.hints.isEmpty })
+        await queue.finish(); try assertOldBuildReads(queue)
+    }
+
+    func testMultilingualSpeechPipelinePassesAutoModeAndLanguage() async throws {
+        let root = try directory(), session = UUID(), calls = AudioTestBox<[ASRLanguageMode]>([])
+        let events = AudioTestBox<[SpeechPipeline.Event]>([]), source = detectedSource()
+        let pipeline = SpeechPipeline(transcriber: { _, _, _, mode in
+            calls.update { $0.append(mode) }
+            return mode == .auto ? source : ASRTranscription(text: "")
+        }, enableAudioAnalysis: false)
+        let input = try await pipeline.startSyntheticCapture(format: format(), recordingURL: root.appendingPathComponent("recording.wav"),
+            sessionID: session, eventHandler: { e in events.update { $0.append(e) } })
+        input.submit(buffer(16_000)); await input.drain()
+        await pipeline.stopCapture(); await pipeline.drainTranscription(sessionID: session)
+        XCTAssertEqual(calls.value, [.english, .auto])
+        XCTAssertEqual(pipeline.transcriptionWork().first?.textLanguage, "zh")
+        XCTAssertEqual(events.value.compactMap { if case .identifiedFinal(let c) = $0 { return c.language }; return nil }, ["zh"])
+    }
+}
+
 /// The journal record exactly as LiveLingo 0.2.0 declares it (synthesized coding),
 /// used to check that new journals still open after a downgrade.
 private struct LegacyWorkRecord: Codable, Equatable {
@@ -1276,4 +1971,158 @@ private func legacyRow<T: Encodable>(_ value: T) throws -> Data {
     var row = try JSONEncoder().encode(LegacyEnvelope(payload: payload, sha256: digest))
     row.append(0x0a)
     return row
+}
+
+/// Frozen recognition and cache from ea844fc, before step 5. Only type names,
+/// access for the test, and Encodable on its outcome differ from that source.
+private enum Step5LegacyRecognition {
+    struct Outcome: Encodable, Sendable {
+        var text = ""
+        var silent = false
+        var candidate: String?
+        var origin: String?
+        /// Why the exact range has no accepted English; identifiers only.
+        var failureReason: TranscriptionWorkRecord.FailureReason?
+        var otherLanguage = false
+    }
+    static func recognize(_ record: TranscriptionWorkRecord, audioURL: URL, recordingURL: URL?,
+                                  formulaContext: String, attempts: Step5LegacyAttemptCache,
+                                  transcriber: DurableTranscriptionQueue.LegacyTranscriber) async throws -> Outcome {
+        try Task.checkCancellation()
+        if try DigitalSilenceGate.isSilent(audioURL) { return Outcome(silent: true) }
+        let attemptNonce = UUID()
+        func recognizeStage(_ url: URL, model: String, enhance: Bool, stage: String) async throws -> String {
+            try Task.checkCancellation()
+            // Only enhanced exact-range requests recur during automatic repair.
+            // Raw first-pass speech and final neighbour clips need no caching.
+            let reusable = enhance && stage != "context" && record.attempt != .manual
+            let fingerprint = reusable ? try? Step5LegacyAttemptCache.fingerprint(url) : nil
+            let key = fingerprint.map { Step5LegacyAttemptCache.Key(id: record.id, model: model,
+                                                                       enhanced: enhance, audio: $0) }
+            if let key, let text = attempts.text(for: key) {
+                try Task.checkCancellation()
+                return text
+            }
+            let id = ASRRequestContext.identifier(sessionID: record.sessionID, chunkID: record.id,
+                automatic: record.automaticRetryCount, manual: record.manualRetryCount,
+                stage: stage, nonce: attemptNonce)
+            let text = try await ASRRequestContext.$requestID.withValue(id) {
+                try await transcriber(url, model, enhance)
+            }
+            try Task.checkCancellation()
+            if let key, text.utf8.count <= Step5LegacyAttemptCache.maximumTextBytes,
+               (try? Step5LegacyAttemptCache.fingerprint(url)) == key.audio {
+                attempts.store(text, for: key)
+            }
+            return text
+        }
+        var primary = ""
+        var primaryError: Error?
+        do { primary = try await recognizeStage(audioURL, model: record.modelKey,
+            enhance: record.attempt != .initial, stage: "primary") }
+        catch is CancellationError { throw CancellationError() }
+        catch { primaryError = error }
+        try Task.checkCancellation()
+        let usable = SpeechPipeline.preferredTranscript(primary: primary, fallback: "", audioDuration: record.duration)
+        let formula = FormulaASRReview.needsReview(primary, context: formulaContext)
+        let needsFallback = primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)
+            || ASRQualityGate.fallbackReason(for: primary, audioDuration: record.duration) != nil
+        var output = Outcome(text: usable)
+        if usable.isEmpty {
+            output.failureReason = primaryError == nil
+                ? .rejection(of: primary, audioDuration: record.duration) : .error
+        }
+        var fallbackVerdict: EnglishTranscriptGate.Verdict?
+        if needsFallback, let model = record.fallbackModelKey {
+            do {
+                let secondary = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback")
+                try Task.checkCancellation()
+                let alternate = SpeechPipeline.preferredTranscript(primary: nil, fallback: secondary, audioDuration: record.duration)
+                fallbackVerdict = EnglishTranscriptGate.verdict(secondary)
+                if output.text.isEmpty {
+                    output.text = alternate
+                    // A primary error stays the reason: it, not the language, blocks `.otherLanguage`.
+                    if primaryError == nil { output.failureReason = .rejection(of: secondary, audioDuration: record.duration) }
+                }
+                else if !alternate.isEmpty, alternate != output.text {
+                    output.candidate = alternate; output.origin = "alternateModel"
+                }
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                // A fallback exception must never erase usable primary speech.
+                if output.text.isEmpty { primaryError = error; output.failureReason = .error }
+            }
+        }
+        if !output.text.isEmpty { return output }
+        // No English was accepted, the enhanced English pass has run (it can still
+        // recover speech the raw pass missed), and the multilingual fallback heard
+        // Han-dominant speech. Stop: later automatic attempts reuse these results
+        // and neighbour context would only borrow adjacent sentences.
+        if primaryError == nil, record.attempt != .initial, fallbackVerdict == .hanDominant {
+            output.otherLanguage = true
+            return output
+        }
+        // The second automatic attempt may consult neighbours after retrying
+        // the EXACT original chunk. Its result is always an explicit candidate.
+        if record.attempt != .initial,
+           record.automaticRetryCount >= DurableTranscriptionJournal.maximumAutomaticRetries,
+           let recordingURL {
+            let clip = try RecordingDiagnostics.contextAudio(recordingURL: recordingURL, start: record.start, end: record.end)
+            defer { try? FileManager.default.removeItem(at: clip) }
+            let text = try await recognizeStage(clip, model: record.fallbackModelKey ?? record.modelKey,
+                                                enhance: true, stage: "context")
+            try Task.checkCancellation()
+            let candidate = SpeechPipeline.preferredTranscript(primary: nil, fallback: text, audioDuration: record.duration + 1.5)
+            if !candidate.isEmpty { output.candidate = candidate; output.origin = "context" }
+        }
+        if output.candidate == nil, let primaryError { throw primaryError }
+        return output
+    }
+}
+
+private final class Step5LegacyAttemptCache: @unchecked Sendable {
+    struct Key: Hashable {
+        let id: UUID
+        let model: String
+        let enhanced: Bool
+        let audio: Data
+    }
+    static let maximumTextBytes = 16 * 1024
+    private let lock = NSLock()
+    private var entries: [Key: String] = [:]
+    private var order: [Key] = []
+
+    func text(for key: Key) -> String? { lock.withLock { entries[key] } }
+    func store(_ text: String, for key: Key) {
+        guard text.utf8.count <= Self.maximumTextBytes else { return }
+        lock.withLock {
+            if entries[key] == nil {
+                if order.count == 64 { entries.removeValue(forKey: order.removeFirst()) }
+                order.append(key)
+            }
+            entries[key] = text
+        }
+    }
+    func remove(id: UUID) {
+        lock.withLock {
+            for key in order where key.id == id { entries.removeValue(forKey: key) }
+            order.removeAll { $0.id == id }
+        }
+    }
+    static func fingerprint(_ url: URL) throws -> Data {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        let limit = 64 * 1024 * 1024
+        guard values.isRegularFile == true, let size = values.fileSize, size <= limit else {
+            throw CocoaError(.fileReadTooLarge)
+        }
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        var digest = SHA256(), count = 0
+        while let data = try file.read(upToCount: 64 * 1024), !data.isEmpty {
+            count += data.count
+            guard count <= limit else { throw CocoaError(.fileReadTooLarge) }
+            digest.update(data: data)
+        }
+        return Data(digest.finalize())
+    }
 }

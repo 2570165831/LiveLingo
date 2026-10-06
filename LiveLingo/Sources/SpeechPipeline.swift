@@ -354,6 +354,20 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         boundarySignal.resume()
     }
 
+    convenience init(transcriber: @escaping TranscriptionQueue.LegacyTranscriber,
+         beforeAudioWrite: (@Sendable () throws -> Void)? = nil,
+         enableAudioAnalysis: Bool = true,
+         captureSleepNotificationCenter: NotificationCenter? = nil,
+         microphoneEngineFactory: @escaping @Sendable () -> any MicrophoneCaptureEngine = { SystemMicrophoneCaptureEngine() },
+         microphoneNotifications: NotificationCenter = .default,
+         microphoneRecoveryScheduler: (@Sendable (@escaping @Sendable () -> Void) -> Void)? = nil,
+         enableMicrophoneWatchdog: Bool = true) {
+        self.init(transcriber: TranscriptionQueue.englishOnly(transcriber), beforeAudioWrite: beforeAudioWrite,
+                  enableAudioAnalysis: enableAudioAnalysis, captureSleepNotificationCenter: captureSleepNotificationCenter,
+                  microphoneEngineFactory: microphoneEngineFactory, microphoneNotifications: microphoneNotifications,
+                  microphoneRecoveryScheduler: microphoneRecoveryScheduler, enableMicrophoneWatchdog: enableMicrophoneWatchdog)
+    }
+
     deinit {
         if let captureSleepObserver { captureSleepNotificationCenter.removeObserver(captureSleepObserver) }
         boundarySignal?.cancel()
@@ -716,9 +730,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     func transcriptionState() -> TranscriptionProcessingState? { transcriptionQueue.state }
     func retainExistingTranscript(id: UUID, text: String) throws { try transcriptionQueue.retainExistingText(id: id, text: text) }
     func preserveConflictingTranscript(id: UUID, sessionID: UUID, originalText: String,
-                                       candidateText: String) throws {
+                                       originalLanguage: String? = nil, candidateText: String,
+                                       candidateLanguage: String? = nil) throws {
         try transcriptionQueue.preserveConflictingTranscript(id: id, sessionID: sessionID,
-            originalText: originalText, candidateText: candidateText)
+            originalText: originalText, originalLanguage: originalLanguage,
+            candidateText: candidateText, candidateLanguage: candidateLanguage)
     }
     func resolveTranscriptionCandidate(id: UUID, acceptedText: String?, expectedOriginal: String? = nil,
                                        expectedCandidate: String? = nil) throws {

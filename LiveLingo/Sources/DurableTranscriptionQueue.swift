@@ -33,7 +33,8 @@ struct TranscriptionCandidate: Sendable {
 /// The capture consumer persists a descriptor synchronously, then wakes this
 /// pump. No Task or decoded PCM is retained for waiting chunks.
 final class DurableTranscriptionQueue: @unchecked Sendable {
-    typealias Transcriber = @Sendable (URL, String, Bool) async throws -> String
+    typealias Transcriber = @Sendable (URL, String, Bool, ASRLanguageMode) async throws -> ASRTranscription
+    typealias LegacyTranscriber = @Sendable (URL, String, Bool) async throws -> String
     private struct Context {
         let generation: UUID
         let journal: DurableTranscriptionJournal
@@ -42,12 +43,13 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         let handler: @Sendable (SpeechPipeline.Event) -> Void
         var attempts = TranscriptionAttemptCache()
     }
-    private struct Outcome: Sendable {
+    struct Outcome: Encodable, Sendable {
         var text = ""
+        var language: String?
         var silent = false
         var candidate: String?
         var origin: String?
-        /// Why the exact range has no accepted English; identifiers only.
+        /// Why the exact range has no accepted transcript; identifiers only.
         var failureReason: TranscriptionWorkRecord.FailureReason?
         var otherLanguage = false
     }
@@ -61,9 +63,19 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     private var recentFormulaContext = ""
     private var storageFailure: String?
 
-    init(transcriber: @escaping Transcriber = { url, model, enhance in
-        try await QwenASRClient.transcribe(audioURL: url, modelKey: model, enhanceSpeech: enhance).text
+    init(transcriber: @escaping Transcriber = { url, model, enhance, mode in
+        try await QwenASRClient.transcribe(audioURL: url, modelKey: model, enhanceSpeech: enhance, language: mode)
     }) { self.transcriber = transcriber }
+
+    convenience init(transcriber: @escaping LegacyTranscriber) {
+        self.init(transcriber: Self.englishOnly(transcriber))
+    }
+
+    static func englishOnly(_ transcriber: @escaping LegacyTranscriber) -> Transcriber {
+        { url, model, enhance, _ in
+            ASRTranscription(text: try await transcriber(url, model, enhance))
+        }
+    }
 
     /// Call before opening capture. A previous request is cancelled and joined
     /// before any request of the new generation can start.
@@ -255,18 +267,22 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     /// The archive is authoritative after an explicit correction. A late
     /// replay from the ASR journal becomes a durable candidate, not a new body.
     func preserveConflictingTranscript(id: UUID, sessionID: UUID, originalText: String,
-                                       candidateText: String) throws {
+                                       originalLanguage: String? = nil, candidateText: String,
+                                       candidateLanguage: String? = nil) throws {
         try lock.withLock {
             guard let context, context.journal.sessionID == sessionID,
                   var record = context.journal.record(id: id) else {
                 throw DurableTranscriptionJournal.JournalError.sessionMismatch
             }
-            guard originalText != candidateText else { return }
-            if let pending = record.candidateText, pending != candidateText {
+            guard originalText != candidateText || originalLanguage != candidateLanguage else { return }
+            if let pending = record.candidateText,
+               pending != candidateText || record.candidateLanguage != candidateLanguage {
                 throw DurableTranscriptionJournal.JournalError.corrupt("该段已有另一份待确认候选，现有正文和候选均保留。")
             }
             record.text = originalText
+            record.textLanguage = originalLanguage
             record.candidateText = candidateText
+            record.candidateLanguage = candidateLanguage
             record.candidateOrigin = "sameRangeRevision"
             try context.journal.put(record)
             _ = try Self.materializeAudio(record, journal: context.journal)
@@ -289,9 +305,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 guard !acceptedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw DurableTranscriptionJournal.JournalError.corrupt("确认文字为空")
                 }
-                record.text = acceptedText; record.status = .completed; record.failure = nil; record.failureReason = nil
+                record.text = acceptedText; record.textLanguage = record.candidateLanguage
+                record.status = .completed; record.failure = nil; record.failureReason = nil
             }
-            record.candidateText = nil; record.candidateOrigin = nil
+            record.candidateText = nil; record.candidateLanguage = nil; record.candidateOrigin = nil
             try context.journal.put(record)
         }
         publishState()
@@ -322,10 +339,12 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                   body.english == change.replacementSegment.english,
                   body.inputRevision == change.toRevision else { continue }
             record.text = body.english
+            record.textLanguage = body.sourceLanguage
             record.status = .completed
             record.failure = nil
             record.failureReason = nil
             record.candidateText = nil
+            record.candidateLanguage = nil
             record.candidateOrigin = nil
             try journal.put(record)
             changed = true
@@ -476,17 +495,20 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     case .success(let output):
                         if let candidate = output.candidate {
                             record.candidateText = candidate; record.candidateOrigin = output.origin
+                            record.candidateLanguage = nil
                         }
                         if output.silent {
                             record.status = .silent; record.failure = nil; record.failureReason = nil
                             owner.handler(.volatile(text: "", start: record.start, end: record.end,
                                                     observedAt: ProcessInfo.processInfo.systemUptime))
                         } else if !output.text.isEmpty {
-                            if let old = record.text, !old.isEmpty, old != output.text {
+                            if let old = record.text, !old.isEmpty,
+                               old != output.text || record.textLanguage != output.language {
                                 record.candidateText = output.text; record.candidateOrigin = "sameRangeRevision"
-                            } else { record.text = output.text }
+                                record.candidateLanguage = output.language
+                            } else { record.text = output.text; record.textLanguage = output.language }
                             record.status = .completed; record.failure = nil; record.failureReason = nil
-                            recentFormulaContext = String(output.text.suffix(1000))
+                            if output.language == nil { recentFormulaContext = String(output.text.suffix(1000)) }
                         } else if output.otherLanguage {
                             record.status = .otherLanguage
                             record.failure = "此处为非英语讲话（未转写），音频已保留，可手动重试。"
@@ -495,7 +517,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             markFailure(&record, message: "此处尚未得到可靠的英文转写，音频已保留。", reason: output.failureReason)
                         }
                         try owner.journal.put(record)
-                        if !output.text.isEmpty, record.text == output.text {
+                        if !output.text.isEmpty, record.text == output.text, record.textLanguage == output.language {
                             emitCommit(record, text: output.text, repair: claimed.attempt != .initial)
                         }
                         if record.candidateText != nil { emitCandidate(record) }
@@ -529,12 +551,15 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     private func emitCommit(_ record: TranscriptionWorkRecord, text: String, repair: Bool) {
         lock.withLock {
             guard let context, context.journal.sessionID == record.sessionID else { return }
-            let hints = AuxiliaryTranslationHintExtractor.extract(from: record.appleEvidence, primary: text)
+            let hints = record.textLanguage == nil
+                ? AuxiliaryTranslationHintExtractor.extract(from: record.appleEvidence, primary: text) : []
             if context.identified {
                 context.handler(.identifiedFinal(TranscriptionCommit(id: record.id, sessionID: record.sessionID,
                     text: text, start: record.start, end: record.end, startFrame: record.startFrame,
-                    endFrame: record.endFrame, sampleRate: record.sampleRate, hints: hints, isRepair: repair)))
-            } else { context.handler(.final(text: text, start: record.start, end: record.end, hints: hints)) }
+                    endFrame: record.endFrame, sampleRate: record.sampleRate, hints: hints, isRepair: repair,
+                    language: record.textLanguage)))
+            } else { context.handler(.final(text: text, start: record.start, end: record.end, hints: hints,
+                                           language: record.textLanguage)) }
         }
     }
     private func emitCandidate(_ record: TranscriptionWorkRecord) {
@@ -547,7 +572,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 start: record.start, end: record.end, detail: message, candidate: text, reason: record.failureReason)
             context.handler(.transcriptionCandidate(TranscriptionCandidate(id: record.id, sessionID: record.sessionID,
                 originalText: record.text ?? "", text: text, start: record.start, end: record.end,
-                audioURL: audio, origin: record.candidateOrigin ?? "context")))
+                audioURL: audio, origin: record.candidateOrigin ?? "context", language: record.candidateLanguage)))
             context.handler(.transcriptionIssue(start: record.start, end: record.end, message: message))
         }
     }
@@ -564,41 +589,50 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             (context?.handler ?? fallbackHandler)?(.failure("转写工作记录无法保存：\(error.localizedDescription)"))
         }
     }
-    private static func recognize(_ record: TranscriptionWorkRecord, audioURL: URL, recordingURL: URL?,
+    static func recognize(_ record: TranscriptionWorkRecord, audioURL: URL, recordingURL: URL?,
                                   formulaContext: String, attempts: TranscriptionAttemptCache,
                                   transcriber: Transcriber) async throws -> Outcome {
         try Task.checkCancellation()
         if try DigitalSilenceGate.isSilent(audioURL) { return Outcome(silent: true) }
         let attemptNonce = UUID()
-        func recognizeStage(_ url: URL, model: String, enhance: Bool, stage: String) async throws -> String {
+        func recognizeStage(_ url: URL, model: String, enhance: Bool, stage: String,
+                            mode: ASRLanguageMode = .english) async throws -> ASRTranscription {
             try Task.checkCancellation()
             // Only enhanced exact-range requests recur during automatic repair.
             // Raw first-pass speech and final neighbour clips need no caching.
             let reusable = enhance && stage != "context" && record.attempt != .manual
             let fingerprint = reusable ? try? TranscriptionAttemptCache.fingerprint(url) : nil
             let key = fingerprint.map { TranscriptionAttemptCache.Key(id: record.id, model: model,
-                                                                       enhanced: enhance, audio: $0) }
-            if let key, let text = attempts.text(for: key) {
+                                                                       enhanced: enhance, mode: mode, audio: $0) }
+            if let key, let result = attempts.result(for: key) {
                 try Task.checkCancellation()
-                return text
+                return result
             }
             let id = ASRRequestContext.identifier(sessionID: record.sessionID, chunkID: record.id,
                 automatic: record.automaticRetryCount, manual: record.manualRetryCount,
                 stage: stage, nonce: attemptNonce)
-            let text = try await ASRRequestContext.$requestID.withValue(id) {
-                try await transcriber(url, model, enhance)
+            let result = try await ASRRequestContext.$requestID.withValue(id) {
+                try await transcriber(url, model, enhance, mode)
             }
             try Task.checkCancellation()
-            if let key, text.utf8.count <= TranscriptionAttemptCache.maximumTextBytes,
+            if let key, result.text.utf8.count <= TranscriptionAttemptCache.maximumTextBytes,
                (try? TranscriptionAttemptCache.fingerprint(url)) == key.audio {
-                attempts.store(text, for: key)
+                attempts.store(result, for: key)
+                if mode == .auto, result.decode == .forced {
+                    // Forced auto decoding is the same English generation on
+                    // this waveform. Strip probe metadata to match an English
+                    // reply exactly; detected replies stay in their own mode.
+                    let englishKey = TranscriptionAttemptCache.Key(id: key.id, model: key.model,
+                        enhanced: key.enhanced, mode: .english, audio: key.audio)
+                    attempts.store(ASRTranscription(text: result.text), for: englishKey)
+                }
             }
-            return text
+            return result
         }
         var primary = ""
         var primaryError: Error?
         do { primary = try await recognizeStage(audioURL, model: record.modelKey,
-            enhance: record.attempt != .initial, stage: "primary") }
+            enhance: record.attempt != .initial, stage: "primary").text }
         catch is CancellationError { throw CancellationError() }
         catch { primaryError = error }
         try Task.checkCancellation()
@@ -614,7 +648,18 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         var fallbackVerdict: EnglishTranscriptGate.Verdict?
         if needsFallback, let model = record.fallbackModelKey {
             do {
-                let secondary = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback")
+                let mode: ASRLanguageMode = usable.isEmpty ? .auto : .english
+                let result = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback", mode: mode)
+                try Task.checkCancellation()
+                if result.decode == .detected,
+                   SourceLanguagePolicy.accepts(result, audioDuration: record.duration, requestedMode: mode) {
+                    return Outcome(text: result.text, language: result.language)
+                }
+                let secondary: String
+                if result.decode == .detected {
+                    secondary = try await recognizeStage(audioURL, model: model, enhance: true,
+                                                         stage: "fallbackEn", mode: .english).text
+                } else { secondary = result.text }
                 try Task.checkCancellation()
                 let alternate = SpeechPipeline.preferredTranscript(primary: nil, fallback: secondary, audioDuration: record.duration)
                 fallbackVerdict = EnglishTranscriptGate.verdict(secondary)
@@ -649,7 +694,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             let clip = try RecordingDiagnostics.contextAudio(recordingURL: recordingURL, start: record.start, end: record.end)
             defer { try? FileManager.default.removeItem(at: clip) }
             let text = try await recognizeStage(clip, model: record.fallbackModelKey ?? record.modelKey,
-                                                enhance: true, stage: "context")
+                                                enhance: true, stage: "context", mode: .english).text
             try Task.checkCancellation()
             let candidate = SpeechPipeline.preferredTranscript(primary: nil, fallback: text, audioDuration: record.duration + 1.5)
             if !candidate.isEmpty { output.candidate = candidate; output.origin = "context" }
@@ -662,27 +707,28 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
 /// Short-lived, bounded raw results for deterministic bundled recognizers.
 /// A new queue generation owns a new cache. No audio, error, or cancelled result
 /// is retained. Nothing is written to archives. Gate checks still run on hits.
-private final class TranscriptionAttemptCache: @unchecked Sendable {
+final class TranscriptionAttemptCache: @unchecked Sendable {
     struct Key: Hashable {
         let id: UUID
         let model: String
         let enhanced: Bool
+        let mode: ASRLanguageMode
         let audio: Data
     }
     static let maximumTextBytes = 16 * 1024
     private let lock = NSLock()
-    private var entries: [Key: String] = [:]
+    private var entries: [Key: ASRTranscription] = [:]
     private var order: [Key] = []
 
-    func text(for key: Key) -> String? { lock.withLock { entries[key] } }
-    func store(_ text: String, for key: Key) {
-        guard text.utf8.count <= Self.maximumTextBytes else { return }
+    func result(for key: Key) -> ASRTranscription? { lock.withLock { entries[key] } }
+    func store(_ result: ASRTranscription, for key: Key) {
+        guard result.text.utf8.count <= Self.maximumTextBytes else { return }
         lock.withLock {
             if entries[key] == nil {
                 if order.count == 64 { entries.removeValue(forKey: order.removeFirst()) }
                 order.append(key)
             }
-            entries[key] = text
+            entries[key] = result
         }
     }
     func remove(id: UUID) {

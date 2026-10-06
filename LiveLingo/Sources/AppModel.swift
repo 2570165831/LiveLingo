@@ -2169,10 +2169,11 @@ final class AppModel: ObservableObject {
             if let existing = segments.first(where: { $0.id == result.id }) {
                 // A repeated delivery from the same disk range is idempotent.
                 // A conflicting result stays a candidate, never a silent edit.
-                if existing.english != result.text {
+                if existing.english != result.text || existing.sourceLanguage != result.language {
                     do {
                         try pipeline.preserveConflictingTranscript(id: result.id, sessionID: sessionID,
-                            originalText: existing.english, candidateText: result.text)
+                            originalText: existing.english, originalLanguage: existing.sourceLanguage,
+                            candidateText: result.text, candidateLanguage: result.language)
                         archiveNotice = "同一录音段出现不同转写，原文已保留，等待确认。"
                     } catch { archiveError = "原文已保留；候选记录失败：\(error.localizedDescription)" }
                 }
