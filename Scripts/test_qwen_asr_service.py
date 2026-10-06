@@ -78,8 +78,11 @@ class AutoLanguageTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.object(service, 'AUTO_SELF_CHECKS', {}))
         self.enterContext(patch.object(service, 'version', side_effect=lambda name: {'mlx-audio': '0.3.1', 'mlx-lm': '0.30.5'}[name]))
-        self.core = SimpleNamespace(array=np.array, argmax=np.argmax, exp=np.exp,
-                                    logsumexp=lambda x: np.log(np.exp(x).sum()), eval=lambda *args: None)
+        def softmax(logits):
+            weights = np.exp(logits - np.max(logits))
+            return weights / weights.sum()
+        self.core = SimpleNamespace(array=np.array, argmax=np.argmax, float32=np.float32,
+                                    softmax=softmax, eval=lambda *args: None)
         self.load_audio = Mock(return_value=np.zeros(16))
         self.generate_step = Mock(return_value=iter([(400, None), (401, None), (151645, None)]))
         self.enterContext(patch.dict(sys.modules, {
@@ -158,6 +161,18 @@ class AutoLanguageTests(unittest.TestCase):
                 result = self.auto(self.model(label))
                 self.assertEqual((result['detected_label'], result['language']), (label, code))
 
+    def test_probe_prefills_through_language_and_leaves_delimiter_unconsumed(self):
+        model = self.model('Cantonese')
+        check = service.auto_self_check(model, '1.7b')
+        probe = service.probe_language(model, 'raw.wav', check)
+        calls = model._model.calls
+        self.assertEqual([call[:2] for call in calls], [
+            ([[7, 8, service.LANGUAGE_TOKEN]], True),
+            ([[300]], False), ([[301]], False),
+        ])
+        self.assertTrue(all(call[2] is probe['cache'] for call in calls))
+        self.assertEqual(probe['detected_label'], 'Cantonese')
+
     def test_unparsed_ambiguous_failed_check_and_probe_exception_force_english(self):
         for failure in ('unparsed', 'ambiguous', 'version', 'suffix', 'delimiter', 'exception'):
             with self.subTest(failure=failure):
@@ -214,6 +229,63 @@ class AutoLanguageTests(unittest.TestCase):
                          service.LATIN_LANGUAGE_CODES)
 
 
+class ProbePrecisionTests(unittest.TestCase):
+    def test_bfloat16_logits_normalize_to_one_with_float32_precision(self):
+        import mlx.core as mx
+
+        tokenizer = AutoLanguageTests.Tokenizer()
+        chinese = tokenizer.encode(' Chinese')[0]
+        english = tokenizer.encode(' English')[0]
+        check = {'labels': frozenset(service.LANGUAGE_CODES) | {'None'},
+                 'english_token': english,
+                 'heads': {tokens[0]: [label] for label, tokens in tokenizer.heads.items()}}
+        for top, runner_up, floor in ((16.0, 12.5, -8.0),
+                                     (1000.0, 992.0, 968.0),
+                                     (-1000.0, -1008.0, -1024.0)):
+            with self.subTest(top=top):
+                fixture = np.full(151800, floor, dtype=np.float32)
+                fixture[chinese], fixture[english] = top, runner_up
+                logits = mx.array(fixture, dtype=mx.bfloat16)
+                quantized = np.asarray(logits.astype(mx.float32)).astype(np.float64)
+                weights = np.exp(quantized - quantized.max())
+                expected = weights / weights.sum()
+                captured = []
+                real_softmax = mx.softmax
+
+                def normalize(values):
+                    probabilities = real_softmax(values)
+                    mx.eval(probabilities)
+                    captured.append((values.dtype, np.asarray(probabilities)))
+                    return probabilities
+
+                class Inner(AutoLanguageTests.Inner):
+                    def __call__(self, ids, cache, input_embeddings=None):
+                        position = cache['position']
+                        cache['position'] += 1
+                        if position == 0:
+                            return logits[None, None, :]
+                        tail = np.full(151800, -np.inf, dtype=np.float32)
+                        tail[service.ASR_TEXT_TOKEN] = 0
+                        return mx.array(tail)[None, None, :]
+
+                model = SimpleNamespace(_model=Inner(tokenizer, 'Chinese', .95, .02))
+                with patch.dict(sys.modules, {
+                    'mlx_audio.stt.utils': SimpleNamespace(load_audio=Mock(return_value=np.zeros(16))),
+                }), patch.object(mx, 'softmax', side_effect=normalize):
+                    probe = service.probe_language(model, 'raw.wav', check)
+                self.assertEqual(len(captured), 1)
+                dtype, probabilities = captured[0]
+                self.assertEqual(dtype, mx.float32)
+                self.assertEqual(probabilities.dtype, np.float32)
+                self.assertAlmostEqual(float(probabilities.sum(dtype=np.float64)), 1.0, places=6)
+                np.testing.assert_allclose(probabilities, expected, rtol=1e-6, atol=1e-9)
+                self.assertAlmostEqual(probe['language_probability'], expected[chinese], places=6)
+                self.assertAlmostEqual(probe['english_probability'], expected[english], places=7)
+                if top == 16.0:
+                    legacy = mx.exp(logits - mx.logsumexp(logits)).astype(mx.float32)
+                    self.assertGreater(abs(float(mx.sum(legacy).item()) - 1.0), .01)
+
+
 class ServiceResponsivenessTests(unittest.TestCase):
     def setUp(self):
         # Every service here owns synthetic state and a test-only executor.
@@ -230,6 +302,54 @@ class ServiceResponsivenessTests(unittest.TestCase):
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='asr-test')
         self.enterContext(patch.object(service, 'INFERENCE_WORKER', self.executor))
         self.addCleanup(self.executor.shutdown, wait=True)
+        if os.environ.get('LIVELINGO_ASR_TEST_IN_PROCESS') == '1':
+            self.use_inprocess_requests()
+
+    def use_inprocess_requests(self):
+        """Exercise the handlers and worker without binding any sockets.
+
+        Opt in for offline validation; the default still tests real HTTP.
+        This fixture does not prove HTTP transport behavior.
+        """
+        from email.message import Message
+        from urllib.parse import urlparse
+
+        servers = {}
+
+        class InProcessServer:
+            def __init__(self, address, handler):
+                self.server_address = (address[0], 12345)
+                self.server_port = 12345
+                self.stopped = threading.Event()
+                servers[self.server_port] = self
+
+            def serve_forever(self): self.stopped.wait()
+            def shutdown(self): self.stopped.set()
+            def server_close(self): self.stopped.set()
+
+        def open_request(request, timeout=None):
+            if isinstance(request, str): request = Request(request)
+            parsed = urlparse(request.full_url)
+            handler = object.__new__(service.Handler)
+            handler.server = servers[parsed.port]
+            handler.path = parsed.path + ('?' + parsed.query if parsed.query else '')
+            handler.headers = Message()
+            for key, value in request.header_items(): handler.headers[key] = value
+            body = request.data or b''
+            handler.headers['Content-Length'] = str(len(body))
+            handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
+            status = []
+            handler.send_response = lambda code: status.append(code)
+            handler.send_header = Mock()
+            handler.end_headers = Mock()
+            handler.do_GET() if request.get_method() == 'GET' else handler.do_POST()
+            response = io.BytesIO(handler.wfile.getvalue())
+            if status[-1] >= 400:
+                raise HTTPError(request.full_url, status[-1], 'in-process response', {}, response)
+            return response
+
+        self.enterContext(patch.object(service, 'ThreadingHTTPServer', InProcessServer))
+        self.enterContext(patch.object(sys.modules[__name__], 'urlopen', side_effect=open_request))
 
     def wait_for(self, predicate, timeout=3):
         deadline = time.monotonic() + timeout
@@ -425,6 +545,30 @@ class ServiceResponsivenessTests(unittest.TestCase):
             return SimpleNamespace(text='finished after disconnect')
         server, base = self.start_server()
         with patch.object(service, 'model_for', return_value=SimpleNamespace(generate=generate)):
+            if os.environ.get('LIVELINGO_ASR_TEST_IN_PROCESS') == '1':
+                handler = self.synthetic_handler('model=parakeet')
+                handler.headers['X-LiveLingo-Request-ID'] = 'disconnected'
+                handler.send_json = service.Handler.send_json.__get__(handler)
+                handler.send_response = Mock()
+                handler.send_header = Mock()
+                handler.end_headers = Mock(side_effect=BrokenPipeError)
+                with ThreadPoolExecutor(max_workers=1) as clients:
+                    job = clients.submit(handler.do_POST)
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        with urlopen(base + '/health', timeout=2) as response:
+                            during = json.load(response)
+                        self.assertEqual(during['requests']['disconnected']['state'], 'running')
+                        self.assertNotIn('disconnected', during['completed_requests'])
+                    finally:
+                        release.set()
+                    job.result(timeout=5)
+                handler.send_response.assert_called_once_with(200)
+                completed = service.resource_snapshot()
+                self.assertNotIn('disconnected', completed['requests'])
+                self.assertEqual(completed['completed_requests']['disconnected'],
+                                 {'model': 'parakeet', 'state': 'finished'})
+                return
             client = socket.create_connection(('127.0.0.1', server.server_port), timeout=3)
             try:
                 client.sendall(b'POST /transcribe?model=parakeet HTTP/1.0\r\n'
@@ -631,8 +775,23 @@ class OwnedServiceProtocolTests(unittest.TestCase):
         from urllib.error import HTTPError
         token = secrets.token_hex(32)
         with tempfile.TemporaryDirectory() as models:
+            command = [sys.executable, '-u', service.__file__]
+            in_process = os.environ.get('LIVELINGO_ASR_TEST_IN_PROCESS') == '1'
+            if in_process:
+                # Run the real CLI/watchdog in a child with an unbound server.
+                # Closing its parent pipe must still terminate that process.
+                command = [sys.executable, '-u', '-c', '''
+import sys, threading
+import qwen_asr_service as service
+class UnboundServer:
+    server_address = ('127.0.0.1', 12345)
+    def serve_forever(self): threading.Event().wait()
+    def server_close(self): pass
+service.create_server = lambda host, port: (UnboundServer(), host, 12345)
+sys.exit(service.main(sys.argv[1:]))
+''']
             child = subprocess.Popen(
-                [sys.executable, "-u", service.__file__, "--supervised", "--port", "0", "--models-dir", models],
+                command + ["--supervised", "--port", "0", "--models-dir", models],
                 env=dict(os.environ, LIVELINGO_ASR_TOKEN=token, PYTHONDONTWRITEBYTECODE="1"),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             try:
@@ -652,13 +811,30 @@ class OwnedServiceProtocolTests(unittest.TestCase):
                 self.assertTrue(ready["supervised"])
                 self.assertGreater(ready["port"], 0)
                 base = f"http://127.0.0.1:{ready['port']}"
+                if in_process:
+                    def open_request(request, timeout=None):
+                        handler = object.__new__(service.Handler)
+                        handler.path = service.urlparse(request.full_url).path
+                        handler.server = SimpleNamespace(server_address=('127.0.0.1', ready['port']))
+                        handler.headers = {service.TOKEN_HEADER: request.get_header('X-livelingo-token', '')}
+                        handler.send_json = Mock()
+                        with patch.object(service, 'AUTH_TOKEN', token), \
+                             patch.object(service, 'MODEL_ROOT', Path(models)), \
+                             patch.object(service, 'MODELS', {}):
+                            handler.do_GET() if request.data is None else handler.do_POST()
+                        status, payload = handler.send_json.call_args.args
+                        response = io.BytesIO(json.dumps(payload).encode())
+                        if status >= 400:
+                            raise HTTPError(request.full_url, status, 'in-process response', {}, response)
+                        return response
+                    self.enterContext(patch.object(sys.modules[__name__], 'urlopen', side_effect=open_request))
                 for endpoint, body in [("/health", None), ("/transcribe", b"invalid audio")]:
                     with self.assertRaises(HTTPError) as caught:
                         urlopen(Request(base + endpoint, data=body), timeout=3)
                     self.assertEqual(caught.exception.code, 401)
                 with urlopen(Request(base + "/health", headers={service.TOKEN_HEADER: token}), timeout=3) as response:
                     health = json.load(response)
-                self.assertEqual(health["pid"], child.pid)
+                self.assertEqual(health["pid"], os.getpid() if in_process else child.pid)
                 self.assertEqual(health["models_root"], models)
                 self.assertEqual(health["loaded_models"], [])
                 # A real parent exit closes both pipes. The watchdog must exit

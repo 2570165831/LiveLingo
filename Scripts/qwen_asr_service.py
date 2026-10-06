@@ -261,8 +261,10 @@ def probe_language(model, probe_input_path, check):
     embeddings = inner._build_inputs_embeds(ids, audio_features)
     cache = inner.make_cache()
     logits = inner(ids[:, :-2], input_embeddings=embeddings[:, :-2], cache=cache)[0, -1]
-    logprobs = logits - mx.logsumexp(logits)
-    mx.eval(logprobs)
+    # Normalize in float32: bfloat16 rounds the partition function enough to
+    # make the probability mass exceed one and can spuriously cross a gate.
+    probabilities = mx.softmax(logits.astype(mx.float32))
+    mx.eval(probabilities)
     head = []
     for _ in range(4):
         token = int(mx.argmax(logits).item())
@@ -274,8 +276,8 @@ def probe_language(model, probe_input_path, check):
                 raise ValueError("Ambiguous language head")
             return {
                 "detected_label": label_text[1:],
-                "language_probability": float(mx.exp(logprobs[head[0]]).item()),
-                "english_probability": float(mx.exp(logprobs[check["english_token"]]).item()),
+                "language_probability": float(probabilities[head[0]].item()),
+                "english_probability": float(probabilities[check["english_token"]].item()),
                 "cache": cache,
             }
         head.append(token)
