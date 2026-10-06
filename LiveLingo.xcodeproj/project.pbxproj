@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		789000000000000000000001 /* MultilingualLearningNotesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 789000000000000000000002 /* MultilingualLearningNotesTests.swift */; };
 		23DAF99A6A46840EF75BFF87 /* MultilingualCaptionGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */; };
 		85FDBC2832DCA7D90ADB81A7 /* MultilingualAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E36FE3F43F9C3628B4ACABDC /* MultilingualAppModelTests.swift */; };
 		0E5D0123C95A0E85803EF27C /* MultilingualTranslationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9503EACCE84D2D8339D5B133 /* MultilingualTranslationTests.swift */; };
@@ -82,6 +83,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		789000000000000000000002 /* MultilingualLearningNotesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualLearningNotesTests.swift; sourceTree = "<group>"; };
 		6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualCaptionGateTests.swift; sourceTree = "<group>"; };
 		E36FE3F43F9C3628B4ACABDC /* MultilingualAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualAppModelTests.swift; sourceTree = "<group>"; };
 		9503EACCE84D2D8339D5B133 /* MultilingualTranslationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualTranslationTests.swift; sourceTree = "<group>"; };
@@ -219,6 +221,7 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				789000000000000000000002 /* MultilingualLearningNotesTests.swift */,
 				6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */,
 				E36FE3F43F9C3628B4ACABDC /* MultilingualAppModelTests.swift */,
 				9503EACCE84D2D8339D5B133 /* MultilingualTranslationTests.swift */,
@@ -350,6 +353,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				789000000000000000000001 /* MultilingualLearningNotesTests.swift in Sources */,
 				F74C17E4B9DBAB4B17E9A433 /* ReviewIdentityTests.swift in Sources */,
 				0D3DFC0CF75D7D67AC572AD4 /* SessionPersistenceTests.swift in Sources */,
 				A10000000000000000000020 /* CausalBoundaryRegressionTests.swift in Sources */,

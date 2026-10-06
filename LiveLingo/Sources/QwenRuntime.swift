@@ -3269,7 +3269,7 @@ enum LectureSummaryInput {
         for segment in segments where !coveredIDs.contains(segment.id) {
             guard !segment.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   segment.hasUsableTranslation else { continue }
-            let entrySize = segment.english.count + segment.chinese.count + 32
+            let entrySize = segment.english.count + (segment.sourceLanguage == "zh" ? 0 : segment.chinese.count) + 32
             if !selected.isEmpty, size + entrySize > maximumCharacters { break }
             selected.append(segment)
             size += entrySize
@@ -3307,11 +3307,17 @@ enum LectureSummaryInput {
         var selected: [String] = []
         var characterCount = 0
         for segment in completed.reversed() {
-            let entry = """
-            [\(clock(segment.startTime))]
-            EN: \(segment.english)
-            ZH: \(segment.chinese)
-            """
+            let entry: String
+            if segment.sourceLanguage == "zh" {
+                let target = CaptionTranslationTarget.current.rawValue.components(separatedBy: "-")[0].uppercased()
+                entry = "[\(clock(segment.startTime))]\n\(target): \(segment.english)"
+            } else {
+                entry = """
+                [\(clock(segment.startTime))]
+                EN: \(segment.english)
+                ZH: \(segment.chinese)
+                """
+            }
             if !selected.isEmpty, characterCount + entry.count > maximumCharacters {
                 break
             }

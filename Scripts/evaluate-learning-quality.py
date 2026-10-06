@@ -399,7 +399,21 @@ def verify_units(units: list[dict], evidence: list[dict]) -> dict[str, dict]:
                 for x in units), "source-unit-owner")
     expected_order = []
     for index, source in enumerate(evidence):
-        for language, key in (("en", "english"), ("zh", "chinese")):
+        source_language = source.get("sourceLanguage")
+        # Match the 0.2.0 Chinese inference when encoding has preserved marker
+        # absence. Ordinary English evidence must still contain both groups.
+        if source_language is None and source["english"] == source["chinese"] \
+                and source.get("translationState", "completed") == "completed":
+            scalars = [ord(c) for c in source["english"].strip()]
+            han = sum(0x3400 <= c <= 0x4DBF or 0x4E00 <= c <= 0x9FFF or 0xF900 <= c <= 0xFAFF
+                      for c in scalars)
+            latin = sum(0x41 <= c <= 0x5A or 0x61 <= c <= 0x7A or 0xC0 <= c <= 0x24F
+                        or 0x1E00 <= c <= 0x1EFF for c in scalars)
+            if han and latin < max(6, han * 3):
+                source_language = "zh"
+        groups = (("en", "english"), ("zh", "chinese")) if source_language in (None, "en") \
+            else (("zh", "english" if source_language == "zh" else "chinese"),)
+        for language, key in groups:
             fragments = [x for x in units if x["index"] == index and x["language"] == language]
             require(bool(fragments), "missing-source-language")
             original = source[key]

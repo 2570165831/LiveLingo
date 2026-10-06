@@ -920,9 +920,18 @@ struct LearningSourceUnit: Encodable, Equatable, Sendable {
     let text: String
     var source: LearningPoint.Source { .init(index: index, quote: text) }
 
+    /// The en/zh review protocol stays fixed. Non-English evidence contributes
+    /// only the target group; Chinese speech uses its unchanged source text.
+    static func textGroups(for segment: TranscriptSegment) -> [(language: String, text: String)] {
+        guard let language = segment.sourceLanguage else {
+            return [("en", segment.english), ("zh", segment.chinese)]
+        }
+        return [("zh", language == "zh" ? segment.english : segment.chinese)]
+    }
+
     static func make(_ evidence: [TranscriptSegment]) -> [Self] {
         evidence.enumerated().flatMap { index, segment in
-            [("en", segment.english), ("zh", segment.chinese)].flatMap { language, text -> [Self] in
+            textGroups(for: segment).flatMap { language, text -> [Self] in
                 var sentences: [String] = []
                 text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .bySentences) { sentence, _, _, _ in
                     if let sentence, !sentence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2757,11 +2766,13 @@ enum LearningPrompts {
         var catalog: [String: PreparedReviewInput.Quote] = [:]
         let evidence = batch.evidence.enumerated().map { entry -> Evidence in
             let item = entry.element
-            let quotes = PreparedReviewInput.evidenceQuotes(index: entry.offset, language: "en", text: item.english)
-                + PreparedReviewInput.evidenceQuotes(index: entry.offset, language: "zh", text: item.chinese)
+            let quotes = LearningSourceUnit.textGroups(for: item).flatMap { language, text in
+                PreparedReviewInput.evidenceQuotes(index: entry.offset, language: language, text: text)
+            }
             for quote in quotes { catalog[quote.id] = quote }
             return Evidence(index: entry.offset, quotes: quotes.map(PreparedReviewInput.WireQuote.init),
-                            chineseWarning: Self.chineseWarning(chinese: item.chinese, english: item.english))
+                            chineseWarning: item.sourceLanguage == nil
+                                ? Self.chineseWarning(chinese: item.chinese, english: item.english) : nil)
         }
         var later: [FollowUp] = []
         for subsequent in laterBatches {
@@ -2770,7 +2781,9 @@ enum LearningPrompts {
                 later.append(FollowUp(pointIndex: index, text: point.text, sources: (point.sources ?? []).map(\.quote)))
             }
         }
-        let terms = LearningNotebook.terms(batch.evidence.map { $0.english + " " + $0.chinese }.joined(separator: " "))
+        let terms = LearningNotebook.terms(batch.evidence.map {
+            LearningSourceUnit.textGroups(for: $0).map(\.text).joined(separator: " ")
+        }.joined(separator: " "))
         let available = laterBatches.enumerated().flatMap { index, subsequent in
             LearningSourceUnit.make(subsequent.evidence).map { LaterEvidence(batchOffset: index + 1, source: $0) }
         }
