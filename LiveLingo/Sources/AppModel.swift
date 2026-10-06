@@ -33,6 +33,10 @@ struct CaptionTranslationDependencies {
     var repair: (DeferredCaptionRepair) async throws -> QwenTranslationClient.PreviousRepair = { _ in
         throw QwenRuntimeError.requestFailed("测试必须注入前句补修器")
     }
+    // Keep the original English dependency signature and all existing doubles.
+    var translateSource: (String, String, String, CaptionTranslationAttempt, Update?) async throws -> String = { _, _, _, _, _ in
+        throw QwenRuntimeError.requestFailed("测试必须注入原语言翻译器")
+    }
 
     static let live = Self(
         translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, attempt: $3, onUpdate: $4) },
@@ -40,12 +44,21 @@ struct CaptionTranslationDependencies {
             current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6, onCurrent: $7, deferRepair: $8) },
         repair: { try await QwenTranslationClient.repairPreviousCaption(previous: $0.previous.english,
             previousChinese: $0.previous.chinese, current: $0.normalizedCurrent,
-            context: $0.context.map(\.english).joined(separator: " "), modelName: $0.modelName) }
+            context: $0.context.filter { $0.sourceLanguage == nil }.map(\.english).joined(separator: " "), modelName: $0.modelName) },
+        translateSource: { try await QwenTranslationClient.translate($0, modelName: $1, sourceLanguage: $2,
+            attempt: $3, onUpdate: $4) }
     )
     static let unavailable = Self(
         translate: { _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
         adjacent: { _, _, _, _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
     )
+
+    func translateCaption(_ text: String, _ model: String, _ hints: [AuxiliaryTranslationHint],
+                          _ attempt: CaptionTranslationAttempt, _ update: Update?,
+                          sourceLanguage: String?) async throws -> String {
+        if let sourceLanguage { return try await translateSource(text, model, sourceLanguage, attempt, update) }
+        return try await translate(text, model, hints, attempt, update)
+    }
 }
 
 @MainActor
@@ -441,7 +454,9 @@ final class AppModel: ObservableObject {
     private var previewSourceChangedAt: TimeInterval = 0
 
     var previewTranslationSource: String {
-        volatileEnglish.isEmpty ? (segments.last?.english ?? "") : volatileEnglish
+        if !volatileEnglish.isEmpty { return volatileEnglish }
+        guard let last = segments.last, last.sourceLanguage == nil else { return "" }
+        return last.english
     }
 
     var supportsPreviewTranslation: Bool {
@@ -1613,6 +1628,12 @@ final class AppModel: ObservableObject {
         if streamingDependencyIDs.contains(previous.id) { clearTranslationPreview() }
         let nextRevision = (sessionSnapshot?.inputRevision ?? segments.map(\.inputRevision).max() ?? 0) + 1
         var next = replacement
+        if SpokenLanguage.find(next.sourceLanguage)?.avoidsTranslation == true {
+            next.completeTranslation(next.english)
+            translationQueue.removeAll { $0 == next.id }
+            translationEnqueuedAt.removeValue(forKey: next.id)
+            translationHints.removeValue(forKey: next.id)
+        }
         next.inputRevision = nextRevision
         let retained = learningNotebook.batches.filter { $0.ids.contains(previous.id) }
         let change = SessionInputRevision(fromRevision: nextRevision - 1, toRevision: nextRevision,
@@ -2019,7 +2040,9 @@ final class AppModel: ObservableObject {
             archiveError = "本段原文已发生变化，请重新查看差异后确认。"
             return
         }
-        if accepted == expectedOriginal {
+        let originalLanguage = existing.flatMap { segments[$0].sourceLanguage }
+        let candidateLanguage = SpokenLanguage.nonEnglishCode(candidate.language)
+        if accepted == expectedOriginal, originalLanguage == candidateLanguage {
             dismissTranscriptionCandidate(id, expectedCandidate: candidate.text)
             return
         }
@@ -2032,8 +2055,9 @@ final class AppModel: ObservableObject {
             do {
                 try await parkSavedProcessing()
                 guard sessionID == identity, generation == epoch,
-                      transcriptionCandidates.contains(where: { $0.id == id && $0.text == candidate.text }),
+                      transcriptionCandidates.contains(where: { $0.id == id && $0.text == candidate.text && $0.language == candidate.language }),
                       (segments.first(where: { $0.id == id })?.english ?? "") == expectedOriginal,
+                      segments.first(where: { $0.id == id })?.sourceLanguage == originalLanguage,
                       expectedRevision.map({ candidateInputRevision(id) == $0 }) ?? true else {
                     throw SessionStoreError.identityConflict("确认期间的原文或候选已更新")
                 }
@@ -2048,7 +2072,8 @@ final class AppModel: ObservableObject {
                     throw SessionStoreError.invalidState("待确认片段无法定位")
                 }
                 let replacement = TranscriptSegment(id: id, startTime: segments[index].startTime,
-                    endTime: segments[index].endTime, english: accepted, sessionID: identity)
+                    endTime: segments[index].endTime, english: accepted, sessionID: identity,
+                    sourceLanguage: candidateLanguage)
                 replaceExistingSegment(at: index, with: replacement, reason: "用户确认补转文字",
                                        candidateText: candidate.text)
                 try await flushSessionArchive()
@@ -2059,9 +2084,11 @@ final class AppModel: ObservableObject {
                 guard pipeline.transcriptionWork().first(where: { $0.id == id })?.candidateText == nil else {
                     throw SessionStoreError.invalidState("候选已更新，已保存的修订需要重新核对")
                 }
-                transcriptionCandidates.removeAll { $0.id == id && $0.text == candidate.text }
-                if !translationQueue.contains(id) { translationQueue.append(id) }
-                translationEnqueuedAt[id] = ProcessInfo.processInfo.systemUptime
+                transcriptionCandidates.removeAll { $0.id == id && $0.text == candidate.text && $0.language == candidate.language }
+                if !segments[index].hasUsableTranslation {
+                    if !translationQueue.contains(id) { translationQueue.append(id) }
+                    translationEnqueuedAt[id] = ProcessInfo.processInfo.systemUptime
+                }
                 archiveNotice = "确认文字已保存，旧正文和笔记保留在修订历史中。"
                 if !previouslyPaused { resumeSavedProcessing() }
             } catch {
@@ -2161,9 +2188,9 @@ final class AppModel: ObservableObject {
             volatileEnglish = text
             // Preview updates do not use the translation model. Let a summary
             // finish unless caption backlog or memory pressure requires yielding.
-        case let .final(text, start, end, hints, _):
+        case let .final(text, start, end, hints, language):
             appendConfirmedCaption(TranscriptSegment(startTime: start,
-                endTime: end, english: text, sessionID: sessionID), hints: hints)
+                endTime: end, english: text, sessionID: sessionID, sourceLanguage: language), hints: hints)
         case .identifiedFinal(let result):
             guard result.sessionID == sessionID else { return }
             if let existing = segments.first(where: { $0.id == result.id }) {
@@ -2181,7 +2208,7 @@ final class AppModel: ObservableObject {
             }
             appendConfirmedCaption(TranscriptSegment(id: result.id, startTime: result.start,
                 endTime: result.end, english: result.text, sessionID: result.sessionID,
-                inputRevision: sessionSnapshot?.inputRevision ?? 0), hints: result.hints)
+                inputRevision: sessionSnapshot?.inputRevision ?? 0, sourceLanguage: result.language), hints: result.hints)
         case .processing(let state):
             guard state.sessionID == sessionID else { return }
             transcriptionProcessing = state
@@ -2249,20 +2276,26 @@ final class AppModel: ObservableObject {
     }
 
     private func appendConfirmedCaption(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint]) {
+            var segment = segment
+            let sourceOnly = SpokenLanguage.find(segment.sourceLanguage)?.avoidsTranslation == true
+            if sourceOnly { segment.completeTranslation(segment.english) }
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
             volatileEnglish = ""
             markCaptionActivity()
             segments.append(segment)
             segments.sort { $0.startTime == $1.startTime ? $0.id.uuidString < $1.id.uuidString : $0.startTime < $1.startTime }
-            translationHints[segment.id] = hints
+            if segment.sourceLanguage == nil { translationHints[segment.id] = hints }
             if lectureSummary.isEmpty, summaryTask == nil {
                 summaryStatus = "正在积累课堂上下文"
             }
-            translationQueue.append(segment.id)
-            translationEnqueuedAt[segment.id] = ProcessInfo.processInfo.systemUptime
+            if !sourceOnly {
+                translationQueue.append(segment.id)
+                translationEnqueuedAt[segment.id] = ProcessInfo.processInfo.systemUptime
+            } else { liveChinese = segment.chinese }
             updateReviewAvailability()
             yieldSummaryToCaptions()
             if !processingPaused { drainTranslationQueue() }
+            if sourceOnly { scheduleSummaryRefresh(force: summaryRefreshRequested) }
     }
 
     func translateTypedText(thinking: Bool = false) {
@@ -2364,7 +2397,7 @@ final class AppModel: ObservableObject {
         let old = segments[index]
         let revised = TranscriptSegment(id: id, startTime: old.startTime, endTime: old.endTime,
                                         english: english, sessionID: old.sessionID,
-                                        inputRevision: old.inputRevision)
+                                        inputRevision: old.inputRevision, sourceLanguage: old.sourceLanguage)
         replaceExistingSegment(at: index, with: revised, reason: "测试确认原文修订")
     }
     func configureNoteSchedulingForTesting(
@@ -2416,6 +2449,7 @@ final class AppModel: ObservableObject {
               generation == epoch, translationWorkerID == worker else { return nil }
         return segments.firstIndex {
             $0.id == input.id && $0.inputRevision == input.inputRevision && $0.english == input.english
+                && $0.sourceLanguage == input.sourceLanguage
         }
     }
 
@@ -2465,7 +2499,10 @@ final class AppModel: ObservableObject {
                 scheduleSummaryRefresh(force: summaryRefreshRequested)
             }
         }
-        guard pending.previousIndex(in: segments, session: session) != nil else {
+        guard let previousIndex = pending.previousIndex(in: segments, session: session),
+              pending.previous.sourceLanguage == nil, pending.current.sourceLanguage == nil,
+              segments[previousIndex].sourceLanguage == nil,
+              segments[previousIndex + 1].sourceLanguage == nil else {
             pendingCaptionRepairs.removeFirst()
             persistCurrentSession()
             return
@@ -2534,13 +2571,24 @@ final class AppModel: ObservableObject {
                         self.updateReviewAvailability()
                     }
                 }
+                if SpokenLanguage.find(input.sourceLanguage)?.avoidsTranslation == true {
+                    self.segments[index].completeTranslation(input.english)
+                    self.translationHints.removeValue(forKey: id)
+                    self.liveChinese = input.english
+                    self.markCaptionActivity()
+                    self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
+                    continue
+                }
                 self.segments[index].beginTranslation()
                 let english = self.segments[index].english
                 let recentContext = self.segments[..<index].suffix(6)
-                    .filter { self.segments[index].startTime - $0.endTime <= 60 }
+                    .filter { $0.sourceLanguage == nil && self.segments[index].startTime - $0.endTime <= 60 }
                     .map(\.english).joined(separator: " ")
-                let normalizedInput = AcademicInputNormalizer.normalize(english, recentContext: recentContext)
-                let protectedInput = ChemistryTranslationProtector.prepare(normalizedInput)
+                let sourceLanguage = input.sourceLanguage
+                let normalizedInput = sourceLanguage == nil
+                    ? AcademicInputNormalizer.normalize(english, recentContext: recentContext) : english
+                let protectedInput = sourceLanguage == nil ? ChemistryTranslationProtector.prepare(normalizedInput)
+                    : ProtectedChemistryTranslationInput(text: normalizedInput, replacements: [])
                 let translationModel = self.effectiveProfile.translationModel
                 let hints = protectedInput.translationHints(from: self.translationHints.removeValue(forKey: id) ?? [])
                 let started = ProcessInfo.processInfo.systemUptime
@@ -2552,6 +2600,7 @@ final class AppModel: ObservableObject {
                 do {
                     let response: String
                     let previousIndex = index > 0 && self.segments[index].startTime - self.segments[index - 1].endTime <= 2
+                        && input.sourceLanguage == nil && self.segments[index - 1].sourceLanguage == nil
                         && self.segments[index - 1].hasUsableTranslation ? index - 1 : nil
                     if let previousIndex {
                         let previousInput = self.segments[previousIndex]
@@ -2567,7 +2616,7 @@ final class AppModel: ObservableObject {
                             previousInput.english,
                             previousInput.chinese,
                             normalizedInput,
-                            repairContext.map(\.english).joined(separator: " "),
+                            repairContext.filter { $0.sourceLanguage == nil }.map(\.english).joined(separator: " "),
                             translationModel,
                             previousInput.endTime - previousInput.startTime >= 9.5
                                 || !".!?".contains(previousInput.english.last ?? " ")
@@ -2627,7 +2676,7 @@ final class AppModel: ObservableObject {
                         }
                         response = acceptedCurrent
                     } else {
-                    response = try await self.captionTranslation.translate(
+                    response = try await self.captionTranslation.translateCaption(
                         protectedInput.text,
                         translationModel,
                         hints,
@@ -2637,28 +2686,33 @@ final class AppModel: ObservableObject {
                                   self.translatingSegmentID == id,
                                   self.translationInputIndex(input, session: currentSession,
                                       epoch: currentGeneration, worker: workerID) != nil else { return }
-                            let draft = SimplifiedChineseNormalizer.normalize(
-                                protectedInput.restorePartial(in: partial)
-                            )
+                            let restored = protectedInput.restorePartial(in: partial)
+                            let draft = sourceLanguage == nil ? SimplifiedChineseNormalizer.normalize(restored)
+                                : CaptionTranslationTarget.current.normalize(restored)
                             if TranslationAcceptance.isModelReply(draft, source: normalizedInput) {
                                 self.clearTranslationPreview()
                                 return
                             }
+                            if sourceLanguage != nil,
+                               (try? TranslationAcceptance.validatedCaption(draft,
+                                   source: normalizedInput, sourceLanguage: sourceLanguage)) == nil { return }
                             if self.streamingChinese.isEmpty, !draft.isEmpty {
                                 Self.traceTranslation("first_text", id: id,
                                                       elapsed: ProcessInfo.processInfo.systemUptime - started)
                             }
                             self.streamingDependencyIDs = [input.id]
                             self.streamingChinese = draft
-                        }
+                        }, sourceLanguage: sourceLanguage
                     )
                     }
                     try Task.checkCancellation()
                     let restored = previousIndex == nil ? try protectedInput.validatedRestore(in: response) : response
                     // The restore step must not turn a technical answer into an
                     // English sentence after the model output was accepted.
+                    let normalized = sourceLanguage == nil ? SimplifiedChineseNormalizer.normalize(restored)
+                        : CaptionTranslationTarget.current.normalize(restored)
                     let chinese = try TranslationAcceptance.validatedCaption(
-                        SimplifiedChineseNormalizer.normalize(restored), source: normalizedInput)
+                        normalized, source: normalizedInput, sourceLanguage: sourceLanguage)
                     guard currentGeneration == self.generation, currentSession == self.sessionID,
                           self.translationWorkerID == workerID, !self.processingPaused else { return }
                     guard self.translationInputIndex(input, session: currentSession,
@@ -2692,8 +2746,8 @@ final class AppModel: ObservableObject {
                         Self.traceTranslation("retry_\(attempt.rawValue)", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started)
                         do {
-                            recovered = try await self.captionTranslation.translate(
-                                protectedInput.text, translationModel, hints, attempt, nil)
+                            recovered = try await self.captionTranslation.translateCaption(
+                                protectedInput.text, translationModel, hints, attempt, nil, sourceLanguage: sourceLanguage)
                         } catch { reason = error.localizedDescription }
                     }
                     guard !Task.isCancelled, currentGeneration == self.generation,
@@ -2705,8 +2759,10 @@ final class AppModel: ObservableObject {
                     if let recovered {
                         do {
                             let restored = try protectedInput.validatedRestore(in: recovered)
+                            let normalized = sourceLanguage == nil ? SimplifiedChineseNormalizer.normalize(restored)
+                                : CaptionTranslationTarget.current.normalize(restored)
                             accepted = try TranslationAcceptance.validatedCaption(
-                                SimplifiedChineseNormalizer.normalize(restored), source: normalizedInput)
+                                normalized, source: normalizedInput, sourceLanguage: sourceLanguage)
                         } catch { reason = error.localizedDescription }
                     }
                     if let accepted {
@@ -2823,7 +2879,7 @@ final class AppModel: ObservableObject {
         }.map {
             CaptionNoteGate.Caption(id: $0.id, revision: $0.inputRevision, start: $0.startTime,
                 end: $0.endTime, english: $0.english.trimmingCharacters(in: .whitespacesAndNewlines),
-                chinese: $0.chinese, usable: $0.hasUsableTranslation)
+                chinese: $0.chinese, usable: $0.hasUsableTranslation, sourceLanguage: $0.sourceLanguage)
         }
         var unsettled = Set(segments.filter { $0.translationState == .pending || $0.translationState == .translating }.map(\.id))
         unsettled.formUnion(translationQueue)

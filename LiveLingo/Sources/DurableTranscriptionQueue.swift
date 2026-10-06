@@ -337,6 +337,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                           && $0.previousSegment.english == (record.text ?? "")
                   }), let body = snapshot.segments.first(where: { $0.id == record.id }),
                   body.english == change.replacementSegment.english,
+                  !body.hasExplicitSourceLanguage || body.sourceLanguage == record.candidateLanguage,
                   body.inputRevision == change.toRevision else { continue }
             record.text = body.english
             record.textLanguage = body.sourceLanguage

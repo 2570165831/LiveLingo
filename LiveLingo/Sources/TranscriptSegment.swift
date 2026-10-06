@@ -50,6 +50,10 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         translationState == .completed && !chinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// An inferred 0.2.0 marker is not evidence of an explicit language choice.
+    /// This is in-memory provenance, never an additional persisted field.
+    var hasExplicitSourceLanguage: Bool { sourceLanguage != nil && !sourceLanguageWasInferred }
+
     /// Old builds omit language metadata when writing an inputRevision. The
     /// predecessor must still match every content, identity and translation field.
     func sameContent(as other: Self) -> Bool {

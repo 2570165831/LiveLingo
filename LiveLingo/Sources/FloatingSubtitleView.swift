@@ -70,11 +70,23 @@ private struct FloatingSubtitleContent: View {
 
 /// Preview wording shared by the classroom window and floating captions.
 extension AppModel {
+    private var confirmedNonEnglishCaption: TranscriptSegment? {
+        guard volatileEnglish.isEmpty, let caption = segments.last,
+              caption.sourceLanguage != nil, caption.sourceLanguage != "en" else { return nil }
+        return caption
+    }
+
     var previewEnglishDisplay: String {
-        previewTranslationSource.isEmpty ? "等待英文语音…" : previewTranslationSource
+        if let caption = confirmedNonEnglishCaption { return caption.english }
+        return previewTranslationSource.isEmpty ? "等待英文语音…" : previewTranslationSource
     }
 
     var previewChineseDisplay: String {
+        if let caption = confirmedNonEnglishCaption {
+            if SpokenLanguage.find(caption.sourceLanguage)?.avoidsTranslation == true { return caption.english }
+            if caption.hasUsableTranslation { return caption.chinese }
+            return caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…"
+        }
         guard previewTranslationEnabled else { return "初译已关闭" }
         guard supportsPreviewTranslation else { return "当前系统不支持初译；正式译文随后显示" }
         if !previewChinese.isEmpty { return "初译 · \(previewChinese)" }

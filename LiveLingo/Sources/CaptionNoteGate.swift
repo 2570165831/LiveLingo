@@ -11,6 +11,9 @@ struct CaptionNoteGate {
         var english: String
         var chinese: String
         var usable: Bool = true
+        var sourceLanguage: String? = nil
+
+        var isEnglishSource: Bool { sourceLanguage == nil || sourceLanguage == "en" }
     }
 
     struct Context {
@@ -50,13 +53,13 @@ struct CaptionNoteGate {
         var result = c.repairTargets
         for index in c.captions.indices {
             let caption = c.captions[index]
-            guard caption.usable else { continue }
+            guard caption.usable, caption.isEnglishSource else { continue }
             if index == c.captions.count - 1 {
                 if !c.producerDrained { result.insert(caption.id) }
             } else {
                 let successor = c.captions[index + 1]
-                // Mirrors AppModel's <= 2s adjacency rule. End punctuation does not seal a tail.
-                if successor.start - caption.end <= 2,
+                // Only English pairs can repair their predecessor. End punctuation does not seal an English tail.
+                if successor.isEnglishSource, successor.start - caption.end <= 2,
                    c.unsettledSuccessors.contains(successor.id) {
                     result.insert(caption.id)
                 }

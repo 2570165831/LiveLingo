@@ -6,6 +6,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		23DAF99A6A46840EF75BFF87 /* MultilingualCaptionGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */; };
+		85FDBC2832DCA7D90ADB81A7 /* MultilingualAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E36FE3F43F9C3628B4ACABDC /* MultilingualAppModelTests.swift */; };
+		0E5D0123C95A0E85803EF27C /* MultilingualTranslationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9503EACCE84D2D8339D5B133 /* MultilingualTranslationTests.swift */; };
 		EA1F1D3944F74AA19F668907 /* LanguageCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA1F1D3944F74AA19F668908 /* LanguageCompatibilityTests.swift */; };
 		EA1F1D3944F74AA19F668905 /* SourceLanguagePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA1F1D3944F74AA19F668906 /* SourceLanguagePolicyTests.swift */; };
 		EA1F1D3944F74AA19F668903 /* SourceLanguagePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA1F1D3944F74AA19F668904 /* SourceLanguagePolicy.swift */; };
@@ -79,6 +82,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualCaptionGateTests.swift; sourceTree = "<group>"; };
+		E36FE3F43F9C3628B4ACABDC /* MultilingualAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualAppModelTests.swift; sourceTree = "<group>"; };
+		9503EACCE84D2D8339D5B133 /* MultilingualTranslationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualTranslationTests.swift; sourceTree = "<group>"; };
 		EA1F1D3944F74AA19F668908 /* LanguageCompatibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LanguageCompatibilityTests.swift; sourceTree = "<group>"; };
 		EA1F1D3944F74AA19F668906 /* SourceLanguagePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceLanguagePolicyTests.swift; sourceTree = "<group>"; };
 		EA1F1D3944F74AA19F668904 /* SourceLanguagePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceLanguagePolicy.swift; sourceTree = "<group>"; };
@@ -213,6 +219,9 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */,
+				E36FE3F43F9C3628B4ACABDC /* MultilingualAppModelTests.swift */,
+				9503EACCE84D2D8339D5B133 /* MultilingualTranslationTests.swift */,
 				A20000000000000000000020 /* CausalBoundaryRegressionTests.swift */,
 				A20000000000000000000025 /* CaptionStabilityDraftTests.swift */,
 				BDBD81461CD14BB28D892236 /* WaveformFreshnessAcceptanceTests.swift */,
@@ -355,6 +364,9 @@
 				ED4315AD3367783A35A82407 /* SessionStoreTests.swift in Sources */,
 				EA1F1D3944F74AA19F668905 /* SourceLanguagePolicyTests.swift in Sources */,
 				EA1F1D3944F74AA19F668907 /* LanguageCompatibilityTests.swift in Sources */,
+				23DAF99A6A46840EF75BFF87 /* MultilingualCaptionGateTests.swift in Sources */,
+				85FDBC2832DCA7D90ADB81A7 /* MultilingualAppModelTests.swift in Sources */,
+				0E5D0123C95A0E85803EF27C /* MultilingualTranslationTests.swift in Sources */,
 				426BDE147DC859D73739A60C /* AudioRemediationTests.swift in Sources */,
 				0CE01B4507E3276B965D388A /* MLXOwnershipTests.swift in Sources */,
 				84845F083D7F515C9602CB68 /* TranscriptStateTests.swift in Sources */,A10000000000000000000008 /* SessionExporterTests.swift in Sources */, A10000000000000000000013 /* RealtimePolicyTests.swift in Sources */, A10000000000000000000019 /* TranslationAcceptanceTests.swift in Sources */, A1000000000000000000001A /* AudioContinuityTests.swift in Sources */, A1000000000000000000001B /* ExportAndPriorityTests.swift in Sources */, A1000000000000000000001C /* ReviewRetryTests.swift in Sources */, A1000000000000000000001D /* MediaImportTests.swift in Sources */, A1000000000000000000001E /* ClassroomPresentationTests.swift in Sources */, A1000000000000000000001F /* LearningFollowUpTests.swift in Sources */, 324C076031A3417B868B9D8D /* CountLanguageAcceptanceTests.swift in Sources */, D4E69378D56E4279BE15D3B3 /* NumberLiteralIntegrityTests.swift in Sources */, 97F1A2C9FD8748DB092D32F2 /* CodeIndexProvenanceTests.swift in Sources */,);
