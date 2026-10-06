@@ -22,6 +22,21 @@ NUMERIC_CONTEXT = "请核对原文中数值对应的对象、属性、单位和�
 SOURCE_POLICY = "fixture-uuid-v1/12s-start/10s-duration/revision-0/session-none"
 DISPLAY_CONTRACT = "production-point-and-rendered-membership-v1"
 PENDING = "pending-independent-readback"
+# Mirror CaptionTranslationTarget.current and SpokenLanguage.all. Source-unit
+# labels stay en/zh even when the spoken source uses a different language.
+CAPTION_TRANSLATION_TARGET = "zh-Hans"
+CAPTION_PASS_THROUGH_LANGUAGE_CODES = frozenset({"zh"})
+CAPTION_PASS_THROUGH_TRANSFORM = "Traditional-Simplified"
+SPOKEN_LANGUAGE_CODES = frozenset({
+    "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it",
+    "ko", "ru", "th", "vi", "ja", "tr", "hi", "ms", "nl", "sv",
+    "da", "fi", "pl", "cs", "fil", "fa", "el", "ro", "hu", "mk",
+})
+# EnglishTranscriptGate deliberately uses these narrower legacy ranges.
+LEGACY_HAN_RANGES = ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF))
+LEGACY_LATIN_RANGES = ((0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F), (0x1E00, 0x1EFF))
+LEGACY_MIN_LATIN_COUNT = 6
+LEGACY_LATIN_PER_HAN = 3
 # These filters only withhold automatic credit. They never declare a claim false.
 UNASSERTED = re.compile(r"^(?:[⚠️\s]*)(?:待(?:核实|核查|确认)(?:清单|内容|项)?|本条未提供解释|"
                        r"(?:以下|这些|上述).{0,16}(?:均|都|尚|未).{0,5}确认|"
@@ -392,6 +407,83 @@ def validate_note(note: dict) -> None:
         open_question(point)
 
 
+def has_usable_translation(source: dict) -> bool:
+    chinese = source.get("chinese", "")
+    return (isinstance(chinese, str) and bool(chinese.strip())
+            and not chinese.strip().startswith("[翻译失败：")
+            and source.get("translationState") in (None, "completed"))
+
+
+def source_language(source: dict) -> str | None:
+    stored = source.get("sourceLanguage")
+    if stored is not None:
+        # An unknown explicit marker is English, never legacy Chinese inference.
+        return stored if isinstance(stored, str) and stored in SPOKEN_LANGUAGE_CODES and stored != "en" else None
+    if has_usable_translation(source) and source["english"] == source["chinese"]:
+        scalars = [ord(c) for c in source["english"].strip()]
+        han = sum(any(start <= c <= end for start, end in LEGACY_HAN_RANGES) for c in scalars)
+        latin = sum(any(start <= c <= end for start, end in LEGACY_LATIN_RANGES) for c in scalars)
+        if han and latin < max(LEGACY_MIN_LATIN_COUNT, han * LEGACY_LATIN_PER_HAN):
+            return "zh"
+    return None
+
+
+def render_pass_through(text: str) -> str:
+    """Use the system transform behind Swift's SimplifiedChineseNormalizer.
+
+    No optional Python package or subprocess receives caption text. If the
+    system API is unavailable, withhold integrity credit rather than guess.
+    """
+    import ctypes
+    import ctypes.util
+
+    require(CAPTION_TRANSLATION_TARGET == "zh-Hans", "unsupported-caption-target")
+    library = ctypes.util.find_library("CoreFoundation") if sys.platform == "darwin" else None
+    require(bool(library), "pass-through-normalizer-unavailable")
+
+    class CFRange(ctypes.Structure):
+        _fields_ = [("location", ctypes.c_long), ("length", ctypes.c_long)]
+
+    pointer, index = ctypes.c_void_p, ctypes.c_long
+    characters = ctypes.POINTER(ctypes.c_uint16)
+    signatures = {
+        "CFStringCreateMutable": (pointer, [pointer, index]),
+        "CFStringAppendCharacters": (None, [pointer, characters, index]),
+        "CFStringCreateWithCString": (pointer, [pointer, ctypes.c_char_p, ctypes.c_uint32]),
+        "CFStringTransform": (ctypes.c_bool, [pointer, pointer, pointer, ctypes.c_bool]),
+        "CFStringGetLength": (index, [pointer]),
+        "CFStringGetCharacters": (None, [pointer, CFRange, characters]),
+        "CFRelease": (None, [pointer]),
+    }
+    try:
+        core = ctypes.CDLL(library)
+        for name, (result, arguments) in signatures.items():
+            function = getattr(core, name)
+            function.restype, function.argtypes = result, arguments
+    except (OSError, AttributeError):
+        raise IntegrityError("pass-through-normalizer-unavailable") from None
+
+    encoding = "utf-16-le" if sys.byteorder == "little" else "utf-16-be"
+    encoded = text.encode(encoding)
+    source = (ctypes.c_uint16 * (len(encoded) // 2)).from_buffer_copy(encoded)
+    mutable = core.CFStringCreateMutable(None, 0)
+    transform = core.CFStringCreateWithCString(None, CAPTION_PASS_THROUGH_TRANSFORM.encode("ascii"), 0x08000100)
+    try:
+        require(bool(mutable and transform), "pass-through-normalization-failed")
+        core.CFStringAppendCharacters(mutable, source, len(source))
+        # Swift's applyingTransform also returns the original text on failure.
+        if not core.CFStringTransform(mutable, None, transform, False):
+            return text
+        length = core.CFStringGetLength(mutable)
+        output = (ctypes.c_uint16 * length)()
+        core.CFStringGetCharacters(mutable, CFRange(0, length), output)
+        return bytes(output).decode(encoding)
+    finally:
+        for value in (mutable, transform):
+            if value:
+                core.CFRelease(value)
+
+
 def verify_units(units: list[dict], evidence: list[dict]) -> dict[str, dict]:
     units = object_list(units, "sourceUnits")
     unique([x.get("id") for x in units], "sourceUnits")
@@ -399,24 +491,15 @@ def verify_units(units: list[dict], evidence: list[dict]) -> dict[str, dict]:
                 for x in units), "source-unit-owner")
     expected_order = []
     for index, source in enumerate(evidence):
-        source_language = source.get("sourceLanguage")
-        # Match the 0.2.0 Chinese inference when encoding has preserved marker
-        # absence. Ordinary English evidence must still contain both groups.
-        if source_language is None and source["english"] == source["chinese"] \
-                and source.get("translationState", "completed") == "completed":
-            scalars = [ord(c) for c in source["english"].strip()]
-            han = sum(0x3400 <= c <= 0x4DBF or 0x4E00 <= c <= 0x9FFF or 0xF900 <= c <= 0xFAFF
-                      for c in scalars)
-            latin = sum(0x41 <= c <= 0x5A or 0x61 <= c <= 0x7A or 0xC0 <= c <= 0x24F
-                        or 0x1E00 <= c <= 0x1EFF for c in scalars)
-            if han and latin < max(6, han * 3):
-                source_language = "zh"
-        groups = (("en", "english"), ("zh", "chinese")) if source_language in (None, "en") \
-            else (("zh", "english" if source_language == "zh" else "chinese"),)
+        language_code = source_language(source)
+        groups = (("en", "english"), ("zh", "chinese")) if language_code is None else (("zh", "chinese"),)
         for language, key in groups:
             fragments = [x for x in units if x["index"] == index and x["language"] == language]
             require(bool(fragments), "missing-source-language")
-            original = source[key]
+            if language_code in CAPTION_PASS_THROUGH_LANGUAGE_CODES:
+                original = source["chinese"] if has_usable_translation(source) else render_pass_through(source["english"])
+            else:
+                original = source[key]
             cursor = 0
             for number, fragment in enumerate(fragments):
                 expected_id = f"{language}{index}s{number}"

@@ -767,7 +767,7 @@ final class SessionStore: @unchecked Sendable {
 
     private func readLegacy() throws -> SessionSnapshot? {
         let jsonl = directory.appendingPathComponent("bilingual.jsonl")
-        let markdown = directory.appendingPathComponent("summary-zh-Hans.md")
+        let markdown = SessionExporter.savedSummaryURL(in: directory)
         try SessionArchiveCoding.requireRegularFileIfPresent(jsonl)
         try SessionArchiveCoding.requireRegularFileIfPresent(markdown)
         let hasJSONL = FileManager.default.fileExists(atPath: jsonl.path)
@@ -1081,7 +1081,7 @@ struct SessionDirectoryIdentity: Equatable, Sendable {
         }
         // A legacy directory has no asserted UUID until explicitly saved.
         var bytes = Data()
-        for name in ["bilingual.jsonl", "summary-zh-Hans.md"] {
+        for name in ["bilingual.jsonl", SessionExporter.savedSummaryURL(in: location).lastPathComponent] {
             let path = location.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: path.path) {
                 bytes.append(Data(name.utf8)); bytes.append(0)

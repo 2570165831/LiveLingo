@@ -3269,7 +3269,10 @@ enum LectureSummaryInput {
         for segment in segments where !coveredIDs.contains(segment.id) {
             guard !segment.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   segment.hasUsableTranslation else { continue }
-            let entrySize = segment.english.count + (segment.sourceLanguage == "zh" ? 0 : segment.chinese.count) + 32
+            let target = CaptionTranslationTarget.current
+            let entrySize = target.keepsSourceAsCaption(language: segment.sourceLanguage)
+                ? SessionExporter.targetLine(segment).count + 32
+                : segment.english.count + segment.chinese.count + 32
             if !selected.isEmpty, size + entrySize > maximumCharacters { break }
             selected.append(segment)
             size += entrySize
@@ -3308,14 +3311,16 @@ enum LectureSummaryInput {
         var characterCount = 0
         for segment in completed.reversed() {
             let entry: String
-            if segment.sourceLanguage == "zh" {
-                let target = CaptionTranslationTarget.current.rawValue.components(separatedBy: "-")[0].uppercased()
-                entry = "[\(clock(segment.startTime))]\n\(target): \(segment.english)"
+            let target = CaptionTranslationTarget.current
+            let sourceLabel = (segment.sourceLanguage ?? "en").uppercased()
+            if target.keepsSourceAsCaption(language: segment.sourceLanguage) {
+                entry = "[\(clock(segment.startTime))]\n\(sourceLabel): \(SessionExporter.targetLine(segment))"
             } else {
+                let targetLabel = target.rawValue.components(separatedBy: "-")[0].uppercased()
                 entry = """
                 [\(clock(segment.startTime))]
-                EN: \(segment.english)
-                ZH: \(segment.chinese)
+                \(sourceLabel): \(segment.english)
+                \(targetLabel): \(segment.chinese)
                 """
             }
             if !selected.isEmpty, characterCount + entry.count > maximumCharacters {

@@ -921,12 +921,16 @@ struct LearningSourceUnit: Encodable, Equatable, Sendable {
     var source: LearningPoint.Source { .init(index: index, quote: text) }
 
     /// The en/zh review protocol stays fixed. Non-English evidence contributes
-    /// only the target group; Chinese speech uses its unchanged source text.
+    /// only the target group; pass-through speech uses target-normalized text.
     static func textGroups(for segment: TranscriptSegment) -> [(language: String, text: String)] {
-        guard let language = segment.sourceLanguage else {
+        guard segment.sourceLanguage != nil else {
             return [("en", segment.english), ("zh", segment.chinese)]
         }
-        return [("zh", language == "zh" ? segment.english : segment.chinese)]
+        let target = CaptionTranslationTarget.current
+        let text = target.keepsSourceAsCaption(language: segment.sourceLanguage)
+            ? (segment.hasUsableTranslation ? segment.chinese : target.renderPassThrough(segment.english))
+            : segment.chinese
+        return [("zh", text)]
     }
 
     static func make(_ evidence: [TranscriptSegment]) -> [Self] {
@@ -1118,7 +1122,10 @@ struct LearningNotebook: Sendable {
                 let referenceCheck = !semanticQuestion && point.sourceHasPronoun == true && point.referenceState == .linked
                 guard semanticQuestion || referenceCheck else { return nil }
                 let quotes = (point.sources ?? []).map(\.quote)
-                let context = quotes.isEmpty ? batch.evidence.map { $0.english.isEmpty ? $0.chinese : $0.english } : quotes
+                let context = quotes.isEmpty ? batch.evidence.map { segment in
+                    if segment.sourceLanguage != nil { return LearningSourceUnit.textGroups(for: segment).first?.text ?? "" }
+                    return segment.english.isEmpty ? segment.chinese : segment.english
+                } : quotes
                 let candidateSources = Array((candidates[id] ?? []).suffix(2).flatMap { candidate in
                     (candidate.point.sources ?? []).map { (quote: $0.quote, ids: candidate.batch.evidence.map(\.id)) }
                 }.suffix(2))
@@ -3154,7 +3161,7 @@ final class LearningReviewQueue: ObservableObject {
             // original is never compared with the full-course Markdown when a
             // snapshot provides exact batch identity and evidence instead.
             let snapshot = try ReviewInputBinding.snapshot(in: directory)
-            if snapshot == nil, !FileManager.default.fileExists(atPath: target.appendingPathComponent("summary-zh-Hans.md").path) {
+            if snapshot == nil, !FileManager.default.fileExists(atPath: SessionExporter.savedSummaryURL(in: target).path) {
                 throw ReviewIdentityError.conflict("目标目录没有可核对的课程快照或笔记")
             }
             for job in moving {

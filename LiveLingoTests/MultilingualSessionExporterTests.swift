@@ -1,5 +1,7 @@
 import AVFoundation
+import AppKit
 import Foundation
+import PDFKit
 import XCTest
 @testable import LiveLingo
 
@@ -75,13 +77,13 @@ final class MultilingualSessionExporterTests: XCTestCase {
         let root = try directory()
         let segments = [
             TranscriptSegment(startTime: 0, endTime: 1, english: "Air is clear.", chinese: "空气清澈。"),
-            TranscriptSegment(startTime: 1, endTime: 2, english: "冰很冷。", chinese: "冰很冷。", sourceLanguage: "zh"),
+            TranscriptSegment(startTime: 1, endTime: 2, english: "這片葉子長大了。", chinese: "这片叶子长大了。", sourceLanguage: "zh"),
             TranscriptSegment(startTime: 2, endTime: 3, english: "El agua fluye.", chinese: "水会流动。", sourceLanguage: "es"),
             TranscriptSegment(startTime: 3, endTime: 4, english: "水會流㗎。", chinese: "水会流动。", sourceLanguage: "yue")
         ]
         try SessionExporter.export(segments: segments, sessionDirectory: root)
-        let expectedSource = "Air is clear.\n冰很冷。\nEl agua fluye.\n水會流㗎。\n"
-        let expectedTarget = "空气清澈。\n冰很冷。\n水会流动。\n水会流动。\n"
+        let expectedSource = "Air is clear.\n這片葉子長大了。\nEl agua fluye.\n水會流㗎。\n"
+        let expectedTarget = "空气清澈。\n这片叶子长大了。\n水会流动。\n水会流动。\n"
         XCTAssertTrue(try Data(contentsOf: root.appendingPathComponent("transcript-en.txt")) == Data(expectedSource.utf8))
         XCTAssertTrue(try Data(contentsOf: root.appendingPathComponent("transcript-zh-Hans.txt")) == Data(expectedTarget.utf8))
         let expectedSRT = """
@@ -92,7 +94,7 @@ final class MultilingualSessionExporterTests: XCTestCase {
 
         2
         00:00:01,000 --> 00:00:02,000
-        冰很冷。
+        这片叶子长大了。
 
         3
         00:00:02,000 --> 00:00:03,000
@@ -107,7 +109,7 @@ final class MultilingualSessionExporterTests: XCTestCase {
         XCTAssertTrue(try Data(contentsOf: root.appendingPathComponent("bilingual.srt")) == Data(expectedSRT.utf8))
         let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("manifest.json"))) as? [String: Any]
         XCTAssertEqual(manifest?["sourceLanguages"] as? [String], ["es", "yue", "zh"])
-        XCTAssertEqual(manifest?["targetLocale"] as? String, CaptionTranslationTarget.current.rawValue)
+        XCTAssertEqual(manifest?["targetLocale"] as? String, "zh-Hans")
         let jsonl = try String(contentsOf: root.appendingPathComponent("bilingual.jsonl"), encoding: .utf8)
         let rows = try jsonl.split(separator: "\n").map {
             try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
@@ -119,16 +121,124 @@ final class MultilingualSessionExporterTests: XCTestCase {
             ["transcript-en.txt", "transcript-zh-Hans.txt", "bilingual.jsonl", "bilingual.srt", "manifest.json"])
     }
 
-    func testChineseRenderingUsesOriginalOnceAndOtherLanguagesKeepBothLines() {
-        let zh = TranscriptSegment(startTime: 0, endTime: 1, english: "冰很冷。", sourceLanguage: "zh")
-        XCTAssertTrue(SessionExporter.sourceLine(zh) == "冰很冷。")
-        XCTAssertTrue(SessionExporter.targetLine(zh) == "冰很冷。")
-        XCTAssertTrue(SessionExporter.srtCue(zh, index: 0) == "1\n00:00:00,000 --> 00:00:01,000\n冰很冷。")
+    func testChineseRenderingNormalizesMissingTargetOnceAndOtherLanguagesKeepBothLines() {
+        let zh = TranscriptSegment(startTime: 0, endTime: 1, english: "這片葉子長大了。", sourceLanguage: "zh")
+        XCTAssertTrue(SessionExporter.sourceLine(zh) == "這片葉子長大了。")
+        XCTAssertTrue(SessionExporter.targetLine(zh) == "这片叶子长大了。")
+        XCTAssertTrue(SessionExporter.srtCue(zh, index: 0) == "1\n00:00:00,000 --> 00:00:01,000\n这片叶子长大了。")
         let es = TranscriptSegment(startTime: 1, endTime: 2, english: "El agua fluye.", sourceLanguage: "es")
         XCTAssertTrue(SessionExporter.srtCue(es, index: 1)
             == "2\n00:00:01,000 --> 00:00:02,000\nEl agua fluye.\n（本段暂无译文）")
-        XCTAssertEqual(SessionExporter.targetTranscriptFileName, "transcript-" + CaptionTranslationTarget.current.rawValue + ".txt")
-        XCTAssertEqual(SessionExporter.targetSummaryFileName, "summary-" + CaptionTranslationTarget.current.rawValue + ".md")
+        XCTAssertEqual(SessionExporter.targetTranscriptFileName, "transcript-zh-Hans.txt")
+        XCTAssertEqual(SessionExporter.targetSummaryFileName, "summary-zh-Hans.md")
+    }
+
+    func testPassThroughPrefersSavedUsableTargetAndNormalizesFailedTarget() {
+        var segment = TranscriptSegment(startTime: 0, endTime: 1, english: "這片葉子長大了。",
+            chinese: "叶子已经长大。", sourceLanguage: "zh")
+        XCTAssertEqual(SessionExporter.targetLine(segment), "叶子已经长大。")
+        segment.failTranslation("synthetic-failure")
+        XCTAssertEqual(SessionExporter.targetLine(segment), "这片叶子长大了。")
+        XCTAssertEqual(SessionExporter.captionLines(segment), ["这片叶子长大了。"])
+    }
+
+    func testSpanishFailureExportsNeutralTextForBothFailureRepresentations() throws {
+        var failed = TranscriptSegment(startTime: 0, endTime: 1, english: "El agua fluye.", sourceLanguage: "es")
+        failed.failTranslation("synthetic-failure")
+        let legacyFailure = TranscriptSegment(startTime: 1, endTime: 2, english: "El calor se mueve.",
+            chinese: "[翻译失败：synthetic-failure]", sourceLanguage: "es")
+        let root = try directory()
+        try SessionExporter.export(segments: [failed, legacyFailure], sessionDirectory: root)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("transcript-en.txt")),
+            Data("El agua fluye.\nEl calor se mueve.\n".utf8))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("transcript-zh-Hans.txt")),
+            Data("（本段翻译未完成，可对照原文）\n（本段翻译未完成，可对照原文）\n".utf8))
+        let expected = "1\n00:00:00,000 --> 00:00:01,000\nEl agua fluye.\n（本段翻译未完成，可对照原文）\n\n"
+            + "2\n00:00:01,000 --> 00:00:02,000\nEl calor se mueve.\n（本段翻译未完成，可对照原文）\n"
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("bilingual.srt")), Data(expected.utf8))
+    }
+
+    func testSavedSummaryNamesUseManifestAndRetainLegacyFallback() throws {
+        let root = try directory()
+        XCTAssertEqual(SessionExporter.targetTranscriptFileName(for: "en"), "transcript-target-en.txt")
+        XCTAssertEqual(SessionExporter.targetSummaryFileName(for: "zh-Hant-TW"), "summary-zh-Hant-TW.md")
+        XCTAssertTrue(SessionExporter.isValidTargetLocale("zh-Hant-HK"))
+        XCTAssertFalse(SessionExporter.isValidTargetLocale("../../private"))
+        try Data(#"{"targetLocale":"zh-Hant-TW"}"#.utf8).write(to: root.appendingPathComponent("manifest.json"))
+        try Data("# 舊筆記\n".utf8).write(to: root.appendingPathComponent("summary-zh-Hans.md"))
+        XCTAssertEqual(SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-zh-Hans.md")
+        try Data("# 新筆記\n".utf8).write(to: root.appendingPathComponent("summary-zh-Hant-TW.md"))
+        XCTAssertEqual(SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-zh-Hant-TW.md")
+        let snapshot = try SessionStore(directory: root).loadDetailed().snapshot
+        XCTAssertEqual(snapshot?.legacyMarkdown, "# 新筆記\n")
+    }
+
+    private func notesSnapshot(_ segments: [TranscriptSegment]) throws -> NotesExportSnapshot {
+        let date = try XCTUnwrap(Calendar(identifier: .gregorian).date(from:
+            DateComponents(year: 2001, month: 1, day: 2, hour: 12, minute: 34)))
+        return NotesExportSnapshot(className: "Chemistry", sessionName: "Lesson 2001-01-02", scope: .wholeLesson,
+            scopeDetail: "全部片段", coverageLine: "已整理", notesMarkdown: "冰很冷。", reviewMarkdown: nil,
+            transcript: segments, generatedAt: date, includesReviewAdvice: false, includesTranscript: true)
+    }
+
+    private func assertNotesSnapshot(_ snapshot: NotesExportSnapshot, captions: String, attributedCaptions: String) throws {
+        // Frozen document text, including the pre-step-7 spacing and headers.
+        // Expectations never call a production renderer to derive their bytes.
+        let markdown = "# Chemistry · 整课笔记 · 2001-01-02\n\n"
+            + "- 内容范围：整课笔记（全部片段）\n- 整理进度：已整理\n- 来源录音：Lesson 2001-01-02\n"
+            + "- 导出时间：2001-01-02 12:34\n"
+            + "- 说明：本文件由本机模型生成，未经人工逐句核对；正文按主题整理，“需要回听”和“来源检查”两节列出的内容仍需自行核对。\n\n\n"
+            + "## 学习笔记\n\n冰很冷。\n\n## 双语字幕（含时间戳）\n\n" + captions + "\n"
+        let plain = "# Chemistry · 整课笔记 · 2001-01-02\n\n"
+            + "  内容范围：整课笔记（全部片段）\n  整理进度：已整理\n  来源录音：Lesson 2001-01-02\n"
+            + "  导出时间：2001-01-02 12:34\n"
+            + "  说明：本文件由本机模型生成，未经人工逐句核对；正文按主题整理，“需要回听”和“来源检查”两节列出的内容仍需自行核对。\n\n\n\n"
+            + "学习笔记\n\n冰很冷。\n\n\n双语字幕（含时间戳）\n\n" + captions + "\n"
+        let attributed = "Chemistry · 整课笔记 · 2001-01-02\n内容范围：整课笔记（全部片段）\n整理进度：已整理\n"
+            + "来源录音：Lesson 2001-01-02\n导出时间：2001-01-02 12:34\n"
+            + "本文件由本机模型生成，未经人工逐句核对；正文按主题整理，“需要回听”和“来源检查”两节列出的内容仍需自行核对。\n"
+            + "学习笔记\n冰很冷。\n双语字幕（含时间戳）\n" + attributedCaptions
+        XCTAssertEqual(try NotesExportDocument.data(snapshot, format: .markdown), Data(markdown.utf8))
+        XCTAssertEqual(try NotesExportDocument.data(snapshot, format: .plainText), Data(plain.utf8))
+        XCTAssertEqual(Data(PDFNotesWriter.attributedDocument(snapshot).string.utf8), Data(attributed.utf8))
+        let word = try NSAttributedString(data: NotesExportDocument.data(snapshot, format: .word),
+            options: [.documentType: NSAttributedString.DocumentType.officeOpenXML], documentAttributes: nil)
+        XCTAssertEqual(Data(word.string.utf8), Data(attributed.utf8))
+        let pdf = try XCTUnwrap(PDFDocument(data: NotesExportDocument.data(snapshot, format: .pdf)))
+        let text = try XCTUnwrap(pdf.string)
+        for line in attributedCaptions.split(separator: "\n") {
+            XCTAssertTrue(text.contains(line), "PDF transcript line missing")
+        }
+    }
+
+    func testEnglishNotesSnapshotMatchesFrozenTextInAllFourFormats() throws {
+        let snapshot = try notesSnapshot([
+            TranscriptSegment(startTime: 0, endTime: 1, english: "Ice is cold.", chinese: "冰很冷。"),
+            TranscriptSegment(startTime: 1, endTime: 2, english: "Water flows."),
+            TranscriptSegment(startTime: 2, endTime: 3, english: "Heat moves.", chinese: "[翻译失败：synthetic-failure]")
+        ])
+        try assertNotesSnapshot(snapshot,
+            captions: "[00:00–00:01] Ice is cold.\n冰很冷。\n\n[00:01–00:02] Water flows.\n（本段暂无译文）\n\n"
+                + "[00:02–00:03] Heat moves.\n（本段翻译未完成，可对照英文）",
+            attributedCaptions: "[00:00–00:01] Ice is cold.\n冰很冷。\n[00:01–00:02] Water flows.\n（本段暂无译文）\n"
+                + "[00:02–00:03] Heat moves.\n（本段翻译未完成，可对照英文）\n")
+    }
+
+    func testMixedNotesSnapshotUsesNormalizedSingleLineAndNeutralFailure() throws {
+        let snapshot = try notesSnapshot([
+            TranscriptSegment(startTime: 0, endTime: 1, english: "Ice is cold.", chinese: "冰很冷。"),
+            TranscriptSegment(startTime: 1, endTime: 2, english: "這片葉子長大了。", chinese: "这片叶子长大了。", sourceLanguage: "zh"),
+            TranscriptSegment(startTime: 2, endTime: 3, english: "El agua fluye.", chinese: "[翻译失败：synthetic-failure]", sourceLanguage: "es"),
+            TranscriptSegment(startTime: 3, endTime: 4, english: "水會流㗎。", chinese: "水会流动。", sourceLanguage: "yue")
+        ])
+        try assertNotesSnapshot(snapshot,
+            captions: "[00:00–00:01] Ice is cold.\n冰很冷。\n\n[00:01–00:02] 这片叶子长大了。\n\n"
+                + "[00:02–00:03] El agua fluye.\n（本段翻译未完成，可对照原文）\n\n[00:03–00:04] 水會流㗎。\n水会流动。",
+            attributedCaptions: "[00:00–00:01] Ice is cold.\n冰很冷。\n[00:01–00:02] 这片叶子长大了。\n"
+                + "[00:02–00:03] El agua fluye.\n（本段翻译未完成，可对照原文）\n[00:03–00:04] 水會流㗎。\n水会流动。\n")
+        let rendered = PDFNotesWriter.attributedDocument(snapshot).string
+        XCTAssertFalse(rendered.contains("這片葉子長大了。"))
+        XCTAssertEqual(rendered.components(separatedBy: "这片叶子长大了。").count, 2)
     }
 
     func testLegacyChineseInferenceRetainsJournalProvenanceAndSingleLineExport() throws {

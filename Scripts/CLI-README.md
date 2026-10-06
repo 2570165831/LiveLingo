@@ -25,13 +25,39 @@ alongside a real recording or use the legacy service script for this CLI.
 Build into a new directory:
 
 ```sh
-bash Scripts/build-cli.sh /absolute/path/to/new-cli-build
+bash Scripts/build-cli.sh work/new-cli-build
 ```
 
 To reuse an existing compatible Swift module cache, pass
 `--module-cache /absolute/path/to/existing-cache`. The output directory must
-still be new. `--lifecycle-tests` can be combined with this option. Headless
+still be new. Both `--lifecycle-tests` and `--multilingual-tests` accept this option,
+but the two test options use separate entry points and cannot be combined. Headless
 commands cancel any UI-only file chooser path without presenting a window.
+
+Run the multilingual regression from the repository root, using a new build
+directory and a new evidence directory under `work/`:
+
+```sh
+bash Scripts/build-cli.sh work/cli-multilingual-build --multilingual-tests
+work/cli-multilingual-build/livelingo-cli-multilingual-tests \
+  work/cli-multilingual-build/livelingo-cli work/cli-multilingual-evidence
+```
+
+The test executable requires the `livelingo-cli` beside it from that same build.
+The optional second argument selects its evidence directory; alternatively set
+`LIVELINGO_CLI_MULTILINGUAL_WORK`. If neither is supplied, it creates a new
+`work/cli-multilingual-<UUID>` directory. Existing directories are refused,
+paths must remain under this repository's `work/`, and the synthetic fixtures
+are retained for inspection. It starts only the CLI's read-only `--verify-saved`
+mode, with no model, HTTP service or audio device. Captured CLI output is checked
+in memory; test events contain check names and counts, never subtitle text.
+
+The existing lifecycle entry point remains separate:
+
+```sh
+bash Scripts/build-cli.sh work/cli-lifecycle-build --lifecycle-tests
+work/cli-lifecycle-build/livelingo-cli-lifecycle-tests work/cli-lifecycle-evidence
+```
 
 Silent real-time replay (no audio output device is opened):
 
@@ -80,14 +106,31 @@ it does not prove complete processing and accepts valid audio with zero captions
 
 Multilingual exports reuse the existing files. `transcript-en.txt` contains the
 original source text without language labels. The target transcript (currently
-`transcript-zh-Hans.txt`, selected by `CaptionTranslationTarget`) contains Chinese
-speech verbatim and translated text for other languages, including Cantonese.
-SRT cues contain Chinese speech once; English and other languages retain source
-and target lines. JSONL keeps the legacy `english` key for source text and the
+`transcript-zh-Hans.txt`, selected by `CaptionTranslationTarget`) uses the saved
+usable target text for Chinese speech, or normalizes its source text to the
+target writing system when that text is unavailable. Other languages, including
+Cantonese, use translated text. SRT cues contain the Chinese target line once;
+English and other languages retain source and target lines. JSONL keeps the
+legacy `english` key for source text and the
 optional `sourceLanguage` code from the existing segment encoder. Inferred legacy
-Chinese keeps its absent marker for 0.2.0 revision replay. Manifest
-`sourceLanguages` is an optional sorted list of unique non-English codes and is
+Chinese keeps its absent marker for 0.2.0 revision replay. Unmarked legacy rows
+infer zh only when their completed source and target text match and satisfy the
+Chinese-content gate; this does not recover a separate historical yue identity.
+Manifest `sourceLanguages` is an optional sorted list of unique non-English codes and is
 omitted for English-only courses; `sourceLocale` retains its legacy value.
+`--verify-saved` selects transcript and summary filenames using the saved
+manifest's `targetLocale`, even when it differs from the current target. With
+`sourceLanguages` present it requires the exact language list and current shared
+rendering. Without that field every row must lack an explicit source-language
+marker, and verification uses the old two-line SRT and
+`humanReadableChinese(chinese)` target text, including inferred zh rows. Absent
+or null JSONL markers remain compatible; any stored `sourceLanguage` string,
+including `en` or an unknown code, requires the manifest language field.
+Removing the manifest language list from an explicitly marked export is rejected.
+An `en` target uses `transcript-target-en.txt`, preserving the separate original
+source file `transcript-en.txt`.
+Non-English translation failures render as
+`（本段翻译未完成，可对照原文）`; the English placeholder stays unchanged.
 
 `run_verified` adds integer counts: `chineseCaptions` counts zh captions,
 `otherLanguageCaptions` counts all other non-English captions (including yue), and
@@ -95,6 +138,8 @@ omitted for English-only courses; `sourceLocale` retains its legacy value.
 count; cached results and historical requests do not. These three event fields
 accept only nonnegative Swift integers, never text, booleans or floating-point
 coercions. The counter is in memory and adds no persisted fields.
+Only the verifier emits `run_verified`; a same-named AppModel callback is
+sanitized to `progress`, while the integer fields remain allowlisted.
 
 For cleanup, first ensure the CLI has exited, keep the result/required logs,
 and move only its explicit test output/build paths to Trash. Never remove

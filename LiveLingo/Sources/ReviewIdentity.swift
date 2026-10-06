@@ -171,7 +171,7 @@ enum ReviewInputBinding {
         guard identity == nil else {
             throw ReviewIdentityError.conflict("课程身份快照缺失，请恢复完整课程目录")
         }
-        let summary = directory.appendingPathComponent("summary-zh-Hans.md")
+        let summary = SessionExporter.savedSummaryURL(in: directory)
         if FileManager.default.fileExists(atPath: summary.path) {
             guard try String(contentsOf: summary, encoding: .utf8) == original + "\n" else {
                 throw ReviewIdentityError.conflict("所选目录的笔记与复查原文不同")

@@ -311,27 +311,37 @@ struct LiveLingoCLI {
   let decoder=JSONDecoder();decoder.dateDecodingStrategy = .iso8601
   let manifest=try decoder.decode(SessionExporter.Manifest.self,from:Data(contentsOf:directory.appendingPathComponent("manifest.json")))
   guard manifest.recordingFile == "recording.wav",
-        manifest.targetLocale == CaptionTranslationTarget.current.rawValue else { throw CLIError.inconsistentExport }
+        SessionExporter.isValidTargetLocale(manifest.targetLocale) else { throw CLIError.inconsistentExport }
+  let targetTranscriptName = SessionExporter.targetTranscriptFileName(for: manifest.targetLocale)
+  let targetSummaryName = SessionExporter.targetSummaryFileName(for: manifest.targetLocale)
   let jsonl=try String(contentsOf:directory.appendingPathComponent("bilingual.jsonl"),encoding:.utf8)
-  let segments=try jsonl.split(separator:"\n").map { try decoder.decode(TranscriptSegment.self,from:Data($0.utf8)) }
+  let rows = jsonl.split(separator:"\n")
+  let segments=try rows.map { try decoder.decode(TranscriptSegment.self,from:Data($0.utf8)) }
   guard segments.count == manifest.segmentCount, Set(segments.map(\.id)).count == segments.count else { throw CLIError.inconsistentExport }
   if let languages = manifest.sourceLanguages {
    guard languages == SessionExporter.sourceLanguages(in: segments) else { throw CLIError.inconsistentExport }
+  } else {
+   // Check the stored marker, including en and unknown codes that the segment
+   // decoder normalizes to nil. Only absent/null markers can use the old format.
+   struct LanguageMetadata: Decodable { let sourceLanguage: String? }
+   guard try rows.allSatisfy({
+    try decoder.decode(LanguageMetadata.self, from: Data($0.utf8)).sourceLanguage == nil
+   }) else { throw CLIError.inconsistentExport }
   }
+  let usesLegacyFormat = manifest.sourceLanguages == nil
   let english=try String(contentsOf:directory.appendingPathComponent("transcript-en.txt"),encoding:.utf8)
-  let chinese=try String(contentsOf:directory.appendingPathComponent(SessionExporter.targetTranscriptFileName),encoding:.utf8)
+  let chinese=try String(contentsOf:directory.appendingPathComponent(targetTranscriptName),encoding:.utf8)
+  let targetLines = usesLegacyFormat ? segments.map(legacyTargetLine) : segments.map(SessionExporter.targetLine)
   guard english == segments.map(SessionExporter.sourceLine).joined(separator:"\n")+"\n",
-        // Keep this aligned with the production exporter, including legacy
-        // missing-translation placeholders. It does not prove translation quality.
-        chinese == segments.map(SessionExporter.targetLine).joined(separator:"\n")+"\n" else { throw CLIError.inconsistentExport }
+        chinese == targetLines.joined(separator:"\n")+"\n" else { throw CLIError.inconsistentExport }
   let expectedSRT = segments.enumerated().map { index, segment in
-   SessionExporter.srtCue(segment, index: index)
+   usesLegacyFormat ? legacySRTCue(segment, index: index) : SessionExporter.srtCue(segment, index: index)
   }.joined(separator: "\n\n") + "\n"
   guard try String(contentsOf: directory.appendingPathComponent("bilingual.srt"), encoding: .utf8) == expectedSRT else { throw CLIError.inconsistentExport }
   let audio=try AVAudioFile(forReading:directory.appendingPathComponent(manifest.recordingFile))
   guard audio.length>0, audio.processingFormat.sampleRate>0 else { throw CLIError.inconsistentExport }
-  var names=["manifest.json","bilingual.jsonl","bilingual.srt","transcript-en.txt",SessionExporter.targetTranscriptFileName,"recording.wav"]
-  if FileManager.default.fileExists(atPath:directory.appendingPathComponent(SessionExporter.targetSummaryFileName).path) { names.append(SessionExporter.targetSummaryFileName) }
+  var names=["manifest.json","bilingual.jsonl","bilingual.srt","transcript-en.txt",targetTranscriptName,"recording.wav"]
+  if FileManager.default.fileExists(atPath:directory.appendingPathComponent(targetSummaryName).path) { names.append(targetSummaryName) }
   let files=try names.map { name -> [String:Any] in
    let digest = try hashFile(directory.appendingPathComponent(name))
    guard digest.bytes > 0 else { throw CLIError.inconsistentExport }
@@ -345,6 +355,17 @@ struct LiveLingoCLI {
     "audioSeconds":Double(audio.length)/audio.processingFormat.sampleRate,"files":files]
   if emit { writeEvent(receipt) }
   return segments.count
+ }
+
+ // Frozen pre-multilingual rendering: even inferred zh used a source line and
+ // humanReadableChinese target line. Do not route it through the new renderer.
+ private static func legacyTargetLine(_ segment: TranscriptSegment) -> String {
+  SessionExporter.humanReadableChinese(segment.chinese)
+ }
+
+ private static func legacySRTCue(_ segment: TranscriptSegment, index: Int) -> String {
+  "\(index + 1)\n\(SessionExporter.srtTimestamp(segment.startTime)) --> \(SessionExporter.srtTimestamp(segment.endTime))\n"
+   + segment.english + "\n" + legacyTargetLine(segment)
  }
 
  static func verifyProcessing(state: TranscriptionProcessingState?, snapshot: SessionSnapshot?, segmentCount: Int) throws {
@@ -758,7 +779,7 @@ struct LiveLingoCLI {
  // leaking classroom text. Identifiers are parsed, never copied arbitrarily.
  static func safeEvent(_ event: String, fields: [String: Any], elapsed: TimeInterval) -> [String: Any] {
   let events: Set<String> = ["prepare", "state", "capture", "capture_ready", "review_start", "review_done",
-                             "review_skipped", "exported", "finished", "save_failed", "opened", "resumed", "run_verified"]
+                             "review_skipped", "exported", "finished", "save_failed", "opened", "resumed"]
   var result: [String: Any] = ["event": events.contains(event) ? (event == "finished" ? "processing_finished" : event) : "progress"]
   if elapsed.isFinite && elapsed >= 0 { result["elapsedSeconds"] = elapsed }
   for key in ["segments", "translated", "summarized", "pendingTranscription", "unresolvedTranscription",
