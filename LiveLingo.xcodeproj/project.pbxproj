@@ -6,6 +6,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		EA1F1D3944F74AA19F668905 /* SourceLanguagePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA1F1D3944F74AA19F668906 /* SourceLanguagePolicyTests.swift */; };
+		EA1F1D3944F74AA19F668903 /* SourceLanguagePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA1F1D3944F74AA19F668904 /* SourceLanguagePolicy.swift */; };
 		EA1F1D3944F74AA19F668901 /* SpokenLanguage.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA1F1D3944F74AA19F668902 /* SpokenLanguage.swift */; };
 		C4DB2CDE54194730B47985D8 /* WaveformFreshnessAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDBD81461CD14BB28D892236 /* WaveformFreshnessAcceptanceTests.swift */; };
 		4B1F01A936444537B3A68D72 /* WaveformFreshness.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA5F00F22FE54B509A3AB67B /* WaveformFreshness.swift */; };
@@ -76,6 +78,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		EA1F1D3944F74AA19F668906 /* SourceLanguagePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceLanguagePolicyTests.swift; sourceTree = "<group>"; };
+		EA1F1D3944F74AA19F668904 /* SourceLanguagePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceLanguagePolicy.swift; sourceTree = "<group>"; };
 		EA1F1D3944F74AA19F668902 /* SpokenLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpokenLanguage.swift; sourceTree = "<group>"; };
 		BDBD81461CD14BB28D892236 /* WaveformFreshnessAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaveformFreshnessAcceptanceTests.swift; sourceTree = "<group>"; };
 		CA5F00F22FE54B509A3AB67B /* WaveformFreshness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaveformFreshness.swift; sourceTree = "<group>"; };
@@ -176,6 +180,7 @@
 				A20000000000000000000004 /* AppModel.swift */,
 				A20000000000000000000005 /* SpeechPipeline.swift */,
 				EA1F1D3944F74AA19F668902 /* SpokenLanguage.swift */,
+				EA1F1D3944F74AA19F668904 /* SourceLanguagePolicy.swift */,
 				A20000000000000000000006 /* TranscriptSegment.swift */,
 				A20000000000000000000007 /* SessionExporter.swift */,
 				A2000000000000000000000D /* QwenRuntime.swift */,
@@ -214,7 +219,7 @@
 				A20000000000000000000022 /* CaptionStabilityPublicationTests.swift */,
 				3B3A361BF6A43DB2222C7A97 /* ReviewIdentityTests.swift */,
 				7B302D42994401027F0893B5 /* SessionPersistenceTests.swift */,
-				337292BF21D61DC3DF379BC0 /* ResourceSchedulingTests.swift */,0464AE938D0DA8BDFC01AC02 /* CaptionIdentityTests.swift */, A604E8F57B707990169FA517 /* SessionTreeMigrationTests.swift */, E3E7681F6F6509C442F83158 /* SessionStoreTests.swift */, 6B24813D3AB630C6B987A16C /* AudioRemediationTests.swift */, 8A7AEC88E07581EB6259A137 /* MLXOwnershipTests.swift */, 61481391EF47F304FE7C5586 /* TranscriptStateTests.swift */, A20000000000000000000008 /* SessionExporterTests.swift */, A20000000000000000000013 /* RealtimePolicyTests.swift */, A20000000000000000000019 /* TranslationAcceptanceTests.swift */, A2000000000000000000001A /* AudioContinuityTests.swift */, A2000000000000000000001B /* ExportAndPriorityTests.swift */, A2000000000000000000001C /* ReviewRetryTests.swift */, A2000000000000000000001D /* MediaImportTests.swift */, A2000000000000000000001E /* ClassroomPresentationTests.swift */, A2000000000000000000001F /* LearningFollowUpTests.swift */, 4C6F7E0AA37E495AAA0B5C85 /* CountLanguageAcceptanceTests.swift */, 9505FFEB607E48AF8146001F /* NumberLiteralIntegrityTests.swift */, B0AE357E04C9DB48AE7E5DAE /* CodeIndexProvenanceTests.swift */,);
+				337292BF21D61DC3DF379BC0 /* ResourceSchedulingTests.swift */,0464AE938D0DA8BDFC01AC02 /* CaptionIdentityTests.swift */, A604E8F57B707990169FA517 /* SessionTreeMigrationTests.swift */, E3E7681F6F6509C442F83158 /* SessionStoreTests.swift */, EA1F1D3944F74AA19F668906 /* SourceLanguagePolicyTests.swift */, 6B24813D3AB630C6B987A16C /* AudioRemediationTests.swift */, 8A7AEC88E07581EB6259A137 /* MLXOwnershipTests.swift */, 61481391EF47F304FE7C5586 /* TranscriptStateTests.swift */, A20000000000000000000008 /* SessionExporterTests.swift */, A20000000000000000000013 /* RealtimePolicyTests.swift */, A20000000000000000000019 /* TranslationAcceptanceTests.swift */, A2000000000000000000001A /* AudioContinuityTests.swift */, A2000000000000000000001B /* ExportAndPriorityTests.swift */, A2000000000000000000001C /* ReviewRetryTests.swift */, A2000000000000000000001D /* MediaImportTests.swift */, A2000000000000000000001E /* ClassroomPresentationTests.swift */, A2000000000000000000001F /* LearningFollowUpTests.swift */, 4C6F7E0AA37E495AAA0B5C85 /* CountLanguageAcceptanceTests.swift */, 9505FFEB607E48AF8146001F /* NumberLiteralIntegrityTests.swift */, B0AE357E04C9DB48AE7E5DAE /* CodeIndexProvenanceTests.swift */,);
 			path = LiveLingoTests;
 			sourceTree = "<group>";
 		};
@@ -313,6 +318,7 @@
 				A10000000000000000000004 /* AppModel.swift in Sources */,
 				A10000000000000000000005 /* SpeechPipeline.swift in Sources */,
 				EA1F1D3944F74AA19F668901 /* SpokenLanguage.swift in Sources */,
+				EA1F1D3944F74AA19F668903 /* SourceLanguagePolicy.swift in Sources */,
 				A10000000000000000000006 /* TranscriptSegment.swift in Sources */,
 				A10000000000000000000007 /* SessionExporter.swift in Sources */,
 				A10000000000000000000009 /* QwenRuntime.swift in Sources */,
@@ -345,6 +351,7 @@
 				BA0F6204768C526F80F5FC3D /* CaptionIdentityTests.swift in Sources */,
 				B676BBD2DF14830C33164843 /* SessionTreeMigrationTests.swift in Sources */,
 				ED4315AD3367783A35A82407 /* SessionStoreTests.swift in Sources */,
+				EA1F1D3944F74AA19F668905 /* SourceLanguagePolicyTests.swift in Sources */,
 				426BDE147DC859D73739A60C /* AudioRemediationTests.swift in Sources */,
 				0CE01B4507E3276B965D388A /* MLXOwnershipTests.swift in Sources */,
 				84845F083D7F515C9602CB68 /* TranscriptStateTests.swift in Sources */,A10000000000000000000008 /* SessionExporterTests.swift in Sources */, A10000000000000000000013 /* RealtimePolicyTests.swift in Sources */, A10000000000000000000019 /* TranslationAcceptanceTests.swift in Sources */, A1000000000000000000001A /* AudioContinuityTests.swift in Sources */, A1000000000000000000001B /* ExportAndPriorityTests.swift in Sources */, A1000000000000000000001C /* ReviewRetryTests.swift in Sources */, A1000000000000000000001D /* MediaImportTests.swift in Sources */, A1000000000000000000001E /* ClassroomPresentationTests.swift in Sources */, A1000000000000000000001F /* LearningFollowUpTests.swift in Sources */, 324C076031A3417B868B9D8D /* CountLanguageAcceptanceTests.swift in Sources */, D4E69378D56E4279BE15D3B3 /* NumberLiteralIntegrityTests.swift in Sources */, 97F1A2C9FD8748DB092D32F2 /* CodeIndexProvenanceTests.swift in Sources */,);

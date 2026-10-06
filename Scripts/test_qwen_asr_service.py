@@ -195,6 +195,24 @@ class AutoLanguageTests(unittest.TestCase):
         self.assertEqual(result['generated_tokens'], 256)
         self.assertTrue(result['truncated'])
 
+    def test_swift_probability_constants_and_language_table_match_server(self):
+        source = Path(__file__).resolve().parents[1] / 'LiveLingo' / 'Sources'
+        policy = (source / 'SourceLanguagePolicy.swift').read_text()
+        for name, expected in {
+            'nonLatinMinProbability': service.NON_LATIN_MIN_PROBABILITY,
+            'nonLatinMaxEnglishProbability': service.NON_LATIN_MAX_ENGLISH_PROBABILITY,
+            'latinMinProbability': service.LATIN_MIN_PROBABILITY,
+            'latinMaxEnglishProbability': service.LATIN_MAX_ENGLISH_PROBABILITY,
+        }.items():
+            match = service.re.search(r'static let ' + name + r'\s*=\s*([0-9.]+)', policy)
+            self.assertIsNotNone(match, name)
+            self.assertEqual(float(match.group(1)), expected, name)
+        table = (source / 'SpokenLanguage.swift').read_text()
+        matches = service.re.findall(r'code: "([a-z]+)", qwenLabel: "([A-Za-z]+)", writingSystem: \.([a-z]+)', table)
+        self.assertEqual({label: code for code, label, _ in matches}, service.LANGUAGE_CODES)
+        self.assertEqual({code for code, _, script in matches if script == 'latin' and code != 'en'},
+                         service.LATIN_LANGUAGE_CODES)
+
 
 class ServiceResponsivenessTests(unittest.TestCase):
     def setUp(self):
