@@ -21,7 +21,7 @@
 
 **[下载 0.2.0（GitHub 发布页）](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0)**：下载页面 Assets 里全部 8 个分卷，按页面上的合并说明合成一个约 14.3 GB 的 `.dmg`。单个分卷不能安装；发布页下方的 `Source code` 是源码，不是安装包。
 
-第一次打开时请保持联网，系统需要向苹果核对一次公证记录；之后转写、翻译和笔记都在本机离线运行。
+**第一次打开时请保持联网。** 这是 macOS 自己的安全检查（Gatekeeper），不是 LiveLingo 在联网：从网上下载的 App 第一次打开时，系统会向苹果确认它经过了苹果的公证（即提交给苹果做过恶意软件扫描）。0.2.0 的公证记录只附在安装包上，拖进“应用程序”的 App 本身没带，所以系统要联网查一次；断网时会提示无法验证而拒绝打开。查过一次之后就不再需要。LiveLingo 本身不上传任何录音、文字或使用数据，转写、翻译和笔记都在本机运行。
 
 | 要求 | |
 | --- | --- |
@@ -78,6 +78,6 @@
 LiveLingo is a macOS app for English-language classes. It transcribes English from the microphone or system audio, translates it into Chinese in real time, and builds study notes as the class goes on. Everything runs on your Mac: the speech and language models are bundled, nothing is uploaded, and no Python or model download is needed.
 
 - Requires an Apple silicon Mac with macOS 14 or later, and about 30 GB of free disk space to install (14.3 GB download, 16 GB installed).
-- Download: version 0.2.0 from the [release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0). Download all 8 split files and merge them as described there (about 14.3 GB). Keep the Mac online the first time you open the app so macOS can check its notarization.
+- Download: version 0.2.0 from the [release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0). Download all 8 split files and merge them as described there (about 14.3 GB). Keep the Mac online the first time you open it: this is macOS Gatekeeper, not LiveLingo. For an app downloaded from the internet, macOS asks Apple once whether it was notarized (scanned by Apple for malware). In 0.2.0 the notarization ticket is attached to the disk image but not to the app itself, so macOS has to look it up online; offline, it refuses to open the app. After that first check no connection is needed. LiveLingo itself never uploads recordings, text or usage data.
 - The interface is in Chinese. Translations and notes can be wrong; check important points against the English transcript.
 - License: GPL-3.0-only. Building from source: [docs/BUILDING.md](docs/BUILDING.md) (in Chinese).
