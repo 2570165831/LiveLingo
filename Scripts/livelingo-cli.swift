@@ -196,6 +196,7 @@ struct LiveLingoCLI {
   writeEvent(["event": "asr_owned", "runtimeID": runtimeID.uuidString, "pid": Int(pid)])
   let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("review-queue.json"), observeSleep: false)
   let model = AppModel(reviewQueue: queue)
+  let initialLanguageProbes = await ASRRequestCoordinator.shared.languageProbeCount
   let start = ProcessInfo.processInfo.systemUptime
   do {
    try await model.cliRun(file: file, seconds: seconds, directory: directory,
@@ -226,9 +227,20 @@ struct LiveLingoCLI {
   writeEvent(["event": "session_bound", "sessionID": bound.sessionID, "revision": bound.inputRevision,
               "segments": bound.segmentIDs.count, "batches": bound.batchIDs.count])
   // Pending and unresolved are verified zero; non-English chunks are terminal but must stay visible.
-  writeEvent(["event": "run_verified", "segments": segmentCount,
-              "pendingTranscription": 0, "unresolvedTranscription": 0,
-              "otherLanguageTranscription": model.transcriptionProcessing?.otherLanguageCount ?? 0])
+  let languageProbes = await ASRRequestCoordinator.shared.languageProbeCount - initialLanguageProbes
+  writeEvent(verifiedRunEvent(segments: snapshot?.segments ?? [],
+              otherLanguageTranscription: model.transcriptionProcessing?.otherLanguageCount ?? 0,
+              languageProbes: languageProbes))
+ }
+
+ static func verifiedRunEvent(segments: [TranscriptSegment], otherLanguageTranscription: Int,
+                              languageProbes: Int) -> [String: Any] {
+  ["event": "run_verified", "segments": segments.count,
+   "pendingTranscription": 0, "unresolvedTranscription": 0,
+   "otherLanguageTranscription": otherLanguageTranscription,
+   "chineseCaptions": segments.filter { $0.sourceLanguage == "zh" }.count,
+   "otherLanguageCaptions": segments.filter { $0.sourceLanguage != nil && $0.sourceLanguage != "zh" }.count,
+   "languageProbes": languageProbes]
  }
 
  /// Reopen a course this CLI created and bound. `resume` additionally continues
@@ -298,24 +310,28 @@ struct LiveLingoCLI {
  @discardableResult static func verifySaved(_ directory: URL, emit: Bool = true) throws -> Int {
   let decoder=JSONDecoder();decoder.dateDecodingStrategy = .iso8601
   let manifest=try decoder.decode(SessionExporter.Manifest.self,from:Data(contentsOf:directory.appendingPathComponent("manifest.json")))
-  guard manifest.recordingFile == "recording.wav" else { throw CLIError.inconsistentExport }
+  guard manifest.recordingFile == "recording.wav",
+        manifest.targetLocale == CaptionTranslationTarget.current.rawValue else { throw CLIError.inconsistentExport }
   let jsonl=try String(contentsOf:directory.appendingPathComponent("bilingual.jsonl"),encoding:.utf8)
   let segments=try jsonl.split(separator:"\n").map { try decoder.decode(TranscriptSegment.self,from:Data($0.utf8)) }
   guard segments.count == manifest.segmentCount, Set(segments.map(\.id)).count == segments.count else { throw CLIError.inconsistentExport }
+  if let languages = manifest.sourceLanguages {
+   guard languages == SessionExporter.sourceLanguages(in: segments) else { throw CLIError.inconsistentExport }
+  }
   let english=try String(contentsOf:directory.appendingPathComponent("transcript-en.txt"),encoding:.utf8)
-  let chinese=try String(contentsOf:directory.appendingPathComponent("transcript-zh-Hans.txt"),encoding:.utf8)
-  guard english == segments.map(\.english).joined(separator:"\n")+"\n",
+  let chinese=try String(contentsOf:directory.appendingPathComponent(SessionExporter.targetTranscriptFileName),encoding:.utf8)
+  guard english == segments.map(SessionExporter.sourceLine).joined(separator:"\n")+"\n",
         // Keep this aligned with the production exporter, including legacy
         // missing-translation placeholders. It does not prove translation quality.
-        chinese == segments.map({ SessionExporter.humanReadableChinese($0.chinese) }).joined(separator:"\n")+"\n" else { throw CLIError.inconsistentExport }
+        chinese == segments.map(SessionExporter.targetLine).joined(separator:"\n")+"\n" else { throw CLIError.inconsistentExport }
   let expectedSRT = segments.enumerated().map { index, segment in
-   "\(index + 1)\n\(SessionExporter.srtTimestamp(segment.startTime)) --> \(SessionExporter.srtTimestamp(segment.endTime))\n\(segment.english)\n\(SessionExporter.humanReadableChinese(segment.chinese))"
+   SessionExporter.srtCue(segment, index: index)
   }.joined(separator: "\n\n") + "\n"
   guard try String(contentsOf: directory.appendingPathComponent("bilingual.srt"), encoding: .utf8) == expectedSRT else { throw CLIError.inconsistentExport }
   let audio=try AVAudioFile(forReading:directory.appendingPathComponent(manifest.recordingFile))
   guard audio.length>0, audio.processingFormat.sampleRate>0 else { throw CLIError.inconsistentExport }
-  var names=["manifest.json","bilingual.jsonl","bilingual.srt","transcript-en.txt","transcript-zh-Hans.txt","recording.wav"]
-  if FileManager.default.fileExists(atPath:directory.appendingPathComponent("summary-zh-Hans.md").path) { names.append("summary-zh-Hans.md") }
+  var names=["manifest.json","bilingual.jsonl","bilingual.srt","transcript-en.txt",SessionExporter.targetTranscriptFileName,"recording.wav"]
+  if FileManager.default.fileExists(atPath:directory.appendingPathComponent(SessionExporter.targetSummaryFileName).path) { names.append(SessionExporter.targetSummaryFileName) }
   let files=try names.map { name -> [String:Any] in
    let digest = try hashFile(directory.appendingPathComponent(name))
    guard digest.bytes > 0 else { throw CLIError.inconsistentExport }
@@ -742,12 +758,18 @@ struct LiveLingoCLI {
  // leaking classroom text. Identifiers are parsed, never copied arbitrarily.
  static func safeEvent(_ event: String, fields: [String: Any], elapsed: TimeInterval) -> [String: Any] {
   let events: Set<String> = ["prepare", "state", "capture", "capture_ready", "review_start", "review_done",
-                             "review_skipped", "exported", "finished", "save_failed", "opened", "resumed"]
+                             "review_skipped", "exported", "finished", "save_failed", "opened", "resumed", "run_verified"]
   var result: [String: Any] = ["event": events.contains(event) ? (event == "finished" ? "processing_finished" : event) : "progress"]
   if elapsed.isFinite && elapsed >= 0 { result["elapsedSeconds"] = elapsed }
   for key in ["segments", "translated", "summarized", "pendingTranscription", "unresolvedTranscription",
               "otherLanguageTranscription", "jobs", "bytes", "revision", "batches"] {
    if let value = fields[key] as? Int, value >= 0 { result[key] = value }
+  }
+  for key in ["chineseCaptions", "otherLanguageCaptions", "languageProbes"] {
+   // NSNumber/Bool and floating-point coercions must not become count fields.
+   if let raw = fields[key], type(of: raw) == Int.self, let value = raw as? Int, value >= 0 {
+    result[key] = value
+   }
   }
   for key in ["summaryRunning", "concurrency", "paused", "capture"] { if let value = fields[key] as? Bool { result[key] = value } }
   for key in ["seconds", "stopSeconds"] { if let value = fields[key] as? Double, value.isFinite && value >= 0 { result[key] = value } }

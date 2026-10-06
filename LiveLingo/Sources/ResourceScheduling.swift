@@ -108,6 +108,9 @@ actor ASRRequestCoordinator {
     private let observeExit: ExitObservation
     private let confirmationTimeout: TimeInterval
     private var leases: [Key: Lease] = [:]
+    /// Submitted auto requests in this process, including failed responses.
+    /// Cached transcription results never reach this coordinator.
+    private(set) var languageProbeCount = 0
     private static let log = Logger(subsystem: "com.jianhongli.LiveLingo", category: "ASROwnership")
 
     init(confirmationTimeout: TimeInterval = 5,
@@ -168,6 +171,7 @@ actor ASRRequestCoordinator {
         request.httpBody = try Data(contentsOf: audioURL, options: .mappedIfSafe)
         try Task.checkCancellation()
         leases[key] = Lease(model: modelKey, language: language)
+        if language == .auto { languageProbeCount += 1 }
         let transport = self.transport
         let started = ProcessInfo.processInfo.systemUptime
         Self.log.notice("asr event=acquired id=\(requestID, privacy: .public) model=\(modelKey, privacy: .public)")

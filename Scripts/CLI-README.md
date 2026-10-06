@@ -78,6 +78,24 @@ Only a zero exit status together with `run_verified` and confirmed runtime
 cleanup is a successful complete run. `--verify-saved` checks export integrity;
 it does not prove complete processing and accepts valid audio with zero captions.
 
+Multilingual exports reuse the existing files. `transcript-en.txt` contains the
+original source text without language labels. The target transcript (currently
+`transcript-zh-Hans.txt`, selected by `CaptionTranslationTarget`) contains Chinese
+speech verbatim and translated text for other languages, including Cantonese.
+SRT cues contain Chinese speech once; English and other languages retain source
+and target lines. JSONL keeps the legacy `english` key for source text and the
+optional `sourceLanguage` code from the existing segment encoder. Inferred legacy
+Chinese keeps its absent marker for 0.2.0 revision replay. Manifest
+`sourceLanguages` is an optional sorted list of unique non-English codes and is
+omitted for English-only courses; `sourceLocale` retains its legacy value.
+
+`run_verified` adds integer counts: `chineseCaptions` counts zh captions,
+`otherLanguageCaptions` counts all other non-English captions (including yue), and
+`languageProbes` counts auto requests submitted during this run. Failed responses
+count; cached results and historical requests do not. These three event fields
+accept only nonnegative Swift integers, never text, booleans or floating-point
+coercions. The counter is in memory and adds no persisted fields.
+
 For cleanup, first ensure the CLI has exited, keep the result/required logs,
 and move only its explicit test output/build paths to Trash. Never remove
 real session directories or the installed app as part of a CLI test.
