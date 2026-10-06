@@ -1389,9 +1389,19 @@ enum ASRQualityGate {
 }
 
 enum EnglishTranscriptGate {
-    static func accepts(_ text: String) -> Bool {
+    enum Verdict: Equatable, Sendable {
+        case accepted
+        /// Han characters present without the required 3:1 (minimum 6) Latin letters.
+        case hanDominant
+        /// No Han character, Latin letter or digit, e.g. punctuation or another script.
+        case noLatin
+    }
+
+    static func accepts(_ text: String) -> Bool { verdict(text) == .accepted }
+
+    static func verdict(_ text: String) -> Verdict {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return true }
+        guard !trimmed.isEmpty else { return .accepted }
 
         var latinCount = 0
         var cjkCount = 0
@@ -1412,8 +1422,11 @@ enum EnglishTranscriptGate {
         }
 
         // Numbers and mathematical expressions are valid classroom captions.
-        guard cjkCount > 0 else { return latinCount > 0 || trimmed.unicodeScalars.contains { CharacterSet.decimalDigits.contains($0) } }
-        return latinCount >= max(6, cjkCount * 3)
+        guard cjkCount > 0 else {
+            return latinCount > 0 || trimmed.unicodeScalars.contains { CharacterSet.decimalDigits.contains($0) }
+                ? .accepted : .noLatin
+        }
+        return latinCount >= max(6, cjkCount * 3) ? .accepted : .hanDominant
     }
 }
 

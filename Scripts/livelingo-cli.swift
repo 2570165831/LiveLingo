@@ -225,8 +225,10 @@ struct LiveLingoCLI {
   }
   writeEvent(["event": "session_bound", "sessionID": bound.sessionID, "revision": bound.inputRevision,
               "segments": bound.segmentIDs.count, "batches": bound.batchIDs.count])
+  // Pending and unresolved are verified zero; non-English chunks are terminal but must stay visible.
   writeEvent(["event": "run_verified", "segments": segmentCount,
-              "pendingTranscription": 0, "unresolvedTranscription": 0])
+              "pendingTranscription": 0, "unresolvedTranscription": 0,
+              "otherLanguageTranscription": model.transcriptionProcessing?.otherLanguageCount ?? 0])
  }
 
  /// Reopen a course this CLI created and bound. `resume` additionally continues
@@ -287,6 +289,7 @@ struct LiveLingoCLI {
               "segments": verified.snapshot.segments.count, "batches": verified.snapshot.batches.count,
               "translated": verified.translatedCount, "summarized": verified.summarizedCount,
               "capture": verified.captureActive, "paused": verified.processingPaused,
+              "otherLanguageTranscription": verified.transcription?.otherLanguageCount ?? 0,
               "exports": verified.exports.map(\.name).sorted(), "reboundRevision": rebound.inputRevision])
  }
 
@@ -741,7 +744,8 @@ struct LiveLingoCLI {
                              "review_skipped", "exported", "finished", "save_failed", "opened", "resumed"]
   var result: [String: Any] = ["event": events.contains(event) ? (event == "finished" ? "processing_finished" : event) : "progress"]
   if elapsed.isFinite && elapsed >= 0 { result["elapsedSeconds"] = elapsed }
-  for key in ["segments", "translated", "summarized", "pendingTranscription", "unresolvedTranscription", "jobs", "bytes", "revision", "batches"] {
+  for key in ["segments", "translated", "summarized", "pendingTranscription", "unresolvedTranscription",
+              "otherLanguageTranscription", "jobs", "bytes", "revision", "batches"] {
    if let value = fields[key] as? Int, value >= 0 { result[key] = value }
   }
   for key in ["summaryRunning", "concurrency", "paused", "capture"] { if let value = fields[key] as? Bool { result[key] = value } }

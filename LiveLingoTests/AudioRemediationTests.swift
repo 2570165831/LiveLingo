@@ -1,4 +1,5 @@
 import AVFoundation
+import CryptoKit
 import Foundation
 import XCTest
 @testable import LiveLingo
@@ -55,12 +56,13 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         }
         XCTFail("condition was not reached", file: file, line: line)
     }
-    private func work(_ session: UUID, ordinal: Int, status: TranscriptionWorkRecord.Status = .pending) -> TranscriptionWorkRecord {
+    private func work(_ session: UUID, ordinal: Int, status: TranscriptionWorkRecord.Status = .pending,
+                      fallback: String? = nil) -> TranscriptionWorkRecord {
         var r = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: ordinal,
             audioFile: "chunk-\(ordinal).wav", startFrame: Int64(ordinal * 160_000),
             endFrame: Int64((ordinal + 1) * 160_000), sampleRate: 16_000,
             start: Double(ordinal * 10), end: Double((ordinal + 1) * 10), captureStart: nil, captureEnd: nil,
-            modelKey: "primary", fallbackModelKey: nil, appleEvidence: "")
+            modelKey: "primary", fallbackModelKey: fallback, appleEvidence: "")
         r.status = status
         return r
     }
@@ -796,4 +798,482 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try AVAudioFile(forReading: first.appendingPathComponent("recording.wav")).length, 8_000)
         XCTAssertEqual(try AVAudioFile(forReading: second.appendingPathComponent("recording.wav")).length, 4_000)
     }
+
+    // MARK: - Non-English speech and persisted failure reasons
+
+    func testEnglishGateVerdictNamesTheRejectionWithoutChangingAcceptance() {
+        XCTAssertEqual(EnglishTranscriptGate.verdict("是。我也想要。"), .hanDominant)
+        XCTAssertEqual(EnglishTranscriptGate.verdict("Use 力"), .hanDominant)
+        XCTAssertEqual(EnglishTranscriptGate.verdict("The symbol 力 means force in this textbook."), .accepted)
+        XCTAssertEqual(EnglishTranscriptGate.verdict("Привет, мир"), .noLatin)
+        XCTAssertEqual(EnglishTranscriptGate.verdict("……"), .noLatin)
+        XCTAssertEqual(EnglishTranscriptGate.verdict("2 + 2 = 4"), .accepted)
+        XCTAssertEqual(EnglishTranscriptGate.verdict("  "), .accepted)
+        let loop = "We know we know we know we know we know we know the velocity."
+        let runaway = (0..<45).map { "word\($0)" }.joined(separator: " ")
+        let samples = ["", "  ", "Okay.", "123", "是。我也想要。", "这是中文", "Use 力", "Привет, мир", "……",
+                       "The symbol 力 means force in this textbook.", "OK 那我们来看一下这个 equation",
+                       "damaged \u{FFFD} text", loop, runaway]
+        for text in samples {
+            XCTAssertEqual(EnglishTranscriptGate.accepts(text), EnglishTranscriptGate.verdict(text) == .accepted, text)
+            // A reason exists exactly when the shared caption gate drops the text.
+            for duration in [2.0, 10.0] {
+                XCTAssertEqual(TranscriptionWorkRecord.FailureReason.rejection(of: text, audioDuration: duration) == nil,
+                               !SpeechPipeline.preferredTranscript(primary: nil, fallback: text, audioDuration: duration).isEmpty,
+                               "\(text) @ \(duration)s")
+            }
+        }
+        typealias Reason = TranscriptionWorkRecord.FailureReason
+        XCTAssertEqual(Reason.rejection(of: " ", audioDuration: 10), .emptyOutput)
+        XCTAssertEqual(Reason.rejection(of: "这是中文", audioDuration: 10), .englishGateHanDominant)
+        XCTAssertEqual(Reason.rejection(of: "……", audioDuration: 10), .englishGateNoLatin)
+        XCTAssertEqual(Reason.rejection(of: "damaged \u{FFFD} text", audioDuration: 10), .invalidText)
+        XCTAssertEqual(Reason.rejection(of: loop, audioDuration: 10), .repeatedLoop)
+        XCTAssertEqual(Reason.rejection(of: runaway, audioDuration: 2), .runawayText)
+        XCTAssertNil(Reason.rejection(of: "Okay.", audioDuration: 10), "A short acknowledgement stays acceptable")
+    }
+
+    func testChineseSpeechBecomesTerminalOtherLanguageAfterOneEnhancedPass() async throws {
+        let root = try directory(), session = UUID(), chunkID = UUID()
+        let recording = try audio(root, name: "recording.wav", seconds: 12)
+        let chunk = try audio(root, name: "zh.wav", seconds: 10)
+        let calls = AudioTestBox<[String]>([]), manual = AudioTestBox(false)
+        let events = AudioTestBox<[SpeechPipeline.Event]>([])
+        let queue = DurableTranscriptionQueue { url, model, enhanced in
+            let context = url.lastPathComponent.hasPrefix("LiveLingo-retry-")
+            calls.update { $0.append("\(model):\(enhanced)" + (context ? ":context" : "")) }
+            if model == "primary" { return manual.value ? "The lecturer switches back to English here." : "" }
+            return "那我们来看一下这道题的答案"
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                  handler: { e in events.update { $0.append(e) } })
+        queue.submit(.init(audioURL: chunk, modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 10,
+                           appleEvidence: "", recordingURL: recording, id: chunkID, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(calls.value, ["primary:false", "fallback:true", "primary:true"],
+                       "Only the enhanced English pass is retried; no second retry and no neighbour context")
+        let record = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(record.status, .otherLanguage)
+        XCTAssertFalse(record.needsWork)
+        XCTAssertEqual(record.automaticRetryCount, 1)
+        XCTAssertEqual(record.failureReason, .englishGateHanDominant)
+        XCTAssertNil(record.text)
+        XCTAssertNil(record.candidateText)
+        XCTAssertEqual(queue.state?.pendingCount, 0)
+        XCTAssertEqual(queue.state?.unresolvedCount, 0)
+        XCTAssertEqual(queue.state?.otherLanguageCount, 1)
+        XCTAssertNotEqual(record.audioRetired, true)
+        let journalDirectory = try XCTUnwrap(queue.journalDirectory)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: journalDirectory.appendingPathComponent(record.audioFile).path))
+        XCTAssertFalse(events.value.contains {
+            if case .identifiedFinal = $0 { return true }
+            if case .transcriptionCandidate = $0 { return true }
+            return false
+        })
+        // Only the first attempt warned; the terminal verdict is a count, not an error.
+        XCTAssertEqual(events.value.filter { if case .transcriptionIssue = $0 { return true }; return false }.count, 1)
+        XCTAssertEqual(events.value.filter { if case .nonEnglishSpeech(start: 0, end: 10) = $0 { return true }; return false }.count, 1)
+        let issues = try String(contentsOf: root.appendingPathComponent("transcription-issues.jsonl"), encoding: .utf8)
+        let rows = issues.split(separator: "\n")
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertTrue(rows.first?.contains("\"event\":\"transcription_missing\"") == true)
+        XCTAssertTrue(rows.last?.contains("\"event\":\"transcription_non_english\"") == true)
+        XCTAssertTrue(rows.allSatisfy { $0.contains("\"reason\":\"englishGateHanDominant\"") })
+        XCTAssertFalse(issues.contains("那我们"), "Diagnostics carry the reason, never recognizer text")
+        let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        XCTAssertEqual(reopened.record(id: chunkID)?.status, .otherLanguage)
+        XCTAssertEqual(reopened.processingState.unresolvedCount, 0)
+        XCTAssertNil(try reopened.claimNext())
+
+        manual.update { $0 = true }
+        try queue.retry(id: chunkID); await queue.finish()
+        let retried = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(retried.status, .completed)
+        XCTAssertEqual(retried.text, "The lecturer switches back to English here.")
+        XCTAssertEqual(retried.manualRetryCount, 1)
+        XCTAssertNil(retried.failure)
+        XCTAssertNil(retried.failureReason)
+        XCTAssertEqual(queue.state?.otherLanguageCount, 0)
+    }
+
+    func testHanFallbackLeavesAcceptedEnglishPathsUnchanged() async throws {
+        // A usable primary caption wins over a Han fallback; the first enhanced
+        // retry still recovers English that the raw pass missed.
+        for enhancedRecovery in [false, true] {
+            let root = try directory(), session = UUID(), chunkID = UUID()
+            let wav = try audio(root, seconds: 10)
+            let commits = AudioTestBox<[TranscriptionCommit]>([])
+            let queue = DurableTranscriptionQueue { _, model, enhanced in
+                guard model == "primary" else { return "这是中文讲话" }
+                if enhancedRecovery { return enhanced ? "The enhanced pass recovers this sentence." : "" }
+                return "Okay."
+            }
+            try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true) { e in
+                if case .identifiedFinal(let commit) = e { commits.update { $0.append(commit) } }
+            }
+            queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 10,
+                               appleEvidence: "", recordingURL: nil, id: chunkID, sessionID: session), handler: { _ in })
+            await queue.finish()
+            let expected = enhancedRecovery ? "The enhanced pass recovers this sentence." : "Okay."
+            let record = try XCTUnwrap(queue.records.first)
+            XCTAssertEqual(record.status, .completed)
+            XCTAssertEqual(record.text, expected)
+            XCTAssertEqual(record.automaticRetryCount, enhancedRecovery ? 1 : 0)
+            XCTAssertNil(record.candidateText)
+            XCTAssertNil(record.failureReason)
+            XCTAssertEqual(commits.value.map(\.text), [expected])
+            XCTAssertEqual(queue.state?.otherLanguageCount, 0)
+        }
+    }
+
+    func testOtherFailuresKeepAutomaticRetriesAndPersistTheirReason() async throws {
+        let cases: [(fallback: String?, context: String, reason: TranscriptionWorkRecord.FailureReason)] = [
+            (nil, "", .error), (nil, "A neighbouring sentence from context.", .error),
+            ("", "", .emptyOutput), ("……", "", .englishGateNoLatin)
+        ]
+        for (fallback, context, reason) in cases {
+            let root = try directory(), session = UUID(), wav = try audio(root)
+            let recording = try audio(root, name: "recording.wav", seconds: 4)
+            let queue = DurableTranscriptionQueue { url, model, _ in
+                if url.lastPathComponent.hasPrefix("LiveLingo-retry-") { return context }
+                // A primary error is not hidden by a Han fallback, even when the
+                // final retry finds a context candidate; it stays retryable.
+                if model == "primary" { if fallback == nil { throw URLError(.timedOut) }; return "" }
+                return fallback ?? "那我们来看一下这道题"
+            }
+            try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+            queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 1,
+                               appleEvidence: "", recordingURL: recording, sessionID: session), handler: { _ in })
+            await queue.finish()
+            let record = try XCTUnwrap(queue.records.first)
+            XCTAssertEqual(record.status, .failed)
+            XCTAssertEqual(record.automaticRetryCount, DurableTranscriptionJournal.maximumAutomaticRetries)
+            XCTAssertEqual(record.failureReason, reason)
+            XCTAssertEqual(record.candidateText, context.isEmpty ? nil : context)
+            XCTAssertEqual(queue.state?.unresolvedCount, 1)
+            XCTAssertEqual(queue.state?.otherLanguageCount, 0)
+        }
+    }
+
+    func testInterruptedAttemptPersistsItsReason() throws {
+        let root = try directory(), id = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+        var record = work(id, ordinal: 0, status: .active)
+        record.attempt = .automaticRetry; record.automaticRetryCount = 1
+        try journal.put(record)
+        let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+        XCTAssertEqual(reopened.record(id: record.id)?.status, .retryWaiting)
+        XCTAssertEqual(reopened.record(id: record.id)?.failureReason, .interrupted)
+    }
+
+    func testOtherLanguageStaysReadableByOldBuildsAndOldJournalsStillDecode() throws {
+        let root = try directory(), session = UUID()
+        let journalDirectory = root.appendingPathComponent(DurableTranscriptionJournal.directoryName)
+        try FileManager.default.createDirectory(at: journalDirectory, withIntermediateDirectories: false)
+        // A journal exactly as 0.2.0 writes it opens without the new keys.
+        var legacy = LegacyWorkRecord(id: UUID(), sessionID: session, ordinal: 0, audioFile: "chunk-0.wav",
+            startFrame: 0, endFrame: 160_000, sampleRate: 16_000, start: 0, end: 10, captureStart: 1, captureEnd: 11,
+            modelKey: "parakeet", fallbackModelKey: "1.7b", appleEvidence: "")
+        legacy.status = .failed; legacy.attempt = .automaticRetry; legacy.automaticRetryCount = 2
+        legacy.failure = "此处尚未得到可靠的英文转写，音频已保留。"
+        try (legacyRow(LegacyMutation(version: 1, sessionID: session, sequence: 1, paused: false))
+             + legacyRow(LegacyMutation(version: 1, sessionID: session, sequence: 2, record: legacy)))
+            .write(to: journalDirectory.appendingPathComponent("work.jsonl"))
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        var record = try XCTUnwrap(journal.record(id: legacy.id))
+        XCTAssertEqual(record.status, .failed)
+        XCTAssertNil(record.failureReason)
+        XCTAssertEqual(record.automaticRetryCount, 2)
+        XCTAssertEqual(record.captureEnd, 11)
+        XCTAssertEqual(record.failure, legacy.failure)
+        XCTAssertEqual(journal.processingState.unresolvedCount, 1)
+
+        // The new status is persisted as `failed` plus optional keys and round-trips.
+        record.status = .otherLanguage
+        record.failureReason = .englishGateHanDominant
+        try journal.put(record); try journal.checkpoint()
+        let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        XCTAssertEqual(reopened.record(id: record.id), record)
+        XCTAssertEqual(reopened.processingState.unresolvedCount, 0)
+        XCTAssertEqual(reopened.processingState.otherLanguageCount, 1)
+        // 0.2.0 still decodes every row and the snapshot, and sees a manually retryable failure.
+        let rows = try Data(contentsOf: journalDirectory.appendingPathComponent("work.jsonl")).split(separator: 0x0a)
+        let mutations = try rows.map {
+            try JSONDecoder().decode(LegacyMutation.self, from: JSONDecoder().decode(LegacyEnvelope.self, from: Data($0)).payload)
+        }
+        XCTAssertEqual(mutations.count, 3)
+        XCTAssertEqual(mutations.last?.record?.status, .failed)
+        let snapshot = try JSONDecoder().decode(LegacyEnvelope.self,
+            from: Data(contentsOf: journalDirectory.appendingPathComponent("snapshot.json")))
+        XCTAssertEqual(try JSONDecoder().decode(LegacyState.self, from: snapshot.payload).records.map(\.status), [.failed])
+
+        // Field-level round-trip with every optional present.
+        var full = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 3, audioFile: "chunk-3.wav",
+            startFrame: 480_000, endFrame: 640_000, sampleRate: 16_000, start: 30, end: 40, captureStart: 31, captureEnd: 41,
+            modelKey: "parakeet", fallbackModelKey: "1.7b", appleEvidence: "evidence", recordingFile: "recording.wav",
+            audioRetired: false)
+        full.status = .otherLanguage; full.attempt = .manual; full.automaticRetryCount = 1; full.manualRetryCount = 2
+        full.text = "Earlier text."; full.candidateText = "A candidate."; full.candidateOrigin = "context"
+        full.failure = "此处为非英语讲话（未转写），音频已保留，可手动重试。"; full.failureReason = .englishGateHanDominant
+        let encoded = try JSONEncoder().encode(full)
+        XCTAssertEqual(try JSONDecoder().decode(TranscriptionWorkRecord.self, from: encoded), full)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(object["status"] as? String, "failed")
+        XCTAssertEqual(object["extendedStatus"] as? String, "otherLanguage")
+        XCTAssertEqual(object["failureReason"] as? String, "englishGateHanDominant")
+        XCTAssertEqual(try JSONDecoder().decode(LegacyWorkRecord.self, from: encoded).status, .failed)
+        // Values from a newer build degrade instead of failing the journal.
+        object["extendedStatus"] = "someLaterStatus"; object["failureReason"] = "someLaterReason"
+        let tolerant = try JSONDecoder().decode(TranscriptionWorkRecord.self,
+                                                from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(tolerant.status, .failed)
+        XCTAssertNil(tolerant.failureReason)
+        // Without new fields the bytes equal 0.2.0's synthesized encoding.
+        let sorted = JSONEncoder(); sorted.outputFormatting = [.sortedKeys]
+        for status: TranscriptionWorkRecord.Status in [.pending, .active, .retryWaiting, .manualPending, .completed, .silent, .failed] {
+            var plain = full; plain.status = status; plain.failureReason = nil
+            let bytes = try sorted.encode(plain)
+            XCTAssertEqual(try sorted.encode(JSONDecoder().decode(LegacyWorkRecord.self, from: bytes)), bytes)
+            XCTAssertEqual(try JSONDecoder().decode(TranscriptionWorkRecord.self, from: bytes), plain)
+        }
+    }
+
+    func testInterruptedManualRetryOfNonEnglishSpeechKeepsItsVerdict() async throws {
+        let root = try directory(), session = UUID(), chunkID = UUID()
+        let recording = try audio(root, name: "recording.wav", seconds: 24)
+        let chunk = try audio(root, name: "zh.wav", seconds: 10)
+        let blocking = AudioTestBox(false), started = AudioTestBox(0)
+        let queue = DurableTranscriptionQueue { url, model, _ in
+            if url.lastPathComponent == "next.wav" { return model == "primary" ? "The next caption wins." : "" }
+            if model == "primary", blocking.value {
+                started.update { $0 += 1 }
+                try await Task.sleep(for: .seconds(30))
+            }
+            return model == "primary" ? "" : "那我们来看一下这道题的答案"
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: chunk, modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 10,
+                           appleEvidence: "", recordingURL: recording, id: chunkID, sessionID: session), handler: { _ in })
+        await queue.finish()
+        let verdict = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(verdict.status, .otherLanguage)
+        blocking.update { $0 = true }
+        func startManualRetry(_ attempt: Int) async throws {
+            try queue.retry(id: chunkID)
+            for _ in 0..<100 where started.value < attempt { try await Task.sleep(for: .milliseconds(50)) }
+            XCTAssertEqual(started.value, attempt)
+        }
+        func assertVerdictStands(_ label: String) throws {
+            let record = try XCTUnwrap(queue.records.first(where: { $0.id == chunkID }), label)
+            XCTAssertEqual(record.status, .otherLanguage, label)
+            XCTAssertEqual(record.failureReason, .englishGateHanDominant, label)
+            XCTAssertEqual(record.failure, verdict.failure, label)
+            XCTAssertEqual(queue.state?.unresolvedCount, 0, label)
+            XCTAssertEqual(queue.state?.otherLanguageCount, 1, label)
+        }
+        // New captions preempt the optional repair.
+        try await startManualRetry(1)
+        queue.submit(.init(audioURL: try audio(root, name: "next.wav", seconds: 10), modelKey: "primary",
+                           fallbackModelKey: "fallback", start: 10, end: 20, appleEvidence: "", recordingURL: recording,
+                           sessionID: session), handler: { _ in })
+        await queue.finish()
+        try assertVerdictStands("preempted")
+        XCTAssertEqual(queue.records.last?.status, .completed)
+        // Parking saved processing (pause, confirming a candidate, opening another course).
+        try await startManualRetry(2)
+        try await queue.pause()
+        try assertVerdictStands("paused")
+        XCTAssertEqual(queue.records.first?.manualRetryCount, 2)
+    }
+
+    func testRelaunchAfterInterruptedRetriesKeepsVerdictsAndMarksOthersInterrupted() throws {
+        let root = try directory(), session = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        var nonEnglish = work(session, ordinal: 0, status: .otherLanguage, fallback: "fallback")
+        nonEnglish.attempt = .automaticRetry; nonEnglish.automaticRetryCount = 1
+        nonEnglish.failure = "此处为非英语讲话（未转写），音频已保留，可手动重试。"
+        nonEnglish.failureReason = .englishGateHanDominant
+        var failed = work(session, ordinal: 1, status: .failed, fallback: "fallback")
+        failed.attempt = .automaticRetry; failed.automaticRetryCount = 2
+        failed.failure = "此处尚未得到可靠的英文转写，音频已保留。"; failed.failureReason = .emptyOutput
+        var waiting = work(session, ordinal: 2, status: .retryWaiting, fallback: "fallback")
+        waiting.failure = failed.failure; waiting.failureReason = .englishGateHanDominant
+        // Without a fallback model the primary's own Han verdict never means `.otherLanguage`.
+        var primaryOnly = work(session, ordinal: 3, status: .failed)
+        primaryOnly.attempt = .automaticRetry; primaryOnly.automaticRetryCount = 2
+        primaryOnly.failure = failed.failure; primaryOnly.failureReason = .englishGateHanDominant
+        for record in [nonEnglish, failed, waiting, primaryOnly] { try journal.put(record) }
+        func retryAndClaimAll() throws {
+            for record in [nonEnglish, failed, primaryOnly] { try journal.retry(id: record.id) }
+            for _ in 0..<4 { XCTAssertNotNil(try journal.claimNext()) }
+        }
+        try retryAndClaimAll()
+        XCTAssertEqual(journal.records.map(\.attempt), [.manual, .manual, .automaticRetry, .manual])
+        // Parking requeues in place.
+        try journal.requeueActive()
+        XCTAssertEqual(journal.records.map(\.status), [.otherLanguage, .failed, .retryWaiting, .failed])
+        XCTAssertEqual(journal.records.map(\.failureReason), [.englishGateHanDominant, .interrupted, .interrupted, .interrupted])
+        XCTAssertEqual(journal.records.first?.failure, nonEnglish.failure)
+        XCTAssertEqual(journal.processingState.unresolvedCount, 3)
+        XCTAssertEqual(journal.processingState.otherLanguageCount, 1)
+        // Quitting mid-attempt is recovered when the journal is reopened.
+        try retryAndClaimAll()
+        let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        XCTAssertEqual(reopened.records.map(\.status), [.otherLanguage, .failed, .failed, .failed])
+        XCTAssertEqual(reopened.records.map(\.failureReason), [.englishGateHanDominant, .interrupted, .interrupted, .interrupted])
+        XCTAssertEqual(reopened.records.first?.failure, nonEnglish.failure)
+        XCTAssertEqual(reopened.processingState.unresolvedCount, 3)
+        XCTAssertEqual(reopened.processingState.otherLanguageCount, 1)
+    }
+
+    func testNonEnglishChunkWithPendingCandidateIsCountedOnce() async throws {
+        for accept in [false, true] {
+            let root = try directory(), session = UUID(), chunkID = UUID()
+            let recording = try audio(root, name: "recording.wav", seconds: 12)
+            let chunk = try audio(root, name: "zh.wav", seconds: 10)
+            let manual = AudioTestBox(false), events = AudioTestBox<[SpeechPipeline.Event]>([])
+            // As in a 0.2.0 course: every automatic attempt fails, and the last one borrows a context candidate.
+            let queue = DurableTranscriptionQueue { url, model, _ in
+                if url.lastPathComponent.hasPrefix("LiveLingo-retry-") { return "A neighbouring sentence from context." }
+                return model == "primary" || !manual.value ? "" : "那我们来看一下这道题的答案"
+            }
+            try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                      handler: { e in events.update { $0.append(e) } })
+            queue.submit(.init(audioURL: chunk, modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 10,
+                               appleEvidence: "", recordingURL: recording, id: chunkID, sessionID: session), handler: { _ in })
+            await queue.finish()
+            XCTAssertEqual(queue.records.first?.status, .failed)
+            XCTAssertEqual(queue.records.first?.candidateOrigin, "context")
+            manual.update { $0 = true }
+            try queue.retry(id: chunkID); await queue.finish()
+            let record = try XCTUnwrap(queue.records.first)
+            XCTAssertEqual(record.status, .otherLanguage)
+            XCTAssertEqual(record.candidateText, "A neighbouring sentence from context.", "A visible candidate is never dropped silently")
+            XCTAssertEqual(queue.state?.unresolvedCount, 1)
+            XCTAssertEqual(queue.state?.otherLanguageCount, 0)
+            XCTAssertFalse(events.value.contains { if case .nonEnglishSpeech = $0 { return true }; return false },
+                           "The candidate notice stays until the candidate is resolved")
+            try queue.resolveCandidate(id: chunkID, acceptedText: accept ? "The accepted sentence." : nil)
+            let resolved = try XCTUnwrap(queue.records.first)
+            XCTAssertNil(resolved.candidateText)
+            XCTAssertEqual(resolved.status, accept ? .completed : .otherLanguage)
+            XCTAssertEqual(resolved.failureReason, accept ? nil : .englishGateHanDominant)
+            XCTAssertEqual(resolved.failure == nil, accept)
+            XCTAssertEqual(queue.state?.unresolvedCount, 0)
+            XCTAssertEqual(queue.state?.otherLanguageCount, accept ? 0 : 1)
+        }
+    }
+
+    func testRestoredConsentCompletesTheChunkAndClearsItsReason() async throws {
+        let root = try directory(), session = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        var record = work(session, ordinal: 0, status: .failed)
+        record.attempt = .automaticRetry; record.automaticRetryCount = 2
+        record.failure = "此处尚未得到可靠的英文转写，音频已保留。"; record.failureReason = .emptyOutput
+        record.text = "An earlier partial sentence."
+        record.candidateText = "A neighbouring sentence from context."; record.candidateOrigin = "context"
+        _ = try audio(journal.directory, name: record.audioFile, seconds: 10)
+        try journal.put(record)
+        let original = TranscriptSegment(id: record.id, startTime: 0, endTime: 10, english: record.text!, sessionID: session)
+        let replacement = TranscriptSegment(id: record.id, startTime: 0, endTime: 10,
+            english: "The confirmed sentence.", sessionID: session, inputRevision: 1)
+        let store = SessionStore(directory: root)
+        _ = try store.save(.init(sessionID: session, segments: [original]))
+        _ = try store.append(.inputRevision(.init(fromRevision: 0, toRevision: 1, previousSegment: original,
+            replacementSegment: replacement, reason: "Confirmed by test user",
+            transcriptionCandidateText: record.candidateText)))
+        let queue = DurableTranscriptionQueue { _, _, _ in
+            XCTFail("Restoring a confirmed candidate cannot call the recognizer")
+            return ""
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true,
+                                  identified: true, restoring: true, startPaused: true, handler: { _ in })
+        let restored = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(restored.status, .completed)
+        XCTAssertEqual(restored.text, replacement.english)
+        XCTAssertNil(restored.failure)
+        XCTAssertNil(restored.failureReason)
+        await queue.cancel()
+    }
+
+    @MainActor
+    func testNonEnglishVerdictClearsOnlyThatRangesWarning() throws {
+        let root = try directory()
+        let reviews = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _ in
+            throw CancellationError()
+        }
+        addTeardownBlock { await reviews.shutdownForTesting() }
+        let model = AppModel(reviewQueue: reviews, backgroundServices: false,
+                             defaults: UserDefaults(suiteName: "LiveLingo-Test-\(UUID())")!)
+        model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: 750, end: 760,
+            message: "此处尚未得到可靠的英文转写，音频已保留。"))
+        XCTAssertEqual(model.sessionNotice, "12:30–12:40 · 此处尚未得到可靠的英文转写，音频已保留。")
+        model.receiveTranscriptionNoticeForTesting(.nonEnglishSpeech(start: 740, end: 750))
+        XCTAssertNotNil(model.sessionNotice, "Another range's warning stays")
+        model.receiveTranscriptionNoticeForTesting(.nonEnglishSpeech(start: 750, end: 760))
+        XCTAssertNil(model.sessionNotice)
+    }
+}
+
+/// The journal record exactly as LiveLingo 0.2.0 declares it (synthesized coding),
+/// used to check that new journals still open after a downgrade.
+private struct LegacyWorkRecord: Codable, Equatable {
+    enum Status: String, Codable { case pending, active, retryWaiting, manualPending, completed, silent, failed }
+    enum Attempt: String, Codable { case initial, automaticRetry, manual }
+    let id: UUID
+    let sessionID: UUID
+    let ordinal: Int
+    let audioFile: String
+    let startFrame: Int64
+    let endFrame: Int64
+    let sampleRate: Double
+    let start: TimeInterval
+    let end: TimeInterval
+    let captureStart: TimeInterval?
+    let captureEnd: TimeInterval?
+    let modelKey: String
+    let fallbackModelKey: String?
+    let appleEvidence: String
+    var recordingFile: String? = nil
+    var audioRetired: Bool? = nil
+    var status: Status = .pending
+    var attempt: Attempt = .initial
+    var automaticRetryCount = 0
+    var manualRetryCount = 0
+    var text: String?
+    var candidateText: String?
+    var candidateOrigin: String?
+    var failure: String?
+}
+
+private struct LegacyMutation: Codable {
+    let version: Int
+    let sessionID: UUID
+    let sequence: Int
+    var record: LegacyWorkRecord?
+    var paused: Bool?
+    var capturing: Bool?
+}
+
+private struct LegacyState: Decodable {
+    let version: Int
+    let sessionID: UUID
+    let sequence: Int
+    let records: [LegacyWorkRecord]
+}
+
+private struct LegacyEnvelope: Codable {
+    let payload: Data
+    let sha256: String
+}
+
+/// One checksummed journal line in the 0.2.0 format.
+private func legacyRow<T: Encodable>(_ value: T) throws -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let payload = try encoder.encode(value)
+    let digest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+    var row = try JSONEncoder().encode(LegacyEnvelope(payload: payload, sha256: digest))
+    row.append(0x0a)
+    return row
 }

@@ -6,7 +6,9 @@ struct SavedProcessingView: View {
     @ObservedObject var model: AppModel
 
     private var actionable: [TranscriptionWorkRecord] {
-        model.savedTranscriptionWork.filter { $0.needsWork || $0.status == .failed || $0.candidateText != nil }
+        model.savedTranscriptionWork.filter {
+            $0.needsWork || $0.status == .failed || $0.status == .otherLanguage || $0.candidateText != nil
+        }
     }
 
     var body: some View {
@@ -17,7 +19,7 @@ struct SavedProcessingView: View {
                         .font(.headline)
                         .accessibilityIdentifier("saved-processing-status")
                     if let state = model.transcriptionProcessing {
-                        Text("等待转写 \(state.pendingCount) 段 · 待确认或失败 \(state.unresolvedCount) 段")
+                        Text(Self.workSummary(state))
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     HStack {
@@ -76,7 +78,7 @@ struct SavedProcessingView: View {
                                     .monospacedDigit()
                                 Text(Self.label(record.status)).foregroundStyle(.secondary)
                                 Spacer(minLength: 8)
-                                if record.status == .failed {
+                                if record.status == .failed || record.status == .otherLanguage {
                                     Button("重试这段") { model.resumeSavedProcessing(retryID: record.id) }
                                         .disabled(model.legacyProvenanceUnavailable)
                                         .accessibilityLabel("重试 \(LearningTimeLabel.stamp(record.start)) 至 \(LearningTimeLabel.stamp(record.end)) 的转写")
@@ -105,6 +107,12 @@ struct SavedProcessingView: View {
         .onDisappear { model.stopCandidatePlayback() }
     }
 
+    private static func workSummary(_ state: TranscriptionProcessingState) -> String {
+        var text = "等待转写 \(state.pendingCount) 段 · 待确认或失败 \(state.unresolvedCount) 段"
+        if state.otherLanguageCount > 0 { text += " · 非英语讲话 \(state.otherLanguageCount) 段" }
+        return text
+    }
+
     private static func label(_ status: TranscriptionWorkRecord.Status) -> String {
         switch status {
         case .pending: return "等待转写"
@@ -114,6 +122,7 @@ struct SavedProcessingView: View {
         case .completed: return "已转写"
         case .silent: return "已确认无讲话"
         case .failed: return "转写失败"
+        case .otherLanguage: return "非英语讲话（未转写）"
         }
     }
 }

@@ -145,6 +145,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         case failure(String)
         case rejectedTranscript
         case transcriptionIssue(start: TimeInterval, end: TimeInterval, message: String)
+        /// This range is terminal non-English speech: counted, not reported as an error.
+        case nonEnglishSpeech(start: TimeInterval, end: TimeInterval)
     }
 
     enum PipelineError: LocalizedError {
@@ -2254,9 +2256,11 @@ enum RecordingDiagnostics {
     private static let lock = NSLock()
 
     static func append(recordingURL: URL?, event: String, start: TimeInterval? = nil,
-                       end: TimeInterval? = nil, detail: String, candidate: String? = nil) {
+                       end: TimeInterval? = nil, detail: String, candidate: String? = nil,
+                       reason: TranscriptionWorkRecord.FailureReason? = nil) {
         let logger = Logger(subsystem: "com.jianhongli.LiveLingo", category: "RecordingDiagnostics")
-        logger.notice("event=\(event, privacy: .public) has_interval=\(start != nil && end != nil) has_candidate=\(candidate != nil)")
+        // The event name already says whether a candidate exists; the reason is a fixed identifier.
+        logger.notice("event=\(event, privacy: .public) has_interval=\(start != nil && end != nil) reason=\(reason?.rawValue ?? "none", privacy: .public)")
         guard let recordingURL else { return }
         lock.withLock {
             do {
@@ -2265,6 +2269,7 @@ enum RecordingDiagnostics {
                 if let start { row["start"] = start }
                 if let end { row["end"] = end }
                 if let candidate { row["candidate"] = candidate }
+                if let reason { row["reason"] = reason.rawValue }
                 var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
                 data.append(0x0a)
                 let url = recordingURL.deletingLastPathComponent().appendingPathComponent("transcription-issues.jsonl")

@@ -54,10 +54,12 @@ import Darwin
             let safe = LiveLingoCLI.safeEvent("state", fields: ["summaryStatus": secret, "message": secret,
                 "phase": secret, "file": secret, "name": secret, "error": secret, "reason": secret,
                 "sessionID": secret, "kind": secret, "format": secret, "segments": 7,
-                "translated": 2, "summaryRunning": true, "unknown": ["prompt": secret]], elapsed: 1.25)
+                "translated": 2, "otherLanguageTranscription": 3, "summaryRunning": true,
+                "unknown": ["prompt": secret]], elapsed: 1.25)
             let encoded = String(decoding: try JSONSerialization.data(withJSONObject: safe), as: UTF8.self)
             try expect(!encoded.contains(secret), "event_redacts_text")
-            try expect(safe["segments"] as? Int == 7 && safe["translated"] as? Int == 2, "event_keeps_counts")
+            try expect(safe["segments"] as? Int == 7 && safe["translated"] as? Int == 2
+                && safe["otherLanguageTranscription"] as? Int == 3, "event_keeps_counts")
             try expect(safe["sessionID"] == nil && safe["kind"] == nil, "event_validates_identifiers")
             try expect(LiveLingoCLI.safeEvent("finished", fields: [:], elapsed: 0)["event"] as? String == "processing_finished", "finish_is_not_verification")
             passed.append("event_allowlist")

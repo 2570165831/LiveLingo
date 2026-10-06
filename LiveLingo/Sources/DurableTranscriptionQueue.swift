@@ -45,6 +45,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         var silent = false
         var candidate: String?
         var origin: String?
+        /// Why the exact range has no accepted English; identifiers only.
+        var failureReason: TranscriptionWorkRecord.FailureReason?
+        var otherLanguage = false
     }
     private let lock = NSRecursiveLock()
     private let transcriber: Transcriber
@@ -284,7 +287,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 guard !acceptedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw DurableTranscriptionJournal.JournalError.corrupt("确认文字为空")
                 }
-                record.text = acceptedText; record.status = .completed; record.failure = nil
+                record.text = acceptedText; record.status = .completed; record.failure = nil; record.failureReason = nil
             }
             record.candidateText = nil; record.candidateOrigin = nil
             try context.journal.put(record)
@@ -319,6 +322,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             record.text = body.english
             record.status = .completed
             record.failure = nil
+            record.failureReason = nil
             record.candidateText = nil
             record.candidateOrigin = nil
             try journal.put(record)
@@ -457,8 +461,12 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     var record = owner.journal.record(id: claimed.id) ?? claimed
                     defer { if !record.needsWork { owner.attempts.remove(id: record.id) } }
                     if activeWasPreempted || task.isCancelled {
-                        record.status = record.automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries ? .retryWaiting : .failed
-                        record.failure = "补转已让出资源，已用重试次数保留。"
+                        if record.interruptedRetryStaysOtherLanguage { record.status = .otherLanguage }
+                        else {
+                            record.status = record.automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries ? .retryWaiting : .failed
+                            record.failure = "补转已让出资源，已用重试次数保留。"
+                            record.failureReason = .interrupted
+                        }
                         try owner.journal.put(record)
                         return
                     }
@@ -468,38 +476,52 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             record.candidateText = candidate; record.candidateOrigin = output.origin
                         }
                         if output.silent {
-                            record.status = .silent; record.failure = nil
+                            record.status = .silent; record.failure = nil; record.failureReason = nil
                             owner.handler(.volatile(text: "", start: record.start, end: record.end,
                                                     observedAt: ProcessInfo.processInfo.systemUptime))
                         } else if !output.text.isEmpty {
                             if let old = record.text, !old.isEmpty, old != output.text {
                                 record.candidateText = output.text; record.candidateOrigin = "sameRangeRevision"
                             } else { record.text = output.text }
-                            record.status = .completed; record.failure = nil
+                            record.status = .completed; record.failure = nil; record.failureReason = nil
                             recentFormulaContext = String(output.text.suffix(1000))
-                        } else { markFailure(&record, message: "此处尚未得到可靠的英文转写，音频已保留。") }
+                        } else if output.otherLanguage {
+                            record.status = .otherLanguage
+                            record.failure = "此处为非英语讲话（未转写），音频已保留，可手动重试。"
+                            record.failureReason = output.failureReason
+                        } else {
+                            markFailure(&record, message: "此处尚未得到可靠的英文转写，音频已保留。", reason: output.failureReason)
+                        }
                         try owner.journal.put(record)
                         if !output.text.isEmpty, record.text == output.text {
                             emitCommit(record, text: output.text, repair: claimed.attempt != .initial)
                         }
                         if record.candidateText != nil { emitCandidate(record) }
                     case .failure(let error):
-                        markFailure(&record, message: "本机转写失败：\(error.localizedDescription)；音频已保留。")
+                        markFailure(&record, message: "本机转写失败：\(error.localizedDescription)；音频已保留。", reason: .error)
                         try owner.journal.put(record)
                     }
                     if let failure = record.failure {
                         let recording = record.recordingFile.map { owner.journal.directory.deletingLastPathComponent().appendingPathComponent($0) }
-                        RecordingDiagnostics.append(recordingURL: recording, event: "transcription_missing",
-                            start: record.start, end: record.end, detail: failure)
-                        owner.handler(.transcriptionIssue(start: record.start, end: record.end, message: failure))
+                        RecordingDiagnostics.append(recordingURL: recording,
+                            event: record.status == .otherLanguage ? "transcription_non_english" : "transcription_missing",
+                            start: record.start, end: record.end, detail: failure, reason: record.failureReason)
+                        if record.status != .otherLanguage {
+                            owner.handler(.transcriptionIssue(start: record.start, end: record.end, message: failure))
+                        } else if record.candidateText == nil {
+                            // Terminal, not an error: counted in the saved status, never a warning.
+                            owner.handler(.nonEnglishSpeech(start: record.start, end: record.end))
+                        }
                     }
                 }
             } catch { failStorage(error, generation: token) }
             publishState()
         }
     }
-    private func markFailure(_ record: inout TranscriptionWorkRecord, message: String) {
+    private func markFailure(_ record: inout TranscriptionWorkRecord, message: String,
+                             reason: TranscriptionWorkRecord.FailureReason?) {
         record.failure = message
+        record.failureReason = reason
         record.status = record.automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries ? .retryWaiting : .failed
     }
     private func emitCommit(_ record: TranscriptionWorkRecord, text: String, repair: Bool) {
@@ -520,7 +542,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             let recording = record.recordingFile.map { context.journal.directory.deletingLastPathComponent().appendingPathComponent($0) }
             let message = "补转得到候选文字（待核对），原正文保留。"
             RecordingDiagnostics.append(recordingURL: recording, event: "transcription_retry",
-                start: record.start, end: record.end, detail: message, candidate: text)
+                start: record.start, end: record.end, detail: message, candidate: text, reason: record.failureReason)
             context.handler(.transcriptionCandidate(TranscriptionCandidate(id: record.id, sessionID: record.sessionID,
                 originalText: record.text ?? "", text: text, start: record.start, end: record.end,
                 audioURL: audio, origin: record.candidateOrigin ?? "context")))
@@ -583,22 +605,40 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         let needsFallback = primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)
             || ASRQualityGate.fallbackReason(for: primary, audioDuration: record.duration) != nil
         var output = Outcome(text: usable)
+        if usable.isEmpty {
+            output.failureReason = primaryError == nil
+                ? .rejection(of: primary, audioDuration: record.duration) : .error
+        }
+        var fallbackVerdict: EnglishTranscriptGate.Verdict?
         if needsFallback, let model = record.fallbackModelKey {
             do {
                 let secondary = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback")
                 try Task.checkCancellation()
                 let alternate = SpeechPipeline.preferredTranscript(primary: nil, fallback: secondary, audioDuration: record.duration)
-                if output.text.isEmpty { output.text = alternate }
+                fallbackVerdict = EnglishTranscriptGate.verdict(secondary)
+                if output.text.isEmpty {
+                    output.text = alternate
+                    // A primary error stays the reason: it, not the language, blocks `.otherLanguage`.
+                    if primaryError == nil { output.failureReason = .rejection(of: secondary, audioDuration: record.duration) }
+                }
                 else if !alternate.isEmpty, alternate != output.text {
                     output.candidate = alternate; output.origin = "alternateModel"
                 }
             } catch is CancellationError { throw CancellationError() }
             catch {
                 // A fallback exception must never erase usable primary speech.
-                if output.text.isEmpty { primaryError = error }
+                if output.text.isEmpty { primaryError = error; output.failureReason = .error }
             }
         }
         if !output.text.isEmpty { return output }
+        // No English was accepted, the enhanced English pass has run (it can still
+        // recover speech the raw pass missed), and the multilingual fallback heard
+        // Han-dominant speech. Stop: later automatic attempts reuse these results
+        // and neighbour context would only borrow adjacent sentences.
+        if primaryError == nil, record.attempt != .initial, fallbackVerdict == .hanDominant {
+            output.otherLanguage = true
+            return output
+        }
         // The second automatic attempt may consult neighbours after retrying
         // the EXACT original chunk. Its result is always an explicit candidate.
         if record.attempt != .initial,

@@ -1308,8 +1308,11 @@ final class AppModel: ObservableObject {
             return "录音已保存 · 译文与笔记处理已暂停"
         }
         if processingTask != nil { return "录音已保存 · 正在整理译文与笔记" }
-        if let state = transcriptionProcessing, state.unresolvedCount > 0 {
-            return "已保存 · \(state.unresolvedCount) 段缺少转写，可手动重试"
+        if let state = transcriptionProcessing, state.unresolvedCount > 0 || state.otherLanguageCount > 0 {
+            var parts: [String] = []
+            if state.unresolvedCount > 0 { parts.append("\(state.unresolvedCount) 段缺少转写，可手动重试") }
+            if state.otherLanguageCount > 0 { parts.append("\(state.otherLanguageCount) 段为非英语讲话（未转写）") }
+            return "已保存 · " + parts.joined(separator: " · ")
         }
         return nil
     }
@@ -2221,8 +2224,10 @@ final class AppModel: ObservableObject {
             volatileEnglish = ""
             sessionNotice = Self.rejectedTranscriptNotice
         case let .transcriptionIssue(start, end, message):
-            let range = "\(Int(start) / 60):\(String(format: "%02d", Int(start) % 60))–\(Int(end) / 60):\(String(format: "%02d", Int(end) % 60))"
-            sessionNotice = "\(range) · \(message)"
+            sessionNotice = "\(Self.transcriptionNoticeRange(start, end)) · \(message)"
+        case let .nonEnglishSpeech(start, end):
+            // An earlier attempt's warning for this range no longer applies.
+            if sessionNotice?.hasPrefix(Self.transcriptionNoticeRange(start, end) + " · ") == true { sessionNotice = nil }
         case .failure(let message):
             if isImportingFile {
                 importFailureMessage = "导入中断：\(message)"
@@ -2236,6 +2241,10 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private static func transcriptionNoticeRange(_ start: TimeInterval, _ end: TimeInterval) -> String {
+        "\(Int(start) / 60):\(String(format: "%02d", Int(start) % 60))–\(Int(end) / 60):\(String(format: "%02d", Int(end) % 60))"
     }
 
     private func appendConfirmedCaption(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint]) {
@@ -2338,6 +2347,10 @@ final class AppModel: ObservableObject {
         consume(.volatile(text: text, start: 0, end: 0,
                           observedAt: ProcessInfo.processInfo.systemUptime))
         if let chinese { previewChinese = chinese }
+    }
+    func receiveTranscriptionNoticeForTesting(_ event: SpeechPipeline.Event) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        consume(event)
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
     func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {
@@ -4186,6 +4199,7 @@ extension AppModel {
                     "summaryRunning": self.summaryTask != nil, "concurrency": self.summaryConcurrencyAllowed,
                     "pendingTranscription": self.transcriptionProcessing?.pendingCount ?? 0,
                     "unresolvedTranscription": self.transcriptionProcessing?.unresolvedCount ?? 0,
+                    "otherLanguageTranscription": self.transcriptionProcessing?.otherLanguageCount ?? 0,
                     "summaryStatus": self.summaryStatus])
                 self.refreshSummaryConcurrency()
                 self.yieldSummaryToCaptions()
@@ -4305,6 +4319,7 @@ extension AppModel {
                 "stopSeconds": ProcessInfo.processInfo.systemUptime - started, "segments": segments.count,
                 "translated": completedTranslationCount, "summarized": lastSummarizedSegmentCount,
                 "unresolvedTranscription": transcriptionProcessing?.unresolvedCount ?? 0,
+                "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0,
                 "summaryStatus": summaryStatus])
         } catch {
             poll.cancel(); preview.cancel()
@@ -4373,7 +4388,8 @@ extension AppModel {
                                          "summaryRunning": summaryTask != nil,
                                          "concurrency": summaryConcurrencyAllowed,
                                          "pendingTranscription": transcriptionProcessing?.pendingCount ?? 0,
-                                         "unresolvedTranscription": transcriptionProcessing?.unresolvedCount ?? 0])
+                                         "unresolvedTranscription": transcriptionProcessing?.unresolvedCount ?? 0,
+                                         "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0])
                         do { try await Task.sleep(for: .seconds(1)) } catch { return }
                     }
                 }
@@ -4495,6 +4511,7 @@ extension AppModel {
             report("finished", ["phase": phaseLabel, "sessionID": sessionID.uuidString, "segments": segments.count,
                                 "translated": completedTranslationCount, "summarized": lastSummarizedSegmentCount,
                                 "revision": disk.inputRevision, "batches": disk.batches.count,
+                                "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0,
                                 "paused": processingPaused, "capture": isRecording])
             return LiveLingoCLI.CLIObservedSession(
                 sessionID: sessionID,
