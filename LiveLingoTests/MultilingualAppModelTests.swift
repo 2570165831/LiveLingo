@@ -5,11 +5,11 @@ import XCTest
 @MainActor
 final class MultilingualAppModelTests: XCTestCase {
     private func fixture(_ translation: CaptionTranslationDependencies = .unavailable) throws -> (AppModel, URL) {
-        let directory = URL(fileURLWithPath:
-            "/Users/li/Documents/Codex/2026-09-01/ll-claude-lab/work/dd-step6/TestFixtures", isDirectory: true)
+        let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("MultilingualAppModel-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "LiveLingo-MultilingualAppModel-\(UUID())"))
+        let suite = "LiveLingo-MultilingualAppModel-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
                 XCTFail("Translation tests must not generate notes or start models")
@@ -21,6 +21,7 @@ final class MultilingualAppModelTests: XCTestCase {
         addTeardownBlock {
             await model.resetTranslationSessionForTesting()?.value
             await queue.shutdownForTesting()
+            UserDefaults.standard.removePersistentDomain(forName: suite)
             try FileManager.default.removeItem(at: directory)
         }
         return (model, directory)
@@ -45,13 +46,13 @@ final class MultilingualAppModelTests: XCTestCase {
             english: original, sourceLanguage: "zh"), hints: [.init(kind: .formula, value: "H2O")])
         let caption = try XCTUnwrap(model.segments.first)
         XCTAssertEqual(caption.english, original)
-        XCTAssertEqual(caption.chinese, original)
+        XCTAssertEqual(caption.chinese, "这片叶子长大了。")
         XCTAssertEqual(caption.sourceLanguage, "zh")
         XCTAssertEqual(caption.translationState, .completed)
         XCTAssertNil(model.translationTaskForTesting)
         XCTAssertTrue(model.previewTranslationSource.isEmpty)
         XCTAssertTrue(model.previewChinese.isEmpty)
-        XCTAssertEqual(model.previewChineseDisplay, original)
+        XCTAssertEqual(model.previewChineseDisplay, "这片叶子长大了。")
     }
 
     func testFinalEventKeepsItsSourceLanguage() throws {
@@ -341,5 +342,516 @@ final class MultilingualAppModelTests: XCTestCase {
         XCTAssertEqual(model.segments.first?.inputRevision, 1)
         XCTAssertEqual(model.segments.first?.translationState, .pending)
         XCTAssertEqual(model.segments.first?.chinese, "")
+    }
+
+    func testTranslateCaptionEnglishBoundaryPreservesHintsAttemptAndUpdates() async throws {
+        let hints: [AuxiliaryTranslationHint] = [.init(kind: .formula, value: "H2O"),
+            .init(kind: .unit, value: "mol·L⁻¹")]
+        for language in [nil, "en"] as [String?] {
+            for attempt in [CaptionTranslationAttempt.standard, .repairContent] {
+                var calls = 0
+                var updates: [String] = []
+                var dependencies = CaptionTranslationDependencies.unavailable
+                dependencies.translate = { text, model, receivedHints, receivedAttempt, update in
+                    calls += 1
+                    XCTAssertEqual(text, "Use H2O at 1 mol·L⁻¹.")
+                    XCTAssertEqual(model, "english-boundary-model")
+                    XCTAssertEqual(receivedHints, hints)
+                    XCTAssertEqual(receivedAttempt, attempt)
+                    await update?("English update bytes: H2O / mol·L⁻¹")
+                    return "Boundary result bytes."
+                }
+                dependencies.translateSource = { _, _, _, _, _ in
+                    XCTFail("nil and en must use the unchanged English dependency")
+                    throw CancellationError()
+                }
+                let result = try await dependencies.translateCaption("Use H2O at 1 mol·L⁻¹.",
+                    "english-boundary-model", hints, attempt, { updates.append($0) }, sourceLanguage: language)
+                XCTAssertEqual(calls, 1)
+                XCTAssertEqual(result, "Boundary result bytes.")
+                XCTAssertEqual(updates, ["English update bytes: H2O / mol·L⁻¹"])
+            }
+        }
+    }
+
+    func testTranslateCaptionNonEnglishBoundaryPreservesLanguageAttemptAndUpdates() async throws {
+        for language in SpokenLanguage.all.map(\.code).filter({ $0 != "en" }) {
+            var calls = 0
+            var updates: [String] = []
+            var dependencies = CaptionTranslationDependencies.unavailable
+            dependencies.translate = { _, _, _, _, _ in
+                XCTFail("Supported non-English codes must reach the source dependency")
+                throw CancellationError()
+            }
+            dependencies.translateSource = { text, model, code, attempt, update in
+                calls += 1
+                XCTAssertEqual(text, "原文：H2O / mol·L⁻¹")
+                XCTAssertEqual(model, "source-boundary-model")
+                XCTAssertEqual(code, language)
+                XCTAssertEqual(attempt, .repairContent)
+                await update?("原样回调：\(language)")
+                return "原样返回：\(language)"
+            }
+            let result = try await dependencies.translateCaption("原文：H2O / mol·L⁻¹", "source-boundary-model",
+                [.init(kind: .formula, value: "Fe3+")], .repairContent, { updates.append($0) },
+                sourceLanguage: language)
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(result, "原样返回：\(language)")
+            XCTAssertEqual(updates, ["原样回调：\(language)"])
+        }
+    }
+
+    func testLiveSourceAdapterForwardsClientArgumentsAndUpdates() async throws {
+        for attempt in [CaptionTranslationAttempt.standard, .repairContent] {
+            var calls = 0
+            var updates: [String] = []
+            let translator = CaptionTranslationDependencies.sourceTranslator { text, model, language, hints, mappedAttempt, update in
+                calls += 1
+                XCTAssertEqual(text, "呢個箱入面有兩本書。")
+                XCTAssertEqual(model, "source-mapping-model")
+                XCTAssertEqual(language, "yue")
+                XCTAssertTrue(hints.isEmpty, "The live non-English adapter must not add English hints")
+                XCTAssertEqual(mappedAttempt, attempt)
+                await update?("這個箱子裡面有兩本書。")
+                return "Client result bytes."
+            }
+            let result = try await translator("呢個箱入面有兩本書。", "source-mapping-model", "yue", attempt,
+                { updates.append($0) })
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(result, "Client result bytes.")
+            XCTAssertEqual(updates, ["這個箱子裡面有兩本書。"])
+        }
+    }
+
+    func testLiveSourceAdapterKeepsNilUpdateAndClientFailure() async throws {
+        let translator = CaptionTranslationDependencies.sourceTranslator { _, _, _, _, _, update in
+            XCTAssertNil(update)
+            throw QwenRuntimeError.invalidResponse
+        }
+        do {
+            _ = try await translator("La hoja crece.", "source-mapping-model", "es", .standard, nil)
+            XCTFail("The live adapter must propagate a client failure")
+        } catch QwenRuntimeError.invalidResponse {
+            // This exact client failure must survive the adapter.
+        }
+    }
+
+    func testDeferredRepairEnglishContextExcludesMixedSourcesWithoutChangingTopology() {
+        let context = [
+            TranscriptSegment(startTime: 0, endTime: 1, english: "The lecture starts."),
+            TranscriptSegment(startTime: 1, endTime: 2, english: "小船靠岸了。", sourceLanguage: "zh"),
+            TranscriptSegment(startTime: 2, endTime: 3, english: "La barca llegó.", sourceLanguage: "es"),
+            TranscriptSegment(startTime: 3, endTime: 4, english: "隻船泊好咗。", sourceLanguage: "yue"),
+            TranscriptSegment(startTime: 4, endTime: 5, english: "The lecture ends.", sourceLanguage: "en")
+        ]
+        XCTAssertEqual(DeferredCaptionRepair.englishContext(context), "The lecture starts. The lecture ends.")
+        XCTAssertEqual(DeferredCaptionRepair.englishContext(Array(context[1...3])), "")
+        XCTAssertEqual(DeferredCaptionRepair.englishContext([]), "")
+        XCTAssertEqual(context.map(\.english), ["The lecture starts.", "小船靠岸了。", "La barca llegó.",
+            "隻船泊好咗。", "The lecture ends."])
+        XCTAssertEqual(context.map(\.sourceLanguage), [nil, "zh", "es", "yue", nil])
+    }
+
+    func testEditedCandidateMatchingOriginalKeepsLanguageAndDoesNotCreateRevision() async throws {
+        for (text, language) in [("The reaction is fast.", nil), ("隻船泊好咗。", "yue")] as [(String, String?)] {
+            let (model, directory, original) = try await step6OpenSavedOriginal(text, language: language)
+            model.receiveTranscriptionNoticeForTesting(.identifiedFinal(try step6CandidateCommit(original,
+                text: "La réaction est rapide.", language: "fr")))
+            try await eventually { model.transcriptionCandidates.count == 1 }
+            model.acceptTranscriptionCandidate(original.id, editedText: original.english,
+                expectedOriginal: original.english, expectedCandidate: "La réaction est rapide.")
+            try await eventually { model.transcriptionCandidates.isEmpty }
+            XCTAssertNil(model.archiveError)
+            XCTAssertFalse(model.archiveLoading)
+            XCTAssertEqual(model.segments, [original])
+            XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+            let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+            XCTAssertEqual(saved.inputRevision, 0)
+            XCTAssertTrue(saved.revisionHistory.isEmpty)
+            let journal = try DurableTranscriptionJournal(sessionDirectory: directory,
+                sessionID: try XCTUnwrap(original.sessionID))
+            let record = try XCTUnwrap(journal.record(id: original.id))
+            XCTAssertNil(record.candidateText)
+            XCTAssertEqual(record.textLanguage, language)
+            XCTAssertEqual(record.text, text)
+        }
+    }
+
+    func testEditedEnglishCandidateKeepsEnglishInArchiveJournalAndReopen() async throws {
+        let (model, directory, original) = try await step6OpenSavedOriginal("The reaction is fast.")
+        model.receiveTranscriptionNoticeForTesting(.identifiedFinal(try step6CandidateCommit(original,
+            text: "La réaction est rapide.", language: "fr")))
+        try await eventually { model.transcriptionCandidates.count == 1 }
+        model.acceptTranscriptionCandidate(original.id, editedText: "The reaction is very fast.",
+            expectedOriginal: original.english, expectedCandidate: "La réaction est rapide.")
+        XCTAssertTrue(model.archiveLoading)
+        try await eventually { !model.archiveLoading }
+        XCTAssertNil(model.archiveError)
+        XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+        XCTAssertNil(model.segments.first?.sourceLanguage)
+        XCTAssertEqual(model.segments.first?.english, "The reaction is very fast.")
+        XCTAssertEqual(model.translationQueueForTesting, [original.id])
+        XCTAssertNil(model.translationTaskForTesting, "The saved class remains paused")
+        let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+        XCTAssertNil(saved.segments.first?.sourceLanguage)
+        XCTAssertEqual(saved.revisionHistory.first?.previousSegment, original)
+        XCTAssertNil(saved.revisionHistory.first?.replacementSegment.sourceLanguage)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory,
+            sessionID: try XCTUnwrap(original.sessionID))
+        let record = try XCTUnwrap(journal.record(id: original.id))
+        XCTAssertEqual(record.text, "The reaction is very fast.")
+        XCTAssertNil(record.textLanguage)
+        XCTAssertNil(record.candidateText)
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        XCTAssertEqual(model.segments.first?.english, "The reaction is very fast.")
+        XCTAssertNil(model.segments.first?.sourceLanguage)
+        XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+        XCTAssertNil(model.archiveError)
+    }
+
+    func testEditedNonEnglishCandidateKeepsOriginalLanguageInArchiveJournalAndReopen() async throws {
+        let (model, directory, original) = try await step6OpenSavedOriginal("隻船泊好咗。", language: "yue")
+        model.receiveTranscriptionNoticeForTesting(.identifiedFinal(try step6CandidateCommit(original,
+            text: "La barca llegó.", language: "es")))
+        try await eventually { model.transcriptionCandidates.count == 1 }
+        model.acceptTranscriptionCandidate(original.id, editedText: "隻小船泊好咗。", expectedOriginal: original.english)
+        XCTAssertTrue(model.archiveLoading)
+        try await eventually { !model.archiveLoading }
+        XCTAssertNil(model.archiveError)
+        XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+        XCTAssertEqual(model.segments.first?.sourceLanguage, "yue")
+        XCTAssertEqual(model.segments.first?.english, "隻小船泊好咗。")
+        XCTAssertEqual(model.translationQueueForTesting, [original.id])
+        let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+        XCTAssertEqual(saved.revisionHistory.first?.previousSegment, original)
+        XCTAssertEqual(saved.revisionHistory.first?.replacementSegment.sourceLanguage, "yue")
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory,
+            sessionID: try XCTUnwrap(original.sessionID))
+        let record = try XCTUnwrap(journal.record(id: original.id))
+        XCTAssertEqual(record.text, "隻小船泊好咗。")
+        XCTAssertEqual(record.textLanguage, "yue")
+        XCTAssertNil(record.candidateText)
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        XCTAssertEqual(model.segments.first?.sourceLanguage, "yue")
+        XCTAssertEqual(model.segments.first?.english, "隻小船泊好咗。")
+        XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+        XCTAssertNil(model.archiveError)
+    }
+
+    func testUneditedSameTextCandidateAdoptsDifferentLanguageThroughProductPath() async throws {
+        let text = "第三章：热力学第一定律。"
+        let (model, directory, original) = try await step6OpenSavedOriginal(text, language: "zh")
+        model.receiveTranscriptionNoticeForTesting(.identifiedFinal(try step6CandidateCommit(original,
+            text: text, language: "yue")))
+        try await eventually { model.transcriptionCandidates.count == 1 }
+        XCTAssertEqual(model.transcriptionCandidates.first?.language, "yue")
+        model.acceptTranscriptionCandidate(original.id, editedText: text, expectedOriginal: text,
+            expectedCandidate: text, expectedSession: original.sessionID)
+        XCTAssertTrue(model.archiveLoading)
+        try await eventually { !model.archiveLoading }
+        XCTAssertNil(model.archiveError)
+        XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+        XCTAssertEqual(model.segments.first?.sourceLanguage, "yue")
+        XCTAssertEqual(model.segments.first?.inputRevision, 1)
+        XCTAssertEqual(model.translationQueueForTesting, [original.id])
+        let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+        XCTAssertEqual(saved.revisionHistory.first?.previousSegment.sourceLanguage, "zh")
+        XCTAssertEqual(saved.revisionHistory.first?.replacementSegment.sourceLanguage, "yue")
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory,
+            sessionID: try XCTUnwrap(original.sessionID))
+        let record = try XCTUnwrap(journal.record(id: original.id))
+        XCTAssertEqual(record.textLanguage, "yue")
+        XCTAssertNil(record.candidateText)
+    }
+
+    func testPausedChineseCandidateDoesNotEnterQueueAndRendersSimplifiedTarget() async throws {
+        let (model, directory, original) = try await step6OpenSavedOriginal("A boat arrives.")
+        let text = "這隻小船已經靠岸了。"
+        model.receiveTranscriptionNoticeForTesting(.identifiedFinal(try step6CandidateCommit(original,
+            text: text, language: "zh")))
+        try await eventually { model.transcriptionCandidates.count == 1 }
+        model.acceptTranscriptionCandidate(original.id, editedText: text, expectedOriginal: original.english)
+        XCTAssertTrue(model.archiveLoading)
+        try await eventually { !model.archiveLoading }
+        XCTAssertNil(model.archiveError)
+        XCTAssertTrue(model.savedProcessingIsPaused)
+        XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+        XCTAssertFalse(model.translationQueueForTesting.contains(original.id))
+        XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+        XCTAssertNil(model.translationTaskForTesting)
+        XCTAssertEqual(model.segments.first?.english, "這隻小船已經靠岸了。")
+        XCTAssertEqual(model.segments.first?.chinese, "这只小船已经靠岸了。")
+        XCTAssertEqual(model.segments.first?.translationState, .completed)
+        let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+        XCTAssertFalse(saved.processing.pendingSegmentIDs.contains(original.id))
+        XCTAssertEqual(saved.segments.first?.sourceLanguage, "zh")
+        XCTAssertEqual(saved.revisionHistory.first?.replacementSegment.chinese, "这只小船已经靠岸了。")
+    }
+
+    func testIdentifiedFinalUsesTargetForChineseAndKeepsForeignSourceLanguage() async throws {
+        var codes: [String] = []
+        var dependencies = CaptionTranslationDependencies.unavailable
+        dependencies.translateSource = { text, _, language, _, _ in
+            codes.append(language)
+            XCTAssertEqual(text, "La hoja crece.")
+            return "叶子长大了。"
+        }
+        let (model, _) = try fixture(dependencies)
+        model.receiveTranscriptionNoticeForTesting(.final(text: "這片葉子長大了。", start: 0, end: 1,
+            hints: [], language: "zh"))
+        let session = try XCTUnwrap(model.segments.first?.sessionID)
+        XCTAssertEqual(model.segments.first?.english, "這片葉子長大了。")
+        XCTAssertEqual(model.segments.first?.chinese, "这片叶子长大了。")
+        XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+        let commit = TranscriptionCommit(id: UUID(), sessionID: session, text: "La hoja crece.", start: 1, end: 2,
+            startFrame: 16000, endFrame: 32000, sampleRate: 16000, hints: [], isRepair: false, language: "es")
+        model.receiveTranscriptionNoticeForTesting(.identifiedFinal(commit))
+        await model.translationTaskForTesting?.value
+        model.receiveTranscriptionNoticeForTesting(.identifiedFinal(commit))
+        XCTAssertEqual(codes, ["es"])
+        XCTAssertEqual(model.segments.count, 2)
+        XCTAssertEqual(model.segments.last?.id, commit.id)
+        XCTAssertEqual(model.segments.last?.sourceLanguage, "es")
+        XCTAssertEqual(model.segments.last?.english, "La hoja crece.")
+        XCTAssertEqual(model.segments.last?.chinese, "叶子长大了。")
+    }
+
+    func testRestoredPendingChineseDrainsWithoutCallingEitherTranslator() async throws {
+        var englishCalls = 0, sourceCalls = 0
+        var dependencies = CaptionTranslationDependencies.unavailable
+        dependencies.translate = { _, _, _, _, _ in englishCalls += 1; return "错误的英文路径。" }
+        dependencies.translateSource = { _, _, _, _, _ in sourceCalls += 1; return "错误的原语言路径。" }
+        let (model, directory) = try fixture(dependencies)
+        var snapshot = SessionSnapshot()
+        let caption = TranscriptSegment(startTime: 0, endTime: 2, english: "這片葉子長大了。",
+            sessionID: snapshot.sessionID, sourceLanguage: "zh")
+        snapshot.segments = [caption]
+        snapshot.processing.paused = true
+        snapshot.processing.phase = .paused
+        snapshot.processing.pendingSegmentIDs = [caption.id]
+        // Retained notes cover the caption so this regression only drains captions.
+        var covered = caption
+        covered.completeTranslation("这片叶子长大了。")
+        var notebook = LearningNotebook()
+        try notebook.append(evidence: [covered], note: .init(topic: "已保存的课堂过渡", points: [],
+            sourceVersion: 2, noNewKnowledge: true))
+        notebook.writeState(to: &snapshot)
+        _ = try SessionStore(directory: directory).save(snapshot)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        XCTAssertEqual(model.segments.first?.translationState, .pending)
+        model.resumeSavedProcessing()
+        try await eventually { model.segments.first?.hasUsableTranslation == true }
+        await model.translationTaskForTesting?.value
+        await model.savedProcessingTaskForTesting?.value
+        XCTAssertNil(model.archiveError)
+        XCTAssertEqual(englishCalls, 0)
+        XCTAssertEqual(sourceCalls, 0)
+        XCTAssertEqual(model.segments.first?.english, "這片葉子長大了。")
+        XCTAssertEqual(model.segments.first?.chinese, "这片叶子长大了。")
+        XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+        let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+        XCTAssertEqual(saved.segments.first?.translationState, .completed)
+        XCTAssertFalse(saved.processing.pendingSegmentIDs.contains(caption.id))
+    }
+
+    func testRestoredMixedPendingRepairsReachLanguageGuardBeforeGenerating() async throws {
+        let cases: [(String?, String?, String?, String?)] = [
+            ("yue", nil, "yue", nil), (nil, "es", nil, "es"),
+            (nil, nil, "yue", nil), (nil, nil, nil, "es")
+        ]
+        for (pendingPreviousLanguage, pendingCurrentLanguage, livePreviousLanguage, liveCurrentLanguage) in cases {
+            var repairCalls = 0
+            var dependencies = CaptionTranslationDependencies.unavailable
+            dependencies.repair = { _ in
+                repairCalls += 1
+                return .init(previous: "不应出现的补修。", rejection: nil)
+            }
+            let (model, directory) = try fixture(dependencies)
+            var snapshot = SessionSnapshot()
+            let previous = TranscriptSegment(startTime: 0, endTime: 1, english: "A bell rings.",
+                chinese: "铃响了。", sessionID: snapshot.sessionID, sourceLanguage: pendingPreviousLanguage)
+            let current = TranscriptSegment(startTime: 1, endTime: 2, english: "The wind stops.",
+                chinese: "风停了。", sessionID: snapshot.sessionID, sourceLanguage: pendingCurrentLanguage)
+            let pending = DeferredCaptionRepair(sessionID: snapshot.sessionID, previous: previous, current: current,
+                context: [], normalizedCurrent: current.english, modelName: "synthetic-repair-model")
+            snapshot.segments = [
+                .init(id: previous.id, startTime: 0, endTime: 1, english: previous.english,
+                    chinese: previous.chinese, sessionID: snapshot.sessionID, sourceLanguage: livePreviousLanguage),
+                .init(id: current.id, startTime: 1, endTime: 2, english: current.english,
+                    chinese: current.chinese, sessionID: snapshot.sessionID, sourceLanguage: liveCurrentLanguage)
+            ]
+            XCTAssertEqual(pending.previousIndex(in: snapshot.segments, session: snapshot.sessionID), 0,
+                "The job must pass topology validation so the language guard is actually reached")
+            snapshot.processing.pendingCaptionRepairs = [pending]
+            snapshot.processing.paused = true
+            snapshot.processing.phase = .paused
+            var notebook = LearningNotebook()
+            try notebook.append(evidence: snapshot.segments, note: .init(topic: "已保存的课堂过渡", points: [],
+                sourceVersion: 2, noNewKnowledge: true))
+            notebook.writeState(to: &snapshot)
+            _ = try SessionStore(directory: directory).save(snapshot)
+            model.loadPresentationForTesting(phase: .idle, evidence: [])
+            try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+            XCTAssertEqual(pending.previousIndex(in: model.segments, session: snapshot.sessionID), 0)
+            model.resumeSavedProcessing()
+            try await eventually { !model.savedProcessingIsPaused }
+            await model.translationTaskForTesting?.value
+            await model.savedProcessingTaskForTesting?.value
+            XCTAssertNil(model.archiveError)
+            XCTAssertEqual(repairCalls, 0)
+            XCTAssertEqual(model.segments, snapshot.segments)
+            XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+            let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+            XCTAssertNil(saved.processing.pendingCaptionRepairs)
+            XCTAssertTrue(saved.revisionHistory.isEmpty)
+        }
+    }
+
+    func testCantoneseStreamingEchoIsHiddenAndTraditionalDraftIsShownSimplified() async throws {
+        let afterEcho = Step6CaptionHold<Void>()
+        let afterDraft = Step6CaptionHold<String>()
+        let source = "呢個箱入面有兩本書。"
+        let traditional = "這個箱子裡面有兩本書。"
+        var dependencies = CaptionTranslationDependencies.unavailable
+        dependencies.translateSource = { text, _, language, _, update in
+            XCTAssertEqual(language, "yue")
+            XCTAssertEqual(text, source)
+            await update?(text)
+            _ = try await afterEcho.wait()
+            await update?(traditional)
+            return try await afterDraft.wait()
+        }
+        let (model, _) = try fixture(dependencies)
+        addTeardownBlock {
+            await afterEcho.finish(.failure(CancellationError()))
+            await afterDraft.finish(.failure(CancellationError()))
+        }
+        model.receiveTranscriptionNoticeForTesting(.final(text: source, start: 0, end: 2, hints: [], language: "yue"))
+        let id = try XCTUnwrap(model.segments.first?.id)
+        try await eventually { afterEcho.entered }
+        XCTAssertEqual(model.translatingSegmentID, id)
+        XCTAssertTrue(model.streamingChinese.isEmpty, "A source echo must not become a visible streaming caption")
+        XCTAssertEqual(model.segments.first?.translationState, .translating)
+        afterEcho.finish(.success(()))
+        try await eventually { afterDraft.entered }
+        XCTAssertEqual(model.translatingSegmentID, id)
+        XCTAssertEqual(model.streamingChinese, "这个箱子里面有两本书。")
+        XCTAssertEqual(model.segments.first?.translationState, .translating)
+        XCTAssertEqual(model.segments.first?.chinese, "", "Streaming text must stay out of the saved caption")
+        XCTAssertEqual(model.segments.first?.english, source)
+        afterDraft.finish(.success(traditional))
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(model.segments.first?.chinese, "这个箱子里面有两本书。")
+        XCTAssertEqual(model.segments.first?.translationState, .completed)
+    }
+
+    func testReopenReconcilesSavedEditedRevisionBeforeReplayingInterruptedJournal() async throws {
+        let sources: [(String?, String, String)] = [
+            (nil, "A boat arrives.", "A small boat arrives."),
+            ("yue", "隻船泊好咗。", "隻小船泊好咗。")
+        ]
+        for (language, originalText, acceptedText) in sources {
+            for textAlreadyWritten in [false, true] {
+                let (model, directory) = try fixture()
+                var snapshot = SessionSnapshot(inputRevision: 1)
+                let original = TranscriptSegment(startTime: 0, endTime: 2, english: originalText,
+                    chinese: "小船到了。", sessionID: snapshot.sessionID, sourceLanguage: language)
+                let accepted = TranscriptSegment(id: original.id, startTime: 0, endTime: 2, english: acceptedText,
+                    sessionID: snapshot.sessionID, inputRevision: 1, sourceLanguage: language)
+                snapshot.segments = [accepted]
+                snapshot.revisionHistory = [.init(fromRevision: 0, toRevision: 1, previousSegment: original,
+                    replacementSegment: accepted, retainedBatches: [], reason: "用户确认补转文字",
+                    confirmedAt: Date(timeIntervalSince1970: 0),
+                    transcriptionCandidateText: "La barca llegó.")]
+                snapshot.processing.paused = true
+                snapshot.processing.phase = .paused
+                snapshot.audioFiles = [.init(relativePath: SessionWorkspace.recordingFileName,
+                    sampleRate: 16000, channelCount: 1, frameCount: 32000, isFinalized: true)]
+                _ = try SessionStore(directory: directory).save(snapshot)
+                let journal = try DurableTranscriptionJournal(sessionDirectory: directory, sessionID: snapshot.sessionID)
+                var record = TranscriptionWorkRecord(id: original.id, sessionID: snapshot.sessionID, ordinal: 0,
+                    audioFile: "synthetic.wav", startFrame: 0, endFrame: 32000, sampleRate: 16000, start: 0, end: 2,
+                    captureStart: nil, captureEnd: nil, modelKey: "parakeet", fallbackModelKey: "1.7b", appleEvidence: "")
+                record.status = .completed
+                record.text = textAlreadyWritten ? acceptedText : originalText
+                record.textLanguage = language
+                record.candidateText = "La barca llegó."
+                record.candidateLanguage = "es"
+                record.candidateOrigin = "sameRangeRevision"
+                try journal.put(record)
+                model.loadPresentationForTesting(phase: .idle, evidence: [])
+                try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+                XCTAssertNil(model.archiveError)
+                XCTAssertEqual(model.segments, [accepted])
+                XCTAssertTrue(model.savedProcessingIsPaused)
+                XCTAssertTrue(model.transcriptionCandidates.isEmpty,
+                    "The journal must be reconciled before restore emits stale conflicts or candidates")
+                let restored = try XCTUnwrap(model.savedTranscriptionWork.first)
+                XCTAssertEqual(restored.text, acceptedText)
+                XCTAssertEqual(restored.textLanguage, language)
+                XCTAssertNil(restored.candidateText)
+                XCTAssertEqual(restored.status, .completed)
+                let persistedJournal = try DurableTranscriptionJournal(sessionDirectory: directory,
+                    sessionID: snapshot.sessionID)
+                XCTAssertEqual(persistedJournal.record(id: original.id), restored)
+                let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+                XCTAssertEqual(saved.revisionHistory, snapshot.revisionHistory)
+                try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+                XCTAssertNil(model.archiveError)
+                XCTAssertEqual(model.segments, [accepted])
+                XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+            }
+        }
+    }
+
+    /// Only archive/journal setup lives here; tests deliver identifiedFinal and
+    /// accept the resulting durable candidate through the production methods.
+    private func step6OpenSavedOriginal(_ text: String, language: String? = nil) async throws -> (AppModel, URL, TranscriptSegment) {
+        let (model, directory) = try fixture()
+        var snapshot = SessionSnapshot()
+        let original = TranscriptSegment(startTime: 0, endTime: 2, english: text,
+            chinese: "原有译文。", sessionID: snapshot.sessionID, sourceLanguage: language)
+        snapshot.segments = [original]
+        snapshot.processing.paused = true
+        snapshot.processing.phase = .paused
+        snapshot.audioFiles = [.init(relativePath: SessionWorkspace.recordingFileName,
+            sampleRate: 16000, channelCount: 1, frameCount: 32000, isFinalized: true)]
+        _ = try SessionStore(directory: directory).save(snapshot)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory, sessionID: snapshot.sessionID)
+        var record = TranscriptionWorkRecord(id: original.id, sessionID: snapshot.sessionID, ordinal: 0,
+            audioFile: "synthetic.wav", startFrame: 0, endFrame: 32000, sampleRate: 16000, start: 0, end: 2,
+            captureStart: nil, captureEnd: nil, modelKey: "parakeet", fallbackModelKey: "1.7b", appleEvidence: "")
+        record.status = .completed
+        record.text = text
+        record.textLanguage = language
+        try journal.put(record)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        return (model, directory, original)
+    }
+
+    private func step6CandidateCommit(_ original: TranscriptSegment, text: String, language: String?) throws -> TranscriptionCommit {
+        .init(id: original.id, sessionID: try XCTUnwrap(original.sessionID), text: text, start: 0, end: 2,
+            startFrame: 0, endFrame: 32000, sampleRate: 16000, hints: [], isRepair: true, language: language)
+    }
+}
+
+@MainActor
+private final class Step6CaptionHold<Value: Sendable> {
+    private var continuation: CheckedContinuation<Value, Error>?
+    private(set) var entered = false
+
+    func wait() async throws -> Value {
+        try await withCheckedThrowingContinuation {
+            continuation = $0
+            entered = true
+        }
+    }
+
+    func finish(_ result: Result<Value, Error>) {
+        let held = continuation
+        continuation = nil
+        held?.resume(with: result)
     }
 }

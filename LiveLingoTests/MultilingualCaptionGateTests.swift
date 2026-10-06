@@ -20,12 +20,12 @@ final class MultilingualCaptionGateTests: XCTestCase {
     }
 
     private func presentationModel() throws -> AppModel {
-        let directory = URL(fileURLWithPath:
-            "/Users/li/Documents/Codex/2026-09-01/ll-claude-lab/work/dd-step6/TestFixtures",
-            isDirectory: true).appendingPathComponent("MultilingualCaptionGate-\(UUID().uuidString)",
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MultilingualCaptionGate-\(UUID().uuidString)",
                                                      isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "LiveLingo-MultilingualCaptionGate-\(UUID().uuidString)"))
+        let suite = "LiveLingo-MultilingualCaptionGate-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
                                        observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
             XCTFail("Caption display tests must not invoke a generator")
@@ -33,6 +33,7 @@ final class MultilingualCaptionGateTests: XCTestCase {
         }
         addTeardownBlock {
             await queue.shutdownForTesting()
+            UserDefaults.standard.removePersistentDomain(forName: suite)
             try FileManager.default.removeItem(at: directory)
         }
         // No preference setters: the isolated suite is read without persisting values.

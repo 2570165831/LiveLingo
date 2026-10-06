@@ -199,6 +199,11 @@ struct DeferredCaptionRepair: Codable, Equatable, Sendable {
     let normalizedCurrent: String
     let modelName: String
 
+    static func englishContext(_ context: [TranscriptSegment]) -> String {
+        context.filter { SpokenLanguage.nonEnglishCode($0.sourceLanguage) == nil }
+            .map(\.english).joined(separator: " ")
+    }
+
     func previousIndex(in segments: [TranscriptSegment], session: UUID) -> Int? {
         guard sessionID == session,
               let index = segments.firstIndex(where: { $0.id == previous.id }),

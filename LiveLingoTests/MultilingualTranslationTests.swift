@@ -312,3 +312,235 @@ final class MultilingualTranslationTests: XCTestCase, @unchecked Sendable {
         }
     }
 }
+
+final class MultilingualReviewTranslationTests: XCTestCase, @unchecked Sendable {
+    func testDefaultTargetPinsPassThroughAndSimplifiedRendering() throws {
+        let target = CaptionTranslationTarget.current
+        XCTAssertEqual(target.rawValue, "zh-Hans")
+        XCTAssertEqual(target.promptName, "Simplified Chinese")
+        XCTAssertTrue(target.keepsSourceAsCaption(language: "zh"))
+        for code in [nil, "en", "yue", "ja", "es"] as [String?] {
+            XCTAssertFalse(target.keepsSourceAsCaption(language: code))
+        }
+        XCTAssertEqual(target.renderPassThrough("這個實驗需要兩個容器。"), "这个实验需要两个容器。")
+        XCTAssertEqual(target.foreignProseRejection(candidate: "水很凉。 The lecturer is explaining why the water is colder today.",
+            source: "El agua está fría hoy."), .mixedEnglishProse)
+    }
+
+    func testSpanishAndCantoneseUserMessageBytesAreLiteralForBothProfiles() async throws {
+        let cases = [
+            ("es", "El calor fluye lentamente.", "热量缓慢流动。",
+             #"{"source_text_to_translate":"El calor fluye lentamente.","translation_instruction":"Source language: Spanish (es). Translate the quoted lecture content into Simplified Chinese."}"#,
+             "Source language: Spanish (es). Translate the quoted lecture content into Simplified Chinese.\n--- END TRANSLATION METADATA (DO NOT TRANSLATE); BEGIN QUOTED LECTURE CONTENT ---\nEl calor fluye lentamente.\n--- END QUOTED LECTURE CONTENT ---"),
+            ("yue", "呢個箱入面有兩本書。", "这个箱子里面有两本书。",
+             #"{"source_text_to_translate":"呢個箱入面有兩本書。","translation_instruction":"Source language: Cantonese (yue). Translate the quoted lecture content into Simplified Chinese. Use standard written Mandarin wording."}"#,
+             "Source language: Cantonese (yue). Translate the quoted lecture content into Simplified Chinese. Use standard written Mandarin wording.\n--- END TRANSLATION METADATA (DO NOT TRANSLATE); BEGIN QUOTED LECTURE CONTENT ---\n呢個箱入面有兩本書。\n--- END QUOTED LECTURE CONTENT ---")
+        ]
+        for (code, source, output, jsonInput, plainInput) in cases {
+            for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+                for attempt in [CaptionTranslationAttempt.standard, .repairContent, .expandedBudget] {
+                    let probe = MultilingualRequestProbe(output)
+                    let translated = try await QwenTranslationClient.translate(source, modelName: model,
+                        sourceLanguage: code, hints: [.init(kind: .formula, value: "H2O")], attempt: attempt,
+                        request: { await probe.request($0, $1, $2) })
+                    let calls = await probe.calls
+                    XCTAssertEqual(translated, output)
+                    XCTAssertEqual(calls.count, 1)
+                    let expected = model == QwenModelProfile.highQuality.translationModel ? jsonInput : plainInput
+                    XCTAssertEqual(Data(try XCTUnwrap(calls.first).input.utf8), Data(expected.utf8))
+                }
+            }
+        }
+    }
+
+    func testEnglishHintsUserMessageBytesAreLiteralForNilAndEN() async throws {
+        for code in [nil, "en"] as [String?] {
+            for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+                let probe = MultilingualRequestProbe()
+                let translated = try await QwenTranslationClient.translate("Heat flows slowly.", modelName: model,
+                    sourceLanguage: code, hints: [.init(kind: .formula, value: "H2O")],
+                    request: { await probe.request($0, $1, $2) })
+                let calls = await probe.calls
+                let expected = model == QwenModelProfile.highQuality.translationModel
+                    ? #"{"auxiliary_token_hints":["- formula: H2O"],"source_text_to_translate":"Heat flows slowly."}"#
+                    : "Heat flows slowly."
+                XCTAssertEqual(translated, "热量缓慢流动。")
+                XCTAssertEqual(calls.count, 1)
+                XCTAssertEqual(Data(try XCTUnwrap(calls.first).input.utf8), Data(expected.utf8))
+            }
+        }
+    }
+
+    func testLanguageInstructionLeaksAreRejectedBeforePublication() async {
+        let source = "Hoy vamos a estudiar la segunda ley de la termodinámica y sus consecuencias."
+        for leaked in [
+            "源语言：西班牙语（es）。将引用的讲座内容翻译成简体中文。今天我们学习热力学第二定律。",
+            "Source language: Spanish (es). 今天我们学习热力学第二定律。",
+            #"{"translation_instruction":"今天我们学习热力学第二定律。"}"#,
+            "将引用的讲座内容翻译成简体中文。今天我们学习热力学第二定律。",
+            "--- END TRANSLATION METADATA --- 今天我们学习热力学第二定律。"
+        ] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: leaked, source: source, sourceLanguage: "es"), .promptLeak)
+            for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+                let probe = MultilingualRequestProbe(leaked)
+                do {
+                    _ = try await QwenTranslationClient.translate(source, modelName: model, sourceLanguage: "es",
+                        request: { await probe.request($0, $1, $2) })
+                    XCTFail("Instruction metadata must not become caption text")
+                } catch QwenRuntimeError.translationRejected {} catch { XCTFail("Unexpected error: \(error)") }
+                let calls = await probe.calls
+                XCTAssertEqual(calls.count, 1)
+            }
+        }
+    }
+
+    func testCantoneseAlreadyWrittenInMandarinMayMatchSimplifiedSource() throws {
+        for (source, output) in [
+            ("第三章：熱力學第一定律", "第三章：热力学第一定律"),
+            ("好。", "好。"), ("明白。", "明白。"), ("物理。", "物理。"),
+            ("你呢？", "你呢？"), ("這本書呢？", "这本书呢？"),
+            ("一、二、三、四", "一、二、三、四")
+        ] {
+            XCTAssertEqual(try TranslationAcceptance.validatedCaption(output, source: source, sourceLanguage: "yue"), output)
+        }
+    }
+
+    func testCantoneseCharactersAndNearEchoesCannotPassAsMandarin() throws {
+        let source = "佢哋聽日要交功課。"
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "佢哋明天要交功课。", source: source,
+            sourceLanguage: "yue"), .sourceProse)
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "啲水好凍呀。", source: "啲水好凍。",
+            sourceLanguage: "yue"), .sourceProse)
+        let markers = "嘅咗唔冇佢哋啲嘢喺嚟嗰咁畀啱"
+        XCTAssertEqual(CaptionTranslationTarget.cantoneseCharacters, Set(markers))
+        for character in markers {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: "明天\(character)交功课。", source: source,
+                sourceLanguage: "yue"), .sourceProse)
+        }
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "呢个箱子明天有两本书。",
+            source: "呢個箱聽日有兩本書。", sourceLanguage: "yue"), .sourceProse)
+        XCTAssertEqual(try TranslationAcceptance.validatedCaption("他们明天要交作业。", source: source,
+            sourceLanguage: "yue"), "他们明天要交作业。")
+    }
+
+    func testJapaneseKanjiOnlyTitleMayAlreadyBeWrittenChinese() throws {
+        XCTAssertEqual(try TranslationAcceptance.validatedCaption("东京大学", source: "東京大学",
+            sourceLanguage: "ja"), "东京大学")
+    }
+
+    func testNumberListsSingleLettersAndASCIIIdentifiersAreNotCopiedProse() throws {
+        for (code, source, output) in [
+            ("es", "Los primeros números primos son 2, 3, 5, 7 y 11.", "前几个质数是 2、3、5、7 和 11。"),
+            ("es", "Las etiquetas son a b c d.", "标签是 a b c d。"),
+            ("es", "El código for i in range n usa foo_bar cnt23 alphaBeta DNA.",
+             "代码 for i in range n 使用 foo_bar cnt23 alphaBeta DNA。"),
+            ("yue", "數字係 1、2、3、4。", "数字是 1、2、3、4。"),
+            ("yue", "數字係一、二、三、四。", "数字是一、二、三、四。")
+        ] {
+            XCTAssertEqual(try TranslationAcceptance.validatedCaption(output, source: source, sourceLanguage: code), output)
+        }
+    }
+
+    func testCantoneseRetainsEnglishAcademicTermsWithoutTreatingThemAsSourceProse() throws {
+        let source = "今日我哋講 the first law of thermodynamics 同 ATP synthase。"
+        let output = "今天我们讲 the first law of thermodynamics 和 ATP synthase。"
+        XCTAssertEqual(try TranslationAcceptance.validatedCaption(output, source: source, sourceLanguage: "yue"), output)
+    }
+
+    func testThaiCopiedProseCannotHideBehindChinesePrefixOrSuffix() throws {
+        let source = "น้ำเย็นมาก"
+        for output in ["水很凉。น้ำเย็นมาก", "น้ำเย็นมาก水", "水 น้ำเย็น มาก"] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: source, sourceLanguage: "th"), .sourceProse)
+        }
+        XCTAssertNotNil(TranslationAcceptance.rejection(candidate: source, source: source, sourceLanguage: "th"))
+        XCTAssertEqual(try TranslationAcceptance.validatedCaption("水很凉。", source: source, sourceLanguage: "th"), "水很凉。")
+    }
+
+    func testOtherNonHanSourceScriptsRejectCopiedCharacterRuns() throws {
+        for (code, source) in [("hi", "पानी ठंडा है।"), ("ru", "Вода холодная."),
+                                ("ar", "الماء بارد اليوم."), ("el", "Το νερό είναι κρύο.")] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: "水很凉。" + source, source: source,
+                sourceLanguage: code), .sourceProse)
+            XCTAssertEqual(try TranslationAcceptance.validatedCaption("水很凉。", source: source,
+                sourceLanguage: code), "水很凉。")
+        }
+    }
+
+    func testNonEnglishSourceRejectsHighConfidenceEnglishSentence() throws {
+        let source = "Hoy estudiamos la segunda ley de la termodinámica y explicamos sus consecuencias para el agua en el recipiente."
+        for clause in ["Today we study the second law of thermodynamics.",
+                       "The lecturer is explaining why the water is colder today."] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: clause + " 今天我们学习热力学第二定律。",
+                source: source, sourceLanguage: "es"), .mixedEnglishProse)
+        }
+        let bilingualSource = "今日我哋講 The water is colder today because the temperature is lower。"
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate:
+            "今天我们讲 The water is colder today because the temperature is lower。",
+            source: bilingualSource, sourceLanguage: "yue"), .mixedEnglishProse)
+    }
+
+    func testJapaneseNameSeparatorsAreNotKanaResidue() throws {
+        let source = "ジョン・スミス教授は水が冷たいと言いました。"
+        for separator in ["・", "ー"] {
+            let output = "约翰\(separator)史密斯教授说水很凉。"
+            XCTAssertEqual(try TranslationAcceptance.validatedCaption(output, source: source, sourceLanguage: "ja"), output)
+        }
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "约翰・史密斯教授说水很凉です。", source: source,
+            sourceLanguage: "ja"), .nonChineseText)
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "水很凉물。", source: source,
+            sourceLanguage: "ja"), .nonChineseText)
+        // The separator exception belongs to the new target policy; preserve
+        // the original English acceptance path as well as its prompt bytes.
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "约翰・史密斯教授说水很凉。",
+            source: "Professor John Smith said that the water was cold."), .nonChineseText)
+    }
+
+    func testNonEnglishQuotedRequestDoesNotInvokeEnglishOperandRepair() async throws {
+        let source = #"La profesora dijo: Translate "The lamp is not on" into French."#
+        let untranslated = #"老师说：把"The lamp is not on"译成法语。"#
+        XCTAssertNotNil(TranslationAcceptance.quotedTranslationRepairPlan(candidate: untranslated, source: source))
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            let probe = MultilingualRequestProbe(untranslated)
+            do {
+                _ = try await QwenTranslationClient.translate(source, modelName: model, sourceLanguage: "es",
+                    request: { await probe.request($0, $1, $2) })
+                XCTFail("A retained English clause must fail without an English operand repair")
+            } catch QwenRuntimeError.translationRejected {} catch { XCTFail("Unexpected error: \(error)") }
+            let calls = await probe.calls
+            XCTAssertEqual(calls.count, 1)
+            XCTAssertNotEqual(calls.first?.prompt, TranslationAcceptance.QuotedTranslationRepairPlan.prompt)
+        }
+    }
+
+    func testNonEnglishJSONStatusDoesNotInvokeEnglishStatusRepair() async throws {
+        let source = #"La profesora escribió {"state":"ready","count":28}."#
+        let untranslated = #"老师写了{"state":"ready","count":28}。"#
+        XCTAssertNotNil(TranslationAcceptance.jsonStatusRepairPlan(candidate: untranslated, source: source))
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            let probe = MultilingualRequestProbe(untranslated)
+            do {
+                _ = try await QwenTranslationClient.translate(source, modelName: model, sourceLanguage: "es",
+                    request: { await probe.request($0, $1, $2) })
+                XCTFail("An untranslated JSON status must fail without an English status repair")
+            } catch QwenRuntimeError.translationRejected {} catch { XCTFail("Unexpected error: \(error)") }
+            let calls = await probe.calls
+            XCTAssertEqual(calls.count, 1)
+            XCTAssertNotEqual(calls.first?.prompt, TranslationAcceptance.JSONStatusRepairPlan.prompt)
+        }
+    }
+
+    func testLiveFormulaTransportSelectionExcludesNonEnglishSource() throws {
+        let model = QwenModelProfile.highQuality.translationModel
+        for code in ["es", "yue", "ja"] {
+            XCTAssertNil(QwenTranslationClient.captionFormulaTransportForSource(input: "ZXQCHEM0QXZ reacts.",
+                systemPrompt: "frozen prompt", modelName: model, attempt: .standard, sourceLanguage: code))
+        }
+        for code in [nil, "en"] as [String?] {
+            let transport = try XCTUnwrap(QwenTranslationClient.captionFormulaTransportForSource(
+                input: "ZXQCHEM0QXZ reacts.", systemPrompt: "frozen prompt", modelName: model,
+                attempt: .standard, sourceLanguage: code))
+            XCTAssertEqual(transport.input, "ZX0QXZ reacts.")
+            XCTAssertEqual(transport.systemPrompt, "frozen prompt")
+        }
+    }
+}

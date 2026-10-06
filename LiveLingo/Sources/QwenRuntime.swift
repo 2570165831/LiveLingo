@@ -81,9 +81,56 @@ enum CaptionTranslationTarget: String, Sendable {
         }
     }
 
+    func keepsSourceAsCaption(language: String?) -> Bool {
+        switch self {
+        case .simplifiedChinese: return language == "zh"
+        }
+    }
+
+    func renderPassThrough(_ text: String) -> String { normalize(text) }
+
+    /// These characters identify written Cantonese, rather than standard
+    /// written Mandarin. Keep one list for both copy and residue checks.
+    static let cantoneseCharacters: Set<Character> = Set("嘅咗唔冇佢哋啲嘢喺嚟嗰咁畀啱")
+    private static let cantonesePhrases = ["呢个", "呢啲"]
+
+    private func containsCantoneseWording(_ text: String) -> Bool {
+        let simplified = SimplifiedChineseNormalizer.normalize(text)
+        return text.contains(where: Self.cantoneseCharacters.contains)
+            || Self.cantonesePhrases.contains(where: simplified.contains)
+    }
+
+    func permitsNormalizedSourceCopy(_ source: String, language: SpokenLanguage) -> Bool {
+        switch self {
+        case .simplifiedChinese:
+            switch language.code {
+            case "yue": return !containsCantoneseWording(source)
+            case "ja":
+                // A kanji-only slide title can already be written Chinese.
+                return !TranslationAcceptance.containsKanaOrHangul(source, allowJapanesePunctuation: true)
+            default: return false
+            }
+        }
+    }
+
     func sourceInstruction(_ language: SpokenLanguage) -> String {
         let cantonese = language.code == "yue" ? " Use standard written Mandarin wording." : ""
         return "Source language: \(language.qwenLabel) (\(language.code)). Translate the quoted lecture content into \(promptName).\(cantonese)\n"
+    }
+
+    func quotedSourceInput(_ text: String, language: SpokenLanguage) -> String {
+        sourceInstruction(language)
+            + "--- END TRANSLATION METADATA (DO NOT TRANSLATE); BEGIN QUOTED LECTURE CONTENT ---\n"
+            + text + "\n--- END QUOTED LECTURE CONTENT ---"
+    }
+
+    func containsInstructionLeak(_ text: String) -> Bool {
+        let folded = normalize(text).lowercased()
+        return ["translation_instruction", "source_text_to_translate", "source language",
+                "源语言", "原文语言", "translate the quoted lecture content",
+                "将引用的讲座内容翻译", "把引用的讲座内容翻译", "standard written mandarin wording",
+                "标准书面普通话", "end translation metadata", "begin quoted lecture content",
+                "end quoted lecture content", "翻译元数据"].contains(where: folded.contains)
     }
 
     func containsOutputScript(_ text: String) -> Bool {
@@ -95,6 +142,43 @@ enum CaptionTranslationTarget: String, Sendable {
     func requiresSourceScriptRemoval(_ code: String) -> Bool {
         switch self {
         case .simplifiedChinese: return code == "ja" || code == "ko"
+        }
+    }
+
+    func sourceResidueRejection(candidate: String, source: String,
+                                language: SpokenLanguage) -> TranslationAcceptance.Rejection? {
+        switch self {
+        case .simplifiedChinese:
+            if language.code == "yue", containsCantoneseWording(candidate) {
+                return .sourceProse
+            }
+            if requiresSourceScriptRemoval(language.code),
+               TranslationAcceptance.containsKanaOrHangul(candidate, allowJapanesePunctuation: true) {
+                return .nonChineseText
+            }
+            switch language.writingSystem {
+            case .thai, .devanagari, .arabic, .cyrillic, .greek:
+                // Script characters, including combining marks, catch copied
+                // prose in languages whose words need not contain spaces.
+                let original = Array(source.unicodeScalars.filter { language.containsSourceScalar($0) })
+                let output = Array(candidate.unicodeScalars.filter { language.containsSourceScalar($0) })
+                guard original.count >= 4, output.count >= 4 else { return nil }
+                let grams = Set((0...(original.count - 4)).map {
+                    String(String.UnicodeScalarView(original[$0..<($0 + 4)]))
+                })
+                if (0...(output.count - 4)).contains(where: {
+                    grams.contains(String(String.UnicodeScalarView(output[$0..<($0 + 4)])))
+                }) { return .sourceProse }
+            default: break
+            }
+            return nil
+        }
+    }
+
+    func foreignProseRejection(candidate: String, source: String) -> TranslationAcceptance.Rejection? {
+        switch self {
+        case .simplifiedChinese:
+            return TranslationAcceptance.targetForeignProseRejection(candidate: candidate, source: source)
         }
     }
 
@@ -973,8 +1057,16 @@ enum TranslationAcceptance {
             options: [.widthInsensitive, .diacriticInsensitive], locale: nil), source: source)
     }
 
-    private static func foreignProseRejection(in foldedCandidate: String, source: String) -> Rejection? {
-        let hasForeignScript = containsKanaOrHangul(foldedCandidate)
+    fileprivate static func targetForeignProseRejection(candidate: String, source: String) -> Rejection? {
+        foreignProseRejection(in: bodyWithoutApplicationNotice(candidate).folding(
+            options: [.widthInsensitive, .diacriticInsensitive], locale: nil), source: source,
+            rejectEnglishProse: true, allowJapanesePunctuation: true)
+    }
+
+    private static func foreignProseRejection(in foldedCandidate: String, source: String,
+                                              rejectEnglishProse: Bool = false,
+                                              allowJapanesePunctuation: Bool = false) -> Rejection? {
+        let hasForeignScript = containsKanaOrHangul(foldedCandidate, allowJapanesePunctuation: allowJapanesePunctuation)
         let spans = latinSpanExpression.matches(in: foldedCandidate,
             range: NSRange(foldedCandidate.startIndex..., in: foldedCandidate))
         guard hasForeignScript || spans.contains(where: {
@@ -982,22 +1074,29 @@ enum TranslationAcceptance {
         }) else { return nil }
         let protected = ChemistryTranslationProtector.prepareLiterals(source)
         let prose = withoutSourceJSONKeys(in: protected.withoutLiteralValues(in: foldedCandidate), source: source)
-        if hasForeignScript && containsKanaOrHangul(prose) { return .nonChineseText }
+        if hasForeignScript && containsKanaOrHangul(prose, allowJapanesePunctuation: allowJapanesePunctuation) {
+            return .nonChineseText
+        }
         let sourceWords = Set(englishTokens(source).map { $0.lowercased() })
         for match in latinSpanExpression.matches(in: prose, range: NSRange(prose.startIndex..., in: prose)) {
             let span = (prose as NSString).substring(with: match.range)
             let words = englishTokens(span)
-            guard words.count >= 4,
-                  !words.allSatisfy({ $0.first?.isUppercase == true }),
-                  words.contains(where: { !isAcronym($0) && $0.count >= 3 && !sourceWords.contains($0.lowercased()) })
-            else { continue }
+            guard words.count >= 4, !words.allSatisfy({ $0.first?.isUppercase == true }) else { continue }
+            let hasNewWords = words.contains {
+                !isAcronym($0) && $0.count >= 3 && !sourceWords.contains($0.lowercased())
+            }
+            guard hasNewWords || (rejectEnglishProse && containsUntranslatedClause(span)) else { continue }
             // NLLanguageRecognizer instances are not safe for concurrent use.
             // Each eligible span owns its recognizer; ordinary Chinese captions
             // and retained terms do not create one or add a model request.
             let recognizer = NLLanguageRecognizer()
             recognizer.processString(span)
             guard let best = recognizer.languageHypotheses(withMaximum: 1).first,
-                  best.key != .english, best.value >= 0.98 else { continue }
+                  best.value >= 0.98 else { continue }
+            if best.key == .english {
+                if rejectEnglishProse { return .mixedEnglishProse }
+                continue
+            }
             return .nonChineseText
         }
         return nil
@@ -1020,18 +1119,25 @@ enum TranslationAcceptance {
         if leakMarkers.contains(where: lowercased.contains) { return .promptLeak }
         if unsupportedModelSelfDescription(in: folded, source: source) { return .modelReply }
         let target = CaptionTranslationTarget.current
+        if target.containsInstructionLeak(body) { return .promptLeak }
         guard target.containsOutputScript(body) else { return .nonChineseText }
-        if echoForm(target.normalize(body)) == echoForm(target.normalize(source)) { return .sourceCopy }
-        let originalWords = sourceWords(source)
-        let outputWords = sourceWords(body)
-        if originalWords.count >= 4, outputWords.count >= 4 {
+        let isCopy = echoForm(target.normalize(body)) == echoForm(target.normalize(source))
+        if isCopy && !target.permitsNormalizedSourceCopy(source, language: language) { return .sourceCopy }
+        let literals = ChemistryTranslationProtector.prepareLiterals(source)
+        let sourceProse = literals.withoutLiteralValues(in: source)
+        let outputProse = literals.withoutLiteralValues(in: body)
+        let originalWords = sourceWords(sourceProse, language: language)
+        let outputWords = sourceWords(outputProse, language: language)
+        if !isCopy, originalWords.count >= 4, outputWords.count >= 4 {
             let copied = Set((0...(originalWords.count - 4)).map { originalWords[$0..<($0 + 4)].joined(separator: " ") })
             if (0...(outputWords.count - 4)).contains(where: {
                 copied.contains(outputWords[$0..<($0 + 4)].joined(separator: " "))
             }) { return .sourceProse }
         }
-        if target.requiresSourceScriptRemoval(code), containsKanaOrHangul(body) { return .nonChineseText }
-        if let rejection = foreignProseRejection(candidate: body, source: source) { return rejection }
+        if let rejection = target.sourceResidueRejection(candidate: body, source: source, language: language) {
+            return rejection
+        }
+        if let rejection = target.foreignProseRejection(candidate: body, source: source) { return rejection }
         let outputCount = body.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count
         guard Double(outputCount) <= target.maximumOutputCharacters(source: source, language: language) else {
             return .disproportionateLength
@@ -1039,9 +1145,21 @@ enum TranslationAcceptance {
         return nil
     }
 
-    private static func sourceWords(_ text: String) -> [String] {
-        text.folding(options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive], locale: nil)
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+    private static func sourceWords(_ text: String, language: SpokenLanguage) -> [String] {
+        // Keep underscores and digits until filtering so an ASCII identifier
+        // cannot turn into several apparent prose words. Case is inspected
+        // before folding to distinguish acronyms and camelCase identifiers.
+        text.folding(options: [.widthInsensitive], locale: nil)
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" })
+            .filter { token in
+                guard token.count > 1, token.allSatisfy(\.isLetter),
+                      token.unicodeScalars.allSatisfy({ language.containsSourceScalar($0) }) else { return false }
+                if language.writingSystem == .latin {
+                    guard !isAcronym(String(token)), !token.dropFirst().contains(where: \.isUppercase) else { return false }
+                }
+                return true
+            }
+            .map { String($0).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
     }
 
     private static func checked(candidate: String, source: String, sourceLanguage: String? = nil) -> Result<String, Rejection> {
@@ -1167,7 +1285,7 @@ enum TranslationAcceptance {
         text.unicodeScalars.contains(where: isHan)
     }
 
-    fileprivate static func isHan(_ scalar: Unicode.Scalar) -> Bool {
+    static func isHan(_ scalar: Unicode.Scalar) -> Bool {
         switch scalar.value {
         case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF,
              0x20000...0x2FA1F, 0x30000...0x323AF:
@@ -1177,8 +1295,9 @@ enum TranslationAcceptance {
         }
     }
 
-    private static func containsKanaOrHangul(_ text: String) -> Bool {
+    fileprivate static func containsKanaOrHangul(_ text: String, allowJapanesePunctuation: Bool = false) -> Bool {
         text.unicodeScalars.contains { scalar in
+            if allowJapanesePunctuation, scalar.value == 0x30FB || scalar.value == 0x30FC { return false }
             switch scalar.value {
             case 0x3040...0x30FF, 0x31F0...0x31FF, 0x1B000...0x1B16F,
                  0x1100...0x11FF, 0x3130...0x318F, 0xA960...0xA97F,
@@ -2184,6 +2303,13 @@ enum QwenTranslationClient {
             enabled: modelName == QwenModelProfile.highQuality.translationModel && attempt == .standard)
     }
 
+    static func captionFormulaTransportForSource(input: String, systemPrompt: String, modelName: String,
+                                                 attempt: CaptionTranslationAttempt,
+                                                 sourceLanguage: String?) -> CaptionFormulaTransport? {
+        guard sourceLanguage == nil || sourceLanguage == "en" else { return nil }
+        return captionFormulaTransport(input: input, systemPrompt: systemPrompt, modelName: modelName, attempt: attempt)
+    }
+
     private static func requestTranslation(
         _ text: String, modelName: String, hints: [AuxiliaryTranslationHint],
         sourceLanguage: String? = nil,
@@ -2233,7 +2359,7 @@ enum QwenTranslationClient {
         // Keep the two existing system-prefix cache variants unchanged. Source
         // and target instructions belong only to the user message.
         let requestInput = usesWrapper ? input
-            : (language.map { CaptionTranslationTarget.current.sourceInstruction($0) + input } ?? input)
+            : (language.map { CaptionTranslationTarget.current.quotedSourceInput(input, language: $0) } ?? input)
         let budget = attempt.outputTokenBudget(for: text)
         let output: String
         if let request { output = try await request(requestInput, prompt, budget) }
@@ -2241,8 +2367,8 @@ enum QwenTranslationClient {
             output = try await TranslationModelLifetime.shared.withModel(modelName) {
                 try await chat(requestInput, modelName: modelName, systemPrompt: prompt,
                     maximumOutputTokens: budget, timeout: 30, streaming: true,
-                    formulaTransport: language == nil ? captionFormulaTransport(input: input, systemPrompt: prompt,
-                        modelName: modelName, attempt: attempt) : nil, onUpdate: onUpdate)
+                    formulaTransport: captionFormulaTransportForSource(input: input, systemPrompt: prompt,
+                        modelName: modelName, attempt: attempt, sourceLanguage: language?.code), onUpdate: onUpdate)
             }
         }
         if usesWrapper, output.range(of: field, options: .caseInsensitive) != nil {

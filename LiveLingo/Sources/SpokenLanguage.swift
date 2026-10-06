@@ -10,9 +10,8 @@ struct SpokenLanguage: Equatable, Sendable {
     let code: String
     let qwenLabel: String
     let writingSystem: WritingSystem
-    /// Only Mandarin Chinese is shown as is. Written Cantonese uses characters
-    /// and phrasing other readers often cannot follow, so it is translated.
-    var avoidsTranslation: Bool { code == "zh" }
+    /// Compatibility for existing callers; the target owns the decision.
+    var avoidsTranslation: Bool { CaptionTranslationTarget.current.keepsSourceAsCaption(language: code) }
     var chineseName: String {
         Locale(identifier: "zh-Hans").localizedString(forLanguageCode: code) ?? qwenLabel
     }
@@ -54,6 +53,31 @@ struct SpokenLanguage: Equatable, Sendable {
     static func nonEnglishCode(_ code: String?) -> String? {
         guard let language = find(code), language.code != "en" else { return nil }
         return language.code
+    }
+
+    /// Source script identity is separate from the target's acceptance policy.
+    func containsSourceScalar(_ scalar: Unicode.Scalar) -> Bool {
+        guard CharacterSet.letters.contains(scalar) || CharacterSet.nonBaseCharacters.contains(scalar) else {
+            return false
+        }
+        switch writingSystem {
+        case .han: return TranslationAcceptance.isHan(scalar)
+        case .japanese:
+            return TranslationAcceptance.isHan(scalar) || (0x3040...0x30FF).contains(scalar.value)
+        case .hangul:
+            return (0x1100...0x11FF).contains(scalar.value) || (0x3130...0x318F).contains(scalar.value)
+                || (0xA960...0xA97F).contains(scalar.value) || (0xAC00...0xD7FF).contains(scalar.value)
+        case .cyrillic: return (0x0400...0x052F).contains(scalar.value)
+        case .arabic:
+            return (0x0600...0x06FF).contains(scalar.value) || (0x0750...0x077F).contains(scalar.value)
+                || (0x08A0...0x08FF).contains(scalar.value)
+        case .thai: return (0x0E00...0x0E7F).contains(scalar.value)
+        case .devanagari: return (0x0900...0x097F).contains(scalar.value)
+        case .greek: return (0x0370...0x03FF).contains(scalar.value) || (0x1F00...0x1FFF).contains(scalar.value)
+        case .latin:
+            return (0x0041...0x005A).contains(scalar.value) || (0x0061...0x007A).contains(scalar.value)
+                || (0x00C0...0x02AF).contains(scalar.value) || (0x1E00...0x1EFF).contains(scalar.value)
+        }
     }
 }
 

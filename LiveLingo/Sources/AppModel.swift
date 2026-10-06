@@ -27,6 +27,7 @@ enum AppRuntimeEnvironment {
 struct CaptionTranslationDependencies {
     typealias Update = @MainActor @Sendable (String) async -> Void
     typealias DeferRepair = @MainActor @Sendable () -> Bool
+    typealias SourceClient = (String, String, String?, [AuxiliaryTranslationHint], CaptionTranslationAttempt, Update?) async throws -> String
     var translate: (String, String, [AuxiliaryTranslationHint], CaptionTranslationAttempt, Update?) async throws -> String
     var adjacent: (String, String, String, String, String, Bool, [AuxiliaryTranslationHint], Update?, DeferRepair?) async throws -> QwenTranslationClient.AdjacentTranslation
 
@@ -44,9 +45,8 @@ struct CaptionTranslationDependencies {
             current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6, onCurrent: $7, deferRepair: $8) },
         repair: { try await QwenTranslationClient.repairPreviousCaption(previous: $0.previous.english,
             previousChinese: $0.previous.chinese, current: $0.normalizedCurrent,
-            context: $0.context.filter { $0.sourceLanguage == nil }.map(\.english).joined(separator: " "), modelName: $0.modelName) },
-        translateSource: { try await QwenTranslationClient.translate($0, modelName: $1, sourceLanguage: $2,
-            attempt: $3, onUpdate: $4) }
+            context: DeferredCaptionRepair.englishContext($0.context), modelName: $0.modelName) },
+        translateSource: sourceTranslator()
     )
     static let unavailable = Self(
         translate: { _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
@@ -56,8 +56,21 @@ struct CaptionTranslationDependencies {
     func translateCaption(_ text: String, _ model: String, _ hints: [AuxiliaryTranslationHint],
                           _ attempt: CaptionTranslationAttempt, _ update: Update?,
                           sourceLanguage: String?) async throws -> String {
-        if let sourceLanguage { return try await translateSource(text, model, sourceLanguage, attempt, update) }
+        if let language = SpokenLanguage.nonEnglishCode(sourceLanguage) {
+            return try await translateSource(text, model, language, attempt, update)
+        }
         return try await translate(text, model, hints, attempt, update)
+    }
+
+    /// The live adapter and its tests share the complete client argument mapping.
+    /// Existing English dependencies and injected translators keep their signatures.
+    static func sourceTranslator(using client: @escaping SourceClient = { text, model, language, hints, attempt, update in
+        try await QwenTranslationClient.translate(text, modelName: model, sourceLanguage: language,
+            hints: hints, attempt: attempt, onUpdate: update)
+    }) -> (String, String, String, CaptionTranslationAttempt, Update?) async throws -> String {
+        { text, model, language, attempt, update in
+            try await client(text, model, language, [], attempt, update)
+        }
     }
 }
 
@@ -1363,8 +1376,8 @@ final class AppModel: ObservableObject {
             if self.archiveError == self.archiveWriteError { self.archiveError = nil }
             self.archiveWriteError = nil
             do {
-                try self.pipeline.reconcileAcceptedTranscriptionCandidates(saved)
-                if self.pipeline.transcriptionState()?.sessionID == boundID {
+                if !self.archiveLoading, self.pipeline.transcriptionState()?.sessionID == boundID {
+                    try self.reconcileSavedTranscriptionCandidates(saved)
                     let pending = Set(self.pipeline.transcriptionWork().filter { $0.candidateText != nil }.map(\.id))
                     self.transcriptionCandidates.removeAll { !pending.contains($0.id) }
                 }
@@ -1579,6 +1592,7 @@ final class AppModel: ObservableObject {
         if FileManager.default.fileExists(atPath: directory.appendingPathComponent(
             DurableTranscriptionJournal.directoryName).path) {
             do {
+                try reconcileSavedTranscriptionCandidates(snapshot, archivedIn: directory)
                 try await pipeline.restoreTranscription(directory: directory, sessionID: identity,
                     startPaused: true) { [weak self] event in
                         Task { @MainActor in
@@ -1628,8 +1642,9 @@ final class AppModel: ObservableObject {
         if streamingDependencyIDs.contains(previous.id) { clearTranslationPreview() }
         let nextRevision = (sessionSnapshot?.inputRevision ?? segments.map(\.inputRevision).max() ?? 0) + 1
         var next = replacement
-        if SpokenLanguage.find(next.sourceLanguage)?.avoidsTranslation == true {
-            next.completeTranslation(next.english)
+        let target = CaptionTranslationTarget.current
+        if target.keepsSourceAsCaption(language: next.sourceLanguage) {
+            next.completeTranslation(target.renderPassThrough(next.english))
             translationQueue.removeAll { $0 == next.id }
             translationEnqueuedAt.removeValue(forKey: next.id)
             translationHints.removeValue(forKey: next.id)
@@ -1993,6 +2008,9 @@ final class AppModel: ObservableObject {
                 if let processingPauseTask { try await processingPauseTask.value }
                 guard sessionID == identity, generation == epoch else { return }
                 if pipeline.transcriptionState()?.sessionID != identity {
+                    if let snapshot = sessionSnapshot {
+                        try reconcileSavedTranscriptionCandidates(snapshot, archivedIn: directory)
+                    }
                     try await pipeline.restoreTranscription(directory: directory, sessionID: identity) { [weak self] event in
                         Task { @MainActor in
                             guard let self, self.sessionID == identity, self.generation == epoch else { return }
@@ -2042,7 +2060,9 @@ final class AppModel: ObservableObject {
         }
         let originalLanguage = existing.flatMap { segments[$0].sourceLanguage }
         let candidateLanguage = SpokenLanguage.nonEnglishCode(candidate.language)
-        if accepted == expectedOriginal, originalLanguage == candidateLanguage {
+        let usesCandidateText = accepted == candidate.text
+        let acceptedLanguage = usesCandidateText ? candidateLanguage : originalLanguage
+        if accepted == expectedOriginal, !usesCandidateText || originalLanguage == candidateLanguage {
             dismissTranscriptionCandidate(id, expectedCandidate: candidate.text)
             return
         }
@@ -2073,13 +2093,13 @@ final class AppModel: ObservableObject {
                 }
                 let replacement = TranscriptSegment(id: id, startTime: segments[index].startTime,
                     endTime: segments[index].endTime, english: accepted, sessionID: identity,
-                    sourceLanguage: candidateLanguage)
+                    sourceLanguage: acceptedLanguage)
                 replaceExistingSegment(at: index, with: replacement, reason: "用户确认补转文字",
                                        candidateText: candidate.text)
                 try await flushSessionArchive()
                 guard sessionID == identity, generation == epoch else { return }
                 if let saved = sessionSaver?.lastSavedSnapshot {
-                    try pipeline.reconcileAcceptedTranscriptionCandidates(saved)
+                    try reconcileSavedTranscriptionCandidates(saved)
                 }
                 guard pipeline.transcriptionWork().first(where: { $0.id == id })?.candidateText == nil else {
                     throw SessionStoreError.invalidState("候选已更新，已保存的修订需要重新核对")
@@ -2098,6 +2118,49 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// An edited candidate keeps the archived source language. The queue's
+    /// unedited-candidate reconciliation requires the candidate language, so
+    /// retire explicit edits using its existing text and dismissal operations.
+    /// Both steps are repeatable after a partial journal write.
+    private func reconcileSavedTranscriptionCandidates(_ snapshot: SessionSnapshot, archivedIn directory: URL? = nil) throws {
+        let journal: DurableTranscriptionJournal?
+        if let directory {
+            guard FileManager.default.fileExists(atPath: directory.appendingPathComponent(
+                DurableTranscriptionJournal.directoryName).path) else { return }
+            // Restore callers have parked the prior queue. Reconcile before its
+            // replay can mistake an interrupted confirmed edit for a new conflict.
+            journal = try DurableTranscriptionJournal(sessionDirectory: directory, sessionID: snapshot.sessionID)
+        } else { journal = nil }
+        for record in journal?.records ?? pipeline.transcriptionWork() {
+            guard record.sessionID == snapshot.sessionID, let candidate = record.candidateText,
+                  let change = snapshot.revisionHistory.last(where: {
+                      $0.previousSegment.id == record.id && $0.transcriptionCandidateText == candidate
+                  }), let body = snapshot.segments.first(where: { $0.id == record.id }),
+                  body.inputRevision == change.toRevision,
+                  body.english == change.replacementSegment.english,
+                  body.english != candidate,
+                  body.sourceLanguage == change.previousSegment.sourceLanguage,
+                  record.textLanguage == body.sourceLanguage,
+                  record.text == change.previousSegment.english || record.text == body.english else { continue }
+            if let journal {
+                var repaired = record
+                repaired.text = body.english
+                repaired.status = .completed
+                repaired.failure = nil
+                repaired.failureReason = nil
+                repaired.candidateText = nil
+                repaired.candidateLanguage = nil
+                repaired.candidateOrigin = nil
+                try journal.put(repaired)
+            } else {
+                try pipeline.retainExistingTranscript(id: record.id, text: body.english)
+                try pipeline.resolveTranscriptionCandidate(id: record.id, acceptedText: nil,
+                    expectedOriginal: body.english, expectedCandidate: candidate)
+            }
+        }
+        if journal == nil { try pipeline.reconcileAcceptedTranscriptionCandidates(snapshot) }
+    }
+
     func retrySavedSessionWrite() {
         guard case .saved(let directory) = phase, !archiveLoading else { return }
         let identity = sessionID, epoch = generation
@@ -2108,7 +2171,7 @@ final class AppModel: ObservableObject {
                 try await flushSessionArchive()
                 guard sessionID == identity, generation == epoch else { return }
                 if let saved = sessionSaver?.lastSavedSnapshot {
-                    try pipeline.reconcileAcceptedTranscriptionCandidates(saved)
+                    try reconcileSavedTranscriptionCandidates(saved)
                 }
                 // A prior failure may have happened while writing readable
                 // exports, after the snapshot succeeded. Retry both outputs
@@ -2277,8 +2340,9 @@ final class AppModel: ObservableObject {
 
     private func appendConfirmedCaption(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint]) {
             var segment = segment
-            let sourceOnly = SpokenLanguage.find(segment.sourceLanguage)?.avoidsTranslation == true
-            if sourceOnly { segment.completeTranslation(segment.english) }
+            let target = CaptionTranslationTarget.current
+            let sourceOnly = target.keepsSourceAsCaption(language: segment.sourceLanguage)
+            if sourceOnly { segment.completeTranslation(target.renderPassThrough(segment.english)) }
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
             volatileEnglish = ""
             markCaptionActivity()
@@ -2387,6 +2451,7 @@ final class AppModel: ObservableObject {
         consume(event)
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
+    var translationQueueForTesting: [UUID] { translationQueue }
     func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         appendConfirmedCaption(segment, hints: hints)
@@ -2571,10 +2636,12 @@ final class AppModel: ObservableObject {
                         self.updateReviewAvailability()
                     }
                 }
-                if SpokenLanguage.find(input.sourceLanguage)?.avoidsTranslation == true {
-                    self.segments[index].completeTranslation(input.english)
+                let target = CaptionTranslationTarget.current
+                if target.keepsSourceAsCaption(language: input.sourceLanguage) {
+                    let rendered = target.renderPassThrough(input.english)
+                    self.segments[index].completeTranslation(rendered)
                     self.translationHints.removeValue(forKey: id)
-                    self.liveChinese = input.english
+                    self.liveChinese = rendered
                     self.markCaptionActivity()
                     self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
                     continue
@@ -3608,6 +3675,7 @@ final class AppModel: ObservableObject {
             self.temporarySessionDirectory = nil
             sessionDirectory = finalDirectory
             bindSessionArchive(to: finalDirectory, restored: saved)
+            try reconcileSavedTranscriptionCandidates(saved, archivedIn: finalDirectory)
             try await pipeline.restoreTranscription(directory: finalDirectory, sessionID: identity) { [weak self] event in
                 Task { @MainActor in
                     guard let self, self.sessionID == identity, self.generation == epoch else { return }

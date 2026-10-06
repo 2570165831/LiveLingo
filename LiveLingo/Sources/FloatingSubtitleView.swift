@@ -83,7 +83,8 @@ extension AppModel {
 
     var previewChineseDisplay: String {
         if let caption = confirmedNonEnglishCaption {
-            if SpokenLanguage.find(caption.sourceLanguage)?.avoidsTranslation == true { return caption.english }
+            let target = CaptionTranslationTarget.current
+            if target.keepsSourceAsCaption(language: caption.sourceLanguage) { return target.renderPassThrough(caption.english) }
             if caption.hasUsableTranslation { return caption.chinese }
             return caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…"
         }
