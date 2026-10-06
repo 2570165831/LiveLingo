@@ -19,7 +19,10 @@ struct SavedProcessingView: View {
                         .font(.headline)
                         .accessibilityIdentifier("saved-processing-status")
                     if let state = model.transcriptionProcessing {
-                        Text(Self.workSummary(state))
+                        Text(SavedProcessingPresentation.workSummary(state, segments: model.segments))
+                            .font(.callout).foregroundStyle(.secondary)
+                    } else if let summary = SavedProcessingPresentation.languageSummary(segments: model.segments) {
+                        Text(summary)
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     HStack {
@@ -107,12 +110,6 @@ struct SavedProcessingView: View {
         .onDisappear { model.stopCandidatePlayback() }
     }
 
-    private static func workSummary(_ state: TranscriptionProcessingState) -> String {
-        var text = "等待转写 \(state.pendingCount) 段 · 待确认或失败 \(state.unresolvedCount) 段"
-        if state.otherLanguageCount > 0 { text += " · 非英语讲话 \(state.otherLanguageCount) 段" }
-        return text
-    }
-
     private static func label(_ status: TranscriptionWorkRecord.Status) -> String {
         switch status {
         case .pending: return "等待转写"
@@ -122,7 +119,7 @@ struct SavedProcessingView: View {
         case .completed: return "已转写"
         case .silent: return "已确认无讲话"
         case .failed: return "转写失败"
-        case .otherLanguage: return "非英语讲话（未转写）"
+        case .otherLanguage: return "非英语讲话（未能可靠转写）"
         }
     }
 }

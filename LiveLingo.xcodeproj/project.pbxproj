@@ -6,6 +6,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		900000000000000000000001 /* CaptionPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 900000000000000000000002 /* CaptionPresentation.swift */; };
+		900000000000000000000003 /* MultilingualCaptionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 900000000000000000000004 /* MultilingualCaptionPresentationTests.swift */; };
 		789000000000000000000003 /* MultilingualSessionExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 789000000000000000000004 /* MultilingualSessionExporterTests.swift */; };
 		789000000000000000000001 /* MultilingualLearningNotesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 789000000000000000000002 /* MultilingualLearningNotesTests.swift */; };
 		23DAF99A6A46840EF75BFF87 /* MultilingualCaptionGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */; };
@@ -84,6 +86,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		900000000000000000000002 /* CaptionPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionPresentation.swift; sourceTree = "<group>"; };
+		900000000000000000000004 /* MultilingualCaptionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualCaptionPresentationTests.swift; sourceTree = "<group>"; };
 		789000000000000000000004 /* MultilingualSessionExporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualSessionExporterTests.swift; sourceTree = "<group>"; };
 		789000000000000000000002 /* MultilingualLearningNotesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualLearningNotesTests.swift; sourceTree = "<group>"; };
 		6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilingualCaptionGateTests.swift; sourceTree = "<group>"; };
@@ -182,6 +186,7 @@
 		A70000000000000000000003 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				900000000000000000000002 /* CaptionPresentation.swift */,
 				EA33EF11F70BAA832EBE7D3D /* ReviewReportCollection.swift */,
 				DC2A12CCCC919BB523AFFB33 /* ReviewIdentity.swift */,
 				BD92DF6ED58E3564FF373249 /* ResourceScheduling.swift */,
@@ -223,6 +228,7 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				900000000000000000000004 /* MultilingualCaptionPresentationTests.swift */,
 				789000000000000000000004 /* MultilingualSessionExporterTests.swift */,
 				789000000000000000000002 /* MultilingualLearningNotesTests.swift */,
 				6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */,
@@ -319,6 +325,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				900000000000000000000001 /* CaptionPresentation.swift in Sources */,
 				04F78613ACCF181FC7155CCF /* ReviewReportCollection.swift in Sources */,
 				BFEA359EEB395F257C15B7E0 /* ReviewIdentity.swift in Sources */,
 				D9EDEB0CD580BC2572257002 /* ResourceScheduling.swift in Sources */,
@@ -356,6 +363,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				900000000000000000000003 /* MultilingualCaptionPresentationTests.swift in Sources */,
 				789000000000000000000003 /* MultilingualSessionExporterTests.swift in Sources */,
 				789000000000000000000001 /* MultilingualLearningNotesTests.swift in Sources */,
 				F74C17E4B9DBAB4B17E9A433 /* ReviewIdentityTests.swift in Sources */,

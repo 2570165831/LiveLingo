@@ -1578,10 +1578,16 @@ private struct ClassroomLivePreview: View {
                     }
                     // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
                     // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
-                    previewReadingSlot(model.previewEnglishDisplay,
-                                       size: textSize - 2, weight: .regular)
-                    previewReadingSlot(model.previewChineseDisplay,
-                                       size: textSize, weight: .regular)
+                    if let caption = model.nonEnglishPreviewPresentation, caption.isChineseOnly {
+                        previewReadingSlot(caption.primaryText, size: textSize, weight: .regular,
+                                           languageName: caption.languageName)
+                    } else {
+                        previewReadingSlot(model.previewEnglishDisplay,
+                                           size: textSize - 2, weight: .regular,
+                                           languageName: model.nonEnglishPreviewPresentation?.languageName)
+                        previewReadingSlot(model.previewChineseDisplay,
+                                           size: textSize, weight: .regular)
+                    }
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1590,7 +1596,8 @@ private struct ClassroomLivePreview: View {
             }
     }
 
-    private func previewReadingSlot(_ text: String, size: Double, weight: Font.Weight) -> some View {
+    private func previewReadingSlot(_ text: String, size: Double, weight: Font.Weight,
+                                    languageName: String? = nil) -> some View {
         // Let SwiftUI measure two lines with the same font and spacing as the captions.
         Text("Ag国\nAg国")
             .font(.system(size: size, weight: weight))
@@ -1603,19 +1610,31 @@ private struct ClassroomLivePreview: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
-                            Text(text)
-                                .font(.system(size: size, weight: weight))
-                                .lineSpacing(7)
-                                .foregroundStyle(.primary)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: 760, alignment: .leading)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if let languageName {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    CaptionLanguageLabel(name: languageName, subtitleSize: size)
+                                    previewText(text, size: size, weight: weight)
+                                }
+                                .accessibilityElement(children: .contain)
+                            } else {
+                                previewText(text, size: size, weight: weight)
+                            }
                             Color.clear.frame(height: 1).id("preview-tail")
                         }
                     }
                     .onChange(of: text) { proxy.scrollTo("preview-tail", anchor: .bottom) }
                 }
             }
+    }
+
+    private func previewText(_ text: String, size: Double, weight: Font.Weight) -> some View {
+        Text(text)
+            .font(.system(size: size, weight: weight))
+            .lineSpacing(7)
+            .foregroundStyle(.primary)
+            .textSelection(.enabled)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
 }
@@ -1698,6 +1717,7 @@ private struct TranscriptCaptionRow: View, Equatable {
     }
 
     var body: some View {
+        let caption = CaptionPresentation(segment)
         HStack(alignment: .top, spacing: 14) {
             Text(Self.clock(segment.startTime))
                 .font(.system(size: 13).monospacedDigit())
@@ -1706,13 +1726,28 @@ private struct TranscriptCaptionRow: View, Equatable {
                 .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text(segment.english)
-                    .font(.system(size: textSize - 2))
-                    .lineSpacing(4)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let name = caption.languageName {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        CaptionLanguageLabel(name: name, subtitleSize: caption.isChineseOnly ? textSize : textSize - 2)
+                        if caption.isChineseOnly {
+                            Text(caption.primaryText)
+                                .font(.system(size: textSize))
+                                .lineSpacing(7)
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            sourceText(caption.primaryText)
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                } else {
+                    sourceText(segment.english)
+                }
 
-                if segment.translationState == .pending || segment.translationState == .translating {
+                if caption.isChineseOnly {
+                    EmptyView()
+                } else if segment.translationState == .pending || segment.translationState == .translating {
                     PendingCaptionTranslation(stream: stream, segmentID: segment.id, textSize: textSize)
                 } else {
                     Text(markdown: segment.displayChinese)
@@ -1735,6 +1770,14 @@ private struct TranscriptCaptionRow: View, Equatable {
             }
         }
         #endif
+    }
+
+    private func sourceText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: textSize - 2))
+            .lineSpacing(4)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private static func clock(_ seconds: TimeInterval) -> String {
