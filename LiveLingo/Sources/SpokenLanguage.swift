@@ -10,7 +10,9 @@ struct SpokenLanguage: Equatable, Sendable {
     let code: String
     let qwenLabel: String
     let writingSystem: WritingSystem
-    var avoidsTranslation: Bool { code == "zh" || code == "yue" }
+    /// Only Mandarin Chinese is shown as is. Written Cantonese uses characters
+    /// and phrasing other readers often cannot follow, so it is translated.
+    var avoidsTranslation: Bool { code == "zh" }
     var chineseName: String {
         Locale(identifier: "zh-Hans").localizedString(forLanguageCode: code) ?? qwenLabel
     }

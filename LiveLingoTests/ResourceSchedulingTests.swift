@@ -172,7 +172,7 @@ final class ResourceSchedulingTests: XCTestCase {
         XCTAssertEqual(SpokenLanguage.all.count, 30)
         XCTAssertEqual(Set(SpokenLanguage.all.map(\.code)).count, 30)
         XCTAssertEqual(Set(SpokenLanguage.all.map(\.qwenLabel)).count, 30)
-        XCTAssertEqual(SpokenLanguage.all.filter(\.avoidsTranslation).map(\.code), ["zh", "yue"])
+        XCTAssertEqual(SpokenLanguage.all.filter(\.avoidsTranslation).map(\.code), ["zh"])
         XCTAssertTrue(SpokenLanguage.all.allSatisfy { !$0.chineseName.isEmpty })
     }
 
