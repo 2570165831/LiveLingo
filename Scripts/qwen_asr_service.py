@@ -11,6 +11,7 @@ import time
 import uuid
 import gc
 import re
+from importlib.metadata import version
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -58,6 +59,29 @@ MAX_INFERENCE_REQUESTS = 3  # one running, at most two submitted ahead
 INFERENCE_SLOTS = threading.BoundedSemaphore(MAX_INFERENCE_REQUESTS)
 IDLE_MODEL_SECONDS = 120.0
 INFERENCE_WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-inference")
+AUTO_SELF_CHECKS = {}  # model key -> (loaded object identity, check result); no model references
+ASR_TEXT_TOKEN = 151704
+LANGUAGE_TOKEN = 11528
+ASR_EOS_TOKENS = {151645, 151643}
+SOURCE_POLICY = 1
+NON_LATIN_MIN_PROBABILITY = 0.90
+NON_LATIN_MAX_ENGLISH_PROBABILITY = 0.05
+LATIN_MIN_PROBABILITY = 0.97
+LATIN_MAX_ENGLISH_PROBABILITY = 0.01
+LANGUAGE_CODES = {
+    "Chinese": "zh", "English": "en", "Cantonese": "yue", "Arabic": "ar",
+    "German": "de", "French": "fr", "Spanish": "es", "Portuguese": "pt",
+    "Indonesian": "id", "Italian": "it", "Korean": "ko", "Russian": "ru",
+    "Thai": "th", "Vietnamese": "vi", "Japanese": "ja", "Turkish": "tr",
+    "Hindi": "hi", "Malay": "ms", "Dutch": "nl", "Swedish": "sv",
+    "Danish": "da", "Finnish": "fi", "Polish": "pl", "Czech": "cs",
+    "Filipino": "fil", "Persian": "fa", "Greek": "el", "Romanian": "ro",
+    "Hungarian": "hu", "Macedonian": "mk",
+}
+LATIN_LANGUAGE_CODES = frozenset({
+    "de", "fr", "es", "pt", "id", "it", "vi", "tr", "ms", "nl", "sv",
+    "da", "fi", "pl", "cs", "fil", "ro", "hu",
+})
 
 
 def resolve_model_root(explicit=None, environ=None) -> Path:
@@ -104,6 +128,7 @@ def model_for(key: str):
         with MODEL_STATE_LOCK:
             MODELS[key] = loaded
             MODEL_LAST_USED[key] = time.monotonic()
+            AUTO_SELF_CHECKS.pop(key, None)
         print(f"ASR loaded model={key} seconds={time.monotonic() - started:.3f}", flush=True)
     return MODELS[key]
 
@@ -179,11 +204,146 @@ def speech_band_enhance(source_path: str) -> tuple[str, dict]:
     }
 
 
-def transcribe_audio(model_input_path: str, model_key: str) -> str:
+def auto_self_check(model, model_key):
+    """Check the pinned private API once per loaded model, without patching it."""
+    cached = AUTO_SELF_CHECKS.get(model_key)
+    if cached is not None and cached[0] == id(model):
+        return cached[1]
+    check = None
+    try:
+        if version("mlx-audio") != "0.3.1" or version("mlx-lm") != "0.30.5":
+            raise ValueError("Unsupported ASR runtime")
+        inner = model._model
+        tokenizer = inner._tokenizer
+        labels = list(inner.config.support_languages)
+        if len(labels) != 30 or set(labels) != set(LANGUAGE_CODES):
+            raise ValueError("Unsupported language table")
+        if tokenizer.encode("<asr_text>", add_special_tokens=False) != [ASR_TEXT_TOKEN]:
+            raise ValueError("Unsupported ASR delimiter")
+        english = tokenizer.encode(" English", add_special_tokens=False)
+        if len(english) != 1:
+            raise ValueError("Unsupported English token")
+        prompt = np.asarray(inner._build_prompt(1, "English")).reshape(-1).tolist()
+        if prompt[-3:] != [LANGUAGE_TOKEN, english[0], ASR_TEXT_TOKEN]:
+            raise ValueError("Unsupported prompt suffix")
+        heads = {}
+        for label in labels + ["None"]:
+            tokens = tokenizer.encode(" " + label, add_special_tokens=False)
+            if not tokens or len(tokens) > 3 or tokenizer.decode(tokens) != " " + label:
+                raise ValueError("Unsupported language head")
+            heads.setdefault(tokens[0], []).append(label)
+        check = {"labels": frozenset(labels + ["None"]), "english_token": english[0], "heads": heads}
+    except Exception:
+        # Neither exception messages nor model output belong in diagnostics.
+        pass
+    AUTO_SELF_CHECKS[model_key] = (id(model), check)
+    return check
+
+
+def probe_language(model, probe_input_path, check):
+    """Prefill the unmodified English prompt through `language` on raw audio.
+
+    The delimiter is left unconsumed so detected decoding can feed it into
+    generate_step with this exact cache. All tensors stay on the inference thread.
+    """
+    import mlx.core as mx
+    from mlx_audio.stt.utils import load_audio
+
+    inner = model._model
+    audio = load_audio(probe_input_path, sr=16000)
+    features, mask, count = inner._preprocess_audio(audio)
+    ids = inner._build_prompt(count, "English")
+    if np.asarray(ids).reshape(-1).tolist()[-3:] != [
+        LANGUAGE_TOKEN, check["english_token"], ASR_TEXT_TOKEN
+    ]:
+        raise ValueError("Unsupported prompt suffix")
+    audio_features = inner.get_audio_features(features, mask)
+    embeddings = inner._build_inputs_embeds(ids, audio_features)
+    cache = inner.make_cache()
+    logits = inner(ids[:, :-2], input_embeddings=embeddings[:, :-2], cache=cache)[0, -1]
+    logprobs = logits - mx.logsumexp(logits)
+    mx.eval(logprobs)
+    head = []
+    for _ in range(4):
+        token = int(mx.argmax(logits).item())
+        if token == ASR_TEXT_TOKEN:
+            label_text = inner._tokenizer.decode(head)
+            if not label_text.startswith(" ") or label_text[1:] not in check["labels"]:
+                raise ValueError("Unparsed language head")
+            if len(check["heads"].get(head[0], [])) != 1:
+                raise ValueError("Ambiguous language head")
+            return {
+                "detected_label": label_text[1:],
+                "language_probability": float(mx.exp(logprobs[head[0]]).item()),
+                "english_probability": float(mx.exp(logprobs[check["english_token"]]).item()),
+                "cache": cache,
+            }
+        head.append(token)
+        logits = inner(mx.array([[token]]), cache=cache)[0, -1]
+    raise ValueError("Unterminated language head")
+
+
+def should_decode_detected(label, p_label, p_english):
+    code = LANGUAGE_CODES.get(label)
+    if code is None or code == "en":
+        return False
+    if not (0 <= p_label <= 1 and 0 <= p_english <= 1):
+        return False
+    if code in LATIN_LANGUAGE_CODES:
+        return p_label >= LATIN_MIN_PROBABILITY and p_english <= LATIN_MAX_ENGLISH_PROBABILITY
+    return p_label >= NON_LATIN_MIN_PROBABILITY and p_english <= NON_LATIN_MAX_ENGLISH_PROBABILITY
+
+
+def transcribe_auto(model, model_input_path, probe_input_path, model_key):
+    """Only the opt-in request gets metadata; failed probing uses legacy English."""
+    metadata = {"language_mode": "auto", "language": "en", "decode": "forced",
+                "detected_label": None, "language_probability": None,
+                "english_probability": None, "generated_tokens": 0,
+                "truncated": False, "policy": SOURCE_POLICY}
+    try:
+        check = auto_self_check(model, model_key)
+        if check is not None:
+            probe = probe_language(model, probe_input_path, check)
+            metadata.update({key: probe[key] for key in (
+                "detected_label", "language_probability", "english_probability")})
+            if should_decode_detected(probe["detected_label"], probe["language_probability"], probe["english_probability"]):
+                import mlx.core as mx
+                from mlx_lm.generate import generate_step
+
+                tokens = []
+                ended = False
+                for token, _ in generate_step(
+                    prompt=mx.array([ASR_TEXT_TOKEN]), model=model._model,
+                    prompt_cache=probe["cache"], max_tokens=256,
+                ):
+                    token = int(token)
+                    if token in ASR_EOS_TOKENS:
+                        ended = True
+                        break
+                    tokens.append(token)
+                text = model._model._tokenizer.decode(tokens, skip_special_tokens=True).strip()
+                return {**metadata, "text": text, "language": LANGUAGE_CODES[probe["detected_label"]],
+                        "decode": "detected", "generated_tokens": len(tokens),
+                        "truncated": len(tokens) == 256 and not ended}
+            del probe  # English never reuses probe state.
+    except Exception:
+        probe = None
+        metadata.update(detected_label=None, language_probability=None, english_probability=None)
+    result = model.generate(
+        model_input_path, language="English", max_tokens=256,
+        temperature=0.0, verbose=False,
+    )
+    return {**metadata, "text": result.text.strip(),
+            "generated_tokens": getattr(result, "generation_tokens", 0)}
+
+
+def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, probe_input_path=None):
     # Keep MLX loading, evaluation and result access on one long-lived thread.
     with MODEL_LOCK:
         try:
             model = model_for(model_key)
+            if language_mode == "auto":
+                return transcribe_auto(model, model_input_path, probe_input_path or model_input_path, model_key)
             if model_key == "parakeet":
                 result = model.generate(model_input_path, verbose=False)
             else:
@@ -197,11 +357,11 @@ def transcribe_audio(model_input_path: str, model_key: str) -> str:
                 if model_key in MODELS: MODEL_LAST_USED[model_key] = time.monotonic()
 
 
-def run_registered_transcription(request_id, model_input_path, model_key):
+def run_registered_transcription(request_id, model_input_path, model_key, language_mode=None, probe_input_path=None):
     with MODEL_STATE_LOCK:
         REQUEST_STATES[request_id] = {'model': model_key, 'state': 'running'}
     try:
-        return transcribe_audio(model_input_path, model_key)
+        return transcribe_audio(model_input_path, model_key, language_mode, probe_input_path)
     finally:
         # A disconnected HTTP caller does not prove inference has stopped.
         # Keep the request registered until the model call actually returns.
@@ -242,6 +402,7 @@ def unload_idle_models(now=None, idle_seconds=IDLE_MODEL_SECONDS):
                 UNLOADING_MODELS.add(key)
                 del MODELS[key]
                 MODEL_LAST_USED.pop(key, None)
+                AUTO_SELF_CHECKS.pop(key, None)
                 retired.append(key)
             pending_release = set(UNLOADING_MODELS)
         if pending_release:
@@ -304,9 +465,16 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path != "/transcribe":
             self.send_error(404)
             return
-        query = parse_qs(parsed.query)
+        query = parse_qs(parsed.query, keep_blank_values=True)
         model_key = query.get("model", ["0.6b"])[0]
         should_enhance = query.get("enhance", ["off"])[0] == "speech"
+        languages = query.get("language", ["English"])
+        if len(languages) != 1 or languages[0] not in {"English", "auto"} or (
+            languages[0] == "auto" and model_key not in {"0.6b", "1.7b"}
+        ):
+            self.send_json(400, {"error": "Unsupported language mode"})
+            return
+        language_mode = "auto" if languages[0] == "auto" else None
         try:
             size = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -347,17 +515,17 @@ class Handler(BaseHTTPRequestHandler):
                 model_input_path, enhancement = speech_band_enhance(temporary_path)
             started = time.monotonic()
             print(f"ASR request id={request_id} model={model_key} bytes={size}", flush=True)
-            text = INFERENCE_WORKER.submit(run_registered_transcription, request_id, model_input_path, model_key).result()
+            text = INFERENCE_WORKER.submit(run_registered_transcription, request_id, model_input_path, model_key,
+                                           language_mode, temporary_path).result()
             print(f"ASR completed id={request_id} model={model_key} seconds={time.monotonic() - started:.3f}", flush=True)
-            self.send_json(
-                200,
-                {
-                    "text": text,
-                    "model": model_key,
-                    "request_id": request_id,
-                    "audio_enhancement": enhancement,
-                },
-            )
+            payload = {"text": text, "model": model_key, "request_id": request_id,
+                       "audio_enhancement": enhancement}
+            if language_mode == "auto":
+                payload.update(text)
+                print(f"ASR language id={request_id} label={text['detected_label']} "
+                      f"p={text['language_probability']} p_en={text['english_probability']} "
+                      f"decode={text['decode']}", flush=True)
+            self.send_json(200, payload)
         except Exception as error:
             self.send_json(500, {"error": str(error), "request_id": request_id, "model": model_key})
         finally:

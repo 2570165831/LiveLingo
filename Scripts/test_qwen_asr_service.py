@@ -8,11 +8,12 @@ import json
 import time
 import weakref
 import socket
+import io
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,178 @@ import soundfile as sf
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from qwen_asr_service import PEAK_CEILING_DBFS, speech_band_enhance
 import qwen_asr_service as service
+
+
+class AutoLanguageTests(unittest.TestCase):
+    """Artificial token streams only; no classroom audio or transcript fixtures."""
+    class Tokenizer:
+        def __init__(self):
+            self.heads = {label: [200 + i] for i, label in enumerate(service.LANGUAGE_CODES)}
+            self.heads.update(Cantonese=[300, 301], Macedonian=[302, 303], None_=[304])
+            self.heads['None'] = self.heads.pop('None_')
+
+        def encode(self, text, **kwargs):
+            if text == '<asr_text>': return [service.ASR_TEXT_TOKEN]
+            return list(self.heads[text[1:]])
+
+        def decode(self, tokens, skip_special_tokens=False):
+            for label, head in self.heads.items():
+                if list(tokens) == head: return ' ' + label
+            if skip_special_tokens:
+                return ''.join(chr(0x4E00 + token - 400) for token in tokens if token != service.ASR_TEXT_TOKEN)
+            return '?'
+
+    class Inner:
+        def __init__(self, tokenizer, label, p_label, p_english):
+            self._tokenizer = tokenizer
+            self.config = SimpleNamespace(support_languages=list(service.LANGUAGE_CODES))
+            self.head = tokenizer.encode(' ' + label) + [service.ASR_TEXT_TOKEN]
+            self.p_label = p_label
+            self.p_english = p_english
+            self.calls = []
+
+        def _build_prompt(self, count, language):
+            return np.array([[7, 8, service.LANGUAGE_TOKEN,
+                              self._tokenizer.encode(' English')[0], service.ASR_TEXT_TOKEN]])
+
+        def _preprocess_audio(self, audio): return audio, None, 1
+        def get_audio_features(self, features, mask): return features
+        def _build_inputs_embeds(self, ids, features): return np.zeros((*ids.shape, 2))
+        def make_cache(self): return {'position': 0}
+
+        def __call__(self, ids, cache, input_embeddings=None):
+            self.calls.append((ids.tolist(), input_embeddings is not None, cache))
+            position = cache['position']
+            cache['position'] += 1
+            logits = np.full(151800, -np.inf)
+            if position == 0:
+                logits[self.head[0]] = np.log(self.p_label)
+                english = self._tokenizer.encode(' English')[0]
+                if english != self.head[0]: logits[english] = np.log(self.p_english)
+                logits[999] = np.log(max(1e-12, 1 - self.p_label - (self.p_english if english != self.head[0] else 0)))
+            else:
+                logits[self.head[position]] = 0
+            return logits[None, None, :]
+
+    def setUp(self):
+        self.enterContext(patch.object(service, 'AUTO_SELF_CHECKS', {}))
+        self.enterContext(patch.object(service, 'version', side_effect=lambda name: {'mlx-audio': '0.3.1', 'mlx-lm': '0.30.5'}[name]))
+        self.core = SimpleNamespace(array=np.array, argmax=np.argmax, exp=np.exp,
+                                    logsumexp=lambda x: np.log(np.exp(x).sum()), eval=lambda *args: None)
+        self.load_audio = Mock(return_value=np.zeros(16))
+        self.generate_step = Mock(return_value=iter([(400, None), (401, None), (151645, None)]))
+        self.enterContext(patch.dict(sys.modules, {
+            'mlx': SimpleNamespace(core=self.core), 'mlx.core': self.core,
+            'mlx_audio': SimpleNamespace(), 'mlx_audio.stt': SimpleNamespace(),
+            'mlx_audio.stt.utils': SimpleNamespace(load_audio=self.load_audio),
+            'mlx_lm': SimpleNamespace(), 'mlx_lm.generate': SimpleNamespace(generate_step=self.generate_step),
+        }))
+
+    def model(self, label='Chinese', p_label=.95, p_english=.02):
+        tokenizer = self.Tokenizer()
+        inner = self.Inner(tokenizer, label, p_label, p_english)
+        return SimpleNamespace(_model=inner, generate=Mock(return_value=SimpleNamespace(text='x', generation_tokens=1)))
+
+    def auto(self, model):
+        self.assertNotIn('_build_prompt', model._model.__dict__)
+        result = service.transcribe_auto(model, 'enhanced.wav', 'raw.wav', '1.7b')
+        self.assertNotIn('_build_prompt', model._model.__dict__)
+        return result
+
+    def assert_forced(self, model, result):
+        self.assertEqual(result['decode'], 'forced')
+        self.assertEqual(result['language'], 'en')
+        model.generate.assert_called_once_with('enhanced.wav', language='English', max_tokens=256,
+                                               temperature=0.0, verbose=False)
+
+    def test_default_and_explicit_english_keep_legacy_generate_arguments(self):
+        for mode in (None, 'English'):
+            with self.subTest(mode=mode):
+                model = self.model()
+                with patch.object(service, 'model_for', return_value=model):
+                    self.assertEqual(service.transcribe_audio('enhanced.wav', '1.7b', mode, 'raw.wav'), 'x')
+                model.generate.assert_called_once_with('enhanced.wav', language='English', max_tokens=256,
+                                                       temperature=0.0, verbose=False)
+                self.assertFalse(service.AUTO_SELF_CHECKS)
+
+    def test_english_none_and_low_confidence_force_legacy_english(self):
+        for label, p, p_en in [('English', .95, .95), ('None', .95, .02), ('Chinese', .8999, .02),
+                               ('Chinese', .95, .0501), ('Spanish', .969, .01)]:
+            with self.subTest(label=label, p=p, p_en=p_en):
+                model = self.model(label, p, p_en)
+                self.assert_forced(model, self.auto(model))
+
+    def test_switch_probability_boundaries(self):
+        for label, p, p_en, expected in [
+            ('Chinese', .8999, .05, False), ('Chinese', .90, .05, True),
+            ('Chinese', .90, .0501, False), ('Spanish', .969, .01, False),
+            ('Spanish', .97, .01, True), ('Spanish', .97, .0101, False),
+            ('English', 1, 0, False), ('None', 1, 0, False),
+        ]:
+            with self.subTest(label=label, p=p, p_en=p_en):
+                self.assertEqual(service.should_decode_detected(label, p, p_en), expected)
+
+    def test_detected_uses_raw_audio_and_continues_the_same_cache(self):
+        model = self.model()
+        result = self.auto(model)
+        self.assertEqual(result['decode'], 'detected')
+        self.assertEqual(result['language'], 'zh')
+        self.assertEqual(result['generated_tokens'], 2)
+        self.assertFalse(result['truncated'])
+        self.assertNotIn('<asr_text>', result['text'])
+        self.assertNotIn('language ', result['text'])
+        self.load_audio.assert_called_once_with('raw.wav', sr=16000)
+        model.generate.assert_not_called()
+        inner = model._model
+        self.assertEqual(inner.calls[0][:2], ([[7, 8, service.LANGUAGE_TOKEN]], True))
+        arguments = self.generate_step.call_args.kwargs
+        self.assertIs(arguments['prompt_cache'], inner.calls[0][2])
+        self.assertEqual(arguments['prompt'].tolist(), [service.ASR_TEXT_TOKEN])
+        self.assertEqual(arguments['max_tokens'], 256)
+
+    def test_multitoken_language_heads_are_greedily_parsed(self):
+        for label, code in [('Cantonese', 'yue'), ('Macedonian', 'mk')]:
+            with self.subTest(label=label):
+                self.generate_step.return_value = iter([(400, None), (151643, None)])
+                result = self.auto(self.model(label))
+                self.assertEqual((result['detected_label'], result['language']), (label, code))
+
+    def test_unparsed_ambiguous_failed_check_and_probe_exception_force_english(self):
+        for failure in ('unparsed', 'ambiguous', 'version', 'suffix', 'delimiter', 'exception'):
+            with self.subTest(failure=failure):
+                service.AUTO_SELF_CHECKS.clear()
+                model = self.model()
+                if failure == 'unparsed': model._model.head = [999, service.ASR_TEXT_TOKEN]
+                if failure == 'ambiguous': model._model._tokenizer.heads['Cantonese'] = model._model._tokenizer.heads['Chinese'] + [301]
+                with patch.object(service, 'version', side_effect=lambda name: '0' if failure == 'version' else {'mlx-audio': '0.3.1', 'mlx-lm': '0.30.5'}[name]):
+                    if failure == 'suffix': model._model._build_prompt = lambda *args: np.array([[7, 8, 9]])
+                    if failure == 'delimiter': model._model._tokenizer.encode = lambda *args, **kwargs: [42]
+                    if failure == 'exception': model._model._preprocess_audio = Mock(side_effect=RuntimeError('synthetic'))
+                    # The suffix fixture replaces a method only on the fake, never on a real model.
+                    result = service.transcribe_auto(model, 'enhanced.wav', 'raw.wav', '1.7b')
+                self.assert_forced(model, result)
+                self.assertIsNone(result['detected_label'])
+
+    def test_self_check_is_cached_per_loaded_model_and_failure(self):
+        model = self.model()
+        with patch.object(service, 'version', wraps=service.version) as versions:
+            first = service.auto_self_check(model, '1.7b')
+            self.assertIs(service.auto_self_check(model, '1.7b'), first)
+            self.assertEqual(versions.call_count, 2)
+            other = self.model()
+            self.assertIsNot(service.auto_self_check(other, '1.7b'), first)
+            self.assertEqual(versions.call_count, 4)
+        with patch.object(service, 'version', return_value='0') as versions:
+            other = self.model()
+            self.assertIsNone(service.auto_self_check(other, '1.7b'))
+            self.assertIsNone(service.auto_self_check(other, '1.7b'))
+            versions.assert_called_once()
+
+    def test_body_limit_marks_truncated_without_eos(self):
+        self.generate_step.return_value = iter([(400, None)] * 256)
+        result = self.auto(self.model())
+        self.assertEqual(result['generated_tokens'], 256)
+        self.assertTrue(result['truncated'])
 
 
 class ServiceResponsivenessTests(unittest.TestCase):
@@ -62,6 +235,58 @@ class ServiceResponsivenessTests(unittest.TestCase):
                           headers={'X-LiveLingo-Request-ID': request_id})
         with urlopen(request, timeout=5) as response:
             return json.load(response)
+
+    def test_default_http_response_has_exactly_legacy_keys(self):
+        handler = self.synthetic_handler('model=1.7b')
+        model = SimpleNamespace(generate=Mock(return_value=SimpleNamespace(text='x')))
+        with patch.object(service, 'model_for', return_value=model):
+            handler.do_POST()
+        status, result = handler.send_json.call_args.args
+        self.assertEqual(status, 200)
+        self.assertEqual(set(result), {'text', 'model', 'request_id', 'audio_enhancement'})
+        self.assertEqual(model.generate.call_count, 1)
+        self.assertEqual(model.generate.call_args.kwargs,
+                         {'language': 'English', 'max_tokens': 256, 'temperature': 0.0, 'verbose': False})
+
+    def test_invalid_language_is_rejected_before_admission_or_loading(self):
+        slots = Mock()
+        with patch.object(service, 'INFERENCE_SLOTS', slots), patch.object(service, 'model_for') as load:
+            for query in ('model=parakeet&language=auto', 'model=1.7b&language=xx',
+                          'model=1.7b&language=Chinese', 'model=1.7b&language=',
+                          'model=1.7b&language=auto&language=English'):
+                with self.subTest(query=query):
+                    handler = self.synthetic_handler(query)
+                    handler.do_POST()
+                    self.assertEqual(handler.send_json.call_args.args[0], 400)
+            slots.acquire.assert_not_called()
+            slots.release.assert_not_called()
+            load.assert_not_called()
+
+    def test_auto_http_passes_raw_and_enhanced_paths_and_only_logs_metadata(self):
+        handler = self.synthetic_handler('model=1.7b&enhance=speech&language=auto')
+        canary = chr(0x4E00) + chr(0x4E01)
+        def transcribe(path, model, language_mode=None, probe_input_path=None):
+            self.assertEqual((path, model, language_mode), ('enhanced.wav', '1.7b', 'auto'))
+            self.assertNotEqual(path, probe_input_path)
+            return {'text': canary, 'language_mode': 'auto', 'language': 'zh', 'decode': 'detected',
+                    'detected_label': 'Chinese', 'language_probability': .95, 'english_probability': .02,
+                    'generated_tokens': 2, 'truncated': False, 'policy': 1}
+        with patch.object(service, 'speech_band_enhance', return_value=('enhanced.wav', {})), \
+             patch.object(service, 'transcribe_audio', side_effect=transcribe), \
+             patch.object(service.os, 'unlink'), patch('builtins.print') as output:
+            handler.do_POST()
+        status, result = handler.send_json.call_args.args
+        self.assertEqual(status, 200)
+        self.assertEqual(result['language'], 'zh')
+        self.assertNotIn(canary, str(output.call_args_list))
+
+    def synthetic_handler(self, query):
+        handler = object.__new__(service.Handler)
+        handler.path = '/transcribe?' + query
+        handler.headers = {'Content-Length': '1', 'X-LiveLingo-Request-ID': 'synthetic'}
+        handler.rfile = io.BytesIO(b'x')
+        handler.send_json = Mock()
+        return handler
 
     def test_idle_unload_keeps_active_and_waiting_model_owners(self):
         class FakeModel: pass
