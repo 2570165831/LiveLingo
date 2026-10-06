@@ -2161,7 +2161,7 @@ final class AppModel: ObservableObject {
             volatileEnglish = text
             // Preview updates do not use the translation model. Let a summary
             // finish unless caption backlog or memory pressure requires yielding.
-        case let .final(text, start, end, hints):
+        case let .final(text, start, end, hints, _):
             appendConfirmedCaption(TranscriptSegment(startTime: start,
                 endTime: end, english: text, sessionID: sessionID), hints: hints)
         case .identifiedFinal(let result):

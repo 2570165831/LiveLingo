@@ -77,7 +77,9 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
     var automaticRetryCount = 0
     var manualRetryCount = 0
     var text: String?
+    var textLanguage: String?
     var candidateText: String?
+    var candidateLanguage: String?
     var candidateOrigin: String?
     var failure: String?
     var failureReason: FailureReason?
@@ -93,14 +95,14 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
 }
 
 extension TranscriptionWorkRecord {
-    // Same keys and optionality as the synthesized coding of 0.2.0, plus two
+    // Same keys and optionality as the synthesized coding of 0.2.0, plus
     // optional keys it ignores. Unknown values from a newer build degrade to
     // the legacy status and to no reason instead of failing the journal.
     private enum CodingKeys: String, CodingKey {
         case id, sessionID, ordinal, audioFile, startFrame, endFrame, sampleRate, start, end
         case captureStart, captureEnd, modelKey, fallbackModelKey, appleEvidence, recordingFile, audioRetired
         case status, extendedStatus, attempt, automaticRetryCount, manualRetryCount
-        case text, candidateText, candidateOrigin, failure, failureReason
+        case text, textLanguage, candidateText, candidateLanguage, candidateOrigin, failure, failureReason
     }
 
     init(from decoder: Decoder) throws {
@@ -123,7 +125,12 @@ extension TranscriptionWorkRecord {
         automaticRetryCount = try c.decode(Int.self, forKey: .automaticRetryCount)
         manualRetryCount = try c.decode(Int.self, forKey: .manualRetryCount)
         text = try c.decodeIfPresent(String.self, forKey: .text)
+        let storedLanguage = try c.decodeIfPresent(String.self, forKey: .textLanguage)
+        textLanguage = SpokenLanguage.nonEnglishCode(storedLanguage)
+        if storedLanguage == nil, status == .completed,
+           let text, EnglishTranscriptGate.verdict(text) == .hanDominant { textLanguage = "zh" }
         candidateText = try c.decodeIfPresent(String.self, forKey: .candidateText)
+        candidateLanguage = SpokenLanguage.nonEnglishCode(try c.decodeIfPresent(String.self, forKey: .candidateLanguage))
         candidateOrigin = try c.decodeIfPresent(String.self, forKey: .candidateOrigin)
         failure = try c.decodeIfPresent(String.self, forKey: .failure)
         failureReason = try c.decodeIfPresent(String.self, forKey: .failureReason).flatMap(FailureReason.init(rawValue:))
@@ -144,6 +151,8 @@ extension TranscriptionWorkRecord {
         try c.encode(attempt, forKey: .attempt)
         try c.encode(automaticRetryCount, forKey: .automaticRetryCount); try c.encode(manualRetryCount, forKey: .manualRetryCount)
         try c.encodeIfPresent(text, forKey: .text); try c.encodeIfPresent(candidateText, forKey: .candidateText)
+        try c.encodeIfPresent(SpokenLanguage.nonEnglishCode(textLanguage), forKey: .textLanguage)
+        try c.encodeIfPresent(SpokenLanguage.nonEnglishCode(candidateLanguage), forKey: .candidateLanguage)
         try c.encodeIfPresent(candidateOrigin, forKey: .candidateOrigin); try c.encodeIfPresent(failure, forKey: .failure)
         try c.encodeIfPresent(failureReason?.rawValue, forKey: .failureReason)
     }

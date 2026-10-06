@@ -509,6 +509,7 @@ struct LiveLingoCLI {
   let ordered = segments.sorted { $0.id.uuidString < $1.id.uuidString }
   let captionLines = ordered.map { segment in
    "\(segment.id.uuidString)|\(segment.english)|\(segment.inputRevision)|\(time(segment.startTime))|\(time(segment.endTime))"
+    + (segment.sourceLanguage.map { "|\($0)" } ?? "")
   }
   let completed = ordered.filter { $0.hasUsableTranslation }
   let completedLines = completed.map { "\($0.id.uuidString)|\($0.chinese)" }

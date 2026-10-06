@@ -427,7 +427,7 @@ enum SessionJournalEvent: Codable, Equatable, Sendable {
                   change.previousSegment.id == change.replacementSegment.id,
                   change.replacementSegment.inputRevision == change.toRevision,
                   let index = snapshot.segments.firstIndex(where: { $0.id == change.previousSegment.id }),
-                  snapshot.segments[index] == change.previousSegment else {
+                  snapshot.segments[index].sameContent(as: change.previousSegment) else {
                 throw SessionStoreError.invalidState("输入修订与当前正文不匹配")
             }
             let affected = snapshot.batches.filter { $0.ids.contains(change.previousSegment.id) }

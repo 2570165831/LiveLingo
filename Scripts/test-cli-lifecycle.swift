@@ -45,6 +45,18 @@ import Darwin
             let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
             guard !FileManager.default.fileExists(atPath: root.path) else { throw Failure(name: "evidence_exists") }
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let goldenID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+            let goldenSession = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+            let englishGolden = TranscriptSegment(id: goldenID, startTime: 0, endTime: 1,
+                                                  english: "x", sessionID: goldenSession)
+            // Measured by running the fingerprint code from ee06eb2 with this exact synthetic input.
+            try expect(LiveLingoCLI.fingerprint(from: [englishGolden], batches: []).captions
+                == "fbaaffd621aa15f98449107cc6dec451025257873530ab26514a3d5dd0ce05ff", "english_fingerprint_matches_ee06")
+            let markedGolden = TranscriptSegment(id: goldenID, startTime: 0, endTime: 1,
+                                                 english: "x", sessionID: goldenSession, sourceLanguage: "es")
+            try expect(LiveLingoCLI.fingerprint(from: [markedGolden], batches: []).captions
+                == LiveLingoCLI.digestLines(["\(goldenID.uuidString)|x|0|0.000000|1.000000|es"]), "source_language_binds_fingerprint")
+            passed.append("language_fingerprint_compatibility")
             let panel = NSSavePanel()
             var panelResponses: [NSApplication.ModalResponse] = []
             FilePanelPresentation.begin(panel) { panelResponses.append($0) }

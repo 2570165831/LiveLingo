@@ -10,7 +10,13 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     var inputRevision: Int
     let startTime: TimeInterval
     let endTime: TimeInterval
+    /// Original source text; the legacy `english` key stays readable by 0.2.0.
     let english: String
+    /// Nil is the existing English path. Only supported non-English codes persist.
+    private(set) var sourceLanguage: String?
+    /// In-memory provenance only. A 0.2.0 predecessor has no marker, even when
+    /// its Chinese content lets the new decoder infer zh (including old yue).
+    private var sourceLanguageWasInferred = false
     var chinese: String {
         didSet { reconcileLegacyTranslation() }
     }
@@ -24,7 +30,8 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         english: String,
         chinese: String = "",
         sessionID: UUID? = nil,
-        inputRevision: Int = 0
+        inputRevision: Int = 0,
+        sourceLanguage: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -32,6 +39,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         self.startTime = max(0, startTime)
         self.endTime = max(startTime, endTime)
         self.english = english
+        self.sourceLanguage = SpokenLanguage.nonEnglishCode(sourceLanguage)
         self.chinese = chinese
         self.translationState = .pending
         self.translationError = nil
@@ -40,6 +48,26 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
 
     var hasUsableTranslation: Bool {
         translationState == .completed && !chinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Old builds omit language metadata when writing an inputRevision. The
+    /// predecessor must still match every content, identity and translation field.
+    func sameContent(as other: Self) -> Bool {
+        var left = self, right = other
+        if left.sourceLanguage == nil || right.sourceLanguage == nil
+            || left.sourceLanguageWasInferred || right.sourceLanguageWasInferred {
+            left.sourceLanguage = nil
+            right.sourceLanguage = nil
+        }
+        return left == right
+    }
+
+    static func == (left: Self, right: Self) -> Bool {
+        left.id == right.id && left.sessionID == right.sessionID && left.inputRevision == right.inputRevision
+            && left.startTime == right.startTime && left.endTime == right.endTime
+            && left.english == right.english && left.chinese == right.chinese
+            && left.translationState == right.translationState && left.translationError == right.translationError
+            && left.sourceLanguage == right.sourceLanguage
     }
 
     /// One rendering rule for saved transcripts, the classroom and all exports.
@@ -86,7 +114,23 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, sessionID, inputRevision, startTime, endTime, english, chinese, translationState, translationError
+        case id, sessionID, inputRevision, startTime, endTime, english, chinese, translationState, translationError, sourceLanguage
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encodeIfPresent(sessionID, forKey: .sessionID)
+        try values.encode(inputRevision, forKey: .inputRevision)
+        try values.encode(startTime, forKey: .startTime)
+        try values.encode(endTime, forKey: .endTime)
+        try values.encode(english, forKey: .english)
+        try values.encode(chinese, forKey: .chinese)
+        try values.encode(translationState, forKey: .translationState)
+        try values.encodeIfPresent(translationError, forKey: .translationError)
+        // Preserve marker absence across the journal's encode/decode boundary;
+        // otherwise an inferred zh becomes explicit and rejects an old yue revision.
+        if !sourceLanguageWasInferred { try values.encodeIfPresent(sourceLanguage, forKey: .sourceLanguage) }
     }
 
     init(from decoder: Decoder) throws {
@@ -101,6 +145,8 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
                                                    debugDescription: "Invalid transcript time range or revision")
         }
         english = try values.decode(String.self, forKey: .english)
+        let storedLanguage = try values.decodeIfPresent(String.self, forKey: .sourceLanguage)
+        sourceLanguage = SpokenLanguage.nonEnglishCode(storedLanguage)
         chinese = try values.decodeIfPresent(String.self, forKey: .chinese) ?? ""
         translationState = .pending
         translationError = nil
@@ -112,6 +158,11 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             }
             translationState = storedState
             translationError = try values.decodeIfPresent(String.self, forKey: .translationError)
+        }
+        if storedLanguage == nil, translationState == .completed, english == chinese,
+           EnglishTranscriptGate.verdict(english) == .hanDominant {
+            sourceLanguage = "zh"
+            sourceLanguageWasInferred = true
         }
     }
 }

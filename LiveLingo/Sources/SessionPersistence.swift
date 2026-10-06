@@ -51,7 +51,7 @@ actor SessionArchiveWriter {
             // Coalescing may skip the first save of a segment, or a translation
             // between two confirmed corrections. Journal the exact predecessor
             // first; the store still enforces its ordinary body-change checks.
-            if committed?.segments.first(where: { $0.id == revision.previousSegment.id }) != revision.previousSegment {
+            if committed?.segments.first(where: { $0.id == revision.previousSegment.id })?.sameContent(as: revision.previousSegment) != true {
                 try append(.upsertSegment(revision.previousSegment))
             }
             for batch in revision.retainedBatches

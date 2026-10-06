@@ -603,7 +603,7 @@ struct ASRRecoveryTests {
         await queue.finish()
         #expect(!collector.events.contains { if case .failure = $0 { return true }; return false })
         #expect(collector.events.contains { if case .transcriptionIssue(start: 0, end: 1, message: _) = $0 { return true }; return false })
-        #expect(collector.events.contains { if case .final(text: "The next sentence is still available.", start: _, end: _, hints: _) = $0 { return true }; return false })
+        #expect(collector.events.contains { if case .final(text: "The next sentence is still available.", start: _, end: _, hints: _, language: _) = $0 { return true }; return false })
         let journal = try String(contentsOf: dir.appendingPathComponent("transcription-issues.jsonl"), encoding: .utf8)
         #expect(journal.contains("transcription_missing"))
         #expect(FileManager.default.fileExists(atPath: recording.path))
@@ -621,7 +621,7 @@ struct ASRRecoveryTests {
         await queue.submit(.init(audioURL: url, modelKey: "primary", fallbackModelKey: "fallback",
             start: 0, end: 1, appleEvidence: "", recordingURL: nil), handler: collector.append)
         await queue.finish()
-        #expect(collector.events.contains { if case .final(text: "This is an English caption.", start: _, end: _, hints: _) = $0 { return true }; return false })
+        #expect(collector.events.contains { if case .final(text: "This is an English caption.", start: _, end: _, hints: _, language: _) = $0 { return true }; return false })
     }
 
     @Test func idleContextRetryIsRecordedWithoutDuplicatingCaptions() async throws {
@@ -676,7 +676,7 @@ struct ASRRecoveryTests {
             start: 1, end: 2, appleEvidence: "", recordingURL: recording), handler: collector.append)
         await queue.finish()
         #expect(collector.events.contains { if case .transcriptionIssue(start: -1, end: -1, message: "retryCancelled") = $0 { return true }; return false })
-        #expect(collector.events.contains { if case .final(text: "The next caption wins.", start: _, end: _, hints: _) = $0 { return true }; return false })
+        #expect(collector.events.contains { if case .final(text: "The next caption wins.", start: _, end: _, hints: _, language: _) = $0 { return true }; return false })
     }
 
     @Test func contextRetryReadsOnlyBoundedNeighbourAudio() throws {

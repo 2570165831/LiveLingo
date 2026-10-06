@@ -13,6 +13,7 @@ struct TranscriptionCommit: Sendable {
     let sampleRate: Double
     let hints: [AuxiliaryTranslationHint]
     let isRepair: Bool
+    var language: String? = nil
 }
 
 struct TranscriptionCandidate: Sendable {
@@ -25,6 +26,7 @@ struct TranscriptionCandidate: Sendable {
     let audioURL: URL
     /// `context` cannot be mapped automatically to the original time interval.
     let origin: String
+    var language: String? = nil
 }
 
 /// Disk-backed work with one serial pump and at most one active ASR task.

@@ -136,7 +136,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             text: String,
             start: TimeInterval,
             end: TimeInterval,
-            hints: [AuxiliaryTranslationHint]
+            hints: [AuxiliaryTranslationHint],
+            language: String? = nil
         )
         case identifiedFinal(TranscriptionCommit)
         case processing(TranscriptionProcessingState)

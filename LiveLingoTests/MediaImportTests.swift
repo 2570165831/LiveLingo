@@ -160,7 +160,7 @@ final class MediaImportTests: XCTestCase {
         XCTAssertLessThan(Double(reader.length), 60 * 16_000)
         XCTAssertEqual(reader.processingFormat.sampleRate, 16_000)
         let spans = collector.events.compactMap { event -> (TimeInterval, TimeInterval)? in
-            if case let .final(_, start, end, _) = event { return (start, end) }
+            if case let .final(_, start, end, _, _) = event { return (start, end) }
             return nil
         }.sorted { $0.0 < $1.0 }
         XCTAssertFalse(spans.isEmpty)
@@ -223,7 +223,7 @@ final class MediaImportTests: XCTestCase {
         XCTAssertEqual(Double(reader.length), 25 * 16_000, accuracy: 3_200, "会话录音应按导入格式完整落盘")
 
         let captions = collector.events.compactMap { event -> String? in
-            if case let .final(text, _, _, _) = event { return text }
+            if case let .final(text, _, _, _, _) = event { return text }
             return nil
         }
         XCTAssertFalse(captions.isEmpty, "25 秒素材应当至少产出一个分块并完成转写")
