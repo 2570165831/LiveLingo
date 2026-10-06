@@ -6,7 +6,7 @@
 
 <!-- TODO: 在这里放一张课堂界面截图（双语字幕 + 笔记），例如 docs/images/classroom.png -->
 
-[English summary](#english)
+中文 | [English](README.en.md)
 
 ## 能做什么
 
@@ -41,7 +41,7 @@
 - **翻译和笔记可能出错**：模型会漏译、误译或写错知识点。重要内容请对照英文原文。
 - **macOS 14 上没有“同步初译”**：这个功能用苹果的翻译接口，需要 macOS 15 及以上。macOS 14 上中文要等正式翻译完成后才出现，不影响翻译本身。
 - **英文逐词预览需要系统资源**：它用的是 macOS 自带的英语识别。预览不出来时，打开“系统设置 → 键盘 → 听写”，开启听写并添加“英语（美国）”，联网等系统准备好资源。正式转写不受影响。详见[苹果的听写说明](https://support.apple.com/en-euro/guide/mac-help/mh40584/mac)。
-- **只支持 Apple 芯片**：Intel 和通用版本没有构建，也没有验证过。
+- **只支持 Apple 芯片**：Intel 和通用版本没有构建，也没有验证过。目前没有 Windows 版；想参与的话见 [issue #1](https://github.com/2570165831/LiveLingo/issues/1)。
 - **安装包很大**：转写和翻译模型都在包里，换来的是装好就能离线用。
 
 ## 用到的模型
@@ -72,12 +72,3 @@
 自有代码采用 **GPL-3.0-only**（见 [LICENSE](LICENSE)），允许商业使用和收费；分发程序或修改版时须按许可证提供源码。软件按现状提供，不提供担保。第三方依赖和模型继续适用各自的许可证，离线许可文本和必要的对应源码保留在 [Packaging/MLXLicenses](Packaging/MLXLicenses/)。
 
 官方版本计划免费提供。这是项目自己的发行安排，不是对其他分发者附加的收费限制。
-
-## English
-
-LiveLingo is a macOS app for English-language classes. It transcribes English from the microphone or system audio, translates it into Chinese in real time, and builds study notes as the class goes on. Everything runs on your Mac: the speech and language models are bundled, nothing is uploaded, and no Python or model download is needed.
-
-- Requires an Apple silicon Mac with macOS 14 or later, and about 30 GB of free disk space to install (14.3 GB download, 16 GB installed).
-- Download: version 0.2.0 from the [release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0). Download all 8 split files and merge them as described there (about 14.3 GB). Keep the Mac online the first time you open it: this is macOS Gatekeeper, not LiveLingo. For an app downloaded from the internet, macOS asks Apple once whether it was notarized (scanned by Apple for malware). In 0.2.0 the notarization ticket is attached to the disk image but not to the app itself, so macOS has to look it up online; offline, it refuses to open the app. After that first check no connection is needed. LiveLingo itself never uploads recordings, text or usage data.
-- The interface is in Chinese. Translations and notes can be wrong; check important points against the English transcript.
-- License: GPL-3.0-only. Building from source: [docs/BUILDING.md](docs/BUILDING.md) (in Chinese).
