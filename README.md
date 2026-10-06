@@ -19,15 +19,15 @@
 
 ## 下载
 
-**[下载完整安装包（Google Drive，约 14.3 GB）](https://drive.google.com/file/d/11nM4jOR_lnf0seLDZg4L9Smt_sLtuO2Z/view?usp=sharing)**
+**[下载 0.2.0（GitHub 发布页）](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0)**：下载页面 Assets 里全部 8 个分卷，按页面上的合并说明合成一个约 14.3 GB 的 `.dmg`。单个分卷不能安装；发布页下方的 `Source code` 是源码，不是安装包。
 
-Google Drive 下载不了时，可以从 [GitHub 发布页](https://github.com/2570165831/LiveLingo/releases/tag/v0.1.0%2B20260924.0014) 下载同一个安装包的分卷，按页面上的说明合并。发布页下方的 `Source code` 是源码，不是安装包。
+第一次打开时请保持联网，系统需要向苹果核对一次公证记录；之后转写、翻译和笔记都在本机离线运行。
 
 | 要求 | |
 | --- | --- |
 | 电脑 | Apple 芯片 Mac（M 系列）。Intel 机型不支持 |
 | 系统 | macOS 14 或更新 |
-| 硬盘 | 安装包约 14.3 GB，装好后的 App 约 16 GB；安装时两者同时在硬盘上，需要约 30 GB 可用空间，装完可以删掉安装包 |
+| 硬盘 | 安装包约 14.3 GB，装好后的 App 约 16 GB；安装时两者同时在硬盘上，需要约 31 GB 可用空间（用分卷合并时约 45 GB），装完可以删掉安装包 |
 <!-- TODO: 补一行“内存”，等实测出 4B / 9B 模型运行时需要的内存后再写 -->
 
 ## 三步上手
@@ -78,6 +78,6 @@ Google Drive 下载不了时，可以从 [GitHub 发布页](https://github.com/2
 LiveLingo is a macOS app for English-language classes. It transcribes English from the microphone or system audio, translates it into Chinese in real time, and builds study notes as the class goes on. Everything runs on your Mac: the speech and language models are bundled, nothing is uploaded, and no Python or model download is needed.
 
 - Requires an Apple silicon Mac with macOS 14 or later, and about 30 GB of free disk space to install (14.3 GB download, 16 GB installed).
-- Download: [full DMG on Google Drive](https://drive.google.com/file/d/11nM4jOR_lnf0seLDZg4L9Smt_sLtuO2Z/view?usp=sharing), or the split files on the [release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.1.0%2B20260924.0014).
+- Download: version 0.2.0 from the [release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0). Download all 8 split files and merge them as described there (about 14.3 GB). Keep the Mac online the first time you open the app so macOS can check its notarization.
 - The interface is in Chinese. Translations and notes can be wrong; check important points against the English transcript.
 - License: GPL-3.0-only. Building from source: [docs/BUILDING.md](docs/BUILDING.md) (in Chinese).
