@@ -512,7 +512,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             if output.language == nil { recentFormulaContext = String(output.text.suffix(1000)) }
                         } else if output.otherLanguage {
                             record.status = .otherLanguage
-                            record.failure = "此处为非英语讲话（未转写），音频已保留，可手动重试。"
+                            record.failure = "此处为\(SavedProcessingPresentation.untranscribedSpeech)，音频已保留，可手动重试。"
                             record.failureReason = output.failureReason
                         } else {
                             markFailure(&record, message: "此处尚未得到可靠的英文转写，音频已保留。", reason: output.failureReason)

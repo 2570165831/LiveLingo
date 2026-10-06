@@ -18,9 +18,10 @@ enum CaptionLanguageNames {
     ]
 
     static func name(for code: String?, locale: Locale = interfaceLocale) -> String? {
-        guard let code = SpokenLanguage.nonEnglishCode(code) else { return nil }
-        if locale.identifier.replacingOccurrences(of: "_", with: "-").hasPrefix("zh-Hans") {
-            return simplifiedChinese[code]
+        guard let code, SpokenLanguage.find(code) != nil else { return nil }
+        if locale.identifier.replacingOccurrences(of: "_", with: "-").hasPrefix("zh-Hans"),
+           let name = simplifiedChinese[code] {
+            return name
         }
         return locale.localizedString(forLanguageCode: code)
     }
@@ -28,27 +29,28 @@ enum CaptionLanguageNames {
     static func accessibilityLabel(for name: String) -> String { "语种：\(name)" }
 }
 
-/// Only these text fields are selectable. The language name stays UI metadata.
+/// The row's primary text is separate from its nonselectable language metadata.
+/// Translation status and streamed text retain their existing dedicated views.
 struct CaptionPresentation: Equatable {
     let languageName: String?
-    let isChineseOnly: Bool
+    let isSourceOnly: Bool
     let primaryText: String
-    let secondaryText: String?
 
     init(_ segment: TranscriptSegment, locale: Locale = CaptionLanguageNames.interfaceLocale) {
-        languageName = CaptionLanguageNames.name(for: segment.sourceLanguage, locale: locale)
-        isChineseOnly = segment.sourceLanguage == "zh"
-        if isChineseOnly {
+        let target = CaptionTranslationTarget.current
+        languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
+        isSourceOnly = target.keepsSourceAsCaption(language: segment.sourceLanguage)
+        if isSourceOnly {
             primaryText = segment.hasUsableTranslation
-                ? segment.chinese : CaptionTranslationTarget.current.renderPassThrough(segment.english)
-            secondaryText = nil
+                ? segment.chinese : target.renderPassThrough(segment.english)
         } else {
             primaryText = segment.english
-            secondaryText = segment.displayChinese
         }
     }
 
-    var textLines: [String] { [primaryText] + (secondaryText.map { [$0] } ?? []) }
+    static func translationStatus(isTranslating: Bool) -> String {
+        isTranslating ? "翻译中…" : "等待翻译…"
+    }
 }
 
 /// Text selection is explicitly disabled for every native copy/select-all path.
@@ -68,6 +70,9 @@ struct CaptionLanguageLabel: View {
 }
 
 enum SavedProcessingPresentation {
+    private static let nonEnglishSpeech = "非英语讲话"
+    static let untranscribedSpeech = nonEnglishSpeech + "（未转写）"
+
     static func languageSummary(segments: [TranscriptSegment], untranscribedCount: Int = 0) -> String? {
         let chinese = segments.filter { $0.sourceLanguage == "zh" }.count
         let other = segments.filter {
@@ -76,15 +81,34 @@ enum SavedProcessingPresentation {
         var parts: [String] = []
         if chinese > 0 { parts.append("中文发言 \(chinese) 段") }
         if other > 0 { parts.append("其他语言 \(other) 段") }
-        if untranscribedCount > 0 { parts.append("非英语讲话（未能可靠转写）\(untranscribedCount) 段") }
+        if untranscribedCount > 0 { parts.append("\(untranscribedSpeech)\(untranscribedCount) 段") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     static func workSummary(_ state: TranscriptionProcessingState, segments: [TranscriptSegment]) -> String {
         let existing = "等待转写 \(state.pendingCount) 段 · 待确认或失败 \(state.unresolvedCount) 段"
+        // English-gate rejections already had a shorter summary before language tags.
+        // Keep that exact wording when no confirmed multilingual caption is present.
+        guard segments.contains(where: { SpokenLanguage.nonEnglishCode($0.sourceLanguage) != nil }) else {
+            return state.otherLanguageCount > 0
+                ? existing + " · \(nonEnglishSpeech) \(state.otherLanguageCount) 段" : existing
+        }
         guard let summary = languageSummary(segments: segments, untranscribedCount: state.otherLanguageCount) else {
             return existing
         }
         return existing + " · " + summary
+    }
+
+    static func recordLabel(_ status: TranscriptionWorkRecord.Status) -> String {
+        switch status {
+        case .pending: return "等待转写"
+        case .active: return "正在转写"
+        case .retryWaiting: return "等待自动补转"
+        case .manualPending: return "等待手动重试"
+        case .completed: return "已转写"
+        case .silent: return "已确认无讲话"
+        case .failed: return "转写失败"
+        case .otherLanguage: return untranscribedSpeech
+        }
     }
 }

@@ -710,10 +710,12 @@ struct ContentView: View {
 /// Measures an actual rendered row in the isolated test host. Release builds
 /// contain neither the probe nor synthetic presentation data.
 private struct CaptionFrameProbe: NSViewRepresentable {
-    let segmentID: UUID
+    let identifier: String
+    init(segmentID: UUID) { identifier = "classroom-caption-\(segmentID)" }
+    init(identifier: String) { self.identifier = identifier }
     func makeNSView(context: Context) -> NSView { NSView() }
     func updateNSView(_ view: NSView, context: Context) {
-        view.identifier = NSUserInterfaceItemIdentifier("classroom-caption-\(segmentID)")
+        view.identifier = NSUserInterfaceItemIdentifier(identifier)
     }
 }
 #endif
@@ -1578,8 +1580,9 @@ private struct ClassroomLivePreview: View {
                     }
                     // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
                     // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
-                    if let caption = model.nonEnglishPreviewPresentation, caption.isChineseOnly {
-                        previewReadingSlot(caption.primaryText, size: textSize, weight: .regular,
+                    if let caption = model.nonEnglishPreviewPresentation, caption.isSourceOnly {
+                        previewSlotMeasure(size: textSize - 2, weight: .regular)
+                        previewReadingSlot(model.previewChineseDisplay, size: textSize, weight: .regular,
                                            languageName: caption.languageName)
                     } else {
                         previewReadingSlot(model.previewEnglishDisplay,
@@ -1592,12 +1595,18 @@ private struct ClassroomLivePreview: View {
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(nsColor: .controlBackgroundColor))
+                #if DEBUG
+                .background {
+                    if AppRuntimeEnvironment.isUnitTesting {
+                        CaptionFrameProbe(identifier: "classroom-live-preview")
+                    }
+                }
+                #endif
                 Divider()
             }
     }
 
-    private func previewReadingSlot(_ text: String, size: Double, weight: Font.Weight,
-                                    languageName: String? = nil) -> some View {
+    private func previewSlotMeasure(size: Double, weight: Font.Weight) -> some View {
         // Let SwiftUI measure two lines with the same font and spacing as the captions.
         Text("Ag国\nAg国")
             .font(.system(size: size, weight: weight))
@@ -1606,6 +1615,11 @@ private struct ClassroomLivePreview: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .hidden()
             .accessibilityHidden(true)
+    }
+
+    private func previewReadingSlot(_ text: String, size: Double, weight: Font.Weight,
+                                    languageName: String? = nil) -> some View {
+        previewSlotMeasure(size: size, weight: weight)
             .overlay {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -1666,7 +1680,7 @@ private struct PendingCaptionTranslation: View {
                         .imageScale(.small)
                         .accessibilityHidden(true)
                 }
-                Text(isTranslating ? "翻译中…" : "等待翻译…")
+                Text(CaptionPresentation.translationStatus(isTranslating: isTranslating))
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1728,8 +1742,8 @@ private struct TranscriptCaptionRow: View, Equatable {
             VStack(alignment: .leading, spacing: 10) {
                 if let name = caption.languageName {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        CaptionLanguageLabel(name: name, subtitleSize: caption.isChineseOnly ? textSize : textSize - 2)
-                        if caption.isChineseOnly {
+                        CaptionLanguageLabel(name: name, subtitleSize: caption.isSourceOnly ? textSize : textSize - 2)
+                        if caption.isSourceOnly {
                             Text(caption.primaryText)
                                 .font(.system(size: textSize))
                                 .lineSpacing(7)
@@ -1742,10 +1756,10 @@ private struct TranscriptCaptionRow: View, Equatable {
                     }
                     .accessibilityElement(children: .contain)
                 } else {
-                    sourceText(segment.english)
+                    sourceText(caption.primaryText)
                 }
 
-                if caption.isChineseOnly {
+                if caption.isSourceOnly {
                     EmptyView()
                 } else if segment.translationState == .pending || segment.translationState == .translating {
                     PendingCaptionTranslation(stream: stream, segmentID: segment.id, textSize: textSize)

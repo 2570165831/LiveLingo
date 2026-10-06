@@ -13,7 +13,7 @@ struct SpokenLanguage: Equatable, Sendable {
     /// Compatibility for existing callers; the target owns the decision.
     var avoidsTranslation: Bool { CaptionTranslationTarget.current.keepsSourceAsCaption(language: code) }
     var chineseName: String {
-        Locale(identifier: "zh-Hans").localizedString(forLanguageCode: code) ?? qwenLabel
+        CaptionLanguageNames.name(for: code) ?? qwenLabel
     }
 
     static let all: [Self] = [

@@ -79,7 +79,7 @@ struct SavedProcessingView: View {
                             HStack(alignment: .firstTextBaseline) {
                                 Text("\(LearningTimeLabel.stamp(record.start))–\(LearningTimeLabel.stamp(record.end))")
                                     .monospacedDigit()
-                                Text(Self.label(record.status)).foregroundStyle(.secondary)
+                                Text(SavedProcessingPresentation.recordLabel(record.status)).foregroundStyle(.secondary)
                                 Spacer(minLength: 8)
                                 if record.status == .failed || record.status == .otherLanguage {
                                     Button("重试这段") { model.resumeSavedProcessing(retryID: record.id) }
@@ -110,18 +110,6 @@ struct SavedProcessingView: View {
         .onDisappear { model.stopCandidatePlayback() }
     }
 
-    private static func label(_ status: TranscriptionWorkRecord.Status) -> String {
-        switch status {
-        case .pending: return "等待转写"
-        case .active: return "正在转写"
-        case .retryWaiting: return "等待自动补转"
-        case .manualPending: return "等待手动重试"
-        case .completed: return "已转写"
-        case .silent: return "已确认无讲话"
-        case .failed: return "转写失败"
-        case .otherLanguage: return "非英语讲话（未能可靠转写）"
-        }
-    }
 }
 
 private struct CandidateEditorIdentity: Hashable {

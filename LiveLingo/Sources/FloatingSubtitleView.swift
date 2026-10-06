@@ -36,8 +36,9 @@ private struct FloatingSubtitleContent: View {
                 .fixedSize()
                 .help("悬浮字幕字号")
             }
-            if let caption = model.nonEnglishPreviewPresentation, caption.isChineseOnly {
-                subtitle(caption.primaryText, size: textSize, weight: .medium, color: .white, height: 138,
+            if let caption = model.nonEnglishPreviewPresentation, caption.isSourceOnly {
+                Color.clear.frame(height: 88).accessibilityHidden(true)
+                subtitle(chinese, size: textSize, weight: .medium, color: .white, height: 138,
                          languageName: caption.languageName)
             } else {
                 subtitle(english, size: textSize - 3, weight: .regular, color: Color(white: 0.9), height: 88,
@@ -107,7 +108,7 @@ extension AppModel {
     var previewChineseDisplay: String {
         if let caption = confirmedNonEnglishCaption {
             let target = CaptionTranslationTarget.current
-            if target.keepsSourceAsCaption(language: caption.sourceLanguage) { return CaptionPresentation(caption).primaryText }
+            if target.keepsSourceAsCaption(language: caption.sourceLanguage) { return target.renderPassThrough(caption.english) }
             if caption.hasUsableTranslation { return caption.chinese }
             return caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…"
         }

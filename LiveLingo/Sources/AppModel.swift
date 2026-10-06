@@ -1339,7 +1339,7 @@ final class AppModel: ObservableObject {
         if let state = transcriptionProcessing, state.unresolvedCount > 0 || state.otherLanguageCount > 0 {
             var parts: [String] = []
             if state.unresolvedCount > 0 { parts.append("\(state.unresolvedCount) 段缺少转写，可手动重试") }
-            if state.otherLanguageCount > 0 { parts.append("\(state.otherLanguageCount) 段为非英语讲话（未转写）") }
+            if state.otherLanguageCount > 0 { parts.append("\(state.otherLanguageCount) 段为\(SavedProcessingPresentation.untranscribedSpeech)") }
             return "已保存 · " + parts.joined(separator: " · ")
         }
         return nil
@@ -2409,11 +2409,12 @@ final class AppModel: ObservableObject {
     /// Synthetic presentation data only. Test hosts have no services or real queue.
     func loadPresentationForTesting(phase: AppPhase, evidence: [TranscriptSegment],
                                     notebook: LearningNotebook = .init(), notice: String? = nil,
-                                    preview: String = "") {
+                                    preview: String = "", processing: TranscriptionProcessingState? = nil) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         precondition(!noteReviewQueue.hasWork && translationWorker == nil)
         self.phase = phase
         self.segments = evidence
+        if let processing { self.transcriptionProcessing = processing }
         self.learningNotebook = notebook
         self.latestLearningIDs = notebook.latestEvidenceIDs
         self.summarizedSegmentIDs = Set(notebook.batches.flatMap { $0.ids })
