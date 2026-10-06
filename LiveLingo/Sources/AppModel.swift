@@ -868,6 +868,7 @@ final class AppModel: ObservableObject {
     private var lastCaptionActivityUptime: TimeInterval?
     private var lastSummaryCycleStartedUptime: TimeInterval?
     private var consecutiveSummaryFailures = 0
+    private var summaryRecoveryCharacters: Int?
     private var summaryRetryNotBefore: TimeInterval?
     private var accumulatedElapsedSeconds: TimeInterval = 0
     private var activeElapsedStartUptime: TimeInterval?
@@ -3092,6 +3093,7 @@ final class AppModel: ObservableObject {
         guard !waitForNoteAdmission(stability, candidates: candidates, force: force) else { return }
         if summaryCycleIDs == nil {
             guard !eligible.isEmpty else { return }
+            summaryRecoveryCharacters = nil
             // Freeze this round's boundary; incoming captions belong to the next round.
             summaryCycleIDs = eligible
             summaryCycleUpdate = ""
@@ -3138,7 +3140,7 @@ final class AppModel: ObservableObject {
                 ?? LectureSummaryInput.incremental(
                     from: segments.filter { boundary.contains($0.id) && admission.eligible.contains($0.id) },
                     coveredIDs: summarizedSegmentIDs, previousSummary: "",
-                    maximumCharacters: noteBatchCharacters).segmentIDs
+                    maximumCharacters: min(noteBatchCharacters, summaryRecoveryCharacters ?? noteBatchCharacters)).segmentIDs
             guard !batchIDs.isEmpty else {
                 if !boundary.isSubset(of: summarizedSegmentIDs) {
                     if let wake = admission.nextWake { scheduleNoteWake(at: wake, force: force) }
@@ -3242,6 +3244,16 @@ final class AppModel: ObservableObject {
                 // A broken process/timeout can resume its journal; an invalid
                 // finished output must not become an endless JSON continuation.
                 if (error as? QwenRuntimeError)?.preservesGenerationProgress != true { learningDraft = nil }
+                if let runtimeError = error as? QwenRuntimeError, case .outputLimitReached = runtimeError,
+                   let smaller = SummaryRefreshPolicy.outputLimitRecoveryCharacters(for: inputSnapshot) {
+                    summaryRecoveryCharacters = min(noteBatchCharacters, smaller)
+                    summaryRetryNotBefore = nil
+                    Self.latencyLog.notice("summary event=batch_split reason=output_limit segments=\(inputSnapshot.count) limit_characters=\(smaller)")
+                    // Keep the cycle boundary and committed notebook. Rebuild
+                    // source IDs and follow-up bindings for each smaller input;
+                    // never continue the runaway output or commit its coverage.
+                    continue
+                }
                 consecutiveSummaryFailures += 1
                 let retry = SummaryRefreshPolicy.failureRetryDelay(consecutiveFailures: consecutiveSummaryFailures)
                 summaryRetryNotBefore = summaryClock() + retry

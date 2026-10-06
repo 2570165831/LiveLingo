@@ -3260,6 +3260,12 @@ enum LectureSummaryInput {
         var uncertainNotes: [String] = []
     }
 
+    static func entryCharacters(for segment: TranscriptSegment) -> Int {
+        CaptionTranslationTarget.current.keepsSourceAsCaption(language: segment.sourceLanguage)
+            ? SessionExporter.targetLine(segment).count + 32
+            : segment.english.count + segment.chinese.count + 32
+    }
+
     static func incremental(
         from segments: [TranscriptSegment], coveredIDs: Set<UUID>, previousSummary: String,
         maximumCharacters: Int = 4_000
@@ -3269,10 +3275,7 @@ enum LectureSummaryInput {
         for segment in segments where !coveredIDs.contains(segment.id) {
             guard !segment.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   segment.hasUsableTranslation else { continue }
-            let target = CaptionTranslationTarget.current
-            let entrySize = target.keepsSourceAsCaption(language: segment.sourceLanguage)
-                ? SessionExporter.targetLine(segment).count + 32
-                : segment.english.count + segment.chinese.count + 32
+            let entrySize = entryCharacters(for: segment)
             if !selected.isEmpty, size + entrySize > maximumCharacters { break }
             selected.append(segment)
             size += entrySize

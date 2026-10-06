@@ -17,6 +17,14 @@ struct SummaryRefreshPolicy: Sendable {
         min(2_048, max(640, inputCharacters / 2))
     }
 
+    /// Retry only a failed multilingual batch, without altering normal or
+    /// English-only inputs. Halving its actual size guarantees fewer sources;
+    /// a single unsplittable caption retains the ordinary failure path.
+    static func outputLimitRecoveryCharacters(for evidence: [TranscriptSegment]) -> Int? {
+        guard evidence.count > 1, evidence.contains(where: { $0.sourceLanguage != nil }) else { return nil }
+        return max(1, evidence.reduce(0) { $0 + LectureSummaryInput.entryCharacters(for: $1) } / 2)
+    }
+
     static let backlogCount = 3
     static let backlogWait: TimeInterval = 8
 

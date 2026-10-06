@@ -61,6 +61,107 @@ final class CaptionStabilityDraftTests: XCTestCase {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.input.utf8)) as? [String: Any])
     }
 
+    private func requestSegmentCount(_ input: String) throws -> Int {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+        let units = try XCTUnwrap(object["evidence"] as? [[String: Any]])
+        return Set(units.compactMap { $0["index"] as? Int }).count
+    }
+
+    func testMultilingualOutputLimitSplitsAndCommitsEverySourceOnceWithoutContinuingOutput() async throws {
+        let time = Time()
+        var requests: [Request] = []
+        let prefix = retainedPrefix
+        let empty = #"{"sourceVersion":2,"topic":"无新增学习知识","points":[],"noNewKnowledge":true}"#
+        let model = try makeModel(time: time, notes: .init(generate: { input, _, continuation, update in
+            requests.append(.init(input: input, prefix: continuation))
+            let count = try self.requestSegmentCount(input)
+            if count > 2 {
+                await update(prefix)
+                throw QwenRuntimeError.outputLimitReached("Synthetic output limit")
+            }
+            return empty
+        }))
+        let earlier = TranscriptSegment(startTime: 0, endTime: 2, english: "归属未说明。",
+            chinese: "归属未说明。", sourceLanguage: "zh")
+        var notebook = LearningNotebook()
+        try notebook.append(evidence: [earlier], note: .init(topic: "先前记录", points: [
+            .init(kind: "待确认", text: "归属未说明。", needsContext: "这项记录属于哪个对象？", sourceIDs: ["zh0s0"])
+        ], sourceVersion: 2))
+        let oldBatch = try XCTUnwrap(notebook.batches.first)
+        let evidence: [TranscriptSegment] = (0..<4).map { n in
+            let start = Double(n) * 2 + 2
+            return TranscriptSegment(startTime: start, endTime: start + 2,
+                english: "水会流动。", chinese: "水会流动。", sourceLanguage: "zh")
+        }
+        model.loadPresentationForTesting(phase: .recording, evidence: [earlier]+evidence, notebook: notebook)
+        await model.generateSummaryForTesting()
+        XCTAssertEqual(try requests.map { try requestSegmentCount($0.input) }, [4, 2, 2])
+        XCTAssertTrue(requests.allSatisfy { $0.prefix.isEmpty }, "Runaway output must not become a continuation")
+        let completed = model.learningNotebookForTesting
+        XCTAssertEqual(completed.batches.first, oldBatch)
+        let newIDs = completed.batches.dropFirst().flatMap { $0.evidence.map { $0.id } }
+        XCTAssertEqual(newIDs.count, evidence.count)
+        XCTAssertEqual(Set(newIDs), Set(evidence.map(\.id)))
+        XCTAssertEqual(completed.pendingPoints.map(\.id), notebook.pendingPoints.map(\.id),
+            "Splitting must not discard the old follow-up question")
+    }
+
+    func testEnglishOutputLimitPreservesTheFrozenInputAndOrdinaryFailurePath() async throws {
+        let time = Time()
+        var requests: [Request] = []
+        let model = try makeModel(time: time, notes: .init(generate: { input, _, prefix, _ in
+            requests.append(.init(input: input, prefix: prefix))
+            throw QwenRuntimeError.outputLimitReached("Synthetic English output limit")
+        }))
+        let evidence: [TranscriptSegment] = (0..<4).map { n in
+            let start = Double(n) * 2
+            return TranscriptSegment(startTime: start, endTime: start + 2,
+                english: "Water flows.", chinese: "水会流动。")
+        }
+        model.loadPresentationForTesting(phase: .recording, evidence: evidence)
+        await model.generateSummaryForTesting()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(try XCTUnwrap(requests.first).input,
+            try LearningPrompts.input(evidence: Array(evidence.prefix(3)), topics: []))
+        XCTAssertTrue(model.learningNotebookForTesting.batches.isEmpty)
+    }
+
+    func testUnsplittableMultilingualOutputLimitStopsWithoutUnboundedRetries() async throws {
+        let time = Time()
+        var counts: [Int] = []
+        let model = try makeModel(time: time, notes: .init(generate: { input, _, _, _ in
+            counts.append(try self.requestSegmentCount(input))
+            throw QwenRuntimeError.outputLimitReached("Synthetic repeated output limit")
+        }))
+        let evidence: [TranscriptSegment] = (0..<2).map { n in
+            let start = Double(n) * 2
+            return TranscriptSegment(startTime: start, endTime: start + 2,
+                english: "水会流动。", chinese: "水会流动。", sourceLanguage: "zh")
+        }
+        model.loadPresentationForTesting(phase: .recording, evidence: evidence)
+        await model.generateSummaryForTesting()
+        XCTAssertEqual(counts, [2, 1])
+        XCTAssertTrue(model.learningNotebookForTesting.batches.isEmpty)
+    }
+
+    func testMultilingualTimeoutKeepsTheExistingBackoffWithoutSplitting() async throws {
+        let time = Time()
+        var count = 0
+        let model = try makeModel(time: time, notes: .init(generate: { _, _, _, _ in
+            count += 1
+            throw QwenRuntimeError.requestTimedOut
+        }))
+        let evidence: [TranscriptSegment] = (0..<2).map { n in
+            let start = Double(n) * 2
+            return TranscriptSegment(startTime: start, endTime: start + 2,
+                english: "水会流动。", chinese: "水会流动。", sourceLanguage: "zh")
+        }
+        model.loadPresentationForTesting(phase: .recording, evidence: evidence)
+        await model.generateSummaryForTesting()
+        XCTAssertEqual(count, 1)
+        XCTAssertTrue(model.learningNotebookForTesting.batches.isEmpty)
+    }
+
     func testRetainedDraftDropsChangedDependencyButKeepsPrefixForUnrelatedRevision() async throws {
         for dependsOnEarlier in [true, false] {
             let time = Time()
