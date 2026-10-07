@@ -11,9 +11,12 @@ checked(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),&addr
 var target:AudioDeviceID?
 for id in devices {
  var prop=AudioObjectPropertyAddress(mSelector:kAudioObjectPropertyName,mScope:kAudioObjectPropertyScopeGlobal,mElement:kAudioObjectPropertyElementMain)
- var name:CFString="" as CFString;var n=UInt32(MemoryLayout<CFString>.size)
+ // CoreAudio returns a retained CFString; receive its unmanaged pointer.
+ var name:Unmanaged<CFString>?;var n=UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
  checked(AudioObjectGetPropertyData(id,&prop,0,nil,&n,&name))
- if (name as String)=="Microsoft Teams Audio" {target=id;print("Selected virtual output: \(name), id=\(id)")}
+ guard let name else { continue }
+ let deviceName=name.takeRetainedValue() as String
+ if deviceName=="Microsoft Teams Audio" {target=id;print("Selected virtual output: \(deviceName), id=\(id)")}
 }
 guard var device=target else {fatalError("Virtual device absent; no fallback allowed")}
 if CommandLine.arguments.count==1 {exit(0)}

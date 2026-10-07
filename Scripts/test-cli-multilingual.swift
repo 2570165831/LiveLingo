@@ -78,9 +78,14 @@ import Foundation
     }
 
     static func runCLI(_ executable: URL, directory: URL) throws -> BinaryResult {
+        try runCLI(executable, arguments: ["--verify-saved", directory.path])
+    }
+
+    static func runCLI(_ executable: URL, arguments: [String]) throws -> BinaryResult {
         let process = Process(), output = Pipe(), errors = Pipe()
         process.executableURL = executable
-        process.arguments = ["--verify-saved", directory.path]
+        process.arguments = arguments
+        process.currentDirectoryURL = executable.deletingLastPathComponent()
         process.standardOutput = output
         process.standardError = errors
         try process.run()
@@ -94,6 +99,18 @@ import Foundation
             return event
         }
         return BinaryResult(status: process.terminationStatus, output: receiptBytes, errors: errorBytes, events: events)
+    }
+
+    static func expectBinaryFailure(_ result: BinaryResult, reason: LiveLingoCLI.CLIError,
+                                    name: String) throws {
+        try expect(result.status != 0 && result.savedReceipt == nil, name + "_no_success_receipt")
+        let failures = try String(decoding: result.errors, as: UTF8.self).split(separator: "\n").map {
+            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        try expect(failures.count == 1 && failures[0]?["event"] as? String == "cli_failed"
+            && failures[0]?["reason"] as? String == reason.rawValue, name + "_explicit_reason")
+        try expect(result.events.contains { $0["event"] as? String == "runtime_cleanup"
+            && $0["confirmed"] as? Bool == true }, name + "_cleanup_confirmed")
     }
 
     static func expectNoCaptionLog(_ result: BinaryResult, segments: [TranscriptSegment]) throws {
@@ -401,7 +418,7 @@ import Foundation
             try Data("broken\n".utf8).write(to: mixed.appendingPathComponent("bilingual.srt"))
             try rejects("corrupt_srt_rejected") { try LiveLingoCLI.verifySaved(mixed, emit: false) }
             passed.append("corrupt_srt_rejected")
-            passed += try targetChecks(root)
+            passed += try targetChecks(root, cli: cli)
             LiveLingoCLI.writeEvent(["event": "multilingual_cli_tests_passed", "tests": passed.count, "checks": passed])
         } catch {
             LiveLingoCLI.writeEvent(["event": "multilingual_cli_tests_failed",
@@ -410,7 +427,7 @@ import Foundation
             exit(1)
         }
     }
-    static func targetChecks(_ root: URL) throws -> [String] {
+    static func targetChecks(_ root: URL, cli: URL) throws -> [String] {
         var passed: [String] = []
         let base = ["--replay", "synthetic.wav", "--output", "synthetic-output"]
         let implicit = try LiveLingoCLI.parse(base)
@@ -419,17 +436,29 @@ import Foundation
         for arguments in [
             base + ["--target", "en"], base + ["--target", "fr"],
             base + ["--target", "zh-Hant-TW"], base + ["--target", "unknown"],
+            base + ["--target", "zh-Hant-HK"],
             base + ["--target", "zh-Hans", "--target", "zh-Hans"],
             ["--verify-saved", "synthetic", "--target", "zh-Hans"],
             ["--open-saved", "synthetic", "--target", "zh-Hans"],
             ["--resume-saved", "synthetic", "--target", "zh-Hans"],
             ["--translate-text", "synthetic", "--target", "zh-Hans"]
         ] {
-            do { _ = try LiveLingoCLI.parse(arguments) }
+            do { _ = try LiveLingoCLI.parseForTesting(arguments, releasedTargets: Set(OutputLanguage.released)) }
             catch LiveLingoCLI.CLIError.invalidArguments { continue }
             throw Failure(name: "target_option_must_be_validated_before_io")
         }
         passed.append("validated_generation_target_and_mode_boundaries")
+        // CLI explicitly opts in to the two unreleased converters; the strict
+        // released-profile parser above retains the UI release guard.
+        for target in [OutputLanguage.traditionalChineseTaiwan, .traditionalChineseHongKong] {
+            guard case .generate(let command) = try LiveLingoCLI.parse(base + ["--target", target.rawValue]) else {
+                throw Failure(name: "traditional_cli_target_not_forwarded")
+            }
+            try expect(command.target == target, "traditional_cli_target_preserved")
+            try expect(!target.isReleased, "traditional_target_remains_unreleased")
+        }
+        passed.append("explicit_traditional_cli_targets_without_gui_release")
+
 
         let course = try fixtureDirectory(root, name: "single-line-english-target")
         let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Air is clear.", chinese: "Air is clear.")
@@ -455,16 +484,19 @@ import Foundation
         passed.append("annotated_traditional_target_keeps_original_rendering")
 
         let manifest = course.appendingPathComponent("manifest.json")
-        for locale in ["xx", "zh-Hant-TW"] {
+        // Regional profiles now have a renderer. Missing actual dictionaries
+        // are checked explicitly in traditionalRoundTrips, independently of
+        // the unknown-locale guard retained here.
+        for locale in ["xx"] {
             var object = try JSONSerialization.jsonObject(with: before["manifest.json"]!) as! [String: Any]
             object["targetLocale"] = locale
             try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: manifest)
-            try rejects("unknown_or_unavailable_saved_renderer_rejected") {
+            try rejects("unknown_saved_renderer_rejected") {
                 try LiveLingoCLI.verifySaved(course, emit: false)
             }
         }
         try before["manifest.json"]!.write(to: manifest)
-        passed.append("unknown_saved_target_and_unavailable_converter_rejected")
+        passed.append("unknown_saved_target_rejected")
 
         let oldMarker = #"{"audioFrames":0,"audioSampleRate":0,"batchDigest":"synthetic","batchIDs":[],"boundAt":"synthetic","captionDigest":"synthetic","completedDigest":"synthetic","completedIDs":[],"inputRevision":0,"journalIncompleteTailBytes":0,"latestEvidenceIDs":[],"segmentIDs":[],"sessionID":"synthetic"}"#
         var bound = try JSONDecoder().decode(LiveLingoCLI.CLIRunSession.self, from: Data(oldMarker.utf8))
@@ -474,7 +506,314 @@ import Foundation
         bound.targetLocale = "en"
         try expect(try JSONDecoder().decode(LiveLingoCLI.CLIRunSession.self, from: encoder.encode(bound)).targetLocale == "en", "marker_target_round_trip")
         passed.append("optional_cli_target_marker_compatibility")
+        passed += try traditionalRoundTrips(root, cli: cli)
         return passed
+    }
+
+    static func rejectsCLI(_ expected: LiveLingoCLI.CLIError, _ name: String,
+                           _ body: () throws -> Void) throws {
+        do { try body() }
+        catch let error as LiveLingoCLI.CLIError where error.rawValue == expected.rawValue { return }
+        throw Failure(name: name)
+    }
+
+    static func cliWithoutVariants(_ cli: URL, root: URL) throws -> URL {
+        let directory = root.appendingPathComponent("cli-without-zh-variants", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        let executable = directory.appendingPathComponent("livelingo-cli")
+        // Copy the normal binary only. No dictionary, runtime or model is copied.
+        try FileManager.default.copyItem(at: cli, to: executable)
+        try expect(FileManager.default.isExecutableFile(atPath: executable.path)
+            && Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)) == ["livelingo-cli"],
+            "isolated_binary_has_no_zh_variants")
+        return executable
+    }
+
+    static func traditionalRoundTrips(_ root: URL, cli: URL) throws -> [String] {
+        let original = "体温と気圧を記録する。"
+        var failed = TranscriptSegment(startTime: 5, endTime: 6, english: "Pressure changes.")
+        failed.failTranslation("PRIVATE_REGIONAL_DIAGNOSTIC")
+        let segments = [
+            TranscriptSegment(startTime: 0, endTime: 1, english: "Hair is here.", chinese: "头发在这里。"),
+            TranscriptSegment(startTime: 1, endTime: 2, english: "頭髮在這裏。", chinese: "头发在这里。", sourceLanguage: "zh"),
+            TranscriptSegment(startTime: 2, endTime: 3, english: original, chinese: "这里有图书。", sourceLanguage: "ja"),
+            TranscriptSegment(startTime: 3, endTime: 4, english: "啲頭髮喺这里。", chinese: "头发在这里。", sourceLanguage: "yue"),
+            TranscriptSegment(startTime: 4, endTime: 5, english: "Next sentence."),
+            failed
+        ]
+        let summary = "## 学习笔记\n头发在这里。\n  - 原文：体温と気圧を記録する。\n"
+            + "## 课程安排与待办\n- [00:02] 体温と気圧を記録する。 — 这里有图书。\n"
+        let baseline = try fixtureDirectory(root, name: "regional-simplified-reference")
+        try SessionExporter.export(segments: segments, sessionDirectory: baseline,
+            summary: summary, createdAt: Date(timeIntervalSince1970: 0))
+        let simplified = try fileBytes(baseline)
+        let missingCLI = try cliWithoutVariants(cli, root: root)
+        // Resource independence includes all identity profiles, without changing
+        // any of the frozen Hans/Latin assertions above.
+        let missing = ChineseScriptConverter(resourceDirectory: nil)
+        for identity in [OutputLanguage.simplifiedChinese, .english, .spanish, .french] {
+            try expect(try LiveLingoCLI.notesHeadingForFingerprint(identity, converter: missing) == "学习笔记",
+                "identity_fingerprint_heading_is_frozen_without_resources")
+        }
+        let identityResult = try runCLI(missingCLI, directory: baseline)
+        try expect(identityResult.status == 0 && identityResult.savedReceipt?["segments"] as? Int == segments.count,
+            "no_dictionary_binary_still_verifies_hans")
+        try expectNoCaptionLog(identityResult, segments: segments)
+        try expect(try fileBytes(baseline) == simplified, "no_dictionary_hans_verify_is_read_only")
+        var passed = ["identity_verification_without_dictionary"]
+        for target in [OutputLanguage.traditionalChineseTaiwan, .traditionalChineseHongKong] {
+            let course = try fixtureDirectory(root, name: "round-trip-" + target.rawValue)
+            try SessionStore(directory: course).save(SessionSnapshot(segments: segments, targetLocale: target.persistedLocale))
+            try SessionExporter.export(segments: segments, sessionDirectory: course,
+                summary: summary, createdAt: Date(timeIntervalSince1970: 0), target: target)
+            let saved = try fileBytes(course)
+            // Hand-authored regional bytes, never derived from render/export.
+            let expected = target == .traditionalChineseTaiwan ? "頭髮在這裡。" : "頭髮在這裏。"
+            let expectedBooks = target == .traditionalChineseTaiwan ? "這裡有圖書。" : "這裏有圖書。"
+            let pending = "（本段暫無譯文）", failure = "（本段翻譯未完成，可對照英文）"
+            let expectedSRT = "1\n00:00:00,000 --> 00:00:01,000\nHair is here.\n" + expected + "\n\n"
+                + "2\n00:00:01,000 --> 00:00:02,000\n" + expected + "\n\n"
+                + "3\n00:00:02,000 --> 00:00:03,000\n体温と気圧を記録する。\n" + expectedBooks + "\n\n"
+                + "4\n00:00:03,000 --> 00:00:04,000\n啲頭髮喺这里。\n" + expected + "\n\n"
+                + "5\n00:00:04,000 --> 00:00:05,000\nNext sentence.\n" + pending + "\n\n"
+                + "6\n00:00:05,000 --> 00:00:06,000\nPressure changes.\n" + failure + "\n"
+            let expectedSummary = "## 學習筆記\n" + expected + "\n  - 原文：体温と気圧を記録する。\n"
+                + "## 課程安排與待辦\n- [00:02] 体温と気圧を記録する。 — " + expectedBooks + "\n"
+            try expect(saved[SessionExporter.targetTranscriptFileName(for: target.rawValue)] ==
+                Data([expected, expected, expectedBooks, expected, pending, failure].joined(separator: "\n").appending("\n").utf8),
+                "traditional_handwritten_transcript")
+            try expect(saved["bilingual.srt"] == Data(expectedSRT.utf8), "traditional_handwritten_srt")
+            try expect(saved[SessionExporter.targetSummaryFileName(for: target.rawValue)] ==
+                Data(expectedSummary.utf8), "traditional_handwritten_summary")
+            for name in ["bilingual.jsonl", "transcript-en.txt"] {
+                try expect(saved[name] == simplified[name], "traditional_original_and_generation_bytes_unchanged")
+            }
+            let manifest = try JSONSerialization.jsonObject(with: saved["manifest.json"]!) as! [String: Any]
+            try expect(manifest["targetLocale"] as? String == target.rawValue
+                && manifest["sourceLanguages"] as? [String] == ["ja", "yue", "zh"]
+                && manifest["converterVersion"] as? String == "opencc-ver.1.1.9+livelingo-v1"
+                && manifest["converterVersion"] as? String == ChineseScriptConverter.version,
+                "traditional_manifest_target_languages_and_converter_version")
+            try expect(try LiveLingoCLI.verifySaved(course, emit: false) == segments.count, "traditional_snapshot_round_trip")
+            let result = try runCLI(cli, directory: course)
+            try expect(result.status == 0 && result.savedReceipt?["segments"] as? Int == segments.count
+                && result.savedReceipt?["missingTranslations"] as? Int == 2, "binary_traditional_snapshot_round_trip")
+            let names = (result.savedReceipt?["files"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []
+            try expect(Set(names) == ["manifest.json", "bilingual.jsonl", "bilingual.srt", "recording.wav",
+                "transcript-en.txt", "transcript-" + target.rawValue + ".txt", "summary-" + target.rawValue + ".md"],
+                "binary_traditional_receipt_uses_regional_names")
+            try expectNoCaptionLog(result, segments: segments)
+            try expect(try fileBytes(course) == saved, "traditional_verify_is_read_only")
+            passed.append("traditional_binary_round_trip_" + target.rawValue)
+
+            try rejectsCLI(.converterUnavailable, "missing_dictionary_was_accepted") {
+                try LiveLingoCLI.verifySaved(course, emit: false, converter: missing)
+            }
+            let missingResult = try runCLI(missingCLI, directory: course)
+            try expectBinaryFailure(missingResult, reason: .converterUnavailable, name: "binary_missing_dictionary")
+            try expectNoCaptionLog(missingResult, segments: segments)
+            let rejectedOutput = root.appendingPathComponent("generation-without-dictionary-" + target.rawValue)
+            let generateResult = try runCLI(missingCLI, arguments: ["--replay", course.appendingPathComponent("recording.wav").path,
+                "--output", rejectedOutput.path, "--target", target.rawValue])
+            try expectBinaryFailure(generateResult, reason: .converterUnavailable, name: "binary_generate_missing_dictionary")
+            try expect(!FileManager.default.fileExists(atPath: rejectedOutput.path)
+                && !generateResult.events.contains { $0["event"] as? String == "asr_owned" },
+                "binary_missing_dictionary_rejects_before_isolation_or_asr")
+            try expectNoCaptionLog(generateResult, segments: segments)
+            try expect(try fileBytes(course) == saved, "missing_dictionary_verify_is_read_only")
+            passed.append("traditional_missing_dictionary_binary_" + target.rawValue)
+
+            var corrupted = manifest
+            corrupted["converterVersion"] = ChineseScriptConverter.version + "-synthetic-unsupported"
+            let manifestURL = course.appendingPathComponent("manifest.json")
+            try JSONSerialization.data(withJSONObject: corrupted, options: [.sortedKeys]).write(to: manifestURL)
+            let corruptBytes = try fileBytes(course)
+            try rejects("traditional_converter_version_mismatch") { try LiveLingoCLI.verifySaved(course, emit: false) }
+            let versionResult = try runCLI(cli, directory: course)
+            try expectBinaryFailure(versionResult, reason: .inconsistentExport, name: "binary_converter_version_mismatch")
+            try expectNoCaptionLog(versionResult, segments: segments)
+            // Even an invalid saved version cannot hide the missing-resource error.
+            let missingVersionResult = try runCLI(missingCLI, directory: course)
+            try expectBinaryFailure(missingVersionResult, reason: .converterUnavailable,
+                name: "binary_missing_dictionary_precedes_renderer_and_version")
+            try expectNoCaptionLog(missingVersionResult, segments: segments)
+            try expect(try fileBytes(course) == corruptBytes, "version_rejection_is_read_only")
+            try saved["manifest.json"]!.write(to: manifestURL)
+            try expect(try fileBytes(course) == saved, "version_test_restores_original_export")
+            passed.append("traditional_converter_version_rejected_" + target.rawValue)
+
+            let englishOnly = try fixtureDirectory(root, name: "new-english-only-" + target.rawValue)
+            let englishSegments = [segments[0], failed]
+            _ = try SessionStore(directory: englishOnly).save(SessionSnapshot(segments: englishSegments,
+                targetLocale: target.rawValue))
+            try SessionExporter.export(segments: englishSegments, sessionDirectory: englishOnly, target: target)
+            let manifestDecoder = JSONDecoder(); manifestDecoder.dateDecodingStrategy = .iso8601
+            let englishManifest = try manifestDecoder.decode(SessionExporter.Manifest.self, from:
+                Data(contentsOf: englishOnly.appendingPathComponent("manifest.json")))
+            try expect(englishManifest.sourceLanguages == nil && englishManifest.converterVersion != nil,
+                "new_regional_english_only_uses_converter_version_to_select_layout")
+            try expect(try LiveLingoCLI.verifySaved(englishOnly, emit: false) == 2,
+                "new_regional_english_only_state_failure_verify")
+            let englishResult = try runCLI(cli, directory: englishOnly)
+            try expect(englishResult.status == 0 && englishResult.savedReceipt?["segments"] as? Int == 2,
+                "binary_new_regional_english_only_verify")
+            try expectNoCaptionLog(englishResult, segments: englishSegments)
+            passed.append("traditional_new_english_only_binary_" + target.rawValue)
+
+            try traditionalLegacyRoundTrip(root, target: target, expected: expected, cli: cli, missingCLI: missingCLI)
+            passed.append("traditional_legacy_two_line_binary_" + target.rawValue)
+            try traditionalFingerprintChecks(root, target: target, segments: segments, summary: summary)
+            passed.append("traditional_notes_heading_and_fingerprint_" + target.rawValue)
+            try traditionalBoundMarkerChecks(course, target: target, segments: segments, cli: cli)
+            passed.append("traditional_bound_run_marker_" + target.rawValue)
+        }
+        return passed
+    }
+
+    static func traditionalLegacyRoundTrip(_ root: URL, target: OutputLanguage, expected: String,
+                                           cli: URL, missingCLI: URL) throws {
+        let sourceJSON = #"{"id":"00000000-0000-0000-0000-000000000501","startTime":0,"endTime":1,"english":"头发在这里。","chinese":"头发在这里。"}"#
+        let failedJSON = #"{"id":"00000000-0000-0000-0000-000000000502","startTime":1,"endTime":2,"english":"Hair is here.","chinese":"[翻译失败：PRIVATE_REGIONAL_LEGACY_DIAGNOSTIC]"}"#
+        let segments = try [sourceJSON, failedJSON].map { try JSONDecoder().decode(TranscriptSegment.self, from: Data($0.utf8)) }
+        try expect(segments[0].sourceLanguage == "zh" && !segments[0].hasExplicitSourceLanguage,
+            "regional_legacy_inference_keeps_absent_source_marker")
+        let failure = "（本段翻譯未完成，可對照英文）"
+        let oldSRT = "1\n00:00:00,000 --> 00:00:01,000\n头发在这里。\n" + expected
+            + "\n\n2\n00:00:01,000 --> 00:00:02,000\nHair is here.\n" + failure + "\n"
+        let course = try frozenFixture(root, name: "legacy-two-line-" + target.rawValue, files: [
+            "manifest.json": "{\"createdAt\":\"1970-01-01T00:00:00Z\",\"recordingFile\":\"recording.wav\",\"segmentCount\":2,\"sourceLocale\":\"en-US\",\"targetLocale\":\"" + target.rawValue + "\"}",
+            "bilingual.jsonl": sourceJSON + "\n" + failedJSON + "\n",
+            "transcript-en.txt": "头发在这里。\nHair is here.\n",
+            "transcript-" + target.rawValue + ".txt": expected + "\n" + failure + "\n",
+            "bilingual.srt": oldSRT
+        ])
+        let saved = try fileBytes(course)
+        let manifest = try JSONSerialization.jsonObject(with: saved["manifest.json"]!) as! [String: Any]
+        try expect(saved[SessionStore.snapshotFileName] == nil && manifest["sourceLanguages"] == nil
+            && manifest["converterVersion"] == nil, "regional_legacy_fixture_has_no_snapshot_languages_or_version")
+        try expect(try LiveLingoCLI.verifySaved(course, emit: false) == 2, "regional_legacy_two_line_verify")
+        let result = try runCLI(cli, directory: course)
+        try expect(result.status == 0 && result.savedReceipt?["segments"] as? Int == 2,
+            "binary_regional_legacy_two_line_verify")
+        try expectNoCaptionLog(result, segments: segments)
+        let missingResult = try runCLI(missingCLI, directory: course)
+        try expectBinaryFailure(missingResult, reason: .converterUnavailable, name: "binary_legacy_missing_dictionary")
+        try expectNoCaptionLog(missingResult, segments: segments)
+        try expect(try fileBytes(course) == saved, "regional_legacy_verify_is_read_only")
+
+        let singleSRT = "1\n00:00:00,000 --> 00:00:01,000\n" + expected
+            + "\n\n2\n00:00:01,000 --> 00:00:02,000\nHair is here.\n" + failure + "\n"
+        try Data(singleSRT.utf8).write(to: course.appendingPathComponent("bilingual.srt"))
+        let corrupted = try fileBytes(course)
+        try rejects("regional_legacy_must_not_use_new_single_line_layout") { try LiveLingoCLI.verifySaved(course, emit: false) }
+        let rejected = try runCLI(cli, directory: course)
+        try expectBinaryFailure(rejected, reason: .inconsistentExport, name: "binary_legacy_single_line_rejected")
+        try expectNoCaptionLog(rejected, segments: segments)
+        try expect(try fileBytes(course) == corrupted, "regional_legacy_layout_rejection_is_read_only")
+        try saved["bilingual.srt"]!.write(to: course.appendingPathComponent("bilingual.srt"))
+        try expect(try fileBytes(course) == saved, "regional_legacy_layout_restored")
+    }
+
+    static func traditionalFingerprintChecks(_ root: URL, target: OutputLanguage,
+                                              segments: [TranscriptSegment], summary: String) throws {
+        let directory = root.appendingPathComponent("notes-fingerprints-" + target.rawValue, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let snapshot = NotesExportSnapshot(className: "合成课堂", sessionName: nil, scope: .wholeLesson,
+            scopeDetail: "合成笔记", coverageLine: "合成覆盖", notesMarkdown: summary, reviewMarkdown: nil,
+            transcript: segments, generatedAt: Date(timeIntervalSince1970: 0), includesReviewAdvice: false,
+            includesTranscript: true, target: target)
+        guard let rendered = try NotesExportDocument.prepare(snapshot) else {
+            throw Failure(name: "regional_notes_fields_must_be_prepared")
+        }
+        try expect(NotesExportDocument.notesHeading(for: target) == "学习笔记"
+            && NotesExportDocument.notesHeading(for: target, rendered: rendered) == "學習筆記",
+            "regional_notes_heading_uses_rendered_fields")
+        let paths = try [NotesExportFormat.markdown, .plainText].map { format -> String in
+            let file = directory.appendingPathComponent("synthetic-notes." + format.fileExtension)
+            let data = try NotesExportDocument.data(snapshot, format: format)
+            try expect(String(decoding: data, as: UTF8.self).contains("學習筆記"), "regional_notes_export_has_rendered_heading")
+            try data.write(to: file, options: .withoutOverwriting)
+            return file.path
+        }
+        let saved = try fileBytes(directory)
+        let fingerprints = try LiveLingoCLI.fingerprintExports(paths, target: target)
+        try expect(fingerprints.count == 2 && Set(fingerprints.map(\.fileExtension)) == ["md", "txt"],
+            "regional_notes_fingerprints_include_both_text_formats")
+        for item in fingerprints {
+            guard let bytes = saved[item.name] else { throw Failure(name: "fingerprint_refers_to_saved_export") }
+            try expect(item.signature == "text" && item.bytes == bytes.count
+                && item.sha256 == LiveLingoCLI.digestData(bytes), "regional_notes_fingerprint_matches_saved_bytes")
+        }
+        try rejectsCLI(.converterUnavailable, "regional_fingerprint_must_preflight_dictionary") {
+            _ = try LiveLingoCLI.fingerprintExports(paths, target: target, converter: ChineseScriptConverter(resourceDirectory: nil))
+        }
+        try expect(try fileBytes(directory) == saved, "regional_fingerprint_is_read_only")
+        let unrendered = directory.appendingPathComponent("unrendered.md")
+        try Data("## 学习笔记\nSynthetic notes.\n".utf8).write(to: unrendered, options: .withoutOverwriting)
+        try rejectsCLI(.exportIncomplete, "regional_fingerprint_rejects_unrendered_heading") {
+            _ = try LiveLingoCLI.fingerprintExports([unrendered.path], target: target)
+        }
+    }
+
+    static func traditionalBoundMarkerChecks(_ course: URL, target: OutputLanguage,
+                                             segments: [TranscriptSegment], cli: URL) throws {
+        let manager = FileManager.default
+        let snapshotURL = course.appendingPathComponent(SessionStore.snapshotFileName)
+        let snapshotBytes = try Data(contentsOf: snapshotURL)
+        for path in [".cli-runtime/data", ".cli-runtime/checkpoints"] {
+            try manager.createDirectory(at: course.appendingPathComponent(path, isDirectory: true),
+                withIntermediateDirectories: true)
+        }
+        let source = LiveLingoCLI.CLIRunSource(kind: "synthetic", file: nil, sha256: nil, bytes: nil,
+            frames: 160, sampleRate: 16_000, seconds: 0.01)
+        let marker = try LiveLingoCLI.newMarker(directory: course, runID: UUID(), source: source)
+        try LiveLingoCLI.writeMarker(marker, directory: course)
+        let bound = try LiveLingoCLI.bindSession(directory: course, source: source)
+        let savedMarker = try LiveLingoCLI.readMarker(course)
+        try expect(savedMarker.source == source && savedMarker.session == bound && bound.targetLocale == target.rawValue,
+            "regional_target_is_bound_in_authenticated_run_marker")
+        let facts = LiveLingoCLI.fingerprint(from: segments, batches: [])
+        try expect(bound.captionDigest == facts.captions && bound.completedDigest == facts.completedDigest
+            && bound.audioFrames == 160 && bound.audioSampleRate == 16_000,
+            "regional_marker_fingerprints_generation_text_and_synthetic_audio")
+        guard let snapshot = try SessionStore(directory: course).load() else {
+            throw Failure(name: "regional_bound_snapshot_missing")
+        }
+        let observed = LiveLingoCLI.CLIObservedSession(sessionID: snapshot.sessionID, snapshot: snapshot,
+            notes: "", processingPaused: true, captureActive: false, transcription: nil, candidates: 0,
+            reviewHasWork: false, reviewRunning: false, reviewFailure: nil, summarizedCount: 0,
+            translatedCount: facts.completed.count, pendingWorkers: 0, archiveErrorPresent: false,
+            journalIncompleteTailBytes: 0, exportPaths: [], audioFrames: bound.audioFrames,
+            audioSampleRate: bound.audioSampleRate)
+        try LiveLingoCLI.verifyRetention(bound: bound, observed: observed)
+        let other: OutputLanguage = target == .traditionalChineseTaiwan ? .traditionalChineseHongKong : .traditionalChineseTaiwan
+        let wrongTargets: [String?] = [nil, "zh-Hans", other.rawValue]
+        for wrong in wrongTargets {
+            var changed = observed
+            changed.snapshot.targetLocale = wrong
+            try rejectsCLI(.sessionIdentityMismatch, "regional_bound_target_must_be_retained") {
+                try LiveLingoCLI.verifyRetention(bound: bound, observed: changed)
+            }
+        }
+        let markerURL = LiveLingoCLI.markerURL(course)
+        let markerBytes = try Data(contentsOf: markerURL)
+        var tampered = savedMarker
+        tampered.session?.targetLocale = other.rawValue
+        try expect(try tampered.checksummed().checksum != savedMarker.checksum, "regional_target_is_covered_by_marker_checksum")
+        // Keep the original checksum, deliberately corrupting only the target.
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(tampered).write(to: markerURL)
+        try rejectsCLI(.markerInvalid, "regional_marker_target_tampering_rejected") { _ = try LiveLingoCLI.readMarker(course) }
+        try markerBytes.write(to: markerURL)
+        try expect(try LiveLingoCLI.readMarker(course) == savedMarker
+            && Data(contentsOf: snapshotURL) == snapshotBytes, "regional_marker_restore_keeps_snapshot_bytes")
+        let result = try runCLI(cli, directory: course)
+        try expect(result.status == 0 && result.savedReceipt?["segments"] as? Int == segments.count,
+            "binary_regional_bound_export_verify")
+        try expectNoCaptionLog(result, segments: segments)
+        try expect(try Data(contentsOf: markerURL) == markerBytes && Data(contentsOf: snapshotURL) == snapshotBytes,
+            "binary_verification_preserves_regional_marker_and_snapshot")
     }
 
 }

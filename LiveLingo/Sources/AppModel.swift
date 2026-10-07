@@ -4752,6 +4752,18 @@ private enum AppError: LocalizedError {
     }
 }
 
+extension AppModel {
+    /// Validate explicit CLI opt-ins before changing a course or preparing a model.
+    /// Keeping this outside the CLI-only entry point lets the App test host exercise
+    /// the same resource and release boundary without starting generation.
+    func preflightCLIGeneration(target: OutputLanguage) throws {
+        guard OutputLanguage.cliGenerationLanguages.contains(target), target.generationTarget != nil else {
+            throw SessionStoreError.invalidState("输出语言尚未开放")
+        }
+        if target.profile.renderer != .identity { try chineseScriptConverter.prepare() }
+    }
+}
+
 #if LIVELINGO_CLI
 extension AppModel {
     private func installCLITranslationFailureReporter(_ report: @escaping @MainActor (String, [String: Any]) -> Void) {
@@ -4775,9 +4787,7 @@ extension AppModel {
                 paced: Bool = true, exportNotes: Bool = false, runReview: Bool = false,
                 target: OutputLanguage = .simplifiedChinese,
                 report: @escaping @MainActor (String, [String: Any]) -> Void) async throws {
-        guard target.isReleased, target.generationTarget != nil else {
-            throw SessionStoreError.invalidState("输出语言尚未开放")
-        }
+        try preflightCLIGeneration(target: target)
         resetSessionStateForNewRun()
         captureNewCourseOutputLanguage(target)
         installCLITranslationFailureReporter(report)

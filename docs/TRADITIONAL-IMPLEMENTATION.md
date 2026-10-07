@@ -23,6 +23,15 @@ signing or publishing are part of this work.
   **待母語者審閱**. Passing upstream gold is an algorithm check, not native
   approval of academic terminology or permission to release.
 
+## Provisional choices requiring user confirmation
+
+`ChineseOutputDefaults` is the single policy location for these decisions:
+classroom fixed text follows the regional rendering; `bilingual.jsonl` keeps
+the Simplified generation draft; Chinese reading can switch without regenerating
+content. Reading switches retain the immutable course/export target and are
+available only for released choices. Already rendered legacy notes cannot switch
+to another region without a Simplified draft. All three decisions are provisional.
+
 ## Verification evidence
 
 Build/test scratch and logs use the one task directory `../work/dd-trad`,
@@ -110,3 +119,27 @@ neither direction is called correct merely because it differs.
   expectation was corrected; the final focused run passed all 36 tests.
 - Python: 674 tests, six skipped, zero failures. Existing multilingual CLI:
   20 groups; target review: six groups. G0 frozen-source diff remains empty.
+
+### Step 11
+
+- Explicit CLI generation accepts `zh-Hant-TW` and `zh-Hant-HK`; GUI release
+  flags remain false. Actual dictionaries are checked before generation state
+  changes. The Latin release boundary is unchanged.
+- Saved verification renders both the current format and historical regional
+  two-line format. New English-only regional exports use converterVersion to
+  distinguish their current layout. Missing dictionaries fail explicitly;
+  a mismatched converter version or bound target is rejected.
+- Actual CLI binary: 36 multilingual groups passed, including Taiwan/Hong Kong
+  round trips, missing dictionaries, changed versions, legacy layouts, notes
+  headings and bound run markers. Target review: six groups passed. CLI build
+  warning checker: zero. Logs: `step11-final-multilingual.log` and
+  `step11-final-target-review.log`.
+- The shared preflight and caption tests passed all 20 focused tests. The first
+  new test build attempted to call a CLI-only entry point from the App host;
+  the production preflight was extracted and tested without generation.
+- Fixed a CLI-player compiler warning by receiving CoreAudio's retained CFString
+  through an unmanaged pointer. The player was compiled, never used for audio.
+- Full Xcode run: XCTest 1192, one skipped, zero failures; Swift Testing 166.
+  Warning checker: zero. Preference cleanup: 298 created and cleaned, all
+  registered plists absent. Log: `step11-xcode.log`. Python: 674 tests, six
+  skipped, zero failures. G0 frozen-source diff remains empty.

@@ -89,11 +89,13 @@ final class TraditionalCaptionPresentationTests: XCTestCase {
         XCTAssertEqual(converter.debugCacheEntryCount, 0)
     }
 
-    func testTraditionalDisplayWorksWhileSavedVerifierGateStaysClosed() throws {
+    func testTraditionalRenderersWorkWhileGUIReleaseGateStaysClosed() throws {
         let converter = ChineseScriptConverter(resourceDirectory: try dictionaries())
         for (language, expected) in traditionalLanguages {
-            XCTAssertFalse(language.rendererIsAvailable)
-            XCTAssertNil(OutputLanguage.savedRenderer(for: language.rawValue))
+            XCTAssertTrue(language.rendererIsAvailable)
+            XCTAssertNotNil(OutputLanguage.savedRenderer(for: language.rawValue))
+            XCTAssertFalse(language.isReleased)
+            XCTAssertNil(OutputLanguage.releasedLanguage(language.rawValue))
             XCTAssertEqual(try language.render("头发在这里。", converter: converter), expected)
         }
         XCTAssertEqual(converter.debugLoadCount, 1)

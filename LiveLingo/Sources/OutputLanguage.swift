@@ -91,6 +91,11 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
     /// The default is omitted from persistence to preserve existing bytes.
     var persistedLocale: String? { self == .simplifiedChinese ? nil : rawValue }
     static var released: [Self] { allCases.filter(\.isReleased) }
+    /// Explicit CLI opt-in is the only creation route for unreleased Chinese
+    /// variants. Latin targets retain their existing release boundary.
+    static var cliGenerationLanguages: [Self] {
+        allCases.filter { $0.isReleased || $0 == .traditionalChineseTaiwan || $0 == .traditionalChineseHongKong }
+    }
     static func releasedLanguage(_ locale: String) -> Self? {
         guard let language = Self(rawValue: locale), language.isReleased else { return nil }
         return language
@@ -124,11 +129,12 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         return .simplifiedChinese
     }
 
-    /// Saved-verifier support is enabled alongside the regional CLI renderer
-    /// in step 11. Display/export use their actual resource preflight instead.
+    /// Implementation availability. Regional exports also preflight the actual
+    /// dictionary; this metadata check never loads resources on the default path.
     var rendererIsAvailable: Bool {
-        if case .identity = profile.renderer { return true }
-        return false
+        switch profile.renderer {
+        case .identity, .taiwan, .hongKong: return true
+        }
     }
 
     func keepsSourceAsCaption(language: String?) -> Bool {

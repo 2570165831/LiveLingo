@@ -49,7 +49,7 @@ struct LiveLingoCLI {
 
  // MARK: - Command line
 
- static let usage = "Usage: livelingo-cli (--replay AUDIO | --system-audio SECONDS) --output NEW_DIRECTORY [--target zh-Hans] [--high-quality] [--import] [--export-notes] [--run-review]\n       livelingo-cli --translate-text TEXT [--high-quality] [--output NEW_DIRECTORY]\n       livelingo-cli --verify-saved DIRECTORY\n       livelingo-cli --open-saved DIRECTORY\n       livelingo-cli --resume-saved DIRECTORY [--high-quality] [--export-notes] [--run-review]\nReplay injects PCM without playing sound. --import uses the app's file-import path. Audio requires ASRRuntime/ and Models/ beside this executable or inside its isolated bundle. External ASR endpoints are rejected. MLX paths use LIVELINGO_MLX_PYTHON/WORKER/MODELS. Each generating run creates independent preferences, data and checkpoints; failures retain state. Only --translate-text prints translated content. --verify-saved is a read-only export-integrity check (it does NOT prove a complete run, and it accepts valid audio with zero captions). --open-saved reopens a course this CLI itself isolated and bound; it never records, never resumes generation and reports identity, revision, batches, source and pause state. --resume-saved performs the same bound reopen and then explicitly continues the saved translation/notes work; it refuses courses whose bound session, revision, captions or batches do not match the recorded identity."
+ static let usage = "Usage: livelingo-cli (--replay AUDIO | --system-audio SECONDS) --output NEW_DIRECTORY [--target zh-Hans|zh-Hant-TW|zh-Hant-HK] [--high-quality] [--import] [--export-notes] [--run-review]\n       livelingo-cli --translate-text TEXT [--high-quality] [--output NEW_DIRECTORY]\n       livelingo-cli --verify-saved DIRECTORY\n       livelingo-cli --open-saved DIRECTORY\n       livelingo-cli --resume-saved DIRECTORY [--high-quality] [--export-notes] [--run-review]\nReplay injects PCM without playing sound. --import uses the app's file-import path. Audio requires ASRRuntime/ and Models/ beside this executable or inside its isolated bundle. External ASR endpoints are rejected. MLX paths use LIVELINGO_MLX_PYTHON/WORKER/MODELS. Each generating run creates independent preferences, data and checkpoints; failures retain state. Only --translate-text prints translated content. --verify-saved is a read-only export-integrity check (it does NOT prove a complete run, and it accepts valid audio with zero captions). --open-saved reopens a course this CLI itself isolated and bound; it never records, never resumes generation and reports identity, revision, batches, source and pause state. --resume-saved performs the same bound reopen and then explicitly continues the saved translation/notes work; it refuses courses whose bound session, revision, captions or batches do not match the recorded identity."
 
  struct GenerateCommand: Equatable, Sendable {
   enum Source: Equatable, Sendable { case replay(String), systemAudio(Double) }
@@ -74,7 +74,9 @@ struct LiveLingoCLI {
  /// Pure syntax parse. It never touches the filesystem, so ambiguity rules can
  /// be tested without creating anything. Runtime path checks happen in run().
  static func parse(_ arguments: [String]) throws -> Command {
-  try parse(arguments, releasedTargets: Set(OutputLanguage.released))
+  // The CLI opts in before the GUI release gate opens. Actual dictionary
+  // availability is a runtime preflight, not a parser or release-metadata check.
+  try parse(arguments, releasedTargets: Set(OutputLanguage.cliGenerationLanguages))
  }
 
  #if LIVELINGO_CLI_LIFECYCLE_TESTS
@@ -179,6 +181,9 @@ struct LiveLingoCLI {
  @MainActor static func runGenerate(_ command: GenerateCommand) async throws {
   let directory = URL(fileURLWithPath: command.output, isDirectory: true).standardizedFileURL
   guard !FileManager.default.fileExists(atPath: directory.path) else { throw CLIError.outputExists }
+  if command.target.profile.renderer != .identity {
+   do { try ChineseScriptConverter.shared.prepare() } catch { throw CLIError.converterUnavailable }
+  }
   var source: CLIRunSource
   var file: URL?
   var seconds = 0.0
@@ -192,7 +197,7 @@ struct LiveLingoCLI {
    if let digest = try? hashFile(url) { source.sha256 = digest.sha256; source.bytes = Int(digest.bytes) }
    if let audio = try? AVAudioFile(forReading: url) {
     source.frames = Int(audio.length)
-    source.sampleRate = try? audio.processingFormat.sampleRate
+    source.sampleRate = audio.processingFormat.sampleRate
     if let rate = source.sampleRate, rate > 0 { source.seconds = Double(audio.length) / rate }
    }
   case .systemAudio(let value):
@@ -291,7 +296,7 @@ struct LiveLingoCLI {
   }
   await queue.pauseAndWait()
   var verified = observed
-  verified.exports = try fingerprintExports(observed.exportPaths)
+  verified.exports = try fingerprintExports(observed.exportPaths, target: try OutputLanguage.storedLanguage(bound.targetLocale))
   // Internal, opt-in diagnostics: counts and digests only, never classroom text.
   if ProcessInfo.processInfo.environment["LIVELINGO_CLI_DEBUG_VERIFY"] == "1" {
    let observedIDs = Set(verified.snapshot.segments.map { $0.id.uuidString })
@@ -331,11 +336,25 @@ struct LiveLingoCLI {
 
  /// Export integrity only; it never proves a whole run. Zero valid captions pass
  /// this check, so a caller must not treat exit 0 here as end-to-end success.
- @discardableResult static func verifySaved(_ directory: URL, emit: Bool = true) throws -> Int {
+ @discardableResult static func verifySaved(_ directory: URL, emit: Bool = true,
+                         converter: ChineseScriptConverter = .shared) throws -> Int {
   let decoder=JSONDecoder();decoder.dateDecodingStrategy = .iso8601
   let manifest=try decoder.decode(SessionExporter.Manifest.self,from:Data(contentsOf:directory.appendingPathComponent("manifest.json")))
-  guard manifest.recordingFile == "recording.wav",
-        let renderer = OutputLanguage.savedRenderer(for: manifest.targetLocale, sourceLanguages: manifest.sourceLanguages) else { throw CLIError.inconsistentExport }
+  guard manifest.recordingFile == "recording.wav" else { throw CLIError.inconsistentExport }
+  let traditional = OutputLanguage(rawValue: manifest.targetLocale).flatMap {
+   $0.profile.renderer == .identity ? nil : $0
+  }
+  // Fail explicitly on missing regional resources before resolving a saved
+  // renderer. Never fall back to an identity/Simplified Chinese comparison.
+  if traditional != nil {
+   do { try converter.prepare() } catch { throw CLIError.converterUnavailable }
+   guard manifest.converterVersion == nil || manifest.converterVersion == ChineseScriptConverter.version else {
+    throw CLIError.inconsistentExport
+   }
+  }
+  guard let renderer = OutputLanguage.savedRenderer(for: manifest.targetLocale, sourceLanguages: manifest.sourceLanguages) else {
+   throw CLIError.inconsistentExport
+  }
   let hasSnapshot = FileManager.default.fileExists(atPath: directory.appendingPathComponent(SessionStore.snapshotFileName).path)
   if hasSnapshot {
    do {
@@ -361,13 +380,33 @@ struct LiveLingoCLI {
    }) else { throw CLIError.inconsistentExport }
   }
   let usesLegacyFormat = manifest.targetLocale == "zh-Hans" && manifest.sourceLanguages == nil
+  let usesLegacyRegionalFormat = manifest.sourceLanguages == nil && manifest.converterVersion == nil
+  func renderedTarget(_ segment: TranscriptSegment) throws -> String {
+   if let language = traditional {
+    if usesLegacyRegionalFormat {
+     return try language.render(legacyTargetLine(segment), converter: converter)
+    }
+    return try SessionExporter.renderedTargetLine(segment, outputLanguage: language, converter: converter)
+   }
+   return renderer.targetLine(segment)
+  }
+  func renderedCue(_ segment: TranscriptSegment, index: Int) throws -> String {
+   if let language = traditional {
+    if usesLegacyRegionalFormat {
+     return "\(index + 1)\n\(SessionExporter.srtTimestamp(segment.startTime)) --> \(SessionExporter.srtTimestamp(segment.endTime))\n"
+       + [segment.english, try renderedTarget(segment)].joined(separator: "\n")
+    }
+    return try SessionExporter.renderedSRTCue(segment, index: index, outputLanguage: language, converter: converter)
+   }
+   return renderer.srtCue(segment, index: index)
+  }
   let english=try String(contentsOf:directory.appendingPathComponent("transcript-en.txt"),encoding:.utf8)
   let chinese=try String(contentsOf:directory.appendingPathComponent(targetTranscriptName),encoding:.utf8)
-  let targetLines = usesLegacyFormat ? segments.map(legacyTargetLine) : segments.map { renderer.targetLine($0) }
+  let targetLines = try usesLegacyFormat ? segments.map(legacyTargetLine) : segments.map { try renderedTarget($0) }
   guard english == segments.map(SessionExporter.sourceLine).joined(separator:"\n")+"\n",
         chinese == targetLines.joined(separator:"\n")+"\n" else { throw CLIError.inconsistentExport }
-  let expectedSRT = segments.enumerated().map { index, segment in
-   usesLegacyFormat ? legacySRTCue(segment, index: index) : renderer.srtCue(segment, index: index)
+  let expectedSRT = try segments.enumerated().map { index, segment in
+   try usesLegacyFormat ? legacySRTCue(segment, index: index) : renderedCue(segment, index: index)
   }.joined(separator: "\n\n") + "\n"
   let savedSRT = try String(contentsOf: directory.appendingPathComponent("bilingual.srt"), encoding: .utf8)
   if savedSRT != expectedSRT {
@@ -771,7 +810,25 @@ struct LiveLingoCLI {
   }
  }
 
- static func fingerprintExports(_ paths: [String]) throws -> [CLIExportFingerprint] {
+ /// Regional document labels come from the same prepared fields as export.
+ /// Identity targets retain the frozen heading used by the existing verifier.
+ static func notesHeadingForFingerprint(_ target: OutputLanguage,
+                                        converter: ChineseScriptConverter = .shared) throws -> String {
+  if target.profile.renderer == .identity { return NotesExportDocument.notesHeading }
+  let probe = NotesExportSnapshot(className: "", sessionName: nil, scope: .wholeLesson,
+      scopeDetail: "", coverageLine: "", notesMarkdown: "", reviewMarkdown: nil,
+      transcript: [], generatedAt: Date(timeIntervalSince1970: 0), includesReviewAdvice: false,
+      includesTranscript: false, target: target)
+  do {
+   guard let rendered = try NotesExportDocument.prepare(probe, converter: converter) else {
+    throw CLIError.converterUnavailable
+   }
+   return NotesExportDocument.notesHeading(for: target, rendered: rendered)
+  } catch { throw CLIError.converterUnavailable }
+ }
+
+ static func fingerprintExports(_ paths: [String], target: OutputLanguage = .simplifiedChinese,
+                                converter: ChineseScriptConverter = .shared) throws -> [CLIExportFingerprint] {
   var result: [CLIExportFingerprint] = []
   for path in paths {
    let url = URL(fileURLWithPath: path).standardizedFileURL
@@ -794,7 +851,8 @@ struct LiveLingoCLI {
     signature = "ooxml"
    case "md", "txt":
     let text = try String(contentsOf: url, encoding: .utf8)
-    guard text.contains(NotesExportDocument.notesHeading) else { throw CLIError.exportIncomplete }
+    let heading = try notesHeadingForFingerprint(target, converter: converter)
+    guard text.contains(heading) else { throw CLIError.exportIncomplete }
     signature = "text"
    default:
     throw CLIError.exportIncomplete
@@ -955,7 +1013,7 @@ struct LiveLingoCLI {
  }
 
  enum CLIError: String, Error {
-  case invalidArguments, outputExists, inconsistentExport, unownedASR, installedAppForbidden
+  case invalidArguments, outputExists, inconsistentExport, unownedASR, installedAppForbidden, converterUnavailable
   case isolationFailed, processingIncomplete, noCaptions, cleanupIncomplete
   case reopenTargetForbidden, markerMissing, markerInvalid, legacyMarkerUnsupported, sessionUnbound
   case isolationMissing, sessionIdentityMismatch, captureChangedSavedAudio

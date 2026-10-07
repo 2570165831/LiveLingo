@@ -35,21 +35,30 @@ still be new. `--lifecycle-tests`, `--multilingual-tests` and
 separate entry points and cannot be combined. Headless
 commands cancel any UI-only file chooser path without presenting a window.
 
-Run the multilingual regression from the repository root, using a new build
-directory and a new evidence directory under `work/`:
+Run the multilingual regression from the repository root. For this worktree,
+keep the build, module cache, temporary files and evidence under
+`../work/dd-trad/`. The following commands use authored fixtures only.
 
 ```sh
-bash Scripts/build-cli.sh work/cli-multilingual-build --multilingual-tests
-work/cli-multilingual-build/livelingo-cli-multilingual-tests \
-  work/cli-multilingual-build/livelingo-cli work/cli-multilingual-evidence
-work/cli-multilingual-build/livelingo-cli-target-review-tests work/cli-target-review-evidence
+mkdir -p ../work/dd-trad/tmp ../work/dd-trad/cli-module-cache
+CLI_TEST_TMP="$(cd ../work/dd-trad/tmp && pwd)"
+CLI_TEST_CACHE="$(cd ../work/dd-trad/cli-module-cache && pwd)"
+TMPDIR="$CLI_TEST_TMP" bash Scripts/build-cli.sh ../work/dd-trad/cli-step11-build \
+  --multilingual-tests --module-cache "$CLI_TEST_CACHE"
+TMPDIR="$CLI_TEST_TMP" LIVELINGO_CLI_TEST_OUTPUT_ROOT="$(cd ../work/dd-trad && pwd)" \
+  ../work/dd-trad/cli-step11-build/livelingo-cli-multilingual-tests \
+  ../work/dd-trad/cli-step11-build/livelingo-cli ../work/dd-trad/cli-step11-evidence
+TMPDIR="$CLI_TEST_TMP" LIVELINGO_CLI_TEST_OUTPUT_ROOT="$(cd ../work/dd-trad && pwd)" \
+  ../work/dd-trad/cli-step11-build/livelingo-cli-target-review-tests \
+  ../work/dd-trad/cli-step11-target-review-evidence
 ```
 
 The test executable requires the `livelingo-cli` beside it from that same build.
 The optional second argument selects its evidence directory; alternatively set
 `LIVELINGO_CLI_MULTILINGUAL_WORK`. If neither is supplied, it creates a new
-`work/cli-multilingual-<UUID>` directory. Existing directories are refused,
-paths must remain under this repository's `work/`, and the synthetic fixtures
+`work/cli-multilingual-<UUID>` directory under the source root, or under
+`LIVELINGO_CLI_TEST_OUTPUT_ROOT` when set. Existing directories and symlink
+escapes are refused. The synthetic fixtures
 are retained for inspection. It starts only the CLI's read-only `--verify-saved`
 mode, with no model, HTTP service or audio device. Captured CLI output is checked
 in memory; test events contain check names and counts, never subtitle text.
@@ -57,6 +66,35 @@ The additional target-review entry point checks snapshot/manifest mismatches,
 snapshot error reporting, fixture-only English layouts, target retention and
 parsed target forwarding. It uses synthetic audio files and an injected CLI
 runner; it never loads a model or starts capture.
+
+The regional regression covers both `zh-Hant-TW` and `zh-Hant-HK`:
+
+- Export synthetic English, Chinese, Japanese and Cantonese captions, including
+  pending/failed translations. Check hand-authored transcript, SRT and summary
+  bytes; keep JSONL and original transcripts identical to the Hans reference.
+  Summary source quotations and schedule source fields keep their original bytes.
+  Run the actual normal CLI's `--verify-saved` and check its receipt and read-only result.
+- Copy only the normal `livelingo-cli` to a new evidence subdirectory without
+  `ZhVariants`. Its regional verification must exit nonzero, emit
+  `cli_failed` with `reason=converterUnavailable`, and emit no `saved_verified`.
+  The same binary must still verify the synthetic Hans reference. The original
+  build's dictionary is retained.
+- Verify hand-authored legacy regional exports with no snapshot,
+  `sourceLanguages` or `converterVersion`, retaining their two-line SRT layout.
+  Reject a substituted one-line layout and preserve files on every rejection.
+- Reject a changed `converterVersion` through both the direct verifier and the
+  actual binary. Missing dictionaries must still report `converterUnavailable`
+  before renderer/version validation. Existing frozen Hans/Latin bytes remain exact.
+- Check rendered `學習筆記` headings and MD/TXT fingerprints, rejecting an
+  unrendered heading or missing converter. Bind each synthetic regional course
+  into its authenticated run marker, verify raw generation-text digests, reject
+  a changed regional target and a target edit without a matching checksum, and
+  keep the marker and snapshot unchanged during binary verification.
+
+The required pass receipt is exit zero plus `multilingual_cli_tests_passed` from
+the test executable. Syntax parsing alone does not establish these results.
+This synthetic verification does not establish GUI release readiness, real
+classroom quality, model execution or PDF/DOCX content acceptance.
 
 The existing lifecycle entry point remains separate:
 
@@ -155,8 +193,16 @@ Manifest `sourceLanguages` is an optional sorted list of unique non-English code
 omitted for English-only courses; `sourceLocale` retains its legacy value.
 `--verify-saved` selects filenames and a supported renderer from the manifest's
 `targetLocale`; unknown targets and unavailable converters are rejected.
-The old unmarked two-line rules apply only to `zh-Hans` without
-`sourceLanguages`. English-target source-only captions use one-line cues;
+For regional Traditional Chinese, the actual dictionary is prepared before
+`savedRenderer` validation. Missing or unreadable dictionaries emit
+`cli_failed` with `reason=converterUnavailable`; the verifier never substitutes
+Simplified Chinese. New regional manifests include `converterVersion`.
+A present version must equal the current converter version, otherwise verification
+fails with `inconsistentExport`. An absent version remains accepted for old exports.
+The old unmarked two-line rules apply to `zh-Hans`, `zh-Hant-TW` and `zh-Hant-HK`
+without either `sourceLanguages` or `converterVersion`; regional target lines
+are converted while source
+lines retain their original bytes. English-target source-only captions use one-line cues;
 this also applies when the saved English body differs from the source.
 Separate read-only rules preserve the synthetic `zh-Hant` fixtures and the
 snapshot-free, unmarked two-line `en` fixture layout (including equal bodies).
@@ -167,8 +213,12 @@ consult the current preference. When a snapshot exists, its effective target
 (nil means `zh-Hans`) must match the manifest. Unreadable, damaged or incomplete
 snapshots fail with `inconsistentExport`, as do target mismatches.
 
-Generation accepts `--target zh-Hans` (also the default). Other codes, duplicate
-flags, and `--target` in verification, reopen, resume, or typed-translation modes
+Generation accepts `--target zh-Hans` (also the default), `--target zh-Hant-TW`
+and `--target zh-Hant-HK`. The two regional codes are explicit CLI opt-ins while
+their GUI release flags remain closed. Parser rejection tests use
+`parseForTesting(releasedTargets: Set(OutputLanguage.released))` to retain that
+release guard. Other codes, duplicate flags, and `--target` in verification,
+reopen, resume, or typed-translation modes
 are rejected before files or runtimes are touched. Opening and resuming use the
 course's recorded target; a changed preference applies only to new courses.
 An existing snapshot with nil target always opens as `zh-Hans`, regardless of
@@ -177,6 +227,18 @@ manifest; unreadable or undecodable metadata falls back to `zh-Hans`. Their
 synthetic non-regional `zh-Hant` code maps to the supported `zh-Hans` generator.
 An unsupported generation target is checked before parking the current course
 or preserving an incomplete journal tail.
+
+Regional output uses `transcript-zh-Hant-TW.txt` / `summary-zh-Hant-TW.md` or
+`transcript-zh-Hant-HK.txt` / `summary-zh-Hant-HK.md`. `transcript-en.txt`, JSONL
+generation text, and non-pass-through SRT source lines remain unchanged.
+`ZhVariants/` with its provenance and dictionaries must be beside the executable
+or inside its own isolated bundle; `build-cli.sh` copies the adjacent resources.
+The GUI release flag and dictionary availability are separate checks.
+Run markers bind `targetLocale` and include it in their checksum; old markers
+omit the field and retain the frozen Hans default. Reopen/resume retention
+rejects a target change. Regional text-export fingerprints obtain their heading
+from `NotesExportDocument.prepare` and `notesHeading(for:rendered:)`;
+identity-profile fingerprint headings retain their existing bytes.
 
 An `en` target uses `transcript-target-en.txt`, preserving the separate original
 source file `transcript-en.txt`.
