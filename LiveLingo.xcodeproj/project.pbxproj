@@ -6,6 +6,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B70000000000000000000009 /* acceptance-verdicts-zh-Hans.json in Resources */ = {isa = PBXBuildFile; fileRef = B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */; };
+		B70000000000000000000007 /* AcceptanceVerdictSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000008 /* AcceptanceVerdictSnapshotTests.swift */; };
 		B70000000000000000000005 /* default-target-golden.json in Resources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000006 /* default-target-golden.json */; };
 		B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000004 /* OutputLanguageBaselineTests.swift */; };
 		B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000002 /* DefaultTargetGoldenTests.swift */; };
@@ -92,6 +94,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/acceptance-verdicts-zh-Hans.json"; sourceTree = "<group>"; };
+		B70000000000000000000008 /* AcceptanceVerdictSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcceptanceVerdictSnapshotTests.swift; sourceTree = "<group>"; };
 		B70000000000000000000006 /* default-target-golden.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/default-target-golden.json"; sourceTree = "<group>"; };
 		B70000000000000000000004 /* OutputLanguageBaselineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputLanguageBaselineTests.swift; sourceTree = "<group>"; };
 		B70000000000000000000002 /* DefaultTargetGoldenTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DefaultTargetGoldenTests.swift; sourceTree = "<group>"; };
@@ -240,6 +244,8 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */,
+				B70000000000000000000008 /* AcceptanceVerdictSnapshotTests.swift */,
 				B70000000000000000000006 /* default-target-golden.json */,
 				B70000000000000000000004 /* OutputLanguageBaselineTests.swift */,
 				B70000000000000000000002 /* DefaultTargetGoldenTests.swift */,
@@ -335,7 +341,7 @@
 
 /* Begin PBXResourcesBuildPhase section */
 		AA0000000000000000000001 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000015 /* AppIcon.icon in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
-		AA0000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B70000000000000000000005 /* default-target-golden.json in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		AA0000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B70000000000000000000005 /* default-target-golden.json in Resources */, B70000000000000000000009 /* acceptance-verdicts-zh-Hans.json in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -381,6 +387,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B70000000000000000000007 /* AcceptanceVerdictSnapshotTests.swift in Sources */,
 				B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,
 				900000000000000000000003 /* MultilingualCaptionPresentationTests.swift in Sources */,
