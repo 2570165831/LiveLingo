@@ -573,6 +573,188 @@ class RunnerTests(unittest.TestCase):
                 self.assertAlmostEqual(report["warmups"][0]["energy"]["gross_j"], 3.0)
                 self.assertEqual([r["route_position"] for r in by_name[routes[0]]["results"]], [0, 1, 0, 1, 0])
 
+    def test_warmup_failure_invalidates_target_and_never_measures_cold_call(self):
+        self.expand_units(6)
+        self.long_prefix_prompts()
+        for code in ("worker_generation_failed", "output_budget_exhausted"):
+            with self.subTest(code=code):
+                clock = [100.0]
+                attempts = []
+
+                class ColdAfterErrorWorker(PrefixCacheWorker):
+                    def generate(worker, system, text, source, target):
+                        start = clock[0]
+                        attempts.append((text, target))
+                        if len(attempts) == 1:
+                            clock[0] += .01
+                            raise a.WorkerFailure(code, measurement=a.stats(start, clock[0]))
+                        result = super().generate(system, text, source, target)
+                        clock[0] += 1.0 if len(attempts) == 2 else .01
+                        result.update(start_mono=start, end_mono=clock[0], total_seconds=clock[0] - start)
+                        return result
+
+                self.recording = ColdAfterErrorWorker()
+                args = self.args("--targets", "es", "fr", "--routes", "direct",
+                                 "--output-dir", str(self.root / code))
+                with patch.object(a.time, "monotonic", side_effect=lambda: clock[0]):
+                    report = self.run_fake(args)
+                invalid, valid = report["routes"]
+                self.assertEqual([text for text, target in attempts if target == "es"], ["1"])
+                self.assertEqual(invalid["summary"]["call_count"], 0)
+                self.assertEqual(invalid["summary"]["failure_count"], 6)
+                self.assertIsNone(invalid["summary"]["p95_seconds"])
+                self.assertIsNone(invalid["summary"]["chrfpp"])
+                self.assertTrue(all(not row["comparison_eligible"] for row in invalid["results"]))
+                self.assertEqual(report["invalid_target_blocks"][0]["target_locale"], "es")
+                self.assertEqual(report["invalid_target_blocks"][0]["failure"]["code"], code)
+                self.assertAlmostEqual(valid["summary"]["mean_seconds"], .01)
+                self.assertEqual({call["reused_prefix_tokens"] for row in valid["results"]
+                                  for call in row["calls"]}, {768})
+                self.assertAlmostEqual(report["warmups"][1]["total_seconds"], 1.0)
+                self.assertEqual(report["status"], "completed_with_failures")
+                summary = (self.root / code / "summary.md").read_text()
+                self.assertIn("Invalid target block: es", summary)
+                self.assertIn(code, summary)
+                self.assertEqual(json.loads((self.root / code / "report.json").read_text()), report)
+
+    def test_failed_rewarm_invalidates_previously_measured_target_rows(self):
+        self.expand_units(6)
+        workers = []
+
+        class BrokenThenColdWorker(RecordingWorker):
+            def generate(worker, system, text, source, target):
+                if len(workers) == 2:
+                    raise a.WorkerFailure("worker_generation_failed")
+                if len(worker.calls) == 3:
+                    raise a.WorkerFailure("worker_exited")
+                return super().generate(system, text, source, target)
+
+        def factory():
+            worker = BrokenThenColdWorker()
+            workers.append(worker)
+            return worker
+
+        report = a.run(self.args(), process_provider=lambda: {}, worker_factory=factory)
+        self.assertEqual(report["worker_sessions"]["count"], 2)
+        self.assertEqual(report["comparisons"][0]["sample_count"], 0)
+        self.assertEqual(report["comparisons"][0]["excluded_count"], 6)
+        for route in report["routes"]:
+            self.assertTrue(all(not row["comparison_eligible"] for row in route["results"]))
+            self.assertIsNone(route["summary"]["mean_seconds"])
+            self.assertIsNone(route["summary"]["chrfpp"])
+        self.assertEqual(len(report["invalid_target_blocks"]), 1)
+        self.assertEqual(report["routes"][0]["results"][0]["status"], "succeeded")
+        self.assertFalse(workers[1].calls)
+
+    def test_model_route_first_positions_balance_without_counting_passthrough(self):
+        for count in (5, 6):
+            self.expand_units(count)
+            # Match the review's default en/zh source selection for a Hant target.
+            units = [c.ParallelUnit(unit.id, unit.corpus,
+                     {locale: unit.texts[locale] for locale in ("zh", "en", "zh-Hant-TW")}, unit.metadata)
+                     for unit in self.units]
+            self.corpus = self.root / f"rotation-corpus-{count}.jsonl"
+            c.write_jsonl(units, self.corpus)
+            for index, routes in enumerate((["direct", "hans-convert"], ["hans-convert", "direct"])):
+                with self.subTest(count=count, routes=routes):
+                    self.recording = RecordingWorker()
+                    args = self.args("--targets", "zh-Hant-TW", "--routes", *routes,
+                                     "--output-dir", str(self.root / f"rotation-{count}-{index}"))
+                    args.sources = None
+                    report = self.run_fake(args)
+                    first_counts = [sum(row["route_position"] == 0 and row["comparison_eligible"]
+                                        for row in route["results"]) for route in report["routes"]]
+                    self.assertEqual(first_counts, [(count + 1) // 2, count // 2])
+                    self.assertEqual(report["comparisons"][0]["sample_count"], count)
+                    for route in report["routes"]:
+                        self.assertEqual(route["summary"]["call_count"], count)
+                        self.assertTrue(all(not row["calls"] and not row["comparison_eligible"]
+                                            for row in route["results"] if row["source_locale"] == "zh"))
+
+    def test_nonuniform_energy_sampling_splits_warmups_targets_and_restarts(self):
+        self.expand_units(5)
+        helper = self.root / "synthetic-helper"
+        helper.touch()
+        helper.chmod(0o700)
+        for scenario, targets, restart in (("review", ["es"], False),
+                                           ("targets", ["es", "fr"], False),
+                                           ("restart", ["es"], True)):
+            with self.subTest(scenario=scenario):
+                clock, joules = [100.0], [0.0]
+                workers, samplers = [], []
+                fault_used = [False]
+
+                class NonuniformWorker(RecordingWorker):
+                    def generate(worker, system, text, source, target):
+                        start = clock[0]
+                        first = not worker.calls
+                        clock[0] += 1.0 if first else .01
+                        joules[0] += 100.0 if first else .01
+                        if restart and len(worker.calls) == 3 and not fault_used[0]:
+                            fault_used[0] = True
+                            raise a.WorkerFailure("worker_exited", measurement=a.stats(start, clock[0]))
+                        worker.calls.append((system, text, source, target))
+                        return {"output": "synthetic translation",
+                                **a.stats(start, clock[0], clock[0], 777 if text == "1" else 7, 0)}
+
+                class BoundarySampler(SyntheticSampler):
+                    def __init__(sampler, **kwargs):
+                        super().__init__(**kwargs)
+                        sampler.started = False
+                        samplers.append(sampler)
+
+                    def start(sampler):
+                        assert not sampler.started, "a stopped sampler must be replaced"
+                        sampler.started = True
+                        sampler.start_j = joules[0]
+                        super().start()
+
+                    def stop(sampler):
+                        assert sampler.started and not sampler.stopped
+                        sampler.end_j = joules[0]
+                        super().stop()
+
+                    def snapshot(sampler):
+                        assert sampler.stopped, "flush counters before taking the final snapshot"
+                        if sampler.start_mono == sampler.end_mono:
+                            return []
+                        return [{"start_mono": sampler.start_mono, "end_mono": sampler.end_mono,
+                                 "is_delta": True, "source": "synthetic_ioreport", "mode": "energy_counters",
+                                 "energy_unit": "J", "rails_j": {"cpu": sampler.end_j - sampler.start_j,
+                                                                   "gpu": 0.0, "ane": 0.0}}]
+
+                def factory():
+                    worker = NonuniformWorker()
+                    workers.append(worker)
+                    return worker
+
+                args = self.real_args_with_fake_protocol("--targets", *targets, "--sample-interval", "2",
+                        "--energy-helper", str(helper), "--output-dir", str(self.root / f"energy-{scenario}"))
+                with patch.object(a.time, "monotonic", side_effect=lambda: clock[0]):
+                    report = a.run(args, process_provider=lambda: {}, worker_factory=factory,
+                                   sampler_factory=BoundarySampler)
+                for route in report["routes"]:
+                    self.assertAlmostEqual(route["summary"]["gross_j"], route["summary"]["call_count"] * .01)
+                    for row in route["results"]:
+                        self.assertAlmostEqual(row["energy"]["gross_j"], len(row["calls"]) * .01)
+                        for call in row["calls"]:
+                            self.assertAlmostEqual(call["energy"]["gross_j"], .01)
+                if scenario == "review":
+                    self.assertAlmostEqual(joules[0], 100.16)
+                    self.assertAlmostEqual(report["routes"][0]["summary"]["gross_j"], .05)
+                    self.assertAlmostEqual(report["routes"][1]["summary"]["gross_j"], .10)
+                expected_segments = 2 if scenario == "review" else 4
+                self.assertEqual(len(samplers), expected_segments)
+                self.assertTrue(all(sampler.stopped for sampler in samplers))
+                self.assertEqual([segment["phase"] for segment in report["energy"]["segments"]],
+                                 ["warmup", "measurement"] * (expected_segments // 2))
+                samples = report["energy"]["samples"]
+                self.assertAlmostEqual(sum(sample["rails_j"]["cpu"] for sample in samples), joules[0])
+                measured_samples = [sample for sample in samples if sample["sampling_phase"] == "measurement"]
+                for warmup in report["warmups"]:
+                    self.assertTrue(all(sample["end_mono"] <= warmup["start_mono"] or
+                                        sample["start_mono"] >= warmup["end_mono"] for sample in measured_samples))
+
     def test_pass_through_table_matches_swift_output_language_profiles(self):
         sources = Path(a.__file__).resolve().parents[2] / "LiveLingo/Sources"
         swift = (sources / "OutputLanguage.swift").read_text()

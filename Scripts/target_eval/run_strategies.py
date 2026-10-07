@@ -566,7 +566,9 @@ def markdown(report):
         lines.append(f"| {route['target_locale']} | {route['route']} | " + " | ".join(display(s[k]) for k in
                      ("sample_count", "failure_count", "passthrough_count", "call_count", "chrfpp", "output_tokens", "total_seconds", "gross_j")) + " |")
     lines += ["", "Targets run in separate blocks; each prompt is warmed outside measured row/call windows.",
-              "Route order rotates by unit/source pair; restarts repeat the block warm-up outside measurements.",
+              "Route order rotates only for unit/source pairs needing model calls; passthrough never advances it.",
+              "A failed warm-up invalidates the entire target block, including earlier rows, and excludes it from comparisons.",
+              "Restarts repeat warm-up outside measurements; fresh samplers separate every warm-up from measured energy.",
               "Input/reused-prefix tokens use optional worker done fields; older workers report null.",
               "First-token seconds use the first visible snapshot/done receipt (a throttled proxy); exact TTFT is unknown.",
               "Totals include failed attempts; quality/mean/p95 exclude failures and passthrough. Paired summaries use common successes.",
@@ -574,6 +576,8 @@ def markdown(report):
               "Energy is whole-machine gross CPU/GPU/ANE energy; AC, thermal and interference are unverified.",
               "No App acceptance/retries, human review, classroom weighting or route-switch gate is established.",
               "UN units are curated turns, SRT units are overlap groups; no sentence/audio times are inferred."]
+    for block in report["invalid_target_blocks"]:
+        lines.append(f"Invalid target block: {block['target_locale']}; warm-up failed ({block['failure']['code']}); excluded from comparisons.")
     return "\n".join(lines) + "\n"
 
 
@@ -631,11 +635,33 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
         factory = worker_factory or (FakeWorker if args.dry_run or not has_calls else
             lambda: MLXWorker(python, worker_path, model, out / "worker-state", args.profile,
                               args.timeout_seconds, args.final_budget))
-        sampler = None if args.dry_run or args.no_energy or not has_calls else (sampler_factory or energy.PowerSampler)(
-            helper_path=args.energy_helper, interval=args.sample_interval)
+        sampling_enabled = not (args.dry_run or args.no_energy or not has_calls)
+        sampler, sampling_segments = None, []
         route_results = [{"target_locale": route.target, "route": route.name,
                           "hops": list(route.hops), "results": []} for route in cases]
-        session, warmups = WorkerSession(factory), []
+        session, warmups, invalid_blocks = WorkerSession(factory), [], []
+
+        def stop_sampling():
+            nonlocal sampler
+            if sampler is not None:
+                sampler.stop()  # flush the final counter interval before changing phase
+                segment = sampling_segments[-1]
+                segment.update(samples=[{**sample, "sampling_phase": segment["phase"],
+                                         "target_block": segment["target_locale"]} for sample in sampler.snapshot()],
+                               metadata=sampler.metadata, errors=list(sampler.errors))
+                sampler = None
+
+        def start_sampling(phase, target):
+            nonlocal sampler
+            stop_sampling()
+            if sampling_enabled:
+                # PowerSampler is single-use. A new helper takes a fresh counter
+                # baseline, so no interval can straddle a warm-up boundary.
+                sampler = (sampler_factory or energy.PowerSampler)(
+                    helper_path=args.energy_helper, interval=args.sample_interval)
+                sampling_segments.append({"phase": phase, "target_locale": target,
+                                          "samples": [], "metadata": {}, "errors": []})
+                sampler.start()
 
         def guard():
             owned_pid = getattr(getattr(session.worker, "process", None), "pid", None)
@@ -643,7 +669,7 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
             if not args.dry_run:
                 guard_other_workers(worker_path, owned_pid)
 
-        def warm_block(target, group):
+        def warm_prompts(target, group):
             start = time.monotonic()
             try:
                 session.start()
@@ -672,31 +698,50 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
                     if error.stream_fault:
                         session.stop(error)
                 warmups.append(item)
-                if session.worker is None:
+                if item["status"] == "failed":
                     return False
             return True
 
+        def warm_block(target, group):
+            start_sampling("warmup", target)
+            try:
+                ready = warm_prompts(target, group)
+            finally:
+                stop_sampling()
+            if ready:
+                start_sampling("measurement", target)
+            return ready
+
         try:
-            if sampler:
-                sampler.start()
             for target in args.targets:
                 group = [(route, result) for route, result in zip(cases, route_results, strict=True) if route.target == target]
                 block_has_calls = any(not row["passthrough"] for route, _ in group for row in cases[route])
-                if block_has_calls:
-                    warm_block(target, group)
+                block_ready = warm_block(target, group) if block_has_calls else True
+                block_failure = None if block_ready else warmups[-1]["failure"]
+                if not block_has_calls:
+                    start_sampling("measurement", target)
+                model_index = 0
                 for index in range(len(cases[group[0][0]])):
-                    shift = index % len(group)
+                    needs_model = not cases[group[0][0]][index]["passthrough"]
+                    shift = model_index % len(group) if needs_model else 0
+                    model_index += int(needs_model)
                     order = group[shift:] + group[:shift]
                     for position, (route, route_result) in enumerate(order):
                         example = cases[route][index]
                         row = {**example, "calls": [], "hypothesis": example["source"],
                                "status": "succeeded", "failure": None, "route_position": position}
                         # Recreate/re-warm only a broken worker, before this row's clock.
-                        if not row["passthrough"] and session.worker is None:
+                        if block_ready and not row["passthrough"] and session.worker is None:
                             try:
-                                warm_block(target, group)
+                                block_ready = warm_block(target, group)
+                                if not block_ready:
+                                    block_failure = warmups[-1]["failure"]
                             except WorkerFailure as error:
-                                row.update(status="failed", failure={"code": error.code, "stream_fault": True})
+                                block_ready = False
+                                block_failure = {"code": error.code, "stream_fault": error.stream_fault}
+                        if not block_ready:
+                            row.update(status="failed", comparison_eligible=False,
+                                       failure={"code": "worker_warmup_failed", "stream_fault": False})
                         start = time.monotonic()
                         source = example["source_locale"]
                         try:
@@ -742,17 +787,30 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
                         row["first_token_method"] = "final_generation_first_visible_output; unavailable_after_nonstreaming_conversion"
                         row["exact_first_token_seconds"] = None
                         route_result["results"].append(row)
+                for _, route_result in group:
+                    route_result["block_valid"] = block_ready
+                    if not block_ready:
+                        for row in route_result["results"]:
+                            row["comparison_eligible"] = False
+                if not block_ready:
+                    invalid_blocks.append({"target_locale": target, "failure": block_failure,
+                                           "reason": "warmup_failed; entire target excluded from comparisons"})
         finally:
-            session.stop()
-            if sampler:
-                sampler.stop()  # final partial interval flushed before window integration
-        samples = sampler.snapshot() if sampler else []
+            try:
+                session.stop()
+            finally:
+                stop_sampling()
+        samples = [sample for segment in sampling_segments for sample in segment["samples"]]
+        measured_samples = [sample for sample in samples if sample["sampling_phase"] == "measurement"]
+        warmup_samples = [sample for sample in samples if sample["sampling_phase"] == "warmup"]
 
-        def attach_energy(item):
-            item["energy"] = energy.window_energy(samples, item["start_mono"], item["end_mono"]) if sampler else disabled_energy("dry_run" if args.dry_run else "disabled")
+        def attach_energy(item, phase_samples):
+            item["energy"] = (energy.window_energy(phase_samples, item["start_mono"], item["end_mono"])
+                if sampling_enabled and item["end_mono"] > item["start_mono"] else
+                disabled_energy("no_measured_window" if sampling_enabled else "dry_run" if args.dry_run else "disabled"))
 
         for item in warmups:
-            attach_energy(item)
+            attach_energy(item, warmup_samples)
         for route in route_results:
             successful = [row for row in route["results"] if row["status"] == "succeeded"]
             quality = evaluate_or_empty(successful)
@@ -760,9 +818,9 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
             route["quality"] = evaluate_or_empty([row for row in successful if row["comparison_eligible"]])
             for row in route["results"]:
                 row["quality"] = qualities.get(row["id"])
-                attach_energy(row)
+                attach_energy(row, measured_samples)
                 for call in row["calls"]:
-                    attach_energy(call)
+                    attach_energy(call, measured_samples)
             route["summary"] = summarize(route["results"], route["quality"])
         bundle.verify_unchanged()
         if digest(worker_path.read_bytes()) != runtime["worker_sha256"] or converter is not None and digest(converter.read_bytes()) != converter_sha:
@@ -794,8 +852,8 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
                                "sample_interval": args.sample_interval, "routes": args.routes, "targets": args.targets},
                   "methods": {"unknown_worker_fields": list(UNKNOWN_STATS), "output_tokens": "finalTokens + thinkingTokens; excludes EOS",
                               "first_token_time": "first nonempty snapshot/done receipt; snapshots throttled to 100ms; not exact TTFT",
-                              "route_order": "target blocks in requested order; per unit/source pair rotate requested routes left by index modulo route count; sequential worker",
-                              "warmup": "one unmeasured short generation per distinct prompt before each target block and after stream restart; cache hits are measured, not assumed",
+                              "route_order": "target blocks in requested order; rotate requested routes left by model-calling unit/source index modulo route count; passthrough does not advance index; sequential worker",
+                              "warmup": "one unmeasured short generation per distinct prompt before each target block and after stream restart; any warmup failure invalidates the entire target, including earlier rows, and excludes it from comparisons; cache hits are measured, not assumed",
                               "optional_worker_fields": ["input_tokens", "reused_prefix_tokens"],
                               "passthrough": "OutputLanguage.passThroughSources; zh uses audited normalization/rendering adapter, en uses identity; zero calls and excluded from comparisons",
                               "failures": "per-row codes and attempted-call timings; continue after generation/converter/input failures; restart and re-warm only stream faults",
@@ -803,11 +861,17 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
                               "input_transport": "App nonthinking ChatML; 9B JSON / 4B quoted content; no auxiliary hints, acceptance or retries",
                               "unit": "one supplied aligned unit/source pair; UN turns and SRT overlap groups are not sentence-aligned",
                               "confidence_interval": "metrics.compare paired corpus chrF++ bootstrap, 95%; supplied units, no classroom weighting",
-                              "energy": "whole-machine gross rails; no idle subtraction or verified AC/thermal/interference"},
+                              "energy": "whole-machine gross rails; fresh single-use samplers before and after every warmup/restart; measured windows integrate measurement segments only; uniform apportionment within each segment; no idle subtraction or verified AC/thermal/interference"},
                   "route_switch_gate": {"established": False, "reason": "No acceptance/human-error/weighted-energy or end-to-end G4 evidence; no production route changes"},
-                  "energy": {"enabled": sampler is not None, "sampler_metadata": sampler.metadata if sampler else {},
-                             "sampler_errors": sampler.errors if sampler else [], "samples": samples},
-                  "warmups": warmups, "worker_sessions": {"count": session.worker_number, "lifecycle_failures": session.lifecycle_failures},
+                  "energy": {"enabled": sampling_enabled,
+                             "sampler_metadata": sampling_segments[0]["metadata"] if sampling_segments else {},
+                             "sampler_errors": sorted({error for segment in sampling_segments for error in segment["errors"]}),
+                             "samples": samples,
+                             "segments": [{"phase": segment["phase"], "target_locale": segment["target_locale"],
+                                           "sampler_metadata": segment["metadata"], "sampler_errors": segment["errors"],
+                                           "sample_count": len(segment["samples"])} for segment in sampling_segments]},
+                  "warmups": warmups, "invalid_target_blocks": invalid_blocks,
+                  "worker_sessions": {"count": session.worker_number, "lifecycle_failures": session.lifecycle_failures},
                   "routes": route_results, "comparisons": comparisons}
         c.write_json(report, out / "report.json")
         c._write_text(out / "summary.md", markdown(report))
