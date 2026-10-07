@@ -112,3 +112,39 @@ enum SavedProcessingPresentation {
         }
     }
 }
+
+/// Classify stored Markdown before any display-language rendering. Branch order
+/// and neighbor whitespace match the original SummaryMarkdownView exactly.
+enum SummaryMarkdownLine: Equatable {
+    case reviewChange(original: String, proposed: String)
+    case hidden
+    case heading(String)
+    case sourceEvidence(label: String, text: String, indentation: Int)
+    case bullet(text: String, indentation: Int)
+    case paragraph(String)
+    case blank
+
+    static func classify(_ lines: [String], at index: Int) -> Self {
+        let line = lines[index]
+        let content = line.trimmingCharacters(in: .whitespaces)
+        let indentation = min(4, line.prefix(while: { $0 == " " }).count / 2)
+        if content.hasPrefix("- **原笔记 · 要点 "), index + 1 < lines.count,
+           lines[index + 1].hasPrefix("- **9B 建议（待核对）**：") {
+            return .reviewChange(original: content.components(separatedBy: "**：").dropFirst().joined(separator: "**："),
+                                 proposed: String(lines[index + 1].dropFirst("- **9B 建议（待核对）**：".count)))
+        } else if content.hasPrefix("- **9B 建议（待核对）**："), index > 0,
+                  lines[index - 1].hasPrefix("- **原笔记 · 要点 ") {
+            return .hidden
+        } else if line.hasPrefix("## ") {
+            return .heading(String(line.dropFirst(3)))
+        } else if indentation > 0 && (content.hasPrefix("- 原文：") || content.hasPrefix("- 先前原文：")) {
+            return .sourceEvidence(label: content.hasPrefix("- 先前原文：") ? "先前原文依据" : "后文原文依据",
+                                   text: String(content.dropFirst(2)), indentation: indentation)
+        } else if content.hasPrefix("- ") {
+            return .bullet(text: String(content.dropFirst(2)), indentation: indentation)
+        } else if !line.trimmingCharacters(in: .whitespaces).isEmpty {
+            return .paragraph(line)
+        }
+        return .blank
+    }
+}

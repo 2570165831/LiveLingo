@@ -1843,43 +1843,39 @@ private struct SummaryMarkdownView: View {
         #endif
         let lines = self.lines
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
-                let content = line.trimmingCharacters(in: .whitespaces)
-                let indentation = min(4, line.prefix(while: { $0 == " " }).count / 2)
-                if content.hasPrefix("- **原笔记 · 要点 "), index + 1 < lines.count,
-                   lines[index + 1].hasPrefix("- **9B 建议（待核对）**：") {
-                    ReviewChangeView(original: content.components(separatedBy: "**：").dropFirst().joined(separator: "**："),
-                                     proposed: String(lines[index + 1].dropFirst("- **9B 建议（待核对）**：".count)))
-                } else if content.hasPrefix("- **9B 建议（待核对）**："), index > 0,
-                          lines[index - 1].hasPrefix("- **原笔记 · 要点 ") {
+            ForEach(Array(lines.enumerated()), id: \.offset) { index, _ in
+                switch SummaryMarkdownLine.classify(lines, at: index) {
+                case let .reviewChange(original, proposed):
+                    ReviewChangeView(original: original, proposed: proposed)
+                case .hidden, .blank:
                     EmptyView()
-                } else if line.hasPrefix("## ") {
-                    Text(String(line.dropFirst(3)))
+                case let .heading(text):
+                    Text(text)
                         .font(.system(size: 18, weight: .semibold))
                         .padding(.top, 5)
-                } else if indentation > 0 && (content.hasPrefix("- 原文：") || content.hasPrefix("- 先前原文：")) {
-                    DisclosureGroup(content.hasPrefix("- 先前原文：") ? "先前原文依据" : "后文原文依据") {
-                        Text(markdown: String(content.dropFirst(2)))
+                case let .sourceEvidence(label, text, indentation):
+                    DisclosureGroup(label) {
+                        Text(markdown: text)
                             .font(.system(size: 15))
                             .lineSpacing(5)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .font(.system(size: 14))
                     .padding(.leading, CGFloat(indentation) * 14)
-                } else if content.hasPrefix("- ") {
+                case let .bullet(text, indentation):
                     HStack(alignment: .top, spacing: 9) {
                         Circle()
                             .fill(Color.secondary)
                             .frame(width: 6, height: 6)
                             .padding(.top, 7)
-                        Text(markdown: String(content.dropFirst(2)))
+                        Text(markdown: text)
                             .font(.system(size: 16))
                             .lineSpacing(5)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.leading, CGFloat(indentation) * 14)
-                } else if !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                    Text(markdown: line)
+                case let .paragraph(text):
+                    Text(markdown: text)
                         .font(.system(size: 16))
                         .lineSpacing(5)
                         .foregroundStyle(.primary)

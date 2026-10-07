@@ -1,0 +1,383 @@
+{
+  "baselineRevision": "1a59adc40a0b5753487b6e4f7909ce73f4f61656",
+  "captions": [
+    "Fe³⁺ 离子使用 H2O。",
+    "加速度为零，但速度不为零。",
+    "把\"门关着\"译成法语。",
+    "他写了{\"state\":\"就绪\",\"count\":28}。",
+    "【公式待核对】公式待核对。",
+    "使用确切标签 speed。",
+    "这个箱子里面有两本书。",
+    "叶子会长大。",
+    "先检查方向。力朝向中心起作用。",
+    "朝向中心。",
+    "这片叶子长大了。"
+  ],
+  "files": {
+    "bilingual.jsonl": {
+      "sha256": "c476ea67677b7e502fa5cb104f0f351d9291c138bde32c1473aca478657c82a3",
+      "text": "{\"chinese\":\"Fe³⁺ 离子使用 H2O。\",\"endTime\":2,\"english\":\"The Fe³⁺ ion uses H2O.\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":0,\"translationState\":\"completed\"}\n{\"chinese\":\"加速度为零，但速度不为零。\",\"endTime\":6,\"english\":\"The acceleration is zero, but the velocity is not zero.\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":4,\"translationState\":\"completed\"}\n{\"chinese\":\"把\\\"门关着\\\"译成法语。\",\"endTime\":10,\"english\":\"Translate \\\"the door is closed\\\" into French.\",\"id\":\"00000000-0000-0000-0000-000000000003\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":8,\"translationState\":\"completed\"}\n{\"chinese\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\",\"endTime\":14,\"english\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\",\"id\":\"00000000-0000-0000-0000-000000000004\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":12,\"translationState\":\"completed\"}\n{\"chinese\":\"【公式待核对】公式待核对。\",\"endTime\":18,\"english\":\"The formula is [Formula transcription uncertain].\",\"id\":\"00000000-0000-0000-0000-000000000005\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":16,\"translationState\":\"completed\"}\n{\"chinese\":\"使用确切标签 speed。\",\"endTime\":22,\"english\":\"Use the exact label \\\"speed\\\".\",\"id\":\"00000000-0000-0000-0000-000000000006\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":20,\"translationState\":\"completed\"}\n{\"chinese\":\"这个箱子里面有两本书。\",\"endTime\":26,\"english\":\"呢個箱入面有兩本書。\",\"id\":\"00000000-0000-0000-0000-000000000007\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"yue\",\"startTime\":24,\"translationState\":\"completed\"}\n{\"chinese\":\"叶子会长大。\",\"endTime\":30,\"english\":\"葉が大きくなります。\",\"id\":\"00000000-0000-0000-0000-000000000008\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"ja\",\"startTime\":28,\"translationState\":\"completed\"}\n{\"chinese\":\"先检查方向。力朝向中心起作用。\",\"endTime\":34,\"english\":\"Check the direction. The force acts.\",\"id\":\"00000000-0000-0000-0000-000000000009\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":32,\"translationState\":\"completed\"}\n{\"chinese\":\"朝向中心。\",\"endTime\":38,\"english\":\"toward the center.\",\"id\":\"00000000-0000-0000-0000-000000000010\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":36,\"translationState\":\"completed\"}\n{\"chinese\":\"这片叶子长大了。\",\"endTime\":42,\"english\":\"這片葉子長大了。\",\"id\":\"00000000-0000-0000-0000-000000000011\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"zh\",\"startTime\":40,\"translationState\":\"completed\"}\n"
+    },
+    "bilingual.srt": {
+      "sha256": "19f6890f450deb0abb6e5f39638dc6a575818aeffca36332b553df0615da9c55",
+      "text": "1\n00:00:00,000 --> 00:00:02,000\nThe Fe³⁺ ion uses H2O.\nFe³⁺ 离子使用 H2O。\n\n2\n00:00:04,000 --> 00:00:06,000\nThe acceleration is zero, but the velocity is not zero.\n加速度为零，但速度不为零。\n\n3\n00:00:08,000 --> 00:00:10,000\nTranslate \"the door is closed\" into French.\n把\"门关着\"译成法语。\n\n4\n00:00:12,000 --> 00:00:14,000\nHe wrote {\"state\":\"ready\",\"count\":28}.\n他写了{\"state\":\"就绪\",\"count\":28}。\n\n5\n00:00:16,000 --> 00:00:18,000\nThe formula is [Formula transcription uncertain].\n【公式待核对】公式待核对。\n\n6\n00:00:20,000 --> 00:00:22,000\nUse the exact label \"speed\".\n使用确切标签 speed。\n\n7\n00:00:24,000 --> 00:00:26,000\n呢個箱入面有兩本書。\n这个箱子里面有两本书。\n\n8\n00:00:28,000 --> 00:00:30,000\n葉が大きくなります。\n叶子会长大。\n\n9\n00:00:32,000 --> 00:00:34,000\nCheck the direction. The force acts.\n先检查方向。力朝向中心起作用。\n\n10\n00:00:36,000 --> 00:00:38,000\ntoward the center.\n朝向中心。\n\n11\n00:00:40,000 --> 00:00:42,000\n这片叶子长大了。\n"
+    },
+    "manifest.json": {
+      "sha256": "20748d1460670ab8c662ae808d56621dccb9e4011a8e304762960fdc6a6f1684",
+      "text": "{\"createdAt\":\"1970-01-01T00:00:00Z\",\"recordingFile\":\"recording.wav\",\"segmentCount\":11,\"sourceLanguages\":[\"ja\",\"yue\",\"zh\"],\"sourceLocale\":\"en-US\",\"targetLocale\":\"zh-Hans\"}"
+    },
+    "note-response.json": {
+      "sha256": "ea138b8e230452a326915e425d867e6f7de7c5c9289c9a7d667cd457d634b5fa",
+      "text": "{\"topic\":\"合成课堂\",\"sourceVersion\":2,\"points\":[{\"kind\":\"核心结论\",\"text\":\"加速度为零，但速度不为零。\",\"sourceIDs\":[\"en1s0\"]},{\"kind\":\"例子\",\"text\":\"盒子里有两本书。\",\"sourceIDs\":[\"zh6s0\"]}],\"noNewKnowledge\":false,\"followUps\":{}}"
+    },
+    "review-input.json": {
+      "sha256": "8700d91688ab97fb157b67e495d305f0ddb404caff43d83ff088ad7f37aab29f",
+      "text": "{\"evidence\":[{\"index\":0,\"quotes\":[{\"id\":\"e0.en.0\",\"language\":\"en\",\"text\":\"The Fe³⁺ ion uses H2O.\"},{\"id\":\"e0.zh.0\",\"language\":\"zh\",\"text\":\"Fe³⁺ 离子使用 H2O。\"}]},{\"index\":1,\"quotes\":[{\"id\":\"e1.en.0\",\"language\":\"en\",\"text\":\"The acceleration is zero, but the velocity is not zero.\"},{\"id\":\"e1.zh.0\",\"language\":\"zh\",\"text\":\"加速度为零，但速度不为零。\"}]},{\"index\":2,\"quotes\":[{\"id\":\"e2.en.0\",\"language\":\"en\",\"text\":\"Translate \\\"the door is closed\\\" into French.\"},{\"id\":\"e2.zh.0\",\"language\":\"zh\",\"text\":\"把\\\"门关着\\\"译成法语。\"}]},{\"index\":3,\"quotes\":[{\"id\":\"e3.en.0\",\"language\":\"en\",\"text\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\"},{\"id\":\"e3.zh.0\",\"language\":\"zh\",\"text\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\"}]},{\"index\":4,\"quotes\":[{\"id\":\"e4.en.0\",\"language\":\"en\",\"text\":\"The formula is [Formula transcription uncertain].\"},{\"id\":\"e4.zh.0\",\"language\":\"zh\",\"text\":\"【公式待核对】公式待核对。\"}]},{\"index\":5,\"quotes\":[{\"id\":\"e5.en.0\",\"language\":\"en\",\"text\":\"Use the exact label \\\"speed\\\".\"},{\"id\":\"e5.zh.0\",\"language\":\"zh\",\"text\":\"使用确切标签 speed。\"}]},{\"index\":6,\"quotes\":[{\"id\":\"e6.zh.0\",\"language\":\"zh\",\"text\":\"这个箱子里面有两本书。\"}]},{\"index\":7,\"quotes\":[{\"id\":\"e7.zh.0\",\"language\":\"zh\",\"text\":\"叶子会长大。\"}]},{\"index\":8,\"quotes\":[{\"id\":\"e8.en.0\",\"language\":\"en\",\"text\":\"Check the direction. The force acts.\"},{\"id\":\"e8.zh.0\",\"language\":\"zh\",\"text\":\"先检查方向。力朝向中心起作用。\"}]},{\"index\":9,\"quotes\":[{\"id\":\"e9.en.0\",\"language\":\"en\",\"text\":\"toward the center.\"},{\"id\":\"e9.zh.0\",\"language\":\"zh\",\"text\":\"朝向中心。\"}]},{\"index\":10,\"quotes\":[{\"id\":\"e10.zh.0\",\"language\":\"zh\",\"text\":\"这片叶子长大了。\"}]}],\"laterContext\":[],\"laterEvidence\":[],\"laterEvidenceOmittedCount\":0,\"note\":{\"points\":[{\"index\":0,\"kind\":\"核心结论\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sources\":[{\"index\":1,\"quote\":\"The acceleration is zero, but the velocity is not zero.\"}],\"text\":\"加速度为零，但速度不为零。\"},{\"index\":1,\"kind\":\"例子\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sources\":[{\"index\":6,\"quote\":\"这个箱子里面有两本书。\"}],\"text\":\"盒子里有两本书。\"}],\"topic\":\"合成课堂\"},\"omittedEarlierCandidates\":0,\"reviewVersion\":2}"
+    },
+    "review-response.json": {
+      "sha256": "e28612d871295c78a55eaf10020ca54d7d9d59fdce52b09fecefe32fffccb056",
+      "text": "{\"reviewVersion\":2,\"corrections\":[{\"index\":0,\"original\":\"加速度为零，但速度不为零。\",\"kind\":\"核心结论\",\"text\":\"加速度为零，但速度不为零。\",\"reason\":\"合成复查保持原意。\"}],\"additions\":[]}"
+    },
+    "snapshot.json": {
+      "sha256": "8c8440e57d3d392047091a621e62d749731d6b88ad757f69b41c8a5d15b81896",
+      "text": "{\"audioFiles\":[],\"audioRanges\":[],\"batches\":[{\"evidence\":[{\"chinese\":\"Fe³⁺ 离子使用 H2O。\",\"endTime\":2,\"english\":\"The Fe³⁺ ion uses H2O.\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":0,\"translationState\":\"completed\"},{\"chinese\":\"加速度为零，但速度不为零。\",\"endTime\":6,\"english\":\"The acceleration is zero, but the velocity is not zero.\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":4,\"translationState\":\"completed\"},{\"chinese\":\"把\\\"门关着\\\"译成法语。\",\"endTime\":10,\"english\":\"Translate \\\"the door is closed\\\" into French.\",\"id\":\"00000000-0000-0000-0000-000000000003\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":8,\"translationState\":\"completed\"},{\"chinese\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\",\"endTime\":14,\"english\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\",\"id\":\"00000000-0000-0000-0000-000000000004\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":12,\"translationState\":\"completed\"},{\"chinese\":\"【公式待核对】公式待核对。\",\"endTime\":18,\"english\":\"The formula is [Formula transcription uncertain].\",\"id\":\"00000000-0000-0000-0000-000000000005\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":16,\"translationState\":\"completed\"},{\"chinese\":\"使用确切标签 speed。\",\"endTime\":22,\"english\":\"Use the exact label \\\"speed\\\".\",\"id\":\"00000000-0000-0000-0000-000000000006\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":20,\"translationState\":\"completed\"},{\"chinese\":\"这个箱子里面有两本书。\",\"endTime\":26,\"english\":\"呢個箱入面有兩本書。\",\"id\":\"00000000-0000-0000-0000-000000000007\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"yue\",\"startTime\":24,\"translationState\":\"completed\"},{\"chinese\":\"叶子会长大。\",\"endTime\":30,\"english\":\"葉が大きくなります。\",\"id\":\"00000000-0000-0000-0000-000000000008\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"ja\",\"startTime\":28,\"translationState\":\"completed\"},{\"chinese\":\"先检查方向。力朝向中心起作用。\",\"endTime\":34,\"english\":\"Check the direction. The force acts.\",\"id\":\"00000000-0000-0000-0000-000000000009\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":32,\"translationState\":\"completed\"},{\"chinese\":\"朝向中心。\",\"endTime\":38,\"english\":\"toward the center.\",\"id\":\"00000000-0000-0000-0000-000000000010\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":36,\"translationState\":\"completed\"},{\"chinese\":\"这片叶子长大了。\",\"endTime\":42,\"english\":\"這片葉子長大了。\",\"id\":\"00000000-0000-0000-0000-000000000011\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"zh\",\"startTime\":40,\"translationState\":\"completed\"}],\"id\":\"00000000-0000-0000-0000-000000002000\",\"note\":{\"noNewKnowledge\":false,\"points\":[{\"kind\":\"核心结论\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sourceIDs\":[\"en1s0\"],\"sources\":[{\"index\":1,\"quote\":\"The acceleration is zero, but the velocity is not zero.\"}],\"text\":\"加速度为零，但速度不为零。\"},{\"kind\":\"例子\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sourceIDs\":[\"zh6s0\"],\"sources\":[{\"index\":6,\"quote\":\"这个箱子里面有两本书。\"}],\"text\":\"盒子里有两本书。\"}],\"sourceVersion\":2,\"topic\":\"合成课堂\"}}],\"createdAt\":0,\"generation\":0,\"generationCheckpoints\":[],\"inputRevision\":0,\"lastJournalDigest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"lastJournalSequence\":0,\"latestEvidenceIDs\":[],\"notebookLastOffered\":{},\"notebookRevision\":1,\"notebookSelectionRound\":0,\"processing\":{\"paused\":false,\"pendingBatchIDs\":[],\"pendingSegmentIDs\":[],\"phase\":\"idle\",\"reviewPaused\":true,\"summaryPaused\":false},\"revisionHistory\":[],\"schemaVersion\":1,\"segments\":[{\"chinese\":\"Fe³⁺ 离子使用 H2O。\",\"endTime\":2,\"english\":\"The Fe³⁺ ion uses H2O.\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":0,\"translationState\":\"completed\"},{\"chinese\":\"加速度为零，但速度不为零。\",\"endTime\":6,\"english\":\"The acceleration is zero, but the velocity is not zero.\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":4,\"translationState\":\"completed\"},{\"chinese\":\"把\\\"门关着\\\"译成法语。\",\"endTime\":10,\"english\":\"Translate \\\"the door is closed\\\" into French.\",\"id\":\"00000000-0000-0000-0000-000000000003\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":8,\"translationState\":\"completed\"},{\"chinese\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\",\"endTime\":14,\"english\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\",\"id\":\"00000000-0000-0000-0000-000000000004\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":12,\"translationState\":\"completed\"},{\"chinese\":\"【公式待核对】公式待核对。\",\"endTime\":18,\"english\":\"The formula is [Formula transcription uncertain].\",\"id\":\"00000000-0000-0000-0000-000000000005\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":16,\"translationState\":\"completed\"},{\"chinese\":\"使用确切标签 speed。\",\"endTime\":22,\"english\":\"Use the exact label \\\"speed\\\".\",\"id\":\"00000000-0000-0000-0000-000000000006\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":20,\"translationState\":\"completed\"},{\"chinese\":\"这个箱子里面有两本书。\",\"endTime\":26,\"english\":\"呢個箱入面有兩本書。\",\"id\":\"00000000-0000-0000-0000-000000000007\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"yue\",\"startTime\":24,\"translationState\":\"completed\"},{\"chinese\":\"叶子会长大。\",\"endTime\":30,\"english\":\"葉が大きくなります。\",\"id\":\"00000000-0000-0000-0000-000000000008\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"ja\",\"startTime\":28,\"translationState\":\"completed\"},{\"chinese\":\"先检查方向。力朝向中心起作用。\",\"endTime\":34,\"english\":\"Check the direction. The force acts.\",\"id\":\"00000000-0000-0000-0000-000000000009\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":32,\"translationState\":\"completed\"},{\"chinese\":\"朝向中心。\",\"endTime\":38,\"english\":\"toward the center.\",\"id\":\"00000000-0000-0000-0000-000000000010\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":36,\"translationState\":\"completed\"},{\"chinese\":\"这片叶子长大了。\",\"endTime\":42,\"english\":\"這片葉子長大了。\",\"id\":\"00000000-0000-0000-0000-000000000011\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"zh\",\"startTime\":40,\"translationState\":\"completed\"}],\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"storageRevision\":0,\"updatedAt\":0}"
+    },
+    "summary-zh-Hans.md": {
+      "sha256": "b3aa1326d2e24213d139a3780d87711ada7b94e02908f900998cd6a032525fbe",
+      "text": "## 合成课堂\n- 加速度为零，但速度不为零。\n- **例子**：盒子里有两本书。\n"
+    },
+    "transcript-en.txt": {
+      "sha256": "25ad181286ee0d1d8a6f322823fe1434fa1a3db460af1470bf91d09f8a3fe234",
+      "text": "The Fe³⁺ ion uses H2O.\nThe acceleration is zero, but the velocity is not zero.\nTranslate \"the door is closed\" into French.\nHe wrote {\"state\":\"ready\",\"count\":28}.\nThe formula is [Formula transcription uncertain].\nUse the exact label \"speed\".\n呢個箱入面有兩本書。\n葉が大きくなります。\nCheck the direction. The force acts.\ntoward the center.\n這片葉子長大了。\n"
+    },
+    "transcript-zh-Hans.txt": {
+      "sha256": "26b35eb7349a73ccd216614a17f2d306c68668d82b3ae0585326c6bb44a1832a",
+      "text": "Fe³⁺ 离子使用 H2O。\n加速度为零，但速度不为零。\n把\"门关着\"译成法语。\n他写了{\"state\":\"就绪\",\"count\":28}。\n【公式待核对】公式待核对。\n使用确切标签 speed。\n这个箱子里面有两本书。\n叶子会长大。\n先检查方向。力朝向中心起作用。\n朝向中心。\n这片叶子长大了。\n"
+    }
+  },
+  "inputFingerprint": "c700a67fe4ffb378e9049fccac1e640cca2f7a0378ac69764619ce6319edb633",
+  "requests": [
+    {
+      "inputSHA256": "e91dbe611ca4c85157b4ec38dbb0c4b54614c367a00f11ab7958a9298098db4e",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 176,
+      "purpose": "text",
+      "route": "formula",
+      "systemSHA256": "894ec63cf5c0889a18c838b918870c5740e6cf3247fc15d8327a573da862e966",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "7ad78056db6832a28d83b1a4a9a28c1e38bedfb67e2bf1363c058f1dff34da9d",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "negation",
+      "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "b68b4df2f723be2c62fae965cb1bd15bee8b9e9461a136ec99263b15230f87d0",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "quoted-request",
+      "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "3450b8ccc050ee51212f2949fa0d3f92dee614247545f57ee0ff7eac62e12737",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 192,
+      "purpose": "text",
+      "route": "quoted-request/quoted-repair",
+      "systemSHA256": "704471c80e2cf31865bc6a5c6d7a0c206528f0b1ea229b24965156f243b150a6",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "2fd887ab8dd580277f6e6e7b56b54a1b620e676118010eedd91e6dae2f95a723",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "json-status",
+      "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "395678177c0cd577a5860c4b1fbb13a0cf77a13e2dd7d7068ee7525f8a0d71c0",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 128,
+      "purpose": "text",
+      "route": "json-status/status-repair",
+      "systemSHA256": "704471c80e2cf31865bc6a5c6d7a0c206528f0b1ea229b24965156f243b150a6",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "a881c02ac528ce4ef755ca36ecdb30936f44a1534d9c99ec7eb1ec7faa6e3e31",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "uncertain-formula",
+      "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "b5cab0d444fd9d0874b942692b6f9d3df6f140a1dafa12feadc3550c0e855a9e",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 168,
+      "purpose": "text",
+      "route": "protected-label",
+      "systemSHA256": "894ec63cf5c0889a18c838b918870c5740e6cf3247fc15d8327a573da862e966",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "660320050f65ac2e9a591c5fe6e13f71ec093305acf53e481cb2464ff65d08ae",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "cantonese",
+      "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "3ede78bfcbbdd3ca576718988a5c4d46379e98170c1e4067c10237a4ce8a4a25",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "japanese",
+      "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "6a7050af1565533c33dada4c2ad69c8e48db0d400566340f7fe6f32fe981cfa4",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "adjacent/current",
+      "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "d2fc7f67864def46188f0d9f562ed424be41acdab889147fbf2cb234a7ee9da6",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 320,
+      "purpose": "text",
+      "route": "adjacent/previous",
+      "systemSHA256": "a4425a136837a1c7262bc8099f976da8a105df9a4a114300ffb6cc9fe2133ee3",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "6a7050af1565533c33dada4c2ad69c8e48db0d400566340f7fe6f32fe981cfa4",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "deferred/current",
+      "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "d2fc7f67864def46188f0d9f562ed424be41acdab889147fbf2cb234a7ee9da6",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 320,
+      "purpose": "text",
+      "route": "deferred/previous",
+      "systemSHA256": "a4425a136837a1c7262bc8099f976da8a105df9a4a114300ffb6cc9fe2133ee3",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "64b018c488ef5b2b97b17741d7874de7e438428fee8dc3b691305ad91776bdb1",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 320,
+      "purpose": "text",
+      "route": "retry/repairContent",
+      "systemSHA256": "1cddd0e16d771023d19cd46c3a1459621517802c5bfeccbe04acc1280239df00",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "64b018c488ef5b2b97b17741d7874de7e438428fee8dc3b691305ad91776bdb1",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 320,
+      "purpose": "text",
+      "route": "retry/expandedBudget",
+      "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "97f40b184b56ddedbb41bec5d2a29cb59fad8f0310377410545f93945f45b196",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 176,
+      "purpose": "text",
+      "route": "formula",
+      "systemSHA256": "ba4550da33a2d65b44c2864ca2baa652ec29749ccb257a47e948d3e4ce315375",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "a443cd87e8aa2ddd2a161896a6d5dd3968cab2882ef0571b7c5751e8fae3ae70",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "negation",
+      "systemSHA256": "aae4a1e13fc3b9c0fcfb27c4dd37515252aee179f337590d322a8c57bc808a10",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "97adae902ce3424885ec4a1ff8aabd9638ab907f02947076bd26b3e13e259987",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "quoted-request",
+      "systemSHA256": "4424066b702d219bd2c28df6be890fbfbe91e068718b8e014fa03e640ec9396a",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "3450b8ccc050ee51212f2949fa0d3f92dee614247545f57ee0ff7eac62e12737",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 192,
+      "purpose": "text",
+      "route": "quoted-request/quoted-repair",
+      "systemSHA256": "704471c80e2cf31865bc6a5c6d7a0c206528f0b1ea229b24965156f243b150a6",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "5cf646787030715718dac6ee20cb67c8f98756388aa4966b865a87533239a813",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "json-status",
+      "systemSHA256": "4424066b702d219bd2c28df6be890fbfbe91e068718b8e014fa03e640ec9396a",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "395678177c0cd577a5860c4b1fbb13a0cf77a13e2dd7d7068ee7525f8a0d71c0",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 128,
+      "purpose": "text",
+      "route": "json-status/status-repair",
+      "systemSHA256": "704471c80e2cf31865bc6a5c6d7a0c206528f0b1ea229b24965156f243b150a6",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "0e6c35c3986ef79fdfae30a0b46d7ba8dbe6216ee55a09c0cc9d6e67a8c21658",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "uncertain-formula",
+      "systemSHA256": "4424066b702d219bd2c28df6be890fbfbe91e068718b8e014fa03e640ec9396a",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "01bcfd9ce7a98f86abc82ab2c35df05cc0acb87b27b35b06cd2eab77ce5bd82e",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 168,
+      "purpose": "text",
+      "route": "protected-label",
+      "systemSHA256": "ba4550da33a2d65b44c2864ca2baa652ec29749ccb257a47e948d3e4ce315375",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "d76464a3950d118b4805b07e8eeeb9db0a839973dc7fa20a94c920f42ac2225d",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "cantonese",
+      "systemSHA256": "4424066b702d219bd2c28df6be890fbfbe91e068718b8e014fa03e640ec9396a",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "950e1bab5022eac6839b0618e425281ceacd7292cece6abe0b369bdf97723801",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "japanese",
+      "systemSHA256": "4424066b702d219bd2c28df6be890fbfbe91e068718b8e014fa03e640ec9396a",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "b8d4e2ac00d0d4d112ecd88d66d71d44ca27070e5579553047171d315f4f2614",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "adjacent/current",
+      "systemSHA256": "4424066b702d219bd2c28df6be890fbfbe91e068718b8e014fa03e640ec9396a",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "d2fc7f67864def46188f0d9f562ed424be41acdab889147fbf2cb234a7ee9da6",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 320,
+      "purpose": "text",
+      "route": "adjacent/previous",
+      "systemSHA256": "c12095496f1c18d25247167ff1cea63e8c2ecbfe9722e94ef335697c88756cb3",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "b8d4e2ac00d0d4d112ecd88d66d71d44ca27070e5579553047171d315f4f2614",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 160,
+      "purpose": "text",
+      "route": "deferred/current",
+      "systemSHA256": "4424066b702d219bd2c28df6be890fbfbe91e068718b8e014fa03e640ec9396a",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "d2fc7f67864def46188f0d9f562ed424be41acdab889147fbf2cb234a7ee9da6",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 320,
+      "purpose": "text",
+      "route": "deferred/previous",
+      "systemSHA256": "c12095496f1c18d25247167ff1cea63e8c2ecbfe9722e94ef335697c88756cb3",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "b555d03dcc3bbf22dcf4bdef51d5bcb7d30f74ecbe7d92052846660963ebe670",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 320,
+      "purpose": "text",
+      "route": "retry/repairContent",
+      "systemSHA256": "d8b0d3f1e6a130ca500d822c4c2fb1dd9a644df4a695f54e153336d94de33c97",
+      "thinking": false
+    },
+    {
+      "inputSHA256": "b555d03dcc3bbf22dcf4bdef51d5bcb7d30f74ecbe7d92052846660963ebe670",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 320,
+      "purpose": "text",
+      "route": "retry/expandedBudget",
+      "systemSHA256": "5ec90cae229b7438e558ed7f9a0cd6f28a9a6547c13955ed4fcd5b4a05ec5d45",
+      "thinking": false
+    },
+    {
+      "completionSHA256": "922c6d96dad5c721cbf6646d30cc01c65e8059db3994f4c442d45d3d3df9dc5b",
+      "inputSHA256": "4a93fcdd029e40d2ede01e863d61a2e1a0db5f03a48592a6da01486a82b53518",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 3072,
+      "purpose": "note",
+      "route": "note",
+      "systemSHA256": "b7429da5ca0fff3d4817ffaefcc05991186f90026a567d42c7092ec91cfb5d38",
+      "thinking": false,
+      "thinkingBudget": 16384
+    },
+    {
+      "completionSHA256": "922c6d96dad5c721cbf6646d30cc01c65e8059db3994f4c442d45d3d3df9dc5b",
+      "inputSHA256": "4a93fcdd029e40d2ede01e863d61a2e1a0db5f03a48592a6da01486a82b53518",
+      "model": "qwen3.5-4b-mlx",
+      "outputBudget": 3072,
+      "purpose": "note",
+      "route": "note",
+      "systemSHA256": "b7429da5ca0fff3d4817ffaefcc05991186f90026a567d42c7092ec91cfb5d38",
+      "thinking": false,
+      "thinkingBudget": 16384
+    },
+    {
+      "completionSHA256": "6f7e5664622787ff493c2454e1f986947c85d3f7210fbfb7349f0b6bfcda42ea",
+      "inputSHA256": "8700d91688ab97fb157b67e495d305f0ddb404caff43d83ff088ad7f37aab29f",
+      "model": "qwen/qwen3.5-9b",
+      "outputBudget": 4096,
+      "purpose": "review",
+      "route": "review",
+      "systemSHA256": "ab5bce580c7f4ba53cb7ac419e51dbfdcf1517315e0869cc16272ae8fd916fcd",
+      "thinking": true,
+      "thinkingBudget": 16384
+    }
+  ],
+  "reviewPrefixDigest": "4b8e2d63369a19b5d07f9f84f82fb3b78085c9ec391607bf5f0d03d5db20486f"
+}
