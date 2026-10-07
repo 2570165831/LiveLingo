@@ -7,18 +7,18 @@ struct FloatingSubtitleWindowSettings: Equatable {
     var isLocked = false
     var backgroundOpacity = 1.0
     var fullScreenClassMode = false
-    var statusMenuIsOpen = false
+    var popupIsOpen = false
 
     // Apple DTS, forums/thread/826308: floating and statusBar remain below
     // other apps' full-screen content; screenSaver is the lowest named level
     // demonstrated to work in that answer, not a proven numerical minimum.
     // It can cover system menus/notifications. Keep subtitles away from those
-    // surfaces; temporarily lower them while our recovery menu is tracking.
+    // surfaces; temporarily lower them while any app menu/popover is open.
     // This single constant is the adjustment point for real-device validation.
     static let fullScreenLevel: NSWindow.Level = .screenSaver
 
     var level: NSWindow.Level {
-        fullScreenClassMode && !statusMenuIsOpen ? Self.fullScreenLevel : .floating
+        fullScreenClassMode && !popupIsOpen ? Self.fullScreenLevel : .floating
     }
 
     func collectionBehavior(restoring original: NSWindow.CollectionBehavior) -> NSWindow.CollectionBehavior {
@@ -275,19 +275,18 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         settings = FloatingSubtitleWindowSettings(showsAcrossSpaces: showsAcrossSpaces,
                                                   isLocked: isLocked, backgroundOpacity: backgroundOpacity,
                                                   fullScreenClassMode: settings.fullScreenClassMode,
-                                                  statusMenuIsOpen: settings.statusMenuIsOpen)
+                                                  popupIsOpen: settings.popupIsOpen)
         configuration?.apply(settings)
     }
 
     func setFullScreenClassMode(_ enabled: Bool) {
         settings.fullScreenClassMode = enabled
-        settings.statusMenuIsOpen = false
         configuration?.apply(settings)
         keepClearOfMenuBar()
     }
 
-    func setStatusMenuIsOpen(_ open: Bool) {
-        settings.statusMenuIsOpen = open
+    func setPopupIsOpen(_ open: Bool) {
+        settings.popupIsOpen = open
         configuration?.apply(settings)
     }
 

@@ -520,6 +520,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(width: 360, height: 220)
+                    .protectFullScreenPopover()
                 }
             }
             .padding(16)
@@ -592,7 +593,7 @@ struct ContentView: View {
                     .disabled(model.segments.isEmpty || model.isExporting)
                     .help("导出 Markdown、纯文本、Word 或 PDF")
                     .accessibilityIdentifier("classroom-export-notes")
-                    .popover(isPresented: $showExportOptions, arrowEdge: .top) { exportOptionsPopover }
+                    .popover(isPresented: $showExportOptions, arrowEdge: .top) { exportOptionsPopover.protectFullScreenPopover() }
 
                     Button {
                         model.requestSummaryRefresh()
@@ -683,7 +684,7 @@ struct ContentView: View {
             Button("状态详情") { showStatusDetails = true }
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier("classroom-status-details")
-                .popover(isPresented: $showStatusDetails, arrowEdge: .top) { statusDetails }
+                .popover(isPresented: $showStatusDetails, arrowEdge: .top) { statusDetails.protectFullScreenPopover() }
             Group {
                 if let notice = model.sessionNotice, notice == model.errorMessage {
                     Button(action: model.dismissSessionNotice) {
@@ -1072,6 +1073,7 @@ struct TypedTranslationView: View {
                         }
                         .font(.callout)
                         .padding(16)
+                        .protectFullScreenPopover()
                     }
             }
             HStack {
@@ -1405,6 +1407,7 @@ private struct LearningReviewControls: View {
         } message: {
             Text("只停止这项复查，不删除录音、原笔记或已保存的核对意见。")
         }
+        .protectFullScreenPopup(isPresented: confirmingRemoval)
     }
 
     private var details: some View {
@@ -1556,6 +1559,7 @@ private struct LearningReviewControls: View {
         } message: { id in
             Text("只会把“\(queueItemName(id))”从复查队列中移除，不会删除录音文件、原笔记或已保存的核对意见。")
         }
+        .protectFullScreenPopup(isPresented: queueRemovalPrompt.wrappedValue)
     }
 
     private func queueRow(id: UUID, name: String, directory: URL,

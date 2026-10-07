@@ -4,17 +4,100 @@ import Combine
 import SwiftUI
 
 @MainActor
-struct FullScreenMainWindowSnapshot {
-    var wasVisible: Bool
+struct FullScreenApplicationWindowSnapshot {
+    var hasWindows: Bool
     var wasKey: Bool
     var restore: () -> Void
+    var armDelayedRestoration: (Bool) -> Void = { _ in }
+    var canRestore: () -> Bool = { true }
+    var cancel: () -> Void = {}
+}
+
+@MainActor
+protocol FullScreenRestorableWindow: AnyObject {
+    var isVisible: Bool { get }
+    var isMiniaturized: Bool { get }
+    var windowNumber: Int { get }
+    var restorationParent: (any FullScreenRestorableWindow)? { get }
+    var restorationChildren: [any FullScreenRestorableWindow] { get }
+    var firstResponder: NSResponder? { get }
+    func orderFrontRegardless()
+    func orderOut(_ sender: Any?)
+    func order(_ place: NSWindow.OrderingMode, relativeTo otherWindowNumber: Int)
+    func makeKey()
+    func makeMain()
+    func makeFirstResponder(_ responder: NSResponder?) -> Bool
+    func miniaturize(_ sender: Any?)
+    func deminiaturize(_ sender: Any?)
+}
+
+extension NSWindow: FullScreenRestorableWindow {
+    var restorationParent: (any FullScreenRestorableWindow)? { sheetParent ?? parent }
+    var restorationChildren: [any FullScreenRestorableWindow] {
+        var children = childWindows ?? []
+        if let attachedSheet, !children.contains(where: { $0 === attachedSheet }) { children.append(attachedSheet) }
+        return children
+    }
+}
+
+/// Tests inject window state and process operations, never transform NSApp.
+@MainActor
+struct FullScreenApplicationEnvironment {
+    var windows: () -> [any FullScreenRestorableWindow]
+    var orderedWindowNumbers: () -> [Int]
+    var mainWindow: () -> (any FullScreenRestorableWindow)?
+    var keyWindow: () -> (any FullScreenRestorableWindow)?
+    var isActive: () -> Bool
+    var activationPolicy: () -> NSApplication.ActivationPolicy
+    var setActivationPolicy: (NSApplication.ActivationPolicy) -> Bool
+    var unhide: () -> Void
+    var activate: () -> Void
+    var foregroundApplicationPID: () -> Int32? = { nil }
+    var applicationPID: Int32 = ProcessInfo.processInfo.processIdentifier
+    var observeUserInput: (@escaping @MainActor () -> Void) -> AnyCancellable = { _ in AnyCancellable {} }
+    var observeForegroundChanges: (@escaping @MainActor (Int32?) -> Void) -> AnyCancellable = { _ in AnyCancellable {} }
+
+    static var live: Self {
+        Self(windows: { NSApp.windows },
+             orderedWindowNumbers: { (NSWindow.windowNumbers(options: .allSpaces) ?? []).map(\.intValue) },
+             mainWindow: { NSApp.mainWindow }, keyWindow: { NSApp.keyWindow }, isActive: { NSApp.isActive },
+             activationPolicy: { NSApp.activationPolicy() }, setActivationPolicy: {
+                 precondition(!AppRuntimeEnvironment.isUnitTesting, "Tests must inject activation policy")
+                 return NSApp.setActivationPolicy($0)
+             }, unhide: { NSApp.unhideWithoutActivation() }, activate: {
+                 precondition(!AppRuntimeEnvironment.isUnitTesting, "Tests must inject app activation")
+                 NSApp.activate(ignoringOtherApps: true)
+             }, foregroundApplicationPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+             observeUserInput: { action in
+                 precondition(!AppRuntimeEnvironment.isUnitTesting, "Tests must inject user input")
+                 // A local monitor needs no system permission and leaves events
+                 // untouched. The click/key that triggered this switch has
+                 // already passed it before the recovery checkpoint is armed.
+                 let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown,
+                     .otherMouseDown, .keyDown, .scrollWheel]) { event in
+                     MainActor.assumeIsolated { action() }
+                     return event
+                 }
+                 return AnyCancellable {
+                     guard let monitor else { return }
+                     if Thread.isMainThread { MainActor.assumeIsolated { NSEvent.removeMonitor(monitor) } }
+                     else { DispatchQueue.main.async { NSEvent.removeMonitor(monitor) } }
+                 }
+             }, observeForegroundChanges: { action in
+                 NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)
+                     .sink { event in
+                         let app = event.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                         MainActor.assumeIsolated { action(app?.processIdentifier) }
+                     }
+             })
+    }
 }
 
 @MainActor
 protocol FullScreenApplicationControlling: AnyObject {
     var activationPolicy: NSApplication.ActivationPolicy { get }
     func setActivationPolicy(_ policy: NSApplication.ActivationPolicy) -> Bool
-    func mainWindowSnapshot() -> FullScreenMainWindowSnapshot
+    func windowSnapshot() -> FullScreenApplicationWindowSnapshot
     func registerMainWindow(_ window: NSWindow, reopen: @escaping () -> Void)
     func showMainWindow()
     func activate()
@@ -25,11 +108,17 @@ protocol FullScreenApplicationControlling: AnyObject {
 final class LiveFullScreenApplication: FullScreenApplicationControlling {
     private weak var mainWindow: NSWindow?
     private var reopen: (() -> Void)?
-    var activationPolicy: NSApplication.ActivationPolicy { NSApp.activationPolicy() }
+    private let environment: FullScreenApplicationEnvironment
+    private let notifications: NotificationCenter
+    var activationPolicy: NSApplication.ActivationPolicy { environment.activationPolicy() }
+
+    init(environment: FullScreenApplicationEnvironment = .live, notifications: NotificationCenter = .default) {
+        self.environment = environment
+        self.notifications = notifications
+    }
 
     func setActivationPolicy(_ policy: NSApplication.ActivationPolicy) -> Bool {
-        precondition(!AppRuntimeEnvironment.isUnitTesting, "Tests must inject activation policy")
-        return NSApp.setActivationPolicy(policy)
+        environment.setActivationPolicy(policy)
     }
 
     func registerMainWindow(_ window: NSWindow, reopen: @escaping () -> Void) {
@@ -37,22 +126,12 @@ final class LiveFullScreenApplication: FullScreenApplicationControlling {
         self.reopen = reopen
     }
 
-    func mainWindowSnapshot() -> FullScreenMainWindowSnapshot {
-        let window = mainWindow
-        let mainWasVisible = window?.isVisible == true
-        // The mode switch normally originates in Settings. Preserve that key
-        // window too, rather than making the classroom steal its focus.
-        let keyWindow = NSApp.isActive ? NSApp.keyWindow : nil
-        let keyWasVisible = keyWindow?.isVisible == true
-        return FullScreenMainWindowSnapshot(wasVisible: mainWasVisible || keyWasVisible,
-                                            wasKey: keyWindow != nil) { [weak window, weak keyWindow] in
-            NSApp.unhideWithoutActivation()
-            if mainWasVisible { window?.orderFrontRegardless() }
-            if keyWasVisible {
-                keyWindow?.orderFrontRegardless()
-                keyWindow?.makeKey()
-            }
-        }
+    func windowSnapshot() -> FullScreenApplicationWindowSnapshot {
+        let restoration = FullScreenWindowRestoration(environment: environment, notifications: notifications,
+                                                      activationTarget: mainWindow)
+        return FullScreenApplicationWindowSnapshot(hasWindows: restoration.hasWindows, wasKey: restoration.hadKeyWindow,
+            restore: { restoration.restore() }, armDelayedRestoration: { restoration.arm(expectsActivation: $0) },
+            canRestore: { restoration.canRestore }, cancel: { restoration.cancel() })
     }
 
     func showMainWindow() {
@@ -66,11 +145,236 @@ final class LiveFullScreenApplication: FullScreenApplicationControlling {
     }
 
     func activate() {
-        precondition(!AppRuntimeEnvironment.isUnitTesting, "Tests must inject app activation")
-        NSApp.activate(ignoringOtherApps: true)
+        environment.activate()
     }
 
     func requestTermination() { FilePanelPresentation.requestTermination() }
+}
+
+/// Capture the entire app-owned graph, including parents omitted from NSApp's
+/// flat list. Never detach/re-present sheets: doing so can complete callbacks.
+@MainActor
+private final class FullScreenWindowRestoration {
+    private struct Entry {
+        weak var window: (any FullScreenRestorableWindow)?
+        let identity: ObjectIdentifier
+        let visible: Bool
+        let minimized: Bool
+        weak var responder: NSResponder?
+    }
+
+    private struct WindowState: Equatable {
+        let identity: ObjectIdentifier
+        let parent: ObjectIdentifier?
+        let responder: ObjectIdentifier?
+    }
+
+    private struct Checkpoint: Equatable {
+        let windows: [WindowState]
+        let active: Bool
+        let key: ObjectIdentifier?
+        let main: ObjectIdentifier?
+        let foregroundApplicationPID: Int32?
+    }
+
+    private let environment: FullScreenApplicationEnvironment
+    private var entries: [Entry] = []
+    private var frontToBack: [Entry] = []
+    private weak var keyWindow: (any FullScreenRestorableWindow)?
+    private weak var mainWindow: (any FullScreenRestorableWindow)?
+    private weak var activationTarget: (any FullScreenRestorableWindow)?
+    private weak var activationKeyWindow: (any FullScreenRestorableWindow)?
+    private weak var activationMainWindow: (any FullScreenRestorableWindow)?
+    private var activationExpected = false
+    private var activationFocusMayChange = false
+    private let wasActive: Bool
+    private var closed: Set<ObjectIdentifier> = []
+    private var observers: [AnyCancellable] = []
+    private var checkpoint: Checkpoint?
+    private var cancelled = false
+    private var restoring = false
+    var hasWindows: Bool { !entries.isEmpty }
+    var hadKeyWindow: Bool { wasActive && keyWindow != nil }
+
+    init(environment: FullScreenApplicationEnvironment, notifications: NotificationCenter,
+         activationTarget: (any FullScreenRestorableWindow)?) {
+        self.environment = environment
+        self.activationTarget = activationTarget
+        wasActive = environment.isActive()
+        keyWindow = wasActive ? environment.keyWindow() : nil
+        mainWindow = environment.mainWindow()
+        entries = Self.windows(in: environment, including: activationTarget).map {
+            Entry(window: $0, identity: ObjectIdentifier($0), visible: $0.isVisible,
+                  minimized: $0.isMiniaturized, responder: $0.firstResponder)
+        }
+        let ranks = Dictionary(environment.orderedWindowNumbers().enumerated().map { ($1, $0) },
+                               uniquingKeysWith: { first, _ in first })
+        frontToBack = entries.filter { $0.visible && !$0.minimized }.sorted {
+            (ranks[$0.window?.windowNumber ?? -1] ?? Int.max) < (ranks[$1.window?.windowNumber ?? -1] ?? Int.max)
+        }
+        // A real close must never be undone, even if it occurs synchronously
+        // during the policy transform. Other policy-generated events are ignored
+        // until the immediate recovery and intentional activation have finished.
+        observers.append(notifications.publisher(for: NSWindow.willCloseNotification).sink { [weak self] event in
+            guard let self, let window = event.object as? any FullScreenRestorableWindow else { return }
+            self.closed.insert(ObjectIdentifier(window))
+            if self.checkpoint != nil { self.cancel() }
+        })
+        for name in [NSApplication.didResignActiveNotification, NSApplication.didHideNotification] {
+            observers.append(notifications.publisher(for: name).sink { [weak self] _ in
+                guard let self, self.checkpoint != nil, !self.restoring else { return }
+                if name == NSApplication.didResignActiveNotification,
+                   self.activationExpected, self.checkpoint?.active == false { return }
+                self.cancel()
+            })
+        }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didBecomeMainNotification] {
+            observers.append(notifications.publisher(for: name).sink { [weak self] event in
+                guard let self, let checkpoint = self.checkpoint, !self.restoring,
+                      let window = event.object as? any FullScreenRestorableWindow else { return }
+                let isMain = name == NSWindow.didBecomeMainNotification
+                let activationFocus = isMain ? self.activationMainWindow : self.activationKeyWindow
+                let expected = activationFocus.map(ObjectIdentifier.init) ?? (isMain ? checkpoint.main : checkpoint.key)
+                let identity = ObjectIdentifier(window)
+                if self.acceptsActivationFocus(identity, isMain: isMain) {
+                    if name == NSWindow.didBecomeKeyNotification { self.activationKeyWindow = window }
+                    else { self.activationMainWindow = window }
+                } else if identity != expected { self.cancel() }
+            })
+        }
+        observers.append(environment.observeUserInput { [weak self] in
+            guard let self, self.checkpoint != nil, !self.restoring else { return }
+            self.cancel()
+        })
+        observers.append(environment.observeForegroundChanges { [weak self] pid in
+            guard let self, self.checkpoint != nil, !self.restoring, pid != environment.applicationPID else { return }
+            self.cancel()
+        })
+    }
+
+    private static func windows(in environment: FullScreenApplicationEnvironment,
+                                including additional: (any FullScreenRestorableWindow)?) -> [any FullScreenRestorableWindow] {
+        var windows: [any FullScreenRestorableWindow] = []
+        var seen: Set<ObjectIdentifier> = []
+        func visit(_ window: any FullScreenRestorableWindow) {
+            guard seen.insert(ObjectIdentifier(window)).inserted else { return }
+            windows.append(window)
+            if let parent = window.restorationParent { visit(parent) }
+            window.restorationChildren.forEach(visit)
+        }
+        environment.windows().forEach(visit)
+        if let main = environment.mainWindow() { visit(main) }
+        if let key = environment.keyWindow() { visit(key) }
+        if let additional { visit(additional) }
+        return windows
+    }
+
+    func restore() {
+        guard !cancelled else { return }
+        restoring = true
+        defer { restoring = false }
+        if entries.contains(where: { $0.visible && !$0.minimized }) { environment.unhide() }
+        // Preserve hidden/minimized windows too: unhide can reveal windows that
+        // were deliberately ordered out before the transition.
+        for entry in entries {
+            guard let window = entry.window, !closed.contains(entry.identity) else { continue }
+            if entry.minimized {
+                if !window.isMiniaturized { window.miniaturize(nil) }
+            } else if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+            if !entry.visible || entry.minimized { window.orderOut(nil) }
+        }
+        // Reveal parents before children, retaining the existing sheet graph.
+        var shown: Set<ObjectIdentifier> = []
+        func show(_ entry: Entry) {
+            guard let window = entry.window, !closed.contains(entry.identity),
+                  shown.insert(entry.identity).inserted else { return }
+            if let parent = window.restorationParent,
+               let parentEntry = frontToBack.first(where: { $0.identity == ObjectIdentifier(parent) }) { show(parentEntry) }
+            window.orderFrontRegardless()
+        }
+        frontToBack.reversed().forEach(show)
+        // Focus restoration uses makeKey/makeMain, not makeKeyAndOrderFront.
+        let keyToRestore = wasActive ? keyWindow : activationKeyWindow
+        if let keyToRestore, !closed.contains(ObjectIdentifier(keyToRestore)) { keyToRestore.makeKey() }
+        let mainToRestore = mainWindow ?? activationMainWindow
+        if let mainToRestore, !closed.contains(ObjectIdentifier(mainToRestore)) { mainToRestore.makeMain() }
+        // Relative ordering restores z-order without activating the application.
+        var previous: (any FullScreenRestorableWindow)?
+        for entry in frontToBack.reversed() {
+            guard let window = entry.window, !closed.contains(entry.identity) else { continue }
+            if let previous { window.order(.above, relativeTo: previous.windowNumber) }
+            previous = window
+        }
+        // Ordering a parent can also reveal its child windows. Enforce the
+        // saved hidden/minimized states after the whole graph has been ordered.
+        for entry in entries {
+            guard let window = entry.window, !closed.contains(entry.identity) else { continue }
+            if entry.minimized {
+                if !window.isMiniaturized { window.miniaturize(nil) }
+            } else if window.isMiniaturized { window.deminiaturize(nil) }
+            if !entry.visible || entry.minimized { window.orderOut(nil) }
+            if let responder = entry.responder { _ = window.makeFirstResponder(responder) }
+        }
+    }
+
+    private func currentCheckpoint() -> Checkpoint {
+        Checkpoint(windows: Self.windows(in: environment, including: activationTarget).map {
+            WindowState(identity: ObjectIdentifier($0), parent: $0.restorationParent.map(ObjectIdentifier.init),
+                        responder: $0.firstResponder.map(ObjectIdentifier.init))
+        }, active: environment.isActive(),
+           key: environment.keyWindow().map(ObjectIdentifier.init), main: environment.mainWindow().map(ObjectIdentifier.init),
+           foregroundApplicationPID: environment.foregroundApplicationPID())
+    }
+
+    func arm(expectsActivation: Bool) {
+        guard !cancelled else { return }
+        let checkpoint = currentCheckpoint()
+        self.checkpoint = checkpoint
+        activationExpected = expectsActivation
+        activationFocusMayChange = expectsActivation && (!checkpoint.active || checkpoint.key == nil)
+    }
+
+    private func acceptsActivationFocus(_ identity: ObjectIdentifier, isMain: Bool) -> Bool {
+        guard activationFocusMayChange, !closed.contains(identity) else { return false }
+        // Own activation may establish one key/main focus. Once known, a
+        // different non-nil focus is a newer decision even without mouse input.
+        let established = isMain ? activationMainWindow : activationKeyWindow
+        if let established { return ObjectIdentifier(established) == identity }
+        return entries.contains { $0.identity == identity && !$0.minimized
+                && ($0.visible || identity == activationTarget.map(ObjectIdentifier.init)) }
+    }
+    var canRestore: Bool {
+        guard !cancelled, let checkpoint else { return false }
+        let current = currentCheckpoint()
+        let expectedKey = activationKeyWindow.map(ObjectIdentifier.init) ?? checkpoint.key
+        let expectedMain = activationMainWindow.map(ObjectIdentifier.init) ?? checkpoint.main
+        guard current.active == checkpoint.active || activationExpected && !checkpoint.active && current.active,
+              current.foregroundApplicationPID == checkpoint.foregroundApplicationPID
+                || activationExpected && current.foregroundApplicationPID == environment.applicationPID,
+              current.key == nil || current.key == expectedKey
+                || current.key.map({ acceptsActivationFocus($0, isMain: false) }) == true,
+              current.main == nil || current.main == expectedMain
+                || current.main.map({ acceptsActivationFocus($0, isMain: true) }) == true,
+              current.windows.count == checkpoint.windows.count else { return false }
+        for old in checkpoint.windows {
+            guard let new = current.windows.first(where: { $0.identity == old.identity }),
+                  old.parent == new.parent,
+                  new.responder == nil || new.responder == old.responder || new.responder == new.identity else { return false }
+        }
+        // Polling while activation is still pending must not consume its one
+        // future focus with the inactive app's existing main window.
+        if current.active {
+            if let key = environment.keyWindow(), acceptsActivationFocus(ObjectIdentifier(key), isMain: false) { activationKeyWindow = key }
+            if let main = environment.mainWindow(), acceptsActivationFocus(ObjectIdentifier(main), isMain: true) { activationMainWindow = main }
+        }
+        // Policy-generated orderOut/key clearing is exactly why this second
+        // pass exists. Input, close and focus tokens distinguish it from a user's
+        // hide/minimize/order decision; comparing visibility alone cannot.
+        return true
+    }
+    func cancel() { cancelled = true; observers.removeAll() }
 }
 
 @MainActor
@@ -79,7 +383,7 @@ protocol FullScreenSubtitleControlling: AnyObject {
     var isVisible: Bool { get }
     var stateChanges: AnyPublisher<Void, Never> { get }
     func setFullScreenClassMode(_ enabled: Bool)
-    func setStatusMenuIsOpen(_ open: Bool)
+    func setPopupIsOpen(_ open: Bool)
     func show(model: AppModel)
     func hide()
     func toggleLock()
@@ -218,9 +522,15 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     private var needsMainWindow = false
     private weak var registeredMainWindow: NSWindow?
     private var lastAppearance: FullScreenStatusAppearance?
+    private var openNativePopups: Set<ObjectIdentifier> = []
+    private var openPresentedPopups: Set<UUID> = []
+    private var popupProtectionIsActive = false
+    private var cancelWindowRestoration: (() -> Void)?
+    private var cancelMainWindowRegistration: (() -> Void)?
 
     init(defaults: UserDefaults, application: any FullScreenApplicationControlling,
          statusItem: any FullScreenStatusItemPresenting, subtitles: any FullScreenSubtitleControlling,
+         notifications: NotificationCenter = .default,
          schedule: @escaping (@escaping @MainActor () -> Void) -> Void = { action in
              DispatchQueue.main.async { action() }
          }) {
@@ -244,6 +554,20 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         observers.append(subtitles.stateChanges.sink { [weak self] in
             self?.schedule { [weak self] in self?.refresh() }
         })
+        // Includes SwiftUI font/picker menus, selectable-text context menus,
+        // the app/menu-bar menus and submenus without replacing their delegates.
+        for name in [NSMenu.didBeginTrackingNotification, NSPopover.willShowNotification] {
+            observers.append(notifications.publisher(for: name).sink { [weak self] event in
+                guard let popup = event.object as AnyObject? else { return }
+                self?.nativePopupChanged(popup, open: true)
+            })
+        }
+        for name in [NSMenu.didEndTrackingNotification, NSPopover.didCloseNotification] {
+            observers.append(notifications.publisher(for: name).sink { [weak self] event in
+                guard let popup = event.object as AnyObject? else { return }
+                self?.nativePopupChanged(popup, open: false)
+            })
+        }
         refresh()
     }
 
@@ -281,8 +605,15 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         guard needsMainWindow, !terminated else { return }
         needsMainWindow = false
         let expected = generation
+        cancelMainWindowRegistration?()
+        let snapshot = application.windowSnapshot()
+        snapshot.armDelayedRestoration(true)
+        cancelMainWindowRegistration = snapshot.cancel
         schedule { [weak self] in
+            defer { snapshot.cancel() }
             guard let self, !self.terminated, self.generation == expected else { return }
+            self.cancelMainWindowRegistration = nil
+            guard snapshot.canRestore() else { return }
             self.application.showMainWindow()
             self.application.activate()
         }
@@ -292,12 +623,18 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
 
     func setEnabled(_ enabled: Bool, persist: Bool = true) {
         guard !terminated, enabled != isEnabled else { return }
-        let snapshot = application.mainWindowSnapshot()
+        cancelWindowRestoration?()
+        cancelWindowRestoration = nil
+        cancelMainWindowRegistration?()
+        cancelMainWindowRegistration = nil
+        let snapshot = application.windowSnapshot()
         if enabled && !statusItem.install(menu: menu, appearance: appearance) {
+            snapshot.cancel()
             errorMessage = "菜单栏图标未能显示，全屏网课模式未开启。"
             return
         }
         guard application.setActivationPolicy(enabled ? .accessory : .regular) else {
+            snapshot.cancel()
             if enabled { statusItem.remove() }
             errorMessage = "macOS 未能切换 App 显示方式，请重试。"
             return
@@ -307,20 +644,26 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         isEnabled = enabled
         errorMessage = nil
         subtitles.setFullScreenClassMode(enabled)
+        updatePopupProtection()
         if !enabled {
             needsMainWindow = false
             statusItem.remove()
             lastAppearance = nil
         }
         if persist { defaults.set(enabled, forKey: Self.preferenceKey) }
-        // Transforming a foreground process can order its windows out later in
-        // this runloop. Restore now and once more after AppKit's transformation.
-        // Do not steal another app's focus when enabling from a non-key window.
-        if snapshot.wasVisible { snapshot.restore() }
+        // Restore every captured window now. The second pass handles delayed
+        // policy-generated hiding/key clearing only while the user-decision
+        // token and focus/window-graph checks remain valid.
+        if snapshot.hasWindows { snapshot.restore() }
         if !enabled || snapshot.wasKey { application.activate() }
+        snapshot.armDelayedRestoration(!enabled || snapshot.wasKey)
+        cancelWindowRestoration = snapshot.cancel
         schedule { [weak self] in
+            defer { snapshot.cancel() }
             guard let self, !self.terminated, self.generation == expected else { return }
-            if snapshot.wasVisible { snapshot.restore() }
+            self.cancelWindowRestoration = nil
+            guard snapshot.canRestore() else { return }
+            if snapshot.hasWindows { snapshot.restore() }
             if !enabled || snapshot.wasKey { self.application.activate() }
         }
         refresh()
@@ -331,6 +674,13 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         terminated = true
         generation += 1
         needsMainWindow = false
+        cancelWindowRestoration?()
+        cancelMainWindowRegistration?()
+        cancelWindowRestoration = nil
+        cancelMainWindowRegistration = nil
+        openNativePopups.removeAll()
+        openPresentedPopups.removeAll()
+        popupProtectionIsActive = false
         subtitles.shutdown()
         statusItem.remove()
         lastAppearance = nil
@@ -403,12 +753,70 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     func menuWillOpen(_ menu: NSMenu) {
         guard !terminated else { return }
         refresh()
-        subtitles.setStatusMenuIsOpen(true)
+        nativePopupChanged(menu, open: true)
     }
 
     func menuDidClose(_ menu: NSMenu) {
         guard !terminated else { return }
-        subtitles.setStatusMenuIsOpen(false)
+        nativePopupChanged(menu, open: false)
+    }
+
+    private func nativePopupChanged(_ popup: AnyObject, open: Bool) {
+        guard !terminated else { return }
+        let identity = ObjectIdentifier(popup)
+        if open { openNativePopups.insert(identity) }
+        else { openNativePopups.remove(identity) }
+        updatePopupProtection()
+    }
+
+    func setPresentedPopup(_ identity: UUID, isPresented: Bool) {
+        guard !terminated else { return }
+        if isPresented { openPresentedPopups.insert(identity) }
+        else { openPresentedPopups.remove(identity) }
+        updatePopupProtection()
+    }
+
+    private func updatePopupProtection() {
+        let open = !openNativePopups.isEmpty || !openPresentedPopups.isEmpty
+        guard open != popupProtectionIsActive else { return }
+        popupProtectionIsActive = open
+        subtitles.setPopupIsOpen(open)
+    }
+}
+
+/// SwiftUI can use a private popup window instead of NSPopover. Protect all
+/// explicit popover content lifetimes as well as native tracking notifications.
+@MainActor
+private struct FullScreenPopoverProtection: ViewModifier {
+    @State private var identity = UUID()
+    let controller: FullScreenClassModeController
+    func body(content: Content) -> some View {
+        content.onAppear { controller.setPresentedPopup(identity, isPresented: true) }
+            .onDisappear { controller.setPresentedPopup(identity, isPresented: false) }
+    }
+}
+
+extension View {
+    @MainActor
+    func protectFullScreenPopover() -> some View {
+        modifier(FullScreenPopoverProtection(controller: .shared))
+    }
+
+    @MainActor
+    func protectFullScreenPopup(isPresented: Bool) -> some View {
+        modifier(FullScreenPresentedPopupProtection(isPresented: isPresented, controller: .shared))
+    }
+}
+
+@MainActor
+private struct FullScreenPresentedPopupProtection: ViewModifier {
+    @State private var identity = UUID()
+    let isPresented: Bool
+    let controller: FullScreenClassModeController
+    func body(content: Content) -> some View {
+        content.onChange(of: isPresented, initial: true) { _, open in
+            controller.setPresentedPopup(identity, isPresented: open)
+        }.onDisappear { controller.setPresentedPopup(identity, isPresented: false) }
     }
 }
 

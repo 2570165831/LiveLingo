@@ -30,6 +30,7 @@ enum FilePanelPresentation {
         panel.preventsApplicationTerminationWhenModal = false
         let id = UUID()
         panels[id] = panel
+        FullScreenClassModeController.shared.setPresentedPopup(id, isPresented: true)
         installQuitMonitor()
         let finish: (NSApplication.ModalResponse) -> Void = { response in
             Task { @MainActor in
@@ -37,6 +38,7 @@ enum FilePanelPresentation {
                 panels[id] = nil
                 if quitting { panel.orderOut(nil) }
                 completion(quitting ? .cancel : response)
+                FullScreenClassModeController.shared.setPresentedPopup(id, isPresented: false)
                 finishIfDismissed()
             }
         }
@@ -52,11 +54,13 @@ enum FilePanelPresentation {
     static func registerSheet(id: UUID, dismiss: @escaping @MainActor () -> Void) {
         guard pendingTermination == nil else { dismiss(); return }
         sheets[id] = dismiss
+        FullScreenClassModeController.shared.setPresentedPopup(id, isPresented: true)
         installQuitMonitor()
     }
 
     static func sheetDidDismiss(id: UUID) {
         sheets[id] = nil
+        FullScreenClassModeController.shared.setPresentedPopup(id, isPresented: false)
         finishIfDismissed()
     }
 
