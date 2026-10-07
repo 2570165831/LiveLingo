@@ -4,7 +4,7 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 output_root="${project_root}/../work/preview"
-architecture=x86_64
+architecture=arm64
 reference_models=0
 installed_app=/Applications/LiveLingo.app
 identity=""
@@ -15,7 +15,7 @@ usage() {
   cat <<'EOF'
 Usage: Scripts/build-preview-app.sh [options]
   --output-root PATH          Dedicated output/cache root (default: ../work/preview)
-  --arch x86_64|arm64          Default x86_64: unsigned UI preview, Rosetta on Apple Silicon
+  --arch arm64|x86_64          Default arm64: native Apple Silicon (signing still skipped)
   --reference-installed-models Reference only the installed app's Models directory
   --installed-app PATH        Model source (default: /Applications/LiveLingo.app)
   --sign IDENTITY             OPTIONAL; requires separate user authorization
@@ -172,6 +172,8 @@ app="${run_directory}/LiveLingo 预览版.app"
 # installed application or replace a previous preview.
 built_app="${derived_data}/Build/Products/Release/LiveLingo.app"
 [[ -d "$built_app" && ! -L "$built_app" ]] || fail "Build product must be an ordinary app directory; inspect this dedicated cache for stale deployment links"
+actual_architecture="$(/usr/bin/lipo -archs "${built_app}/Contents/MacOS/LiveLingo")"
+[[ "$actual_architecture" == "$architecture" ]] || fail "Expected ${architecture}, built ${actual_architecture}; refusing to package"
 mv "$built_app" "$app"
 cp "${project_root}/LICENSE" "${app}/Contents/Resources/LICENSE"
 if [[ -n "$models" ]]; then
@@ -186,7 +188,9 @@ LiveLingo 预览版：界面与窗口试用包。
 数据放在用户 Library/Application Support/LiveLingoPreview。
 所有课程打开、保存、导出及迁移限制在该目录的 Courses 子目录；
 导入媒体也须先放入此目录。不会继承正式版课程书签或 CLI 数据路径。
-Intel 预览包在 Apple Silicon 上需要已安装的 Rosetta。
+默认原生 arm64 包显式关闭了链接器自动 ad-hoc 签名。
+严格未签名的 arm64 包不能直接执行，须另行授权签名后才可试用。
+若明确选择 Intel 包，在 Apple Silicon 上需要已安装的 Rosetta。
 本包不会自行安装、下载、签名或修改系统设置。
 EOF
 
@@ -200,8 +204,14 @@ if [[ -n "$identity" ]]; then
   /usr/bin/codesign --verify --strict "$app"
 fi
 python3 "${project_root}/Scripts/preview-app-metadata.py" "$app" >"${run_directory}/receipt.json"
+if /usr/bin/codesign -dv --verbose=4 "$app" >"${run_directory}/codesign-display.log" 2>&1; then
+  [[ -n "$identity" ]] || fail "Unexpected signature reported by codesign"
+else
+  [[ -z "$identity" ]] || fail "codesign could not read the explicitly signed preview"
+fi
 echo "Preview: $app"
 echo "Receipt: ${run_directory}/receipt.json"
+echo "Read-only signature report: ${run_directory}/codesign-display.log"
 [[ -n "$identity" ]] || echo "Signing skipped (including ad-hoc). Sandbox is not active."
 if [[ "$architecture" == arm64 && -z "$identity" ]]; then
   echo "Unsigned arm64 is build evidence only; it needs separately authorized signing to launch."
