@@ -8,6 +8,8 @@
 /* Begin PBXBuildFile section */
 		B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */; };
 		B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71400000000000000000002 /* TargetPipelineRefactorTests.swift */; };
+		930000000000000000000001 /* FloatingSubtitleWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000002 /* FloatingSubtitleWindow.swift */; };
+		930000000000000000000003 /* FloatingSubtitleWindowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000004 /* FloatingSubtitleWindowTests.swift */; };
 		B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */; };
 		B71900000000000000000001 /* TargetAcceptance.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71900000000000000000002 /* TargetAcceptance.swift */; };
 		B70000000000000000000009 /* acceptance-verdicts-zh-Hans.json in Resources */ = {isa = PBXBuildFile; fileRef = B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */; };
@@ -113,6 +115,8 @@
 /* Begin PBXFileReference section */
 		B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetSourcePolicyRefactorTests.swift; sourceTree = "<group>"; };
 		B71400000000000000000002 /* TargetPipelineRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetPipelineRefactorTests.swift; sourceTree = "<group>"; };
+		930000000000000000000002 /* FloatingSubtitleWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingSubtitleWindow.swift; sourceTree = "<group>"; };
+		930000000000000000000004 /* FloatingSubtitleWindowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingSubtitleWindowTests.swift; sourceTree = "<group>"; };
 		B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatinTargetAcceptanceTests.swift; sourceTree = "<group>"; };
 		B71900000000000000000002 /* TargetAcceptance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetAcceptance.swift; sourceTree = "<group>"; };
 		B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/acceptance-verdicts-zh-Hans.json"; sourceTree = "<group>"; };
@@ -237,6 +241,7 @@
 			isa = PBXGroup;
 			children = (
 				910000000000000000000002 /* FloatingSubtitlePreferences.swift */,
+				930000000000000000000002 /* FloatingSubtitleWindow.swift */,
 				CA0000000000000000000102 /* CaptureHealth.swift */,
 				B71900000000000000000002 /* TargetAcceptance.swift */,
 				B70500000000000000000002 /* OutputLanguage.swift */,
@@ -296,6 +301,7 @@
 				B70000000000000000000004 /* OutputLanguageBaselineTests.swift */,
 				B70000000000000000000002 /* DefaultTargetGoldenTests.swift */,
 				910000000000000000000004 /* FloatingSubtitleDisplayTests.swift */,
+				930000000000000000000004 /* FloatingSubtitleWindowTests.swift */,
 				920000000000000000000002 /* TestPreferenceCleanup.swift */,
 				14C010000000000000000002 /* ClassroomAppearanceTests.swift */,
 				CA0000000000000000000104 /* CaptureHealthTests.swift */,
@@ -401,6 +407,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				910000000000000000000001 /* FloatingSubtitlePreferences.swift in Sources */,
+				930000000000000000000001 /* FloatingSubtitleWindow.swift in Sources */,
 				CA0000000000000000000101 /* CaptureHealth.swift in Sources */,
 				B71900000000000000000001 /* TargetAcceptance.swift in Sources */,
 				B70500000000000000000001 /* OutputLanguage.swift in Sources */,
@@ -454,6 +461,7 @@
 				B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,
 				910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */,
+				930000000000000000000003 /* FloatingSubtitleWindowTests.swift in Sources */,
 				920000000000000000000001 /* TestPreferenceCleanup.swift in Sources */,
 				14C010000000000000000001 /* ClassroomAppearanceTests.swift in Sources */,
 				CA0000000000000000000103 /* CaptureHealthTests.swift in Sources */,

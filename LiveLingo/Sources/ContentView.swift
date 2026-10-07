@@ -137,6 +137,7 @@ enum SummaryRenderingDiagnostics {
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @ObservedObject private var floatingWindow = FloatingSubtitleWindowController.shared
     @Environment(\.openWindow) private var openWindow
     @AppStorage("transcriptTextSize") private var transcriptTextSize = 18.0
     @State private var wholeLessonNotes = false
@@ -212,19 +213,27 @@ struct ContentView: View {
         return "实时课堂"
     }
 
-    /// At most four visible actions: one prominent record control, the
-    /// session's pause control, floating captions, and everything else in 更多.
+    /// Recording, pause, adjacent floating-caption controls, and 更多.
     @ToolbarContentBuilder
     private var classroomToolbar: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) { moreMenu }
         ToolbarItem(placement: .primaryAction) {
-            Button {
-                openWindow(id: "subtitles")
-            } label: {
-                Label("浮动字幕", systemImage: "pip")
+            HStack(spacing: 8) {
+                Button {
+                    openWindow(id: "subtitles")
+                } label: {
+                    Label("浮动字幕", systemImage: "pip")
+                }
+                .help("打开浮动字幕")
+                .accessibilityIdentifier("classroom-floating-subtitles")
+                Button { floatingWindow.toggleLock() } label: {
+                    Label(floatingWindow.lockActionTitle,
+                          systemImage: floatingWindow.isLocked ? "lock.fill" : "lock.open")
+                }
+                .labelStyle(.iconOnly)
+                .help(floatingWindow.lockActionTitle + "（⌘⇧L）；锁定后点击穿过字幕窗")
+                .accessibilityIdentifier("classroom-floating-lock")
             }
-            .help("打开浮动字幕")
-            .accessibilityIdentifier("classroom-floating-subtitles")
         }
         ToolbarItem(placement: .primaryAction) {
             Button {
@@ -891,7 +900,12 @@ struct ClassroomSettingsView: View {
                 subtitleSlider("背景不透明度", value: subtitles.backgroundOpacityBinding,
                                range: FloatingSubtitlePreferences.opacityRange, step: 0.05,
                                label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
+                Toggle("在全屏应用和所有桌面显示", isOn: subtitles.showsAcrossSpacesBinding)
+                    .accessibilityIdentifier("floating-all-spaces")
                 Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("锁定后点击会穿过字幕窗；可在主窗口或“录音”菜单解锁（⌘⇧L）。每次启动默认未锁定。")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -968,6 +982,7 @@ struct RecordingMenuItems: View {
     private struct Content: View {
         @ObservedObject var model: AppModel
         @Environment(\.openWindow) private var openWindow
+        @ObservedObject private var floatingWindow = FloatingSubtitleWindowController.shared
 
         var body: some View {
             Button(model.hasActiveSession ? model.stopRecordingTitle : "开始记录") { model.toggleRecording() }
@@ -988,6 +1003,12 @@ struct RecordingMenuItems: View {
             Divider()
             Button("浮动字幕") { openWindow(id: "subtitles") }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
+            Button(floatingWindow.lockActionTitle) { floatingWindow.toggleLock() }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+            Button("浮动字幕移到屏幕底部") {
+                floatingWindow.moveToScreenBottom()
+                openWindow(id: "subtitles")
+            }
         }
     }
 }

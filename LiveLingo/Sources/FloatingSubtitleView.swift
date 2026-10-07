@@ -2,15 +2,17 @@ import SwiftUI
 
 struct FloatingSubtitleView: View {
     @EnvironmentObject private var model: AppModel
+    var windowController: FloatingSubtitleWindowController = .shared
 
     var body: some View {
-        FloatingSubtitleContent(model: model, stream: model.captionStream)
+        FloatingSubtitleContent(model: model, stream: model.captionStream, windowController: windowController)
     }
 }
 
 private struct FloatingSubtitleContent: View {
     @ObservedObject var model: AppModel
     @ObservedObject var stream: LiveCaptionState
+    @ObservedObject var windowController: FloatingSubtitleWindowController
 
     private var preferences = FloatingSubtitlePreferences()
 
@@ -56,7 +58,19 @@ private struct FloatingSubtitleContent: View {
         .frame(minWidth: 640, maxWidth: 640, alignment: .leading)
         .background(Color(white: FloatingSubtitlePalette.backgroundWhite).opacity(preferences.backgroundOpacity))
         .preferredColorScheme(.dark)
-        .background(FloatingWindowLevel(backgroundOpacity: preferences.backgroundOpacity))
+        .overlay(alignment: .topTrailing) {
+            if windowController.isLocked {
+                Label("已锁定", systemImage: "lock.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(white: palette.headerWhite))
+                    .padding(.top, 4).padding(.trailing, 8)
+                    .allowsHitTesting(false)
+                    .accessibilityLabel("字幕窗已锁定，点击穿透；可在主窗口或菜单解锁")
+            }
+        }
+        .background(FloatingSubtitleWindowBridge(controller: windowController,
+                                                 showsAcrossSpaces: preferences.showsAcrossSpaces,
+                                                 backgroundOpacity: preferences.backgroundOpacity))
     }
 
     private func subtitle(_ text: String, size: Double, weight: Font.Weight, color: Color, height: CGFloat,
@@ -152,58 +166,5 @@ extension AppModel {
         guard supportsPreviewTranslation else { return "当前系统不支持初译；正式译文随后显示" }
         if !previewChinese.isEmpty { return "初译 · \(previewChinese)" }
         return previewTranslationSource.isEmpty ? "等待语音…" : "等待初译…"
-    }
-}
-
-private struct FloatingWindowLevel: NSViewRepresentable {
-    let backgroundOpacity: Double
-
-    final class View: NSView {
-        var backgroundOpacity = 1.0
-        private weak var configuredWindow: NSWindow?
-        private var originalIsOpaque = true
-        private var originalBackgroundColor: NSColor?
-
-        override func viewWillMove(toWindow newWindow: NSWindow?) {
-            if configuredWindow !== newWindow { restoreBackground() }
-            super.viewWillMove(toWindow: newWindow)
-        }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            configureWindow()
-        }
-
-        func configureWindow() {
-            guard let window else { return }
-            if configuredWindow !== window {
-                configuredWindow = window
-                originalIsOpaque = window.isOpaque
-                originalBackgroundColor = window.backgroundColor
-            }
-            window.level = .floating
-            if backgroundOpacity < 1 {
-                window.isOpaque = false
-                window.backgroundColor = .clear
-            } else {
-                restoreBackground()
-            }
-            window.invalidateShadow()
-        }
-
-        private func restoreBackground() {
-            configuredWindow?.isOpaque = originalIsOpaque
-            if let originalBackgroundColor { configuredWindow?.backgroundColor = originalBackgroundColor }
-            configuredWindow?.invalidateShadow()
-        }
-    }
-    func makeNSView(context: Context) -> View {
-        let view = View()
-        view.backgroundOpacity = backgroundOpacity
-        return view
-    }
-    func updateNSView(_ nsView: View, context: Context) {
-        nsView.backgroundOpacity = backgroundOpacity
-        nsView.configureWindow()
     }
 }

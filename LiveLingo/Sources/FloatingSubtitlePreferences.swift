@@ -27,6 +27,7 @@ struct FloatingSubtitlePreferences: DynamicProperty {
     @AppStorage private var storedTranslationSize: Double
     @AppStorage private var storedDisplayMode: String
     @AppStorage private var storedOpacity: Double
+    @AppStorage private var storedShowsAcrossSpaces: Bool
 
     init(store: UserDefaults? = nil) {
         _legacyTextSize = AppStorage(wrappedValue: 24, "floatingTextSize", store: store)
@@ -35,6 +36,7 @@ struct FloatingSubtitlePreferences: DynamicProperty {
         _storedDisplayMode = AppStorage(wrappedValue: FloatingSubtitleDisplayMode.bilingual.rawValue,
                                        "floatingDisplayMode", store: store)
         _storedOpacity = AppStorage(wrappedValue: 1, "floatingBackgroundOpacity", store: store)
+        _storedShowsAcrossSpaces = AppStorage(wrappedValue: true, "floatingShowsAcrossSpaces", store: store)
     }
 
     var displayMode: FloatingSubtitleDisplayMode {
@@ -57,6 +59,11 @@ struct FloatingSubtitlePreferences: DynamicProperty {
     var backgroundOpacity: Double {
         get { bounded(storedOpacity, to: Self.opacityRange, fallback: 1) }
         nonmutating set { storedOpacity = bounded(newValue, to: Self.opacityRange, fallback: 1) }
+    }
+
+    var showsAcrossSpaces: Bool {
+        get { storedShowsAcrossSpaces }
+        nonmutating set { storedShowsAcrossSpaces = newValue }
     }
 
     var sizePreset: Double? {
@@ -84,6 +91,9 @@ struct FloatingSubtitlePreferences: DynamicProperty {
     }
     var backgroundOpacityBinding: Binding<Double> {
         Binding(get: { backgroundOpacity }, set: { backgroundOpacity = $0 })
+    }
+    var showsAcrossSpacesBinding: Binding<Bool> {
+        Binding(get: { showsAcrossSpaces }, set: { showsAcrossSpaces = $0 })
     }
     var sizePresetBinding: Binding<Double?> {
         Binding(get: { sizePreset }, set: { sizePreset = $0 })
