@@ -15,6 +15,7 @@
 		910000000000000000000001 /* FloatingSubtitlePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 910000000000000000000002 /* FloatingSubtitlePreferences.swift */; };
 		910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 910000000000000000000004 /* FloatingSubtitleDisplayTests.swift */; };
 		14C010000000000000000001 /* ClassroomAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C010000000000000000002 /* ClassroomAppearanceTests.swift */; };
+		CA0000000000000000000203 /* CaptureHealthSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000204 /* CaptureHealthSafetyTests.swift */; };
 		CA0000000000000000000103 /* CaptureHealthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000104 /* CaptureHealthTests.swift */; };
 		CA0000000000000000000101 /* CaptureHealth.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000102 /* CaptureHealth.swift */; };
 		7F0000000000000000000005 /* TranslationRetirementRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F0000000000000000000006 /* TranslationRetirementRegressionTests.swift */; };
@@ -109,6 +110,7 @@
 		910000000000000000000002 /* FloatingSubtitlePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingSubtitlePreferences.swift; sourceTree = "<group>"; };
 		910000000000000000000004 /* FloatingSubtitleDisplayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingSubtitleDisplayTests.swift; sourceTree = "<group>"; };
 		14C010000000000000000002 /* ClassroomAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassroomAppearanceTests.swift; sourceTree = "<group>"; };
+		CA0000000000000000000204 /* CaptureHealthSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureHealthSafetyTests.swift; sourceTree = "<group>"; };
 		CA0000000000000000000104 /* CaptureHealthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureHealthTests.swift; sourceTree = "<group>"; };
 		CA0000000000000000000102 /* CaptureHealth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureHealth.swift; sourceTree = "<group>"; };
 		7F0000000000000000000006 /* TranslationRetirementRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationRetirementRegressionTests.swift; sourceTree = "<group>"; };
@@ -267,6 +269,7 @@
 				920000000000000000000002 /* TestPreferenceCleanup.swift */,
 				14C010000000000000000002 /* ClassroomAppearanceTests.swift */,
 				CA0000000000000000000104 /* CaptureHealthTests.swift */,
+				CA0000000000000000000204 /* CaptureHealthSafetyTests.swift */,
 				900000000000000000000004 /* MultilingualCaptionPresentationTests.swift */,
 				789000000000000000000004 /* MultilingualSessionExporterTests.swift */,
 				789000000000000000000002 /* MultilingualLearningNotesTests.swift */,
@@ -414,6 +417,7 @@
 				920000000000000000000001 /* TestPreferenceCleanup.swift in Sources */,
 				14C010000000000000000001 /* ClassroomAppearanceTests.swift in Sources */,
 				CA0000000000000000000103 /* CaptureHealthTests.swift in Sources */,
+				CA0000000000000000000203 /* CaptureHealthSafetyTests.swift in Sources */,
 				900000000000000000000003 /* MultilingualCaptionPresentationTests.swift in Sources */,
 				789000000000000000000003 /* MultilingualSessionExporterTests.swift in Sources */,
 				789000000000000000000001 /* MultilingualLearningNotesTests.swift in Sources */,

@@ -5,7 +5,8 @@ import OSLog
 import ScreenCaptureKit
 
 /// Delivery health is independent of speech detection. A quiet room is valid
-/// audio; only virtually zero PCM warrants a source-check notice, never a restart.
+/// audio. System capture may omit callbacks while silent; the microphone's
+/// existing watchdog still recovers a stalled engine, even if it reports running.
 enum CaptureHealthIssue: String, Sendable {
     case noCallbacks = "no_callbacks"
     case noData = "no_data"
@@ -13,16 +14,29 @@ enum CaptureHealthIssue: String, Sendable {
     case callbackInterrupted = "callback_interrupted"
     case deviceChanged = "device_changed"
     case formatChanged = "format_changed"
+    case streamError = "stream_error"
+    case recoveryLimited = "recovery_limited"
 
     func message(for mode: AudioInputMode) -> String {
         let source = mode == .systemAudio ? "系统内录" : "麦克风"
         switch self {
-        case .noCallbacks: return "\(source)已启动，但尚未收到音频。请检查音源。"
-        case .noData: return "系统内录有回调，但没有音频数据。请检查播放来源。"
-        case .digitalSilence: return "系统内录持续收到数字静音。请确认课程正在播放。"
-        case .callbackInterrupted: return "\(source)音频已中断，正在尝试恢复…"
-        case .deviceChanged: return "\(source)设备已变化，正在重新连接…"
-        case .formatChanged: return "\(source)格式已变化，正在重新连接…"
+        case .noCallbacks:
+            return mode == .systemAudio ? "系统内录暂时没有收到声音（课程暂停或静音时属正常）。"
+                : "麦克风已启动，但尚未收到音频。请检查音源。"
+        case .noData:
+            return "\(source)暂时没有收到声音（课程暂停或静音时属正常）。"
+        case .callbackInterrupted:
+            return mode == .systemAudio ? "系统内录暂时没有收到声音（课程暂停或静音时属正常）。"
+                : "麦克风音频已中断，正在尝试恢复…"
+        case .digitalSilence: return "系统内录暂时没有声音（课程暂停或静音时属正常）。"
+        case .deviceChanged:
+            return mode == .systemAudio ? "系统内录设备已变化，请留意声音是否正常。"
+                : "麦克风设备已变化，正在重新连接…"
+        case .formatChanged:
+            return mode == .systemAudio ? "系统内录音频格式已变化，请留意声音是否正常。"
+                : "麦克风格式已变化，正在重新连接…"
+        case .streamError: return "\(source)采集流报错，正在尝试恢复…"
+        case .recoveryLimited: return "\(source)自动恢复次数已达上限，当前采集保留，请留意声音是否正常。"
         }
     }
 }
@@ -53,12 +67,13 @@ struct CaptureHealthState {
 
     mutating func restart(at now: TimeInterval) {
         startedAt = now
+        hasReceivedCallback = false
         silentStart = nil; silentEnd = nil; silentDuration = 0
         // Retain the notice until this replacement actually delivers audio.
     }
 
     mutating func deliveryIssue(_ input: OwnedAudioCaptureBuffer.HealthSnapshot, now: TimeInterval) -> CaptureHealthIssue? {
-        if input.callbacks == 0 {
+        if input.callbacks == 0 || (input.lastCallback ?? -.infinity) < startedAt {
             if hasReceivedCallback {
                 return now - startedAt >= Self.callbackTimeout ? .callbackInterrupted : nil
             }

@@ -44,14 +44,16 @@ private final class HealthSource: SystemAudioCaptureSource, @unchecked Sendable 
     private let lock = NSLock()
     private var input: OwnedAudioCaptureBuffer?
     private var onError: (@Sendable () -> Void)?
+    private var stops = 0
     let shouldFail: Bool
     init(shouldFail: Bool = false) { self.shouldFail = shouldFail }
     func start(input: OwnedAudioCaptureBuffer, onError: @escaping @Sendable () -> Void) async throws {
         lock.withLock { self.input = input; self.onError = onError }
         if shouldFail { throw NSError(domain: "Private error text must not enter health diagnostics", code: 9) }
     }
-    func stop() async {}
+    func stop() async { lock.withLock { stops += 1 } }
     var buffer: OwnedAudioCaptureBuffer { lock.withLock { input! } }
+    var stopCount: Int { lock.withLock { stops } }
     func fail() { lock.withLock { onError }?() }
     func send(frames: Int = 4_800, value: Float = 0.25, end: TimeInterval,
               format: AVAudioFormat? = nil) -> OwnedAudioCaptureBuffer.Submission {
@@ -101,12 +103,15 @@ private final class HealthDelay: @unchecked Sendable {
 private final class HealthEvents: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [CaptureHealthNotice] = []
+    private var missing: [CaptureGap] = []
     private var errors: [String] = []
     let failed = XCTestExpectation(description: "Capture fails after bounded recovery")
     var notices: [CaptureHealthNotice] { lock.withLock { values } }
+    var gaps: [CaptureGap] { lock.withLock { missing } }
     var failures: [String] { lock.withLock { errors } }
     func consume(_ event: SpeechPipeline.Event) {
         if case .captureHealth(let notice) = event { lock.withLock { values.append(notice) } }
+        if case .captureGap(let gap) = event { lock.withLock { missing.append(gap) } }
         if case .failure(let message) = event {
             lock.withLock { errors.append(message) }
             failed.fulfill()
@@ -224,6 +229,10 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         await check(f, after: 60)
         XCTAssertEqual(f.events.notices.count, 1, "An unchanged warning must not spam events or disk")
         XCTAssertEqual(f.sources.count, 1, "An idle playback source is not proof that capture needs restarting")
+        XCTAssertEqual(f.sources.latest.stopCount, 0)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 0)
+        XCTAssertTrue(f.delay.delays.isEmpty)
+        XCTAssertTrue(f.events.failures.isEmpty)
         await send(f)
         XCTAssertNil(f.events.notices.last?.message)
         await f.pipeline.stop()
@@ -239,6 +248,10 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         for _ in 0..<3 { await send(f, seconds: 1, value: 0) }
         XCTAssertEqual(f.events.notices.count, 1)
         XCTAssertEqual(f.sources.count, 1, "Digital silence alone must not consume recovery attempts")
+        XCTAssertEqual(f.sources.latest.stopCount, 0)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 0)
+        XCTAssertTrue(f.delay.delays.isEmpty)
+        XCTAssertTrue(f.events.failures.isEmpty)
         await send(f, value: 1e-6)
         XCTAssertNil(f.events.notices.last?.message)
         await f.pipeline.stop()
@@ -286,11 +299,15 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try diagnostics(f).first?["callbacks"] as? Int, 5)
         XCTAssertEqual(try diagnostics(f).first?["frames"] as? Int, 0)
         XCTAssertEqual(f.sources.count, 1)
+        XCTAssertEqual(f.sources.latest.stopCount, 0)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 0)
+        XCTAssertTrue(f.delay.delays.isEmpty)
+        XCTAssertTrue(f.events.failures.isEmpty)
         await send(f, value: 0)
         XCTAssertNil(f.events.notices.last?.message)
     }
 
-    func testRuntimeInterruptionDrainsAndSealsBeforeRestartAndPreservesEverySample() async throws {
+    func testRuntimeCallbackInterruptionOnlyWarnsAndKeepsEverySampleOnTheSameInput() async throws {
         let f = try await start()
         let old = f.sources.latest
         f.clock.advance(0.1)
@@ -299,25 +316,29 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(f.events.notices.isEmpty)
         await check(f, after: 0.02)
         await f.pipeline.waitForSyntheticSystemRecovery()
-        XCTAssertEqual(f.sources.count, 2)
-        XCTAssertEqual(old.buffer.pendingFrames, 0)
-        XCTAssertEqual(f.pipeline.transcriptionWork().map { $0.endFrame - $0.startFrame }, [4_800])
+        XCTAssertEqual(f.sources.count, 1)
+        XCTAssertTrue(f.sources.latest === old)
+        XCTAssertEqual(old.stopCount, 0)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 0)
+        XCTAssertTrue(f.pipeline.transcriptionWork().isEmpty, "A callback gap must not rotate the current chunk")
+        XCTAssertTrue(f.events.gaps.isEmpty)
+        XCTAssertTrue(f.events.failures.isEmpty)
         XCTAssertEqual(f.events.notices.last?.message, CaptureHealthIssue.callbackInterrupted.message(for: .systemAudio))
-        XCTAssertEqual(f.delay.delays, [0.25])
-        XCTAssertEqual(old.send(end: f.clock.now), .closed)
+        XCTAssertTrue(f.delay.delays.isEmpty)
         await send(f, value: 0.5)
         XCTAssertNil(f.events.notices.last?.message)
+        XCTAssertEqual(old.buffer.pendingFrames, 0)
         await f.pipeline.stop()
         try verifyAudio(f, values: [(4_800, 0.25), (4_800, 0.5)])
-        XCTAssertEqual(f.pipeline.transcriptionWork().map(\.startFrame), [0, 4_800])
-        XCTAssertEqual(f.pipeline.transcriptionWork().map(\.endFrame), [4_800, 9_600])
+        XCTAssertEqual(f.pipeline.transcriptionWork().map(\.startFrame), [0])
+        XCTAssertEqual(f.pipeline.transcriptionWork().map(\.endFrame), [9_600])
     }
 
-    func testFailedRestartUsesBackoffAndStopsAtThreeAttempts() async throws {
+    func testStreamErrorWithFailedReopensUsesBackoffAndStopsAtThreeAttempts() async throws {
         let f = try await start()
         await send(f)
         f.sources.failNext(10)
-        await check(f, after: 3)
+        f.sources.latest.fail()
         await f.pipeline.waitForSyntheticSystemRecovery()
         await fulfillment(of: [f.events.failed], timeout: 3)
         XCTAssertEqual(f.sources.count, 4)
@@ -329,31 +350,58 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         try verifyAudio(f, values: [(4_800, 0.25)])
     }
 
-    func testSuccessfulStartsWithoutDeliveryDoNotRenewRecoveryBudget() async throws {
+    func testSuccessfulReopensWithoutDeliveryDoNotSpendOrRenewRecoveryBudget() async throws {
         let f = try await start()
         await send(f)
-        for _ in 0..<3 {
-            await check(f, after: 3.01)
+        for attempt in 1...3 {
+            f.sources.latest.fail()
             await f.pipeline.waitForSyntheticSystemRecovery()
+            XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, attempt)
+            let reopened = f.sources.latest
+            await check(f, after: 5.01)
+            XCTAssertEqual(f.events.notices.last?.message, CaptureHealthIssue.noCallbacks.message(for: .systemAudio))
+            await check(f, after: 60)
+            XCTAssertTrue(f.sources.latest === reopened)
+            XCTAssertEqual(reopened.stopCount, 0)
+            XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, attempt)
+            XCTAssertTrue(f.events.failures.isEmpty)
         }
         XCTAssertEqual(f.sources.count, 4)
-        XCTAssertNotNil(f.events.notices.last?.message)
-        await check(f, after: 3.01)
+        XCTAssertEqual(f.delay.delays, [0.25, 0.5, 1])
+        let current = f.sources.latest
+        let chunks = f.pipeline.transcriptionWork().count
+        let gaps = f.events.gaps.count
+        current.fail()
         await f.pipeline.waitForSyntheticSystemRecovery()
-        await fulfillment(of: [f.events.failed], timeout: 3)
+        XCTAssertEqual(f.events.notices.last?.message, CaptureHealthIssue.recoveryLimited.message(for: .systemAudio))
         XCTAssertEqual(f.sources.count, 4)
+        XCTAssertEqual(current.stopCount, 0, "A spent budget must preserve the attached source")
         XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 3)
+        XCTAssertEqual(f.pipeline.transcriptionWork().count, chunks)
+        XCTAssertEqual(f.events.gaps.count, gaps)
+        XCTAssertTrue(f.events.failures.isEmpty)
+        await send(f, value: 0.5)
+        XCTAssertNil(f.events.notices.last?.message)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 3, "A brief callback must not renew the budget")
         await f.pipeline.stop()
-        try verifyAudio(f, values: [(4_800, 0.25)])
+        try verifyAudio(f, values: [(4_800, 0.25), (4_800, 0.5)])
     }
 
-    func testDeviceChangeWarnsAndUsesTheSameDrainedRecovery() async throws {
+    func testDeviceChangeOnlyWarnsAndKeepsTheNormalStreamOpen() async throws {
         let f = try await start()
         await send(f)
+        let current = f.sources.latest
         f.route.change()
-        await f.pipeline.waitForSyntheticSystemRecovery()
+        await f.pipeline.waitForSyntheticSystemRouteNotice()
         XCTAssertEqual(f.events.notices.last?.message, CaptureHealthIssue.deviceChanged.message(for: .systemAudio))
-        XCTAssertEqual(f.sources.count, 2)
+        XCTAssertEqual(f.sources.count, 1)
+        XCTAssertTrue(f.sources.latest === current)
+        XCTAssertEqual(current.stopCount, 0)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 0)
+        XCTAssertTrue(f.delay.delays.isEmpty)
+        XCTAssertTrue(f.pipeline.transcriptionWork().isEmpty)
+        XCTAssertTrue(f.events.gaps.isEmpty)
+        XCTAssertTrue(f.events.failures.isEmpty)
         await send(f, value: 0.5)
         XCTAssertNil(f.events.notices.last?.message)
         await f.pipeline.stop()
@@ -397,13 +445,20 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         try verifyAudio(f, values: [(4_800, 0.25), (4_800, 0.5)])
     }
 
-    func testHardwareFormatNotificationIsDistinctFromDeviceChange() async throws {
+    func testHardwareFormatNotificationOnlyWarnsAndKeepsTheNormalStreamOpen() async throws {
         let f = try await start()
         await send(f)
         f.route.change(.formatChanged)
-        await f.pipeline.waitForSyntheticSystemRecovery()
+        await f.pipeline.waitForSyntheticSystemRouteNotice()
         XCTAssertEqual(f.events.notices.last?.message, CaptureHealthIssue.formatChanged.message(for: .systemAudio))
         XCTAssertTrue(try diagnostics(f).contains { ($0["category"] as? String) == "system_format_changed" })
+        XCTAssertEqual(f.sources.count, 1)
+        XCTAssertEqual(f.sources.latest.stopCount, 0)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 0)
+        XCTAssertTrue(f.delay.delays.isEmpty)
+        XCTAssertTrue(f.pipeline.transcriptionWork().isEmpty)
+        XCTAssertTrue(f.events.gaps.isEmpty)
+        XCTAssertTrue(f.events.failures.isEmpty)
         await send(f)
         XCTAssertNil(f.events.notices.last?.message)
     }
@@ -421,7 +476,7 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(f.events.notices.isEmpty)
     }
 
-    func testDelegateStopErrorUsesRecoveryAndOldDelegateCannotRestartNewSource() async throws {
+    func testDelegateStreamErrorRecoversAndOldDelegateCannotRestartNewSource() async throws {
         let f = try await start()
         await send(f)
         let old = f.sources.latest
@@ -431,36 +486,45 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         await f.pipeline.waitForSyntheticSystemRecovery()
         XCTAssertEqual(f.sources.count, 2)
         XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 1)
-        XCTAssertEqual(f.events.notices.last?.message, CaptureHealthIssue.callbackInterrupted.message(for: .systemAudio))
+        XCTAssertEqual(old.stopCount, 1)
+        XCTAssertEqual(f.sources.latest.stopCount, 0)
+        XCTAssertEqual(f.events.notices.last?.message, CaptureHealthIssue.streamError.message(for: .systemAudio))
     }
 
-    func testPauseIgnoresElapsedTimeAndDefersDeviceRecoveryUntilResume() async throws {
+    func testPauseIgnoresElapsedTimeAndDoesNotQueueDeviceRecoveryOnResume() async throws {
         let f = try await start()
         f.pipeline.pause()
         f.route.change()
+        await f.pipeline.waitForSyntheticSystemRouteNotice()
         await check(f, after: 60)
         XCTAssertTrue(f.events.notices.isEmpty)
         XCTAssertEqual(f.sources.count, 1)
         try f.pipeline.resume()
         await f.pipeline.waitForSyntheticSystemRecovery()
-        XCTAssertEqual(f.sources.count, 2)
-        XCTAssertEqual(f.events.notices.last?.message, CaptureHealthIssue.deviceChanged.message(for: .systemAudio))
+        XCTAssertEqual(f.sources.count, 1)
+        XCTAssertEqual(f.sources.latest.stopCount, 0)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 0)
+        XCTAssertTrue(f.events.notices.isEmpty)
+        XCTAssertTrue(f.delay.delays.isEmpty)
         await send(f)
         XCTAssertNil(f.events.notices.last?.message)
     }
 
-    func testPauseDuringBackoffDoesNotReopenOrPreventLaterResume() async throws {
+    func testPauseDuringStreamErrorBackoffDoesNotSpendAttemptOrPreventResume() async throws {
         let f = try await start()
         await send(f)
         f.delay.setHook { f.pipeline.pause() }
-        f.route.change()
+        f.sources.latest.fail()
         await f.pipeline.waitForSyntheticSystemRecovery()
         XCTAssertEqual(f.sources.count, 1)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 0)
         XCTAssertTrue(f.events.failures.isEmpty)
         f.delay.setHook(nil)
         try f.pipeline.resume()
         await f.pipeline.waitForSyntheticSystemRecovery()
         XCTAssertEqual(f.sources.count, 2)
+        XCTAssertEqual(f.pipeline.syntheticSystemRecoveryAttempts, 1)
+        XCTAssertEqual(f.delay.delays, [0.25, 0.25])
         await send(f, value: 0.5)
         await f.pipeline.stop()
         try verifyAudio(f, values: [(4_800, 0.25), (4_800, 0.5)])
@@ -471,13 +535,16 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         await send(f)
         f.sources.failNext(1)
         f.route.change()
+        await f.pipeline.waitForSyntheticSystemRouteNotice()
+        f.sources.latest.fail()
         await f.pipeline.waitForSyntheticSystemRecovery()
         await send(f)
         let rows = try diagnostics(f)
         XCTAssertFalse(rows.isEmpty)
+        XCTAssertEqual(rows.filter { ($0["category"] as? String) == "system_recovery_attempt" }.count, 2)
         for row in rows {
             XCTAssertEqual(Set(row.keys), ["category", "time", "callbacks", "frames", "recoveryAttempts"])
-            XCTAssertTrue(["system_device_changed", "system_recovery_attempt", "system_delivery_resumed"].contains(row["category"] as? String ?? ""))
+            XCTAssertTrue(["system_device_changed", "system_stream_error", "system_recovery_attempt", "system_delivery_resumed"].contains(row["category"] as? String ?? ""))
             XCTAssertNotNil(row["time"] as? Double)
             XCTAssertNotNil(row["callbacks"] as? Int)
             XCTAssertNotNil(row["frames"] as? Int)

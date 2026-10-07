@@ -53,6 +53,7 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
     private var accepting = true
     private var paused = false
     private var failure: Failure?
+    private var closedRejection: Failure?
     private var failureDelivered = false
     private var finishDelivered = false
     private var lastAcceptedEnd: TimeInterval?
@@ -100,6 +101,7 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
     var pendingFrames: Int { lock.withLock { occupiedFrames } }
     var lastAcceptedUptime: TimeInterval? { lock.withLock { lastAcceptedEnd } }
     var failureSnapshot: Failure? { lock.withLock { failure } }
+    var closedRejectionSnapshot: Failure? { lock.withLock { closedRejection } }
     var healthSnapshot: HealthSnapshot { lock.withLock { health } }
     func setPaused(_ value: Bool) { lock.withLock { paused = value } }
     func seal() { lock.withLock { accepting = false }; source.add(data: 1) }
@@ -109,10 +111,10 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
         guard SpeechPipeline.formatsMatch(buffer.format, format) else {
             return lock.withLock {
                 if paused { return .paused }
-                guard accepting else { return .closed }
+                guard accepting else { noteRejected(frames: Int(buffer.frameLength), end: observedEnd); return .closed }
                 noteCallback(end: observedEnd)
                 recordFailure("采集音频格式变化，当前缓冲未写入。", frames: Int(buffer.frameLength),
-                              end: observedEnd, formatChanged: true)
+                              end: observedEnd, formatChanged: true, frameRate: buffer.format.sampleRate)
                 source.add(data: 1)
                 return .overflow
             }
@@ -162,13 +164,16 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
         noteCallback(end: observedEnd)
         guard CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer) else { return .closed }
         guard frames > 0 else { return .accepted }
-        guard let description = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description),
+        let asbd = CMSampleBufferGetFormatDescription(sampleBuffer).flatMap {
+            CMAudioFormatDescriptionGetStreamBasicDescription($0)
+        }
+        guard let asbd,
               asbd.pointee.mSampleRate == format.sampleRate,
               asbd.pointee.mChannelsPerFrame == format.channelCount,
               asbd.pointee.mBytesPerFrame == format.streamDescription.pointee.mBytesPerFrame,
               asbd.pointee.mFormatFlags == format.streamDescription.pointee.mFormatFlags else {
-            recordFailure("系统音频格式发生变化。", frames: frames, end: observedEnd, formatChanged: true); return .overflow
+            recordFailure("系统音频格式发生变化。", frames: frames, end: observedEnd, formatChanged: true,
+                          frameRate: asbd?.pointee.mSampleRate); return .overflow
         }
         guard frames <= capacityFrames - occupiedFrames, spanCount < spans.count else {
             recordFailure("磁盘处理跟不上采集，两秒音频缓冲已耗尽。", frames: frames, end: observedEnd); return .overflow
@@ -199,15 +204,25 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
     private func noteCallback(end: TimeInterval) {
         health.callbacks += 1; health.lastCallback = end
     }
-    private func recordFailure(_ reason: String, frames: Int, end: TimeInterval, formatChanged: Bool = false) {
+    private func recordFailure(_ reason: String, frames: Int, end: TimeInterval, formatChanged: Bool = false,
+                               frameRate: Double? = nil) {
         accepting = false
         guard failure == nil else { return }
-        failure = Failure(reason: reason, observedStart: end - Double(frames) / format.sampleRate,
+        let rate = frameRate.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? format.sampleRate
+        failure = Failure(reason: reason, observedStart: end - Double(frames) / rate,
                           observedEnd: end, rejectedFrames: Int64(frames), processedFrames: processedFrames,
                           formatChanged: formatChanged)
     }
     private func noteRejected(frames: Int, end: TimeInterval) {
-        guard let old = failure, frames > 0 else { return }
+        guard frames > 0 else { return }
+        guard let old = failure else {
+            let start = end - Double(frames) / format.sampleRate
+            closedRejection = Failure(reason: "采集源关闭后收到的音频未写入。",
+                observedStart: min(closedRejection?.observedStart ?? start, start),
+                observedEnd: max(closedRejection?.observedEnd ?? end, end),
+                rejectedFrames: (closedRejection?.rejectedFrames ?? 0) + Int64(frames), processedFrames: processedFrames)
+            return
+        }
         failure = Failure(reason: old.reason, observedStart: old.observedStart,
             observedEnd: max(old.observedEnd, end), rejectedFrames: old.rejectedFrames + Int64(frames),
             processedFrames: processedFrames, formatChanged: old.formatChanged)
