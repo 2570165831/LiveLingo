@@ -30,8 +30,9 @@ bash Scripts/build-cli.sh work/new-cli-build
 
 To reuse an existing compatible Swift module cache, pass
 `--module-cache /absolute/path/to/existing-cache`. The output directory must
-still be new. Both `--lifecycle-tests` and `--multilingual-tests` accept this option,
-but the two test options use separate entry points and cannot be combined. Headless
+still be new. `--lifecycle-tests`, `--multilingual-tests` and
+`--translation-failure-tests` all accept this option, but the test options use
+separate entry points and cannot be combined. Headless
 commands cancel any UI-only file chooser path without presenting a window.
 
 Run the multilingual regression from the repository root, using a new build
@@ -58,6 +59,33 @@ The existing lifecycle entry point remains separate:
 bash Scripts/build-cli.sh work/cli-lifecycle-build --lifecycle-tests
 work/cli-lifecycle-build/livelingo-cli-lifecycle-tests work/cli-lifecycle-evidence
 ```
+
+Build and run the translation-failure regression independently from the
+repository root. In this lab, keep its build, module cache and isolated test
+directory under the shared `../work/dd/`:
+
+```sh
+bash Scripts/build-cli.sh ../work/dd/cli-translation-failure-build --translation-failure-tests
+../work/dd/cli-translation-failure-build/livelingo-cli-translation-failure-tests \
+  ../work/dd/cli-translation-failure-evidence
+```
+
+The build produces the normal CLI and a separate
+`livelingo-cli-translation-failure-tests` executable, just like the multilingual
+option. The test runs without invoking the normal CLI. Its optional argument
+names a new test directory whose parent already exists; by default it creates
+one beside the test executable. Existing directories and symlink paths are
+refused. It instantiates an isolated AppModel with injected translators and a
+stopped, synthetic review queue, with background services and scheduled notes
+disabled. No model, HTTP service, audio capture or real course is started.
+Frozen enum strings, persisted JSON and event JSON are checked, along with the
+production translation queue, shared CLI failure reporter and event whitelist.
+The queue checks cover recovery, persistent dependency cancellation and actual
+worker cancellation; normal successful English translation emits no failure
+event. Synthetic caption and error text stay in memory; test output contains
+only check names and counts. A zero exit status and
+`translation_failure_cli_tests_passed` establish this regression's result,
+separately from `run_verified` for a real CLI run.
 
 Silent real-time replay (no audio output device is opened):
 
@@ -140,6 +168,30 @@ accept only nonnegative Swift integers, never text, booleans or floating-point
 coercions. The counter is in memory and adds no persisted fields.
 Only the verifier emits `run_verified`; a same-named AppModel callback is
 sanitized to `progress`, while the integer fields remain allowlisted.
+
+`translation_failure` reports each recorded caption translation failure through
+the AppModel's CLI reporter. Its exact allowlist is:
+
+```json
+{"event":"translation_failure","translationFailureCount":1,"translationFailureReason":"dependencyCancelled"}
+```
+
+No elapsed time, caption text, error message, path, session ID or unrelated
+progress field is emitted. `translationFailureCount` must be a positive native
+Swift integer; booleans, bridged numbers, floating-point values and strings are
+rejected. `translationFailureReason` must be one of these frozen strings:
+`processExited`, `requestTimedOut`, `outputLimitReached`, `translationRejected`,
+`runtimeUnavailable`, `invalidResponse`, `generationInterrupted`, `requestFailed`,
+`dependencyCancelled`, `unknown`, `cancelled`, `interrupted`. If either value is
+invalid or missing, both fields are dropped and only the event name remains.
+Counts accumulate for the same reason on that caption, including retries;
+different reasons have separate counts. A successful retry retains the saved
+trail without emitting another failure event. `dependencyCancelled` means a
+dependency raised cancellation while the caption worker itself was still
+active. The legacy `cancelled` and `interrupted` values remain readable and
+allowlisted; routine pauses, parks, restarts and actual worker cancellation do
+not write them as new translation failures. The CLI regression checks worker
+cancellation; saved-course pause/reopen coverage belongs to the app tests.
 
 For cleanup, first ensure the CLI has exited, keep the result/required logs,
 and move only its explicit test output/build paths to Trash. Never remove

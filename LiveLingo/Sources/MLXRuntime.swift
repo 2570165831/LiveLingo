@@ -113,6 +113,9 @@ actor MLXRuntime {
     }
 
     #if DEBUG
+    enum RetryWaitPhaseForTesting: Sendable {
+        case requestRelease, workerExit
+    }
     struct TestConfiguration: Sendable {
         let python: URL
         let script: URL
@@ -120,6 +123,8 @@ actor MLXRuntime {
         let state: URL
         var controlTimeout: TimeInterval = 1
         var interpreterArguments: [String] = []
+        var onCancellationControlResolved: (@Sendable () async -> Void)?
+        var onRetryWait: (@Sendable (RetryWaitPhaseForTesting) async -> Void)?
     }
     private var testConfiguration: TestConfiguration?
     init(testConfiguration: TestConfiguration? = nil) {
@@ -358,30 +363,43 @@ actor MLXRuntime {
     func finishRetirementBeforeRetry(_ model: String) async throws {
         guard let worker = workers[model] ?? retiringWorkers[model] else { return }
         let deadline = ProcessInfo.processInfo.systemUptime + controlTimeout + 2
-        func cancellationPending() -> Bool {
-            controls.values.contains {
-                $0.workerID == worker.id && $0.result == nil && ["cancel", "paused"].contains($0.expected)
+        func requestReleasePending() -> Bool {
+            // A resolved control still owns its request until control()'s
+            // defer and pause()'s forget()/ended() have run. In particular, a
+            // failed cancellation must not admit a retry onto a doomed worker.
+            if controls.values.contains(where: {
+                $0.workerID == worker.id && ["cancel", "paused"].contains($0.expected)
+            }) { return true }
+            if workers[model]?.id == worker.id {
+                return worker.requests.contains { streams[$0] == nil }
             }
+            return false
         }
-        while cancellationPending(), ProcessInfo.processInfo.systemUptime < deadline {
+        while requestReleasePending(), ProcessInfo.processInfo.systemUptime < deadline {
             try Task.checkCancellation()
+            #if DEBUG
+            if let onRetryWait = testConfiguration?.onRetryWait { await onRetryWait(.requestRelease) }
+            #endif
             try await Task.sleep(for: .milliseconds(20))
         }
         try Task.checkCancellation()
-        guard !cancellationPending() else {
+        guard !requestReleasePending() else {
             throw QwenRuntimeError.generationInterrupted("上一个请求的取消尚未确认，暂缓翻译补试。")
         }
-        if retiringWorkers[model]?.id == worker.id, worker.process.isRunning {
+        if retiringWorkers[model]?.id == worker.id {
             // The existing retirement task owns termination. The retry caller
             // only waits, and can cancel without spinning a cancelled sleep or
             // issuing a second termination against the same worker.
             let exitDeadline = ProcessInfo.processInfo.systemUptime + controlTimeout + 2
-            while worker.process.isRunning, ProcessInfo.processInfo.systemUptime < exitDeadline {
+            while retiringWorkers[model]?.id == worker.id, ProcessInfo.processInfo.systemUptime < exitDeadline {
                 try Task.checkCancellation()
+                #if DEBUG
+                if let onRetryWait = testConfiguration?.onRetryWait { await onRetryWait(.workerExit) }
+                #endif
                 try await Task.sleep(for: .milliseconds(20))
             }
             try Task.checkCancellation()
-            guard !worker.process.isRunning else {
+            guard retiringWorkers[model]?.id != worker.id else {
                 throw QwenRuntimeError.generationInterrupted("上一个模型进程尚未退出，暂缓翻译补试。")
             }
         }
@@ -421,16 +439,29 @@ actor MLXRuntime {
             resolveControl(token, with: .failure(QwenRuntimeError.generationInterrupted("模型暂停或退出未及时确认；保留上次有效进度。")))
         }
         defer { timeout.cancel() }
-        try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
-            // send() yields the actor, so a reply or exit may already be stored.
-            guard var control = controls[token] else {
-                waiter.resume(throwing: QwenRuntimeError.invalidResponse)
-                return
+        var failure: Error?
+        do {
+            try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
+                // send() yields the actor, so a reply or exit may already be stored.
+                guard var control = controls[token] else {
+                    waiter.resume(throwing: QwenRuntimeError.invalidResponse)
+                    return
+                }
+                if let result = control.result { waiter.resume(with: result); return }
+                control.waiter = waiter
+                controls[token] = control
             }
-            if let result = control.result { waiter.resume(with: result); return }
-            control.waiter = waiter
-            controls[token] = control
+        } catch { failure = error }
+        #if DEBUG
+        // Hold the real resolved-entry/pre-retirement window only when a
+        // scripted-worker test explicitly supplies a hook. Normal calls add
+        // no suspension between resolution, entry removal and request release.
+        if ["cancel", "pause"].contains(operation), controls[token]?.result != nil,
+           let onResolved = testConfiguration?.onCancellationControlResolved {
+            await onResolved()
         }
+        #endif
+        if let failure { throw failure }
     }
 
     private func pause(_ id: String, timedOut: Bool = false, stalled: Bool = false) async {

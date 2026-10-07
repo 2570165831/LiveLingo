@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-output="${1:?Usage: build-cli.sh NEW_OUTPUT_DIRECTORY [--lifecycle-tests | --multilingual-tests] [--module-cache EXISTING_ABSOLUTE_DIRECTORY]}"
+output="${1:?Usage: build-cli.sh NEW_OUTPUT_DIRECTORY [--lifecycle-tests | --multilingual-tests | --translation-failure-tests] [--module-cache EXISTING_ABSOLUTE_DIRECTORY]}"
 shift
 lifecycle_tests=0
 multilingual_tests=0
+translation_failure_tests=0
 module_cache=""
 while [[ $# -gt 0 ]]; do
  case "$1" in
@@ -14,6 +15,9 @@ while [[ $# -gt 0 ]]; do
  --multilingual-tests)
   if [[ "$multilingual_tests" == 1 ]]; then echo 'Duplicate build option.' >&2; exit 1; fi
   multilingual_tests=1; shift ;;
+ --translation-failure-tests)
+  if [[ "$translation_failure_tests" == 1 ]]; then echo 'Duplicate build option.' >&2; exit 1; fi
+  translation_failure_tests=1; shift ;;
  --module-cache)
   if [[ $# -lt 2 || -n "$module_cache" || "$2" != /* || "$2" == / || ! -d "$2" || -L "$2" ]]; then
    echo 'Module cache must be an existing absolute directory, supplied once.' >&2; exit 1
@@ -22,8 +26,8 @@ while [[ $# -gt 0 ]]; do
  *) echo 'Unknown build option.' >&2; exit 1 ;;
  esac
 done
-if [[ "$lifecycle_tests" == 1 && "$multilingual_tests" == 1 ]]; then
- echo 'Lifecycle and multilingual tests use separate entry points; select one.' >&2; exit 1
+if (( lifecycle_tests + multilingual_tests + translation_failure_tests > 1 )); then
+ echo 'CLI test options use separate entry points; select one.' >&2; exit 1
 fi
 if [[ -e "$output" || -L "$output" ]]; then echo 'Output directory already exists; refusing to overwrite.' >&2; exit 1; fi
 mkdir -p "$output"
@@ -42,5 +46,8 @@ else
  if [[ "$multilingual_tests" == 1 ]]; then
   xcrun swiftc -D LIVELINGO_CLI -D LIVELINGO_CLI_LIFECYCLE_TESTS -swift-version 6 -parse-as-library -O -target arm64-apple-macos14.0 -module-cache-path "$module_cache" "${sources[@]}" "$root/Scripts/livelingo-cli.swift" "$root/Scripts/test-cli-multilingual.swift" -o "$output/livelingo-cli-multilingual-tests"
   printf 'Built %s/livelingo-cli-multilingual-tests\n' "$output"
+ elif [[ "$translation_failure_tests" == 1 ]]; then
+  xcrun swiftc -D LIVELINGO_CLI -D LIVELINGO_CLI_LIFECYCLE_TESTS -swift-version 6 -parse-as-library -O -target arm64-apple-macos14.0 -module-cache-path "$module_cache" "${sources[@]}" "$root/Scripts/livelingo-cli.swift" "$root/Scripts/test-cli-translation-failures.swift" -o "$output/livelingo-cli-translation-failure-tests"
+  printf 'Built %s/livelingo-cli-translation-failure-tests\n' "$output"
  fi
 fi

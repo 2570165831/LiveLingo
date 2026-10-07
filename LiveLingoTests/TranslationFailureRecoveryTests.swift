@@ -78,7 +78,7 @@ final class TranslationFailureRecoveryTests: XCTestCase {
             (QwenRuntimeError.invalidResponse, .invalidResponse),
             (QwenRuntimeError.generationInterrupted("PRIVATE_ERROR_TEXT"), .generationInterrupted),
             (QwenRuntimeError.requestFailed("PRIVATE_ERROR_TEXT"), .requestFailed),
-            (CancellationError(), .cancelled), (URLError(.cancelled), .cancelled),
+            (CancellationError(), .dependencyCancelled), (URLError(.cancelled), .dependencyCancelled),
             (URLError(.timedOut), .requestTimedOut), (POSIXError(.EPIPE), .processExited),
             (DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "PRIVATE_ERROR_TEXT")), .invalidResponse),
             (PrivateError(), .unknown)
@@ -136,7 +136,7 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         }
     }
 
-    func testFutureReasonsMergeIntoUnknownAndInvalidCountsAreRejected() throws {
+    func testFutureReasonsMergeIntoUnknownAndInvalidCountsDegrade() throws {
         let caption = TranscriptSegment(startTime: 0, endTime: 1, english: source)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encode(caption)) as? [String: Any])
         object["translationFailures"] = [["reason": "FUTURE_PRIVATE_REASON", "count": 2],
@@ -150,8 +150,10 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         XCTAssertEqual(decoded.translationFailures.first?.count, Int.max)
         for invalid in [0, -1, true, "PRIVATE", 1.5] as [Any] {
             object["translationFailures"] = [["reason": "unknown", "count": invalid]]
-            XCTAssertThrowsError(try JSONDecoder().decode(TranscriptSegment.self,
-                from: JSONSerialization.data(withJSONObject: object)))
+            let degraded = try JSONDecoder().decode(TranscriptSegment.self,
+                from: JSONSerialization.data(withJSONObject: object))
+            XCTAssertTrue(degraded.translationFailures.isEmpty)
+            XCTAssertEqual(degraded.english, source)
         }
     }
 
@@ -208,7 +210,7 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         XCTAssertNil(model.segments[0].translationError)
     }
 
-    func testRepeatedTimeoutStopsAfterTwoAttemptsAndLaterCaptionStillCompletes() async throws {
+    func testRepeatedTimeoutGetsOnlyOneTailRescueAfterALaterSuccess() async throws {
         var calls = 0, sleeps = 0
         var deps = CaptionTranslationDependencies.unavailable
         deps.translate = { [self] text, _, _, _, _ in
@@ -221,9 +223,9 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         model.receiveCaptionForTesting(source, start: 0, end: 1)
         model.receiveCaptionForTesting("A bell rings.", start: 4, end: 5)
         await model.translationTaskForTesting?.value
-        XCTAssertEqual(calls, 3); XCTAssertEqual(sleeps, 1)
+        XCTAssertEqual(calls, 4); XCTAssertEqual(sleeps, 1)
         XCTAssertEqual(model.segments[0].translationState, .failed)
-        XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .requestTimedOut, count: 2)])
+        XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .requestTimedOut, count: 3)])
         XCTAssertTrue(model.segments[1].hasUsableTranslation)
         XCTAssertTrue(model.translationQueueForTesting.isEmpty)
         XCTAssertNil(model.translationTaskForTesting)
@@ -255,9 +257,9 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         model.receiveCaptionForTesting(source, start: 0, end: 1)
         model.receiveCaptionForTesting(source, start: 4, end: 5)
         await model.translationTaskForTesting?.value
-        XCTAssertEqual(calls, 2)
-        XCTAssertEqual(model.segments[0].translationState, .failed)
-        XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .cancelled, count: 1)])
+        XCTAssertEqual(calls, 3)
+        XCTAssertTrue(model.segments[0].hasUsableTranslation)
+        XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .dependencyCancelled, count: 1)])
         XCTAssertTrue(model.segments[1].hasUsableTranslation)
         XCTAssertTrue(model.translationQueueForTesting.isEmpty)
     }
@@ -275,8 +277,236 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         await task.value
         XCTAssertEqual(model.segments[0].translationState, .pending)
         XCTAssertEqual(model.translationQueueForTesting, [model.segments[0].id])
-        XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .cancelled, count: 1)])
+        XCTAssertTrue(model.segments[0].translationFailures.isEmpty)
+        XCTAssertTrue(model.translationEnqueuedAtForTesting.isEmpty)
+        XCTAssertFalse(model.hasCaptionBacklogForTesting)
         XCTAssertNil(model.translationTaskForTesting)
+    }
+
+    func testEarlierSuccessDoesNotAuthorizeTransportRescue() async throws {
+        var requests: [String] = []
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.translate = { [self] text, _, _, _, _ in
+            requests.append(text)
+            if text == source { throw QwenRuntimeError.processExited }
+            return "钟响了。"
+        }
+        deps.retrySleep = { _ in }
+        let (model, _) = try fixture(deps)
+        model.receiveCaptionForTesting("A bell rings.", start: 0, end: 1)
+        model.receiveCaptionForTesting(source, start: 4, end: 5)
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(requests, ["A bell rings.", source, source])
+        XCTAssertEqual(model.segments[1].translationState, .failed)
+        XCTAssertEqual(model.segments[1].translationFailures, [.init(reason: .processExited, count: 2)])
+        XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+    }
+
+    private func assertSavedTailRescue(dependencyCancellation: Bool) async throws {
+        var firstCalls = 0, laterCalls = 0
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.translate = { [self] text, _, _, attempt, _ in
+            XCTAssertEqual(attempt, .standard)
+            if text == source {
+                firstCalls += 1
+                if dependencyCancellation, firstCalls == 1 { throw CancellationError() }
+                if !dependencyCancellation, firstCalls <= 2 { throw QwenRuntimeError.requestTimedOut }
+                return result
+            }
+            laterCalls += 1
+            return "钟响了。"
+        }
+        deps.retrySleep = { _ in }
+        let (model, root) = try fixture(deps)
+        var snapshot = SessionSnapshot(segments: [
+            .init(startTime: 0, endTime: 1, english: source),
+            .init(startTime: 4, endTime: 5, english: "A bell rings.")
+        ])
+        snapshot.processing.paused = true
+        snapshot.processing.phase = .paused
+        _ = try SessionStore(directory: root).save(snapshot)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        model.resumeSavedProcessing()
+        try await eventually { model.segments.allSatisfy(\.hasUsableTranslation) }
+        await model.savedProcessingTaskForTesting?.value
+        XCTAssertEqual(firstCalls, dependencyCancellation ? 2 : 3)
+        XCTAssertEqual(laterCalls, 1)
+        XCTAssertEqual(model.segments[0].translationFailures,
+            [.init(reason: dependencyCancellation ? .dependencyCancelled : .requestTimedOut,
+                   count: dependencyCancellation ? 1 : 2)])
+        XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+        XCTAssertNil(model.translationTaskForTesting)
+        XCTAssertEqual(try SessionStore(directory: root).load()?.segments, model.segments)
+        let exported = try String(contentsOf: root.appendingPathComponent("bilingual.jsonl"), encoding: .utf8)
+        XCTAssertTrue(exported.contains(result))
+        XCTAssertTrue(exported.contains("钟响了。"))
+    }
+
+    func testStopDrainRescuesTwiceFailedTransportCaptionBeforeExport() async throws {
+        try await assertSavedTailRescue(dependencyCancellation: false)
+    }
+
+    func testStopDrainRescuesDependencyCancelledCaptionBeforeExport() async throws {
+        try await assertSavedTailRescue(dependencyCancellation: true)
+    }
+
+    func testExplicitResumeOfFinishedDrainStartsANewBoundedRecoveryRound() async throws {
+        var firstCalls = 0, laterCalls = 0
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.translate = { [self] text, _, _, _, _ in
+            if text == source {
+                firstCalls += 1
+                if firstCalls <= 4 { throw QwenRuntimeError.processExited }
+                return result
+            }
+            laterCalls += 1
+            return "钟响了。"
+        }
+        deps.retrySleep = { _ in }
+        let (model, root) = try fixture(deps)
+        var snapshot = SessionSnapshot(segments: [
+            .init(startTime: 0, endTime: 1, english: source),
+            .init(startTime: 4, endTime: 5, english: "A bell rings.")
+        ])
+        snapshot.processing.paused = true
+        snapshot.processing.phase = .paused
+        _ = try SessionStore(directory: root).save(snapshot)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        model.resumeSavedProcessing()
+        try await eventually { firstCalls == 3 && model.savedProcessingTaskForTesting == nil }
+        XCTAssertFalse(model.savedProcessingIsPaused)
+        XCTAssertEqual(model.segments[0].translationState, .failed)
+        XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .processExited, count: 3)])
+        // A user-requested new drain gets the usual first retry; the previous
+        // round's tail-rescue set cannot suppress it or repeatedly reopen it.
+        model.resumeSavedProcessing()
+        try await eventually { model.segments.allSatisfy(\.hasUsableTranslation) }
+        await model.savedProcessingTaskForTesting?.value
+        XCTAssertEqual(firstCalls, 5)
+        XCTAssertEqual(laterCalls, 1)
+        XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .processExited, count: 4)])
+        XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+    }
+
+    func testTailRescueExcludesModelAndAcceptanceFailures() async throws {
+        for rejected in [false, true] {
+            var firstCalls = 0, laterCalls = 0
+            var deps = CaptionTranslationDependencies.unavailable
+            deps.translate = { [self] text, _, _, _, _ in
+                if text == source {
+                    firstCalls += 1
+                    if rejected { throw QwenRuntimeError.translationRejected("PRIVATE_REJECTION") }
+                    throw QwenRuntimeError.modelUnavailable("PRIVATE_MODEL")
+                }
+                laterCalls += 1
+                return "钟响了。"
+            }
+            deps.retrySleep = { _ in XCTFail("Non-transport failures must not wait for recovery") }
+            let (model, _) = try fixture(deps)
+            model.receiveCaptionForTesting(source, start: 0, end: 1)
+            model.receiveCaptionForTesting("A bell rings.", start: 4, end: 5)
+            await model.translationTaskForTesting?.value
+            XCTAssertEqual(firstCalls, rejected ? 2 : 1)
+            XCTAssertEqual(laterCalls, 1)
+            XCTAssertEqual(model.segments[0].translationState, .failed)
+            XCTAssertEqual(model.segments[0].translationFailures,
+                [.init(reason: rejected ? .translationRejected : .runtimeUnavailable, count: rejected ? 2 : 1)])
+            XCTAssertTrue(model.segments[1].hasUsableTranslation)
+            XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+        }
+    }
+
+    func testDeferredRepairDependencyCancellationKeepsCaptionsAndDrainsOnce() async throws {
+        var repairs = 0
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.repair = { _ in repairs += 1; throw CancellationError() }
+        deps.translate = { [self] _, _, _, _, _ in return result }
+        let (model, root) = try fixture(deps)
+        var snapshot = SessionSnapshot()
+        let previous = TranscriptSegment(startTime: 0, endTime: 1, english: "A bell rings.", chinese: "钟响了。")
+        let current = TranscriptSegment(startTime: 1, endTime: 2, english: "The wind stops.", chinese: "风停了。")
+        snapshot.segments = [previous, current]
+        snapshot.processing.pendingCaptionRepairs = [.init(sessionID: snapshot.sessionID,
+            previous: previous, current: current, context: [], normalizedCurrent: current.english, modelName: "synthetic")]
+        snapshot.processing.paused = true
+        snapshot.processing.phase = .paused
+        _ = try SessionStore(directory: root).save(snapshot)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        model.resumeSavedProcessing()
+        try await eventually { repairs == 1 && model.savedProcessingTaskForTesting == nil }
+        XCTAssertEqual(repairs, 1)
+        XCTAssertEqual(model.segments, [previous, current])
+        XCTAssertTrue(model.segments.allSatisfy { $0.translationFailures.isEmpty })
+        XCTAssertNil(try SessionStore(directory: root).load()?.processing.pendingCaptionRepairs)
+        XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+        XCTAssertNil(model.translationTaskForTesting)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("bilingual.jsonl").path))
+    }
+
+    func testRoutineParkResumeAndReopenPreserveFrozenEnglishArchiveBytes() async throws {
+        let gate = Item7Gate()
+        defer { gate.release() }
+        var calls = 0
+        var observedEnqueueTimes: [TimeInterval] = []
+        var observedModel: AppModel?
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.translate = { [self] _, _, _, attempt, _ in
+            XCTAssertEqual(attempt, .standard)
+            calls += 1
+            if let model = observedModel, let id = model.segments.first?.id,
+               let timestamp = model.translationEnqueuedAtForTesting[id] { observedEnqueueTimes.append(timestamp) }
+            if calls == 1 { try await gate.wait(); try Task.checkCancellation() }
+            return result
+        }
+        deps.retrySleep = { _ in XCTFail("Routine parking must not trigger backoff") }
+        deps.prepareRetry = { _ in XCTFail("Routine parking must not recover a failed runtime") }
+        let (model, root) = try fixture(deps)
+        observedModel = model
+        let id = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let session = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        let original = TranscriptSegment(id: id, startTime: 0, endTime: 1, english: source, sessionID: session)
+        var snapshot = SessionSnapshot(sessionID: session, segments: [original], createdAt: Date(timeIntervalSince1970: 0))
+        snapshot.processing.phase = .paused
+        snapshot.processing.paused = true
+        _ = try SessionStore(directory: root).save(snapshot)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        model.resumeSavedProcessing()
+        try await eventually { gate.entered }
+        let initialEnqueue = try XCTUnwrap(model.translationEnqueuedAtForTesting[id])
+        model.pauseSavedProcessing()
+        try await eventually { model.savedProcessingIsPaused }
+        gate.release()
+        try await model.savedPauseTaskForTesting?.value
+        await model.savedProcessingTaskForTesting?.value
+        XCTAssertEqual(model.segments, [original])
+        XCTAssertTrue(model.translationEnqueuedAtForTesting.isEmpty)
+        XCTAssertFalse(model.hasCaptionBacklogForTesting)
+        XCTAssertFalse(model.captionWorkPendingForTesting)
+        XCTAssertEqual(model.translationQueueForTesting, [id])
+        XCTAssertEqual(try SessionStore(directory: root).load()?.segments, [original])
+
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        XCTAssertEqual(model.segments, [original])
+        model.resumeSavedProcessing()
+        try await eventually { model.segments[0].hasUsableTranslation }
+        await model.savedProcessingTaskForTesting?.value
+        XCTAssertEqual(calls, 2)
+        XCTAssertTrue(model.segments[0].translationFailures.isEmpty)
+        XCTAssertEqual(observedEnqueueTimes.count, 2)
+        XCTAssertGreaterThan(try XCTUnwrap(observedEnqueueTimes.last), initialEnqueue)
+        // Literals frozen from the e1e3b03 English segment/snapshot/event format.
+        let captionBytes = #"{"chinese":"房间很冷。","endTime":1,"english":"The room is cold.","id":"11111111-1111-1111-1111-111111111111","inputRevision":0,"sessionID":"22222222-2222-2222-2222-222222222222","startTime":0,"translationState":"completed"}"#
+        XCTAssertEqual(try encode(model.segments[0]), Data(captionBytes.utf8))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("bilingual.jsonl")), Data((captionBytes + "\n").utf8))
+        let archive = SessionSnapshot(sessionID: session, segments: model.segments, createdAt: Date(timeIntervalSince1970: 0))
+        let snapshotBytes = #"{"audioFiles":[],"audioRanges":[],"batches":[],"createdAt":0,"generation":0,"generationCheckpoints":[],"inputRevision":0,"lastJournalDigest":"0000000000000000000000000000000000000000000000000000000000000000","lastJournalSequence":0,"latestEvidenceIDs":[],"notebookLastOffered":{},"notebookRevision":0,"notebookSelectionRound":0,"processing":{"paused":false,"pendingBatchIDs":[],"pendingSegmentIDs":[],"phase":"idle","reviewPaused":true,"summaryPaused":false},"revisionHistory":[],"schemaVersion":1,"segments":["# + captionBytes + #"],"sessionID":"22222222-2222-2222-2222-222222222222","storageRevision":0,"updatedAt":0}"#
+        XCTAssertEqual(try SessionArchiveCoding.encode(archive), Data(snapshotBytes.utf8))
+        XCTAssertEqual(try SessionArchiveCoding.encode(SessionJournalEvent.upsertSegment(model.segments[0])),
+            Data((#"{"upsertSegment":{"_0":"# + captionBytes + "}}").utf8))
     }
 
     func testRevisionDuringBackoffDoesNotRetryOrPublishTheObsoleteInput() async throws {
@@ -302,7 +532,7 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         XCTAssertTrue(model.segments[0].translationFailures.isEmpty)
     }
 
-    func testInterruptedSnapshotReopensWithoutStartingWorkAndKeepsReason() async throws {
+    func testReopenedInFlightSnapshotKeepsOnlyPreviouslyObservedFailures() async throws {
         var calls = 0
         var deps = CaptionTranslationDependencies.unavailable
         deps.translate = { [self] _, _, _, _, _ in calls += 1; return result }
@@ -318,12 +548,40 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         XCTAssertEqual(calls, 0)
         XCTAssertEqual(model.segments[0].translationState, .pending)
         XCTAssertEqual(model.segments[0].translationFailures,
-            [.init(reason: .processExited, count: 1), .init(reason: .interrupted, count: 1)])
+            [.init(reason: .processExited, count: 1)])
         model.resumeSavedProcessing()
         try await eventually { model.segments[0].hasUsableTranslation }
         await model.savedProcessingTaskForTesting?.value
         XCTAssertEqual(calls, 1)
         XCTAssertEqual(try SessionStore(directory: root).load()?.segments, model.segments)
+    }
+
+    func testReopenedInFlightWithoutObservedFailureOnlyReturnsToPending() async throws {
+        var calls = 0
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.translate = { [self] _, _, _, _, _ in calls += 1; return result }
+        let (model, root) = try fixture(deps)
+        var caption = TranscriptSegment(startTime: 0, endTime: 1, english: source)
+        caption.beginTranslation()
+        var snapshot = SessionSnapshot(segments: [caption])
+        snapshot.processing.phase = .paused
+        snapshot.processing.paused = true
+        _ = try SessionStore(directory: root).save(snapshot)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(model.segments[0].translationState, .pending)
+        XCTAssertTrue(model.segments[0].translationFailures.isEmpty)
+        model.resumeSavedProcessing()
+        try await eventually { model.segments[0].hasUsableTranslation }
+        await model.savedProcessingTaskForTesting?.value
+        XCTAssertEqual(calls, 1)
+        XCTAssertTrue(model.segments[0].translationFailures.isEmpty)
+        var old = Item7Legacy020.TranscriptSegment(id: caption.id, startTime: 0, endTime: 1, english: source)
+        old.completeTranslation(result)
+        XCTAssertEqual(try encode(model.segments[0]), try encode(old))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("bilingual.jsonl")),
+                       try encode(old) + Data("\n".utf8))
     }
 
     func testPauseDuringBackoffPersistsFailureAndResumesWithoutAnInfiniteRetry() async throws {
@@ -357,7 +615,7 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         XCTAssertEqual(calls, 1)
         XCTAssertEqual(model.segments[0].translationState, .pending)
         XCTAssertEqual(try SessionStore(directory: root).load()?.segments[0].translationFailures,
-            [.init(reason: .requestTimedOut, count: 1), .init(reason: .cancelled, count: 1)])
+            [.init(reason: .requestTimedOut, count: 1)])
         model.resumeSavedProcessing()
         try await eventually { model.segments[0].hasUsableTranslation }
         await model.savedProcessingTaskForTesting?.value
@@ -403,31 +661,6 @@ final class TranslationFailureRecoveryTests: XCTestCase {
 
     func testOwnedCaptionTimeoutReclaimsTheUnresponsiveWorkerAndRetriesOnce() async throws {
         try await assertOwnedWorkerRecovery(mode: "timeout", reason: .requestTimedOut)
-    }
-
-    func testCancellingRetryWaitLeavesTerminationToTheExistingOwner() async throws {
-        let root = try directory(), modelName = "qwen3.5-4b-mlx"
-        let script = root.appendingPathComponent("fake-caption-worker.pl")
-        try Self.fakeWorker.write(to: script, atomically: true, encoding: .utf8)
-        let runtime = MLXRuntime(testConfiguration: .init(python: URL(fileURLWithPath: "/usr/bin/perl"),
-            script: script, models: root, state: root, controlTimeout: 1))
-        addTeardownBlock { try? await runtime.finishRetirementBeforeRetry(modelName); await runtime.unload(modelName) }
-        do {
-            _ = try await runtime.generate(model: modelName, prompt: "retirement", input: "", prefix: "",
-                thinking: false, purpose: "text", finalBudget: 64, timeout: 5, onUpdate: { _ in })
-            XCTFail("The fake worker must close its output")
-        } catch QwenRuntimeError.processExited {}
-        let waiter = Task { try await runtime.finishRetirementBeforeRetry(modelName) }
-        waiter.cancel()
-        do { try await waiter.value; XCTFail("A cancelled retry must stop waiting") }
-        catch is CancellationError {}
-        let retiring = await runtime.resourceStates()[modelName]
-        XCTAssertTrue(retiring?.retiring == true, "Cancelling the waiter must not terminate the process itself")
-        try await runtime.finishRetirementBeforeRetry(modelName)
-        let remaining = await runtime.resourceStates()
-        XCTAssertTrue(remaining.isEmpty)
-        let boots = try String(contentsOf: root.appendingPathComponent("boots"), encoding: .utf8)
-        XCTAssertEqual(boots.split(separator: "\n").count, 1, "Cancellation must not start a replacement model")
     }
 
     // Real pipes/owned child processes, no MLX imports, network, service or GPU.

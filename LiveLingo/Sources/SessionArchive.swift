@@ -75,7 +75,7 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
             let legacyMarkdown: String?
         }
         return SessionArchiveCoding.digest(try SessionArchiveCoding.encode(Input(
-            sessionID: sessionID, inputRevision: inputRevision, segments: segments,
+            sessionID: sessionID, inputRevision: inputRevision, segments: segments.map(\.withoutTranslationFailures),
             batches: batches, latestEvidenceIDs: latestEvidenceIDs.sorted { $0.uuidString < $1.uuidString },
             legacyMarkdown: legacyMarkdown
         )))

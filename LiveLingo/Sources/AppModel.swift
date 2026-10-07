@@ -712,6 +712,14 @@ final class AppModel: ObservableObject {
     private var pendingCaptionRepairs: [DeferredCaptionRepair] = []
     private var hasPendingTranslationWork: Bool { !translationQueue.isEmpty || !pendingCaptionRepairs.isEmpty }
     private var translationEnqueuedAt: [UUID: TimeInterval] = [:]
+    // A round spans all live drains until a new session or an explicit saved
+    // resume. A later successful request permits one final transport rescue.
+    private var captionTranslationSuccessCount = 0
+    private var failedTransportCaptions: [UUID: (input: TranscriptSegment, successes: Int)] = [:]
+    private var rescuedTransportCaptionIDs: Set<UUID> = []
+    private var captionWorkPending: Bool {
+        translationWorker != nil || (!processingPaused && hasPendingTranslationWork)
+    }
     private static let latencyLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "TranslationLatency")
     /// 苹果初译（预览）的时序日志：只记毫秒/计数，绝不记正文。
     private static let previewLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "PreviewLatency")
@@ -1482,6 +1490,7 @@ final class AppModel: ObservableObject {
         let translationID = translationWorkerID
         let summary = summaryTask
         processingPaused = true
+        translationEnqueuedAt.removeAll()
         clearTranslationPreview()
         oldProcessing?.cancel()
         translation?.cancel()
@@ -1510,6 +1519,7 @@ final class AppModel: ObservableObject {
             for index in segments.indices where segments[index].translationState == .translating {
                 segments[index].deferTranslation()
             }
+            updateReviewAvailability()
             try await flushSessionArchive()
             if let pauseFailure { throw pauseFailure }
         }
@@ -1573,7 +1583,8 @@ final class AppModel: ObservableObject {
         pendingCaptionRepairs = snapshot.processing.pendingCaptionRepairs ?? []
         segments = snapshot.segments
         for index in segments.indices where segments[index].translationState == .translating {
-            segments[index].recordTranslationFailure(.interrupted)
+            // A saved in-flight state proves only that the writer stopped;
+            // it cannot distinguish a routine quit from a runtime failure.
             segments[index].deferTranslation()
         }
         learningNotebook = notebook
@@ -1727,6 +1738,7 @@ final class AppModel: ObservableObject {
         translationQueue = []
         pendingCaptionRepairs = []
         translationEnqueuedAt = [:]
+        resetCaptionRecoveryRound()
         translationHints = [:]
         sessionDirectory = nil
         temporarySessionDirectory = nil
@@ -2040,9 +2052,12 @@ final class AppModel: ObservableObject {
                 try pipeline.resumeTranscription()
                 noteInputProducerDrained = false
                 noteSourceProducerDrained = false
+                if processingPaused || (processingTask == nil && translationWorker == nil) {
+                    resetCaptionRecoveryRound()
+                }
                 processingPaused = false
-                for segment in segments where !segment.hasUsableTranslation && !translationQueue.contains(segment.id) {
-                    translationQueue.append(segment.id)
+                for segment in segments where !segment.hasUsableTranslation {
+                    if !translationQueue.contains(segment.id) { translationQueue.append(segment.id) }
                     translationEnqueuedAt[segment.id] = ProcessInfo.processInfo.systemUptime
                 }
                 drainTranslationQueue()
@@ -2470,6 +2485,9 @@ final class AppModel: ObservableObject {
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
     var translationQueueForTesting: [UUID] { translationQueue }
+    var translationEnqueuedAtForTesting: [UUID: TimeInterval] { translationEnqueuedAt }
+    var hasCaptionBacklogForTesting: Bool { hasCaptionBacklog }
+    var captionWorkPendingForTesting: Bool { captionWorkPending }
     func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         appendConfirmedCaption(segment, hints: hints)
@@ -2601,18 +2619,55 @@ final class AppModel: ObservableObject {
             if let index = pending.previousIndex(in: segments, session: session) {
                 applyPreviousRepair(result, at: index, started: started)
             }
-        } catch is CancellationError {
-            withUnsafeCurrentTask { $0?.cancel() }
-            return
         } catch {
             guard !Task.isCancelled, sessionID == session, generation == epoch,
                   translationWorkerID == worker, !processingPaused else { return }
             Self.traceTranslation("adjacent_repair_kept", id: pending.previous.id,
-                elapsed: ProcessInfo.processInfo.systemUptime - started, detail: error.localizedDescription)
+                elapsed: ProcessInfo.processInfo.systemUptime - started,
+                detail: TranscriptSegment.TranslationFailureReason.category(for: error).rawValue)
         }
         guard sessionID == session, generation == epoch, translationWorkerID == worker else { return }
         pendingCaptionRepairs.removeAll { $0.current.id == pending.current.id }
         persistCurrentSession()
+    }
+
+    private func resetCaptionRecoveryRound() {
+        captionTranslationSuccessCount = 0
+        failedTransportCaptions.removeAll()
+        rescuedTransportCaptionIDs.removeAll()
+    }
+
+    private static func isTransportFailure(_ reason: TranscriptSegment.TranslationFailureReason) -> Bool {
+        switch reason {
+        case .processExited, .requestTimedOut, .generationInterrupted, .requestFailed, .dependencyCancelled:
+            return true
+        default: return false
+        }
+    }
+
+    private func noteSuccessfulCaptionTranslation(_ id: UUID) {
+        captionTranslationSuccessCount += 1
+        failedTransportCaptions.removeValue(forKey: id)
+    }
+
+    private func requeueRecoveredTransportCaptions() -> Bool {
+        guard !processingPaused, !Task.isCancelled else { return false }
+        var queued = false
+        for segment in segments where segment.translationState == .failed {
+            guard let failed = failedTransportCaptions[segment.id],
+                  failed.successes < captionTranslationSuccessCount,
+                  !rescuedTransportCaptionIDs.contains(segment.id),
+                  failed.input.inputRevision == segment.inputRevision,
+                  failed.input.english == segment.english,
+                  failed.input.sourceLanguage == segment.sourceLanguage else { continue }
+            rescuedTransportCaptionIDs.insert(segment.id)
+            failedTransportCaptions.removeValue(forKey: segment.id)
+            translationQueue.append(segment.id)
+            translationEnqueuedAt[segment.id] = ProcessInfo.processInfo.systemUptime
+            queued = true
+        }
+        if queued { updateReviewAvailability() }
+        return queued
     }
 
     private func drainTranslationQueue() {
@@ -2631,11 +2686,13 @@ final class AppModel: ObservableObject {
                     self.clearTranslationPreview()
                     self.translationWorker = nil
                     self.translationWorkerID = nil
+                    self.updateReviewAvailability()
                 }
             }
-            while self.hasPendingTranslationWork, !Task.isCancelled, !self.processingPaused,
+            while !Task.isCancelled, !self.processingPaused,
                   currentGeneration == self.generation, currentSession == self.sessionID,
                   self.translationWorkerID == workerID {
+                if !self.hasPendingTranslationWork, !self.requeueRecoveredTransportCaptions() { break }
                 if self.translationQueue.isEmpty {
                     await self.finishNextCaptionRepair(session: currentSession, epoch: currentGeneration, worker: workerID)
                     continue
@@ -2656,9 +2713,10 @@ final class AppModel: ObservableObject {
                            $0.id == input.id && $0.inputRevision == input.inputRevision
                                && $0.english == input.english && $0.sourceLanguage == input.sourceLanguage
                        }), self.segments[currentIndex].translationState == .translating {
-                        self.recordCaptionTranslationFailure(.cancelled, at: currentIndex)
                         self.segments[currentIndex].deferTranslation()
                         if !self.translationQueue.contains(id) { self.translationQueue.append(id) }
+                        self.translationEnqueuedAt.removeValue(forKey: id)
+                        self.updateReviewAvailability()
                         self.persistCurrentSession()
                     }
                     if currentGeneration == self.generation, currentSession == self.sessionID,
@@ -2823,6 +2881,7 @@ final class AppModel: ObservableObject {
                     guard let currentIndex = self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) else { continue }
                     self.segments[currentIndex].completeTranslation(chinese)
+                    self.noteSuccessfulCaptionTranslation(id)
                     self.liveChinese = chinese
                     Self.traceTranslation(previousIndex == nil ? "complete" : "complete_adjacent", id: id,
                                           elapsed: ProcessInfo.processInfo.systemUptime - started)
@@ -2834,13 +2893,15 @@ final class AppModel: ObservableObject {
                         epoch: currentGeneration, worker: workerID) else { continue }
                     self.reviewConcurrency.observe(elapsed: 0, successful: false)
                     var reason = TranscriptSegment.TranslationFailureReason.category(for: error)
+                    var transportFailuresOnly = Self.isTransportFailure(reason)
                     self.recordCaptionTranslationFailure(reason, at: failureIndex)
                     var recovered: String?
                     // One bounded recovery, owned by the same caption revision.
                     // Content failures change instructions; output-limit failures
                     // increase the budget; transient or unclassified runtime errors
                     // retain one ordinary retry.
-                    if let attempt = CaptionTranslationAttempt.recovery(for: error) {
+                    if !self.rescuedTransportCaptionIDs.contains(id),
+                       let attempt = CaptionTranslationAttempt.recovery(for: error) {
                         Self.traceTranslation("retry_\(attempt.rawValue)", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started)
                         do {
@@ -2862,6 +2923,7 @@ final class AppModel: ObservableObject {
                             guard !Task.isCancelled, let currentIndex = self.translationInputIndex(input,
                                 session: currentSession, epoch: currentGeneration, worker: workerID) else { continue }
                             reason = TranscriptSegment.TranslationFailureReason.category(for: error)
+                            transportFailuresOnly = transportFailuresOnly && Self.isTransportFailure(reason)
                             self.recordCaptionTranslationFailure(reason, at: currentIndex)
                         }
                     }
@@ -2880,6 +2942,7 @@ final class AppModel: ObservableObject {
                                 normalized, source: normalizedInput, sourceLanguage: sourceLanguage)
                         } catch {
                             reason = TranscriptSegment.TranslationFailureReason.category(for: error)
+                            transportFailuresOnly = false
                             self.recordCaptionTranslationFailure(reason, at: currentIndex)
                         }
                     }
@@ -2888,12 +2951,16 @@ final class AppModel: ObservableObject {
                                               elapsed: ProcessInfo.processInfo.systemUptime - started,
                                               detail: reason.rawValue)
                         self.segments[currentIndex].completeTranslation(accepted)
+                        self.noteSuccessfulCaptionTranslation(id)
                         self.liveChinese = accepted
                     } else {
                         Self.traceTranslation("failed", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started,
                                               detail: reason.rawValue)
                         self.segments[currentIndex].finishFailedTranslation()
+                        if transportFailuresOnly, !self.rescuedTransportCaptionIDs.contains(id) {
+                            self.failedTransportCaptions[id] = (input, self.captionTranslationSuccessCount)
+                        }
                         self.liveChinese = self.segments[currentIndex].displayChinese
                     }
                     self.persistCurrentSession()
@@ -3332,7 +3399,7 @@ final class AppModel: ObservableObject {
         if hasCaptionBacklog { reviewConcurrency.reset() }
         let capable = reviewConcurrency.allows(mode: selectedMode)
         let available = SummaryResourcePolicy.estimatedAvailableBytes() ?? 0
-        let liveWorkPending = translationWorker != nil || hasPendingTranslationWork
+        let liveWorkPending = captionWorkPending
             || summaryTask != nil || manualRequestInFlight || isManualTranslating
         let decision = ProcessingFocusPolicy.decision(ProcessingFocusPolicy.Context(
             focusMode: processingFocusEnabled,
@@ -3360,7 +3427,7 @@ final class AppModel: ObservableObject {
     private func resourceContext(summaryRunning: Bool, continuingSummary: Bool,
                                  allowConcurrent: Bool? = nil) -> ResourceSchedulingPolicy.Context {
         .init(now: ProcessInfo.processInfo.systemUptime, memoryNormal: summaryMemoryPressureNormal,
-            captionBacklog: hasCaptionBacklog, captionPending: translationWorker != nil || hasPendingTranslationWork,
+            captionBacklog: hasCaptionBacklog, captionPending: captionWorkPending,
             recording: hasActiveSession || phase == .preparing || phase == .stopping,
             allowConcurrent: allowConcurrent ?? summaryConcurrencyAllowed, summaryRunning: summaryRunning,
             paused: processingPaused, lastSummaryStarted: lastSummaryCycleStartedUptime,
@@ -3421,7 +3488,8 @@ final class AppModel: ObservableObject {
     }
 
     private var hasCaptionBacklog: Bool {
-        SummaryRefreshPolicy.shouldYieldToCaptions(
+        guard !processingPaused else { return false }
+        return SummaryRefreshPolicy.shouldYieldToCaptions(
             now: ProcessInfo.processInfo.systemUptime,
             pendingCount: translationEnqueuedAt.count,
             oldestEnqueuedAt: translationEnqueuedAt.values.min()
@@ -4372,11 +4440,28 @@ private enum AppError: LocalizedError {
 
 #if LIVELINGO_CLI
 extension AppModel {
+    private func installCLITranslationFailureReporter(_ report: @escaping @MainActor (String, [String: Any]) -> Void) {
+        translationFailureReporter = { report("translation_failure", $0) }
+    }
+
+    #if LIVELINGO_CLI_LIFECYCLE_TESTS
+    func cliTranslateForTesting(_ captions: [TranscriptSegment],
+                                report: @escaping @MainActor (String, [String: Any]) -> Void) async {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled && !scheduledNotesEnabled)
+        precondition(!noteReviewQueue.hasWork)
+        resetSessionStateForNewRun()
+        installCLITranslationFailureReporter(report)
+        defer { translationFailureReporter = nil }
+        for caption in captions { appendConfirmedCaption(caption, hints: []) }
+        await translationWorker?.value
+    }
+    #endif
+
     func cliRun(file: URL?, seconds: Double, directory: URL, highQuality: Bool,
                 paced: Bool = true, exportNotes: Bool = false, runReview: Bool = false,
                 report: @escaping @MainActor (String, [String: Any]) -> Void) async throws {
         resetSessionStateForNewRun()
-        translationFailureReporter = { report("translation_failure", $0) }
+        installCLITranslationFailureReporter(report)
         defer { translationFailureReporter = nil }
         effectiveProfile = highQuality ? .highQuality : .energySaver
         pipeline.update(profile: effectiveProfile)
@@ -4543,7 +4628,7 @@ extension AppModel {
     /// Returns observed facts so the CLI, not the model, decides PASS.
     func cliOpenSaved(directory: URL, resume: Bool, highQuality: Bool, exportNotes: Bool, runReview: Bool,
                       report: @escaping @MainActor (String, [String: Any]) -> Void) async throws -> LiveLingoCLI.CLIObservedSession {
-        translationFailureReporter = { report("translation_failure", $0) }
+        installCLITranslationFailureReporter(report)
         defer { translationFailureReporter = nil }
         effectiveProfile = highQuality ? .highQuality : .energySaver
         pipeline.update(profile: effectiveProfile)

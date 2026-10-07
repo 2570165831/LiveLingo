@@ -959,6 +959,34 @@ struct LearningNoteBatch: Codable, Equatable, Sendable {
     /// 旧数据没有这个键 ✓（可选字段，Codable 兼容 ✓）。
     var followUps: [LearningFollowUp]? = nil
     var ids: Set<UUID> { Set(evidence.map(\.id)) }
+
+    init(id: UUID, evidence: [TranscriptSegment], note: LearningNote,
+         followUps: [LearningFollowUp]? = nil) {
+        self.id = id
+        self.evidence = evidence.map(\.withoutTranslationFailures)
+        self.note = note
+        self.followUps = followUps
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, evidence, note, followUps }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try values.decode(UUID.self, forKey: .id),
+                  evidence: try values.decode([TranscriptSegment].self, forKey: .evidence),
+                  note: try values.decode(LearningNote.self, forKey: .note),
+                  followUps: try values.decodeIfPresent([LearningFollowUp].self, forKey: .followUps))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        // Also enforce the boundary at encoding: direct copies and restored
+        // batches must have the same bytes/digests as the pre-trail format.
+        try values.encode(evidence.map(\.withoutTranslationFailures), forKey: .evidence)
+        try values.encode(note, forKey: .note)
+        try values.encodeIfPresent(followUps, forKey: .followUps)
+    }
 }
 
 /// 时间标签：把"来源片段 → 字幕时间"的换算集中在一处（**纯函数** ✓，可单测 ✓）。
@@ -2517,7 +2545,7 @@ struct LearningDraft: Sendable {
          text: String = "", attempts: Int = 0, completedNote: LearningNote? = nil,
          pendingTargets: [String] = [], contextRevision: Int = 0,
          dependencyIDs: [UUID]? = nil, frozenBinding: SessionGenerationCheckpoint? = nil) {
-        self.id = id; self.evidence = evidence; self.model = model; self.input = input
+        self.id = id; self.evidence = evidence.map(\.withoutTranslationFailures); self.model = model; self.input = input
         self.text = text; self.attempts = attempts; self.completedNote = completedNote
         self.pendingTargets = pendingTargets; self.contextRevision = contextRevision
         self.dependencyIDs = dependencyIDs ?? evidence.map(\.id)
@@ -2563,7 +2591,7 @@ struct LearningDraft: Sendable {
     func matches(evidence: [TranscriptSegment], model: String) -> Bool {
         // The exact model input is frozen. A revision of unrelated notebook
         // content does not invalidate this draft's source dependencies.
-        self.evidence == evidence && self.model == model
+        self.evidence == evidence.map(\.withoutTranslationFailures) && self.model == model
     }
 
     func matches(snapshot: SessionSnapshot, model: String) -> Bool {

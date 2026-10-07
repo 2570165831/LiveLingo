@@ -10,13 +10,14 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         case processExited, requestTimedOut, outputLimitReached, translationRejected
         case cancelled, interrupted, runtimeUnavailable, invalidResponse
         case generationInterrupted, requestFailed, unknown
+        case dependencyCancelled
 
         static func category(for error: Error) -> Self {
-            if error is CancellationError { return .cancelled }
+            if error is CancellationError { return .dependencyCancelled }
             if error is DecodingError { return .invalidResponse }
             if let error = error as? URLError {
                 if error.code == .timedOut { return .requestTimedOut }
-                if error.code == .cancelled { return .cancelled }
+                if error.code == .cancelled { return .dependencyCancelled }
             }
             if let error = error as? POSIXError, error.code == .EPIPE { return .processExited }
             guard let error = error as? QwenRuntimeError else { return .unknown }
@@ -107,6 +108,14 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     /// An inferred 0.2.0 marker is not evidence of an explicit language choice.
     /// This is in-memory provenance, never an additional persisted field.
     var hasExplicitSourceLanguage: Bool { sourceLanguage != nil && !sourceLanguageWasInferred }
+
+    /// Diagnostics belong to the transcript archive, never to frozen learning
+    /// evidence or its digest. Preserve every content and provenance field.
+    var withoutTranslationFailures: Self {
+        var evidence = self
+        evidence.translationFailures = []
+        return evidence
+    }
 
     /// Old builds omit language metadata when writing an inputRevision. The
     /// predecessor must still match every content, identity and translation field.
@@ -246,8 +255,15 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             translationState = storedState
             translationError = try values.decodeIfPresent(String.self, forKey: .translationError)
         }
-        for failure in try values.decodeIfPresent([TranslationFailure].self, forKey: .translationFailures) ?? [] {
-            addTranslationFailure(failure.reason, count: failure.count)
+        // This optional trail cannot make otherwise valid course content
+        // unreadable. Consume entries independently so a bad one does not
+        // discard its valid neighbours; core segment fields remain strict.
+        if var failures = try? values.nestedUnkeyedContainer(forKey: .translationFailures) {
+            while !failures.isAtEnd {
+                guard let entry = try? failures.superDecoder() else { break }
+                guard let failure = try? TranslationFailure(from: entry) else { continue }
+                addTranslationFailure(failure.reason, count: failure.count)
+            }
         }
         if storedLanguage == nil, translationState == .completed, english == chinese,
            EnglishTranscriptGate.verdict(english) == .hanDominant {
