@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 from typing import Iterable, Mapping, Sequence
 
+from .reference_annotations import apply_reference_annotations
+
 UN_LOCALES = ("ar", "zh", "en", "fr", "ru", "es")
 OUTPUT_ROOT_ENV = "LIVELINGO_TARGET_EVAL_OUTPUT_ROOT"
 
@@ -151,7 +153,9 @@ def read_un_meeting(path: str | Path, *, include_partial: bool = False) -> Corpu
 
     Incomplete extracted text is excluded by default and always reported. Raw
     record turn counts may differ after a curated correction; never realign by
-    zipping raw records. No timestamps are inferred from text length.
+    zipping raw records. Only catalogue-listed, hash-bound reference annotations
+    are applied in memory and retained in metadata. Raw files are never changed.
+    No timestamps are inferred from text length.
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
@@ -201,6 +205,9 @@ def read_un_meeting(path: str | Path, *, include_partial: bool = False) -> Corpu
                     "original_languages": turn.get("original_languages", []),
                     "alignment": "curated-turn-index",
                     "audio_alignment": "not-used", **turn_notes}
+        six_texts, annotations = apply_reference_annotations(meeting, index, six_texts)
+        if annotations:
+            metadata["reference_annotations"] = annotations
         units.append(ParallelUnit(unit_id, "un", six_texts, metadata))
     return CorpusResult(tuple(units), tuple(excluded))
 

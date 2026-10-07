@@ -35,7 +35,7 @@ be within the task's write authorization. Without `TMPDIR`, tests use Python's
 system temporary directory. Each fixture test configures its own temporary
 directory through `LIVELINGO_TARGET_EVAL_OUTPUT_ROOT` and exercises the production
 validation function. The aggregate runner and root-level `test_target_eval`
-discovery bridge load all corpus, metric and review regressions without path
+discovery bridge load all corpus, metric, review and calibration regressions without path
 overrides, filtering or skips. Temporary synthetic fixtures and environment
 changes are cleaned up by unittest. No UserDefaults suites are used.
 
@@ -132,3 +132,153 @@ decision. Per-example scores remain available.
 nonempty list of nonempty alternative strings; an empty outer list means no
 required concepts. Null, numbers, booleans, objects and strings in place of the
 outer list produce an argparse error without a traceback or output file.
+
+## Offline Latin-target calibration
+
+`calibrate.py` invokes the compiled Swift target-acceptance CLI through `judge`
+JSONL. Python does not implement acceptance, identify languages, import a model,
+download data or load a tokenizer. Tests use invented inputs and canned replies.
+Use Python 3.13; `python3` below must select that interpreter.
+
+From the checkout, set the existing external output root as described
+above. Build the offline CLI and use new destinations under that root:
+
+```sh
+Scripts/build-target-eval-cli.sh "$LIVELINGO_TARGET_EVAL_OUTPUT_ROOT/latin-cli-delivery"
+
+"$LIVELINGO_TARGET_EVAL_OUTPUT_ROOT/latin-cli-delivery/target-acceptance-cli" \
+  prompts --output-dir "$LIVELINGO_TARGET_EVAL_OUTPUT_ROOT/latin-prompts"
+
+PYTHONDONTWRITEBYTECODE=1 python3 -m Scripts.target_eval.calibrate \
+  --cli "$LIVELINGO_TARGET_EVAL_OUTPUT_ROOT/latin-cli-delivery/target-acceptance-cli" \
+  --un-root ../data/un \
+  --output "$LIVELINGO_TARGET_EVAL_OUTPUT_ROOT/new-report.json"
+```
+
+Existing outputs are never replaced. `corpora.validate_output_path` rejects
+checkout writes, symlinks and destinations outside the configured root. UN input
+defaults to `../data/un`; calibration reads curated `S_PV.*/turns.json`, without
+opening audio, raw records or quarantines. Partial turns are excluded and counted
+by default; `--include-partial` is a diagnostic opt-in.
+
+One explicit reference annotation is applied **in memory at corpus load**:
+S/PV.10142, turn 9, English, U+03A4 (Greek capital Tau) becomes U+0054 (Latin T).
+`reference_annotations.py` binds it to the complete original reference SHA-256
+and zero-based Unicode scalar offset 3408. A mismatch stops loading. No other
+occurrence, meeting or language is corrected. Metadata retains the annotation
+ID, before/after hashes, code points, offset and official-record URL, PDF/text
+hashes, page and line. The local PDF text layer independently confirmed the Tau;
+calibration does not re-read those record files. Raw corpus files stay unchanged,
+and the Swift `nonLatinScript` rule is not relaxed. See [PROVENANCE.md](PROVENANCE.md).
+
+The evaluation unit is a complete curated speech turn, not a sentence. For each
+es/fr/en target, a turn supplies five source comparisons: a human target
+reference, a loaded-source echo and four wrong-language references for each
+source. No source equals its target, including en/en. The explicit annotation
+affects every use of that loaded English reference consistently. Nothing is
+discarded because of length, script, identical wording or a verdict.
+
+Reports retain descriptive comparison counts and ratios, with a separate
+`clustered_by_turn_reference` summary. Five uses of one target reference form
+**one turn/reference cluster**, not five independent observations. Clustered
+false rejection is the equal-weight mean of within-turn rejection fractions;
+`any_false_rejection` also counts turns with at least one rejected reference.
+Every cluster retains its comparison/rejection counts. Echo and wrong-language
+interception, source breakdowns and wrong-candidate breakdowns are clustered too.
+
+Confidence intervals use a deterministic percentile bootstrap: lexicographically
+sort turn IDs, resample whole turn/reference clusters with replacement, then
+take the interpolated 2.5th and 97.5th percentiles of mean turn rates.
+`--bootstrap-resamples` defaults to 10000 and `--bootstrap-seed` to 0; both are
+recorded. Intervals condition on the observed turns and fixed policy. All-zero
+or all-one outcomes give degenerate bootstrap intervals and **do not establish
+a population bound**. Turns within one meeting may remain correlated; that
+dependence is not estimated here. As a separate best-case diagnostic, zero
+failures among 85 IID turn references would still have a one-sided 95% binomial
+upper bound of about 3.46%, from `1 - 0.05 ** (1 / 85)`. This is not a confidence
+bound for observed nonzero failures.
+
+Length ratios include rejected references. Count NFC-normalized Unicode letters
+(Lu/Ll/Lt/Lm/Lo, Python `isalpha`), preserving accents and excluding combining
+marks, digits and punctuation. Every CLI count and ratio is checked; mismatches
+stop calibration. Zero-letter source ratios are null. Quantiles use linear
+interpolation at `(n - 1) * q`. Reports include p50/p95/p99/p99.5/max, rejection
+codes and length rejections. Each source breakdown compares the observed p99.5
+ceiling with the CLI's configured ratio; mismatches are reported, never tuned.
+
+`--maximum-length-ratio` is an explicit diagnostic override to Swift. Without
+it, the CLI selects its fixed target/source parameters; the documented formula
+is `max(sourceLetters, 24) * maximumRatio + 12`. The 12-letter allowance is a
+heuristic. Effective limit ratios include that allowance and differ from the
+configured ratio. The reviewed `fr <- ru` parameter 1.20 does **not** equal the
+documented p99.5 ceiling of 1.19; [PROVENANCE.md](PROVENANCE.md) gives the evidence.
+This review retains the existing 1.20 parameter, discloses the unconfirmed
+extra 0.01 in Swift's comment, and changes no policy ratio.
+
+The same UN turns supplied the parameters and the evaluation references. These
+are **in-sample diagnostics**, with **no independent holdout** and no sentence,
+short-caption or formula generalization evidence. Reports explicitly leave the
+1% population false-rejection gate unestablished. Synthetic tests verify code,
+not held-out accuracy. Wrong-language labels test language/script interception,
+not semantic quality; script-different negatives can make interception easier.
+Token ratios remain unmeasured. No real corpus is downloaded or exported here.
+
+Schema 2 reports retain all CLI verdicts, exclusions, relative input manifests,
+reference annotations, code hashes and counting/resampling methods. The CLI
+identity is only its **basename and SHA-256**, without its machine path. Stderr
+is represented by byte counts and hashes, without raw diagnostic text. The
+command prints its output path relative to the configured output root. Input and CLI
+mutations are detected before writing. `--batch-size` defaults to 128 and
+`--timeout-seconds` to 120 per batch; both pipes are drained while sending input.
+Unknown, duplicate, missing or inconsistent replies fail.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+  Scripts.target_eval.test_corpora \
+  Scripts.target_eval.test_metrics \
+  Scripts.target_eval.test_calibrate \
+  Scripts.target_eval.test_review_sidecar
+```
+
+Initial reuse provenance is `src-target-eval` commit
+`b4abd77454e74c4646b62bbde8c26e1bb94703f4`: `__init__.py`, `corpora.py`,
+`metrics.py`, `test_corpora.py` and `test_metrics.py` originated there.
+`corpora.py` now adds the explicit annotation. Reports hash current Python files,
+including the additional annotation and clustering modules; the reuse commit
+identifies origin, not byte identity of every current file.
+
+The Swift `judge` command receives `id`, `source`, `candidate`, `sourceLanguage`,
+`targetLocale` and optional `maximumLengthRatio` per stdin line, and emits one
+verdict per line. Latin acceptance remains the Swift owner's responsibility.
+The Python runner evaluates only en/es/fr; it does not assert that the diagnostic
+zh-Hans CLI reproduces every production App branch.
+
+`prompts` exports UTF-8 bytes and a SHA-256 manifest. Build and prompt output
+directories must be new descendants of `LIVELINGO_TARGET_EVAL_OUTPUT_ROOT`,
+without symlinks. The build and prompt export read that variable; neither
+checkout placement, binary placement nor the current directory supplies
+a fallback. An absent, relative, missing, symlinked or checkout root fails
+before output creation.
+The build uses `work/dd-latin/target-acceptance-cli/<output-directory-name>/ModuleCache.noindex`
+and the sibling `tmp` directory. A different output name isolates concurrent
+CLI builds without conflicting with the App's DerivedData. Synthetic Swift CLI integration tests remain in
+`Scripts/test_target_acceptance_cli.py`; set `LIVELINGO_TARGET_ACCEPTANCE_CLI`
+when using a different build directory. Those tests require an existing binary.
+
+The root `test_offline_suite.py` exposes all existing Python script suites to
+`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest` on Python 3.13, which otherwise
+skips the namespace directories. The complete suite also requires the existing
+runtime dependencies, a current offline CLI via `LIVELINGO_TARGET_ACCEPTANCE_CLI`,
+and `LIVELINGO_QUALITY_TEST_DIRECTORY` pointing to an isolated directory under
+`work/dd-latin`. Set `TMPDIR` to an existing authorized temporary directory
+under `work/target-eval` for fixture output, and
+`LIVELINGO_ASR_TEST_IN_PROCESS=1` to run the ASR handlers without sockets.
+If the selected Python lacks runtime dependencies, add existing tested Python
+3.13 site-packages directories to `PYTHONPATH`. Include `$PWD/Scripts` and
+`$PWD/Scripts/mlx_runtime` there for the in-process ASR child probe. This reuses
+installed dependencies and never installs packages or loads model weights.
+The existing `test_target_eval` bridge loads all evaluation suites once;
+the new discovery bridge loads the remaining script suites without
+duplicating them. It follows unittest's module-name rules; standalone CLI/release
+scripts with hyphenated names retain their separate entry points. It never
+acquires dependencies or model weights automatically.

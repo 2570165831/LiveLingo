@@ -6,6 +6,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */; };
+		B71900000000000000000001 /* TargetAcceptance.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71900000000000000000002 /* TargetAcceptance.swift */; };
 		B70000000000000000000009 /* acceptance-verdicts-zh-Hans.json in Resources */ = {isa = PBXBuildFile; fileRef = B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */; };
 		B70000000000000000000007 /* AcceptanceVerdictSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000008 /* AcceptanceVerdictSnapshotTests.swift */; };
 		B70000000000000000000005 /* default-target-golden.json in Resources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000006 /* default-target-golden.json */; };
@@ -101,6 +103,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatinTargetAcceptanceTests.swift; sourceTree = "<group>"; };
+		B71900000000000000000002 /* TargetAcceptance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetAcceptance.swift; sourceTree = "<group>"; };
 		B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/acceptance-verdicts-zh-Hans.json"; sourceTree = "<group>"; };
 		B70000000000000000000008 /* AcceptanceVerdictSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcceptanceVerdictSnapshotTests.swift; sourceTree = "<group>"; };
 		B70000000000000000000006 /* default-target-golden.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/default-target-golden.json"; sourceTree = "<group>"; };
@@ -218,6 +222,7 @@
 			children = (
 				910000000000000000000002 /* FloatingSubtitlePreferences.swift */,
 				CA0000000000000000000102 /* CaptureHealth.swift */,
+				B71900000000000000000002 /* TargetAcceptance.swift */,
 				900000000000000000000002 /* CaptionPresentation.swift */,
 				EA33EF11F70BAA832EBE7D3D /* ReviewReportCollection.swift */,
 				DC2A12CCCC919BB523AFFB33 /* ReviewIdentity.swift */,
@@ -260,6 +265,7 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */,
 				B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */,
 				B70000000000000000000008 /* AcceptanceVerdictSnapshotTests.swift */,
 				B70000000000000000000006 /* default-target-golden.json */,
@@ -372,6 +378,7 @@
 			files = (
 				910000000000000000000001 /* FloatingSubtitlePreferences.swift in Sources */,
 				CA0000000000000000000101 /* CaptureHealth.swift in Sources */,
+				B71900000000000000000001 /* TargetAcceptance.swift in Sources */,
 				900000000000000000000001 /* CaptionPresentation.swift in Sources */,
 				04F78613ACCF181FC7155CCF /* ReviewReportCollection.swift in Sources */,
 				BFEA359EEB395F257C15B7E0 /* ReviewIdentity.swift in Sources */,
@@ -410,6 +417,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */,
 				B70000000000000000000007 /* AcceptanceVerdictSnapshotTests.swift in Sources */,
 				B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,

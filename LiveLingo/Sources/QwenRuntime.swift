@@ -253,6 +253,20 @@ enum TranslationAcceptance {
         "<think>", "</think>", "<|im_start|>", "<|im_end|>", "<|endoftext|>"
     ]
 
+    /// Shared ordering for empty/control/leak/self-reply checks. Each target
+    /// supplies its own leak and self-description policies; Chinese keeps its
+    /// original expressions and normalization unchanged.
+    static func structuralRejection(in text: String, source: String, originalIsEmpty: Bool? = nil,
+                                    containsLeak: (String) -> Bool,
+                                    containsSelfReply: (String, String) -> Bool) -> Rejection? {
+        guard !(originalIsEmpty ?? text.isEmpty) else { return .empty }
+        let folded = text.lowercased()
+        if controlMarkers.contains(where: folded.contains) { return .controlMarker }
+        if containsLeak(folded) { return .promptLeak }
+        if containsSelfReply(text, source) { return .modelReply }
+        return nil
+    }
+
     // Refusals can be fluent Chinese and shorter than the length limit. Reject
     // an added model self-description, but keep it when the lecture itself
     // quotes or discusses that wording. Ordinary "I cannot" is not a marker.
@@ -452,7 +466,7 @@ enum TranslationAcceptance {
         }
     }
 
-    private static func preservesSourceJSON(in candidate: String, source: String) -> Bool {
+    static func preservesSourceJSON(in candidate: String, source: String) -> Bool {
         let original = jsonObjects(in: source).filter { !$0.fields.isEmpty }
         // Bare {} is also an empty set; it does not establish JSON source data.
         guard !original.isEmpty else { return true }
@@ -1112,12 +1126,12 @@ enum TranslationAcceptance {
     private static func nonEnglishRejection(candidate: String, source: String, code: String) -> Rejection? {
         guard let language = SpokenLanguage.find(code) else { return .nonChineseText }
         let body = bodyWithoutApplicationNotice(candidate)
-        guard !body.isEmpty else { return .empty }
         let folded = body.folding(options: [.widthInsensitive, .diacriticInsensitive], locale: nil)
-        let lowercased = folded.lowercased()
-        if controlMarkers.contains(where: lowercased.contains) { return .controlMarker }
-        if leakMarkers.contains(where: lowercased.contains) { return .promptLeak }
-        if unsupportedModelSelfDescription(in: folded, source: source) { return .modelReply }
+        if let structural = structuralRejection(in: folded, source: source, originalIsEmpty: body.isEmpty,
+            containsLeak: { text in leakMarkers.contains(where: text.contains) },
+            containsSelfReply: { text, source in unsupportedModelSelfDescription(in: text, source: source) }) {
+            return structural
+        }
         let target = CaptionTranslationTarget.current
         if target.containsInstructionLeak(body) { return .promptLeak }
         guard target.containsOutputScript(body) else { return .nonChineseText }
@@ -1187,12 +1201,10 @@ enum TranslationAcceptance {
         let trimmed = bodyWithoutApplicationNotice(candidate).folding(
             options: [.widthInsensitive, .diacriticInsensitive], locale: nil
         )
-        guard !trimmed.isEmpty else { return .empty }
-        let lowercased = trimmed.lowercased()
-        if controlMarkers.contains(where: lowercased.contains) { return .controlMarker }
-        if leakMarkers.contains(where: lowercased.contains) { return .promptLeak }
-        if unsupportedModelSelfDescription(in: trimmed, source: source) {
-            return .modelReply
+        if let structural = structuralRejection(in: trimmed, source: source,
+            containsLeak: { text in leakMarkers.contains(where: text.contains) },
+            containsSelfReply: { text, source in unsupportedModelSelfDescription(in: text, source: source) }) {
+            return structural
         }
 
         let sourceForm = echoForm(source)
