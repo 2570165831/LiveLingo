@@ -1689,37 +1689,47 @@ enum LatinTargetAcceptance {
 enum LatinTargetLengthGuard {
     static let minimumSourceLetters = 24
     static let absoluteLetterAllowance = 12
-    /// Provisional value from 85 complete turns in four local UN meetings.
-    /// Same NFC Unicode-letter scalar unit as letterCount, for both source
-    /// and English reference: p99.5 4.5673229613733906, ceiling to 0.01.
-    /// 55 Han-only sources; 30 mixed sources contain 60 non-Han letters.
-    /// Scripts/target_eval/calibrate.py reports these cohorts separately.
-    /// In-sample only, with no added ratio margin; not a 1% gate or caption
-    /// guarantee. Recalibrate after expanding meetings/sources and validate
-    /// on an independent holdout. Existing 24/+12 allowances are retained.
-    static let englishFromHanMaximumRatio = 4.57
+    /// OPUS TED2020 v1 community references, calibrated 2026-10-08:
+    /// one exact English-pivot alignment per talk; 2,346 training documents,
+    /// 1,222 disjoint held-out talks. NFC Unicode-letter scalar counting.
+    /// ceil(training p99.5 of max(0, (targetLetters - 12) / max(sourceLetters, 24))
+    /// * 100) / 100, with no added margin; existing 24/+12 incorporated.
+    /// zh_cn -> en held-out length rejection: 5/1,222; one-sided exact 95%
+    /// upper bound 0.8584%, assuming independent talks. Full acceptance has
+    /// 7/1,222 rejections (upper 1.0732%); this is no classroom/quality guarantee.
+    static let englishFromHanMaximumRatio = 3.84
 
-    /// Four local UN meetings, 85 fully extracted aligned turns. Values follow
-    /// the reference letter-ratio p99.5 rounded UP to 0.01, except es/zh is
-    /// now stratified by the existing 24-letter source floor (tl2526 low 2).
-    /// Its 83 long sources give p99.5 4.947313799104824 => 4.95; all 85 ratios
-    /// using max(sourceLetters, 24) independently give 4.946933924302552 =>
-    /// 4.95. The two repeated 16-letter sources belong to a separate short
-    /// stratum, not the long-source multiplier. With +12, one long reference
-    /// exceeds this provisional boundary by 0.85 letters; no holdout claim.
-    /// Scripts/target_eval/recompute_es_zh_length.py binds the raw input hashes,
-    /// deduplication, strata and exact-fraction interpolation. Step 25 corrects
-    /// the unsubstantiated historical fr/ru 1.20 to its measured ceiling 1.19
-    /// (Scripts/target_eval/PROVENANCE.md). These are provisional in-sample parameters;
-    /// expanded meetings/sources and an independent holdout must establish
-    /// their replacement, not this sample or a subtitle guarantee.
+    /// Same TED2020 v1 derivation and 2,346/1,222 document split as above for
+    /// 14 listed directions (Han/Latin/Cyrillic/Arabic sources). TED proposals
+    /// were frozen before evaluating holdout; Scripts/target_eval/calibrate.py
+    /// --public-manifest reports raw/effective quantiles, full rejections and
+    /// unchanged-source/wrong-language interception. CS50 references with
+    /// unverified authorship are excluded; gated FLORES+ was not downloaded.
+    /// Below, source-order counts are held-out length rejections out of 1,222.
+    /// Bounds assume approximately independent talks, not independent language
+    /// comparisons. Unlisted languages retain uncalibrated fallback values.
+    /// Exception: es <- zh retains the provisional UN value 4.95. The independent
+    /// review found that TED's 4.16 rejects 9/85 saved UN references, versus 1/85
+    /// at 4.95. The 83 sources at least 24 letters have raw p99.5
+    /// 4.947313799104824; all 85 floor-adjusted ratios give 4.946933924302552.
+    /// Both round up to 4.95; the two repeated 16-letter sources stay separate.
+    /// recompute_es_zh_length.py preserves exact fractions and input provenance.
+    /// Review-only TED length arithmetic at 4.95 is 3/1,222 (upper 0.6333%);
+    /// it does not verify merged full acceptance, long-source or classroom gates.
+    /// This avoids a known cross-domain length regression, not a universal 1%
+    /// guarantee: 4.95 still rejects 1/85 UN references. Preserve the mainline
+    /// source-copy checks independently of these temporary length constants.
     static func maximumRatio(target: LatinTargetAcceptance.Target, sourceLanguage: String?) -> Double {
         LatinAcceptanceInstrumentation.record(.maximumRatio)
         let source = sourceLanguage?.lowercased().split(separator: "-").first.map(String.init) ?? "en"
         let ratios: [LatinTargetAcceptance.Target: [String: Double]] = [
-            .english: ["es": 1.10, "fr": 1.13, "zh": englishFromHanMaximumRatio, "ar": 1.89, "ru": 1.08],
-            .spanish: ["en": 1.26, "fr": 1.23, "zh": 4.95, "ar": 2.25, "ru": 1.24],
-            .french: ["en": 1.26, "es": 1.10, "zh": 4.96, "ar": 1.84, "ru": 1.19]
+            // es/fr/zh/ar/ru: 1/7/5/5/1; 95% upper 0.3876/1.0732/0.8584/0.8584/0.3876%.
+            .english: ["es": 1.33, "fr": 1.20, "zh": englishFromHanMaximumRatio, "ar": 1.64, "ru": 1.45],
+            // en/fr/zh/ar/ru: 3/6/3/4/6; 95% upper 0.6333/0.9668/0.6333/0.7475/0.9668%.
+            .spanish: ["en": 1.49, "fr": 1.35, "zh": 4.95, "ar": 1.79, "ru": 1.52],
+            // en/es/zh/ar/ru: 4/8/10/3/6; 95% upper 0.7475/1.1781/1.3841/0.6333/0.9668%.
+            // fr <- es/zh and en <- fr do not establish a 1% bound; all remain provisional.
+            .french: ["en": 1.63, "es": 1.43, "zh": 4.57, "ar": 2.08, "ru": 1.67]
         ]
         return ratios[target]?[source] ?? (["zh", "ja", "ko", "yue"].contains(source) ? 6 : 2)
     }

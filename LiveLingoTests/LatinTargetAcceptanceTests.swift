@@ -643,17 +643,17 @@ extension LatinTargetAcceptanceTests {
         XCTAssertEqual(LatinTargetLengthGuard.letterCount(mixed), 34)
         XCTAssertEqual(LatinTargetLengthGuard.letterCount("汉Ａe\u{301}𠮷 123。"), 4)
         XCTAssertEqual(LatinTargetLengthGuard.maximumOutputLetters(source: mixed,
-            target: .english, sourceLanguage: "zh"), 34 * 4.57 + 12, accuracy: 1e-12)
+            target: .english, sourceLanguage: "zh"), 34 * 3.84 + 12, accuracy: 1e-12)
         XCTAssertGreaterThan(LatinTargetLengthGuard.maximumOutputLetters(source: mixed,
             target: .english, sourceLanguage: "zh"),
             LatinTargetLengthGuard.maximumOutputLetters(source: String(repeating: "汉", count: 30),
                 target: .english, sourceLanguage: "zh"))
     }
 
-    func testEnglishHanProvisionalLengthBoundAcceptsEdgeAndRejectsNextLetter() {
-        // 4.57 is the 85-turn in-sample p99.5 ceiling, not a holdout
-        // guarantee. The existing floor and absolute allowance are retained.
-        XCTAssertEqual(LatinTargetLengthGuard.englishFromHanMaximumRatio, 4.57)
+    func testEnglishHanCalibratedLengthBoundAcceptsEdgeAndRejectsNextLetter() {
+        // 3.84 comes from 2,346 TED training talks with 1,222 held-out talks.
+        // The effective p99.5 incorporates the retained floor/allowance.
+        XCTAssertEqual(LatinTargetLengthGuard.englishFromHanMaximumRatio, 3.84)
         for source in ["汉", String(repeating: "汉", count: 24),
                        String(repeating: "汉", count: 233),
                        String(repeating: "汉", count: 30) + " DNA"] {

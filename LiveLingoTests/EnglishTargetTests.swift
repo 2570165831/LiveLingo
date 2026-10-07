@@ -285,7 +285,7 @@ final class EnglishTargetTests: XCTestCase {
             (QwenTranslationClient.englishWrapper9B, "90e1c8ea3292feb9fff75e05cfc38f664425dcaa206de7fbf4f635982e271490"),
             (QwenTranslationClient.englishRecoverySuffix, "8256f3a178f093cd1921cf36a5f55f45a09692b309ffbff8b08269ad1c5e9d61")]
         for (prompt, digest) in prompts { XCTAssertEqual(SessionArchiveCoding.digest(Data(prompt.utf8)), digest) }
-        XCTAssertEqual(LatinTargetLengthGuard.englishFromHanMaximumRatio, 4.57)
+        XCTAssertEqual(LatinTargetLengthGuard.englishFromHanMaximumRatio, 3.84)
         XCTAssertFalse(CaptionTranslationTarget.english.sourceInstruction(SpokenLanguage.find("yue")!).contains("Mandarin"))
     }
 
