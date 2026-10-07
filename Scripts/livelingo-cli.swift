@@ -49,7 +49,16 @@ struct LiveLingoCLI {
 
  // MARK: - Command line
 
- static let usage = "Usage: livelingo-cli (--replay AUDIO | --system-audio SECONDS) --output NEW_DIRECTORY [--target zh-Hans|zh-Hant-TW|zh-Hant-HK] [--high-quality] [--import] [--export-notes] [--run-review]\n       livelingo-cli --translate-text TEXT [--high-quality] [--output NEW_DIRECTORY]\n       livelingo-cli --verify-saved DIRECTORY\n       livelingo-cli --open-saved DIRECTORY\n       livelingo-cli --resume-saved DIRECTORY [--high-quality] [--export-notes] [--run-review]\nReplay injects PCM without playing sound. --import uses the app's file-import path. Audio requires ASRRuntime/ and Models/ beside this executable or inside its isolated bundle. External ASR endpoints are rejected. MLX paths use LIVELINGO_MLX_PYTHON/WORKER/MODELS. Each generating run creates independent preferences, data and checkpoints; failures retain state. Only --translate-text prints translated content. --verify-saved is a read-only export-integrity check (it does NOT prove a complete run, and it accepts valid audio with zero captions). --open-saved reopens a course this CLI itself isolated and bound; it never records, never resumes generation and reports identity, revision, batches, source and pause state. --resume-saved performs the same bound reopen and then explicitly continues the saved translation/notes work; it refuses courses whose bound session, revision, captions or batches do not match the recorded identity."
+ static let usage = "Usage: livelingo-cli (--replay AUDIO | --system-audio SECONDS) --output NEW_DIRECTORY [--target zh-Hans|zh-Hant-TW|zh-Hant-HK] [--high-quality] [--import] [--export-notes] [--run-review]\n       livelingo-cli (--translate-file UTF8_FILE | --translate-stdin) --translation-output NEW_JSONL_FILE [--high-quality] [--output NEW_DIRECTORY]\n       livelingo-cli --translate-text TEXT [--high-quality] [--output NEW_DIRECTORY] [--translation-output NEW_JSONL_FILE] [--allow-content-output]\n       livelingo-cli --verify-saved DIRECTORY\n       livelingo-cli --open-saved DIRECTORY\n       livelingo-cli --resume-saved DIRECTORY [--high-quality] [--export-notes] [--run-review]\nReplay injects PCM without playing sound. --import uses the app's file-import path. Audio requires ASRRuntime/ and Models/ beside this executable or inside its isolated bundle. External ASR endpoints are rejected. MLX paths use LIVELINGO_MLX_PYTHON/WORKER/MODELS. Each generating run creates independent preferences, data and checkpoints; failures retain state. Text translations go to a new private JSONL file; stdout contains progress only. Legacy --translate-text exposes input in process arguments and warns; its default file is translation.jsonl in the isolated output directory. --allow-content-output explicitly enables legacy OUTPUT[n] stdout. --verify-saved is a read-only export-integrity check (it does NOT prove a complete run, and it accepts valid audio with zero captions). --open-saved reopens a course this CLI itself isolated and bound; it never records, never resumes generation and reports identity, revision, batches, source and pause state. --resume-saved performs the same bound reopen and then explicitly continues the saved translation/notes work; it refuses courses whose bound session, revision, captions or batches do not match the recorded identity."
+
+ struct TextCommand: Equatable, Sendable {
+  enum Input: Equatable, Sendable { case legacy(String), file(String), stdin }
+  let input: Input
+  let highQuality: Bool
+  let output: String?
+  let translationOutput: String?
+  let allowContentOutput: Bool
+ }
 
  struct GenerateCommand: Equatable, Sendable {
   enum Source: Equatable, Sendable { case replay(String), systemAudio(Double) }
@@ -66,6 +75,7 @@ struct LiveLingoCLI {
   case help
   case verifySaved(String)
   case translateText(text: String, highQuality: Bool, output: String?)
+  case translateInput(TextCommand)
   case generate(GenerateCommand)
   case openSaved(String)
   case resumeSaved(path: String, highQuality: Bool, exportNotes: Bool, runReview: Bool)
@@ -87,9 +97,9 @@ struct LiveLingoCLI {
 
  private static func parse(_ arguments: [String], releasedTargets: Set<OutputLanguage>) throws -> Command {
   if arguments.isEmpty || arguments.contains("--help") { return .help }
-  let valueOptions: Set<String> = ["--replay", "--system-audio", "--output", "--translate-text",
+  let valueOptions: Set<String> = ["--replay", "--system-audio", "--output", "--translate-text", "--translate-file", "--translation-output",
                                    "--verify-saved", "--open-saved", "--resume-saved", "--target"]
-  let switches: Set<String> = ["--high-quality", "--import", "--export-notes", "--run-review"]
+  let switches: Set<String> = ["--high-quality", "--import", "--export-notes", "--run-review", "--translate-stdin", "--allow-content-output"]
   var values: [String: String] = [:]
   var index = 0
   while index < arguments.count {
@@ -110,9 +120,11 @@ struct LiveLingoCLI {
    }
   }
   func flag(_ name: String) -> Bool { values[name] != nil }
-  let modes = ["--replay", "--system-audio", "--translate-text", "--verify-saved",
+  let modes = ["--replay", "--system-audio", "--translate-text", "--translate-file", "--translate-stdin", "--verify-saved",
                "--open-saved", "--resume-saved"].filter { values[$0] != nil }
   guard modes.count == 1, let mode = modes.first else { throw CLIError.invalidArguments }
+  let isText = ["--translate-text", "--translate-file", "--translate-stdin"].contains(mode)
+  guard isText || (!flag("--translation-output") && !flag("--allow-content-output")) else { throw CLIError.invalidArguments }
   if mode == "--verify-saved" || mode == "--open-saved" {
    // Read-only and reopen-only modes take no other option: mixing them with
    // generation flags is ambiguous and must be rejected before any path is
@@ -125,9 +137,17 @@ struct LiveLingoCLI {
    return .resumeSaved(path: values[mode]!, highQuality: flag("--high-quality"),
                        exportNotes: flag("--export-notes"), runReview: flag("--run-review"))
   }
-  if mode == "--translate-text" {
+  if isText {
    guard !flag("--import"), !flag("--export-notes"), !flag("--run-review"), !flag("--target") else { throw CLIError.invalidArguments }
-   return .translateText(text: values[mode]!, highQuality: flag("--high-quality"), output: values["--output"])
+   if mode == "--translate-text", !flag("--translation-output"), !flag("--allow-content-output") {
+    return .translateText(text: values[mode]!, highQuality: flag("--high-quality"), output: values["--output"])
+   }
+   guard mode == "--translate-text" || flag("--translation-output") else { throw CLIError.invalidArguments }
+   let input: TextCommand.Input = mode == "--translate-text" ? .legacy(values[mode]!)
+      : (mode == "--translate-file" ? .file(values[mode]!) : .stdin)
+   return .translateInput(TextCommand(input: input, highQuality: flag("--high-quality"),
+       output: values["--output"], translationOutput: values["--translation-output"],
+       allowContentOutput: flag("--allow-content-output")))
   }
   guard let output = values["--output"] else { throw CLIError.invalidArguments }
   guard !flag("--import") || mode == "--replay" else { throw CLIError.invalidArguments }
@@ -155,6 +175,8 @@ struct LiveLingoCLI {
    try verifySaved(URL(fileURLWithPath: path, isDirectory: true))
   case .translateText(let text, let highQuality, let output):
    try await runTranslateText(text: text, highQuality: highQuality, output: output)
+  case .translateInput(let command):
+   try await runTranslate(command)
   case .generate(let command):
    try await runGenerate(command)
   case .openSaved(let path):
@@ -167,14 +189,43 @@ struct LiveLingoCLI {
  }
 
  @MainActor static func runTranslateText(text: String, highQuality: Bool, output: String?) async throws {
-  let directory = output.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
-  _ = try configureIsolation(output: directory)
-  let model = highQuality ? QwenModelProfile.highQuality.translationModel
+  try await runTranslate(TextCommand(input: .legacy(text), highQuality: highQuality,
+      output: output, translationOutput: nil, allowContentOutput: false))
+ }
+
+ @MainActor static func runTranslate(_ command: TextCommand,
+      generate: (@MainActor (String, String) async throws -> String)? = nil) async throws {
+  let text: String
+  switch command.input {
+  case .legacy(let value):
+   FileHandle.standardError.write(Data("Warning: --translate-text exposes input in process arguments and possibly shell history. Use --translate-file or --translate-stdin. Translations are saved to a private file; --allow-content-output enables content on stdout.\n".utf8))
+   text = value
+  case .file(let path):
+   guard let value = String(data: try Data(contentsOf: URL(fileURLWithPath: path)), encoding: .utf8) else { throw CLIError.invalidArguments }
+   text = value
+  case .stdin:
+   guard let value = String(data: try FileHandle.standardInput.readToEnd() ?? Data(), encoding: .utf8) else { throw CLIError.invalidArguments }
+   text = value
+  }
+  guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CLIError.invalidArguments }
+  let directory = try configureIsolation(output: command.output.map { URL(fileURLWithPath: $0, isDirectory: true) })
+  let destination = command.translationOutput.map { URL(fileURLWithPath: $0).standardizedFileURL }
+      ?? directory.appendingPathComponent("translation.jsonl")
+  let file = try createPrivateFile(destination)
+  defer { try? file.close() }
+  let model = command.highQuality ? QwenModelProfile.highQuality.translationModel
                           : QwenModelProfile.energySaver.translationModel
-  print("model=\(model)")
+  if command.allowContentOutput { print("model=\(model)") }
+  var count = 0
   for (index, sentence) in text.components(separatedBy: "||").enumerated() {
-   let translated = try await QwenTranslationClient.translate(sentence, modelName: model)
-   print("OUTPUT[\(index)]=\(translated)")
+   let translated: String
+   if let generate { translated = try await generate(sentence, model) }
+   else { translated = try await QwenTranslationClient.translate(sentence, modelName: model) }
+   let row: [String: Any] = ["index": index, "text": translated]
+   try file.write(contentsOf: JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]) + Data([10]))
+   if command.allowContentOutput { print("OUTPUT[\(index)]=\(translated)") }
+   count += 1
+   writeEvent(["event": "translation_written", "translations": count])
   }
  }
 
@@ -545,7 +596,7 @@ struct LiveLingoCLI {
   let url = markerURL(directory)
   let confirmed = try marker.checksummed()
   let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-  try encoder.encode(confirmed).write(to: url, options: .atomic)
+  try writePrivate(encoder.encode(confirmed), to: url)
  }
 
  /// Decode and authenticate the marker. The checksum covers every field except
@@ -941,6 +992,28 @@ struct LiveLingoCLI {
   return (count, hash.finalize().map { String(format: "%02x", $0) }.joined())
  }
 
+ /// Claim a new body-bearing output without following or replacing a leaf.
+ static func createPrivateFile(_ url: URL) throws -> FileHandle {
+  let path = url.standardizedFileURL
+  guard path.deletingLastPathComponent().resolvingSymlinksInPath() == path.deletingLastPathComponent() else {
+   throw CLIError.isolationFailed
+  }
+  let descriptor = Darwin.open(path.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+  guard descriptor >= 0 else { throw errno == EEXIST ? CLIError.outputExists : CLIError.isolationFailed }
+  return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+ }
+
+ /// Atomic updates inside an owned private output tree. The temporary file is
+ /// private from creation; renaming it never follows a destination symlink.
+ static func writePrivate(_ data: Data, to url: URL) throws {
+  let temporary = url.deletingLastPathComponent().appendingPathComponent(".private-write-" + UUID().uuidString)
+  let file = try createPrivateFile(temporary)
+  defer { try? file.close(); try? FileManager.default.removeItem(at: temporary) }
+  try file.write(contentsOf: data)
+  try file.close()
+  guard Darwin.rename(temporary.path, url.path) == 0 else { throw CLIError.isolationFailed }
+ }
+
  @discardableResult static func configureIsolation(output: URL?, source: CLIRunSource = .pending) throws -> URL {
   let environment = ProcessInfo.processInfo.environment
   guard environment["LIVELINGO_ASR_ENDPOINT"] == nil, environment["LIVELINGO_ASR_TOKEN"] == nil else { throw CLIError.unownedASR }
@@ -968,7 +1041,9 @@ struct LiveLingoCLI {
   let runtime = directory.appendingPathComponent(".cli-runtime", isDirectory: true)
   let data = runtime.appendingPathComponent("data", isDirectory: true)
   let checkpoints = runtime.appendingPathComponent("checkpoints", isDirectory: true)
-  for folder in [data, checkpoints] { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
+  for folder in [runtime, data, checkpoints] {
+   guard mkdir(folder.path, 0o700) == 0 else { throw CLIError.isolationFailed }
+  }
   let marker = try newMarker(directory: directory, runID: runID, source: source)
   for (key, value) in ["LIVELINGO_PREFERENCES_SUITE": marker.preferencesSuite,
                        "LIVELINGO_DATA_DIRECTORY": data.path, "LIVELINGO_MLX_STATE": checkpoints.path] {

@@ -33,10 +33,29 @@ class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
         return subprocess.run([str(self.cli), *args], input=input, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, env=env)
 
-    def judge(self, rows):
-        reply = self.run_cli(["judge"], "".join(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n" for row in rows))
+    def judge(self, rows, *, include_content=True):
+        args = ["judge"] + (["--include-content"] if include_content else [])
+        reply = self.run_cli(args, "".join(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n" for row in rows))
         self.assertEqual(reply.returncode, 0, reply.stderr)
         return [json.loads(line) for line in reply.stdout.split("\n") if line]
+
+    def test_default_verdict_omits_literal_prefix_and_numbers(self):
+        rows = [self.row(source="The value is 3.14. It increases.",
+                         candidate="La valeur est 3,14. Elle augmente.", target="fr")]
+        private = self.judge(rows)
+        summary = self.judge(rows, include_content=False)
+        self.assertTrue(private[0]["stablePrefix"])
+        self.assertTrue(private[0]["sourceNumbers"])
+        self.assertEqual(summary[0]["stablePrefix"], "")
+        self.assertEqual(summary[0]["sourceNumbers"], [])
+        self.assertEqual(summary[0]["targetNumbers"], [])
+        self.assertEqual(summary[0]["accepted"], private[0]["accepted"])
+
+    def test_errors_do_not_echo_arbitrary_request_content(self):
+        canary = "PRIVATE_SYNTHETIC_REQUEST_DIAGNOSTIC"
+        reply = self.run_cli(["judge"], json.dumps(self.row(target=canary)) + "\n")
+        self.assertNotEqual(reply.returncode, 0)
+        self.assertNotIn(canary, reply.stdout + reply.stderr)
 
     def test_multitarget_jsonl_verdicts_have_reasons_and_preserve_identity(self):
         source = "The solution contains water and the temperature increases."

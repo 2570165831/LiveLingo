@@ -106,8 +106,10 @@ def run(args, windows, rate, report):
                 began = time.monotonic()
                 result = model.generate(waveform, verbose=False)
                 mx.synchronize()
-                record = {'raw':result.text.strip(), 'generation_seconds':time.monotonic() - began,
+                record = {'generation_seconds':time.monotonic() - began,
                           'window_start':lo / rate, 'window_end':hi / rate}
+                if args.include_content:
+                    record['raw'] = result.text.strip()
                 if mode == 'overlap':
                     tokens = [token for sentence in result.sentences for token in sentence.tokens]
                     for token in tokens:
@@ -133,8 +135,9 @@ def run(args, windows, rate, report):
                 pair[mode] = record
             report['chunks'].append(pair)
             print(f'Compared {index + 1}/{len(windows)} chunks', flush=True)
-    report['text'] = {'exact':' '.join(row['exact']['raw'] for row in report['chunks']),
-                      'overlap':''.join(token.text for token in merged).strip()}
+    if args.include_content:
+        report['text'] = {'exact':' '.join(row['exact']['raw'] for row in report['chunks']),
+                          'overlap':''.join(token.text for token in merged).strip()}
     report['formal_generations'] = 2 * len(report['chunks'])
     report['totals'] = {mode: {
         'generation_seconds':sum(row[mode]['generation_seconds'] for row in report['chunks']),
@@ -153,6 +156,8 @@ def main():
     parser.add_argument('--chunk-seconds', type=float, default=8)
     parser.add_argument('--overlap-seconds', type=float, default=0.5,
                         help='Audio context added on EACH side of a chunk')
+    parser.add_argument('--include-content', action='store_true',
+                        help='Include literal transcriptions; keep this result private')
     args = parser.parse_args()
     try:
         args.audio = args.audio.resolve(strict=True)
@@ -163,11 +168,14 @@ def main():
         windows = frame_windows(frames, rate, args.start_seconds, args.duration_seconds,
                                 args.chunk_seconds, args.overlap_seconds)
         # Exclusive creation also handles symlinks and a race with another run.
-        output = args.output.open('x', encoding='utf-8')
+        if args.output.parent.resolve() != args.output.parent.absolute():
+            raise ValueError('Output parent must not use symlinks')
+        args.output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        output = os.fdopen(descriptor, 'w', encoding='utf-8')
     except (OSError, ValueError, wave.Error) as error:
-        parser.error(str(error))
-    report = {'schema':1, 'status':'running', 'audio_name':args.audio.name,
-              'model_name':args.model.name, 'actual_sample_rate':rate,
+        parser.error('benchmark_preflight_failed; raw diagnostics omitted')
+    report = {'schema':1, 'status':'running', 'content_included':args.include_content, 'actual_sample_rate':rate,
               'actual_file_frames':frames, 'start_frame':windows[0][0], 'end_frame':windows[-1][1],
               'chunk_seconds':args.chunk_seconds, 'margin_seconds':args.overlap_seconds,
               'scope':'Offline ASR comparison, not live App scheduling or energy measurement. Prefix retractions are diagnostics, not a qualified streaming policy.',
@@ -186,7 +194,7 @@ def main():
         report['status'] = 'completed'
     except BaseException as error:
         report['status'] = 'failed'
-        report['error'] = {'type':type(error).__name__, 'message':str(error)}
+        report['error'] = {'code':'benchmark_failed'}
         status = 1
     finally:
         with output:

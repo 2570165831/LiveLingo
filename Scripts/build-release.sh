@@ -22,6 +22,15 @@ entitlements="${project_root}/LiveLingo/Resources/LiveLingo.entitlements"
   VALIDATE_PRODUCT=YES \
   build
 
+# Reject recovery/run records and unreviewed resources before any signing.
+# This gate never edits the product or an already signed input.
+python_bin="${LIVELINGO_PYTHON:-/usr/bin/python3}"
+if [[ "${python_bin}" != /* || ! -x "${python_bin}" ]]; then
+  echo "LIVELINGO_PYTHON must select an absolute executable path." >&2
+  exit 1
+fi
+"${python_bin}" "${project_root}/Scripts/privacy_package.py" check --root "${product}"
+
 if [[ -z "${LIVELINGO_SIGN_IDENTITY:-}" ]]; then
   if [[ -n "${LIVELINGO_CERTIFICATE_PATH:-}" || -n "${LIVELINGO_KEYCHAIN_PATH:-}" ]]; then
     echo "LIVELINGO_SIGN_IDENTITY is required when signing material is supplied; refusing to fall back to an unsigned build." >&2

@@ -29,6 +29,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+from privacy_package import PrivacyError, copy_distribution_tree, distribution_manifest, inspect_tree
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -102,10 +103,11 @@ def clone_tree(source, destination):
         fail("source directory is missing or is a symlink: %s" % source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     same_device = os.stat(source).st_dev == os.stat(destination.parent).st_dev
-    if same_device and is_apfs(destination.parent):
-        run(["/bin/cp", "-cR", source, destination])
-    else:
-        run(["/usr/bin/ditto", "--rsrc", "--extattr", source, destination])
+    try:
+        copy_distribution_tree(source, destination,
+                               clone_files=same_device and is_apfs(destination.parent))
+    except (PrivacyError, OSError, shutil.Error):
+        fail("input rejected by distribution privacy gate; source kept unchanged")
     if not destination.is_dir() or destination.is_symlink():
         fail("copy did not produce a real directory: %s" % destination)
 
@@ -324,7 +326,7 @@ def main():
     install_file(REPO_ROOT / "LICENSE", resources / "LICENSE", replace=True)
 
     manifest_path = resources / "LanguageRuntime/runtime-manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = distribution_manifest(json.loads(manifest_path.read_text()))
     for component in manifest["components"]:
         supplement = REPO_ROOT / "Packaging/MLXLicenses" / \
             ("%s-%s-LICENSE" % (component["name"].lower(), component["version"]))
@@ -379,6 +381,10 @@ def main():
     check_required_paths(args.output)
     scan_forbidden(args.output, "assembled candidate")
     check_symlinks(args.output)
+    try:
+        inspect_tree(args.output)
+    except (PrivacyError, OSError):
+        fail("assembled candidate rejected by distribution privacy gate")
 
     print(json.dumps({
         "candidate": str(args.output.resolve()),

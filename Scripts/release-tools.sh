@@ -22,6 +22,11 @@ check_write_path() {
   "${python_bin}" "${project_root}/Scripts/release-state.py" safe-path "$1"
 }
 
+check_package_privacy() {
+  # Read-only: a signed/stapled artifact must be rebuilt, never cleaned in place.
+  "${python_bin}" "${project_root}/Scripts/privacy_package.py" check --root "$1" --layout "${2:-tree}"
+}
+
 check_authority() {
   local target="$1" identity="$2" details
   details="$("${codesign_bin}" -d --verbose=4 "${target}" 2>&1)" || fail "无法读取签名：${target}"

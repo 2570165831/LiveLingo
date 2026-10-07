@@ -472,6 +472,25 @@ class QualityScoreTests(unittest.TestCase):
                           '--results',str(self.directory/'missing'),'--output',str(output)],capture_output=True,text=True)
         self.assertEqual(r.returncode,2,r.stderr)
         self.assertEqual(json.loads(output.read_text())['totals']['expectedFacts'],55)
+        report = json.loads(output.read_text())
+        self.assertFalse(report['contentIncluded'])
+        self.assertNotIn('cases', report)
+        self.assertNotIn('resultsDirectory', report)
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
+    def test_shareable_report_requires_content_opt_in_and_omits_raw_errors(self):
+        canary = 'PRIVATE_SYNTHETIC_SCORER_TEXT'
+        value = {'version': 2, 'integrityStatus': 'failed', 'error': canary,
+                 'resultsDirectory': canary, 'cases': [{'facts': [{'meaning': canary}],
+                 'pointReadback': {'1': [{'text': canary}]}, 'error': canary,
+                 'checks': [{'passed': False, 'reason': canary}]}], 'totals': {'expectedFacts': 1}}
+        summary = scorer.delivery_report(value)
+        self.assertNotIn(canary, json.dumps(summary))
+        content = scorer.delivery_report(value, include_content=True)
+        self.assertEqual(content['cases'][0]['pointReadback']['1'][0]['text'], canary)
+        self.assertEqual(content['error'], 'evaluation_failed')
+        self.assertEqual(content['cases'][0]['error'], 'integrity_failed')
+        self.assertNotIn('resultsDirectory', content)
     def test_full_synthetic_set_has_exit_zero_for_structure_only(self):
         results=self.directory/'full'
         for item in json.loads((CORPUS/'gold.json').read_text())['cases']:

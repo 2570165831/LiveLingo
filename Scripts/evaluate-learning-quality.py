@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -1090,6 +1091,28 @@ def score(corpus: Path, results: Path, *, allow_synthetic: bool = False,
     return value
 
 
+def delivery_report(value: dict, *, include_content: bool = False) -> dict:
+    """Keep point readback and source meanings behind an explicit body switch."""
+    if not include_content:
+        fields = ("version", "goldSHA256", "integrityStatus", "totals", "bySplit", "evidenceOrigin",
+                  "producerIdentityConsistent", "splitInterpretation", "overallAcceptance",
+                  "exitCodeMeaning", "targetLocale")
+        report = {key: value[key] for key in fields if key in value}
+    else:
+        report = json.loads(json.dumps(value))
+        report.pop("resultsDirectory", None)
+        for case in report.get("cases", []):
+            if "error" in case:
+                case["error"] = "integrity_failed"
+            for check in case.get("checks", []):
+                if "reason" in check and not check.get("passed"):
+                    check["reason"] = "integrity_failed"
+    if "error" in value:
+        report["error"] = "evaluation_failed"
+    report["contentIncluded"] = include_content
+    return report
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", required=True, type=Path)
@@ -1100,16 +1123,22 @@ def main(argv=None) -> int:
                         help="Target evidence language; default preserves the zh-Hans protocol")
     parser.add_argument("--allow-synthetic-regression", action="store_true",
                         help="Validate explicitly marked injected test results; never count as model evidence")
+    parser.add_argument("--include-content", action="store_true",
+                        help="Save source meanings and point readback; keep this report private")
     args = parser.parse_args(argv)
     if args.output.exists(): parser.error("Output already exists; retain previous evaluations")
     try:
         value = score(args.corpus, args.results, allow_synthetic=args.allow_synthetic_regression,
                       target=args.target)
     except (IntegrityError, ValueError, TypeError, KeyError, OSError) as error:
-        value = {"version": 2, "integrityStatus": "failed", "error": str(error),
+        value = {"version": 2, "integrityStatus": "failed", "error": "evaluation_failed",
                  "overallAcceptance": "pending-semantic-readback-and-baseline-comparison"}
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("x", encoding="utf-8") as stream:
+    value = delivery_report(value, include_content=args.include_content)
+    if args.output.parent.resolve() != args.output.parent.absolute():
+        parser.error("output_parent_unsafe")
+    args.output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         json.dump(value, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
     print(json.dumps({"integrityStatus": value["integrityStatus"], "totals": value.get("totals"),
@@ -1121,5 +1150,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except OSError as error:
-        print(f"Scorer execution failed: {error}", file=sys.stderr)
+        print("Scorer execution failed; raw diagnostics omitted", file=sys.stderr)
         sys.exit(1)

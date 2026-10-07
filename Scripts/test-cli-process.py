@@ -146,21 +146,45 @@ def main() -> None:
     for name, mode in [('translation-success', 'success'), ('translation-failure', 'failure')]:
         case = root / name
         case.mkdir()
-        result = subprocess.run([str(binary), '--translate-text', 'This is a synthetic classroom sentence.', '--output', str(case / 'run')],
+        source = case / 'text-input.txt'
+        source.write_text('This is a synthetic classroom sentence.')
+        source.chmod(0o600)
+        destination = case / 'translation.jsonl'
+        result = subprocess.run([str(binary), '--translate-file', str(source), '--translation-output', str(destination), '--output', str(case / 'run')],
                                 env=environment(case, mode), capture_output=True, text=True, timeout=40)
         record(case, result.returncode, result.stdout, result.stderr)
         assert result.returncode == (0 if mode == 'success' else 1)
         assert (case / 'shutdown-received').exists()
         if mode == 'success':
-            assert 'OUTPUT[0]=这是用于检查的合成译文。' in result.stdout
+            assert json.loads(destination.read_text()) == {'index': 0, 'text': '这是用于检查的合成译文。'}
+            assert '这是用于检查的合成译文。' not in result.stdout + result.stderr
+            assert destination.stat().st_mode & 0o777 == 0o600
         else:
             assert 'model_runtime' in result.stderr
+        passed.append(name)
+
+    for name, arguments, input_text in [
+            ('stdin-translation', ['--translate-stdin'], 'This is a synthetic classroom sentence.'),
+            ('legacy-file-translation', ['--translate-text', 'Synthetic text'], None),
+            ('legacy-explicit-stdout', ['--translate-text', 'Synthetic text', '--allow-content-output'], None)]:
+        case = root / name
+        case.mkdir()
+        destination = case / 'translation.jsonl'
+        result = subprocess.run([str(binary), *arguments, '--translation-output', str(destination), '--output', str(case / 'run')],
+                                input=input_text, env=environment(case), capture_output=True, text=True, timeout=40)
+        record(case, result.returncode, result.stdout, result.stderr)
+        assert result.returncode == 0
+        assert json.loads(destination.read_text())['text'] == '这是用于检查的合成译文。'
+        assert ('OUTPUT[0]=' in result.stdout) == (name == 'legacy-explicit-stdout')
+        assert ('Warning: --translate-text' in result.stderr) == name.startswith('legacy-')
         passed.append(name)
 
     for name, number in [('sigint', signal.SIGINT), ('sigterm', signal.SIGTERM)]:
         case = root / name
         case.mkdir()
-        process = subprocess.Popen([str(binary), '--translate-text', 'This request deliberately waits.', '--output', str(case / 'run')],
+        source = case / 'text-input.txt'
+        source.write_text('This request deliberately waits.')
+        process = subprocess.Popen([str(binary), '--translate-file', str(source), '--translation-output', str(case / 'translation.jsonl'), '--output', str(case / 'run')],
                                    env=environment(case, 'hold'), stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
         try:
@@ -179,7 +203,7 @@ def main() -> None:
             raise
         record(case, process.returncode, out, err)
         assert process.returncode == 128 + number
-        assert (case / 'cancel-received').exists()  # --translate-text has no resumable generation prefix.
+        assert (case / 'cancel-received').exists()  # Text translation has no resumable generation prefix.
         assert (case / 'shutdown-received').exists()
         assert (case / 'run/.cli-runtime/run.json').is_file()
         passed.append(name)

@@ -146,7 +146,7 @@ struct LearningQualityTargetCLITests {
             try encoder.encode(fixture).write(to: input, options: .atomic)
             let output = root.appendingPathComponent("dry-\(target.rawValue)", isDirectory: true)
             try await LearningQualityCLI.run(arguments: ["--input", input.path, "--output", output.path,
-                "--target", target.rawValue, "--dry-run"], generate: { _, _ in
+                "--target", target.rawValue, "--dry-run", "--include-content"], generate: { _, _ in
                     injectionCalls += 1
                     throw Failure.assertion("dry-run must not invoke generation")
                 })
@@ -181,7 +181,7 @@ struct LearningQualityTargetCLITests {
 
             let generated = root.appendingPathComponent("injected-\(target.rawValue)", isDirectory: true)
             try await LearningQualityCLI.run(arguments: ["--input", input.path, "--output", generated.path,
-                "--target", target.rawValue], generate: { prepared, _ in
+                "--target", target.rawValue, "--include-content"], generate: { prepared, _ in
                     injectionCalls += 1
                     let obj = try JSONSerialization.jsonObject(with: Data(prepared.utf8)) as? [String: Any]
                     let units = obj?["evidence"] as? [[String: Any]] ?? []

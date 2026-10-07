@@ -107,11 +107,63 @@ struct LearningQualityCLITests {
         try check(noPoints.isEmpty, "legitimate empty note")
 
         let input = corpus.appendingPathComponent("constant-acceleration.json")
+        let privateCanary = "PRIVATE_SYNTHETIC_DIAGNOSTIC"
+        let outside = root.appendingPathComponent("unrelated-state", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let sentinel = outside.appendingPathComponent("sentinel.txt")
+        try Data(privateCanary.utf8).write(to: sentinel)
+        setenv("LIVELINGO_MLX_STATE", outside.path, 1)
+        let summaryOutput = root.appendingPathComponent("summary-only", isDirectory: true)
+        do {
+            try await LearningQualityCLI.run(arguments: ["--input", input.path, "--output", summaryOutput.path],
+                generate: { _, _ in throw QwenRuntimeError.requestFailed(privateCanary) })
+            throw TestFailure.expectedFailure
+        } catch QwenRuntimeError.requestFailed { }
+        let summary = try read(summaryOutput)
+        try check(summary["contentIncluded"] as? Bool == false && summary["error"] as? String == "generation_failed", "summary failure code")
+        let summaryBytes = try JSONSerialization.data(withJSONObject: summary)
+        try check(!String(decoding: summaryBytes, as: UTF8.self).contains(privateCanary), "diagnostic omitted")
+        try check(ProcessInfo.processInfo.environment["LIVELINGO_MLX_STATE"] == summaryOutput.appendingPathComponent(".cli-runtime/checkpoints").path, "state overrides inherited directory")
+        let sentinelBytes = try Data(contentsOf: sentinel)
+        try check(sentinelBytes == Data(privateCanary.utf8), "unrelated state unchanged")
+        for name in ["fixture.json", "input-1.json", "response-1.txt", "notes-stage-1.md"] {
+            try check(!FileManager.default.fileExists(atPath: summaryOutput.appendingPathComponent(name).path), "default omits body file")
+        }
+        for (name, mode) in [("", 0o700), (".cli-runtime", 0o700), (".cli-runtime/checkpoints", 0o700), ("result.json", 0o600)] {
+            let attributes = try FileManager.default.attributesOfItem(atPath: summaryOutput.appendingPathComponent(name).path)
+            try check((attributes[.posixPermissions] as? NSNumber)?.intValue == mode, "private output modes")
+        }
+        let successCanary = "合成私密正文PRIVATE_SYNTHETIC_SUCCESS_CONTENT。"
+        let successfulSummary = root.appendingPathComponent("summary-success", isDirectory: true)
+        try await LearningQualityCLI.run(arguments: ["--input", input.path, "--output", successfulSummary.path],
+            generate: { prepared, _ in
+                let object = try JSONSerialization.jsonObject(with: Data(prepared.utf8)) as? [String: Any]
+                let units = object?["evidence"] as? [[String: Any]] ?? []
+                guard let identifier = units.first(where: { $0["language"] as? String == "zh" })?["id"] as? String else {
+                    throw TestFailure.assertion("summary synthetic source")
+                }
+                let note: [String: Any] = ["sourceVersion": 2, "topic": successCanary,
+                    "points": [["kind": "核心结论", "text": successCanary, "sourceIDs": [identifier]]],
+                    "noNewKnowledge": false]
+                return String(decoding: try JSONSerialization.data(withJSONObject: note), as: UTF8.self)
+            })
+        let successBytes = try Data(contentsOf: successfulSummary.appendingPathComponent("result.json"))
+        let successSummary = try read(successfulSummary)
+        try check((successSummary["stages"] as? [Any])?.isEmpty == false && successSummary["error"] == nil, "completed summary stages")
+        try check(!String(decoding: successBytes, as: UTF8.self).contains(successCanary), "completed notes and topic omitted")
+        try check(!FileManager.default.fileExists(atPath: successfulSummary.appendingPathComponent("response-1.txt").path), "completed response not saved by default")
+        let dry = root.appendingPathComponent("dry-summary", isDirectory: true)
+        try await LearningQualityCLI.run(arguments: ["--input", input.path, "--output", dry.path, "--dry-run"],
+            generate: { _, _ in throw TestFailure.assertion("dry run must not generate") })
+        let dryBytes = try Data(contentsOf: dry.appendingPathComponent("dry-run.json"))
+        let drySummary = try JSONSerialization.jsonObject(with: dryBytes) as? [String: Any]
+        try check(drySummary?["contentIncluded"] as? Bool == false && drySummary?["modelInvoked"] as? Bool == false, "dry summary only")
+        try check(!FileManager.default.fileExists(atPath: dry.appendingPathComponent("fixture.json").path), "dry source not copied")
         let bad = root.appendingPathComponent("malformed-final", isDirectory: true)
         let badResponse = "{\"sourceVersion\":2,\"topic\":\"unfinished"
         var receivedFailure = false
         do {
-            try await LearningQualityCLI.run(arguments: ["--input", input.path, "--output", bad.path], generate: { _, _ in badResponse })
+            try await LearningQualityCLI.run(arguments: ["--input", input.path, "--output", bad.path, "--include-content"], generate: { _, _ in badResponse })
         } catch { receivedFailure = true }
         try check(receivedFailure, "malformed model response must fail")
         let savedResponse = try String(contentsOf: bad.appendingPathComponent("response-1.txt"), encoding: .utf8)
@@ -129,7 +181,7 @@ struct LearningQualityCLITests {
         let outputs = root.appendingPathComponent("synthetic-results", isDirectory: true)
         for fixture in fixtures {
             let destination = outputs.appendingPathComponent(fixture.deletingPathExtension().lastPathComponent, isDirectory: true)
-            try await LearningQualityCLI.run(arguments: ["--input", fixture.path, "--output", destination.path], generate: { prepared, _ in
+            try await LearningQualityCLI.run(arguments: ["--input", fixture.path, "--output", destination.path, "--include-content"], generate: { prepared, _ in
                 guard let data = prepared.data(using: .utf8),
                       let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let units = object["evidence"] as? [[String: Any]] else { throw TestFailure.assertion("prepared input") }
@@ -159,10 +211,10 @@ struct LearningQualityCLITests {
             try check((result["stages"] as? [Any])?.isEmpty == false && result["error"] == nil, "successful injected course")
             try check((result["requestedRequests"] as? Int) == (result["successfulRequests"] as? Int), "successful request counts")
         }
-        let summary: [String: Any] = ["assertions": assertions, "fixtureCount": fixtures.count,
+        let receipt: [String: Any] = ["assertions": assertions, "fixtureCount": fixtures.count,
             "generationOrigin": "synthetic-regression", "realModelsInvoked": false, "status": "passed"]
-        try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])
+        try JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys])
             .write(to: root.appendingPathComponent("swift-test-results.json"), options: .atomic)
-        print(String(decoding: try JSONSerialization.data(withJSONObject: summary, options: .sortedKeys), as: UTF8.self))
+        print(String(decoding: try JSONSerialization.data(withJSONObject: receipt, options: .sortedKeys), as: UTF8.self))
     }
 }

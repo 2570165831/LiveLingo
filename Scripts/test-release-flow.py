@@ -211,6 +211,9 @@ elif name == "hdiutil":
         if scenario == "attach-failure": fail("attach failed without device")
         if scenario == "attach-malformed": print("not a plist"); sys.exit(0)
         shutil.copytree(owned(data["snapshot"]), mount, dirs_exist_ok=True, symlinks=True)
+        if scenario == "privacy-mounted":
+            private = mount / "LiveLingo.app/.migration-source-fixture"
+            private.mkdir(); (private / "transcript.txt").write_text("synthetic classroom canary")
         (root / "mounted.json").write_text(json.dumps(dict(device="/dev/disk999", mount=str(mount), image=str(owned(args[-1])))))
         if scenario == "interrupt-attach":
             (root / "attach-ready").write_text(str(os.getpid()))
@@ -266,12 +269,13 @@ class ReleaseFlowTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.scratch = Path(tempfile.mkdtemp(prefix="livelingo-release-tests-", dir="/private/tmp"))
+        cls.scratch_parent = Path(tempfile.gettempdir()).resolve()
+        cls.scratch = Path(tempfile.mkdtemp(prefix="livelingo-release-tests-", dir=cls.scratch_parent))
         print("Offline fixtures: " + str(cls.scratch), flush=True)
 
     @classmethod
     def tearDownClass(cls):
-        assert cls.scratch.parent == Path("/private/tmp") and not cls.scratch.is_symlink()
+        assert cls.scratch.parent == cls.scratch_parent and not cls.scratch.is_symlink()
         shutil.rmtree(cls.scratch)
         print("Offline fixtures removed: " + str(not cls.scratch.exists()), flush=True)
 
@@ -291,8 +295,11 @@ class ReleaseFlowTests(unittest.TestCase):
                          "Models/mlx-community/Qwen3.5-4B-MLX-8bit/config.json", "Models/lmstudio-community/Qwen3.5-9B-MLX-4bit/config.json",
                          "Models/mlx-community/parakeet-tdt-0.6b-v2/config.json", "Models/mlx-community/Qwen3-ASR-1.7B-4bit/config.json"):
             item = contents / "Resources" / relative; item.parent.mkdir(parents=True, exist_ok=True); item.write_text("fixture")
+            if item.suffix == ".json":
+                item.write_text(json.dumps({"components": [], "python": "python"}
+                                           if item.name == "runtime-manifest.json" else {}))
         keychain = case / "fixture.keychain-db"; keychain.write_text("not a keychain")
-        env = {k: v for k, v in os.environ.items() if not k.startswith("LIVELINGO_")}
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": str(self.scratch)}
         env.update(LIVELINGO_TEST_TOOL_DIR=str(tools), LIVELINGO_PYTHON=str(tools / "python-verify-stub"),
                    FAKE_ROOT=str(case), FAKE_SCENARIO=scenario, FAKE_REAL_PYTHON=sys.executable,
                    PYTHONDONTWRITEBYTECODE="1", PYTHONOPTIMIZE="")
@@ -405,6 +412,65 @@ class ReleaseFlowTests(unittest.TestCase):
                     self.assertEqual(len(self.calls(events, "stapler", "staple", scenario.split("-")[0])), 3)
                 if scenario.endswith("log-failure"):
                     self.assertIn("log", result.stderr)
+
+    def test_private_signed_inputs_are_rejected_without_mutation_or_upload(self):
+        for kind in ("recovery", "manifest", "body", "metrics", "unexpected-resource", "symlink"):
+            with self.subTest(kind=kind):
+                case, app, env, command = self.fixture("privacy-input-" + kind)
+                if kind == "recovery":
+                    item = app / ".migration-source-fixture/transcript.txt"
+                elif kind == "manifest":
+                    item = app / "Contents/Resources/LanguageRuntime/runtime-manifest.json"
+                elif kind == "body":
+                    item = app / "Contents/Resources/LanguageRuntime/innocent.json"
+                elif kind == "metrics":
+                    item = app / "Contents/Resources/LanguageRuntime/classroom-metrics.json"
+                elif kind == "unexpected-resource":
+                    item = app / "Contents/Resources/handout.txt"
+                else:
+                    item = app / "Contents/Resources/LanguageRuntime/escape"
+                item.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "manifest":
+                    item.write_text(json.dumps({"components": [], "python": str(case / "private-python")}))
+                elif kind == "body":
+                    item.write_text(json.dumps({"originalText": "synthetic classroom canary"}))
+                elif kind == "symlink":
+                    item.symlink_to(case)
+                else:
+                    item.write_text("synthetic classroom canary")
+                before = os.readlink(item) if item.is_symlink() else item.read_bytes()
+                result, events = self.execute(case, env, command)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("privacy-package:", result.stderr)
+                self.assertNotIn("synthetic classroom canary", result.stdout + result.stderr)
+                self.assertEqual(before, os.readlink(item) if item.is_symlink() else item.read_bytes())
+                self.assertFalse(self.calls(events, "hdiutil", "create"))
+                self.assertFalse(self.calls(events, "notarytool", "submit"))
+                self.assertFalse((case / "release with spaces.dmg").exists())
+
+    def test_resumed_private_stage_is_rejected_before_more_notary_calls(self):
+        case, app, env, command = self.fixture("app-stuck")
+        result, before = self.execute(case, env, command)
+        self.assertNotEqual(result.returncode, 0)
+        stage = next(case.glob("stage-*"))
+        private = stage / "LiveLingo/LiveLingo.app/.cli-runtime/run.json"
+        private.parent.mkdir(); private.write_text("synthetic private run")
+        env["FAKE_SCENARIO"] = "success"
+        result, after = self.execute(case, env, [command[0], command[1], "--resume-stage", str(stage),
+                                                 "--notary-profile", "fixture-profile"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("privacy-package:", result.stderr)
+        self.assertEqual(self.calls(before, "notarytool"), self.calls(after, "notarytool"))
+        self.assertEqual(private.read_text(), "synthetic private run")
+        self.assertFalse((case / "release with spaces.dmg").exists())
+
+    def test_mounted_privacy_failure_detaches_and_does_not_publish(self):
+        result, events, case = self.run_case("privacy-mounted")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("privacy-package:", result.stderr)
+        self.assertEqual(len(self.calls(events, "hdiutil", "detach")), 1)
+        self.assertFalse((case / "release with spaces.dmg").exists())
+        self.assertFalse(list(case.glob("stage-*/verify-mount")))
 
     def test_resume_entire_build_reuses_uploads(self):
         for scenario in ("app-stuck", "app-retry-exhausted", "app-staple-failure", "dmg-stuck", "dmg-retry-exhausted", "dmg-staple-failure", "stapled-checkpoint-failure", "mounted-ticket-failure"):

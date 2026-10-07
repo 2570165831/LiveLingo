@@ -10,6 +10,7 @@ from importlib import metadata
 import json
 from pathlib import Path
 import shutil
+from privacy_package import PrivacyError, copy_distribution_tree, excluded, inspect_tree
 
 RUNTIME_MODULES=('worker.py','engine.py','schemas.py','checks.py','review_diagnostics.py','grammar_vocabulary.py','latin_numbers.py','checkpoints.py')
 # 先确认运行时模块都在，再谈环境：否则从克隆构建时只会看到裸的 FileNotFoundError，
@@ -33,7 +34,10 @@ base=args.base_python.resolve()
 if not (base/'bin/python3').is_file():raise SystemExit('Missing portable base Python')
 root=args.output.resolve()
 root.mkdir(parents=True)
-shutil.copytree(base,root/'python',symlinks=True,ignore=shutil.ignore_patterns('__pycache__'))
+try:
+ copy_distribution_tree(base,root/'python')
+except (PrivacyError,OSError,shutil.Error):
+ raise SystemExit('Portable Python rejected by the distribution privacy gate') from None
 site=root/'python/lib/python3.13/site-packages'
 roots=['mlx','mlx-lm','outlines','Pint','sympy','chempy','numpy','scipy','quantities','pyparsing','setuptools']
 selected={}
@@ -63,7 +67,7 @@ for name,dist in sorted(selected.items()):
  for relative in dist.files or []:
   source=Path(dist.locate_file(relative)).resolve()
   # Never copy environment console scripts or paths outside site-packages.
-  if '..' in relative.parts or '__pycache__' in relative.parts or source.suffix=='.pyc' or not source.is_file():continue
+  if '..' in relative.parts or any(excluded(part) for part in relative.parts) or not source.is_file():continue
   target=site/relative
   target.parent.mkdir(parents=True,exist_ok=True)
   shutil.copy2(source,target)
@@ -85,7 +89,7 @@ for source in base.rglob('*'):
   target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
 receipt=dict(components=manifest,missingLicenseFiles=missing,
  chempyScope='Only Substance.from_formula and composition; solver, plotting and notebook dependencies intentionally omitted. This is not a general-purpose ChemPy installation.',
- python=str(base),workerHashes={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in root.glob('*.py')})
+ python='python',workerHashes={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in root.glob('*.py')})
 supplements=Path(__file__).parent.parent/'Packaging/MLXLicenses'
 for source in supplements.iterdir():
  if source.is_dir():shutil.copytree(source,root/'Licenses'/source.name)
@@ -93,4 +97,8 @@ for source in supplements.iterdir():
 audit_path=supplements/'AUDIT.json'
 receipt['nativeTransitiveNoticeAudit']=json.loads(audit_path.read_text()) if audit_path.is_file() else {'status':'pending'}
 (root/'runtime-manifest.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2))
+try:
+ inspect_tree(root)
+except (PrivacyError,OSError):
+ raise SystemExit('Runtime rejected by the distribution privacy gate') from None
 print(json.dumps(dict(runtime=str(root),components=len(manifest),missingLicenseFiles=missing)))

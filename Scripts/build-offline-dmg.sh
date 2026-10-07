@@ -92,7 +92,7 @@ except (ValueError, OverflowError):
     sys.exit("错误：超时/间隔须为有限正数（上传可为 0），查询/装订次数须为正整数，重试须非负。")
 BOUNDS
 if (( dry_run )); then
-  print -r -- "DRY RUN：严格校验原 App → 暂存并严格校验 → 生成只含 App 的临时 DMG → 公证 → 装订/验证 App → 创建/签名暂存 DMG → 公证/装订 → 挂载自检 → 移到正式输出。"
+  print -r -- "DRY RUN：隐私检查/严格校验原 App → 暂存并检查 → 生成只含 App 的临时 DMG → 公证 → 装订/验证 App → 检查最终交付目录 → 创建/签名暂存 DMG → 公证/装订 → 挂载自检 → 移到正式输出。"
   print -r -- "上传超时 ${notary_submit_timeout}s（0 不限）；上传完成后处理时限 ${notary_timeout}s；info/log 单次 ${notary_command_timeout}s。"
   print -r -- "跳过真实产物检查：未调用发布工具，不能视为签名、公证或发布验收通过。"
   exit 0
@@ -165,6 +165,7 @@ stage_copy() {
   fi
 }
 if [[ -z "${resume_stage}" ]]; then
+  check_package_privacy "${signed_app}"
   required_paths=(
     "Contents/Info.plist"
     "Contents/Resources/LanguageRuntime/worker.py"
@@ -226,6 +227,11 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 print -r -- "本次发布暂存：${stage_dir}"
 # Both a fresh copy and a resumed App must pass these before any upload.
+if [[ -L "${package_root}/Applications" ]]; then
+  check_package_privacy "${package_root}" dmg
+else
+  check_package_privacy "${package_root}" app-only
+fi
 "${python_bin}" "${sign_script}" --verify-only --app "${staged_app}" --identity "${sign_identity}"
 "${codesign_bin}" --verify --deep --strict --verbose=2 "${staged_app}"
 check_authority "${staged_app}" "${sign_identity}"
@@ -258,6 +264,7 @@ staple_with_retry() {
 app_container="$(state_get appContainer)"
 if [[ -z "${app_container}" ]]; then
   [[ "$(/bin/ls -A "${package_root}")" == LiveLingo.app ]] || fail "首次 App 公证容器只能含 LiveLingo.app"
+  check_package_privacy "${package_root}" app-only
   app_container="${run_dir}/App-notarization.dmg"
   "${hdiutil_bin}" create -size "$("${python_bin}" "${state_script}" image-size "${package_root}")" -srcfolder "${package_root}" -volname LiveLingoAppNotarization -format UDZO -imagekey zlib-level=6 "${app_container}"
   "${hdiutil_bin}" verify "${app_container}"
@@ -284,6 +291,7 @@ if [[ ! -e "${package_root}/使用说明.txt" ]]; then
 fi
 top_level="$(/bin/ls -A "${package_root}" | /usr/bin/awk '$0 != ".DS_Store"' | LC_ALL=C /usr/bin/sort | /usr/bin/tr '\n' ' ')"
 [[ "${top_level}" == "Applications LiveLingo.app 使用说明.txt " ]] || fail "DMG 顶层内容不符合要求"
+check_package_privacy "${package_root}" dmg
 staged_dmg="$(state_get releaseDMG)"
 if [[ -z "${staged_dmg}" ]]; then
   staged_dmg="${run_dir}/Release.dmg"

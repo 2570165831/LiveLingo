@@ -76,14 +76,22 @@ struct LearningQualityCLI {
         let output: URL
         let target: CaptionTranslationTarget
         let dryRun: Bool
+        let includeContent: Bool
     }
     static func options(_ arguments: [String],
                         defaultTarget: CaptionTranslationTarget = .simplifiedChinese) throws -> Options {
         var values: [String: String] = [:]
         var dryRun = false
+        var includeContent = false
         var index = 0
         while index < arguments.count {
             let flag = arguments[index]
+            if flag == "--include-content" {
+                guard !includeContent else { throw Failure.arguments }
+                includeContent = true
+                index += 1
+                continue
+            }
             if flag == "--dry-run" {
                 guard !dryRun else { throw Failure.arguments }
                 dryRun = true
@@ -101,7 +109,8 @@ struct LearningQualityCLI {
         guard ["zh-Hans", "en", "es", "fr"].contains(code),
               let target = CaptionTranslationTarget(rawValue: code) else { throw Failure.unsupportedTarget }
         return Options(input: URL(fileURLWithPath: input),
-            output: URL(fileURLWithPath: output, isDirectory: true), target: target, dryRun: dryRun)
+            output: URL(fileURLWithPath: output, isDirectory: true), target: target,
+            dryRun: dryRun, includeContent: includeContent)
     }
 
     struct DryRunRequest: Encodable {
@@ -131,13 +140,16 @@ struct LearningQualityCLI {
     /// Exercise actual production preparation, never the model runtime.
     /// An empty seed is used for review-input shape, not as a generated note.
     static func prepare(fixture: Fixture, bytes: Data, output: URL,
-                        target: CaptionTranslationTarget = .simplifiedChinese) throws {
-        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        try bytes.write(to: output.appendingPathComponent("fixture.json"), options: .atomic)
+                        target: CaptionTranslationTarget = .simplifiedChinese,
+                        includeContent: Bool = false) throws {
+        func saveContent(_ data: Data, _ name: String) throws {
+            if includeContent { try LiveLingoCLI.writePrivate(data, to: output.appendingPathComponent(name)) }
+        }
+        try saveContent(bytes, "fixture.json")
         let prompt = Data(target.learningNotePrompt.utf8)
         let reviewPrompt = Data(target.learningReviewPrompt.utf8)
-        try prompt.write(to: output.appendingPathComponent("generation-prompt.txt"), options: .atomic)
-        try reviewPrompt.write(to: output.appendingPathComponent("review-prompt.txt"), options: .atomic)
+        try saveContent(prompt, "generation-prompt.txt")
+        try saveContent(reviewPrompt, "review-prompt.txt")
         var evidence: [TranscriptSegment] = []
         var preparedIDs = Set<UUID>()
         var requests: [DryRunRequest] = []
@@ -160,8 +172,8 @@ struct LearningQualityCLI {
                 let number = requests.count + 1
                 let inputFile = "input-\(number).json"
                 let reviewInputFile = "review-input-\(number).json"
-                try Data(input.utf8).write(to: output.appendingPathComponent(inputFile), options: .atomic)
-                try Data(review.json.utf8).write(to: output.appendingPathComponent(reviewInputFile), options: .atomic)
+                try saveContent(Data(input.utf8), inputFile)
+                try saveContent(Data(review.json.utf8), reviewInputFile)
                 requests.append(DryRunRequest(number: number, stage: stageIndex + 1,
                     sourceUnits: LearningSourceUnit.make(current, target: target),
                     inputFile: inputFile, inputSHA256: sha(Data(input.utf8)),
@@ -173,7 +185,20 @@ struct LearningQualityCLI {
             generationPromptFile: "generation-prompt.txt", generationPromptSHA256: sha(prompt),
             reviewPromptFile: "review-prompt.txt", reviewPromptSHA256: sha(reviewPrompt), requests: requests)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(plan).write(to: output.appendingPathComponent("dry-run.json"), options: .atomic)
+        let report: Data
+        if includeContent { report = try encoder.encode(plan) }
+        else {
+            report = try JSONSerialization.data(withJSONObject: ["preparationVersion": 1,
+                "generationOrigin": "offline-preparation", "modelInvoked": false,
+                "contentIncluded": false, "targetLocale": target.rawValue, "fixtureSHA256": sha(bytes),
+                "generationPromptSHA256": sha(prompt), "reviewPromptSHA256": sha(reviewPrompt),
+                "preparedRequests": requests.count,
+                "requests": requests.map { ["number": $0.number, "stage": $0.stage,
+                    "sourceCount": $0.sourceUnits.count, "inputSHA256": $0.inputSHA256,
+                    "reviewInputSHA256": $0.reviewInputSHA256] as [String: Any] }],
+                options: [.prettyPrinted, .sortedKeys])
+        }
+        try LiveLingoCLI.writePrivate(report, to: output.appendingPathComponent("dry-run.json"))
         let event: [String: Any] = ["event": "offline_prepared", "target": target.rawValue,
             "preparedRequests": requests.count, "modelInvoked": false]
         print(String(decoding: try JSONSerialization.data(withJSONObject: event, options: .sortedKeys), as: UTF8.self))
@@ -284,7 +309,7 @@ struct LearningQualityCLI {
         do { try await run() }
         catch {
             if !dryRun { await shutdown() }
-            fputs("Quality probe failed; inspect the isolated result and response files.\n", stderr)
+            fputs("Quality probe failed; inspect the isolated summary. Raw diagnostics are omitted.\n", stderr)
             exit(1)
         }
         if !dryRun { await shutdown() }
@@ -312,8 +337,12 @@ struct LearningQualityCLI {
                   !$0.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     && !$0.chinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
               } }) else { throw Failure.invalidFixture }
+        // Override inherited/default App state before any model runtime is used.
+        // This also claims a new 0700 root and independent preferences/data.
+        _ = try LiveLingoCLI.configureIsolation(output: output)
         if parsed.dryRun {
-            try prepare(fixture: fixture, bytes: bytes, output: output, target: target)
+            try prepare(fixture: fixture, bytes: bytes, output: output, target: target,
+                        includeContent: parsed.includeContent)
             return
         }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -339,10 +368,12 @@ struct LearningQualityCLI {
             generationOrigin: generate == nil ? "production-model" : "synthetic-regression",
             buildManifestSHA256: buildManifest.map(sha),
             targetLocale: target == .simplifiedChinese ? nil : target.rawValue)
-        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        try bytes.write(to: output.appendingPathComponent("fixture.json"), options: .atomic)
+        func saveContent(_ data: Data, _ name: String) throws {
+            if parsed.includeContent { try LiveLingoCLI.writePrivate(data, to: output.appendingPathComponent(name)) }
+        }
+        try saveContent(bytes, "fixture.json")
         if let buildManifest {
-            try buildManifest.write(to: output.appendingPathComponent("quality-build-manifest.json"), options: .atomic)
+            try saveContent(buildManifest, "quality-build-manifest.json")
         }
         let model = QwenModelProfile.energySaver.translationModel
         var notebook = LearningNotebook(target: target)
@@ -356,7 +387,29 @@ struct LearningQualityCLI {
             let result = Result(fixtureID: fixture.id, fixtureSHA256: sha(bytes), model: model,
                 producer: producer, stages: stages, requests: requests, requestedRequests: requests.count,
                 successfulRequests: successes, error: error)
-            try encoder.encode(result).write(to: output.appendingPathComponent("result.json"), options: .atomic)
+            let report: Data
+            if parsed.includeContent { report = try encoder.encode(result) }
+            else {
+                var summary: [String: Any] = ["summaryVersion": 1, "contentIncluded": false,
+                    "fixtureSHA256": sha(bytes), "model": model,
+                    "producer": try JSONSerialization.jsonObject(with: encoder.encode(producer)),
+                    "requestedRequests": requests.count, "successfulRequests": successes,
+                    "stages": stages.map { ["number": $0.number, "elapsedSeconds": $0.elapsedSeconds,
+                        "batchCount": $0.batches.count, "sourceCount": $0.coveredSourceIDs.count,
+                        "pointCount": $0.displayPoints.count, "requestedRequests": $0.requestedRequests,
+                        "successfulRequests": $0.successfulRequests] as [String: Any] },
+                    "requests": requests.map { request -> [String: Any] in
+                        var row: [String: Any] = ["number": request.number, "stage": request.stage,
+                            "sourceCount": request.sourceUnits.count, "outcome": request.outcome,
+                            "inputSHA256": request.inputSHA256]
+                        if let hash = request.responseSHA256 { row["responseSHA256"] = hash }
+                        if let failure = request.error { row["error"] = failure }
+                        return row
+                    }]
+                if let error { summary["error"] = error }
+                report = try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])
+            }
+            try LiveLingoCLI.writePrivate(report, to: output.appendingPathComponent("result.json"))
         }
         try save()
         do {
@@ -377,7 +430,7 @@ struct LearningQualityCLI {
                         pending: pending, target: target)
                     let number = requests.count + 1
                     let inputFile = "input-\(number).json"
-                    try Data(prepared.utf8).write(to: output.appendingPathComponent(inputFile), options: .atomic)
+                    try saveContent(Data(prepared.utf8), inputFile)
                     requests.append(Request(number: number, stage: stageIndex + 1, evidence: current,
                         sourceUnits: LearningSourceUnit.make(current, target: target), pendingTargets: Array(pending.prefix(4).map(\.id)),
                         inputFile: inputFile, inputSHA256: sha(Data(prepared.utf8))))
@@ -393,7 +446,7 @@ struct LearningQualityCLI {
                         }
                         let responseFile = "response-\(number).txt"
                         // Persist the final response before attempting production decoding.
-                        try Data(response.utf8).write(to: output.appendingPathComponent(responseFile), options: .atomic)
+                        try saveContent(Data(response.utf8), responseFile)
                         requests[number - 1].responseFile = responseFile
                         requests[number - 1].responseSHA256 = sha(Data(response.utf8))
                         requests[number - 1].outcome = "received"
@@ -414,7 +467,7 @@ struct LearningQualityCLI {
                         try save()
                     } catch {
                         requests[number - 1].outcome = "failed"
-                        requests[number - 1].error = String(describing: error)
+                        requests[number - 1].error = safeError(error)
                         throw error
                     }
                     let event: [String: Any] = ["event": "batch_completed", "stage": stageIndex + 1,
@@ -433,14 +486,20 @@ struct LearningQualityCLI {
                         latestMarkdown: latest, target: target),
                     requestedRequests: requests.count, successfulRequests: successes)
                 stages.append(stage)
-                try markdown.write(to: output.appendingPathComponent("notes-stage-\(stage.number).md"),
-                                   atomically: true, encoding: .utf8)
+                try saveContent(Data(markdown.utf8), "notes-stage-\(stage.number).md")
                 try save()
             }
             try save()
         } catch {
-            try save(error: String(describing: error))
+            try save(error: safeError(error))
             throw error
         }
+    }
+
+    static func safeError(_ error: Error) -> String {
+        if error is CancellationError { return "cancelled" }
+        if error is DecodingError { return "invalid_response" }
+        if error is Failure { return "invalid_probe_state" }
+        return "generation_failed"
     }
 }

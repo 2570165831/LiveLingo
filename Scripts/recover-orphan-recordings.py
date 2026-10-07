@@ -13,13 +13,24 @@
   * data 偏移之后确有成整帧的 PCM/IEEE float 数据。
 
 明确不做的事：data 长度非零一律跳过，不按 EOF 延长；fmt 扩展、A-law/µ-law 等
-未知编码不猜；PCM 内部不搜索块标记来猜边界；导出用 "xb" 打开，已存在的文件
+未知编码不猜；PCM 内部不搜索块标记来猜边界；导出以排他模式创建，已存在的文件
 不覆盖；输出目录在扫描前固定；源文件只读，处理中源文件变化则本次不算成功。
 
+隐私边界：必须显式指定 --root；仅检查各根目录下一层 LiveLingo-Live-* 目录的
+recording.wav，不递归扫描，也不跟随其中的软链接。导出必须同时给 --export 和
+--output，新建目录 0700、文件 0600；已有输出目录必须属于当前用户且权限为 0700。
+stdout 默认只写汇总和显式指定的扫描/输出路径，不列会话/课程名或异常正文。
+路径本身仍可能敏感；只有 --include-sensitive-diagnostics 才向 stdout/stderr
+写会话名、逐文件路径和异常诊断。导出文件名保留会话名，录音和文件名需在分享前
+自行检查；私有权限不会阻止当前用户的同步程序读取。脚本不写独立日志文件。
+
+退出码：扫描完成且没有导出失败时为 0；扫描中断或任一导出失败时为 1；
+参数或导出目录不符合要求时为 2。不可恢复文件的跳过仍计入汇总，不视为导出失败。
+
 用法：
-  python3 Scripts/recover-orphan-recordings.py            # 只报告，不写文件
-  python3 Scripts/recover-orphan-recordings.py --export   # 导出到 --output（默认 ~/Downloads/…）
-  python3 Scripts/recover-orphan-recordings.py --export --output /某个目录 --root /另一个容器/Data/tmp
+  python3 Scripts/recover-orphan-recordings.py --root ./recording-input
+  python3 Scripts/recover-orphan-recordings.py --root ./recording-input --export --output ./private-export
+  python3 Scripts/recover-orphan-recordings.py --root ./recording-input --include-sensitive-diagnostics
 """
 from __future__ import annotations
 
@@ -29,14 +40,8 @@ import stat
 import struct
 import sys
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Iterator, NamedTuple
-
-DEFAULT_ROOTS = [
-    Path.home() / "Library/Containers/com.jianhongli.LiveLingo/Data/tmp",
-    Path.home() / "Library/Containers/com.jianhongli.LiveLingoSandboxTests/Data/tmp",
-]
 
 FMT_NAMES = {1: "PCM 整数", 3: "IEEE float", 6: "A-law", 7: "µ-law", 0xFFFE: "扩展格式"}
 
@@ -216,26 +221,31 @@ def require_unchanged_source(source: Path, handle, layout: Layout) -> None:
             raise SourceChanged("源文件在处理过程中被改动或替换")
 
 
-def preserve_incomplete(target: Path, identity: tuple[int, int] | None) -> None:
+def preserve_incomplete(target: Path, identity: tuple[int, int] | None, *,
+                        include_sensitive_diagnostics: bool = False) -> None:
     """仅改名本次创建的文件；别人替换的目标不动，也不删除失败数据。"""
     if identity is None:
         return
     try:
         current = target.lstat()
         if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != identity:
-            print(f"    输出路径已被替换，未改动：{target}", file=sys.stderr)
+            if include_sensitive_diagnostics:
+                print(f"    输出路径已被替换，未改动：{str(target)!r}", file=sys.stderr)
             return
         # UUID 名称避免与已有失败结果冲突；不复用固定的 .incomplete 名称。
         incomplete = target.with_name(f"{target.name}.{uuid.uuid4().hex}.incomplete")
         if incomplete.exists() or incomplete.is_symlink():
             raise FileExistsError(f"不完整输出路径已存在：{incomplete}")
         target.rename(incomplete)
-        print(f"    不完整输出已保留：{incomplete}", file=sys.stderr)
+        if include_sensitive_diagnostics:
+            print(f"    不完整输出已保留：{str(incomplete)!r}", file=sys.stderr)
     except OSError as error:
-        print(f"    无法改名失败输出，请保留检查：{target}（{error}）", file=sys.stderr)
+        if include_sensitive_diagnostics:
+            print(f"    无法改名失败输出，请保留检查：{str(target)!r}（{error!s}）", file=sys.stderr)
 
 
-def export_recording(source: Path, layout: Layout, target: Path) -> int:
+def export_recording(source: Path, layout: Layout, target: Path, *,
+                     include_sensitive_diagnostics: bool = False) -> int:
     """按块读取源 PCM 原样写出；不覆盖已存在文件，源文件保持只读。"""
     with source.open("rb") as handle:
         require_unchanged_source(source, handle, layout)
@@ -243,9 +253,12 @@ def export_recording(source: Path, layout: Layout, target: Path) -> int:
         remaining = layout.usable
         created_identity = None
         try:
-            with target.open("xb") as output:  # 已存在即失败，绝不覆盖
+            # 以 0600 原子创建；O_EXCL 也拒绝已有软链接，不先创建宽权限文件再收紧。
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
                 created = os.fstat(output.fileno())
                 created_identity = (created.st_dev, created.st_ino)
+                os.fchmod(output.fileno(), 0o600)
                 output.write(header_bytes(layout.fmt_chunk, remaining))
                 while remaining > 0:
                     block = handle.read(min(COPY_BLOCK, remaining))
@@ -258,7 +271,8 @@ def export_recording(source: Path, layout: Layout, target: Path) -> int:
             if not stat.S_ISREG(final_target.st_mode) or (final_target.st_dev, final_target.st_ino) != created_identity:
                 raise OSError("输出路径在导出过程中被替换，本次结果不能确认为成功")
         except BaseException:
-            preserve_incomplete(target, created_identity)
+            preserve_incomplete(target, created_identity,
+                                include_sensitive_diagnostics=include_sensitive_diagnostics)
             raise
     return layout.usable
 
@@ -268,77 +282,122 @@ def candidates(roots: list[Path]) -> Iterator[Path]:
         if not root.is_dir():
             continue
         for directory in sorted(root.glob("LiveLingo-Live-*")):
+            if directory.is_symlink() or not directory.is_dir():
+                continue
             recording = directory / "recording.wav"
-            if recording.is_file():
+            if not recording.is_symlink() and recording.is_file():
                 yield recording
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--root", type=Path, action="append", help="容器 tmp 目录（可重复；默认查两个 LiveLingo 容器）")
-    parser.add_argument("--output", type=Path, help="导出目录（默认 ~/Downloads/LiveLingo-未收尾录音-<时间戳>）")
-    parser.add_argument("--export", action="store_true", help="真正写出恢复文件（默认只报告）")
-    args = parser.parse_args()
+def prepare_output_directory(output: Path) -> None:
+    """只创建缺失目录；已有目录不改权限、不覆盖，也不接受软链接作为输出。"""
+    missing = []
+    parent = output
+    while not parent.exists() and not parent.is_symlink():
+        missing.append(parent)
+        parent = parent.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700)
+    state = output.lstat()
+    if (not stat.S_ISDIR(state.st_mode) or state.st_uid != os.getuid()
+            or stat.S_IMODE(state.st_mode) != 0o700):
+        raise PermissionError("导出目录必须属于当前用户、不是软链接且权限为 0700")
 
-    roots = args.root or DEFAULT_ROOTS
-    # 输出目录在循环前固定：一次运行只对应一个目录，不会每个文件换一个时间戳。
-    output = args.output or (Path.home() / "Downloads" /
-                             f"LiveLingo-未收尾录音-{datetime.now():%Y%m%d-%H%M%S}")
-    found = restored = skipped = failed = 0
-    for recording in candidates(roots):
-        found += 1
+
+class PrivateArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        # argparse 的原始错误可能带上用户误传的正文；只给固定的参数提示。
+        super().error("参数无效：必须显式指定 --root；导出还需 --export 和 --output。"
+                      "请用 --help 查看用法。")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = PrivateArgumentParser(prog="recover-orphan-recordings.py", description=__doc__,
+                                   formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--root", type=Path, action="append", required=True,
+                        help="必须显式指定扫描根目录，可重复；没有默认容器")
+    parser.add_argument("--output", type=Path, help="--export 时必须显式指定的私有导出目录")
+    parser.add_argument("--export", action="store_true", help="真正写出恢复文件（默认只报告）")
+    parser.add_argument("--include-sensitive-diagnostics", action="store_true",
+                        help="显式允许 stdout/stderr 输出会话/课程名、逐文件路径及异常正文；分享前检查")
+    args = parser.parse_args(argv)
+    if args.export and args.output is None:
+        parser.error("--export 必须同时显式指定 --output")
+    try:
+        roots = [root.expanduser().resolve() for root in args.root]
+        # 不解析输出末级软链接；prepare_output_directory 会拒绝它，避免改动其目标。
+        output = args.output.expanduser().absolute() if args.output is not None else None
+    except Exception as error:
+        print("无法解析显式指定的目录；未开始扫描。", file=sys.stderr)
+        if args.include_sensitive_diagnostics:
+            print(f"    诊断：{error!s}", file=sys.stderr)
+        return 2
+
+    print("stdout 默认仅含汇总和显式指定的目录路径；不列会话/课程名或异常正文。"
+          "路径本身也可能敏感，分享前检查；不写独立日志文件。")
+    print("扫描范围（不递归、不跟随子项软链接）：" + "，".join(repr(str(root)) for root in roots)
+          + "；仅 LiveLingo-Live-*/recording.wav")
+    if args.include_sensitive_diagnostics:
+        print("已显式开启敏感诊断：stdout/stderr 会包含会话名、文件路径和异常正文。")
+    if args.export:
+        print(f"导出位置：{str(output)!r}；目录 0700，文件 0600。"
+              "文件名保留会话名，录音与失败输出可能敏感；源文件不修改，已有输出不覆盖。")
         try:
-            layout = inspect(recording)
-        except NotRecoverable as error:
-            skipped += 1
-            print(f"  跳过 {recording.parent.name}：{error}")
-            continue
-        except SourceChanged as error:
-            skipped += 1
-            print(f"  跳过 {recording.parent.name}：{error}")
-            continue
-        except OSError as error:
-            skipped += 1
-            print(f"  跳过 {recording.parent.name}：无法读取（{error.strerror or error}）")
-            continue
-        print(f"  可恢复 {recording.parent.name}")
-        print(f"    源: data 块声明 {layout.declared} 字节（应用异常退出，头部没写完）"
-              f" → 实际可用 {layout.usable} 字节 ≈ {layout.seconds:.1f} 秒")
-        print(f"    格式: {FMT_NAMES.get(layout.fmt_tag, layout.fmt_tag)}"
-              f" / {layout.channels} 声道 / {layout.rate} Hz / {layout.bits} bit")
-        if not args.export:
-            continue
-        try:
-            output.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            failed += 1
-            print(f"    未导出：无法创建输出目录（{error.strerror or error}）")
-            continue
-        target = output / f"{recording.parent.name}.wav"
-        try:
-            written = export_recording(recording, layout, target)
-        except FileExistsError:
-            failed += 1
-            print(f"    未导出：{target} 已存在，不覆盖")
-            continue
-        except SourceChanged as error:
-            failed += 1
-            print(f"    未导出：源文件在处理过程中变化，结果不可信（{error}）")
-            continue
-        except OSError as error:
-            failed += 1
-            print(f"    未导出：写入失败（{error.strerror or error}）")
-            continue
-        restored += 1
-        print(f"    已写出: {target}（{written} 字节，源文件未修改）")
+            prepare_output_directory(output)
+        except Exception as error:
+            print("未导出：无法准备私有输出目录；需当前用户拥有、非软链接且权限为 0700 的目录。"
+                  "未开始扫描；已有目录不会被改权限。", file=sys.stderr)
+            if args.include_sensitive_diagnostics:
+                print(f"    诊断：{error!s}", file=sys.stderr)
+            return 2
+    else:
+        print("输出位置：无（本次只报告，未导出录音）。")
+
+    found = restored = skipped = failed = existing = 0
+    scan_failed = False
+    try:
+        for recording in candidates(roots):
+            found += 1
+            try:
+                layout = inspect(recording)
+            except Exception as error:
+                skipped += 1
+                if args.include_sensitive_diagnostics:
+                    print(f"  跳过 {recording.parent.name!r}：{error!s}")
+                continue
+            if args.include_sensitive_diagnostics:
+                print(f"  可恢复 {recording.parent.name!r}：{layout.usable} 字节 ≈ {layout.seconds:.1f} 秒；"
+                      f"{FMT_NAMES.get(layout.fmt_tag, layout.fmt_tag)} / {layout.channels} 声道"
+                      f" / {layout.rate} Hz / {layout.bits} bit")
+            if not args.export:
+                continue
+            target = output / f"{recording.parent.name}.wav"
+            try:
+                written = export_recording(recording, layout, target,
+                                           include_sensitive_diagnostics=args.include_sensitive_diagnostics)
+            except Exception as error:
+                failed += 1
+                existing += isinstance(error, FileExistsError)
+                if args.include_sensitive_diagnostics:
+                    print(f"    未导出 {str(target)!r}：{error!s}")
+                continue
+            restored += 1
+            if args.include_sensitive_diagnostics:
+                print(f"    已写出: {str(target)!r}（{written} 字节，源文件未修改）")
+    except Exception as error:
+        scan_failed = True
+        print("扫描未完成：无法枚举指定根目录；汇总仅包含已检查项目。", file=sys.stderr)
+        if args.include_sensitive_diagnostics:
+            print(f"    诊断：{error!s}", file=sys.stderr)
 
     if found == 0:
-        print("没找到未收尾的录音（查过：" + "，".join(str(r) for r in roots) + "）")
-        return 0
-    print(f"\n共发现 {found} 段，可恢复 {found - skipped} 段"
-          + (f"，已导出 {restored} 段" if args.export else "（本次未导出，加 --export 才会写文件）")
-          + (f"，{failed} 段未写出" if failed else ""))
-    return 0
+        print("没找到符合扫描模式的录音。")
+    print(f"共发现 {found} 段，可恢复 {found - skipped} 段，跳过 {skipped} 段"
+          + (f"，已导出 {restored} 段，{failed} 段未写出，已有输出不覆盖：{existing} 段"
+             if args.export else "（本次未导出，加 --export 并指定 --output 才会写文件）"))
+    if failed:
+        print("失败输出可能以 .incomplete 后缀保留在导出目录；输出被他人替换时不移动。")
+    return 1 if scan_failed or (args.export and failed > 0) else 0
 
 
 if __name__ == "__main__":

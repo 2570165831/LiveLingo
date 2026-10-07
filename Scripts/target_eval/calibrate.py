@@ -146,7 +146,7 @@ def _json_object(pairs: list[tuple[str, object]]) -> dict:
     value = {}
     for key, item in pairs:
         if key in value:
-            raise ValueError(f"duplicate CLI JSON field: {key}")
+            raise ValueError("duplicate CLI JSON field")
         value[key] = item
     return value
 
@@ -220,7 +220,7 @@ def _validate_verdict(row: object, case: CalibrationCase) -> dict:
 
 
 def judge_cases(cli: Path, cases: Sequence[CalibrationCase], *, batch_size: int = 128,
-                timeout_seconds: float = 120,
+                timeout_seconds: float = 120, include_content: bool = False,
                 on_batch: Callable[[int, int], None] | None = None) -> tuple[list[dict], list[dict]]:
     """subprocess.run uses communicate to drain both pipes while sending input."""
     _positive_integer(batch_size, "batch size")
@@ -231,15 +231,16 @@ def judge_cases(cli: Path, cases: Sequence[CalibrationCase], *, batch_size: int 
         payload = "".join(json.dumps(case.request, ensure_ascii=False, allow_nan=False) + "\n"
                           for case in batch)
         try:
-            process = subprocess.run([str(cli), "judge"], input=payload,
+            arguments = [str(cli), "judge"] + (["--include-content"] if include_content else [])
+            process = subprocess.run(arguments, input=payload,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, encoding="utf-8", check=False,
                                      timeout=timeout_seconds, cwd=c.repository_root())
         except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
             raise ValueError(f"Swift judge could not finish batch {offset // batch_size + 1}: "
-                             f"{type(error).__name__}") from error
+                             f"{type(error).__name__}") from None
         if process.returncode != 0:
-            raise ValueError(f"Swift judge exited {process.returncode}: {process.stderr[-4096:]}")
+            raise ValueError(f"Swift judge exited {process.returncode}; raw diagnostics omitted")
         if process.stderr:
             data = process.stderr.encode("utf-8")
             diagnostics.append({"batch": offset // batch_size + 1, "stderr_bytes": len(data),
@@ -260,7 +261,10 @@ def judge_cases(cli: Path, cases: Sequence[CalibrationCase], *, batch_size: int 
                 raise ValueError("CLI judge returned an unknown or duplicate request identity")
             returned[row["id"]] = _validate_verdict(row, expected[row["id"]])
         for case in batch:
-            records.append({**returned[case.request["id"]], "turn_id": case.turn_id,
+            verdict = dict(returned[case.request["id"]])
+            if not include_content:
+                verdict.update(stablePrefix="", sourceNumbers=[], targetNumbers=[])
+            records.append({**verdict, "turn_id": case.turn_id,
                             "case_kind": case.kind,
                             "source_language": case.request["sourceLanguage"],
                             "candidate_language": case.candidate_language})
@@ -425,7 +429,7 @@ def calibrate(*, cli: str | Path, un_root: str | Path, output: str | Path,
               targets: Sequence[str] = TARGET_LOCALES, include_partial: bool = False,
               maximum_length_ratio: float | None = None, batch_size: int = 128,
               timeout_seconds: float = 120, bootstrap_resamples: int = clusters.DEFAULT_RESAMPLES,
-              bootstrap_seed: int = clusters.DEFAULT_SEED) -> dict:
+              bootstrap_seed: int = clusters.DEFAULT_SEED, include_content: bool = False) -> dict:
     destination = c.validate_output_path(output)
     if destination.exists():
         raise FileExistsError("calibration output already exists")
@@ -439,7 +443,7 @@ def calibrate(*, cli: str | Path, un_root: str | Path, output: str | Path,
     corpus, corpus_metadata = load_un(Path(un_root).resolve(), include_partial=include_partial)
     cases = make_cases(corpus.units, targets=targets, maximum_length_ratio=maximum_length_ratio)
     records, diagnostics = judge_cases(executable, cases, batch_size=batch_size,
-                                        timeout_seconds=timeout_seconds)
+                                        timeout_seconds=timeout_seconds, include_content=include_content)
     if cli_hash != sha256_file(executable):
         raise ValueError("Swift CLI executable changed during calibration")
     python_files = {name: sha256_file(Path(__file__).with_name(name))
@@ -486,7 +490,15 @@ def calibrate(*, cli: str | Path, un_root: str | Path, output: str | Path,
                             "cli_stderr": diagnostics,
                             "stderr_policy": "byte counts and SHA-256 only; raw diagnostics omitted to avoid machine-path disclosure"},
               "targets": summarize(records, targets, bootstrap_resamples=bootstrap_resamples,
-                                   bootstrap_seed=bootstrap_seed), "verdicts": records}
+                                   bootstrap_seed=bootstrap_seed), "content_included": include_content}
+    if include_content:
+        report["verdicts"] = records
+    else:
+        # Per-turn rows and annotations may contain literal reference material.
+        for audit in report["reference_length_audits"].values():
+            audit.pop("rows", None)
+        report["corpus"].pop("reference_annotations", None)
+        report["corpus"].pop("partial_turns", None)
     c.write_json(report, destination)
     return report
 
@@ -801,6 +813,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--targets", nargs="+", choices=TARGET_LOCALES, default=TARGET_LOCALES)
     parser.add_argument("--include-partial", action="store_true")
+    parser.add_argument("--include-content", action="store_true",
+                        help="Save literal prefix/number diagnostics and per-turn details; keep this report private")
     parser.add_argument("--maximum-length-ratio", type=float)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--timeout-seconds", type=float, default=120)
@@ -828,9 +842,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                            maximum_length_ratio=args.maximum_length_ratio,
                            batch_size=args.batch_size, timeout_seconds=args.timeout_seconds,
                            bootstrap_resamples=args.bootstrap_resamples,
-                           bootstrap_seed=args.bootstrap_seed)
+                           bootstrap_seed=args.bootstrap_seed, include_content=args.include_content)
     except (ValueError, OSError) as error:
-        parser.error(str(error))
+        parser.error("calibration_failed; raw diagnostics omitted")
     print(json.dumps({"output": c.validate_output_path(args.output).relative_to(c.output_root()).as_posix(),
                       "included_turn_count": report["corpus"]["included_turn_count"],
                       "excluded_turn_count": report["corpus"]["excluded_turn_count"],

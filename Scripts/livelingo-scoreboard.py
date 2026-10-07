@@ -829,6 +829,26 @@ def translation_outputs(text):
     return outputs
 
 
+def translation_file_outputs(path):
+    """Read private JSONL translations; content never goes through argv/stdout."""
+    if not path.exists():
+        return {}
+    if path.is_symlink() or not path.is_file():
+        raise Rejected("invalid_translation_output", 4)
+    outputs = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            if (not isinstance(row, dict) or set(row) != {"index", "text"}
+                    or type(row["index"]) is not int or row["index"] != len(outputs)
+                    or not isinstance(row["text"], str)):
+                raise ValueError("invalid translation record")
+            outputs[row["index"]] = row["text"]
+    except (OSError, ValueError, UnicodeError):
+        raise Rejected("invalid_translation_output", 4) from None
+    return outputs
+
+
 def collect_oslog(execution, run_dir):
     start = dt.datetime.fromtimestamp(execution["spawn_wall"] - 5).astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
     end = dt.datetime.fromtimestamp(execution["exit_wall"] + 5).astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
@@ -1264,14 +1284,21 @@ def run(args, provider=read_processes, log_collector=collect_oslog):
                             directory = out / f"translate-{label}-{profile}-{attempts:03d}"
                             directory.mkdir(mode=0o700)
                             remaining = "||".join(case["text"] for case in cases[cursor:])
-                            arguments = ["--translate-text", remaining, "--output", str(directory / "session")]
+                            content_directory = directory / ".translation-content"
+                            content_directory.mkdir(mode=0o700)
+                            input_file = content_directory / "input.txt"
+                            output_file = content_directory / "translations.jsonl"
+                            with exclusive(input_file) as stream:
+                                stream.write(remaining)
+                            arguments = ["--translate-file", str(input_file), "--translation-output", str(output_file),
+                                         "--output", str(directory / "session")]
                             if profile == "9b":
                                 arguments.append("--high-quality")
-                            execution, output = execute_cli(cli, arguments, directory, max(600, args.timeout_slack), provider,
-                                                            capture_required=False, translate=True)
+                            execution, _ = execute_cli(cli, arguments, directory, max(600, args.timeout_slack), provider,
+                                                       capture_required=False)
                             if execution["residual_owned_processes"] or execution["ownership_uncertain"]:
                                 raise Rejected("runtime_ownership_or_cleanup_unconfirmed", 4)
-                            parsed = translation_outputs(output)
+                            parsed = translation_file_outputs(output_file)
                             contiguous = 0
                             while contiguous in parsed and cursor + contiguous < len(cases):
                                 outputs[cursor + contiguous] = parsed[contiguous]

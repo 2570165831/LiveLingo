@@ -50,8 +50,11 @@ struct TargetAcceptanceCLI {
             try c.encode(configuredMaximumLengthRatio, forKey: .configuredMaximumLengthRatio)
             try c.encode(minimumSourceLetters, forKey: .minimumSourceLetters)
             try c.encode(absoluteLetterAllowance, forKey: .absoluteLetterAllowance)
-            try c.encode(stablePrefix, forKey: .stablePrefix); try c.encode(sourceNumbers, forKey: .sourceNumbers)
-            try c.encode(targetNumbers, forKey: .targetNumbers); try c.encode(detectedLanguage, forKey: .detectedLanguage)
+            let includeContent = encoder.userInfo[CodingUserInfoKey(rawValue: "includeContent")!] as? Bool == true
+            try c.encode(includeContent ? stablePrefix : "", forKey: .stablePrefix)
+            try c.encode(includeContent ? sourceNumbers : [], forKey: .sourceNumbers)
+            try c.encode(includeContent ? targetNumbers : [], forKey: .targetNumbers)
+            try c.encode(detectedLanguage, forKey: .detectedLanguage)
             try c.encode(candidateLanguages, forKey: .candidateLanguages)
         }
     }
@@ -60,14 +63,15 @@ struct TargetAcceptanceCLI {
     static func main() async {
         do { try await run(Array(CommandLine.arguments.dropFirst())) }
         catch {
-            FileHandle.standardError.write(Data("target-acceptance-cli: \(error)\n".utf8))
+            FileHandle.standardError.write(Data("target-acceptance-cli: request_failed; raw diagnostics omitted\n".utf8))
             exit(1)
         }
     }
     static func run(_ arguments: [String]) async throws {
-        if arguments == ["judge"] {
+        if arguments == ["judge"] || arguments == ["judge", "--include-content"] {
             let decoder = JSONDecoder(), encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            encoder.userInfo[CodingUserInfoKey(rawValue: "includeContent")!] = arguments.contains("--include-content")
             while let line = readLine() {
                 let request = try decoder.decode(Request.self, from: Data(line.utf8))
                 let result = try judge(request)
@@ -310,7 +314,9 @@ struct TargetAcceptanceCLI {
         for name in prompts.keys.sorted() {
             let data = Data(prompts[name]!.utf8), fileName = "\(target.rawValue)-\(name).utf8"
             let file = try checkedOutput(directory.appendingPathComponent(fileName).path)
-            try data.write(to: file, options: .withoutOverwriting)
+            let handle = try LiveLingoCLI.createPrivateFile(file)
+            try handle.write(contentsOf: data)
+            try handle.close()
             // Bind metadata to re-read bytes, not just intended content.
             let reread = try Data(contentsOf: file)
             guard reread == data else { throw Failure.promptCapture }
@@ -322,7 +328,9 @@ struct TargetAcceptanceCLI {
                 : target == .spanish ? ["en", "fr"] : target == .french ? ["en", "es"] : ["en", "es", "fr"],
             "capture": "App constants and injected request substitutes; no model or network", "prompts": entries]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        try data.write(to: try checkedOutput(directory.appendingPathComponent("manifest.json").path), options: .withoutOverwriting)
+        let handle = try LiveLingoCLI.createPrivateFile(try checkedOutput(directory.appendingPathComponent("manifest.json").path))
+        try handle.write(contentsOf: data)
+        try handle.close()
         FileHandle.standardOutput.write(data + Data([10]))
     }
 }

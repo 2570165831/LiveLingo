@@ -22,6 +22,61 @@ and no LM Studio service is required. Read-only model files may be reused, but
 test processes and their writable state belong to this run. Do not run a replay
 alongside a real recording or use the legacy service script for this CLI.
 
+## Text and evaluation privacy
+
+Read UTF-8 text from a file or stdin and write translations to a **new** JSONL
+file (`index` and `text` per line):
+
+```sh
+work/new-cli-build/livelingo-cli --translate-file /absolute/private/input.txt \
+  --translation-output /absolute/private/new-translations.jsonl \
+  --output /absolute/private/new-run
+cat /absolute/private/input.txt | work/new-cli-build/livelingo-cli --translate-stdin \
+  --translation-output /absolute/private/another-translations.jsonl \
+  --output /absolute/private/another-run
+```
+
+Stdout contains progress only. The legacy `--translate-text TEXT` is accepted
+with a warning because text in arguments may be visible to process observers
+and shell history. Its default output is `translation.jsonl` inside the run
+directory. `--allow-content-output` explicitly enables the legacy `OUTPUT[n]`
+stdout format. Translation files are created as 0600 without overwriting files
+or following output symlinks; each run directory is 0700. Failures may leave
+partial translations and isolated state for inspection.
+
+`learning-quality-cli` always overrides inherited App preferences, data and MLX
+checkpoint locations with `.cli-runtime/` inside its new output directory.
+Its default result and `--dry-run` contain counts, status codes and hashes.
+`--include-content` also saves fixtures, prepared inputs, final responses and
+notes for private readback. Scoring those detailed artifacts with
+`evaluate-learning-quality.py` produces a summary by default; its own
+`--include-content` enables source meanings and point readback. A summary-only
+probe is insufficient for semantic or detailed structural scoring.
+
+`target-acceptance-cli judge` omits literal stable prefixes and number fragments;
+`judge --include-content` enables them. `target_eval.calibrate` and
+`benchmark-asr-chunking.py` require `--include-content` for detailed/content
+reports. Calibration and scorer failures omit raw diagnostics. Reports are
+private files, and sharing them still requires checking the final artifact.
+See [privacy boundaries](../docs/PRIVACY.md) for Apple translation and clipboard
+handling. These settings do not verify macOS internal communication or retention.
+
+`recover-orphan-recordings.py` requires explicit `--root` directories; exporting
+also requires `--export --output`. It never scans App containers by default.
+Stdout identifies the requested scope/output and aggregate counts; no separate
+log is created. `--include-sensitive-diagnostics` enables course names, per-file
+paths and raw diagnostics. Export names still identify sessions, so inspect
+them before sharing a recovered directory.
+
+Release assembly uses `privacy_package.py` to exclude migration recovery trees,
+CLI/model state, measurement logs and sidecar files from **new copies**, retaining
+the original data. Runtime manifests keep relative Python locations and necessary
+notices/hashes. Build, DMG and mounted-DMG verification check the final package;
+signed inputs are checked without editing. Unexpected classroom files, structured
+local paths, or extra App resources stop packaging. This is a known-file and
+metadata check; it cannot identify every renamed text file or every binary's
+embedded information.
+
 Build into a new directory:
 
 ```sh

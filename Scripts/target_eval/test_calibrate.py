@@ -193,7 +193,7 @@ class ScratchTests(unittest.TestCase):
         executable.write_text(
             "#!/opt/homebrew/bin/python3.13 -B\n"
             "import json\nfrom pathlib import Path\nimport sys\n"
-            "assert sys.argv[1:] == ['judge']\n"
+            "assert sys.argv[1:] in (['judge'], ['judge', '--include-content'])\n"
             "rows = json.loads(Path(__file__).with_name('canned-replies.json').read_text())\n"
             + ("sys.stderr.write('synthetic diagnostic\\n' * 10000)\n" if noisy else "")
             + "requests = [json.loads(line) for line in sys.stdin.read().split('\\n') if line]\n"
@@ -221,12 +221,26 @@ class ScratchTests(unittest.TestCase):
 
 
 class JudgeTransportTests(ScratchTests):
+    def test_default_transport_drops_unrequested_content_and_failure_diagnostics(self):
+        cases = a.make_cases([synthetic_unit()], targets=("es",))
+        executable = self.transport_cli(cases, large_prefix=True)
+        rows, _ = a.judge_cases(executable, cases)
+        self.assertTrue(all(row["stablePrefix"] == "" and row["sourceNumbers"] == []
+                            and row["targetNumbers"] == [] for row in rows))
+        canary = "PRIVATE_SYNTHETIC_FAILURE_OUTPUT"
+        failure = subprocess.CompletedProcess(["synthetic"], 3, stdout="", stderr=canary)
+        with patch.object(a.subprocess, "run", return_value=failure):
+            with self.assertRaises(ValueError) as caught:
+                a.judge_cases(executable, cases)
+        self.assertNotIn(canary, str(caught.exception))
+        self.assertIn("raw diagnostics omitted", str(caught.exception))
+
     def test_real_subprocess_drains_large_stdin_stdout_stderr_and_reorders_by_id(self):
         unit = synthetic_unit()
         unit.texts.update({locale: text * 1000 for locale, text in unit.texts.items()})
         cases = a.make_cases([unit], targets=("es",))
         executable = self.transport_cli(cases, noisy=True, large_prefix=True)
-        rows, diagnostics = a.judge_cases(executable, cases, batch_size=11, timeout_seconds=10)
+        rows, diagnostics = a.judge_cases(executable, cases, batch_size=11, timeout_seconds=10, include_content=True)
         self.assertEqual([row["id"] for row in rows], [case.request["id"] for case in cases])
         self.assertEqual(len(rows), 30)
         self.assertEqual(len(diagnostics), 3)
@@ -257,7 +271,7 @@ class JudgeTransportTests(ScratchTests):
         reply["stablePrefix"] = "Une phrase.\u2028Une autre phrase."
         process = subprocess.CompletedProcess([], 0, json.dumps(reply, ensure_ascii=False) + "\n", "")
         with patch.object(a.subprocess, "run", return_value=process):
-            rows, _ = a.judge_cases(self.root / "not-run", [case])
+            rows, _ = a.judge_cases(self.root / "not-run", [case], include_content=True)
         self.assertEqual(rows[0]["stablePrefix"], reply["stablePrefix"])
 
     def test_bad_identity_row_count_and_duplicate_json_fields_fail(self):
@@ -330,7 +344,7 @@ class CalibrationReportTests(ScratchTests):
         cases = a.make_cases(units[:1])
         executable = self.transport_cli(cases)
         output = self.root / "report" / "new.json"
-        report = a.calibrate(cli=executable, un_root=path.parent.parent, output=output, batch_size=31)
+        report = a.calibrate(cli=executable, un_root=path.parent.parent, output=output, batch_size=31, include_content=True)
         self.assertEqual(json.loads(output.read_text()), report)
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(report["corpus"]["files"][0]["sha256"], hashlib.sha256(original).hexdigest())
@@ -358,7 +372,7 @@ class CalibrationReportTests(ScratchTests):
         path, units = self.un_fixture()
         executable = self.transport_cli(a.make_cases(units, targets=("en",)))
         report = a.calibrate(cli=executable, un_root=path.parent.parent, output=self.root / "partial.json",
-                             targets=("en",), include_partial=True, maximum_length_ratio=2)
+                             targets=("en",), include_partial=True, maximum_length_ratio=2, include_content=True)
         self.assertTrue(report["corpus"]["include_partial"])
         self.assertEqual(report["corpus"]["excluded_turn_count"], 0)
         self.assertEqual(report["corpus"]["partial_turn_count"], 1)
@@ -486,12 +500,26 @@ class ReferenceLetterAuditTests(unittest.TestCase):
 
 
 class ReferenceLetterReportTests(ScratchTests):
+    def test_default_calibration_report_is_summary_only_and_private(self):
+        path, units = self.un_fixture()
+        executable = self.transport_cli(a.make_cases(units[:1], targets=("en",)), large_prefix=True)
+        output = self.root / "summary" / "report.json"
+        report = a.calibrate(cli=executable, un_root=path.parent.parent,
+                             output=output, targets=("en",))
+        self.assertFalse(report["content_included"])
+        self.assertNotIn("verdicts", report)
+        self.assertNotIn("rows", report["reference_length_audits"]["en_from_zh"])
+        self.assertNotIn("reference_annotations", report["corpus"])
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(output.parent.stat().st_mode & 0o777, 0o700)
+        self.assertNotIn(units[0].texts["en"], output.read_text())
+
     def test_calibration_exports_same_unit_audit_without_changing_inputs(self):
         path, units = self.un_fixture()
         original = path.read_bytes()
         executable = self.transport_cli(a.make_cases(units[:1], targets=("en",)))
         report = a.calibrate(cli=executable, un_root=path.parent.parent,
-                             output=self.root / "letters.json", targets=("en",))
+                             output=self.root / "letters.json", targets=("en",), include_content=True)
         audit = report["reference_length_audits"]["en_from_zh"]
         self.assertEqual(audit["sample_count"], 1)
         self.assertEqual(audit["by_source_composition"]["han_only"]["sample_count"], 1)

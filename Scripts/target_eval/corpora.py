@@ -95,10 +95,11 @@ def validate_output_path(path: str | Path) -> Path:
 
 def _write_text(path: str | Path, content: str) -> Path:
     destination = validate_output_path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     validate_output_path(destination)
     # Exclusive creation also refuses existing files and dangling leaf symlinks.
-    with destination.open("x", encoding="utf-8", newline="\n") as handle:
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(content)
     return destination
 

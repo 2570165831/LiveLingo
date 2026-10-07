@@ -128,6 +128,7 @@ fi
 (( attach_code == 0 )) || fail "attach 失败（exit ${attach_code}），清理已返回的设备 ${device}"
 mounted_app="${mount_dir}/LiveLingo.app"
 [[ -d "${mounted_app}" && ! -L "${mounted_app}" ]] || fail "DMG 内缺少真实 LiveLingo.app 目录"
+check_package_privacy "${mount_dir}" dmg
 "${stapler_bin}" validate "${mounted_app}"
 "${codesign_bin}" --verify --deep --strict --verbose=2 "${mounted_app}"
 [[ -z "${identity}" ]] || check_authority "${mounted_app}" "${identity}"

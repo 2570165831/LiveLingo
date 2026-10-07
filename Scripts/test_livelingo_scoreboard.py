@@ -31,9 +31,14 @@ args = sys.argv[1:]
 root = pathlib.Path(args[args.index('--output') + 1]); root.mkdir()
 sentinel = 'PRIVATE_CLASSROOM_SENTINEL_do_not_export'
 segment = '00000000-0000-0000-0000-000000000001'
-if '--translate-text' in args:
-    print('model=synthetic')
-    print('OUTPUT[0]=合成译文')
+if '--translate-file' in args:
+    source = pathlib.Path(args[args.index('--translate-file') + 1]).read_text()
+    destination = pathlib.Path(args[args.index('--translation-output') + 1])
+    with destination.open('x') as stream:
+        for index, text in enumerate(source.split('||')):
+            stream.write(json.dumps(dict(index=index, text='合成译文')) + '\n')
+    destination.chmod(0o600)
+    print(json.dumps(dict(event='runtime_cleanup',confirmed=True)))
     time.sleep(.1)
     sys.exit(0)
 row = dict(id=segment,startTime=0.,endTime=.1,english=sentinel,
@@ -144,6 +149,37 @@ class ScoreboardOrchestrationTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(m.score(m.parser().parse_args(["score", "--run-dir", str(out), "--out", str(rescored)])), 0)
         self.assertEqual(report, m.read_json(rescored / "scoreboard.json"))
+
+    def test_authored_runner_uses_private_files_instead_of_content_arguments(self):
+        out = self.path("authored-private-files")
+        args = self.args(out)
+        args.tier, args.skip_authored = "standard", False
+        manifest_path = self.fixtures / "fixtures-manifest.json"
+        original_manifest = manifest_path.read_bytes()
+        manifest = json.loads(original_manifest)
+        manifest["clips"][0]["tiers"].append("standard")
+        manifest_path.write_text(json.dumps(manifest))
+        captured = []
+        popen = subprocess.Popen
+        def check_popen(arguments, *positional, **keywords):
+            if str(arguments[0]) == str(self.cli):
+                self.assertNotIn("--translate-text", arguments)
+                if "--translate-file" in arguments:
+                    captured.append(arguments)
+                    source = Path(arguments[arguments.index("--translate-file") + 1])
+                    self.assertEqual(source.parent.name, ".translation-content")
+                    self.assertEqual(source.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(source.parent.stat().st_mode & 0o777, 0o700)
+                    self.assertNotIn(source.read_text(), arguments)
+            return popen(arguments, *positional, **keywords)
+        try:
+            with patch.object(m.subprocess, "Popen", side_effect=check_popen), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(m.run(args, provider=self.provider, log_collector=self.oslog), 0)
+        finally:
+            manifest_path.write_bytes(original_manifest)
+        self.assertEqual(len(captured), 1)
+        self.assertTrue((out / "translate-A-9b-000/.translation-content/translations.jsonl").is_file())
+        self.assertNotIn("合成译文", (out / "scoreboard.json").read_text())
 
     def test_existing_output_is_refused_without_overwriting(self):
         out = self.path("existing")
@@ -512,6 +548,16 @@ class ScoreboardOrchestrationTests(unittest.TestCase):
         result = m.translation_outputs("model=synthetic\nOUTPUT[0]=第一行\n第二行\nOUTPUT[1]=下一句\n")
         self.assertEqual(result, {0: "第一行\n第二行", 1: "下一句"})
         self.assertEqual(m.translation_outputs("model=synthetic\n"), {})
+
+    def test_private_translation_file_multiline_and_partial_failure(self):
+        destination = self.path("translation.jsonl")
+        self.assertEqual(m.translation_file_outputs(destination), {})
+        destination.write_text(json.dumps({"index": 0, "text": "第一行\n第二行"}) + "\n")
+        self.assertEqual(m.translation_file_outputs(destination), {0: "第一行\n第二行"})
+        destination.write_text(json.dumps({"index": 2, "text": SENTINEL}) + "\n")
+        with self.assertRaises(m.Rejected) as caught:
+            m.translation_file_outputs(destination)
+        self.assertNotIn(SENTINEL, str(caught.exception))
 
     def test_compare_uses_paired_ci_noise_and_accuracy_guardrail(self):
         def group(errors, energy, censored=False):

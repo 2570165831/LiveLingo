@@ -131,6 +131,18 @@ import Darwin
             let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
             guard !FileManager.default.fileExists(atPath: root.path) else { throw Failure(name: "evidence_exists") }
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let textCommand = try LiveLingoCLI.parse(["--translate-file", "private-input.txt", "--translation-output", "private-output.jsonl"])
+            guard case .translateInput(let textOptions) = textCommand else { throw Failure(name: "private_text_mode") }
+            try expect(textOptions.input == .file("private-input.txt") && !textOptions.allowContentOutput, "text_file_defaults_private")
+            let stdinCommand = try LiveLingoCLI.parse(["--translate-stdin", "--translation-output", "private-output.jsonl"])
+            guard case .translateInput(let stdinOptions) = stdinCommand else { throw Failure(name: "stdin_text_mode") }
+            try expect(stdinOptions.input == .stdin, "text_stdin_input")
+            for arguments in [["--translate-file", "private-input.txt"], ["--translate-stdin"],
+                ["--translate-stdin", "--translate-file", "private-input.txt", "--translation-output", "private-output.jsonl"],
+                ["--replay", "input.wav", "--output", "new-run", "--allow-content-output"]] {
+                try rejects("ambiguous_private_text_options") { _ = try LiveLingoCLI.parse(arguments) }
+            }
+            passed.append("private_text_parse_boundaries")
             let goldenID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
             let goldenSession = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
             let englishGolden = TranscriptSegment(id: goldenID, startTime: 0, endTime: 1,

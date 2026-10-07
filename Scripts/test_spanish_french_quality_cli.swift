@@ -28,7 +28,7 @@ struct SpanishFrenchQualityCLITests {
                     .appendingPathComponent(name + ".json")
                 let dry = root.appendingPathComponent("dry-" + target.rawValue + "-" + name)
                 try await LearningQualityCLI.run(arguments: ["--input", input.path, "--output", dry.path,
-                    "--target", target.rawValue, "--dry-run"], generate: { _, _ in
+                    "--target", target.rawValue, "--dry-run", "--include-content"], generate: { _, _ in
                         throw Failure.assertion("dry run must not generate")
                     })
                 try check(try object(dry.appendingPathComponent("dry-run.json"))["modelInvoked"] as? Bool == false, "offline preparation")
@@ -36,7 +36,7 @@ struct SpanishFrenchQualityCLITests {
                 try check(generatePrompt == target.learningNotePrompt, "production target prompt")
                 let output = root.appendingPathComponent("generated-" + target.rawValue + "-" + name)
                 try await LearningQualityCLI.run(arguments: ["--input", input.path, "--output", output.path,
-                    "--target", target.rawValue], generate: { input, model in
+                    "--target", target.rawValue, "--include-content"], generate: { input, model in
                         calls += 1
                         try check(model == QwenModelProfile.energySaver.translationModel, "injected generation model")
                         let parsed = try JSONSerialization.jsonObject(with: Data(input.utf8)) as! [String: Any]
