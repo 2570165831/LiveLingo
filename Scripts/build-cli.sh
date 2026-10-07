@@ -49,7 +49,7 @@ else
   xcrun swiftc -D LIVELINGO_CLI -D LIVELINGO_CLI_LIFECYCLE_TESTS -swift-version 6 -parse-as-library -O -target arm64-apple-macos14.0 -module-cache-path "$module_cache" "${sources[@]}" "$root/Scripts/livelingo-cli.swift" "$root/Scripts/test-cli-target-review.swift" -o "$output/livelingo-cli-target-review-tests"
   printf 'Built %s/livelingo-cli-target-review-tests\n' "$output"
  elif [[ "$translation_failure_tests" == 1 ]]; then
-  xcrun swiftc -D LIVELINGO_CLI -D LIVELINGO_CLI_LIFECYCLE_TESTS -swift-version 6 -parse-as-library -O -target arm64-apple-macos14.0 -module-cache-path "$module_cache" "${sources[@]}" "$root/Scripts/livelingo-cli.swift" "$root/Scripts/test-cli-translation-failures.swift" -o "$output/livelingo-cli-translation-failure-tests"
+  xcrun swiftc -D LIVELINGO_CLI -D LIVELINGO_CLI_LIFECYCLE_TESTS -swift-version 6 -parse-as-library -O -target arm64-apple-macos14.0 -module-cache-path "$module_cache" "${sources[@]}" "$root/Scripts/livelingo-cli.swift" "$root/LiveLingoTests/TestPreferenceCleanup.swift" "$root/Scripts/test-cli-translation-failures.swift" -o "$output/livelingo-cli-translation-failure-tests"
   printf 'Built %s/livelingo-cli-translation-failure-tests\n' "$output"
  fi
 fi

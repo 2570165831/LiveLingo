@@ -1095,14 +1095,14 @@ enum LatinTargetAcceptance {
             }
             let unchanged = echoForm(candidate) == echoForm(source)
             let foreignSource = sourceCode(sourceLanguage) != target.rawValue
-            if foreignSource, unchanged, sourceContentWords(source).count >= 3 { return .sourceEcho }
-            // Short copies still undergo recognition and competing-language
-            // checks. Only explicit portable forms can override an uncertain
-            // recognizer; foreign prose evidence defeats a title-case name.
+            // Recognition alone also calls names foreign. Resolve portable
+            // entities before using lexical or language evidence against a copy.
             let language = identifyLanguage(candidate, target: target, sourceLanguage: sourceLanguage)
-            let portableCopy = unchanged && isPortableSourceCopy(candidate, target: target, sourceLanguage: sourceLanguage)
+            let portableCopy = unchanged && isPortableSourceCopy(candidate, target: target,
+                sourceLanguage: sourceLanguage, assessment: language)
             if foreignSource, unchanged, !portableCopy,
-               hasShortSourceProseEvidence(candidate, target: target, sourceLanguage: sourceLanguage)
+               sourceContentWords(source).count >= 3
+                || hasShortSourceProseEvidence(candidate, target: target, sourceLanguage: sourceLanguage)
                 || (language.detectedLanguage != target.rawValue && language.detectedConfidence >= 0.8) {
                 return .sourceEcho
             }
@@ -1114,8 +1114,8 @@ enum LatinTargetAcceptance {
             if target != .english, containsEnglishClause(candidate, target: target, sourceLanguage: sourceLanguage) {
                 return .mixedEnglishProse
             }
-            if hasCompetingEvidence(candidate, target: target) { return .wrongLanguage }
-            if foreignSource, containsCopiedProse(candidate: candidate, source: source) { return .sourceProse }
+            if !portableCopy, hasCompetingEvidence(candidate, target: target) { return .wrongLanguage }
+            if !portableCopy, foreignSource, containsCopiedProse(candidate: candidate, source: source) { return .sourceProse }
 
         }
         guard LatinTargetLengthGuard.isPlausible(candidate: candidate, source: source, target: target,
@@ -1232,7 +1232,7 @@ enum LatinTargetAcceptance {
     ]
     private static let sharedEnglishWordForms: [Target: Set<String>] = [
         .spanish: Set("radio hotel internet animal hospital local final total original material central experimental".split(separator: " ").map(String.init)),
-        .french: Set("excellent question internet radio menu restaurant important original final total".split(separator: " ").map(String.init))
+        .french: Set("excellent question internet radio menu restaurant important original final total pardon".split(separator: " ").map(String.init))
     ]
     private static func isSharedEnglishWord(_ tokens: [String], target: Target, source: Target) -> Bool {
         guard tokens.count == 1 else { return false }
@@ -1259,14 +1259,54 @@ enum LatinTargetAcceptance {
     }
     private static let portableIdentifier = try! NSRegularExpression(pattern:
         #"^[A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+|[0-9][A-Za-z0-9_]*|[a-z][A-Z][A-Za-z0-9_]*)[.!?]?$"#)
-    private static func isPortableSourceCopy(_ text: String, target: Target, sourceLanguage: String?) -> Bool {
+    // Only suspected, unchanged copies use this second check. Requiring both
+    // constrained and unconstrained recognition avoids a forced source label.
+    // One/two-word fragments remain governed by short-prose/name evidence.
+    static func hasConfidentForeignCopyLanguage(_ assessment: LanguageAssessment, target: Target,
+                                                 sourceLanguage: String?, tokenCount: Int) -> Bool {
+        let source = sourceCode(sourceLanguage)
+        return tokenCount >= 3 && source != target.rawValue
+            && assessment.detectedLanguage == source && assessment.detectedConfidence >= 0.98
+            && assessment.unconstrainedLanguage == source && assessment.unconstrainedConfidence >= 0.98
+    }
+
+    /// Use the bundled English named-entity tagger in a fixed carrier sentence
+    /// so short standalone names get context (e.g. Jean de La Fontaine). Every
+    /// letter of the candidate must belong to an entity, not just a name inside
+    /// prose. No asset requests, network, hints, or mutable recognizer are used.
+    private static func isRecognizedPortableName(_ text: String) -> Bool {
+        let carrier = "The name is "
+        let input = carrier + text + "."
+        let start = input.index(input.startIndex, offsetBy: carrier.count)
+        let end = input.index(start, offsetBy: text.count)
+        let tagger = NLTagger(tagSchemes: [.nameType])
+        tagger.string = input
+        tagger.setLanguage(.english, range: input.startIndex..<input.endIndex)
+        let letters = text.unicodeScalars.filter(isLetter).count
+        var covered = 0
+        tagger.enumerateTags(in: input.startIndex..<input.endIndex, unit: .word, scheme: .nameType,
+                             options: [.joinNames, .omitWhitespace, .omitPunctuation]) { tag, range in
+            if let tag, [NLTag.personalName, .placeName, .organizationName].contains(tag),
+               range.lowerBound >= start, range.upperBound <= end {
+                covered += input[range].unicodeScalars.filter(isLetter).count
+            }
+            return true
+        }
+        return letters > 0 && covered == letters
+    }
+
+    private static func isPortableSourceCopy(_ text: String, target: Target, sourceLanguage: String?,
+                                             assessment: LanguageAssessment) -> Bool {
         let canonical = text.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         if portableIdentifier.firstMatch(in: canonical, range: NSRange(canonical.startIndex..., in: canonical)) != nil { return true }
         let tokens = words(canonical)
         if let source = Target(rawValue: sourceCode(sourceLanguage)), isSharedEnglishWord(tokens, target: target, source: source) { return true }
+        if isRecognizedPortableName(canonical) { return true }
         guard !hasShortSourceProseEvidence(canonical, target: target, sourceLanguage: sourceLanguage) else { return false }
-        // Preserve capitalized name tokens, but never a known foreign clause
-        // merely because its first word (or every word) is capitalized.
+        guard !hasConfidentForeignCopyLanguage(assessment, target: target,
+            sourceLanguage: sourceLanguage, tokenCount: tokens.count) else { return false }
+        // Retain the historical spelling fallback only for uncertain fragments.
+        // Title case cannot overrule confident foreign-prose recognition.
         let names = wordExpression.matches(in: canonical, range: NSRange(canonical.startIndex..., in: canonical))
             .compactMap { Range($0.range, in: canonical).map { String(canonical[$0]) } }
         return !names.isEmpty && names.allSatisfy {

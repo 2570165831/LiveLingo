@@ -818,10 +818,14 @@ final class SessionStore: @unchecked Sendable {
         var snapshot = SessionSnapshot(sessionID: ids.first ?? legacySessionID,
                                        inputRevision: segments.map(\.inputRevision).max() ?? 0,
                                        segments: segments, legacyMarkdown: summary, createdAt: date)
-        // Only legacy imports consult export metadata. A stored nil remains
-        // the frozen Simplified Chinese choice and is never stamped by writes.
-        snapshot.targetLocale = try OutputLanguage.savedLanguage(in: directory,
-            snapshot: snapshot, origin: .legacy).persistedLocale
+        // Chinese legacy imports historically left the generation target nil,
+        // including regional Traditional manifests. Keep their fingerprints
+        // and paused source ledgers frozen; savedLanguage still selects their
+        // display locale. Non-Chinese imports must bind their own generator.
+        let language = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: .legacy)
+        if language.profile.generationLocale != "zh-Hans" {
+            snapshot.targetLocale = language.persistedLocale
+        }
         try snapshot.validate()
         return snapshot
     }

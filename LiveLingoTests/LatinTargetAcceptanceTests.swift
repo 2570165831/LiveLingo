@@ -488,6 +488,79 @@ final class LatinTargetAcceptanceTests: XCTestCase {
 }
 
 extension LatinTargetAcceptanceTests {
+    func testForeignCopyRecognitionThresholdAndShortTextPolicy() {
+        func assessment(_ constrained: Double, _ unconstrained: Double,
+                        detected: String = "es", unrestricted: String = "es") -> LatinTargetAcceptance.LanguageAssessment {
+            .init(candidateLanguages: ["en", "es"], detectedLanguage: detected,
+                detectedConfidence: constrained, unconstrainedLanguage: unrestricted,
+                unconstrainedConfidence: unconstrained)
+        }
+        let samples: [(LatinTargetAcceptance.LanguageAssessment, Int, Bool)] = [
+            (assessment(0.98, 0.98), 3, true),
+            (assessment(0.9799, 1), 3, false),
+            (assessment(1, 0.9799), 3, false),
+            (assessment(1, 1), 2, false),
+            (assessment(1, 1, unrestricted: "pt"), 4, false),
+            (assessment(1, 1, detected: "en"), 4, false)
+        ]
+        for (language, count, expected) in samples {
+            XCTAssertEqual(LatinTargetAcceptance.hasConfidentForeignCopyLanguage(language,
+                target: .english, sourceLanguage: "es-MX", tokenCount: count), expected)
+        }
+        XCTAssertFalse(LatinTargetAcceptance.hasConfidentForeignCopyLanguage(assessment(1, 1),
+            target: .spanish, sourceLanguage: "es", tokenCount: 4))
+    }
+
+    func testReviewedEnglishPortableCopiesSurviveProductionClient() async throws {
+        let samples: [(String, String)] = [
+            ("Los Angeles", "es"), ("La Paz", "es"), ("Agua Prieta", "es"),
+            ("Le Havre", "fr"), ("La Rochelle", "fr"), ("Jean de La Fontaine", "fr"),
+            ("Pardon.", "fr"), ("Dijkstra", "es"), ("Isaac Newton", "fr"),
+            ("Buenos Aires", "es"), ("Radio", "es"), ("frame_index", "fr")
+        ]
+        for (text, language) in samples {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: text, source: text,
+                sourceLanguage: language, target: .english), text)
+            let capture = B1RequestCapture()
+            do {
+                let result = try await QwenTranslationClient.translate(text,
+                    modelName: QwenModelProfile.energySaver.translationModel,
+                    sourceLanguage: language, target: .english,
+                    request: { _, prompt, _ in await capture.reply(prompt: prompt, text: text) })
+                XCTAssertEqual(result, text, text)
+            } catch { XCTFail("Portable English copy rejected: \(text): \(error)") }
+            let prompts = await capture.snapshot()
+            XCTAssertEqual(prompts.count, 1, text)
+        }
+    }
+
+    func testReviewedTitleCaseForeignProseIsRejectedByProductionClient() async throws {
+        let samples = [
+            ("Continuamos Estudiando Funciones Lineales", "es"),
+            ("Aprendemos Conceptos Matemáticos Fundamentales Nuevamente", "es"),
+            ("Étudiants Étudient Lentement", "fr"),
+            ("La Rochelle Est Belle.", "fr"),
+            ("Newton Est Un Scientifique.", "fr")
+        ]
+        for (title, language) in samples {
+            // Case changes cannot turn the same prose into a portable name.
+            for text in [title, title.lowercased()] {
+                XCTAssertEqual(TranslationAcceptance.rejection(candidate: text, source: text,
+                    sourceLanguage: language, target: .english), .sourceCopy, text)
+                let capture = B1RequestCapture()
+                do {
+                    _ = try await QwenTranslationClient.translate(text,
+                        modelName: QwenModelProfile.energySaver.translationModel,
+                        sourceLanguage: language, target: .english,
+                        request: { _, prompt, _ in await capture.reply(prompt: prompt, text: text) })
+                    XCTFail("Copied foreign prose reached an English caption: \(text)")
+                } catch QwenRuntimeError.translationRejected { }
+                let prompts = await capture.snapshot()
+                XCTAssertEqual(prompts.count, 1, text)
+            }
+        }
+    }
+
     private static let b1ForeignShortCaptions: [(source: String, language: String, translation: String)] = [
         ("Hola.", "es", "Hello."),
         ("Buenos días.", "es", "Good morning."),

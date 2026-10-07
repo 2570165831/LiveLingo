@@ -6,6 +6,14 @@ import Foundation
 @main
 @MainActor
 struct CLITranslationFailureTests {
+    @MainActor private static var preferenceCleanups: [TestPreferenceCleanup] = []
+
+    @MainActor private static func cleanPreferences() throws {
+        while let cleanup = preferenceCleanups.last {
+            try cleanup.remove()
+            preferenceCleanups.removeLast()
+        }
+    }
     struct Failure: Error { let check: String }
     typealias Reason = TranscriptSegment.TranslationFailureReason
 
@@ -85,7 +93,10 @@ struct CLITranslationFailureTests {
     }
 
     static func fixture(_ dependencies: CaptionTranslationDependencies, root: URL, name: String) async throws -> AppModel {
-        guard let defaults = UserDefaults(suiteName: "LiveLingo-CLI-FailureTests-" + UUID().uuidString) else {
+        let suite = "LiveLingo-Test-" + UUID().uuidString
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        preferenceCleanups.append(cleanup)
+        guard let defaults = UserDefaults(suiteName: suite) else {
             throw Failure(check: "isolated_preferences_unavailable")
         }
         defaults.setVolatileDomain(["LiveLingo.modelMode": ModelMode.energySaver.rawValue], forName: UserDefaults.argumentDomain)
@@ -270,11 +281,16 @@ struct CLITranslationFailureTests {
             try await testDependencyCancellation(root: root, persistent: true); passed.append("persistent_dependency_cancellation")
             try await testActualWorkerCancellation(root: root); passed.append("actual_worker_cancellation")
             try expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty, "no_review_or_session_files_written")
+            try cleanPreferences()
             LiveLingoCLI.writeEvent(["event": "translation_failure_cli_tests_passed", "groups": passed.count])
         } catch let failure as Failure {
+            do { try cleanPreferences() }
+            catch { LiveLingoCLI.writeEvent(["event": "test_preference_cleanup_failed"], to: .standardError) }
             LiveLingoCLI.writeEvent(["event": "translation_failure_cli_tests_failed", "check": failure.check], to: .standardError)
             exit(1)
         } catch {
+            do { try cleanPreferences() }
+            catch { LiveLingoCLI.writeEvent(["event": "test_preference_cleanup_failed"], to: .standardError) }
             LiveLingoCLI.writeEvent(["event": "translation_failure_cli_tests_failed", "check": "unexpected_error"], to: .standardError)
             exit(1)
         }

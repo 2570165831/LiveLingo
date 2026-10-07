@@ -6,6 +6,101 @@ import XCTest
 
 @MainActor
 final class EnglishTargetTests: XCTestCase {
+    func testLegacyChineseManifestImportKeepsParentInputFingerprint() throws {
+        let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("LegacyChineseFingerprint-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionID = try XCTUnwrap(UUID(uuidString: "11111111-1111-4111-8111-111111111111"))
+        let segmentID = try XCTUnwrap(UUID(uuidString: "22222222-2222-4222-8222-222222222222"))
+        let segment = TranscriptSegment(id: segmentID, startTime: 0, endTime: 1,
+            english: "The temperature is 10 °C.", chinese: "温度是 10 °C。", sessionID: sessionID)
+        for locale in ["zh-Hans", "zh-Hant", "zh-Hant-TW", "zh-Hant-HK"] {
+            let directory = root.appendingPathComponent(locale)
+            try SessionExporter.export(segments: [segment], sessionDirectory: directory,
+                summary: "## 温度\n- 温度是 10 °C。", createdAt: Date(timeIntervalSince1970: 0))
+            try setLegacyManifestTarget(locale, in: directory)
+            XCTAssertFalse(FileManager.default.fileExists(atPath:
+                directory.appendingPathComponent(SessionStore.snapshotFileName).path))
+            let loaded = try SessionStore(directory: directory, legacySessionID: sessionID).loadDetailed()
+            XCTAssertEqual(loaded.origin, .legacy)
+            let snapshot = try XCTUnwrap(loaded.snapshot)
+            XCTAssertNil(snapshot.targetLocale, locale)
+            XCTAssertEqual(try snapshot.inputFingerprint(),
+                "2cd54119ac29e0e9e34a9cff9a54e2a5413b3b3a21d10a64c4934ad5e45a2cec", locale)
+            let expected: OutputLanguage = locale == "zh-Hant" ? .simplifiedChinese
+                : try XCTUnwrap(OutputLanguage(rawValue: locale))
+            XCTAssertEqual(try OutputLanguage.savedLanguage(in: directory,
+                snapshot: snapshot, origin: loaded.origin), expected, locale)
+            XCTAssertEqual(try LearningNotebook(snapshot: snapshot).target, .simplifiedChinese, locale)
+        }
+    }
+
+    func testLegacyChinesePausedNotebookSourcesRestoreThroughApp() async throws {
+        for locale in ["zh-Hans", "zh-Hant", "zh-Hant-TW", "zh-Hant-HK"] {
+            let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+                .appendingPathComponent("LegacyChineseRecovery-\(UUID())")
+            let directory = root.appendingPathComponent("course")
+            let evidence = [TranscriptSegment(startTime: 0, endTime: 1,
+                english: "The temperature is 10 °C.", chinese: "温度是 10 °C。")]
+            var book = LearningNotebook()
+            try book.append(evidence: evidence, note: LearningNote(topic: "温度", points: [
+                .init(kind: "核心结论", text: "温度是 10 °C。", sourceIDs: ["zh0s0"])
+            ], sourceVersion: 2, noNewKnowledge: false))
+            try SessionExporter.export(segments: evidence, sessionDirectory: directory,
+                summary: book.markdown(), createdAt: Date(timeIntervalSince1970: 0))
+            try setLegacyManifestTarget(locale, in: directory)
+            let job = try LearningReviewQueue.prepareJob(directory: directory,
+                batches: book.batches, original: book.markdown())
+            let journal = root.appendingPathComponent("queue.json")
+            try JSONEncoder().encode(LearningReviewQueue.Journal(jobs: [job], userPaused: true,
+                version: LearningReviewQueue.journalVersion)).write(to: journal)
+            let queue = LearningReviewQueue(journalURL: journal, observeSleep: false,
+                diagnostics: .disabled) { _, _, _, _, _ in
+                XCTFail("A paused legacy queue must not generate")
+                throw CancellationError()
+            }
+            let suite = "LiveLingo-Test-\(UUID())"
+            let cleanup = try TestPreferenceCleanup(suite: suite)
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
+                backgroundServices: false, scheduledNotes: false, defaults: defaults)
+            addTeardownBlock {
+                await model.resetTranslationSessionForTesting()?.value
+                await queue.shutdownForTesting()
+                try cleanup.remove()
+                try FileManager.default.removeItem(at: root)
+            }
+            let loaded = try SessionStore(directory: directory).loadDetailed()
+            let snapshot = try XCTUnwrap(loaded.snapshot)
+            let before = try Data(contentsOf: journal)
+            let recovered = try queue.restorableLegacyNotebook(for: directory, snapshot: snapshot)
+            XCTAssertEqual(recovered?.batches, book.batches, locale)
+            XCTAssertEqual(try Data(contentsOf: journal), before, "Read-only recovery changed progress: \(locale)")
+            try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+            XCTAssertEqual(model.learningNotebookForTesting.batches, book.batches, locale)
+            XCTAssertEqual(model.learningNotebookForTesting.target, .simplifiedChinese, locale)
+            XCTAssertEqual(model.outputLanguage.rawValue, locale == "zh-Hant" ? "zh-Hans" : locale)
+            XCTAssertTrue(model.archiveNotice?.contains("已恢复旧队列记录的笔记批次与来源") == true, locale)
+            XCTAssertFalse(model.lectureSummary.isEmpty, locale)
+            XCTAssertTrue(queue.userPaused, locale)
+            let saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self,
+                from: Data(contentsOf: journal))
+            XCTAssertNil(saved.jobs.first?.targetLocale, locale)
+            XCTAssertEqual(saved.jobs.first?.next, 0, locale)
+            XCTAssertEqual(saved.jobs.first?.reports, [], locale)
+        }
+    }
+
+    // Regional manifests are synthetic: their renderer remains unreleased.
+    // Exercise the supported storage path without claiming a regional export.
+    private func setLegacyManifestTarget(_ locale: String, in directory: URL) throws {
+        let manifest = directory.appendingPathComponent("manifest.json")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any])
+        object["targetLocale"] = locale
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: manifest)
+    }
+
     func testOptionalAnnotationsPreserveDefaultBytesAndRoundTripLatinMetadata() throws {
         var segment = TranscriptSegment(startTime: 0, endTime: 1, english: "An uncertain formula.")
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
