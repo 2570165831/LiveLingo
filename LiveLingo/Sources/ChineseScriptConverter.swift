@@ -3,7 +3,7 @@ import Foundation
 /// Offline OpenCC data, with scalar-based longest-prefix matching. Conversion
 /// preserves the original segmentation across every upstream conversion stage.
 final class ChineseScriptConverter: @unchecked Sendable {
-    enum Region: Sendable { case taiwan, hongKong }
+    enum Region: Hashable, Sendable { case taiwan, hongKong }
     enum Mode: String, CaseIterable, Sendable { case s2tw, s2hk, s2twp }
     enum Failure: LocalizedError {
         case resourcesMissing
@@ -21,13 +21,46 @@ final class ChineseScriptConverter: @unchecked Sendable {
     private let directory: URL?
     private let lock = NSLock()
     private var loaded: Result<Tables, Error>?
+    private struct CacheKey: Hashable {
+        let region: Region
+        let text: String
+
+        // Swift String equality folds canonically equivalent Unicode. Cache
+        // keys must preserve the original UTF-8 spelling of non-Han content.
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.region == rhs.region && lhs.text.utf8.elementsEqual(rhs.text.utf8)
+        }
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(region)
+            for byte in text.utf8 { hasher.combine(byte) }
+        }
+    }
+    private struct CacheEntry {
+        let text: String
+        let utf8Bytes: Int
+    }
+    private let cacheEntryLimit: Int
+    private let cacheByteLimit: Int
+    private var cache: [CacheKey: CacheEntry] = [:]
+    private var cacheOrder: [CacheKey] = []
+    private var cacheBytes = 0
     #if DEBUG
     private var loads = 0
+    private var cacheHits = 0
     var debugLoadCount: Int { lock.withLock { loads } }
+    var debugCacheEntryCount: Int { lock.withLock { cache.count } }
+    /// Counts the retained original and converted UTF-8 payloads. Entry count
+    /// separately bounds the dictionary/order bookkeeping, not measured RSS.
+    var debugCacheByteCount: Int { lock.withLock { cacheBytes } }
+    var debugCacheHitCount: Int { lock.withLock { cacheHits } }
     #endif
 
-    init(resourceDirectory: URL? = ChineseScriptConverter.resourceDirectory()) {
+    init(resourceDirectory: URL? = ChineseScriptConverter.resourceDirectory(),
+         cacheEntryLimit: Int = 256, cacheByteLimit: Int = 1_048_576) {
+        precondition(cacheEntryLimit >= 0 && cacheByteLimit >= 0)
         directory = resourceDirectory
+        self.cacheEntryLimit = cacheEntryLimit
+        self.cacheByteLimit = cacheByteLimit
     }
 
     static func resourceDirectory(bundle: Bundle = .main,
@@ -47,14 +80,42 @@ final class ChineseScriptConverter: @unchecked Sendable {
 
     func convert(_ text: String, to region: Region) throws -> String {
         try lock.withLock {
+            let key = CacheKey(region: region, text: text)
+            if let entry = cache[key] {
+                #if DEBUG
+                cacheHits += 1
+                #endif
+                if let index = cacheOrder.firstIndex(of: key) { cacheOrder.remove(at: index) }
+                cacheOrder.append(key)
+                return entry.text
+            }
             let data = try tables()
             let base = data.convert(text, mode: region == .taiwan ? .s2tw : .s2hk)
             // Match the project override first, then the reviewed phrase table.
             // A replacement is emitted once and never recursively reconverted.
-            return region == .taiwan
+            let result = region == .taiwan
                 ? Dictionary.convert(base, dictionaries: [data.taiwanOverlay, data.reviewedTaiwan])
                 : Dictionary.convert(base, dictionaries: [data.hongKongOverlay])
+            storeInCache(result, for: key)
+            return result
         }
+    }
+
+    /// Called only with lock held. Oversized entries bypass the cache without
+    /// changing conversion or evicting reusable short captions.
+    private func storeInCache(_ result: String, for key: CacheKey) {
+        guard cacheEntryLimit > 0, cacheByteLimit > 0 else { return }
+        let originalBytes = key.text.utf8.count
+        guard originalBytes <= cacheByteLimit else { return }
+        let (bytes, overflow) = originalBytes.addingReportingOverflow(result.utf8.count)
+        guard !overflow, bytes <= cacheByteLimit else { return }
+        while cache.count >= cacheEntryLimit || cacheBytes > cacheByteLimit - bytes {
+            let oldest = cacheOrder.removeFirst()
+            if let entry = cache.removeValue(forKey: oldest) { cacheBytes -= entry.utf8Bytes }
+        }
+        cache[key] = CacheEntry(text: result, utf8Bytes: bytes)
+        cacheOrder.append(key)
+        cacheBytes += bytes
     }
 
     private func tables() throws -> Tables {

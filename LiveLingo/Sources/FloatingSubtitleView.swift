@@ -133,7 +133,7 @@ extension AppModel {
                         && !previewChinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 hasTranslation = true
             } else if volatileEnglish.isEmpty, let caption = segments.last, caption.hasUsableTranslation {
-                translatedText = caption.chinese
+                translatedText = captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter)
             } else {
                 hasTranslation = false
             }
@@ -152,7 +152,9 @@ extension AppModel {
 
     var nonEnglishPreviewPresentation: CaptionPresentation? {
         if captionTarget == .english, !volatileEnglish.isEmpty { return CaptionPresentation(sourceOnlyText: volatileEnglish) }
-        return confirmedNonEnglishCaption.map { CaptionPresentation($0, target: captionTarget) }
+        return confirmedNonEnglishCaption.map {
+            CaptionPresentation($0, outputLanguage: captionDisplayLanguage, converter: chineseScriptConverter)
+        }
     }
 
     var previewEnglishDisplay: String {
@@ -165,13 +167,19 @@ extension AppModel {
         if captionTarget == .english, !volatileEnglish.isEmpty { return volatileEnglish }
         if let caption = confirmedNonEnglishCaption {
             let target = captionTarget
-            if target.keepsSourceAsCaption(language: caption.sourceLanguage) { return target.renderPassThrough(caption.english) }
-            if caption.hasUsableTranslation { return caption.chinese }
+            if target.keepsSourceAsCaption(language: caption.sourceLanguage) {
+                return captionDisplayLanguage.renderForDisplay(target.renderPassThrough(caption.english), converter: chineseScriptConverter)
+            }
+            if caption.hasUsableTranslation {
+                return captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter)
+            }
             return caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…"
         }
         guard previewTranslationEnabled else { return "初译已关闭" }
         guard supportsPreviewTranslation else { return "当前系统不支持初译；正式译文随后显示" }
-        if !previewChinese.isEmpty { return "初译 · \(previewChinese)" }
+        if !previewChinese.isEmpty {
+            return "初译 · \(captionDisplayLanguage.renderForDisplay(previewChinese, converter: chineseScriptConverter))"
+        }
         return previewTranslationSource.isEmpty ? "等待语音…" : "等待初译…"
     }
 }

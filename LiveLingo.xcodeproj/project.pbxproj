@@ -113,6 +113,7 @@
 		C70400000000000000000003 /* ChineseScriptConverterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70400000000000000000004 /* ChineseScriptConverterTests.swift */; };
 		C70400000000000000000005 /* ZhVariants in Resources */ = {isa = PBXBuildFile; fileRef = C70400000000000000000006 /* ZhVariants */; };
 		C70400000000000000000007 /* ZhVariantFixtures in Resources */ = {isa = PBXBuildFile; fileRef = C70400000000000000000008 /* ZhVariantFixtures */; };
+		C70800000000000000000001 /* TraditionalCaptionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -237,6 +238,7 @@
 		C70400000000000000000004 /* ChineseScriptConverterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChineseScriptConverterTests.swift; sourceTree = "<group>"; };
 		C70400000000000000000006 /* ZhVariants */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ZhVariants; sourceTree = "<group>"; };
 		C70400000000000000000008 /* ZhVariantFixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ZhVariantFixtures; path = "../Scripts/Fixtures/zh-variants-v1"; sourceTree = "<group>"; };
+		C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraditionalCaptionPresentationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -319,6 +321,7 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */,
 				C70400000000000000000008 /* ZhVariantFixtures */,
 				C70400000000000000000004 /* ChineseScriptConverterTests.swift */,
 				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
@@ -507,6 +510,7 @@
 				B75600000000000000000001 /* TargetPersistenceTests.swift in Sources */,
 				B70000000000000000000007 /* AcceptanceVerdictSnapshotTests.swift in Sources */,
 				B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */,
+				C70800000000000000000001 /* TraditionalCaptionPresentationTests.swift in Sources */,
 				C70400000000000000000003 /* ChineseScriptConverterTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,
 				910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */,

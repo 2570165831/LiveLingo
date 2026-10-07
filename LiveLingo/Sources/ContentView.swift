@@ -483,7 +483,8 @@ struct ContentView: View {
     }
 
     private func segmentRow(_ segment: TranscriptSegment) -> some View {
-        TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize, stream: model.finalCaptionStream, target: model.outputLanguage)
+        TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize, stream: model.finalCaptionStream,
+                             target: model.captionDisplayLanguage, converter: model.chineseScriptConverter)
             .equatable()
     }
 
@@ -672,7 +673,7 @@ struct ContentView: View {
             Image(systemName: model.errorMessage == nil ? model.currentInputMode.statusIcon : "exclamationmark.triangle")
                 .foregroundStyle(model.errorMessage == nil ? Color.secondary : ClassroomPalette.failure)
                 .accessibilityHidden(true)
-            Text(model.errorMessage ?? model.savedProcessingStatus ?? model.archiveNotice
+            Text(model.errorMessage ?? model.chineseDisplayNotice ?? model.savedProcessingStatus ?? model.archiveNotice
                  ?? (model.translationReady ? saveDestinationStatus : model.translationStatus))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -722,6 +723,7 @@ struct ContentView: View {
                     Text(error)
                     Divider()
                 }
+                if let notice = model.chineseDisplayNotice { Text(notice) }
                 if let status = model.savedProcessingStatus { Text(status) }
                 if let notice = model.archiveNotice { Text(notice) }
                 Text(model.isLiveOnly ? "保存：实时暂存，结束后删除录音并清空"
@@ -1800,13 +1802,18 @@ private struct PendingCaptionTranslation: View {
     let stream: FinalCaptionState
     let segmentID: UUID
     let textSize: Double
+    let target: OutputLanguage
+    let converter: ChineseScriptConverter
     @State private var isTranslating: Bool
 
     @MainActor
-    init(stream: FinalCaptionState, segmentID: UUID, textSize: Double) {
+    init(stream: FinalCaptionState, segmentID: UUID, textSize: Double,
+         target: OutputLanguage = .simplifiedChinese, converter: ChineseScriptConverter = .shared) {
         self.stream = stream
         self.segmentID = segmentID
         self.textSize = textSize
+        self.target = target
+        self.converter = converter
         _isTranslating = State(initialValue: stream.translatingSegmentID == segmentID)
     }
 
@@ -1828,7 +1835,8 @@ private struct PendingCaptionTranslation: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             if isTranslating {
-                ActiveCaptionTranslation(stream: stream, segmentID: segmentID, textSize: textSize)
+                ActiveCaptionTranslation(stream: stream, segmentID: segmentID, textSize: textSize,
+                                         target: target, converter: converter)
             }
         }
         .onReceive(stream.$translatingSegmentID
@@ -1846,6 +1854,8 @@ private struct ActiveCaptionTranslation: View {
     @ObservedObject var stream: FinalCaptionState
     let segmentID: UUID
     let textSize: Double
+    var target: OutputLanguage = .simplifiedChinese
+    var converter: ChineseScriptConverter = .shared
 
     var body: some View {
         #if DEBUG
@@ -1853,7 +1863,7 @@ private struct ActiveCaptionTranslation: View {
         #endif
         // Membership delivery and view removal need not happen in the same pass.
         if stream.translatingSegmentID == segmentID, !stream.streamingChinese.isEmpty {
-            Text(stream.streamingChinese)
+            Text(target.renderForDisplay(stream.streamingChinese, converter: converter))
                 .font(.system(size: textSize))
                 .lineSpacing(7)
                 .foregroundStyle(.primary)
@@ -1869,13 +1879,15 @@ private struct TranscriptCaptionRow: View, Equatable {
     let textSize: Double
     let stream: FinalCaptionState
     var target: OutputLanguage = .simplifiedChinese
+    var converter: ChineseScriptConverter = .shared
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.segment == rhs.segment && lhs.textSize == rhs.textSize && lhs.stream === rhs.stream && lhs.target == rhs.target
+        lhs.segment == rhs.segment && lhs.textSize == rhs.textSize && lhs.stream === rhs.stream
+            && lhs.target == rhs.target && lhs.converter === rhs.converter
     }
 
     var body: some View {
-        let caption = CaptionPresentation(segment, outputLanguage: target)
+        let caption = CaptionPresentation(segment, outputLanguage: target, converter: converter)
         HStack(alignment: .top, spacing: 14) {
             Text(Self.clock(segment.startTime))
                 .font(.system(size: 13).monospacedDigit())
@@ -1905,14 +1917,15 @@ private struct TranscriptCaptionRow: View, Equatable {
 
                 if let notice = segment.annotationText(targetCode: target.rawValue),
                    segment.captionAnnotation == .formulaNeedsReview {
-                    Text(notice).font(.caption).foregroundStyle(.secondary)
+                    Text(target.renderFixedTextForDisplay(notice, converter: converter)).font(.caption).foregroundStyle(.secondary)
                 }
                 if caption.isSourceOnly {
                     EmptyView()
                 } else if segment.translationState == .pending || segment.translationState == .translating {
-                    PendingCaptionTranslation(stream: stream, segmentID: segment.id, textSize: textSize)
+                    PendingCaptionTranslation(stream: stream, segmentID: segment.id, textSize: textSize,
+                                              target: target, converter: converter)
                 } else {
-                    Text(markdown: target.profile.script == .han ? segment.displayChinese : SessionExporter.targetLine(segment, outputLanguage: target))
+                    Text(markdown: CaptionPresentation.translationText(segment, outputLanguage: target, converter: converter))
                         .font(.system(size: textSize))
                         .lineSpacing(7)
                         .foregroundStyle(.primary)

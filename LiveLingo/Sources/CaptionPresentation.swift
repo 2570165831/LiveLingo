@@ -55,10 +55,35 @@ struct CaptionPresentation: Equatable {
     }
 
     init(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
-         locale: Locale = CaptionLanguageNames.interfaceLocale) {
+         locale: Locale = CaptionLanguageNames.interfaceLocale,
+         converter: ChineseScriptConverter = .shared) {
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
         isSourceOnly = outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
-        primaryText = isSourceOnly ? SessionExporter.targetLine(segment, outputLanguage: outputLanguage) : segment.english
+        primaryText = isSourceOnly
+            ? outputLanguage.renderForDisplay(SessionExporter.targetLine(segment, outputLanguage: outputLanguage), converter: converter)
+            : segment.english
+    }
+
+    /// Determine failures/placeholders on the stored draft before converting.
+    /// The default row keeps its existing displayChinese wording exactly.
+    static func translationText(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
+                                converter: ChineseScriptConverter = .shared) -> String {
+        if outputLanguage == .simplifiedChinese { return segment.displayChinese }
+        let failureMarker = segment.chinese.trimmingCharacters(in: .whitespacesAndNewlines)
+            .hasPrefix("[翻译失败：")
+        let text: String
+        if outputLanguage.profile.renderer != .identity {
+            // The UI has a state-only failure wording that the legacy exporter
+            // does not use. Keep that wording and hide old private diagnostics.
+            text = failureMarker ? SessionExporter.humanReadableChinese(segment.chinese) : segment.displayChinese
+        } else {
+            text = SessionExporter.targetLine(segment, outputLanguage: outputLanguage)
+        }
+        let isFixedText = !segment.hasUsableTranslation
+            || failureMarker
+        return isFixedText
+            ? outputLanguage.renderFixedTextForDisplay(text, converter: converter)
+            : outputLanguage.renderForDisplay(text, converter: converter)
     }
 
     static func translationStatus(isTranslating: Bool) -> String {

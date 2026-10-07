@@ -525,7 +525,53 @@ final class AppModel: ObservableObject {
     /// 因此能算上「请求在途期间新文本已经到达并等待」的那段时间。
     private var previewSourceChangedAt: TimeInterval = 0
 
-    @Published private(set) var outputLanguage: OutputLanguage = .simplifiedChinese
+    @Published private(set) var outputLanguage: OutputLanguage = .simplifiedChinese {
+        didSet {
+            if oldValue != outputLanguage { prepareChineseDisplay() }
+        }
+    }
+    @Published private(set) var chineseDisplayNotice: String?
+    @Published private(set) var chineseDisplayReady = false
+    private var chineseDisplayPreparationTask: Task<Void, Never>?
+
+    /// Do not let a first UI read synchronously load dictionaries. Completion
+    /// publishes only for Traditional Chinese; the default redraw path is inert.
+    var captionDisplayLanguage: OutputLanguage {
+        switch outputLanguage {
+        case .traditionalChineseTaiwan, .traditionalChineseHongKong:
+            return chineseDisplayReady ? outputLanguage : .simplifiedChinese
+        case .simplifiedChinese, .english, .spanish, .french: return outputLanguage
+        }
+    }
+
+    private func prepareChineseDisplay() {
+        chineseDisplayPreparationTask?.cancel()
+        chineseDisplayPreparationTask = nil
+        let language = outputLanguage
+        guard language == .traditionalChineseTaiwan || language == .traditionalChineseHongKong else {
+            if chineseDisplayReady { chineseDisplayReady = false }
+            if chineseDisplayNotice != nil { chineseDisplayNotice = nil }
+            return
+        }
+        // Both regions share one immutable dictionary load.
+        guard !chineseDisplayReady else { return }
+        if chineseDisplayNotice != nil { chineseDisplayNotice = nil }
+        let converter = chineseScriptConverter
+        chineseDisplayPreparationTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
+            let failure = await Task.detached(priority: .utility) { () -> String? in
+                do { try converter.prepare(); return nil }
+                catch { return error.localizedDescription }
+            }.value
+            guard !Task.isCancelled, let self, self.outputLanguage == language else { return }
+            self.chineseDisplayPreparationTask = nil
+            if let failure {
+                if self.chineseDisplayNotice != failure { self.chineseDisplayNotice = failure }
+            } else if !self.chineseDisplayReady {
+                self.chineseDisplayReady = true
+            }
+        }
+    }
     var captionTarget: CaptionTranslationTarget {
         // Unsupported generation targets are rejected before restoring work.
         if let snapshot = sessionSnapshot {
@@ -815,6 +861,7 @@ final class AppModel: ObservableObject {
     private let backgroundServicesEnabled: Bool
     private let scheduledNotesEnabled: Bool
     private let preferences: UserDefaults
+    let chineseScriptConverter: ChineseScriptConverter
     private var releasedOutputLanguage: (String) -> OutputLanguage? = OutputLanguage.releasedLanguage
     private var translationWorkerID: UUID?
     private var translationQueue: [UUID] = []
@@ -1011,7 +1058,8 @@ final class AppModel: ObservableObject {
          notes: LearningGenerationDependencies? = nil,
          backgroundServices: Bool = true,
          scheduledNotes: Bool? = nil,
-         defaults: UserDefaults = AppRuntimeEnvironment.preferences) {
+         defaults: UserDefaults = AppRuntimeEnvironment.preferences,
+         chineseScriptConverter: ChineseScriptConverter = .shared) {
         precondition(!AppRuntimeEnvironment.isUnitTesting || reviewQueue != nil,
                      "Tests must inject an isolated review queue")
         self.pipeline = pipeline
@@ -1022,6 +1070,7 @@ final class AppModel: ObservableObject {
         precondition(!AppRuntimeEnvironment.isUnitTesting || !self.scheduledNotesEnabled || notes != nil,
                      "Scheduled note tests must inject their generator")
         self.preferences = defaults
+        self.chineseScriptConverter = chineseScriptConverter
         noteReviewQueue = reviewQueue ?? LearningReviewQueue()
         let savedMode = preferences.string(forKey: Self.modelModeDefaultsKey)
             .flatMap(ModelMode.init(rawValue:)) ?? .automatic
@@ -2645,9 +2694,11 @@ final class AppModel: ObservableObject {
     /// Synthetic presentation data only. Test hosts have no services or real queue.
     func loadPresentationForTesting(phase: AppPhase, evidence: [TranscriptSegment],
                                     notebook: LearningNotebook = .init(), notice: String? = nil,
-                                    preview: String = "", processing: TranscriptionProcessingState? = nil) {
+                                    preview: String = "", processing: TranscriptionProcessingState? = nil,
+                                    outputLanguage: OutputLanguage? = nil) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         precondition(!noteReviewQueue.hasWork && translationWorker == nil)
+        if let outputLanguage { self.outputLanguage = outputLanguage }
         self.phase = phase
         self.segments = evidence
         if let processing { self.transcriptionProcessing = processing }
@@ -2666,6 +2717,11 @@ final class AppModel: ObservableObject {
         self.audioInputStatus = "合成输入 · 未使用麦克风"
         self.speechStatus = "界面验收数据"
         self.elapsedSeconds = evidence.last?.endTime ?? 0
+    }
+
+    var chineseDisplayPreparationForTesting: Task<Void, Never>? {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        return chineseDisplayPreparationTask
     }
 
     @discardableResult

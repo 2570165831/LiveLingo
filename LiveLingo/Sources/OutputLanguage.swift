@@ -1,5 +1,17 @@
 import Foundation
 
+/// Provisional Chinese display policies. They never rewrite a course's stamped
+/// targetLocale, generator input, or Simplified Chinese archival draft.
+enum ChineseOutputDefaults {
+    static let fixedTextFollowsDisplayLanguage = true
+    static let jsonlKeepsSimplifiedDraft = true
+    static let allowsChineseDisplaySwitch = true
+
+    static func canSwitchDisplay(from current: OutputLanguage, to next: OutputLanguage) -> Bool {
+        allowsChineseDisplaySwitch && current.profile.script == .han && next.profile.script == .han
+    }
+}
+
 /// Pending user choices live here. Changing a route requires the G3 comparison.
 enum LatinOutputDefaults {
     static let spanishPromptName = "Spanish"
@@ -114,11 +126,25 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         profile.passThroughSources.contains(language ?? "en")
     }
 
-    func render(_ text: String) throws -> String {
-        guard rendererIsAvailable else {
-            throw SessionStoreError.invalidState("课程输出语言的渲染器尚不可用")
+    /// Display conversion is available independently of the export gate, which
+    /// stays closed for Traditional Chinese until step 10 is integrated.
+    func render(_ text: String, converter: ChineseScriptConverter = .shared) throws -> String {
+        switch self {
+        case .traditionalChineseTaiwan: return try converter.convert(text, to: .taiwan)
+        case .traditionalChineseHongKong: return try converter.convert(text, to: .hongKong)
+        case .simplifiedChinese, .english, .spanish, .french: return text
         }
-        return text
+    }
+
+    /// AppModel prepares the same converter off the main actor and publishes
+    /// any failure separately, so rendering never mutates observable UI state.
+    func renderForDisplay(_ text: String, converter: ChineseScriptConverter = .shared) -> String {
+        (try? render(text, converter: converter)) ?? text
+    }
+
+    func renderFixedTextForDisplay(_ text: String, converter: ChineseScriptConverter = .shared) -> String {
+        ChineseOutputDefaults.fixedTextFollowsDisplayLanguage
+            ? renderForDisplay(text, converter: converter) : text
     }
 
     enum SavedRenderer {

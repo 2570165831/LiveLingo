@@ -57,3 +57,22 @@ neither direction is called correct merely because it differs.
 - Initial full run failed two new fixture-path tests because Xcode copied the
   folder using its actual basename, `zh-variants-v1`. The lookup was corrected;
   the subsequent full run above passed. The failed xcresult is retained.
+
+### Step 8
+
+- Added one-time background dictionary preparation, raw-draft caption and
+  streaming rendering, preview/floating content rendering and bounded regional
+  caching. Source lines, UI labels/placeholders, generation input and storage
+  remain untouched. Traditional profiles remain unreleased.
+- Full Xcode run: XCTest 1168, one skipped, zero failures; Swift Testing 166.
+  Warning checker: zero. Preference cleanup: 296 created and cleaned, no
+  remaining registered plist. Log: `step8-final-xcode.log`.
+- Python: 674 tests, six skipped, zero failures. Multilingual CLI: 20 groups;
+  target review: six groups. The frozen-source diff against `9014439` is empty.
+- Eighteen new tests cover raw requests, regional content/source boundaries,
+  Unicode spellings, cache limits/concurrency, missing resources, background
+  completion and preservation of the stamped course target.
+- A failed full run exposed a state-only failure being displayed as pending.
+  The regional UI now retains the original UI failure wording; a creation
+  fixture also now sets the real creation preference. Focused and full reruns
+  passed. Failed build/test evidence remains in the task scratch directory.
