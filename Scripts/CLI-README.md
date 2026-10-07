@@ -42,6 +42,7 @@ directory and a new evidence directory under `work/`:
 bash Scripts/build-cli.sh work/cli-multilingual-build --multilingual-tests
 work/cli-multilingual-build/livelingo-cli-multilingual-tests \
   work/cli-multilingual-build/livelingo-cli work/cli-multilingual-evidence
+work/cli-multilingual-build/livelingo-cli-target-review-tests work/cli-target-review-evidence
 ```
 
 The test executable requires the `livelingo-cli` beside it from that same build.
@@ -52,6 +53,10 @@ paths must remain under this repository's `work/`, and the synthetic fixtures
 are retained for inspection. It starts only the CLI's read-only `--verify-saved`
 mode, with no model, HTTP service or audio device. Captured CLI output is checked
 in memory; test events contain check names and counts, never subtitle text.
+The additional target-review entry point checks snapshot/manifest mismatches,
+snapshot error reporting, fixture-only English layouts, target retention and
+parsed target forwarding. It uses synthetic audio files and an injected CLI
+runner; it never loads a model or starts capture.
 
 The existing lifecycle entry point remains separate:
 
@@ -152,15 +157,26 @@ omitted for English-only courses; `sourceLocale` retains its legacy value.
 `targetLocale`; unknown targets and unavailable converters are rejected.
 The old unmarked two-line rules apply only to `zh-Hans` without
 `sourceLanguages`. English-target source-only captions use one-line cues;
-earlier exports with different source and saved English bodies retain both.
-Already rendered legacy `zh-Hant` exports remain readable through a separate
-compatibility renderer. Explicit JSONL source markers still require the exact
-manifest language list. Verification does not consult the current preference.
+this also applies when the saved English body differs from the source.
+Separate read-only rules preserve the synthetic `zh-Hant` fixtures and the
+snapshot-free, unmarked two-line `en` fixture layout (including equal bodies).
+No released exporter produced these fixture formats; they are not generation
+targets or evidence of Traditional Chinese conversion. Explicit JSONL source
+markers still require the exact manifest language list. Verification does not
+consult the current preference. When a snapshot exists, its effective target
+(nil means `zh-Hans`) must match the manifest. Unreadable, damaged or incomplete
+snapshots fail with `inconsistentExport`, as do target mismatches.
 
 Generation accepts `--target zh-Hans` (also the default). Other codes, duplicate
 flags, and `--target` in verification, reopen, resume, or typed-translation modes
 are rejected before files or runtimes are touched. Opening and resuming use the
 course's recorded target; a changed preference applies only to new courses.
+An existing snapshot with nil target always opens as `zh-Hans`, regardless of
+the derived manifest. Only legacy directories without a snapshot consult the
+manifest; unreadable or undecodable metadata falls back to `zh-Hans`. Their
+synthetic non-regional `zh-Hant` code maps to the supported `zh-Hans` generator.
+An unsupported generation target is checked before parking the current course
+or preserving an incomplete journal tail.
 
 An `en` target uses `transcript-target-en.txt`, preserving the separate original
 source file `transcript-en.txt`.

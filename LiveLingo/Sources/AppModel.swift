@@ -498,7 +498,7 @@ final class AppModel: ObservableObject {
 
     private func captureNewCourseOutputLanguage(_ explicit: OutputLanguage? = nil) {
         outputLanguage = explicit ?? preferences.string(forKey: "LiveLingo.outputLanguage")
-            .flatMap(OutputLanguage.releasedLanguage) ?? .simplifiedChinese
+            .flatMap(releasedOutputLanguage) ?? .simplifiedChinese
     }
 
     var previewTranslationSource: String {
@@ -731,6 +731,7 @@ final class AppModel: ObservableObject {
     private let backgroundServicesEnabled: Bool
     private let scheduledNotesEnabled: Bool
     private let preferences: UserDefaults
+    private var releasedOutputLanguage: (String) -> OutputLanguage? = OutputLanguage.releasedLanguage
     private var translationWorkerID: UUID?
     private var translationQueue: [UUID] = []
     private var pendingCaptionRepairs: [DeferredCaptionRepair] = []
@@ -1585,6 +1586,10 @@ final class AppModel: ObservableObject {
         var loaded = try await Task.detached { try store.loadDetailed() }.value
         guard var snapshot = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
         _ = try LearningNotebook(snapshot: snapshot)
+        var restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)
+        guard restoredLanguage.generationTarget != nil else {
+            throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
+        }
         let sameDirectory = sessionDirectory.map(SessionDirectoryLocation.canonical)
             == SessionDirectoryLocation.canonical(directory)
         let priorPaused = sameDirectory ? processingPaused : snapshot.processing.paused
@@ -1593,6 +1598,10 @@ final class AppModel: ObservableObject {
             loaded = try await Task.detached { try store.loadDetailed() }.value
             guard let latest = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
             snapshot = latest
+            restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)
+            guard restoredLanguage.generationTarget != nil else {
+                throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
+            }
         }
         if loaded.incompleteTailBytes > 0 {
             _ = try await Task.detached { try store.preserveIncompleteTailAndResume() }.value
@@ -1604,10 +1613,6 @@ final class AppModel: ObservableObject {
         catch { recoveryError = error.localizedDescription }
         let notebook = try recoveredNotebook ?? LearningNotebook(snapshot: snapshot)
         if recoveredNotebook != nil { notebook.writeState(to: &snapshot) }
-        let restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot)
-        guard restoredLanguage.generationTarget != nil else {
-            throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
-        }
         resetSessionStateForNewRun()
         outputLanguage = restoredLanguage
         sessionID = snapshot.sessionID
@@ -2475,6 +2480,40 @@ final class AppModel: ObservableObject {
     func cancelTypedTranslation() { manualTranslationTask?.cancel() }
 
     #if DEBUG
+    /// Changes only the creation-time release lookup in an isolated test host.
+    func setReleasedOutputLanguagesForTesting(_ languages: Set<OutputLanguage>) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        releasedOutputLanguage = { locale in
+            guard let language = OutputLanguage(rawValue: locale), languages.contains(language) else { return nil }
+            return language
+        }
+    }
+
+    /// Exercise the real creation, persistence and stop/export paths without
+    /// preparing a model, requesting audio permission or starting capture.
+    func beginSavedCourseForTesting(directory: URL) async throws {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        precondition(!noteReviewQueue.hasWork && translationWorker == nil)
+        try await parkSavedProcessing()
+        resetSessionStateForNewRun()
+        captureNewCourseOutputLanguage()
+        sessionDirectory = directory
+        activeStorageMode = .saveSession
+        phase = .recording
+        bindSessionArchive(to: directory)
+        try await flushSessionArchive()
+    }
+
+    func stopSavedCourseForTesting() async {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        await stopSession()
+    }
+
+    func flushSavedCourseForTesting() async throws {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        try await flushSessionArchive()
+    }
+
     /// Synthetic presentation data only. Test hosts have no services or real queue.
     func loadPresentationForTesting(phase: AppPhase, evidence: [TranscriptSegment],
                                     notebook: LearningNotebook = .init(), notice: String? = nil,

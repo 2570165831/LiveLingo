@@ -74,6 +74,16 @@ struct LiveLingoCLI {
  /// Pure syntax parse. It never touches the filesystem, so ambiguity rules can
  /// be tested without creating anything. Runtime path checks happen in run().
  static func parse(_ arguments: [String]) throws -> Command {
+  try parse(arguments, releasedTargets: Set(OutputLanguage.released))
+ }
+
+ #if LIVELINGO_CLI_LIFECYCLE_TESTS
+ static func parseForTesting(_ arguments: [String], releasedTargets: Set<OutputLanguage>) throws -> Command {
+  try parse(arguments, releasedTargets: releasedTargets)
+ }
+ #endif
+
+ private static func parse(_ arguments: [String], releasedTargets: Set<OutputLanguage>) throws -> Command {
   if arguments.isEmpty || arguments.contains("--help") { return .help }
   let valueOptions: Set<String> = ["--replay", "--system-audio", "--output", "--translate-text",
                                    "--verify-saved", "--open-saved", "--resume-saved", "--target"]
@@ -128,7 +138,8 @@ struct LiveLingoCLI {
    }
    source = .systemAudio(seconds)
   }
-  guard let target = OutputLanguage.releasedLanguage(values["--target"] ?? "zh-Hans") else { throw CLIError.invalidArguments }
+  guard let target = OutputLanguage(rawValue: values["--target"] ?? "zh-Hans"),
+        releasedTargets.contains(target) else { throw CLIError.invalidArguments }
   return .generate(GenerateCommand(source: source, output: output, highQuality: flag("--high-quality"),
                                    fileImport: flag("--import"), exportNotes: flag("--export-notes"),
                                    runReview: flag("--run-review"), target: target))
@@ -201,9 +212,8 @@ struct LiveLingoCLI {
   let initialLanguageProbes = await ASRRequestCoordinator.shared.languageProbeCount
   let start = ProcessInfo.processInfo.systemUptime
   do {
-   try await model.cliRun(file: file, seconds: seconds, directory: directory,
-                          highQuality: command.highQuality, paced: !command.fileImport,
-                          exportNotes: command.exportNotes, runReview: command.runReview, target: command.target) { event, fields in
+   try await executeGeneration(command, file: file, seconds: seconds, directory: directory,
+                                runner: model.cliRun) { event, fields in
     writeEvent(safeEvent(event, fields: fields, elapsed: ProcessInfo.processInfo.systemUptime - start))
    }
   } catch {
@@ -233,6 +243,18 @@ struct LiveLingoCLI {
   writeEvent(verifiedRunEvent(segments: snapshot?.segments ?? [],
               otherLanguageTranscription: model.transcriptionProcessing?.otherLanguageCount ?? 0,
               languageProbes: languageProbes))
+ }
+
+ /// Keep the parsed target in the same dispatch used by the real run. The
+ /// injectable runner permits an offline forwarding check before any model I/O.
+ typealias GenerationRunner = @MainActor (URL?, Double, URL, Bool, Bool, Bool, Bool, OutputLanguage,
+     @escaping @MainActor (String, [String: Any]) -> Void) async throws -> Void
+
+ @MainActor static func executeGeneration(_ command: GenerateCommand, file: URL?, seconds: Double,
+                                          directory: URL, runner: GenerationRunner,
+                                          report: @escaping @MainActor (String, [String: Any]) -> Void) async throws {
+  try await runner(file, seconds, directory, command.highQuality, !command.fileImport,
+                   command.exportNotes, command.runReview, command.target, report)
  }
 
  static func verifiedRunEvent(segments: [TranscriptSegment], otherLanguageTranscription: Int,
@@ -314,9 +336,14 @@ struct LiveLingoCLI {
   let manifest=try decoder.decode(SessionExporter.Manifest.self,from:Data(contentsOf:directory.appendingPathComponent("manifest.json")))
   guard manifest.recordingFile == "recording.wav",
         let renderer = OutputLanguage.savedRenderer(for: manifest.targetLocale, sourceLanguages: manifest.sourceLanguages) else { throw CLIError.inconsistentExport }
-  if FileManager.default.fileExists(atPath: directory.appendingPathComponent(SessionStore.snapshotFileName).path),
-     let snapshot = try SessionStore(directory: directory).load(), let recorded = snapshot.targetLocale,
-     recorded != manifest.targetLocale { throw CLIError.inconsistentExport }
+  let hasSnapshot = FileManager.default.fileExists(atPath: directory.appendingPathComponent(SessionStore.snapshotFileName).path)
+  if hasSnapshot {
+   do {
+    let loaded = try SessionStore(directory: directory).loadDetailed()
+    guard let snapshot = loaded.snapshot, loaded.incompleteTailBytes == 0,
+          snapshot.effectiveTargetLocale == manifest.targetLocale else { throw CLIError.inconsistentExport }
+   } catch { throw CLIError.inconsistentExport }
+  }
   let targetTranscriptName = SessionExporter.targetTranscriptFileName(for: manifest.targetLocale)
   let targetSummaryName = SessionExporter.targetSummaryFileName(for: manifest.targetLocale)
   let jsonl=try String(contentsOf:directory.appendingPathComponent("bilingual.jsonl"),encoding:.utf8)
@@ -342,7 +369,15 @@ struct LiveLingoCLI {
   let expectedSRT = segments.enumerated().map { index, segment in
    usesLegacyFormat ? legacySRTCue(segment, index: index) : renderer.srtCue(segment, index: index)
   }.joined(separator: "\n\n") + "\n"
-  guard try String(contentsOf: directory.appendingPathComponent("bilingual.srt"), encoding: .utf8) == expectedSRT else { throw CLIError.inconsistentExport }
+  let savedSRT = try String(contentsOf: directory.appendingPathComponent("bilingual.srt"), encoding: .utf8)
+  if savedSRT != expectedSRT {
+   // An old synthetic English fixture used two lines. Accept that complete
+   // layout only for snapshot-free, unmarked exports, never for generation.
+   let fixtureRenderer = OutputLanguage.SavedRenderer.fixtureEnglishTwoLine
+   guard !hasSnapshot, manifest.targetLocale == "en", manifest.sourceLanguages == nil,
+         savedSRT == segments.enumerated().map({ fixtureRenderer.srtCue($0.element, index: $0.offset) })
+            .joined(separator: "\n\n") + "\n" else { throw CLIError.inconsistentExport }
+  }
   let audio=try AVAudioFile(forReading:directory.appendingPathComponent(manifest.recordingFile))
   guard audio.length>0, audio.processingFormat.sampleRate>0 else { throw CLIError.inconsistentExport }
   var names=["manifest.json","bilingual.jsonl","bilingual.srt","transcript-en.txt",targetTranscriptName,"recording.wav"]

@@ -3310,7 +3310,7 @@ final class LearningReviewQueue: ObservableObject {
             // original is never compared with the full-course Markdown when a
             // snapshot provides exact batch identity and evidence instead.
             let snapshot = try ReviewInputBinding.snapshot(in: directory)
-            if snapshot == nil, !FileManager.default.fileExists(atPath: SessionExporter.savedSummaryURL(in: target).path) {
+            if snapshot == nil, !FileManager.default.fileExists(atPath: SessionExporter.savedSummaryURL(in: target, targetLocale: nil).path) {
                 throw ReviewIdentityError.conflict("目标目录没有可核对的课程快照或笔记")
             }
             for job in moving {
@@ -3646,7 +3646,8 @@ final class LearningReviewQueue: ObservableObject {
 
     init(journalURL: URL? = nil, observeSleep: Bool = true,
          diagnostics: ReviewDiagnosticsPolicy = .standard, generate: Generator? = nil,
-         retryDelays: [TimeInterval] = ReviewRetryPolicy.delays) {
+         retryDelays: [TimeInterval] = ReviewRetryPolicy.delays,
+         startupSnapshotReader: (URL) throws -> SessionSnapshot? = ReviewInputBinding.snapshot(in:)) {
         self.retryDelays = retryDelays.isEmpty ? ReviewRetryPolicy.delays : retryDelays
         let environmentRoot = ProcessInfo.processInfo.environment["LIVELINGO_DATA_DIRECTORY"]
         if let environmentRoot {
@@ -3674,19 +3675,36 @@ final class LearningReviewQueue: ObservableObject {
                     throw ReviewIdentityError.conflict("复查日志含有重复任务 ID")
                 }
                 var repaired = false
+                var deferredTargets = Set<UUID>()
                 // 2026-09-20：旧版本写的日志没有 version，那时的任务是**自动入队**的 ✗。
                 // 新策略下整课复查只在你明确请求时才跑 ✓ → 未完成的任务标成"等待手动开始" ✓。
                 // 已完成批次、报告、思考前缀、暂停选择全部保留 ✓，不删除任何历史复查 ✓。
                 let legacyJournal = journal.version == nil
                 for index in jobs.indices {
-                    do {
-                        if try upgradeTargetLocale(&jobs[index]) { repaired = true }
-                    } catch {
-                        jobs[index].failure = error.localizedDescription
-                        jobs[index].retryPending = nil
-                        repaired = true
-                        continue
+                    var snapshot: SessionSnapshot?
+                    if jobs[index].targetLocale == nil || jobs[index].identity == nil {
+                        let read = Self.startupSnapshot(for: jobs[index], reader: startupSnapshotReader)
+                        snapshot = read.snapshot
+                        if read.deferred, jobs[index].targetLocale == nil {
+                            deferredTargets.insert(jobs[index].id)
+                        }
                     }
+                    if upgradeTargetLocale(&jobs[index], snapshot: snapshot) { repaired = true }
+                    let previousIdentity = jobs[index].identity
+                    try upgradeIdentity(&jobs[index], snapshot: snapshot)
+                    if previousIdentity != jobs[index].identity { repaired = true }
+                    if legacyJournal, jobs[index].next < jobs[index].batches.count,
+                       jobs[index].awaitingManualStart != true {
+                        jobs[index].awaitingManualStart = true
+                        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "migrated_manual_start",
+                                                     batch: jobs[index].next, batchCount: jobs[index].batches.count,
+                                                     detail: "legacy_journal"), at: index)
+                        repaired = true
+                    }
+                    // Directory access is not established until the run path
+                    // resolves the bookmark. Keep target-dependent state intact
+                    // if a best-effort read could not establish the target.
+                    if deferredTargets.contains(jobs[index].id) { continue }
                     guard let expectedPrompt = Self.reviewPrompt(for: jobs[index].targetLocale) else {
                         // Keep the original prompt and wire prefix. These may
                         // become resumable when this language is implemented.
@@ -3699,17 +3717,6 @@ final class LearningReviewQueue: ObservableObject {
                             }
                         }
                         continue
-                    }
-                    let previousIdentity = jobs[index].identity
-                    try upgradeIdentity(&jobs[index])
-                    if previousIdentity != jobs[index].identity { repaired = true }
-                    if legacyJournal, jobs[index].next < jobs[index].batches.count,
-                       jobs[index].awaitingManualStart != true {
-                        jobs[index].awaitingManualStart = true
-                        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "migrated_manual_start",
-                                                     batch: jobs[index].next, batchCount: jobs[index].batches.count,
-                                                     detail: "legacy_journal"), at: index)
-                        repaired = true
                     }
                     if jobs[index].prompt != expectedPrompt {
                         // A changed instruction prefix invalidates only unfinished
@@ -3742,7 +3749,10 @@ final class LearningReviewQueue: ObservableObject {
                     }
                 }
                 for index in retiredJobs.indices {
-                    if try upgradeTargetLocale(&retiredJobs[index]) { repaired = true }
+                    if retiredJobs[index].targetLocale == nil {
+                        let read = Self.startupSnapshot(for: retiredJobs[index], reader: startupSnapshotReader)
+                        if upgradeTargetLocale(&retiredJobs[index], snapshot: read.snapshot) { repaired = true }
+                    }
                     guard retiredJobs[index].supersededByRevision != nil else {
                         throw ReviewIdentityError.conflict("历史任务缺少停止续写标记")
                     }
@@ -3764,7 +3774,8 @@ final class LearningReviewQueue: ObservableObject {
                     catch { persistenceFailure = "复查进度保存失败，已暂停：\(error.localizedDescription)" }
                 }
                 for index in jobs.indices
-                where jobs[index].next > 0 || !jobs[index].prefix.isEmpty || jobs[index].failure != nil {
+                where !deferredTargets.contains(jobs[index].id)
+                    && (jobs[index].next > 0 || !jobs[index].prefix.isEmpty || jobs[index].failure != nil) {
                     recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "resumed",
                                                  batch: jobs[index].next, batchCount: jobs[index].batches.count,
                                                  request: jobs[index].lastRequestID,
@@ -3794,20 +3805,35 @@ final class LearningReviewQueue: ObservableObject {
         refreshStatus()
     }
 
-    /// Old jobs inherit only their own saved course target, never preferences.
-    private func upgradeTargetLocale(_ job: inout Job) throws -> Bool {
-        let snapshot = try ReviewInputBinding.snapshot(in: job.directory)
-        let previous = job.targetLocale
-        if job.targetLocale == nil {
-            job.targetLocale = SessionSnapshot.normalizedTargetLocale(snapshot?.targetLocale)
+    /// Startup never requires access to a course. Permission errors, partial
+    /// journals and damaged snapshots defer only target-dependent migrations.
+    private static func startupSnapshot(for job: Job, reader: (URL) throws -> SessionSnapshot?)
+        -> (snapshot: SessionSnapshot?, deferred: Bool) {
+        guard FileManager.default.fileExists(atPath: job.directory.appendingPathComponent(SessionStore.snapshotFileName).path)
+        else {
+            // Readable pre-snapshot courses retain their existing default
+            // migrations and resume events. An inaccessible directory cannot
+            // establish that it is such a legacy course.
+            return (nil, !FileManager.default.isReadableFile(atPath: job.directory.path))
         }
-        try Self.validateTargetLocale(job.targetLocale, snapshot: snapshot)
+        do {
+            let snapshot = try reader(job.directory)
+            return (snapshot, snapshot == nil)
+        }
+        catch { return (nil, true) }
+    }
+
+    /// Old jobs inherit only their own saved course target, never preferences.
+    private func upgradeTargetLocale(_ job: inout Job, snapshot: SessionSnapshot?) -> Bool {
+        guard job.targetLocale == nil, let snapshot else { return false }
+        let previous = job.targetLocale
+        job.targetLocale = SessionSnapshot.normalizedTargetLocale(snapshot.targetLocale)
         return previous != job.targetLocale
     }
 
     /// Old queue evidence already has stable UUIDs. Bind it only when a saved
     /// snapshot proves the exact batches; otherwise leave the legacy job intact.
-    private func upgradeIdentity(_ job: inout Job) throws {
+    private func upgradeIdentity(_ job: inout Job, snapshot: SessionSnapshot?) throws {
         guard job.next >= 0, job.next <= job.batches.count,
               job.reports.count <= job.next else {
             throw ReviewIdentityError.conflict("保存的复查进度无效")
@@ -3819,8 +3845,7 @@ final class LearningReviewQueue: ObservableObject {
             }
             return
         }
-        guard FileManager.default.fileExists(atPath: job.directory.appendingPathComponent(SessionStore.snapshotFileName).path),
-              let snapshot = try ReviewInputBinding.snapshot(in: job.directory) else { return }
+        guard let snapshot else { return }
         let oldPrefix = Self.prefixDigest(for: job)
         var scope = job.resolvedScope
         if !scope.isWholeLesson {
@@ -4016,6 +4041,13 @@ final class LearningReviewQueue: ObservableObject {
         refreshStatus()
     }
 
+    #if DEBUG
+    var journalForTesting: Journal {
+        Journal(jobs: jobs, userPaused: userPaused, version: Self.journalVersion,
+                retiredJobs: retiredJobs.isEmpty ? nil : retiredJobs)
+    }
+    #endif
+
     func togglePause() {
         if persistenceFailure != nil, !jobs.isEmpty { persistenceFailure = nil }
         else if userPaused { userPaused = false }
@@ -4119,7 +4151,7 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     private func runOneBatch() async {
-        guard let job = jobs.first else { return }
+        guard var job = jobs.first else { return }
         var accessURL = job.directory
         var scoped = false
         var generationAttempted = false
@@ -4159,6 +4191,33 @@ final class LearningReviewQueue: ObservableObject {
                                     detail: issue == "directory_in_trash"
                                         ? "录音目录已在废纸篓中，复查已停止；请恢复目录后重新定位，或移出队列"
                                         : "录音目录找不到或无法写入。请恢复目录后重试，或将此任务移出复查队列。")
+            }
+            // Now the bookmark is resolved. Finish deferred target/identity
+            // upgrades before validating or sending a prompt to a generator.
+            if job.targetLocale == nil {
+                let snapshot = try ReviewInputBinding.snapshot(in: accessURL)
+                var restored = jobs[0]
+                let targetChanged = upgradeTargetLocale(&restored, snapshot: snapshot)
+                let priorIdentity = restored.identity
+                try upgradeIdentity(&restored, snapshot: snapshot)
+                var repaired = targetChanged || priorIdentity != restored.identity
+                if let prompt = Self.reviewPrompt(for: restored.targetLocale) {
+                    if restored.prompt != prompt {
+                        restored.prompt = prompt
+                        restored.prefix = ""
+                        restored.prefixInputDigest = nil
+                        repaired = true
+                    }
+                    if !restored.prefix.isEmpty,
+                       restored.prefixInputDigest != Self.prefixDigest(for: restored) {
+                        restored.prefix = ""
+                        restored.prefixInputDigest = nil
+                        repaired = true
+                    }
+                }
+                jobs[0] = restored
+                job = restored
+                if repaired { try save() }
             }
             try validateLocation(job, at: accessURL, allowHistorical: false)
             if job.next < job.batches.count {

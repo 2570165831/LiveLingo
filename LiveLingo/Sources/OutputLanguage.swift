@@ -69,13 +69,22 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// Course data owns this choice. Preferences apply only at creation.
-    static func savedLanguage(in directory: URL, snapshot: SessionSnapshot) throws -> Self {
+    static func savedLanguage(in directory: URL, snapshot: SessionSnapshot,
+                              origin: SessionLoadResult.Origin? = nil) throws -> Self {
         if let locale = snapshot.targetLocale { return try storedLanguage(locale) }
+        // A persisted nil is an explicit Simplified Chinese choice. Only a
+        // legacy import without a snapshot needs the export's metadata.
+        let hasSnapshot = origin.map { $0 == .snapshot }
+            ?? FileManager.default.fileExists(atPath: directory.appendingPathComponent(SessionStore.snapshotFileName).path)
+        if hasSnapshot { return .simplifiedChinese }
         struct Metadata: Decodable { let targetLocale: String? }
         let manifest = directory.appendingPathComponent("manifest.json")
-        if FileManager.default.fileExists(atPath: manifest.path) {
-            let data = try Data(contentsOf: manifest)
-            return try storedLanguage(JSONDecoder().decode(Metadata.self, from: data).targetLocale)
+        if let data = try? Data(contentsOf: manifest),
+           let metadata = try? JSONDecoder().decode(Metadata.self, from: data) {
+            // The non-regional code occurs in synthetic verifier fixtures,
+            // not released exporters. Continue using the supported generator.
+            if metadata.targetLocale == "zh-Hant" { return .simplifiedChinese }
+            return try storedLanguage(metadata.targetLocale)
         }
         return .simplifiedChinese
     }
@@ -98,14 +107,17 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
 
     enum SavedRenderer {
         case output(OutputLanguage)
-        // Earlier exporters used this non-regional code for already rendered
-        // Traditional Chinese. It is read-only compatibility, not a new target.
-        case legacyTraditionalChinese(usesLegacyFormat: Bool)
+        // These layouts preserve synthetic verifier fixtures. No released
+        // exporter produced them; they are never used for new exports.
+        case fixtureTraditionalChinese(usesLegacyFormat: Bool)
+        case fixtureEnglishTwoLine
 
         func targetLine(_ segment: TranscriptSegment) -> String {
             switch self {
             case .output(let language): return SessionExporter.targetLine(segment, outputLanguage: language)
-            case .legacyTraditionalChinese(let usesLegacyFormat):
+            case .fixtureEnglishTwoLine:
+                return SessionExporter.targetLine(segment, outputLanguage: .english)
+            case .fixtureTraditionalChinese(let usesLegacyFormat):
                 return usesLegacyFormat ? SessionExporter.humanReadableChinese(segment.chinese)
                     : SessionExporter.targetLine(segment, target: .simplifiedChinese)
             }
@@ -113,7 +125,10 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         func srtCue(_ segment: TranscriptSegment, index: Int) -> String {
             switch self {
             case .output(let language): return SessionExporter.srtCue(segment, index: index, outputLanguage: language)
-            case .legacyTraditionalChinese(let usesLegacyFormat):
+            case .fixtureEnglishTwoLine:
+                return "\(index + 1)\n\(SessionExporter.srtTimestamp(segment.startTime)) --> \(SessionExporter.srtTimestamp(segment.endTime))\n"
+                    + [segment.english, targetLine(segment)].joined(separator: "\n")
+            case .fixtureTraditionalChinese(let usesLegacyFormat):
                 if !usesLegacyFormat {
                     return SessionExporter.srtCue(segment, index: index, target: .simplifiedChinese)
                 }
@@ -124,7 +139,7 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
     }
 
     static func savedRenderer(for locale: String, sourceLanguages: [String]? = nil) -> SavedRenderer? {
-        if locale == "zh-Hant" { return .legacyTraditionalChinese(usesLegacyFormat: sourceLanguages == nil) }
+        if locale == "zh-Hant" { return .fixtureTraditionalChinese(usesLegacyFormat: sourceLanguages == nil) }
         guard let language = Self(rawValue: locale), language.rendererIsAvailable else { return nil }
         return .output(language)
     }

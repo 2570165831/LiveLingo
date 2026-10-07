@@ -142,12 +142,20 @@ enum SessionExporter {
     /// Saved courses keep the target recorded at export time. Pre-manifest
     /// courses retain their legacy summary name and identity fingerprint.
     static func savedSummaryURL(in directory: URL) -> URL {
+        // This convenience entry point is for callers outside SessionStore's
+        // lock. Store readers must use the explicit-target overload below.
+        let snapshotURL = directory.appendingPathComponent(SessionStore.snapshotFileName)
+        let snapshot = FileManager.default.fileExists(atPath: snapshotURL.path)
+            ? try? SessionStore(directory: directory).load() : nil
+        return savedSummaryURL(in: directory, targetLocale: snapshot?.targetLocale)
+    }
+
+    /// Does not acquire a SessionStore lock or read a snapshot. The caller
+    /// supplies its already known target (nil for a legacy import).
+    static func savedSummaryURL(in directory: URL, targetLocale: String?) -> URL {
         struct TargetMetadata: Decodable { let targetLocale: String }
         var names: [String] = []
-        let snapshotURL = directory.appendingPathComponent(SessionStore.snapshotFileName)
-        if FileManager.default.fileExists(atPath: snapshotURL.path),
-           let snapshot = try? SessionStore(directory: directory).load(),
-           let locale = snapshot.targetLocale, isValidTargetLocale(locale) {
+        if let locale = targetLocale, isValidTargetLocale(locale) {
             names.append(targetSummaryFileName(for: locale))
         }
         if let data = try? Data(contentsOf: directory.appendingPathComponent("manifest.json")),
@@ -208,11 +216,6 @@ enum SessionExporter {
     static func captionLines(_ segment: TranscriptSegment, outputLanguage: OutputLanguage) -> [String] {
         let translated = targetLine(segment, outputLanguage: outputLanguage)
         if outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage) {
-            // Earlier English-target exports could contain a separate English
-            // rendering. Retain both lines when those saved bodies differ.
-            if outputLanguage == .english, translated != sourceLine(segment) {
-                return [sourceLine(segment), translated]
-            }
             return [translated]
         }
         return [sourceLine(segment), translated]
