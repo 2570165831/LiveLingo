@@ -47,6 +47,13 @@ class SignatureDetectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check(header + struct.pack('<2I', 1, 0))
 
+    def test_redirected_app_is_refused_before_reading_bundle(self):
+        with tempfile.TemporaryDirectory(prefix='preview-metadata-') as root:
+            app = Path(root) / 'Preview.app'
+            app.symlink_to(Path(root) / 'External.app', target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'ordinary directory'):
+                metadata.inspect(app)
+
 
 class PreviewArgumentSafetyTests(unittest.TestCase):
     def rejects(self, *arguments):

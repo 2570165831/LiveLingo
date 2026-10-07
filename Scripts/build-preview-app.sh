@@ -170,7 +170,9 @@ python3 "${project_root}/Scripts/check_build_warnings.py" "${run_directory}/buil
 app="${run_directory}/LiveLingo 预览版.app"
 # Move this build product instead of duplicating the bundle. Never touch the
 # installed application or replace a previous preview.
-mv "${derived_data}/Build/Products/Release/LiveLingo.app" "$app"
+built_app="${derived_data}/Build/Products/Release/LiveLingo.app"
+[[ -d "$built_app" && ! -L "$built_app" ]] || fail "Build product must be an ordinary app directory; inspect this dedicated cache for stale deployment links"
+mv "$built_app" "$app"
 cp "${project_root}/LICENSE" "${app}/Contents/Resources/LICENSE"
 if [[ -n "$models" ]]; then
   [[ ! -e "${app}/Contents/Resources/Models" && ! -L "${app}/Contents/Resources/Models" ]] || fail "Unexpected bundled models"

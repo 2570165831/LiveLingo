@@ -46,6 +46,8 @@ def signature_commands(path):
 
 
 def inspect(app, unsigned=False):
+    if app.is_symlink():
+        raise ValueError('Preview app must be an ordinary directory, not a symbolic link')
     app = app.resolve(strict=True)
     with (app / 'Contents/Info.plist').open('rb') as stream:
         info = plistlib.load(stream)
