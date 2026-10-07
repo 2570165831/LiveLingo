@@ -1,6 +1,8 @@
 """Review v2 response binding regressions; no model weights or user data required."""
 import importlib.util
+import hashlib
 import json
+import re
 import unittest
 
 import jsonschema
@@ -56,6 +58,44 @@ def note(follow_ups=None, points=None, no_new_knowledge=False):
 
 
 class NoteSchemaTests(unittest.TestCase):
+    def test_english_pending_schema_and_grammar_match_frozen_v2b_baseline(self):
+        # Frozen on 0c715af, including a pending alias. The public grammar is
+        # intentionally unchanged by the new historical input namespace.
+        data = note_input(['en0s0', 'en0s1', 'zh0s0', 'zh0s1', 'en1s0', 'zh1s0'], ['q0'])
+        schema = note_schema(data)
+        encoded = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(),
+                         'c5516884d608706fdb8b219d6e4a96caf531fc7badbcbb2a9ce32193bac447a1')
+        if importlib.util.find_spec('outlines_core') is None:
+            self.skipTest('outlines_core is not installed in this interpreter')
+        self.assertEqual(hashlib.sha256(build_generation_regex(schema).encode()).hexdigest(),
+                         '9f110ee2ac5f9c788cf8c2030d81794ec713b22aca180f8f6439e277ef35e43d')
+
+    def test_prior_evidence_ids_never_enter_current_source_enums_or_grammar(self):
+        data = note_input(['en0s0', 'zh16s0'], ['q0'])
+        data['priorEvidence'] = [{'id': 'h0', 'scope': 'prior', 'locations': [], 'text': 'Invented history.'}]
+        data['pendingPoints'][0].update(quoteIDs=['h0'], candidateQuoteIDs=['en0s0'],
+                                        quotes=[], candidateQuotes=[])
+        schema = note_schema(data)
+        normal, empty = schema['oneOf']
+        sources = normal['properties']['points']['items']['properties']['sourceIDs']
+        self.assertEqual(sources['items']['enum'], ['en0s0', 'zh16s0'])
+        for branch in (normal, empty):
+            self.assertEqual(branch['properties']['followUps']['properties']['q0']['properties']['sourceIDs'], sources)
+        point = {'kind': '核心结论', 'text': '自编正文', 'sourceIDs': ['zh16s0'], 'needsContext': None}
+        value = note({'q0': followup('后文补充', ['zh16s0'])}, points=[point])
+        jsonschema.validate(value, schema)
+        if importlib.util.find_spec('outlines_core') is None:
+            self.skipTest('outlines_core is not installed in this interpreter')
+        regex = build_generation_regex(schema)
+        self.assertIsNotNone(re.fullmatch(regex, json.dumps(value, ensure_ascii=False)))
+        for where in ('point', 'followup'):
+            point['sourceIDs'] = ['h0'] if where == 'point' else ['zh16s0']
+            value['followUps']['q0']['sourceIDs'] = ['h0'] if where == 'followup' else ['zh16s0']
+            with self.assertRaises(jsonschema.ValidationError):
+                jsonschema.validate(value, schema)
+            self.assertIsNone(re.fullmatch(regex, json.dumps(value, ensure_ascii=False)))
+
     def test_note_source_count_matches_production_binding(self):
         schema = note_schema(note_input())
         point = {'kind': '核心结论', 'text': '保留正文', 'sourceIDs': ['en0s0', 'en0s1'],

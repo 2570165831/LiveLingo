@@ -1059,11 +1059,20 @@ struct LearningNotebook: Sendable {
     }
     var topics: [String] { batches.filter { !$0.note.points.isEmpty }.reduce(into: []) { if !$0.contains($1.note.topic) { $0.append($1.note.topic) } } }
     struct PendingPoint: Encodable, Sendable {
+        struct QuoteOrigin: Encodable, Hashable, Sendable {
+            let scope: String = "prior"
+            let batch: Int
+            let index: Int
+            /// Stored field group, not a new identification of the spoken language.
+            let language: String
+        }
         let id: String
         let question: String
         let quotes: [String]
         let candidateQuotes: [String]
         let referenceCheck: Bool
+        var quoteOrigins: [[QuoteOrigin]] = []
+        var candidateQuoteOrigins: [[QuoteOrigin]] = []
         /// All batches supplying the frozen question and candidate quotes.
         /// A source revision retires its whole note batch, so each supplying
         /// batch's source IDs participate in checkpoint invalidation.
@@ -1110,33 +1119,53 @@ struct LearningNotebook: Sendable {
         let retired = retiredQuestionReferences
         return followUpPoints.filter { !$0.referenceCheck && !retired.contains($0.id) }
     }
+    private static func quoteOrigins(_ quote: String, in batch: LearningNoteBatch, number: Int, index: Int) -> [PendingPoint.QuoteOrigin] {
+        guard batch.evidence.indices.contains(index), !quote.isEmpty else { return [] }
+        let segment = batch.evidence[index]
+        let bytes = Data(quote.utf8)
+        return [("en", segment.english), ("zh", segment.chinese)].compactMap { language, text in
+            guard Data(text.utf8).range(of: bytes) != nil else { return nil }
+            return .init(batch: number, index: index, language: language)
+        }
+    }
     private var followUpPoints: [PendingPoint] {
-        let candidates = Dictionary(grouping: batches.flatMap { batch in
-            batch.note.points.filter { $0.clarifies != nil }.map { (point: $0, batch: batch) }
+        let candidates = Dictionary(grouping: batches.enumerated().flatMap { offset, batch in
+            batch.note.points.filter { $0.clarifies != nil }.map { (point: $0, batch: batch, number: offset + 1) }
         }, by: { $0.point.clarifies! })
-        return batches.flatMap { batch in
+        return batches.enumerated().flatMap { offset, batch in
             batch.note.points.enumerated().compactMap { index, point -> PendingPoint? in
                 let id = Self.reference(batch, index)
                 let semanticQuestion = point.referenceState == .pending || point.referenceState == .awaitingContext
                     || point.referenceState == .numericDifference || !(point.needsContext ?? "").isEmpty
                 let referenceCheck = !semanticQuestion && point.sourceHasPronoun == true && point.referenceState == .linked
                 guard semanticQuestion || referenceCheck else { return nil }
-                let quotes = (point.sources ?? []).map(\.quote)
+                let sources = point.sources ?? []
+                let quotes = sources.map(\.quote)
                 let context = quotes.isEmpty ? batch.evidence.map { segment in
                     if segment.sourceLanguage != nil { return LearningSourceUnit.textGroups(for: segment).first?.text ?? "" }
                     return segment.english.isEmpty ? segment.chinese : segment.english
                 } : quotes
                 let candidateSources = Array((candidates[id] ?? []).suffix(2).flatMap { candidate in
-                    (candidate.point.sources ?? []).map { (quote: $0.quote, ids: candidate.batch.evidence.map(\.id)) }
+                    (candidate.point.sources ?? []).map { source in
+                        (quote: source.quote, ids: candidate.batch.evidence.map(\.id),
+                         origins: Self.quoteOrigins(String(source.quote.prefix(600)), in: candidate.batch,
+                                                    number: candidate.number, index: source.index))
+                    }
                 }.suffix(2))
                 var dependencies = batch.evidence.map(\.id)
                 for source in candidateSources {
                     for sourceID in source.ids where !dependencies.contains(sourceID) { dependencies.append(sourceID) }
                 }
+                let frozenQuotes = Array(context.prefix(2)).map { String($0.prefix(600)) }
+                let origins = frozenQuotes.enumerated().map { position, quote in
+                    Self.quoteOrigins(quote, in: batch, number: offset + 1,
+                                      index: quotes.isEmpty ? position : sources[position].index)
+                }
                 return PendingPoint(id: id, question: point.needsContext ?? "原文中有哪项关系需要澄清？请仅依据原文判断。",
-                                    quotes: Array(context.prefix(2)).map { String($0.prefix(600)) },
+                                    quotes: frozenQuotes,
                                     candidateQuotes: candidateSources.map { String($0.quote.prefix(600)) },
-                                    referenceCheck: referenceCheck, dependencyIDs: dependencies)
+                                    referenceCheck: referenceCheck, quoteOrigins: origins,
+                                    candidateQuoteOrigins: candidateSources.map(\.origins), dependencyIDs: dependencies)
             }
         }
     }
@@ -2690,6 +2719,69 @@ enum LearningPrompts {
         struct Input: Encodable { let evidence: [LearningSourceUnit]; let pendingPoints: [FollowUp] }
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
+        // The legacy branch below is byte-frozen, including English requests
+        // with follow-ups. Current evidence and the response grammar stay unchanged.
+        if evidence.contains(where: { $0.sourceLanguage != nil }), !pending.isEmpty {
+            struct PriorEvidence: Encodable {
+                let id: String
+                let scope = "prior"
+                var locations: [LearningNotebook.PendingPoint.QuoteOrigin]
+                let text: String
+            }
+            struct IndexedFollowUp: Encodable {
+                let id: String
+                let question: String
+                let quotes: [String] = []
+                let candidateQuotes: [String] = []
+                let quoteIDs: [String]
+                let candidateQuoteIDs: [String]
+                let referenceCheck: Bool
+            }
+            struct IndexedInput: Encodable {
+                let evidence: [LearningSourceUnit]
+                let pendingPoints: [IndexedFollowUp]
+                let priorEvidence: [PriorEvidence]
+                let pendingEvidenceRule = "quoteIDs 和 candidateQuoteIDs 引用 priorEvidence 的旧原文或 evidence 的当前原文。h 编号只作历史上下文，不能用于当前正文 sourceIDs；旧引文不作为本批新知识重复整理。"
+            }
+            let units = LearningSourceUnit.make(evidence)
+            // Data keys preserve exact UTF-8: Swift String equality also merges
+            // canonically equivalent spellings, which is not exact-text deduplication.
+            let current = Dictionary(grouping: units, by: { Data($0.text.utf8) })
+            var prior: [PriorEvidence] = []
+            var catalog: [Data: Int] = [:]
+            func references(_ quotes: [String], origins: [[LearningNotebook.PendingPoint.QuoteOrigin]], allowCurrent: Bool) -> [String] {
+                var result: [String] = []
+                for (position, quote) in quotes.enumerated() {
+                    let bytes = Data(quote.utf8)
+                    let ids: [String]
+                    if allowCurrent, let matches = current[bytes] {
+                        ids = matches.map(\.id)
+                    } else {
+                        let index: Int
+                        if let existing = catalog[bytes] { index = existing }
+                        else {
+                            index = prior.count
+                            catalog[bytes] = index
+                            prior.append(PriorEvidence(id: "h\(index)", locations: [], text: quote))
+                        }
+                        for origin in origins.indices.contains(position) ? origins[position] : [] {
+                            if !prior[index].locations.contains(origin) { prior[index].locations.append(origin) }
+                        }
+                        ids = [prior[index].id]
+                    }
+                    for id in ids where !result.contains(id) { result.append(id) }
+                }
+                return result
+            }
+            let indexed = pending.prefix(4).enumerated().map { index, point in
+                let quoteIDs = references(point.quotes, origins: point.quoteOrigins, allowCurrent: false)
+                let candidateIDs = references(point.candidateQuotes, origins: point.candidateQuoteOrigins, allowCurrent: true)
+                return IndexedFollowUp(id: "q\(index)",
+                    question: "当前原文是否明确补充了所引原文中的同一对象、属性、条件或指代关系？没有新依据就不重复旧问题。",
+                    quoteIDs: quoteIDs, candidateQuoteIDs: candidateIDs, referenceCheck: point.referenceCheck)
+            }
+            return String(decoding: try encoder.encode(IndexedInput(evidence: units, pendingPoints: indexed, priorEvidence: prior)), as: UTF8.self)
+        }
         // Do not feed generated titles or old assertions back as premises. Questions
         // are neutral too: a model-written question can itself contain a false premise.
         let followUps = pending.prefix(4).enumerated().map { index, point in

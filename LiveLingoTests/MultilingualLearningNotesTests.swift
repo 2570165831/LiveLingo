@@ -224,6 +224,184 @@ final class MultilingualLearningNotesTests: XCTestCase {
             == Data(expected.utf8))
     }
 
+    // Frozen from the 0c715af wire format, not generated from the V2b implementation.
+    // A pending question must not opt an English batch into the new namespace.
+    func testEnglishWithPendingMatchesFrozenV2bBaselineBytes() throws {
+        let book = try pendingNotebook([
+            TranscriptSegment(startTime: 0, endTime: 1, english: "Ice is cold.", chinese: "冰很冷。"),
+            TranscriptSegment(startTime: 1, endTime: 2, english: "", chinese: "水会流动。")
+        ])
+        let expected = #"{"evidence":[{"id":"en0s0","index":0,"language":"en","text":"Ice is cold."},{"id":"en0s1","index":0,"language":"en","text":"Water flows."},{"id":"zh0s0","index":0,"language":"zh","text":"冰很冷。"},{"id":"zh0s1","index":0,"language":"zh","text":"水会流动。"},{"id":"en1s0","index":1,"language":"en","text":"Heat moves."},{"id":"zh1s0","index":1,"language":"zh","text":"热会传递。"}],"pendingPoints":[{"candidateQuotes":[],"id":"q0","question":"当前原文是否明确补充了所引原文中的同一对象、属性、条件或指代关系？没有新依据就不重复旧问题。","quotes":["Ice is cold.","水会流动。"],"referenceCheck":false}]}"#
+        let input = try LearningPrompts.input(evidence: englishEvidence, topics: [], pending: book.pendingPoints)
+        XCTAssertEqual(Data(input.utf8), Data(expected.utf8))
+        let checkpoint = LearningDraft(evidence: englishEvidence, model: "9b", input: input)
+            .checkpoint(sessionID: UUID(), inputRevision: 0, generation: 0)
+        XCTAssertEqual(checkpoint.inputDigest, SessionArchiveCoding.digest(Data(expected.utf8)))
+        XCTAssertEqual(checkpoint.promptDigest, "b7429da5ca0fff3d4817ffaefcc05991186f90026a567d42c7092ec91cfb5d38")
+    }
+
+    func testNonEnglishWithoutPendingMatchesFrozenV2bBaselineBytes() throws {
+        let evidence = [TranscriptSegment(startTime: 0, endTime: 1,
+            english: "水会流动。", chinese: "水会流动。", sourceLanguage: "zh")]
+        let expected = #"{"evidence":[{"id":"zh0s0","index":0,"language":"zh","text":"水会流动。"}],"pendingPoints":[]}"#
+        XCTAssertEqual(Data(try LearningPrompts.input(evidence: evidence, topics: []).utf8), Data(expected.utf8))
+    }
+
+    // Invented short sentences, with the 16 English / 9 Chinese / 1 pending
+    // shape of batch 18. Both old quotes intentionally contain identical bytes.
+    private func v2bFixture() throws -> (book: LearningNotebook, evidence: [TranscriptSegment], target: String) {
+        let old = (0..<2).map { index in
+            TranscriptSegment(startTime: Double(index), endTime: Double(index + 1),
+                english: "容器已经密封。", chinese: "容器已经密封。", sourceLanguage: "zh")
+        }
+        var book = LearningNotebook()
+        try book.append(evidence: old, note: LearningNote(topic: "归属", points: [
+            LearningPoint(kind: "待确认", text: "容器归属待确认。", needsContext: "容器属于哪个样品？",
+                sourceIDs: ["zh0s0", "zh1s0"])
+        ], sourceVersion: 2))
+        let target = try XCTUnwrap(book.pendingPoints.first?.id)
+        let candidate = [
+            TranscriptSegment(startTime: 2, endTime: 3, english: "Sample A is sealed.", chinese: "样品甲已经密封。"),
+            TranscriptSegment(startTime: 3, endTime: 4, english: "容器已经密封。", chinese: "容器已经密封。", sourceLanguage: "zh")
+        ]
+        try book.append(evidence: candidate, note: LearningNote(topic: "候选", points: [
+            LearningPoint(kind: "核心结论", text: "样品甲已经密封。", clarifies: target, sourceIDs: ["en0s0", "zh1s0"])
+        ], sourceVersion: 2))
+        let english = Array("ABCDEFGHIJKLMNOP").enumerated().map { index, label in
+            TranscriptSegment(startTime: Double(index + 4), endTime: Double(index + 5),
+                english: "Sample \(label) is sealed.", chinese: "样品\(label)已经密封。")
+        }
+        let chinese = Array("甲乙丙丁戊己庚辛壬").enumerated().map { index, label in
+            TranscriptSegment(startTime: Double(index + 20), endTime: Double(index + 21),
+                english: "样品\(label)已经密封。", chinese: "样品\(label)已经密封。", sourceLanguage: "zh")
+        }
+        return (book, english + chinese, target)
+    }
+
+    func testV2bHistoryIDsDeduplicateAndCandidatesReuseCurrentEvidence() throws {
+        let fixture = try v2bFixture()
+        var book = fixture.book
+        let evidence = fixture.evidence
+        let target = fixture.target
+        let pending = book.selectPendingPoints(for: evidence)
+        XCTAssertEqual(pending.map(\.id), [target])
+        XCTAssertEqual(pending[0].dependencyIDs.count, 4)
+        let input = try LearningPrompts.input(evidence: evidence, topics: book.topics, pending: pending)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+        let prior = try XCTUnwrap(root["priorEvidence"] as? [[String: Any]])
+        XCTAssertEqual(prior.compactMap { $0["id"] as? String }, ["h0"])
+        XCTAssertEqual(prior[0]["scope"] as? String, "prior")
+        XCTAssertEqual(Data(try XCTUnwrap(prior[0]["text"] as? String).utf8), Data("容器已经密封。".utf8))
+        let locations = try XCTUnwrap(prior[0]["locations"] as? [[String: Any]])
+        XCTAssertEqual(locations.count, 6)
+        XCTAssertEqual(locations.compactMap { $0["batch"] as? Int }, [1, 1, 1, 1, 2, 2])
+        XCTAssertEqual(locations.compactMap { $0["index"] as? Int }, [0, 0, 1, 1, 1, 1])
+        XCTAssertEqual(locations.compactMap { $0["language"] as? String }, ["en", "zh", "en", "zh", "en", "zh"])
+        XCTAssertTrue(locations.allSatisfy { $0["scope"] as? String == "prior" })
+        let points = try XCTUnwrap(root["pendingPoints"] as? [[String: Any]])
+        XCTAssertEqual(points[0]["id"] as? String, "q0")
+        XCTAssertEqual(points[0]["quoteIDs"] as? [String], ["h0"])
+        XCTAssertEqual(points[0]["candidateQuoteIDs"] as? [String], ["en0s0", "h0"])
+        XCTAssertEqual(points[0]["quotes"] as? [String], [])
+        XCTAssertEqual(points[0]["candidateQuotes"] as? [String], [])
+        let units = try XCTUnwrap(root["evidence"] as? [[String: Any]])
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: units, options: .sortedKeys),
+            try encoder.encode(LearningSourceUnit.make(evidence)))
+        XCTAssertEqual(units.count, 41)
+        XCTAssertEqual(units.filter { ($0["index"] as? Int ?? -1) >= 16 }.compactMap { $0["language"] as? String },
+            Array(repeating: "zh", count: 9))
+        XCTAssertFalse(units.contains { ($0["id"] as? String)?.hasPrefix("h") == true })
+        XCTAssertEqual(root["pendingEvidenceRule"] as? String,
+            "quoteIDs 和 candidateQuoteIDs 引用 priorEvidence 的旧原文或 evidence 的当前原文。h 编号只作历史上下文，不能用于当前正文 sourceIDs；旧引文不作为本批新知识重复整理。")
+    }
+
+    func testV2bHistoricalCandidateRetainsItsOriginAndDependencies() throws {
+        let fixture = try v2bFixture()
+        var book = fixture.book
+        var evidence = fixture.evidence
+        let first = evidence[0]
+        evidence[0] = TranscriptSegment(id: first.id, startTime: first.startTime, endTime: first.endTime,
+            english: "Sample A is open.", chinese: first.chinese)
+        let pending = book.selectPendingPoints(for: evidence)
+        let input = try LearningPrompts.input(evidence: evidence, topics: [], pending: pending)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+        let prior = try XCTUnwrap(root["priorEvidence"] as? [[String: Any]])
+        XCTAssertEqual(prior.compactMap { $0["id"] as? String }, ["h0", "h1"])
+        XCTAssertEqual(prior[1]["text"] as? String, "Sample A is sealed.")
+        let locations = try XCTUnwrap(prior[1]["locations"] as? [[String: Any]])
+        XCTAssertEqual(locations.count, 1)
+        XCTAssertEqual(locations[0]["batch"] as? Int, 2)
+        XCTAssertEqual(locations[0]["index"] as? Int, 0)
+        XCTAssertEqual(locations[0]["language"] as? String, "en")
+        let points = try XCTUnwrap(root["pendingPoints"] as? [[String: Any]])
+        XCTAssertEqual(points[0]["candidateQuoteIDs"] as? [String], ["h1", "h0"])
+        XCTAssertEqual(Set(pending[0].dependencyIDs), Set(book.batches.flatMap { $0.evidence.map(\.id) }))
+    }
+
+    func testV2bParsedOutputBindsCurrentSourcesAndCommitsFullCoverage() throws {
+        let fixture = try v2bFixture()
+        var book = fixture.book
+        let evidence = fixture.evidence
+        let target = fixture.target
+        let old = book.batches
+        let pending = book.selectPendingPoints(for: evidence)
+        _ = try LearningPrompts.input(evidence: evidence, topics: [], pending: pending)
+        let output = #"{"sourceVersion":2,"topic":"密封","noNewKnowledge":false,"points":[{"kind":"核心结论","text":"样品甲已经密封。","sourceIDs":["en0s0","zh16s0"],"needsContext":null},{"kind":"核心结论","text":"样品乙已经密封。","sourceIDs":["zh17s0"],"needsContext":null}],"followUps":{"q0":{"state":"后文补充","sourceIDs":["en0s0","zh16s0"],"detail":"当前来源给出了归属。"}}}"#
+        let resolved = LearningPrompts.resolvingFollowUps(try LearningNote.decode(output), targets: pending.map(\.id))
+        try book.append(evidence: evidence, note: resolved)
+        XCTAssertEqual(Array(book.batches.prefix(old.count)), old)
+        let batch = try XCTUnwrap(book.batches.last)
+        XCTAssertEqual(batch.evidence.count, 25)
+        XCTAssertEqual(Set(batch.evidence.map(\.id)), Set(evidence.map(\.id)))
+        XCTAssertEqual(batch.note.points.filter { $0.referenceState == .unlinked }.count, 0)
+        XCTAssertEqual(batch.note.points.map(\.referenceState), [.linked, .linked])
+        XCTAssertEqual(batch.note.points[0].sources?.map(\.index), [0, 16])
+        XCTAssertEqual(batch.note.points[0].sources?.map(\.quote), ["Sample A is sealed.", "样品甲已经密封。"])
+        XCTAssertEqual(batch.note.points[1].sources?.map(\.index), [17])
+        XCTAssertEqual(batch.followUps?.first?.target, target)
+        XCTAssertEqual(batch.followUps?.first?.pointIndex, 0)
+        XCTAssertEqual(batch.followUps?.first?.state, .supplemented)
+        XCTAssertTrue(book.retiredQuestionReferences.contains(target))
+        let ids = book.batches.flatMap { $0.evidence.map(\.id) }
+        XCTAssertEqual(ids.count, Set(ids).count)
+    }
+
+    func testV2bHistoricalIDsCannotBindCurrentPointsOrRetireQuestions() throws {
+        let fixture = try v2bFixture()
+        var book = fixture.book
+        let evidence = fixture.evidence
+        let target = fixture.target
+        let pending = book.selectPendingPoints(for: evidence)
+        let output = #"{"sourceVersion":2,"topic":"密封","noNewKnowledge":false,"points":[{"kind":"核心结论","text":"容器已经密封。","sourceIDs":["h0"],"needsContext":null}],"followUps":{"q0":{"state":"后文补充","sourceIDs":["h0"],"detail":"旧来源。"}}}"#
+        let resolved = LearningPrompts.resolvingFollowUps(try LearningNote.decode(output), targets: pending.map(\.id))
+        try book.append(evidence: evidence, note: resolved)
+        let batch = try XCTUnwrap(book.batches.last)
+        XCTAssertEqual(batch.note.points[0].referenceState, .unlinked)
+        XCTAssertEqual(batch.note.points[0].sources, [])
+        XCTAssertEqual(batch.followUps?.first?.state, .unclear)
+        XCTAssertFalse(book.retiredQuestionReferences.contains(target))
+    }
+
+    func testV2bDeduplicationUsesExactUTF8AcrossPendingPoints() throws {
+        let evidence = [TranscriptSegment(startTime: 0, endTime: 1,
+            english: "当前来源。", chinese: "当前来源。", sourceLanguage: "zh")]
+        let first = LearningNotebook.PendingPoint(id: "old:0", question: "unused",
+            quotes: ["Caf\u{e9}.", "Cafe\u{301}.", "Caf\u{e9}."], candidateQuotes: [], referenceCheck: false)
+        let second = LearningNotebook.PendingPoint(id: "old:1", question: "unused",
+            quotes: ["Caf\u{e9}."], candidateQuotes: ["Cafe\u{301}."], referenceCheck: false)
+        let input = try LearningPrompts.input(evidence: evidence, topics: [], pending: [first, second])
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+        let prior = try XCTUnwrap(root["priorEvidence"] as? [[String: Any]])
+        XCTAssertEqual(prior.compactMap { $0["id"] as? String }, ["h0", "h1"])
+        XCTAssertEqual(prior.compactMap { ($0["text"] as? String).map { Data($0.utf8) } },
+            [Data("Caf\u{e9}.".utf8), Data("Cafe\u{301}.".utf8)])
+        let points = try XCTUnwrap(root["pendingPoints"] as? [[String: Any]])
+        XCTAssertEqual(points[0]["quoteIDs"] as? [String], ["h0", "h1"])
+        XCTAssertEqual(points[1]["quoteIDs"] as? [String], ["h0"])
+        XCTAssertEqual(points[1]["candidateQuoteIDs"] as? [String], ["h1"])
+    }
+
     func testInferredLegacyChineseProducesOnlyOneGroup() throws {
         let raw = #"{"id":"00000000-0000-0000-0000-000000000078","startTime":0,"endTime":1,"english":"冰很冷。","chinese":"冰很冷。"}"#
         let segment = try JSONDecoder().decode(TranscriptSegment.self, from: Data(raw.utf8))
