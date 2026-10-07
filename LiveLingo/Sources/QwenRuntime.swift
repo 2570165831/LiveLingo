@@ -88,40 +88,47 @@ enum TranslationCheckText {
 /// belong here; the existing English prompts remain frozen for compatibility.
 enum CaptionTranslationTarget: String, Sendable {
     case simplifiedChinese = "zh-Hans"
+    case english = "en"
 
     var learningNotePrompt: String {
         switch self {
         case .simplifiedChinese: return LearningPrompts.generate
+        case .english: return LearningPrompts.generate
         }
     }
 
     var learningReviewPrompt: String {
         switch self {
         case .simplifiedChinese: return LearningPrompts.review
+        case .english: return LearningPrompts.review
         }
     }
 
     var promptName: String {
         switch self {
         case .simplifiedChinese: return "Simplified Chinese"
+        case .english: return "English"
         }
     }
 
     var acceptancePolicy: any TargetAcceptancePolicy.Type {
         switch self {
         case .simplifiedChinese: return HanTargetAcceptance.self
+        case .english: return HanTargetAcceptance.self
         }
     }
 
     func normalize(_ text: String) -> String {
         switch self {
         case .simplifiedChinese: return SimplifiedChineseNormalizer.normalize(text)
+        case .english: return text
         }
     }
 
     func keepsSourceAsCaption(language: String?) -> Bool {
         switch self {
         case .simplifiedChinese: return language == "zh"
+        case .english: return OutputLanguage.english.keepsSourceAsCaption(language: language)
         }
     }
 
@@ -1498,6 +1505,9 @@ enum QwenTranslationClient {
         onUpdate: (@MainActor @Sendable (String) async -> Void)? = nil,
         request: AdjacentRequest? = nil
     ) async throws -> String {
+        if target == .english, target.keepsSourceAsCaption(language: sourceLanguage) {
+            return target.renderPassThrough(text)
+        }
         let output = try await requestTranslation(text, modelName: modelName, hints: hints,
                                                   sourceLanguage: sourceLanguage, target: target,
                                                   attempt: attempt, request: request, onUpdate: onUpdate)

@@ -295,6 +295,8 @@ struct SessionGenerationCheckpoint: Codable, Equatable, Sendable {
     var protocolVersion: Int
     var inputDigest: String
     var promptDigest: String
+    /// Nil retains the historical Simplified Chinese checkpoint bytes.
+    var targetLocale: String? = nil
     var input: String
     var prefix: String = ""
     /// Complete source dependency set, including prior pending questions.
@@ -320,7 +322,8 @@ struct SessionGenerationCheckpoint: Codable, Equatable, Sendable {
     /// Use this overload after reopening or revising a different source segment.
     func matches(snapshot: SessionSnapshot, modelName: String, protocolVersion: Int,
                  input: String, prompt: String) -> Bool {
-        snapshot.canResume(self) && matches(sessionID: snapshot.sessionID, inputRevision: self.inputRevision,
+        SessionSnapshot.normalizedTargetLocale(targetLocale) == SessionSnapshot.normalizedTargetLocale(snapshot.targetLocale)
+            && snapshot.canResume(self) && matches(sessionID: snapshot.sessionID, inputRevision: self.inputRevision,
                                             modelName: modelName, protocolVersion: protocolVersion,
                                             input: input, prompt: prompt)
     }
@@ -330,6 +333,7 @@ struct SessionGenerationCheckpoint: Codable, Equatable, Sendable {
               generation == old.generation, kind == old.kind, modelName == old.modelName,
               protocolVersion == old.protocolVersion, inputDigest == old.inputDigest,
               promptDigest == old.promptDigest, input == old.input, evidenceIDs == old.evidenceIDs,
+              targetLocale == old.targetLocale,
               batchEvidenceIDs == old.batchEvidenceIDs,
               pendingTargetIDs == old.pendingTargetIDs, contextRevision == old.contextRevision else {
             throw SessionStoreError.identityConflict("相同检查点对应不同生成输入")

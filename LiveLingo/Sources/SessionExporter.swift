@@ -178,6 +178,10 @@ enum SessionExporter {
         if target.keepsSourceAsCaption(language: segment.sourceLanguage) {
             return segment.hasUsableTranslation ? segment.chinese : target.renderPassThrough(segment.english)
         }
+        if target != .simplifiedChinese {
+            if segment.translationState == .failed { return ClassroomFixedText.failedAgainstSource.text(targetCode: target.rawValue) }
+            return segment.hasUsableTranslation ? segment.chinese : ClassroomFixedText.pendingTranslation.text(targetCode: target.rawValue)
+        }
         if segment.sourceLanguage != nil, segment.translationState == .failed {
             return "（本段翻译未完成，可对照原文）"
         }
@@ -434,6 +438,9 @@ enum NotesExportDocument {
     static let notesHeading = "学习笔记"
     static let reviewHeading = "9B 复查意见（仅供核对，未合并进笔记正文）"
     static let transcriptHeading = "双语字幕（含时间戳）"
+    static func transcriptHeading(for target: OutputLanguage) -> String {
+        target == .english ? ClassroomFixedText.transcriptHeading.text(targetCode: target.rawValue) : transcriptHeading
+    }
     static let disclaimer = "本文件由本机模型生成，未经人工逐句核对；正文按主题整理，“需要回听”和“来源检查”两节列出的内容仍需自行核对。"
 
     static func classDate(of snapshot: NotesExportSnapshot) -> String {
@@ -530,7 +537,7 @@ enum NotesExportDocument {
                 let stamp = "\(timestamp(segment.startTime))–\(timestamp(segment.endTime))"
                 return "[\(stamp)] " + SessionExporter.captionLines(segment, outputLanguage: snapshot.target).joined(separator: "\n")
             }
-            sections.append("## \(transcriptHeading)\n\n" + lines.joined(separator: "\n\n"))
+            sections.append("## \(transcriptHeading(for: snapshot.target))\n\n" + lines.joined(separator: "\n\n"))
         }
         return sections.joined(separator: "\n\n") + "\n"
     }
@@ -550,7 +557,7 @@ enum NotesExportDocument {
                 let stamp = "\(timestamp(segment.startTime))–\(timestamp(segment.endTime))"
                 return "[\(stamp)] " + SessionExporter.captionLines(segment, outputLanguage: snapshot.target).joined(separator: "\n")
             }
-            sections.append(transcriptHeading + "\n\n" + lines.joined(separator: "\n\n"))
+            sections.append(transcriptHeading(for: snapshot.target) + "\n\n" + lines.joined(separator: "\n\n"))
         }
         return sections.joined(separator: "\n\n\n") + "\n"
     }
@@ -703,7 +710,7 @@ enum PDFNotesWriter {
         }
 
         if snapshot.includesTranscript, !snapshot.transcript.isEmpty {
-            append(NotesExportDocument.transcriptHeading, style: .heading)
+            append(NotesExportDocument.transcriptHeading(for: snapshot.target), style: .heading)
             for segment in snapshot.transcript {
                 let stamp = "\(NotesExportDocument.timestamp(segment.startTime))–\(NotesExportDocument.timestamp(segment.endTime))"
                 let lines = SessionExporter.captionLines(segment, outputLanguage: snapshot.target)

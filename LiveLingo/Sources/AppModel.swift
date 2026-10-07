@@ -39,6 +39,9 @@ struct CaptionTranslationDependencies {
         throw QwenRuntimeError.requestFailed("测试必须注入原语言翻译器")
     }
     var translateTarget: ((String, String, String?, CaptionTranslationTarget, [AuxiliaryTranslationHint], CaptionTranslationAttempt, Update?) async throws -> String)? = nil
+    var adjacentTarget: ((String, String, String, String, String, Bool, CaptionTranslationTarget,
+                          [AuxiliaryTranslationHint], Update?, DeferRepair?) async throws -> QwenTranslationClient.AdjacentTranslation)? = nil
+    var repairTarget: ((DeferredCaptionRepair, CaptionTranslationTarget) async throws -> QwenTranslationClient.PreviousRepair)? = nil
     var retrySleep: @MainActor (TimeInterval) async throws -> Void = CaptionTranslationDependencies.sleepBeforeRetry
     var prepareRetry: @MainActor (String) async throws -> Void = { _ in }
 
@@ -64,6 +67,16 @@ struct CaptionTranslationDependencies {
             try await QwenTranslationClient.translate(text, modelName: model, sourceLanguage: language,
                 target: target, hints: hints, attempt: attempt, onUpdate: update)
         }
+        dependencies.adjacentTarget = { previous, translated, current, context, model, repair, target, hints, update, deferRepair in
+            try await QwenTranslationClient.translateAdjacent(previous: previous, previousChinese: translated,
+                current: current, context: context, modelName: model, repairPrevious: repair, target: target,
+                currentHints: hints, onCurrent: update, deferRepair: deferRepair)
+        }
+        dependencies.repairTarget = { pending, target in
+            try await QwenTranslationClient.repairPreviousCaption(previous: pending.previous.english,
+                previousChinese: pending.previous.chinese, current: pending.normalizedCurrent,
+                context: DeferredCaptionRepair.englishContext(pending.context), modelName: pending.modelName, target: target)
+        }
         dependencies.prepareRetry = { try await MLXRuntime.shared.finishRetirementBeforeRetry($0) }
         return dependencies
     }
@@ -84,6 +97,22 @@ struct CaptionTranslationDependencies {
             return try await translateSource(text, model, language, attempt, update)
         }
         return try await translate(text, model, hints, attempt, update)
+    }
+
+    func translateAdjacentCaption(_ previous: String, _ translated: String, _ current: String,
+                                  _ context: String, _ model: String, _ repairPrevious: Bool,
+                                  _ hints: [AuxiliaryTranslationHint], _ update: Update?, _ deferRepair: DeferRepair?,
+                                  target: CaptionTranslationTarget) async throws -> QwenTranslationClient.AdjacentTranslation {
+        if let adjacentTarget {
+            return try await adjacentTarget(previous, translated, current, context, model, repairPrevious,
+                                            target, hints, update, deferRepair)
+        }
+        return try await adjacent(previous, translated, current, context, model, repairPrevious, hints, update, deferRepair)
+    }
+
+    func repairCaption(_ pending: DeferredCaptionRepair, target: CaptionTranslationTarget) async throws -> QwenTranslationClient.PreviousRepair {
+        if let repairTarget { return try await repairTarget(pending, target) }
+        return try await repair(pending)
     }
 
     /// The live adapter and its tests share the complete client argument mapping.
@@ -521,6 +550,16 @@ final class AppModel: ObservableObject {
         return last.english
     }
 
+    var applePreviewLanguagePair: OutputLanguage.AppleLanguagePair? { outputLanguage.profile.appleLanguagePair }
+
+    /// The real Apple session preparation and its injected tests use this gate.
+    @discardableResult
+    func preparePreviewTranslationIfEligible(_ prepare: () async throws -> Void) async throws -> Bool {
+        guard applePreviewLanguagePair != nil else { return false }
+        try await prepare()
+        return true
+    }
+
     var supportsPreviewTranslation: Bool {
         if #available(macOS 15.0, *) { return true }
         return false
@@ -554,6 +593,7 @@ final class AppModel: ObservableObject {
     func runPreviewTranslation(session: TranslationSession) async {
         // 令牌必须在任何 await 之前绑定：否则旧会话的 prepareTranslation 返回后
         // 会覆盖新会话的令牌，把最新一次运行误判成“已过期”。
+        guard applePreviewLanguagePair != nil else { return }
         let runToken = UUID()
         previewRunToken = runToken
         // Wake the superseded loop before preparation: preparation may fail
@@ -562,7 +602,7 @@ final class AppModel: ObservableObject {
         markPreviewSourceChanged()
         previewTranslationStatus = "准备初译语言包…"
         do {
-            try await session.prepareTranslation()
+            guard try await preparePreviewTranslationIfEligible({ try await session.prepareTranslation() }) else { return }
             try Task.checkCancellation()
             // prepare 期间可能已经有更新的会话接替：旧会话直接退出，不改状态。
             guard previewRunToken == runToken else { return }
@@ -1601,7 +1641,7 @@ final class AppModel: ObservableObject {
         guard var snapshot = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
         _ = try LearningNotebook(snapshot: snapshot)
         var restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)
-        guard restoredLanguage.generationTarget != nil else {
+        guard restoredLanguage.generationTarget != nil, restoredLanguage != .english || releasedOutputLanguage("en") != nil else {
             throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
         }
         let sameDirectory = sessionDirectory.map(SessionDirectoryLocation.canonical)
@@ -1613,7 +1653,7 @@ final class AppModel: ObservableObject {
             guard let latest = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
             snapshot = latest
             restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)
-            guard restoredLanguage.generationTarget != nil else {
+            guard restoredLanguage.generationTarget != nil, restoredLanguage != .english || releasedOutputLanguage("en") != nil else {
                 throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
             }
         }
@@ -2433,7 +2473,7 @@ final class AppModel: ObservableObject {
             let sourceOnly = policy.keepsSourceAsCaption
             if sourceOnly { segment.completeTranslation(target.renderPassThrough(segment.english), targetCode: target.rawValue) }
             segment.updateCaptionAnnotation(targetCode: target.rawValue,
-                formulaUncertain: policy.usesEnglishTranslationPipeline && FormulaASRReview.uncertain(segment.english))
+                formulaUncertain: (segment.sourceLanguage == nil || segment.sourceLanguage == "en") && FormulaASRReview.uncertain(segment.english))
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
             volatileEnglish = ""
             markCaptionActivity()
@@ -2648,6 +2688,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func recentTranslationContext(before index: Int) -> String {
+        guard segments.indices.contains(index) else { return "" }
+        return segments[..<index].suffix(6)
+            .filter { captionTarget.sourcePolicy(for: $0.sourceLanguage).usesEnglishTranslationPipeline
+                && segments[index].startTime - $0.endTime <= 60 }
+            .map(\.english).joined(separator: " ")
+    }
+
+    func repairTranslationContext(_ context: [TranscriptSegment]) -> String {
+        context.filter { captionTarget.sourcePolicy(for: $0.sourceLanguage).usesEnglishTranslationPipeline }
+            .map(\.english).joined(separator: " ")
+    }
+
     private func clearTranslationPreview() {
         streamingChinese = ""
         streamingDependencyIDs.removeAll()
@@ -2705,7 +2758,7 @@ final class AppModel: ObservableObject {
         }
         let started = ProcessInfo.processInfo.systemUptime
         do {
-            let result = try await captionTranslation.repair(pending)
+            let result = try await captionTranslation.repairCaption(pending, target: captionTarget)
             try Task.checkCancellation()
             guard sessionID == session, generation == epoch, translationWorkerID == worker,
                   !processingPaused else { return }
@@ -2824,7 +2877,7 @@ final class AppModel: ObservableObject {
                 let target = self.captionTarget
                 if target.keepsSourceAsCaption(language: input.sourceLanguage) {
                     let rendered = target.renderPassThrough(input.english)
-                    self.segments[index].completeTranslation(rendered)
+                    self.segments[index].completeTranslation(rendered, targetCode: target.rawValue)
                     self.translationHints.removeValue(forKey: id)
                     self.liveChinese = rendered
                     self.markCaptionActivity()
@@ -2833,10 +2886,7 @@ final class AppModel: ObservableObject {
                 }
                 self.segments[index].beginTranslation()
                 let english = self.segments[index].english
-                let recentContext = self.segments[..<index].suffix(6)
-                    .filter { target.sourcePolicy(for: $0.sourceLanguage).usesEnglishTranslationPipeline
-                        && self.segments[index].startTime - $0.endTime <= 60 }
-                    .map(\.english).joined(separator: " ")
+                let recentContext = self.recentTranslationContext(before: index)
                 let sourceLanguage = input.sourceLanguage
                 let policy = target.sourcePolicy(for: sourceLanguage)
                 let normalizedInput = policy.usesEnglishTranslationPipeline
@@ -2867,12 +2917,11 @@ final class AppModel: ObservableObject {
                                 self.inlineCaptionRepairTargets.removeValue(forKey: workerID)
                             }
                         }
-                        let pair = try await self.captionTranslation.adjacent(
+                        let pair = try await self.captionTranslation.translateAdjacentCaption(
                             previousInput.english,
                             previousInput.chinese,
                             normalizedInput,
-                            repairContext.filter { target.sourcePolicy(for: $0.sourceLanguage).usesEnglishTranslationPipeline }
-                                .map(\.english).joined(separator: " "),
+                            self.repairTranslationContext(repairContext),
                             translationModel,
                             previousInput.endTime - previousInput.startTime >= 9.5
                                 || !".!?".contains(previousInput.english.last ?? " ")
@@ -2898,7 +2947,7 @@ final class AppModel: ObservableObject {
                             }, { [weak self] in
                                 guard let self else { return true }
                                 return self.hasPendingTranslationWork
-                            })
+                            }, target: target)
                         try Task.checkCancellation()
                         guard currentGeneration == self.generation, currentSession == self.sessionID,
                               self.translationWorkerID == workerID, !self.processingPaused else { return }
@@ -3396,6 +3445,7 @@ final class AppModel: ObservableObject {
                         evidence: inputSnapshot, model: modelName,
                         input: try LearningPrompts.input(evidence: inputSnapshot, topics: learningNotebook.topics,
                             pending: pending, target: captionTarget),
+                        target: captionTarget,
                         systemPrompt: captionTarget.learningNotePrompt,
                         pendingTargets: pending.map(\.id), contextRevision: learningNotebook.revision,
                         dependencyIDs: dependencies
@@ -4603,9 +4653,9 @@ extension AppModel {
             }
         }
         let preview = Task { @MainActor in
-            if #available(macOS 26.0, *) {
-                let session = TranslationSession(installedSource: Locale.Language(identifier: "en"),
-                    target: Locale.Language(identifier: "zh-Hans"))
+            if #available(macOS 26.0, *), let pair = self.applePreviewLanguagePair {
+                let session = TranslationSession(installedSource: Locale.Language(identifier: pair.source),
+                    target: Locale.Language(identifier: pair.target))
                 await self.runPreviewTranslation(session: session)
             }
         }

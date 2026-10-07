@@ -47,11 +47,11 @@ private struct FloatingSubtitleContent: View {
             // source-only Chinese. Hidden bodies cannot be selected or accessed.
             subtitle(presentation.source?.text ?? "",
                      size: preferences.sourceTextSize, weight: .regular,
-                     color: Color(white: palette.sourceWhite), height: 88,
+                     color: Color(white: palette.sourceWhite), height: model.captionTarget == .english && presentation.source == nil ? 0 : 88,
                      languageName: presentation.source?.languageName, languageWhite: palette.languageWhite,
                      visible: presentation.source != nil)
             subtitle(presentation.translation?.text ?? "", size: preferences.translationTextSize, weight: .medium,
-                     color: .white, height: 138, languageName: presentation.translation?.languageName,
+                     color: .white, height: model.captionTarget == .english && presentation.translation == nil ? 0 : 138, languageName: presentation.translation?.languageName,
                      languageWhite: palette.languageWhite, visible: presentation.translation != nil)
         }
         .padding(22)
@@ -145,20 +145,24 @@ extension AppModel {
 
     private var confirmedNonEnglishCaption: TranscriptSegment? {
         guard volatileEnglish.isEmpty, let caption = segments.last,
-              caption.sourceLanguage != nil, caption.sourceLanguage != "en" else { return nil }
+              (caption.sourceLanguage != nil && caption.sourceLanguage != "en")
+                || (captionTarget == .english && captionTarget.keepsSourceAsCaption(language: caption.sourceLanguage)) else { return nil }
         return caption
     }
 
     var nonEnglishPreviewPresentation: CaptionPresentation? {
-        confirmedNonEnglishCaption.map { CaptionPresentation($0, target: captionTarget) }
+        if captionTarget == .english, !volatileEnglish.isEmpty { return CaptionPresentation(sourceOnlyText: volatileEnglish) }
+        return confirmedNonEnglishCaption.map { CaptionPresentation($0, target: captionTarget) }
     }
 
     var previewEnglishDisplay: String {
         if let caption = confirmedNonEnglishCaption { return caption.english }
+        if captionTarget == .english, !volatileEnglish.isEmpty { return volatileEnglish }
         return previewTranslationSource.isEmpty ? "等待英文语音…" : previewTranslationSource
     }
 
     var previewChineseDisplay: String {
+        if captionTarget == .english, !volatileEnglish.isEmpty { return volatileEnglish }
         if let caption = confirmedNonEnglishCaption {
             let target = captionTarget
             if target.keepsSourceAsCaption(language: caption.sourceLanguage) { return target.renderPassThrough(caption.english) }

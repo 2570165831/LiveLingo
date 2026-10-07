@@ -639,7 +639,7 @@ struct ContentView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
-            Toggle("附带双语字幕与时间戳（按所选范围）", isOn: $model.exportIncludesTranscript)
+            Toggle(model.outputLanguage == .english ? ClassroomFixedText.exportTranscriptToggle.text(targetCode: "en") : "附带双语字幕与时间戳（按所选范围）", isOn: $model.exportIncludesTranscript)
                 .toggleStyle(.switch)
                 .controlSize(.small)
             Toggle("附带核对意见（独立章节）", isOn: $model.exportIncludesReviewAdvice)
@@ -2119,7 +2119,7 @@ private struct ApplePreviewTranslationHost: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(macOS 15.0, *), !AppRuntimeEnvironment.isUnitTesting {
+        if #available(macOS 15.0, *), !AppRuntimeEnvironment.isUnitTesting, model.applePreviewLanguagePair != nil {
             content.translationTask(model.previewTranslationEnabled ? configuration : nil) { session in
                 await model.runPreviewTranslation(session: session)
             }

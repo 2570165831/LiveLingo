@@ -149,7 +149,7 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
 /// One policy switch and one table for fixed classroom output text. The user
 /// has not selected target-language labels yet; interface Chinese is the default.
 enum ClassroomFixedText: String, CaseIterable {
-    case pendingTranslation, failedAgainstSource, failedAgainstEnglish, formulaNeedsReview
+    case pendingTranslation, failedAgainstSource, failedAgainstEnglish, formulaNeedsReview, transcriptHeading, exportTranscriptToggle
 
     static let usesTargetLanguage = false
     private static let labels: [Self: [String: String]] = [
@@ -157,6 +157,8 @@ enum ClassroomFixedText: String, CaseIterable {
         .failedAgainstSource: ["zh": "（本段翻译未完成，可对照原文）", "en": "(Translation incomplete; see source)"],
         .failedAgainstEnglish: ["zh": "（本段翻译未完成，可对照英文）", "en": "(Translation incomplete; see English source)"],
         .formulaNeedsReview: ["zh": "【公式待核对】", "en": "[Formula needs review]"],
+        .transcriptHeading: ["zh": "字幕（含时间戳）", "en": "Captions (with timestamps)"],
+        .exportTranscriptToggle: ["zh": "附带字幕与时间戳（按所选范围）", "en": "Include captions and timestamps for this scope"],
     ]
 
     func text(targetCode: String, useTargetLanguage: Bool = usesTargetLanguage) -> String {

@@ -2530,6 +2530,7 @@ struct LearningReview: Decodable {
 
 struct LearningDraft: Sendable {
     let id: UUID
+    let target: CaptionTranslationTarget
     let evidence: [TranscriptSegment]
     let model: String
     let input: String
@@ -2544,11 +2545,12 @@ struct LearningDraft: Sendable {
     private var frozenBinding: SessionGenerationCheckpoint?
 
     init(id: UUID = UUID(), evidence: [TranscriptSegment], model: String, input: String,
+         target: CaptionTranslationTarget = .simplifiedChinese,
          systemPrompt: String = CaptionTranslationTarget.simplifiedChinese.learningNotePrompt,
          text: String = "", attempts: Int = 0, completedNote: LearningNote? = nil,
          pendingTargets: [String] = [], contextRevision: Int = 0,
          dependencyIDs: [UUID]? = nil, frozenBinding: SessionGenerationCheckpoint? = nil) {
-        self.id = id; self.evidence = evidence.map(\.withoutTranslationFailures); self.model = model; self.input = input
+        self.id = id; self.target = target; self.evidence = evidence.map(\.withoutTranslationFailures); self.model = model; self.input = input
         self.systemPrompt = systemPrompt
         self.promptDigest = SessionArchiveCoding.digest(Data(systemPrompt.utf8))
         self.text = text; self.attempts = attempts; self.completedNote = completedNote
@@ -2568,6 +2570,7 @@ struct LearningDraft: Sendable {
             generation: generation, modelName: model, protocolVersion: 2,
             inputDigest: SessionArchiveCoding.digest(Data(input.utf8)),
             promptDigest: promptDigest,
+            targetLocale: target == .simplifiedChinese ? nil : target.rawValue,
             input: input, prefix: text, evidenceIDs: dependencyIDs, batchEvidenceIDs: evidence.map(\.id),
             pendingTargetIDs: pendingTargets, contextRevision: contextRevision,
             attempts: attempts, completedNote: completedNote)
@@ -2590,7 +2593,7 @@ struct LearningDraft: Sendable {
         let evidence = batchIDs.compactMap { byID[$0] }
         guard evidence.count == batchIDs.count,
               checkpoint.evidenceIDs.allSatisfy({ byID[$0] != nil }) else { return nil }
-        self.init(id: checkpoint.id, evidence: evidence, model: model, input: checkpoint.input,
+        self.init(id: checkpoint.id, evidence: evidence, model: model, input: checkpoint.input, target: target,
                   systemPrompt: prompt,
                   text: checkpoint.prefix, attempts: checkpoint.attempts, completedNote: checkpoint.completedNote,
                   pendingTargets: checkpoint.pendingTargetIDs, contextRevision: checkpoint.contextRevision,
@@ -2606,7 +2609,8 @@ struct LearningDraft: Sendable {
     }
 
     func matches(snapshot: SessionSnapshot, model: String, systemPrompt: String? = nil) -> Bool {
-        guard let target = (try? OutputLanguage.storedLanguage(snapshot.targetLocale))?.generationTarget else { return false }
+        guard let target = (try? OutputLanguage.storedLanguage(snapshot.targetLocale))?.generationTarget,
+              target == self.target else { return false }
         let prompt = systemPrompt ?? target.learningNotePrompt
         let ids = Set(evidence.map(\.id))
         guard matches(evidence: snapshot.segments.filter { ids.contains($0.id) }, model: model,
