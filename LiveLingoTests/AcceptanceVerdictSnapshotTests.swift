@@ -105,7 +105,7 @@ final class AcceptanceVerdictSnapshotTests: XCTestCase {
     }
 
     private func verdict(_ input: Translation) throws -> Verdict {
-        let normalized = CaptionTranslationTarget.current.normalize(input.candidate)
+        let normalized = CaptionTranslationTarget.simplifiedChinese.normalize(input.candidate)
         let raw = TranslationAcceptance.rejection(candidate: input.candidate, source: input.source,
                                                  sourceLanguage: input.sourceLanguage)
         let normalizedRejection = TranslationAcceptance.rejection(candidate: normalized, source: input.source,
@@ -140,7 +140,7 @@ final class AcceptanceVerdictSnapshotTests: XCTestCase {
             captionError: captionError,
             lengthPlausible: TranslationLengthGuard.isPlausible(chinese: input.candidate, english: input.source),
             targetMaximumOutputCharacters: language.map {
-                CaptionTranslationTarget.current.maximumOutputCharacters(source: input.source, language: $0)
+                CaptionTranslationTarget.simplifiedChinese.maximumOutputCharacters(source: input.source, language: $0)
             }, stableTranslationPrefix: QwenTranslationClient.stableTranslationPrefix(normalized),
             rawStableTranslationPrefix: QwenTranslationClient.stableTranslationPrefix(input.candidate),
             numericUnsupported: numeric.unsupported, numericUndecidable: numeric.undecidable,
@@ -232,13 +232,19 @@ final class AcceptanceVerdictSnapshotTests: XCTestCase {
             "MultilingualCaptionGateTests.swift": "057799a09d2ff2a7845497c506d6f6a1223a9501351649886af4b24cc40fe413",
             "CountLanguageAcceptanceTests.swift": "3e97ca4757fd6eb305aad9158d92a8266ce7cfd0868aa01316c118529aaebcb5"
         ])
-        XCTAssertEqual(snapshot.translations.count, 453)
+        XCTAssertEqual(snapshot.translations.count, 457)
         XCTAssertEqual(snapshot.counts.count, 28)
         XCTAssertEqual(snapshot.gates.count, 142)
         XCTAssertEqual(snapshot.bindings.count, 3)
         let identifiers = snapshot.translations.map(\.id) + snapshot.counts.map(\.id)
             + snapshot.gates.map(\.id) + snapshot.bindings.map(\.id)
-        XCTAssertEqual(Set(identifiers).count, 626)
+        XCTAssertEqual(Set(identifiers).count, 630)
+        XCTAssertTrue(snapshot.translations.contains {
+            $0.expected.rawCategory != $0.expected.normalizedCategory
+        }, "Freeze a decision that normalization actually changes")
+        XCTAssertTrue(snapshot.translations.contains {
+            $0.expected.rawStableTranslationPrefix != $0.expected.stableTranslationPrefix
+        }, "Freeze a multi-sentence prefix whose spelling normalization changes")
         XCTAssertEqual(Set(snapshot.translations.map { $0.expected.rawCategory }), [
             "accepted", "empty", "controlMarker", "promptLeak", "modelReply", "sourceEcho",
             "englishProse", "mixedEnglishProse", "nonChineseText", "incompleteProse",

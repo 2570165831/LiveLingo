@@ -26328,6 +26328,96 @@
       "id": "generated-numeric-context-2",
       "origin": "generated",
       "source": "The count is 4."
+    },
+    {
+      "after": "",
+      "before": "",
+      "candidate": "我是語言模型。我無法翻譯這句話。",
+      "existingChinese": "我是語言模型。我無法翻譯這句話。",
+      "expected": {
+        "captionOutput": "我是語言模型。我無法翻譯這句話。",
+        "lengthPlausible": true,
+        "normalizedCategory": "modelReply",
+        "normalizedOutput": "我是语言模型。我无法翻译这句话。",
+        "numericUndecidable": false,
+        "numericUnsupported": [],
+        "rawCategory": "accepted",
+        "rawStableTranslationPrefix": "我是語言模型。",
+        "stableTranslationPrefix": "我是语言模型。",
+        "validatedOutput": "我是語言模型。我無法翻譯這句話。"
+      },
+      "id": "traditional-self-description-en",
+      "origin": "synthetic normalization distinction",
+      "source": "The box holds two books.",
+      "sourceLanguage": null
+    },
+    {
+      "after": "",
+      "before": "",
+      "candidate": "作為一個語言模型，我無法翻譯這句話。",
+      "existingChinese": "作為一個語言模型，我無法翻譯這句話。",
+      "expected": {
+        "captionOutput": "作為一個語言模型，我無法翻譯這句話。",
+        "lengthPlausible": true,
+        "normalizedCategory": "modelReply",
+        "normalizedOutput": "作为一个语言模型，我无法翻译这句话。",
+        "numericUndecidable": true,
+        "numericUnsupported": [],
+        "rawCategory": "accepted",
+        "rawStableTranslationPrefix": "",
+        "stableTranslationPrefix": "",
+        "targetMaximumOutputCharacters": 24,
+        "validatedOutput": "作為一個語言模型，我無法翻譯這句話。"
+      },
+      "id": "traditional-self-description-ja",
+      "origin": "synthetic normalization distinction",
+      "source": "葉が大きくなります。",
+      "sourceLanguage": "ja"
+    },
+    {
+      "after": "",
+      "before": "",
+      "candidate": "先檢查方向。力朝向中心起作用。",
+      "existingChinese": "先檢查方向。力朝向中心起作用。",
+      "expected": {
+        "captionOutput": "先檢查方向。力朝向中心起作用。",
+        "lengthPlausible": true,
+        "normalizedCategory": "accepted",
+        "normalizedOutput": "先检查方向。力朝向中心起作用。",
+        "numericUndecidable": false,
+        "numericUnsupported": [],
+        "rawCategory": "accepted",
+        "rawStableTranslationPrefix": "先檢查方向。",
+        "stableTranslationPrefix": "先检查方向。",
+        "validatedOutput": "先檢查方向。力朝向中心起作用。"
+      },
+      "id": "traditional-multisentence-prefix-en",
+      "origin": "synthetic normalization distinction",
+      "source": "Check the direction. The force acts toward the center.",
+      "sourceLanguage": null
+    },
+    {
+      "after": "",
+      "before": "",
+      "candidate": "先觀察葉片。葉子會長大。",
+      "existingChinese": "先觀察葉片。葉子會長大。",
+      "expected": {
+        "captionOutput": "先觀察葉片。葉子會長大。",
+        "lengthPlausible": true,
+        "normalizedCategory": "accepted",
+        "normalizedOutput": "先观察叶片。叶子会长大。",
+        "numericUndecidable": false,
+        "numericUnsupported": [],
+        "rawCategory": "accepted",
+        "rawStableTranslationPrefix": "先觀察葉片。",
+        "stableTranslationPrefix": "先观察叶片。",
+        "targetMaximumOutputCharacters": 32,
+        "validatedOutput": "先觀察葉片。葉子會長大。"
+      },
+      "id": "traditional-multisentence-prefix-ja",
+      "origin": "synthetic normalization distinction",
+      "source": "葉を観察します。葉が大きくなります。",
+      "sourceLanguage": "ja"
     }
   ]
 }
