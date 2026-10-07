@@ -30,12 +30,51 @@ actor MLXRuntime {
     private final class Writer: @unchecked Sendable {
         let handle: FileHandle
         let queue = DispatchQueue(label: "LiveLingo.MLX.write")
-        init(_ handle: FileHandle) { self.handle = handle }
-        func write(_ data: Data) async throws {
+        // Accessed only on queue. A partial command must never be followed by
+        // another command on the same stream after its deadline expires.
+        private var failure: Error?
+        init(_ handle: FileHandle) {
+            self.handle = handle
+            let descriptor = handle.fileDescriptor
+            let flags = fcntl(descriptor, F_GETFL)
+            if flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) < 0
+                || fcntl(descriptor, F_SETNOSIGPIPE, 1) < 0 {
+                failure = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
+        func write(_ data: Data, deadline: ExitDeadline) async throws {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 queue.async {
-                    do { try self.handle.write(contentsOf: data); continuation.resume() }
-                    catch { continuation.resume(throwing: error) }
+                    do {
+                        if let failure = self.failure { throw failure }
+                        try data.withUnsafeBytes { bytes in
+                            var offset = 0
+                            while offset < bytes.count {
+                                try deadline.check()
+                                let count = Darwin.write(self.handle.fileDescriptor,
+                                    bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                                if count > 0 { offset += count; continue }
+                                if count < 0, errno == EINTR { continue }
+                                guard count < 0, errno == EAGAIN || errno == EWOULDBLOCK else {
+                                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                                }
+                                var descriptor = pollfd(fd: self.handle.fileDescriptor, events: Int16(POLLOUT), revents: 0)
+                                let milliseconds = Int32(max(1, min(50, (deadline.remaining * 1000).rounded(.up))))
+                                let ready = Darwin.poll(&descriptor, 1, milliseconds)
+                                if ready < 0, errno != EINTR {
+                                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                                }
+                                if ready > 0, descriptor.revents & Int16(POLLERR | POLLHUP | POLLNVAL) != 0 {
+                                    throw POSIXError(.EPIPE)
+                                }
+                            }
+                        }
+                        try deadline.check()
+                        continuation.resume()
+                    } catch {
+                        self.failure = error
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
         }
@@ -134,6 +173,13 @@ actor MLXRuntime {
     init(testConfiguration: TestConfiguration? = nil) {
         self.testConfiguration = testConfiguration
         if let testConfiguration { controlTimeout = testConfiguration.controlTimeout }
+    }
+    static func writeForExitTesting(_ data: Data, to handle: FileHandle, timeout: TimeInterval) async throws {
+        try await Writer(handle).write(data, deadline: ExitDeadline(seconds: timeout))
+    }
+    func controlForExitTesting(to handle: FileHandle, timeout: TimeInterval) async throws {
+        controlTimeout = timeout
+        try await control("shutdown", id: nil, worker: Worker(process: Process(), input: handle))
     }
     #endif
     private static let relativeModels = [
@@ -352,18 +398,20 @@ actor MLXRuntime {
     }
 
     private func waitForExit(_ worker: Worker, model: String) async {
-        let deadline = ProcessInfo.processInfo.systemUptime + controlTimeout
-        while worker.process.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
-            try? await Task.sleep(for: .milliseconds(50))
+        let deadline = (ExitDeadline.current ?? ExitDeadline(seconds: controlTimeout + 2)).limited(to: controlTimeout)
+        while worker.process.isRunning && !deadline.isExpired {
+            do { try await Task.sleep(for: .milliseconds(50)) }
+            catch { break }
         }
         if worker.process.isRunning {
             // Process is a child owned by this Worker instance. Never enumerate
             // or signal another application's model processes.
             _ = Darwin.kill(worker.process.processIdentifier, SIGKILL)
         }
-        let killDeadline = ProcessInfo.processInfo.systemUptime + 2
-        while worker.process.isRunning && ProcessInfo.processInfo.systemUptime < killDeadline {
-            try? await Task.sleep(for: .milliseconds(20))
+        let killDeadline = (ExitDeadline.current ?? ExitDeadline(seconds: 2)).limited(to: 2)
+        while worker.process.isRunning && !killDeadline.isExpired {
+            do { try await Task.sleep(for: .milliseconds(20)) }
+            catch { break }
         }
         if !worker.process.isRunning, retiringWorkers[model]?.id == worker.id {
             retiringWorkers[model] = nil
@@ -418,10 +466,16 @@ actor MLXRuntime {
         }
     }
 
-    private func send(_ object: [String: Any], to worker: Worker) async throws {
+    private func send(_ object: [String: Any], to worker: Worker, deadline: ExitDeadline? = nil,
+                      ignoringTaskCancellation: Bool = false) async throws {
+        let deadline = deadline ?? (ExitDeadline.current ?? ExitDeadline(seconds: controlTimeout)).limited(to: controlTimeout)
+        try deadline.check(ignoringTaskCancellation: ignoringTaskCancellation)
         var data = try JSONSerialization.data(withJSONObject: object)
         data.append(10)
-        try await worker.writer.write(data)
+        do { try await worker.writer.write(data, deadline: deadline) }
+        catch is ExitDeadlineExceeded {
+            throw QwenRuntimeError.generationInterrupted("模型管道发送超时；保留上次有效进度。")
+        }
     }
 
     private func resolveControl(_ token: String, with result: Result<Void, Error>) {
@@ -434,6 +488,10 @@ actor MLXRuntime {
     }
 
     private func control(_ operation: String, id: String?, worker: Worker) async throws {
+        let deadline = (ExitDeadline.current ?? ExitDeadline(seconds: controlTimeout)).limited(to: controlTimeout)
+        // Cancelled generation tasks still own the pause/ack lease until the
+        // matching worker reply. Cancellation never removes the time limit.
+        try deadline.check(ignoringTaskCancellation: true)
         let token = UUID().uuidString
         controls[token] = Control(workerID: worker.id, expected: operation == "pause" ? "paused" : operation)
         if let id { requestControls[id] = token }
@@ -443,15 +501,16 @@ actor MLXRuntime {
         }
         var command: [String: Any] = ["op": operation, "controlID": token]
         if let id { command["id"] = id }
-        try await send(command, to: worker)
         // Unstructured timeout and checked continuation deliberately outlive
         // caller cancellation: a pause still owns its worker until confirmed.
         let timeout = Task {
-            do { try await Task.sleep(for: .seconds(controlTimeout)) }
+            do { try await Task.sleep(for: .seconds(deadline.remaining)) }
             catch { return }
             resolveControl(token, with: .failure(QwenRuntimeError.generationInterrupted("模型暂停或退出未及时确认；保留上次有效进度。")))
         }
         defer { timeout.cancel() }
+        // Queueing and a full stdin pipe consume the very same control budget.
+        try await send(command, to: worker, deadline: deadline, ignoringTaskCancellation: true)
         var failure: Error?
         do {
             try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in

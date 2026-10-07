@@ -124,6 +124,7 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     #if DEBUG
     var cleanupForTesting: (@MainActor @Sendable () async -> Bool)?
     var replyForTesting: (@MainActor @Sendable (Bool) -> Void)?
+    var terminationTimeoutForTesting: TimeInterval?
     #endif
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -142,18 +143,42 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         if AppRuntimeEnvironment.isUnitTesting, cleanupForTesting == nil { return .terminateNow }
         #endif
         guard terminationTask == nil else { return .terminateLater }
+        #if DEBUG
+        let deadline = ExitDeadline(seconds: terminationTimeoutForTesting ?? ExitDeadline.applicationTimeout)
+        #else
+        let deadline = ExitDeadline()
+        #endif
         terminationTask = Task { [self] in
-            let shouldExit: Bool
-            #if DEBUG
-            if let cleanupForTesting { shouldExit = await cleanupForTesting() }
-            else { shouldExit = await Self.model?.prepareForApplicationExit() ?? true }
-            #else
-            shouldExit = await Self.model?.prepareForApplicationExit() ?? true
-            #endif
-            if shouldExit, !AppRuntimeEnvironment.isUnitTesting {
+            let retireServices: @MainActor @Sendable () async throws -> Void = {
+                guard !AppRuntimeEnvironment.isUnitTesting else { return }
                 await ASRRuntime.shared.stop()
+                // The process's own termination remains visible if its exit
+                // cannot be confirmed within the shared application deadline.
+                guard !deadline.isExpired else { return }
                 await MLXRuntime.shared.shutdown()
+                guard await !ASRRuntime.shared.isRunning, await MLXRuntime.shared.resourceStates().isEmpty else {
+                    throw ExitDeadlineExceeded()
+                }
             }
+            var shouldExit = false
+            #if DEBUG
+            if let cleanupForTesting {
+                do { shouldExit = try await deadline.wait { await cleanupForTesting() } }
+                catch { shouldExit = false }
+            } else if let model = Self.model {
+                shouldExit = await model.prepareForApplicationExit(deadline: deadline, retireServices: retireServices)
+            } else {
+                do { try await deadline.wait { try await retireServices() }; shouldExit = true }
+                catch { shouldExit = false }
+            }
+            #else
+            if let model = Self.model {
+                shouldExit = await model.prepareForApplicationExit(deadline: deadline, retireServices: retireServices)
+            } else {
+                do { try await deadline.wait { try await retireServices() }; shouldExit = true }
+                catch { shouldExit = false }
+            }
+            #endif
             terminationTask = nil
             #if DEBUG
             if let replyForTesting { replyForTesting(shouldExit); return }
@@ -166,7 +191,7 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         guard !AppRuntimeEnvironment.isUnitTesting else { return }
         FullScreenClassModeController.shared.shutdown()
-        ASRRuntime.shared.stopBeforeApplicationExit()
+        // Service retirement was awaited before the affirmative AppKit reply.
     }
 }
 

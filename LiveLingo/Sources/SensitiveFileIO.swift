@@ -1,12 +1,22 @@
 import Darwin
 import Foundation
 
-/// Body-bearing files use owned descriptors, private modes and no allow ACLs.
-/// Existing ancestors are opened without following links and are never changed.
+/// Newly created objects are private. Existing objects are validated without
+/// changing their permissions; replacements preserve their access constraints.
 enum SensitiveFileIO {
     enum Failure: Error {
         case unsafePath
         case system(operation: String, code: Int32)
+    }
+
+    struct Identity: Codable, Equatable, Sendable {
+        let device: Int32
+        let inode: UInt64
+        let owner: UInt32
+
+        init(_ info: stat) {
+            device = info.st_dev; inode = info.st_ino; owner = info.st_uid
+        }
     }
 
     static func prepareDirectory(_ url: URL) throws {
@@ -78,7 +88,7 @@ enum SensitiveFileIO {
                     guard info.st_mode & S_IFMT == S_IFDIR else { throw Failure.unsafePath }
                     if created || index == components.count - 1 {
                         try requireOwner(info)
-                        if created || tighten { try makePrivate(next, directory: true) }
+                        if created { try makePrivate(next, directory: true) }
                     }
                 } catch {
                     _ = Darwin.close(next)
@@ -94,22 +104,132 @@ enum SensitiveFileIO {
 
         func subdirectory(named name: String, create: Bool = true) throws -> Directory {
             try validateName(name)
+            var created = false
             var child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
             if child < 0, errno == ENOENT, create {
-                if mkdirat(fd, name, 0o700) != 0, errno != EEXIST { throw system("create private directory") }
+                if mkdirat(fd, name, 0o700) == 0 { created = true }
+                else if errno != EEXIST { throw system("create private directory") }
                 child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
             }
             guard child >= 0 else { throw pathFailure("open private directory") }
+            do {
+                try requireOwner(status(child))
+                if created { try makePrivate(child, directory: true) }
+            }
+            catch { _ = Darwin.close(child); throw error }
+            return Directory(fd: child, url: url.appendingPathComponent(name, isDirectory: true))
+        }
+
+        func createSubdirectory(named name: String) throws -> Directory {
+            try validateName(name)
+            guard mkdirat(fd, name, 0o700) == 0 else { throw system("create exclusive directory") }
+            let child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+            guard child >= 0 else { throw pathFailure("bind new directory") }
             do { try makePrivate(child, directory: true) }
             catch { _ = Darwin.close(child); throw error }
             return Directory(fd: child, url: url.appendingPathComponent(name, isDirectory: true))
         }
 
+        func assertPrivate() throws {
+            guard try status(fd).st_mode & 0o077 == 0 else { throw Failure.unsafePath }
+            let acl = try readACL(fd)
+            defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
+            guard try firstAllowEntry(acl) == nil else { throw Failure.unsafePath }
+        }
+
         func assertStillAtOriginalPath() throws {
             let current = try Directory.open(at: url, create: false, tighten: false)
             let priorInfo = try status(fd), currentInfo = try status(current.fd)
-            guard priorInfo.st_dev == currentInfo.st_dev, priorInfo.st_ino == currentInfo.st_ino else {
+            guard Identity(priorInfo) == Identity(currentInfo) else {
                 throw Failure.unsafePath
+            }
+        }
+
+        var identity: Identity { get throws { Identity(try status(fd)) } }
+
+        /// The caller owns the returned descriptor. An existing leaf is never
+        /// opened for writing by this creation-only operation.
+        func createPrivateFile(named name: String) throws -> Int32 {
+            try validateName(name)
+            let item = openat(fd, name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
+            guard item >= 0 else { throw pathFailure("create private file") }
+            do { try makePrivate(item, directory: false) }
+            catch {
+                let owned = try? status(item)
+                _ = Darwin.close(item)
+                if let owned { removeIfMatching(name, identity: Identity(owned)) }
+                throw error
+            }
+            return item
+        }
+
+        func openRegularFile(named name: String, flags: Int32, create: Bool) throws -> Int32 {
+            guard let before = try entryStatus(name) else {
+                guard create else { throw Failure.system(operation: "open file", code: ENOENT) }
+                return try createPrivateFile(named: name)
+            }
+            try requireRegular(before)
+            let item = openat(fd, name, flags | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+            guard item >= 0 else { throw pathFailure("open existing file") }
+            do {
+                let opened = try status(item)
+                try requireRegular(opened)
+                guard Identity(opened) == Identity(before) else { throw Failure.unsafePath }
+            } catch { _ = Darwin.close(item); throw error }
+            return item
+        }
+
+        func directoryIfPresent(named name: String) throws -> Directory? {
+            guard let before = try entryStatus(name) else { return nil }
+            try requireOwner(before)
+            guard before.st_mode & S_IFMT == S_IFDIR else { throw Failure.unsafePath }
+            let result = try subdirectory(named: name, create: false)
+            guard try result.identity == Identity(before) else { throw Failure.unsafePath }
+            return result
+        }
+
+        /// Detach the expected directory into a private namespace before any
+        /// recursive deletion. A name swapped during rename is restored (when
+        /// free) and is never passed to the recursive remover.
+        func moveDirectory(named name: String, matching identity: Identity,
+                           to destination: Directory, named destinationName: String) throws {
+            try validateName(destinationName)
+            guard let source = try directoryIfPresent(named: name),
+                  try source.identity == identity else { throw Failure.unsafePath }
+            guard renameatx_np(fd, name, destination.fd, destinationName, UInt32(RENAME_EXCL)) == 0 else {
+                throw pathFailure("detach temporary directory")
+            }
+            guard let detached = try destination.directoryIfPresent(named: destinationName),
+                  try detached.identity == identity else {
+                _ = renameatx_np(destination.fd, destinationName, fd, name, UInt32(RENAME_EXCL))
+                throw Failure.unsafePath
+            }
+            try synchronize()
+            try destination.synchronize()
+        }
+
+        func removeDirectory(named name: String, matching identity: Identity) throws {
+            guard let owned = try directoryIfPresent(named: name),
+                  try owned.identity == identity else { throw Failure.unsafePath }
+            try owned.removeContents()
+            guard let current = try entryStatus(name), Identity(current) == identity else { throw Failure.unsafePath }
+            guard unlinkat(fd, name, AT_REMOVEDIR) == 0 else { throw system("remove owned directory") }
+            try synchronize()
+        }
+
+        private func removeContents() throws {
+            for name in try names() {
+                guard let before = try entryStatus(name) else { throw Failure.unsafePath }
+                try requireOwner(before)
+                if before.st_mode & S_IFMT == S_IFDIR {
+                    try removeDirectory(named: name, matching: Identity(before))
+                } else {
+                    try requireRegular(before)
+                    guard let current = try entryStatus(name), Identity(current) == Identity(before) else {
+                        throw Failure.unsafePath
+                    }
+                    guard unlinkat(fd, name, 0) == 0 else { throw system("remove owned file") }
+                }
             }
         }
 
@@ -129,7 +249,9 @@ enum SensitiveFileIO {
             let item = openat(fd, name, flags)
             guard item >= 0 else { throw pathFailure("open private object") }
             defer { _ = Darwin.close(item) }
-            try makePrivate(item, directory: isDirectory)
+            let opened = try status(item)
+            guard Identity(opened) == Identity(info) else { throw Failure.unsafePath }
+            try requireOwner(opened)
         }
 
         func readIfPresent(named name: String) throws -> Data? {
@@ -138,46 +260,104 @@ enum SensitiveFileIO {
             guard item >= 0 else { throw pathFailure("open private file") }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
-            try makePrivate(item, directory: false)
+            try requireRegular(status(item))
             return try handle.readToEnd() ?? Data()
         }
 
         func atomicWrite(_ data: Data, named name: String, requireAbsent: Bool = false,
                          temporaryPrefix: String = ".sensitive-write-") throws {
-            let exists = try requireRegularFileIfPresent(named: name)
-            if requireAbsent, exists { throw Failure.system(operation: "create private file", code: EEXIST) }
+            let original = try entryStatus(name)
+            if let original { try requireRegular(original) }
+            if requireAbsent, original != nil { throw Failure.system(operation: "create private file", code: EEXIST) }
+            // Opening without truncation asks the kernel about effective write
+            // access, including ACL denials, before any replacement is made.
+            var originalFD: Int32 = -1
+            var originalACL: acl_t?
+            defer {
+                if originalFD >= 0 { _ = Darwin.close(originalFD) }
+                if let originalACL { _ = acl_free(UnsafeMutableRawPointer(originalACL)) }
+            }
+            if let original {
+                originalFD = openat(fd, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+                guard originalFD >= 0 else { throw pathFailure("write access to existing file") }
+                guard Identity(try status(originalFD)) == Identity(original) else { throw Failure.unsafePath }
+                originalACL = try readACL(originalFD)
+            }
             let temporary = temporaryPrefix + UUID().uuidString + ".tmp"
             try validateName(temporary)
-            let item = openat(fd, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
-            guard item >= 0 else { throw system("create private temporary file") }
+            let item = try createPrivateFile(named: temporary)
+            let pendingIdentity = Identity(try status(item))
             // Unlink only this invocation's exclusive temporary entry. This
             // also runs if writing, syncing, closing or replacing fails.
             var pending = true
-            defer { if pending { _ = unlinkat(fd, temporary, 0) } }
+            defer { if pending { removeIfMatching(temporary, identity: pendingIdentity) } }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
-            try makePrivate(item, directory: false)
             try handle.write(contentsOf: data)
+            if let original, let originalACL {
+                guard fchown(item, original.st_uid, original.st_gid) == 0 else { throw system("preserve file owner") }
+                guard fchmod(item, original.st_mode & 0o7777) == 0 else { throw system("preserve file mode") }
+                guard acl_set_fd(item, originalACL) == 0 else { throw system("preserve file ACL") }
+                let verified = try readACL(item)
+                defer { _ = acl_free(UnsafeMutableRawPointer(verified)) }
+                guard try aclText(verified) == aclText(originalACL),
+                      try status(item).st_mode & 0o7777 == original.st_mode & 0o7777 else { throw Failure.unsafePath }
+            }
             try handle.synchronize()
             try handle.close()
-            if requireAbsent {
+            if let original {
+                guard let current = try entryStatus(name), Identity(current) == Identity(original),
+                      current.st_mode == original.st_mode,
+                      let originalACL else { throw Failure.unsafePath }
+                let currentACL = try readACL(originalFD)
+                defer { _ = acl_free(UnsafeMutableRawPointer(currentACL)) }
+                guard try aclText(currentACL) == aclText(originalACL) else { throw Failure.unsafePath }
+            } else if try entryStatus(name) != nil { throw Failure.unsafePath }
+            if original == nil {
                 guard linkat(fd, temporary, fd, name, 0) == 0 else { throw pathFailure("commit private file") }
                 guard unlinkat(fd, temporary, 0) == 0 else { throw system("unlink private temporary file") }
                 pending = false
-            } else {
-                guard renameat(fd, temporary, fd, name) == 0 else { throw pathFailure("replace private file") }
+            } else if let original, let originalACL {
+                // Swap keeps the replaced inode reachable until its identity
+                // and constraints have been checked after the atomic commit.
+                // A concurrent chmod/ACL edit or pathname replacement is
+                // rolled back instead of silently losing that restriction.
+                guard renameatx_np(fd, temporary, fd, name, UInt32(RENAME_SWAP)) == 0 else {
+                    throw pathFailure("replace private file")
+                }
+                do {
+                    guard let replaced = try entryStatus(temporary), Identity(replaced) == Identity(original),
+                          replaced.st_mode == original.st_mode, replaced.st_gid == original.st_gid else {
+                        throw Failure.unsafePath
+                    }
+                    let replacedACL = try readACL(originalFD)
+                    defer { _ = acl_free(UnsafeMutableRawPointer(replacedACL)) }
+                    guard try aclText(replacedACL) == aclText(originalACL) else { throw Failure.unsafePath }
+                    guard unlinkat(fd, temporary, 0) == 0 else { throw system("retire replaced file") }
+                } catch {
+                    if let current = try entryStatus(name), Identity(current) == pendingIdentity {
+                        _ = renameatx_np(fd, temporary, fd, name, UInt32(RENAME_SWAP))
+                    }
+                    throw error
+                }
                 pending = false
             }
             try synchronize()
         }
 
         func append(_ data: Data, named name: String) throws {
-            _ = try requireRegularFileIfPresent(named: name)
-            let item = openat(fd, name, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
+            let original = try entryStatus(name)
+            if let original { try requireRegular(original) }
+            let item: Int32
+            if original == nil { item = try createPrivateFile(named: name) }
+            else { item = openat(fd, name, O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             guard item >= 0 else { throw pathFailure("open private append file") }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
-            try makePrivate(item, directory: false)
+            let opened = try status(item)
+            try requireRegular(opened)
+            if let original, Identity(opened) != Identity(original) { throw Failure.unsafePath }
+            guard fcntl(item, F_SETFL, fcntl(item, F_GETFL) | O_APPEND) == 0 else { throw system("set append mode") }
             try handle.write(contentsOf: data)
             try handle.synchronize()
             try handle.close()
@@ -190,7 +370,7 @@ enum SensitiveFileIO {
             guard item >= 0 else { throw pathFailure("open private repair file") }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
-            try makePrivate(item, directory: false)
+            try requireRegular(status(item))
             try handle.truncate(atOffset: length)
             try handle.synchronize()
         }
@@ -232,9 +412,27 @@ enum SensitiveFileIO {
             throw system("inspect private entry")
         }
 
+        private func removeIfMatching(_ name: String, identity: Identity) {
+            guard let current = try? entryStatus(name), Identity(current) == identity else { return }
+            _ = unlinkat(fd, name, 0)
+        }
+
         private func synchronize() throws {
             guard fsync(fd) == 0 else { throw system("sync private directory") }
         }
+    }
+
+    private static func aclText(_ acl: acl_t) throws -> String {
+        var length: ssize_t = 0
+        guard let text = acl_to_text(acl, &length) else { throw system("read ACL constraints") }
+        defer { _ = acl_free(UnsafeMutableRawPointer(text)) }
+        return String(cString: text)
+    }
+
+    private static func readACL(_ fd: Int32) throws -> acl_t {
+        if let acl = acl_get_fd(fd) { return acl }
+        guard errno == ENOENT, let empty = acl_init(0) else { throw system("read existing ACL") }
+        return empty
     }
 
     private static func validateName(_ name: String) throws {

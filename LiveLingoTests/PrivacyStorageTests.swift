@@ -72,7 +72,7 @@ struct PrivacyStorageTests {
         #expect(names.filter { $0.hasPrefix(".session-write-") }.isEmpty)
     }
 
-    @Test func exporterTightensExistingSensitiveFilesAndPreservesOtherContents() throws {
+    @Test func exporterPreservesExistingPermissionsAndOtherContents() throws {
         let f = try Fixture(); defer { f.clean() }
         let directory = try f.directory("session")
         let sentinel = directory.appendingPathComponent("user-kept.bin")
@@ -85,8 +85,8 @@ struct PrivacyStorageTests {
             english: "Water flows.", chinese: "水会流动。")
         try SessionExporter.export(segments: [segment], sessionDirectory: directory,
             summary: "合成笔记。", createdAt: Date(timeIntervalSince1970: 0))
-        #expect(try mode(directory) == 0o700)
-        for name in names { #expect(try mode(directory.appendingPathComponent(name)) == 0o600) }
+        #expect(try mode(directory) == 0o755)
+        for name in names { #expect(try mode(directory.appendingPathComponent(name)) == 0o644) }
         #expect(try Data(contentsOf: sentinel) == kept)
         #expect(try mode(sentinel) == 0o640)
         #expect(try Data(contentsOf: directory.appendingPathComponent("transcript-en.txt")) == Data("Water flows.\n".utf8))
@@ -94,7 +94,7 @@ struct PrivacyStorageTests {
         #expect(try Data(contentsOf: directory.appendingPathComponent("summary-zh-Hans.md")) == Data("合成笔记。\n".utf8))
     }
 
-    @Test func notesExportWritesPrivateFileWithUnchangedPayload() throws {
+    @Test func notesExportPreservesExistingModeWithUnchangedPayload() throws {
         let f = try Fixture(); defer { f.clean() }
         let snapshot = NotesExportSnapshot(className: "Synthetic class", sessionName: nil,
             scope: .wholeLesson, scopeDetail: "合成范围", coverageLine: "合成覆盖",
@@ -105,7 +105,7 @@ struct PrivacyStorageTests {
             try seed(Data("Synthetic previous export".utf8), at: destination)
             let expected = try NotesExportDocument.data(snapshot, format: format)
             try NotesExportDocument.write(snapshot, format: format, to: destination)
-            #expect(try mode(destination) == 0o600)
+            #expect(try mode(destination) == 0o644)
             #expect(try Data(contentsOf: destination) == expected)
         }
     }
@@ -134,7 +134,7 @@ struct PrivacyStorageTests {
         }
     }
 
-    @Test func reviewReportFilesArePrivateAndHistoryRemainsReadable() throws {
+    @Test func reviewReportPreservesExistingPermissionsAndHistory() throws {
         let f = try Fixture(); defer { f.clean() }
         let directory = try f.directory("reports")
         let sentinel = directory.appendingPathComponent("user-kept.bin")
@@ -150,16 +150,16 @@ struct PrivacyStorageTests {
         }
         entry.markdown = "合成复查新正文。"
         try ReviewReportCollection.save(entry, in: directory)
-        #expect(try mode(directory) == 0o700)
+        #expect(try mode(directory) == 0o755)
         for name in [ReviewReportCollection.manifestFileName, entry.fileName] {
-            #expect(try mode(directory.appendingPathComponent(name)) == 0o600)
+            #expect(try mode(directory.appendingPathComponent(name)) == 0o644)
         }
         #expect(try ReviewReportCollection.read(in: directory).first?.markdown == entry.markdown)
         #expect(try Data(contentsOf: directory.appendingPathComponent(entry.fileName)) == Data((entry.markdown + "\n").utf8))
         #expect(try Data(contentsOf: sentinel) == kept)
     }
 
-    @Test func journalTightensExistingDirectoriesFilesAndKeepsRecords() throws {
+    @Test func journalPreservesExistingPermissionsAndKeepsRecords() throws {
         let f = try Fixture(); defer { f.clean() }
         let session = try f.directory("session")
         let work = session.appendingPathComponent(DurableTranscriptionJournal.directoryName)
@@ -175,10 +175,10 @@ struct PrivacyStorageTests {
         try DurableTranscriptionJournal.stageCapture(capture, directory: journal.directory)
         for name in ["work.jsonl", "snapshot.json"] { try #require(chmod(work.appendingPathComponent(name).path, 0o644) == 0) }
         let reopened = try DurableTranscriptionJournal(sessionDirectory: session, sessionID: id)
-        #expect(try mode(session) == 0o700)
-        #expect(try mode(work) == 0o700)
+        #expect(try mode(session) == 0o755)
+        #expect(try mode(work) == 0o755)
         for name in ["work.jsonl", "snapshot.json", "capture-" + capture.id.uuidString + ".json"] {
-            #expect(try mode(work.appendingPathComponent(name)) == 0o600)
+            #expect(try mode(work.appendingPathComponent(name)) == (name.hasPrefix("capture-") ? 0o600 : 0o644))
         }
         #expect(reopened.records == [value])
         #expect(try reopened.unfinishedCaptures().map(\.id) == [capture.id])
@@ -201,7 +201,7 @@ struct PrivacyStorageTests {
         #expect(try mode(saved) == 0o600)
         #expect(try Data(contentsOf: saved) == tail)
         #expect(try Data(contentsOf: log) == original)
-        #expect(try mode(log) == 0o600)
+        #expect(try mode(log) == 0o644)
     }
 
     @Test func journalRejectsLinkedWorkingDirectoryWithoutChangingTarget() throws {
@@ -377,7 +377,7 @@ struct PrivacyStorageTests {
         #expect(review.contains(marker)) // The stored historical input is unchanged.
     }
 
-    @Test func inheritedAllowACLIsRemovedFromSensitiveObjectsOnly() throws {
+    @Test func newObjectsRemoveInheritedACLWhileExistingAppendPreservesACL() throws {
         let f = try Fixture(); defer { f.clean() }
         let group = try #require(getgrnam("everyone"))
         // membership.h documents this synthesized GID UUID as valid for ACLs,
@@ -427,11 +427,11 @@ struct PrivacyStorageTests {
         try SensitiveFileIO.atomicWrite(original, to: destination)
         #expect(try mode(destination) == 0o600)
         #expect(try !aclText(destination).contains("allow"))
-        // Reapply inheritance to the owned leaf and test the existing-file
-        // append path as well as the new atomic-file path.
+        // User changes to an existing object are retained on append.
         try #require(acl_set_file(destination.path, ACL_TYPE_EXTENDED, acl) == 0)
+        let leafACL = try aclText(destination)
         try SensitiveFileIO.append(suffix, to: destination)
-        #expect(try !aclText(destination).contains("allow"))
+        #expect(try aclText(destination) == leafACL)
         #expect(try Data(contentsOf: destination) == original + suffix)
         let directory = f.root.appendingPathComponent("private-work")
         try SensitiveFileIO.prepareDirectory(directory)
@@ -440,7 +440,7 @@ struct PrivacyStorageTests {
         #expect(try aclText(f.root) == ancestorACL)
     }
 
-    @Test func sessionStoreTightensExistingRootSnapshotAndAppendFile() throws {
+    @Test func sessionStoreReadsExistingRootSnapshotAndAppendFileWithoutMigration() throws {
         let f = try Fixture(); defer { f.clean() }
         let store = SessionStore(directory: f.root)
         let initial = try store.save(SessionSnapshot(createdAt: Date(timeIntervalSince1970: 0)))
@@ -454,9 +454,9 @@ struct PrivacyStorageTests {
         let loadedSnapshot = try store.load()
         let loaded = try #require(loadedSnapshot)
         #expect(loaded.segments == [segment])
-        #expect(try mode(f.root) == 0o700)
+        #expect(try mode(f.root) == 0o755)
         for name in [SessionStore.snapshotFileName, SessionStore.journalFileName] {
-            #expect(try mode(f.root.appendingPathComponent(name)) == 0o600)
+            #expect(try mode(f.root.appendingPathComponent(name)) == 0o644)
         }
     }
 }

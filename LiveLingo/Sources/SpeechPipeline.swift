@@ -230,8 +230,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private var audioEngine: (any MicrophoneCaptureEngine)?
     private var systemAudioStream: (any SystemAudioCaptureSource)?
     var hasRecordedAudio: Bool { stateLock.withLock { writtenFrames > 0 && sessionRecordingURL != nil } }
-    private var recordingFile: AVAudioFile?
-    private var chunkFile: AVAudioFile?
+    private var recordingFile: SecureAudioWriter?
+    private var chunkFile: SecureAudioWriter?
     private var chunkURL: URL?
     private var chunkDirectory: URL?
     private var inputFormat: AVAudioFormat?
@@ -523,8 +523,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             root = recordingURL.deletingLastPathComponent()
             try SensitiveFileIO.prepareDirectory(root)
         } else {
-            root = try SessionWorkspace.temporaryRoot().appendingPathComponent("LiveLingo-ASR-" + id.uuidString)
-            try SensitiveFileIO.prepareDirectory(root)
+            root = try SessionWorkspace.makeTemporarySessionDirectory(identifier: id)
         }
         stateLock.withLock {
             generation = token; sessionID = id; identifiedEvents = requestedID != nil
@@ -582,15 +581,12 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         guard format.channelCount > 0 else { throw PipelineError.noInputDevice }
         guard format.sampleRate > 0 else { throw PipelineError.invalidInputFormat }
 
-        let fullRecording: AVAudioFile?
+        let fullRecording: SecureAudioWriter?
         if let recordingURL {
-            fullRecording = try AVAudioFile(
+            fullRecording = try SecureAudioWriter(
                 forWriting: recordingURL,
-                settings: format.settings,
-                commonFormat: format.commonFormat,
-                interleaved: format.isInterleaved
+                format: format
             )
-            try SensitiveFileIO.tightenFileIfPresent(recordingURL)
         } else {
             fullRecording = nil
         }
@@ -646,15 +642,12 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             channels: 2
         )!
 
-        let fullRecording: AVAudioFile?
+        let fullRecording: SecureAudioWriter?
         if let recordingURL {
-            fullRecording = try AVAudioFile(
+            fullRecording = try SecureAudioWriter(
                 forWriting: recordingURL,
-                settings: format.settings,
-                commonFormat: format.commonFormat,
-                interleaved: format.isInterleaved
+                format: format
             )
-            try SensitiveFileIO.tightenFileIfPresent(recordingURL)
         } else {
             fullRecording = nil
         }
@@ -901,11 +894,15 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 let detector = stateLock.withLock { let d = activityDetector; activityDetector = nil; return d }
                 detector?.finish()
                 flushChunkOnConsumer(openNext: false, finishBoundary: true)
-                stateLock.withLock {
+                let recordingCloseError = stateLock.withLock { () -> Error? in
+                    var closeError: Error?
+                    do { try recordingFile?.close() } catch { closeError = error }
                     recordingFile = nil; chunkFile = nil; chunkURL = nil
                     ingress = nil; audioEngine = nil; captureHealth = nil
                     inputMode = nil; captureConfigured = false
+                    return closeError
                 }
+                if let recordingCloseError { reportQueueFailure(recordingCloseError) }
                 do { try transcriptionQueue.setCapturing(false) }
                 catch { reportQueueFailure(error) }
                 continuation.resume()
@@ -922,7 +919,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         await transcriptionQueue.cancel()
         guard stateLock.withLock({ generation == token }) else { return }
         do {
-            try FileManager.default.removeItem(at: root)
+            try SessionWorkspace.discardTemporarySession(root)
             stateLock.withLock { if temporarySessionDirectory == root { temporarySessionDirectory = nil } }
         } catch { reportQueueFailure(error) }
     }
@@ -1979,7 +1976,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private func configureSession(
         format: AVAudioFormat,
-        recordingFile: AVAudioFile?,
+        recordingFile: SecureAudioWriter?,
         chunkDirectory: URL
     ) throws {
         let token = stateLock.withLock { generation }
@@ -2024,6 +2021,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private func rotateCurrentChunkLocked(elapsed: TimeInterval, openNext: Bool) -> FlushSnapshot {
         let completedURL = chunkURL
         let completedLength = chunkFile?.length ?? 0
+        var closeError: Error?
+        do { try chunkFile?.close() } catch { closeError = error }
         let completedStart = chunkStartedAt
         let completedProfile = profile
         let completedID = chunkID
@@ -2040,7 +2039,12 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         chunkURL = nil
         chunkStartedAt = elapsed
         chunkStartFrame = writtenFrames; chunkCaptureStart = nil
-        if openNext {
+        if let closeError {
+            let token = generation
+            let message = "音频分段无法完成保存：\(LearningFailureCode.label(for: LearningFailureCode.code(for: closeError)))"
+            audioProcessingQueue.async { [weak self] in self?.failCapture(message, generation: token) }
+        }
+        if openNext, closeError == nil {
             do {
                 try openNextChunkLocked()
             } catch {
@@ -2050,7 +2054,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             }
         }
         let handler = eventHandler
-        if completedLength > 0, let completedURL {
+        if closeError == nil, completedLength > 0, let completedURL {
             return FlushSnapshot(
                 job: ChunkJob(
                     audioURL: completedURL,
@@ -2067,7 +2071,9 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 handler: handler
             )
         }
-        if let completedURL { try? FileManager.default.removeItem(at: completedURL) }
+        // Keep empty exclusive files with their capture records. Removing an
+        // audio URL here could unlink a replacement in a swapped parent;
+        // identity-checked session cleanup owns deletion of these files.
         return FlushSnapshot(job: nil, handler: handler)
     }
 
@@ -2106,20 +2112,13 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             ordinal: nextChunkIndex, audioFile: url.lastPathComponent, recordingFile: sessionRecordingURL?.lastPathComponent,
             startFrame: writtenFrames, sampleRate: inputFormat.sampleRate,
             modelKey: profile.asrKey, fallbackModelKey: profile.fallbackASRKey), directory: chunkDirectory)
-        nextChunkIndex += 1
-        chunkURL = url
-        let parent = try SensitiveFileIO.Directory.open(at: chunkDirectory, create: false, tighten: true)
-        guard try !parent.requireRegularFileIfPresent(named: url.lastPathComponent) else {
-            throw PipelineError.temporaryDirectoryUnavailable
-        }
-        chunkFile = try AVAudioFile(
+        let file = try SecureAudioWriter(
             forWriting: url,
-            settings: inputFormat.settings,
-            commonFormat: inputFormat.commonFormat,
-            interleaved: inputFormat.isInterleaved
+            format: inputFormat
         )
-        try parent.assertStillAtOriginalPath()
-        try SensitiveFileIO.tightenFileIfPresent(url)
+        nextChunkIndex += 1
+        chunkFile = file
+        chunkURL = url
     }
 
 }
@@ -2292,12 +2291,7 @@ extension SpeechPipeline {
         let token = stateLock.withLock { generation }
         let format = MediaFileImport.storageFormat
         do {
-            let output = try recordingURL.map {
-                let file = try AVAudioFile(forWriting: $0, settings: format.settings,
-                                commonFormat: format.commonFormat, interleaved: format.isInterleaved)
-                try SensitiveFileIO.tightenFileIfPresent($0)
-                return file
-            }
+            let output = try recordingURL.map { try SecureAudioWriter(forWriting: $0, format: format) }
             try configureSession(format: format, recordingFile: output, chunkDirectory: temporaryDirectory)
         } catch {
             await stopCapture(continueTranscribing: false)
@@ -2345,12 +2339,7 @@ extension SpeechPipeline {
                                eventHandler: @escaping @Sendable (Event) -> Void) async throws -> OwnedAudioCaptureBuffer {
         let directory = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
             persistsSession: persistsSession, eventHandler: eventHandler)
-        let file = try recordingURL.map {
-            let file = try AVAudioFile(forWriting: $0, settings: format.settings,
-                commonFormat: format.commonFormat, interleaved: format.isInterleaved)
-            try SensitiveFileIO.tightenFileIfPresent($0)
-            return file
-        }
+        let file = try recordingURL.map { try SecureAudioWriter(forWriting: $0, format: format) }
         try configureSession(format: format, recordingFile: file, chunkDirectory: directory)
         let input = try makeIngress(format: format)
         stateLock.withLock { ingress = input; self.inputMode = inputMode }
@@ -2393,8 +2382,7 @@ extension SpeechPipeline {
         let temporary = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
                                                persistsSession: true, eventHandler: eventHandler)
         let audio = try AVAudioFile(forReading: file)
-        let output = try AVAudioFile(forWriting: recordingURL, settings: audio.processingFormat.settings)
-        try SensitiveFileIO.tightenFileIfPresent(recordingURL)
+        let output = try SecureAudioWriter(forWriting: recordingURL, format: audio.processingFormat)
         await startStreamingPreviewIfAvailable()
         try configureSession(format: audio.processingFormat, recordingFile: output, chunkDirectory: temporary)
         try transcriptionQueue.setCapturing(true)
@@ -2453,7 +2441,8 @@ struct WaveformMeter {
 
 /// Reads PCM/float WAV data that may still be growing.
 ///
-/// The recorder writes through `AVAudioFile`, which keeps the `data` chunk
+/// The recorder writes through descriptor-backed AudioToolbox, which keeps
+/// the `data` chunk
 /// length at zero until the file is closed, so `AVAudioFile(forReading:)`
 /// reports `length == 0` for a recording in progress even though audio is
 /// already on disk. This reader parses the RIFF chunks itself, takes a size

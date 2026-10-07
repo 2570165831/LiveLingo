@@ -1046,6 +1046,24 @@ final class AppModel: ObservableObject {
     private var finalizationOwner: UUID?
     private var finalizationInProgress = false
     private var preparingApplicationExit = false
+    private var applicationExitDeadline: ExitDeadline?
+    private var temporaryCleanupRequested = false
+    private var lifecycleRevision = UUID()
+    private var sessionStartTask: Task<Void, Never>?
+    private var sessionStartID: UUID?
+    #if DEBUG
+    struct PrivacyExitConfiguration {
+        var timeout: TimeInterval = ExitDeadline.applicationTimeout
+        var stopCapture: (@MainActor @Sendable (Bool) async -> Void)?
+        var pauseTranscription: (@MainActor @Sendable () async throws -> Void)?
+        var pauseReview: (@MainActor @Sendable () async -> Void)?
+        var park: (@MainActor @Sendable () async throws -> Void)?
+        var flush: (@MainActor @Sendable () async throws -> Void)?
+        var retryTemporarySessions: (@MainActor @Sendable () throws -> Void)?
+        var discardTemporarySession: (@MainActor @Sendable (URL) throws -> Void)?
+    }
+    private var privacyExitConfiguration: PrivacyExitConfiguration?
+    #endif
     private var processingTask: Task<Void, Never>?
     private var processingTaskID: UUID?
     private var processingPauseTask: Task<Void, Error>?
@@ -1361,11 +1379,19 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
-        guard !phase.isBusy, !archiveLoading, !isImportingFile else { return }
+        guard !preparingApplicationExit, !phase.isBusy, !archiveLoading, !isImportingFile,
+              sessionStartTask == nil else { return }
+        guard admitLifecycleRetry() else { return }
         phase = .preparing
-        Task {
+        let startID = UUID()
+        sessionStartID = startID
+        sessionStartTask = Task {
+            defer {
+                if sessionStartID == startID { sessionStartTask = nil; sessionStartID = nil }
+            }
             do {
                 try await parkSavedProcessing()
+                try Task.checkCancellation()
                 await startSession()
             } catch {
                 if let directory = sessionDirectory { phase = .saved(directory) }
@@ -1424,6 +1450,7 @@ final class AppModel: ObservableObject {
         do { try PreviewDataIsolation.requireCourseDirectory(fileURL) }
         catch { archiveError = error.localizedDescription; return }
         #endif
+        guard admitLifecycleRetry() else { return }
         if outputDirectory == nil { await chooseOutputDirectory() }
         guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
         guard let outputDirectory else { return }
@@ -1446,7 +1473,7 @@ final class AppModel: ObservableObject {
             }
             return
         }
-        resetSessionStateForNewRun()
+        guard resetSessionStateForNewRun() else { return }
         captureNewCourseOutputLanguage()
         let importSession = sessionID, importEpoch = generation
         activeStorageMode = .saveSession
@@ -1503,6 +1530,8 @@ final class AppModel: ObservableObject {
     }
 
     private func finishMediaImport(message: String) async {
+        let revision = lifecycleRevision
+        guard !preparingApplicationExit, (try? validateLifecycleCompletion(revision)) != nil else { return }
         phase = .stopping
         let hasPartialContent = pipeline.hasRecordedAudio || !segments.isEmpty
         let finishing = Task { @MainActor in
@@ -1513,16 +1542,21 @@ final class AppModel: ObservableObject {
                     sessionNotice = "\(message)，已保存已导入的音频和处理结果。"
                 }
             } else {
-                await pipeline.cancel()
                 let oldTranslation = translationWorker
                 oldTranslation?.cancel()
-                await oldTranslation?.value
+                let pendingSummary = summaryTask
+                cancelSummaryTask()
+                do {
+                    try await stopCaptureForLifecycle(continueTranscribing: false)
+                    try await pauseTranscriptionForLifecycle()
+                    try await waitForLifecycle { await oldTranslation?.value }
+                    try await waitForLifecycle { await pendingSummary?.value }
+                    try validateLifecycleCompletion(revision)
+                } catch { return }
+                guard !preparingApplicationExit else { return }
                 translationWorker = nil
                 translationQueue = []
                 pendingCaptionRepairs = []
-                let pendingSummary = summaryTask
-                cancelSummaryTask()
-                await pendingSummary?.value
                 // No audio or completed result exists in this app-created empty session.
                 if let sessionDirectory { try? FileManager.default.removeItem(at: sessionDirectory) }
                 sessionDirectory = nil
@@ -1531,7 +1565,8 @@ final class AppModel: ObservableObject {
                 sessionNotice = "\(message)：没有已导入的音频，未保存空会话。"
             }
         }
-        await finishing.value
+        do { try await waitForLifecycle { await finishing.value } }
+        catch { return }
     }
 
     /// Legacy regional files have no Simplified Chinese notebook draft.
@@ -1654,7 +1689,9 @@ final class AppModel: ObservableObject {
     func clearExportStatus() { exportStatus = nil }
 
     func stop() {
-        guard hasActiveSession else { return }
+        guard !preparingApplicationExit,
+              hasActiveSession || (activeStorageMode == .liveOnly && temporarySessionDirectory != nil) else { return }
+        guard admitLifecycleRetry() else { return }
         resetElapsedClock()
         phase = .stopping
         stopOverlapStarted = false
@@ -1665,70 +1702,195 @@ final class AppModel: ObservableObject {
     /// Closing capture, parking owned writers and clearing volatile content must
     /// finish before AppKit is allowed to terminate. A failed cleanup keeps its
     /// exact temporary root for retry, never scans or removes saved courses.
-    func prepareForApplicationExit() async -> Bool {
+    func prepareForApplicationExit(deadline suppliedDeadline: ExitDeadline? = nil,
+                                   retireServices: @escaping @MainActor @Sendable () async throws -> Void = {}) async -> Bool {
+        guard !preparingApplicationExit else { return false }
+        if applicationExitDeadline?.hasPendingOperations == true {
+            archiveError = "上次退出仍有任务未结束，内容与文件已保留，请稍后重试。"
+            return false
+        }
+        #if DEBUG
+        let deadline = suppliedDeadline ?? ExitDeadline(seconds: privacyExitConfiguration?.timeout ?? ExitDeadline.applicationTimeout)
+        #else
+        let deadline = suppliedDeadline ?? ExitDeadline()
+        #endif
+        applicationExitDeadline = deadline
         preparingApplicationExit = true
         defer { preparingApplicationExit = false }
-        cancelScheduledSummaryRefresh()
-        readinessMonitorTask?.cancel()
-        powerMonitorTask?.cancel()
-        let refresh = resourceRefreshTask
-        refresh?.cancel()
-        let manual = manualTranslationTask
-        manual?.cancel()
-        let importing = importTask
-        importing?.cancel()
-        stopCandidatePlayback()
-        while finalizationInProgress { try? await Task.sleep(for: .milliseconds(20)) }
-        let discardsContent = activeStorageMode == .liveOnly
-            || (temporarySessionDirectory != nil && sessionSaver == nil)
-        if activeStorageMode == .liveOnly { await stopSession() }
-        else {
-            await pipeline.stopCapture(continueTranscribing: false)
+        return await ExitDeadline.$current.withValue(deadline) {
+            cancelScheduledSummaryRefresh()
+            processingPaused = true
+            let readiness = readinessMonitorTask, power = powerMonitorTask
+            let refresh = resourceRefreshTask, manual = manualTranslationTask
+            let importing = importTask, starting = sessionStartTask
             let translation = translationWorker, summary = summaryTask
-            translation?.cancel()
+            let processing = processingTask
+            for task in [translation, summary, processing, importing, starting, manual, refresh, readiness, power] {
+                deadline.track(task)
+            }
+            readiness?.cancel(); power?.cancel(); refresh?.cancel(); manual?.cancel()
+            importing?.cancel(); starting?.cancel(); translation?.cancel(); processing?.cancel()
             cancelSummaryTask()
-            await translation?.value
-            await summary?.value
+            stopCandidatePlayback()
+            let reviewPause = Task { @MainActor in try await pauseReviewForLifecycle() }
+            deadline.track(reviewPause)
+            let discardsContent = activeStorageMode == .liveOnly
+                || (temporarySessionDirectory != nil && sessionSaver == nil)
             do {
+                try await waitForLifecycle { [self] in
+                    while finalizationInProgress {
+                        try deadline.check()
+                        try await Task.sleep(for: .milliseconds(20))
+                    }
+                }
+                try await stopCaptureForLifecycle(continueTranscribing: false)
+                // cancel()/stop() contain downstream directory deletion. Join
+                // their non-destructive capture/pause primitives instead; no
+                // opaque cleanup task can resume after this attempt times out.
+                try await pauseTranscriptionForLifecycle()
+                for task in [translation, summary, processing, importing, starting, manual, refresh, readiness, power] {
+                    try await waitForLifecycle { await task?.value }
+                }
+                try await waitForLifecycle { try await reviewPause.value }
                 try await parkSavedProcessing()
+                var savedDirectory: URL?
                 if sessionSaver != nil {
                     let directory = try await finalizeSessionDirectoryIfNeeded(resumeAfterMigration: false)
                     try await flushSessionArchive()
+                    try deadline.check()
                     try SessionExporter.export(segments: segments, sessionDirectory: directory,
                         summary: lectureSummary, target: outputLanguage)
-                    phase = .saved(directory)
+                    savedDirectory = directory
                 }
+                try await waitForLifecycle { try await retireServices() }
+                try deadline.check()
+                // Only explicitly requested journal entries are retried. All
+                // owned writers and services have reached their safe boundary.
+                try retryPendingTemporarySessions()
+                try deadline.check()
+                if discardsContent {
+                    if let root = temporarySessionDirectory { try discardTemporarySession(root) }
+                    try deadline.check()
+                    clearLiveOnlySessionContent()
+                    phase = .liveEnded
+                } else if let savedDirectory { phase = .saved(savedDirectory) }
+                try deadline.check()
+                generation += 1
+                applicationExitDeadline = nil
+                return true
             } catch {
-                archiveError = "退出前保存失败，现有课程与进度已保留，请重试。"
+                deadline.revoke()
+                lifecycleRevision = UUID()
+                if error is ExitDeadlineExceeded || error is CancellationError {
+                    archiveError = "退出等待超时，已取消退出；内容与文件保留，未完成任务结束后可重试。"
+                } else {
+                    archiveError = "退出前保存或临时文件清理失败，已取消退出；内容与文件保留，请重试。"
+                }
                 return false
             }
-            await pipeline.cancel()
         }
-        await importing?.value
-        await manual?.value
-        await refresh?.value
-        await noteReviewQueue.pauseAndWait()
-        if discardsContent, let root = temporarySessionDirectory {
-            do { try SessionWorkspace.discardTemporarySession(root) }
-            catch {
-                phase = .failed("临时文件未能删除，已取消退出，请重试。")
-                return false
-            }
+    }
+
+    private func waitForLifecycle<Value: Sendable>(_ operation: @escaping @MainActor @Sendable () async throws -> Value) async throws -> Value {
+        if let deadline = applicationExitDeadline ?? ExitDeadline.current { return try await deadline.wait(operation) }
+        return try await operation()
+    }
+
+    private func admitLifecycleRetry() -> Bool {
+        guard !preparingApplicationExit, !finalizationInProgress,
+              applicationExitDeadline?.hasPendingOperations != true else {
+            archiveError = "上次停止仍有任务未结束，内容与文件已保留，请稍后重试。"
+            return false
+        }
+        applicationExitDeadline = nil
+        return true
+    }
+
+    private func validateLifecycleCompletion(_ revision: UUID) throws {
+        guard revision == lifecycleRevision else { throw ExitDeadlineExceeded() }
+        try ExitDeadline.current?.check()
+        try applicationExitDeadline?.check()
+    }
+
+    private func stopCaptureForLifecycle(continueTranscribing: Bool) async throws {
+        try await waitForLifecycle { [self] in
+            #if DEBUG
+            if let stop = privacyExitConfiguration?.stopCapture { await stop(continueTranscribing); return }
+            #endif
+            await pipeline.stopCapture(continueTranscribing: continueTranscribing)
+        }
+    }
+
+    private func pauseTranscriptionForLifecycle() async throws {
+        try await waitForLifecycle { [self] in
+            #if DEBUG
+            if let pause = privacyExitConfiguration?.pauseTranscription { try await pause(); return }
+            #endif
+            try await pipeline.pauseTranscription()
+        }
+    }
+
+    private func pauseReviewForLifecycle() async throws {
+        try await waitForLifecycle { [self] in
+            #if DEBUG
+            if let pause = privacyExitConfiguration?.pauseReview { await pause(); return }
+            #endif
+            await noteReviewQueue.pauseAndWait()
+        }
+    }
+
+    private func retryPendingTemporarySessions() throws {
+        #if DEBUG
+        if let retry = privacyExitConfiguration?.retryTemporarySessions { try retry() }
+        else { try SessionWorkspace.retryPendingTemporarySessions() }
+        #else
+        try SessionWorkspace.retryPendingTemporarySessions()
+        #endif
+        // A successful retry has disposed every requested registration, including
+        // our failed root. Do not attempt a second discard after its record left.
+        if temporaryCleanupRequested {
             temporarySessionDirectory = nil
             sessionDirectory = nil
+            temporaryCleanupRequested = false
         }
-        if discardsContent {
-            volatileEnglish = ""
-            liveChinese = ""
-            segments = []
-            lectureSummary = ""
-            latestSummaryUpdate = ""
-            transcriptionCandidates = []
-            clearTranslationPreview()
-            resetLearningNotes()
-        }
-        generation += 1
-        return true
+    }
+
+    private func discardTemporarySession(_ root: URL) throws {
+        if root == temporarySessionDirectory { temporaryCleanupRequested = true }
+        #if DEBUG
+        if let discard = privacyExitConfiguration?.discardTemporarySession { try discard(root) }
+        else { try SessionWorkspace.discardTemporarySession(root) }
+        #else
+        try SessionWorkspace.discardTemporarySession(root)
+        #endif
+        if root == temporarySessionDirectory { temporaryCleanupRequested = false }
+    }
+
+    private func clearLiveOnlySessionContent() {
+        sessionSaver = nil
+        sessionSnapshot = nil
+        volatileEnglish = ""
+        liveChinese = ""
+        translatingSegmentID = nil
+        clearTranslationPreview()
+        segments = []
+        resetLearningNotes()
+        lectureSummary = ""
+        latestSummaryUpdate = ""
+        summaryCycleIDs = nil
+        summaryCycleUpdate = ""
+        summaryStatus = "等待课堂内容"
+        translationQueue = []
+        pendingCaptionRepairs = []
+        translationEnqueuedAt = [:]
+        translationHints = [:]
+        transcriptionCandidates = []
+        transcriptionProcessing = nil
+        sessionDirectory = nil
+        temporarySessionDirectory = nil
+        temporaryCleanupRequested = false
+        activeStorageMode = nil
+        activeInputMode = nil
     }
 
     func pause() {
@@ -1863,10 +2025,21 @@ final class AppModel: ObservableObject {
     }
 
     private func flushSessionArchive() async throws {
+        let revision = lifecycleRevision
+        try validateLifecycleCompletion(revision)
+        #if DEBUG
+        if let flush = privacyExitConfiguration?.flush {
+            try await waitForLifecycle { try await flush() }
+            try validateLifecycleCompletion(revision)
+            return
+        }
+        #endif
         guard let saver = sessionSaver else { return }
         let identity = sessionID
         persistCurrentSession()
-        if let saved = try await saver.readback(), sessionID == identity,
+        let saved = try await waitForLifecycle { try await saver.readback() }
+        try validateLifecycleCompletion(revision)
+        if let saved, sessionID == identity,
            sessionSaver === saver {
             // The disk actor can advance while the classroom changes. Only
             // reconcile storage counters; keep newer in-memory content.
@@ -1880,9 +2053,19 @@ final class AppModel: ObservableObject {
     /// Suspend processing of the displayed saved course before switching UI.
     /// Capture has already ended. New recording never waits for a 9B review.
     private func parkSavedProcessing() async throws {
+        let revision = lifecycleRevision
+        try validateLifecycleCompletion(revision)
+        #if DEBUG
+        if let park = privacyExitConfiguration?.park {
+            try await waitForLifecycle { try await park() }
+            try validateLifecycleCompletion(revision)
+            return
+        }
+        #endif
         stopCandidatePlayback()
         if let task = processingPauseTask {
-            try await task.value
+            try await waitForLifecycle { try await task.value }
+            try validateLifecycleCompletion(revision)
             return
         }
         guard sessionSaver != nil else { return }
@@ -1903,12 +2086,13 @@ final class AppModel: ObservableObject {
         let task = Task { @MainActor [self] in
             var pauseFailure: Error?
             if pipeline.transcriptionState()?.sessionID == identity {
-                do { try await pipeline.pauseTranscription() }
+                do { try await pauseTranscriptionForLifecycle() }
                 catch { pauseFailure = error }
             }
-            await translation?.value
-            await summary?.value
-            await oldProcessing?.value
+            try await waitForLifecycle { await translation?.value }
+            try await waitForLifecycle { await summary?.value }
+            try await waitForLifecycle { await oldProcessing?.value }
+            try validateLifecycleCompletion(revision)
             guard sessionID == identity, generation == epoch else { return }
             if processingTaskID == oldProcessingID {
                 processingTask = nil
@@ -1934,7 +2118,8 @@ final class AppModel: ObservableObject {
                 processingPauseID = nil
             }
         }
-        try await task.value
+        try await waitForLifecycle { try await task.value }
+        try validateLifecycleCompletion(revision)
     }
 
     func chooseSavedSession() {
@@ -1971,6 +2156,7 @@ final class AppModel: ObservableObject {
         try PreviewDataIsolation.requireCourseDirectory(directory)
         #endif
         guard !phase.isBusy, !archiveLoading else { return }
+        guard admitLifecycleRetry() else { throw ExitDeadlineExceeded() }
         archiveLoading = true
         defer { archiveLoading = false }
         let store = SessionStore(directory: directory)
@@ -2000,7 +2186,7 @@ final class AppModel: ObservableObject {
         catch { recoveryError = error.localizedDescription }
         let notebook = try recoveredNotebook ?? LearningNotebook(snapshot: snapshot)
         if recoveredNotebook != nil { notebook.writeState(to: &snapshot) }
-        resetSessionStateForNewRun()
+        guard resetSessionStateForNewRun() else { throw ExitDeadlineExceeded() }
         outputLanguage = restoredLanguage
         sessionID = snapshot.sessionID
         sessionDirectory = directory
@@ -2131,7 +2317,31 @@ final class AppModel: ObservableObject {
     }
 
     /// 开始任意一次"课堂会话"前的状态重置：实时录音与文件导入共用。
-    private func resetSessionStateForNewRun() {
+    @discardableResult
+    private func resetSessionStateForNewRun() -> Bool {
+        guard !preparingApplicationExit, !finalizationInProgress,
+              applicationExitDeadline?.hasPendingOperations != true else {
+            archiveError = "前一次停止仍有任务未结束，内容与文件已保留，新课堂未开始。"
+            return false
+        }
+        do {
+            try retryPendingTemporarySessions()
+            // A prior deadline may have stopped before requesting deletion.
+            // Its active registration is intentionally excluded from journal
+            // retries, so request cleanup here after all old writers settled.
+            if sessionSaver == nil, let root = temporarySessionDirectory {
+                try discardTemporarySession(root)
+                temporarySessionDirectory = nil
+                sessionDirectory = nil
+            }
+        }
+        catch {
+            archiveError = "待清理的临时文件仍未删除，现有内容已保留，新课堂未开始。"
+            phase = .failed(archiveError!)
+            return false
+        }
+        applicationExitDeadline = nil
+        lifecycleRevision = UUID()
         if chineseDisplayOverride != nil {
             chineseDisplayOverride = nil
             prepareChineseDisplay()
@@ -2189,10 +2399,12 @@ final class AppModel: ObservableObject {
         translationWorker = nil
         cancelSummaryTask()
         resetElapsedClock()
+        return true
     }
 
     private func startSession() async {
-        resetSessionStateForNewRun()
+        guard resetSessionStateForNewRun() else { return }
+        let revision = lifecycleRevision
         captureNewCourseOutputLanguage()
         let startingSession = sessionID, startingEpoch = generation
         let storageMode = selectedStorageMode
@@ -2202,6 +2414,7 @@ final class AppModel: ObservableObject {
 
         do {
             if !translationReady { await refreshRuntimeReadiness() }
+            try validateLifecycleCompletion(revision)
             guard translationReady else {
                 runtimeFailurePending = true
                 startRuntimeReadinessMonitor()
@@ -2211,6 +2424,7 @@ final class AppModel: ObservableObject {
             var selectedOutputDirectory: URL?
             if storageMode.requiresOutputDirectoryBeforeStart {
                 if outputDirectory == nil { await chooseOutputDirectory() }
+                try validateLifecycleCompletion(revision)
                 guard sessionID == startingSession, generation == startingEpoch,
                       finalizationOwner == nil else { return }
                 guard let outputDirectory else {
@@ -2222,6 +2436,7 @@ final class AppModel: ObservableObject {
             }
 
             try await requestPermissions(for: inputMode)
+            try validateLifecycleCompletion(revision)
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
             try await pipeline.prepareModel(profile: effectiveProfile) { [weak self] status in
                 Task { @MainActor in
@@ -2229,6 +2444,7 @@ final class AppModel: ObservableObject {
                     self.speechStatus = status
                 }
             }
+            try validateLifecycleCompletion(revision)
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
 
             let sessionName = Self.sessionFolderName()
@@ -2259,6 +2475,7 @@ final class AppModel: ObservableObject {
                 bindSessionArchive(to: directory)
                 try await flushSessionArchive()
             }
+            try validateLifecycleCompletion(revision)
 
             do {
                 let eventGeneration = generation
@@ -2279,22 +2496,29 @@ final class AppModel: ObservableObject {
                 }
                 throw error
             }
+            try validateLifecycleCompletion(revision)
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
             audioInputStatus = inputMode == .microphone ? "麦克风已接入" : "系统音频已接入"
             phase = .recording
             beginElapsedClock()
         } catch {
+            guard !preparingApplicationExit, (try? validateLifecycleCompletion(revision)) != nil else { return }
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
             if pipeline.hasRecordedAudio {
                 await stopSession(failure: error.localizedDescription)
                 return
             }
-            await pipeline.cancel()
+            do {
+                try await stopCaptureForLifecycle(continueTranscribing: false)
+                try await pauseTranscriptionForLifecycle()
+                try validateLifecycleCompletion(revision)
+            } catch { return }
+            guard !preparingApplicationExit else { return }
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
             stopElapsedClock()
             if let temporarySessionDirectory {
                 do {
-                    try SessionWorkspace.discardTemporarySession(temporarySessionDirectory)
+                    try discardTemporarySession(temporarySessionDirectory)
                     self.temporarySessionDirectory = nil
                     sessionDirectory = nil
                 } catch {
@@ -2313,62 +2537,65 @@ final class AppModel: ObservableObject {
     }
 
     private func stopSession(failure: String? = nil) async {
+        if !preparingApplicationExit, applicationExitDeadline?.isExpired == true {
+            guard applicationExitDeadline?.hasPendingOperations != true else { return }
+            applicationExitDeadline = nil
+        }
+        let deadline = ExitDeadline.current ?? applicationExitDeadline ?? ExitDeadline()
+        await ExitDeadline.$current.withValue(deadline) { await finishSessionStop(failure: failure) }
+    }
+
+    private func finishSessionStop(failure: String?) async {
         let identity = sessionID
         let epoch = generation
+        let revision = lifecycleRevision
         guard finalizationOwner != identity else { return }
         finalizationOwner = identity
         finalizationInProgress = true
         defer { finalizationInProgress = false }
         let mode = activeStorageMode
+        if mode?.clearsHistoryWhenStopped == true {
+            ExitDeadline.current?.track(translationWorker)
+            ExitDeadline.current?.track(summaryTask)
+        }
         phase = .stopping
         stopElapsedClock()
         cancelScheduledSummaryRefresh()
         let stopStarted = ProcessInfo.processInfo.systemUptime
-        await pipeline.stopCapture(continueTranscribing: mode?.clearsHistoryWhenStopped != true)
+        do {
+            try await stopCaptureForLifecycle(continueTranscribing: mode?.clearsHistoryWhenStopped != true)
+            try validateLifecycleCompletion(revision)
+        } catch {
+            failSessionStop(error, revision: revision)
+            return
+        }
         guard sessionID == identity, generation == epoch else { return }
         Self.traceStop("capture_closed", since: stopStarted)
 
         if mode?.clearsHistoryWhenStopped == true {
-            await pipeline.cancel()
             let translation = translationWorker
             translation?.cancel()
             let summary = summaryTask
             cancelSummaryTask()
-            await translation?.value
-            await summary?.value
-            guard sessionID == identity, generation == epoch else { return }
-            var cleanupError: Error?
-            if let temporarySessionDirectory {
-                do { try SessionWorkspace.discardTemporarySession(temporarySessionDirectory) }
-                catch { cleanupError = error }
+            do {
+                try await pauseTranscriptionForLifecycle()
+                try await waitForLifecycle { await translation?.value }
+                try await waitForLifecycle { await summary?.value }
+                try await pauseReviewForLifecycle()
+                try validateLifecycleCompletion(revision)
+                guard sessionID == identity, generation == epoch else { return }
+                // Exit owns its final cleanup after every other writer joins.
+                guard !preparingApplicationExit else { finalizationOwner = nil; return }
+                if let temporarySessionDirectory { try discardTemporarySession(temporarySessionDirectory) }
+                try validateLifecycleCompletion(revision)
+            } catch {
+                // Keep body, storage mode and exact root, and admit an explicit
+                // retry. Failed deletion remains in the persistent journal.
+                failSessionStop(error, revision: revision)
+                return
             }
-            sessionSaver = nil
-            sessionSnapshot = nil
-            volatileEnglish = ""
-            liveChinese = ""
-            translatingSegmentID = nil
-            clearTranslationPreview()
-            segments = []
-            resetLearningNotes()
-            lectureSummary = ""
-            latestSummaryUpdate = ""
-            summaryCycleIDs = nil
-            summaryCycleUpdate = ""
-            summaryStatus = "等待课堂内容"
-            translationQueue = []
-            pendingCaptionRepairs = []
-            translationEnqueuedAt = [:]
-            translationHints = [:]
-            transcriptionCandidates = []
-            transcriptionProcessing = nil
-            if cleanupError == nil {
-                sessionDirectory = nil
-                temporarySessionDirectory = nil
-            }
-            activeStorageMode = nil
-            activeInputMode = nil
-            if cleanupError != nil { phase = .failed("实时录音已结束；临时文件未能删除，请重试停止或退出。") }
-            else if let failure { phase = .failed(failure) }
+            clearLiveOnlySessionContent()
+            if let failure { phase = .failed(failure) }
             else { phase = .liveEnded }
             return
         }
@@ -2382,16 +2609,21 @@ final class AppModel: ObservableObject {
             // A converted live-only course may still be in a temporary root.
             // Pause every writer before verified full-tree promotion.
             let directory = try await finalizeSessionDirectoryIfNeeded()
+            try validateLifecycleCompletion(revision)
             guard sessionID == identity, generation == epoch else { return }
             if sessionSaver == nil { bindSessionArchive(to: directory) }
             try await flushSessionArchive()
             let captions = segments, notes = lectureSummary, target = outputLanguage
             let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
-            try await Task.detached {
-                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target,
-                    summaryIsLegacyRendered: legacy, summaryEvidence: evidence, converter: converter)
-            }.value
+            try await waitForLifecycle {
+                try await Task.detached {
+                    try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target,
+                        summaryIsLegacyRendered: legacy, summaryEvidence: evidence, converter: converter)
+                }.value
+            }
+            try validateLifecycleCompletion(revision)
             guard sessionID == identity, generation == epoch else { return }
+            guard !preparingApplicationExit else { return }
             volatileEnglish = ""
             activeStorageMode = nil
             activeInputMode = nil
@@ -2400,10 +2632,14 @@ final class AppModel: ObservableObject {
                 sessionNotice = Self.recordingStoppedNotice(message: failure, segmentCount: segments.count)
             }
             processingPaused = false
-            startSavedDrain()
+            ExitDeadline.$current.withValue(nil) { startSavedDrain() }
             try await flushSessionArchive()
             Self.traceStop("audio_and_initial_state_saved", since: stopStarted)
         } catch {
+            if error is ExitDeadlineExceeded || error is CancellationError {
+                failSessionStop(error, revision: revision)
+                return
+            }
             guard sessionID == identity, generation == epoch else { return }
             processingPaused = true
             activeStorageMode = nil
@@ -2412,6 +2648,21 @@ final class AppModel: ObservableObject {
             sessionSnapshot?.processing.recordFailure(archiveError!, source: .storage)
             phase = .failed(archiveError!)
         }
+    }
+
+    private func failSessionStop(_ error: Error, revision: UUID) {
+        guard revision == lifecycleRevision else { return }
+        if error is ExitDeadlineExceeded || error is CancellationError {
+            let deadline = ExitDeadline.current ?? applicationExitDeadline
+            deadline?.revoke()
+            applicationExitDeadline = deadline
+            lifecycleRevision = UUID()
+            archiveError = "停止等待超时，内容与文件保留；未完成任务结束后请重试停止或退出。"
+        } else {
+            archiveError = "临时文件未能删除，内容与文件保留，请重试停止或退出。"
+        }
+        finalizationOwner = nil
+        phase = .failed(archiveError!)
     }
 
     private func startSavedDrain() {
@@ -2952,7 +3203,7 @@ final class AppModel: ObservableObject {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         precondition(!noteReviewQueue.hasWork && translationWorker == nil)
         try await parkSavedProcessing()
-        resetSessionStateForNewRun()
+        guard resetSessionStateForNewRun() else { throw ExitDeadlineExceeded() }
         captureNewCourseOutputLanguage()
         sessionDirectory = directory
         activeStorageMode = .saveSession
@@ -2964,11 +3215,44 @@ final class AppModel: ObservableObject {
     func beginLiveOnlyCourseForTesting(directory: URL) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         precondition(sessionSaver == nil && !noteReviewQueue.hasWork)
-        resetSessionStateForNewRun()
+        guard resetSessionStateForNewRun() else { return }
         activeStorageMode = .liveOnly
         sessionDirectory = directory
         temporarySessionDirectory = directory
         phase = .recording
+    }
+
+    func configurePrivacyExitForTesting(_ configuration: PrivacyExitConfiguration) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        privacyExitConfiguration = configuration
+    }
+
+    func setPrivacyExitTaskForTesting(_ task: Task<Void, Never>, stage: String) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        switch stage {
+        case "manual": manualTranslationTask = task
+        case "refresh": resourceRefreshTask = task
+        case "import": importTask = task
+        case "translation": translationWorker = task
+        case "summary": summaryTask = task
+        case "processing": processingTask = task
+        case "start": sessionStartTask = task
+        case "readiness": readinessMonitorTask = task
+        case "power": powerMonitorTask = task
+        default: preconditionFailure("Unknown synthetic exit stage")
+        }
+    }
+
+    func setPrivacyExitFinalizationForTesting(_ pending: Bool) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        finalizationInProgress = pending
+    }
+
+    var temporarySessionForPrivacyExitTesting: URL? { temporarySessionDirectory }
+
+    func resetSessionForPrivacyExitTesting() -> Bool {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        return resetSessionStateForNewRun()
     }
 
     func stopSavedCourseForTesting() async {
@@ -3017,7 +3301,7 @@ final class AppModel: ObservableObject {
     @discardableResult
     func resetTranslationSessionForTesting() -> Task<Void, Never>? {
         let old = translationWorker
-        resetSessionStateForNewRun()
+        guard resetSessionStateForNewRun() else { return old }
         return old
     }
     func receiveCaptionForTesting(_ text: String, start: TimeInterval, end: TimeInterval) {
@@ -3240,7 +3524,8 @@ final class AppModel: ObservableObject {
     }
 
     private func drainTranslationQueue() {
-        guard !processingPaused, !manualRequestInFlight,
+        guard !preparingApplicationExit, applicationExitDeadline?.isExpired != true,
+              !processingPaused, !manualRequestInFlight,
               (summaryTask == nil || summaryConcurrencyAllowed),
               translationWorker == nil, hasPendingTranslationWork else { return }
         let currentGeneration = generation
@@ -3695,7 +3980,7 @@ final class AppModel: ObservableObject {
     }
 
     private func scheduleSummaryRefresh(force: Bool = false) {
-        guard !preparingApplicationExit else { return }
+        guard !preparingApplicationExit, applicationExitDeadline?.isExpired != true else { return }
         // Observe availability even while resources are occupied; queue activity must not slide deadlines.
         let stability = noteAdmissionDecision()
         let savedCanContinue: Bool
@@ -4357,33 +4642,62 @@ final class AppModel: ObservableObject {
     }
 
     private func finalizeSessionDirectoryIfNeeded(resumeAfterMigration: Bool = true) async throws -> URL {
+        let revision = lifecycleRevision
+        try validateLifecycleCompletion(revision)
         if let temporarySessionDirectory {
             guard let outputDirectory else { throw AppError.outputDirectoryMissing }
-            try await pipeline.pauseTranscription()
+            try await pauseTranscriptionForLifecycle()
             let translation = translationWorker
             translation?.cancel()
             let summary = summaryTask
             cancelSummaryTask()
-            await translation?.value
-            await summary?.value
+            try await waitForLifecycle { await translation?.value }
+            try await waitForLifecycle { await summary?.value }
             try await flushSessionArchive()
+            try validateLifecycleCompletion(revision)
             let preferredName = Self.sessionFolderName()
             let identity = sessionID, epoch = generation
-            let migration = try await noteReviewQueue.withCourseWritersPaused(sessionID: identity,
-                directory: temporarySessionDirectory) {
-                let copied = try await Task.detached {
-                    try SessionWorkspace.copyTemporarySession(from: temporarySessionDirectory,
-                        to: outputDirectory, preferredName: preferredName)
-                }.value
-                try noteReviewQueue.relocatePausedCourse(sessionID: identity,
-                    from: temporarySessionDirectory, to: copied.destinationDirectory)
-                do { return try await Task.detached { try SessionTreeMigration.retireVerifiedCopy(copied) }.value }
-                catch {
+            let migration = try await waitForLifecycle { [self] in
+                try await noteReviewQueue.withCourseWritersPaused(sessionID: identity,
+                    directory: temporarySessionDirectory) {
+                    try validateLifecycleCompletion(revision)
+                    let copied = try await waitForLifecycle {
+                        try await Task.detached {
+                            try SessionWorkspace.copyTemporarySession(from: temporarySessionDirectory,
+                                to: outputDirectory, preferredName: preferredName)
+                        }.value
+                    }
+                    try validateLifecycleCompletion(revision)
+                    let snapshot = try await waitForLifecycle {
+                        try await Task.detached { try SessionStore(directory: copied.destinationDirectory).load() }.value
+                    }
+                    try validateLifecycleCompletion(revision)
+                    guard let snapshot else { throw SessionStoreError.missingSnapshot }
                     try noteReviewQueue.relocatePausedCourse(sessionID: identity,
-                        from: copied.destinationDirectory, to: temporarySessionDirectory)
-                    throw error
+                        from: temporarySessionDirectory, to: copied.destinationDirectory)
+                    let retired: SessionMigrationReceipt
+                    do {
+                        // No suspension or raced background deletion between
+                        // the lease check and retirement of the verified source.
+                        try validateLifecycleCompletion(revision)
+                        retired = try SessionTreeMigration.retireVerifiedCopy(copied)
+                    } catch {
+                        try noteReviewQueue.relocatePausedCourse(sessionID: identity,
+                            from: copied.destinationDirectory, to: temporarySessionDirectory)
+                        throw error
+                    }
+                    // Publish the verified destination without another await.
+                    // A timeout during later restoration cannot leave memory
+                    // pointing at the source that has already been retired.
+                    sessionSaver = nil
+                    self.temporarySessionDirectory = nil
+                    sessionDirectory = retired.destinationDirectory
+                    bindSessionArchive(to: retired.destinationDirectory, restored: snapshot)
+                    try SessionWorkspace.forgetPromotedTemporarySession(temporarySessionDirectory)
+                    return retired
                 }
             }
+            try validateLifecycleCompletion(revision)
             let finalDirectory = migration.destinationDirectory
             if let preserved = migration.preservedSourceDirectory {
                 do {
@@ -4392,23 +4706,21 @@ final class AppModel: ObservableObject {
                     try SensitiveFileIO.atomicWrite(data, to: finalDirectory.appendingPathComponent("migration-recovery.json"))
                 } catch { archiveNotice = "课程已迁移；原件保留于 \(preserved.path)，恢复位置记录未能保存。" }
             }
-            guard let saved = try await Task.detached(operation: {
-                try SessionStore(directory: finalDirectory).load()
-            }).value else {
-                throw SessionStoreError.missingSnapshot
+            if let snapshot = sessionSnapshot {
+                try reconcileSavedTranscriptionCandidates(snapshot, archivedIn: finalDirectory)
             }
-            sessionSaver = nil
-            self.temporarySessionDirectory = nil
-            sessionDirectory = finalDirectory
-            bindSessionArchive(to: finalDirectory, restored: saved)
-            try reconcileSavedTranscriptionCandidates(saved, archivedIn: finalDirectory)
-            try await pipeline.restoreTranscription(directory: finalDirectory, sessionID: identity) { [weak self] event in
-                Task { @MainActor in
-                    guard let self, self.sessionID == identity, self.generation == epoch else { return }
-                    self.consume(event)
+            if resumeAfterMigration && !preparingApplicationExit {
+                try await waitForLifecycle { [self] in
+                    try await pipeline.restoreTranscription(directory: finalDirectory, sessionID: identity) { [weak self] event in
+                        Task { @MainActor in
+                            guard let self, self.sessionID == identity, self.generation == epoch else { return }
+                            self.consume(event)
+                        }
+                    }
                 }
+                try validateLifecycleCompletion(revision)
+                try pipeline.resumeTranscription()
             }
-            if resumeAfterMigration { try pipeline.resumeTranscription() }
             return finalDirectory
         }
         guard let sessionDirectory else { throw AppError.sessionDirectoryMissing }
@@ -5046,7 +5358,7 @@ extension AppModel {
                                 report: @escaping @MainActor (String, [String: Any]) -> Void) async {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled && !scheduledNotesEnabled)
         precondition(!noteReviewQueue.hasWork)
-        resetSessionStateForNewRun()
+        guard resetSessionStateForNewRun() else { return }
         installCLITranslationFailureReporter(report)
         defer { translationFailureReporter = nil }
         for caption in captions { appendConfirmedCaption(caption, hints: []) }
@@ -5059,7 +5371,7 @@ extension AppModel {
                 target: OutputLanguage = .simplifiedChinese,
                 report: @escaping @MainActor (String, [String: Any]) -> Void) async throws {
         try preflightCLIGeneration(target: target)
-        resetSessionStateForNewRun()
+        guard resetSessionStateForNewRun() else { throw ExitDeadlineExceeded() }
         captureNewCourseOutputLanguage(target)
         installCLITranslationFailureReporter(report)
         defer { translationFailureReporter = nil }

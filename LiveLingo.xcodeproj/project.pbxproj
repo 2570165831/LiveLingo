@@ -123,6 +123,11 @@
 		E80200000000000000000001 /* PrivacyTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E80200000000000000000002 /* PrivacyTransportTests.swift */; };
 		E80300000000000000000001 /* PrivacyStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E80300000000000000000002 /* PrivacyStorageTests.swift */; };
 		E80400000000000000000001 /* SensitiveFileIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = E80400000000000000000002 /* SensitiveFileIO.swift */; };
+		281E57C8E7D68A294B32CF61 /* ExitDeadline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40C70FBCD4C34F7FF4DBC0C0 /* ExitDeadline.swift */; };
+		CEED4CDF0362D0B9AE3DDE16 /* SecureAudioWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 699C4C9F8EAE75721EC0CB33 /* SecureAudioWriter.swift */; };
+		8D49BE0052E8A8509EFF8CB7 /* PrivacyFollowupStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D2DA7040395364E149F21DA /* PrivacyFollowupStorageTests.swift */; };
+		A7D951F0B2D483A5B585DC18 /* PrivacyAudioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 166D40F22F74343E38591F02 /* PrivacyAudioTests.swift */; };
+		D8BA39AA5D7459C24D85E6DE /* PrivacyExitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27FB4EB3DC474EAF6C57B7EB /* PrivacyExitTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -257,6 +262,11 @@
 		E80200000000000000000002 /* PrivacyTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyTransportTests.swift; sourceTree = "<group>"; };
 		E80300000000000000000002 /* PrivacyStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyStorageTests.swift; sourceTree = "<group>"; };
 		E80400000000000000000002 /* SensitiveFileIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveFileIO.swift; sourceTree = "<group>"; };
+		40C70FBCD4C34F7FF4DBC0C0 /* ExitDeadline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExitDeadline.swift; sourceTree = "<group>"; };
+		699C4C9F8EAE75721EC0CB33 /* SecureAudioWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureAudioWriter.swift; sourceTree = "<group>"; };
+		3D2DA7040395364E149F21DA /* PrivacyFollowupStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyFollowupStorageTests.swift; sourceTree = "<group>"; };
+		166D40F22F74343E38591F02 /* PrivacyAudioTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyAudioTests.swift; sourceTree = "<group>"; };
+		27FB4EB3DC474EAF6C57B7EB /* PrivacyExitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyExitTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -288,6 +298,8 @@
 			children = (
 				C70400000000000000000002 /* ChineseScriptConverter.swift */,
 				C70900000000000000000002 /* ClassroomMarkdownRendering.swift */,
+				699C4C9F8EAE75721EC0CB33 /* SecureAudioWriter.swift */,
+				40C70FBCD4C34F7FF4DBC0C0 /* ExitDeadline.swift */,
 				910000000000000000000002 /* FloatingSubtitlePreferences.swift */,
 				930000000000000000000002 /* FloatingSubtitleWindow.swift */,
 				940000000000000000000002 /* FullScreenClassMode.swift */,
@@ -348,6 +360,9 @@
 				C71200000000000000000002 /* OutputLanguageSelectionTests.swift */,
 				C70400000000000000000008 /* ZhVariantFixtures */,
 				C70400000000000000000004 /* ChineseScriptConverterTests.swift */,
+				27FB4EB3DC474EAF6C57B7EB /* PrivacyExitTests.swift */,
+				166D40F22F74343E38591F02 /* PrivacyAudioTests.swift */,
+				3D2DA7040395364E149F21DA /* PrivacyFollowupStorageTests.swift */,
 				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
 				B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */,
 				B71800000000000000000002 /* EnglishTargetTests.swift */,
@@ -475,6 +490,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CEED4CDF0362D0B9AE3DDE16 /* SecureAudioWriter.swift in Sources */,
+				281E57C8E7D68A294B32CF61 /* ExitDeadline.swift in Sources */,
 				910000000000000000000001 /* FloatingSubtitlePreferences.swift in Sources */,
 				930000000000000000000001 /* FloatingSubtitleWindow.swift in Sources */,
 				940000000000000000000001 /* FullScreenClassMode.swift in Sources */,
@@ -525,6 +542,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D8BA39AA5D7459C24D85E6DE /* PrivacyExitTests.swift in Sources */,
+				A7D951F0B2D483A5B585DC18 /* PrivacyAudioTests.swift in Sources */,
+				8D49BE0052E8A8509EFF8CB7 /* PrivacyFollowupStorageTests.swift in Sources */,
 				B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */,
 				B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */,
 				B71800000000000000000001 /* EnglishTargetTests.swift in Sources */,

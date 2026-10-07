@@ -903,13 +903,15 @@ final class SessionStore: @unchecked Sendable {
                 try SensitiveFileIO.tightenFileIfPresent(directory.appendingPathComponent(name))
             }
         }
-        let lockURL = directory.appendingPathComponent(".session-store.lock")
-        try SessionArchiveCoding.requireRegularFileIfPresent(lockURL)
-        let flags = (writing ? O_RDWR | O_CREAT : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW
-        let fd = Darwin.open(lockURL.path, flags, 0o600)
-        if fd < 0 {
-            if !writing && errno == ENOENT { return try action() }
-            throw SessionStoreError.io(operation: "open lock", code: errno)
+        let fd: Int32
+        do {
+            let parent = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
+            fd = try parent.openRegularFile(named: ".session-store.lock",
+                                            flags: writing ? O_RDWR : O_RDONLY, create: writing)
+        } catch SensitiveFileIO.Failure.system(_, let code) where !writing && code == ENOENT {
+            return try action()
+        } catch {
+            throw SessionStoreError.unsafePath(directory.path)
         }
         defer { _ = Darwin.close(fd) }
         guard flock(fd, writing ? LOCK_EX : LOCK_SH) == 0 else {

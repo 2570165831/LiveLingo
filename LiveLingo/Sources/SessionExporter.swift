@@ -20,6 +20,15 @@ enum SessionWorkspaceError: LocalizedError {
 enum SessionWorkspace {
     static let temporaryPrefix = "LiveLingo-Live-"
     static let recordingFileName = "recording.wav"
+    private static let cleanupDirectoryName = ".LiveLingo-Cleanup"
+    private static let cleanupLock = NSRecursiveLock()
+
+    private struct CleanupRecord: Codable {
+        let originalPath: String
+        let identity: SensitiveFileIO.Identity
+        var cleanupRequested = false
+        var stagedName: String?
+    }
 
     static func temporaryRoot(fileManager: FileManager = .default) throws -> URL {
         #if LIVELINGO_PREVIEW
@@ -35,12 +44,17 @@ enum SessionWorkspace {
         fileManager: FileManager = .default,
         identifier: UUID = UUID()
     ) throws -> URL {
-        let directory = try temporaryRoot(fileManager: fileManager).appendingPathComponent(
+        cleanupLock.lock(); defer { cleanupLock.unlock() }
+        let directory = try temporaryRoot(fileManager: fileManager).resolvingSymlinksInPath().appendingPathComponent(
             temporaryPrefix + identifier.uuidString,
             isDirectory: true
         )
-        let root = try SensitiveFileIO.Directory.open(at: fileManager.temporaryDirectory, create: false, tighten: false)
-        _ = try root.subdirectory(named: directory.lastPathComponent)
+        let root = try SensitiveFileIO.Directory.open(at: temporaryRoot(fileManager: fileManager), create: false, tighten: false)
+        let journal = try root.subdirectory(named: cleanupDirectoryName)
+        try journal.assertPrivate()
+        let owned = try root.createSubdirectory(named: directory.lastPathComponent)
+        let record = CleanupRecord(originalPath: directory.path, identity: try owned.identity)
+        try journal.atomicWrite(JSONEncoder().encode(record), named: identifier.uuidString + ".json", requireAbsent: true)
         return directory
     }
 
@@ -84,6 +98,7 @@ enum SessionWorkspace {
             let bytes = try JSONSerialization.data(withJSONObject: recovery, options: [.sortedKeys])
             try SensitiveFileIO.atomicWrite(bytes, to: destination.appendingPathComponent("migration-recovery.json"))
         }
+        try forgetPromotedTemporarySession(temporaryDirectory, fileManager: fileManager)
         return receipt.destinationDirectory
     }
 
@@ -91,10 +106,101 @@ enum SessionWorkspace {
         _ directory: URL,
         fileManager: FileManager = .default
     ) throws {
+        cleanupLock.lock(); defer { cleanupLock.unlock() }
         try validateTemporarySession(directory, fileManager: fileManager)
-        if fileManager.fileExists(atPath: directory.path) {
-            try fileManager.removeItem(at: directory)
+        let root = try SensitiveFileIO.Directory.open(at: temporaryRoot(fileManager: fileManager), create: false, tighten: false)
+        let journal = try root.subdirectory(named: cleanupDirectoryName, create: false)
+        try journal.assertPrivate()
+        let name = try recordName(for: directory)
+        guard let bytes = try journal.readIfPresent(named: name) else { throw SessionWorkspaceError.invalidTemporarySession }
+        var record = try JSONDecoder().decode(CleanupRecord.self, from: bytes)
+        let expectedPath = try temporaryRoot(fileManager: fileManager).resolvingSymlinksInPath()
+            .appendingPathComponent(directory.lastPathComponent).path
+        guard record.originalPath == expectedPath else {
+            throw SessionWorkspaceError.invalidTemporarySession
         }
+        record.cleanupRequested = true
+        try journal.atomicWrite(JSONEncoder().encode(record), named: name)
+        try clean(record: &record, name: name, root: root, journal: journal)
+    }
+
+    /// Only records created by this App and explicitly marked for cleanup are
+    /// retried. Active sessions and unknown historical directories are retained.
+    static func retryPendingTemporarySessions(fileManager: FileManager = .default) throws {
+        cleanupLock.lock(); defer { cleanupLock.unlock() }
+        let root = try SensitiveFileIO.Directory.open(at: temporaryRoot(fileManager: fileManager), create: false, tighten: false)
+        guard let journal = try root.directoryIfPresent(named: cleanupDirectoryName) else { return }
+        try journal.assertPrivate()
+        for name in try journal.names().sorted() where isRecordName(name) {
+            guard let bytes = try journal.readIfPresent(named: name) else { continue }
+            var record = try JSONDecoder().decode(CleanupRecord.self, from: bytes)
+            guard record.cleanupRequested else { continue }
+            let url = URL(fileURLWithPath: record.originalPath, isDirectory: true)
+            try validateTemporarySession(url, fileManager: fileManager)
+            guard try recordName(for: url) == name else { throw SessionWorkspaceError.invalidTemporarySession }
+            try clean(record: &record, name: name, root: root, journal: journal)
+        }
+    }
+
+    static func pendingTemporarySessionDirectories(fileManager: FileManager = .default) throws -> [URL] {
+        cleanupLock.lock(); defer { cleanupLock.unlock() }
+        let root = try SensitiveFileIO.Directory.open(at: temporaryRoot(fileManager: fileManager), create: false, tighten: false)
+        guard let journal = try root.directoryIfPresent(named: cleanupDirectoryName) else { return [] }
+        return try journal.names().filter(isRecordName).compactMap { name in
+            guard let bytes = try journal.readIfPresent(named: name) else { return nil }
+            let record = try JSONDecoder().decode(CleanupRecord.self, from: bytes)
+            guard record.cleanupRequested else { return nil }
+            return record.stagedName.map { journal.url.appendingPathComponent($0, isDirectory: true) }
+                ?? URL(fileURLWithPath: record.originalPath, isDirectory: true)
+        }
+    }
+
+    static func forgetPromotedTemporarySession(_ directory: URL, fileManager: FileManager = .default) throws {
+        cleanupLock.lock(); defer { cleanupLock.unlock() }
+        let root = try SensitiveFileIO.Directory.open(at: temporaryRoot(fileManager: fileManager), create: false, tighten: false)
+        let journal = try root.subdirectory(named: cleanupDirectoryName, create: false)
+        try journal.removeRegularFileIfPresent(named: recordName(for: directory))
+    }
+
+    private static func clean(record: inout CleanupRecord, name: String,
+                              root: SensitiveFileIO.Directory, journal: SensitiveFileIO.Directory) throws {
+        let leaf = URL(fileURLWithPath: record.originalPath).lastPathComponent
+        let stagedName = record.stagedName ?? ".cleanup-" + UUID().uuidString
+        if let staged = try journal.directoryIfPresent(named: stagedName) {
+            guard try staged.identity == record.identity else { throw SessionWorkspaceError.invalidTemporarySession }
+        } else {
+            // Both checks and the detach use descriptors. Replacing the path
+            // with another directory can never authorize deleting that object.
+            guard let owned = try root.directoryIfPresent(named: leaf),
+                  try owned.identity == record.identity else { throw SessionWorkspaceError.invalidTemporarySession }
+            record.stagedName = stagedName
+            try journal.atomicWrite(JSONEncoder().encode(record), named: name)
+            try root.moveDirectory(named: leaf, matching: record.identity, to: journal, named: stagedName)
+        }
+        do {
+            try journal.removeDirectory(named: stagedName, matching: record.identity)
+            try journal.removeRegularFileIfPresent(named: name)
+        } catch {
+            // Preserve the original location on ordinary failures. If another
+            // object already occupies it, keep the journal's exact staged path.
+            if (try? journal.moveDirectory(named: stagedName, matching: record.identity, to: root, named: leaf)) != nil {
+                record.stagedName = nil
+                try journal.atomicWrite(JSONEncoder().encode(record), named: name)
+            }
+            throw error
+        }
+    }
+
+    private static func recordName(for directory: URL) throws -> String {
+        let suffix = String(directory.lastPathComponent.dropFirst(temporaryPrefix.count))
+        guard directory.lastPathComponent.hasPrefix(temporaryPrefix), let id = UUID(uuidString: suffix) else {
+            throw SessionWorkspaceError.invalidTemporarySession
+        }
+        return id.uuidString + ".json"
+    }
+
+    private static func isRecordName(_ name: String) -> Bool {
+        name.hasSuffix(".json") && UUID(uuidString: String(name.dropLast(5))) != nil
     }
 
     static func copyTemporarySession(from temporaryDirectory: URL, to outputRoot: URL,
@@ -111,13 +217,14 @@ enum SessionWorkspace {
         _ directory: URL,
         fileManager: FileManager
     ) throws {
-        let resolvedDirectory = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedDirectory = directory.standardizedFileURL
         let resolvedRoot = try temporaryRoot(fileManager: fileManager).standardizedFileURL.resolvingSymlinksInPath()
-        guard resolvedDirectory.deletingLastPathComponent() == resolvedRoot,
+        guard resolvedDirectory.deletingLastPathComponent().resolvingSymlinksInPath() == resolvedRoot,
               resolvedDirectory.lastPathComponent.hasPrefix(temporaryPrefix)
         else {
             throw SessionWorkspaceError.invalidTemporarySession
         }
+        _ = try recordName(for: directory)
     }
 
     private static func fileSize(at url: URL, fileManager: FileManager) throws -> UInt64 {
@@ -622,8 +729,8 @@ enum NotesExportDocument {
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
             let text = String(line)
             let trimmed = text.trimmingCharacters(in: .whitespaces)
-            let failurePrefixes = ["本批复查失败，保留原笔记：", "读取路径失败", "复查进度读取失败",
-                                   "复查报告读取失败", "报告保存失败", "复查报告保存失败"]
+            let failurePrefixes = ["本批复查失败，保留原笔记：", "读取路径失败：", "复查进度读取失败，已保留现场：",
+                                   "复查报告读取失败：", "报告保存失败：", "复查报告保存失败："]
             if failurePrefixes.contains(where: trimmed.hasPrefix) {
                 output.append("本批复查未完成，原笔记已保留。")
                 continue

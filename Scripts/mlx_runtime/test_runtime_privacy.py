@@ -205,7 +205,7 @@ class WorkerPrivacyTests(unittest.TestCase):
             self.assertFalse(self.error_event(worker)['recoverable'])
             self.assertEqual(list(directory.glob('*.safetensors')), [])
 
-    def test_state_migration_is_repeatable_and_preserves_unknown_pending(self):
+    def test_state_validation_preserves_existing_modes_and_unknown_pending(self):
         def setup(directory):
             directory.chmod(0o755)
             checkpoint_path(directory, 'old').write_bytes(b'old')
@@ -219,12 +219,12 @@ class WorkerPrivacyTests(unittest.TestCase):
             for _ in range(2):
                 with WorkerSession(directory, checkpoint_bytes=32, boot=BOOT) as worker:
                     worker.await_ready()
-                    self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
-                    self.assertEqual(stat.S_IMODE(checkpoint_path(directory, 'old').stat().st_mode), 0o600)
+                    self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+                    self.assertEqual(stat.S_IMODE(checkpoint_path(directory, 'old').stat().st_mode), 0o644)
                     for name, data in (('a' * 64 + '.pending.safetensors', b'partial'),
                                        ('a' * 64 + '.' + 'c' * 32 + '.pending.safetensors', b'active writer')):
                         self.assertEqual((directory / name).read_bytes(), data)
-                        self.assertEqual(stat.S_IMODE((directory / name).stat().st_mode), 0o600)
+                        self.assertEqual(stat.S_IMODE((directory / name).stat().st_mode), 0o644)
                     self.assertEqual((directory / 'unrelated.pending.safetensors').read_bytes(), b'keep')
                     worker.shutdown()
 
@@ -263,6 +263,26 @@ class CheckpointPrivacyTests(unittest.TestCase):
     @staticmethod
     def write(path, *args):
         Path(path).write_bytes(b'synthetic checkpoint')
+
+    @staticmethod
+    def acl_entries(path):
+        listing = subprocess.run(['/bin/ls', '-led', str(path)], check=True,
+                                 capture_output=True, text=True).stdout
+        return re.findall(r'^\s*\d+:\s*(.*)$', listing, re.MULTILINE)
+
+    @staticmethod
+    def add_acl(path, entry):
+        subprocess.run(['/bin/chmod', '+a', entry, str(path)],
+                       check=True, capture_output=True)
+
+    def permissions(self, path):
+        entries = self.acl_entries(path) if sys.platform == 'darwin' else []
+        return stat.S_IMODE(path.stat().st_mode), entries
+
+    def assert_kernel_write_denied(self):
+        with self.assertRaises(PermissionError):
+            fd = os.open(self.path, os.O_WRONLY | os.O_NOFOLLOW)
+            os.close(fd)
 
     def test_failed_write_removes_pending_and_preserves_previous_checkpoint(self):
         for done in (False, True):
@@ -326,14 +346,113 @@ class CheckpointPrivacyTests(unittest.TestCase):
         self.assertEqual(created[0].read_bytes(), b'other writer')
         self.assertFalse(self.path.exists())
 
-    def test_private_modes_are_repaired_on_every_save(self):
+    def test_existing_modes_are_preserved_on_every_save(self):
         for _ in range(2):
             self.directory.chmod(0o755)
             self.path.write_bytes(b'previous')
             self.path.chmod(0o644)
             self.generation.save(self.path)
-            self.assertEqual(stat.S_IMODE(self.directory.stat().st_mode), 0o700)
-            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(self.directory.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
+
+    def test_new_directories_and_checkpoint_are_private(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.directory.chmod(0o755)
+        path = self.directory / 'new' / 'nested' / self.path.name
+        checkpoints.atomic_checkpoint(path, self.write)
+        self.assertEqual(stat.S_IMODE(self.directory.stat().st_mode), 0o755)
+        for directory in (path.parent.parent, path.parent):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(path.read_bytes(), b'synthetic checkpoint')
+
+    def test_readers_and_getters_preserve_existing_modes(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.directory.chmod(0o755)
+        self.path.write_bytes(b'previous')
+        self.path.chmod(0o644)
+        for _ in range(2):
+            checkpoints.prepare_state_directory(self.directory)
+            self.assertIsNotNone(checkpoints.checkpoint_token(self.directory, self.path.stem))
+            self.assertEqual(len(checkpoints.checkpoint_records(self.directory)), 1)
+            self.assertEqual(checkpoints.load_checkpoint(self.path, lambda path: Path(path).read_bytes()),
+                             b'previous')
+            self.assertEqual(stat.S_IMODE(self.directory.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
+
+    def test_missing_runtime_getters_do_not_create_directories(self):
+        checkpoints = importlib.import_module('checkpoints')
+        missing = self.directory / 'missing'
+        self.assertIsNone(checkpoints.checkpoint_token(missing, self.path.stem))
+        self.assertEqual(checkpoints.checkpoint_records(missing), [])
+        self.assertFalse(missing.exists())
+
+    def test_read_only_target_is_rejected_before_serialization(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.path.write_bytes(b'previous')
+        self.path.chmod(0o400)
+        previous = self.path.stat().st_ino, self.permissions(self.path)
+        self.assert_kernel_write_denied()
+        writes = []
+        with self.assertRaises(PermissionError):
+            checkpoints.atomic_checkpoint(self.path, lambda path: writes.append(path))
+        self.assertEqual(writes, [])
+        self.assertEqual((self.path.stat().st_ino, self.permissions(self.path)), previous)
+        self.assertEqual(self.path.read_bytes(), b'previous')
+        self.assertEqual(list(self.directory.glob('*.pending.safetensors')), [])
+
+    def test_write_access_is_rechecked_after_serialization(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.path.write_bytes(b'previous')
+        inode = self.path.stat().st_ino
+        def revoke_write(path):
+            self.write(path)
+            self.path.chmod(0o400)
+        with self.assertRaises(PermissionError):
+            checkpoints.atomic_checkpoint(self.path, revoke_write)
+        self.assertEqual(self.path.stat().st_ino, inode)
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o400)
+        self.assertEqual(self.path.read_bytes(), b'previous')
+        self.assertEqual(list(self.directory.glob('*.pending.safetensors')), [])
+
+    def test_target_replaced_during_serialization_is_preserved(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.path.write_bytes(b'previous')
+        def another_writer(path):
+            self.write(path)
+            replacement = self.directory / 'another-record'
+            replacement.write_bytes(b'another writer')
+            replacement.chmod(0o640)
+            os.replace(replacement, self.path)
+        with self.assertRaisesRegex(checkpoints.CheckpointSafetyError, 'changed'):
+            checkpoints.atomic_checkpoint(self.path, another_writer)
+        self.assertEqual(self.path.read_bytes(), b'another writer')
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o640)
+        self.assertEqual(list(self.directory.glob('*.pending.safetensors')), [])
+
+    def test_new_directory_replaced_before_open_keeps_existing_permissions(self):
+        checkpoints = importlib.import_module('checkpoints')
+        foreign = self.directory / 'foreign'
+        foreign.mkdir()
+        foreign.chmod(0o755)
+        (foreign / 'body').write_bytes(b'another directory')
+        if sys.platform == 'darwin':
+            self.add_acl(foreign, 'everyone allow list,search,readattr,readsecurity')
+        previous = self.permissions(foreign)
+        original_open = os.open
+        changed = []
+        def replace_before_open(name, flags, *args, **kwargs):
+            if name == 'created' and not changed:
+                changed.append(True)
+                fd = kwargs['dir_fd']
+                os.rename('created', 'unused-created', src_dir_fd=fd, dst_dir_fd=fd)
+                os.rename('foreign', 'created', src_dir_fd=fd, dst_dir_fd=fd)
+            return original_open(name, flags, *args, **kwargs)
+        with patch.object(os, 'open', side_effect=replace_before_open):
+            with self.assertRaisesRegex(checkpoints.CheckpointSafetyError, 'changed'):
+                checkpoints.prepare_state_directory(self.directory / 'created')
+        self.assertEqual(self.permissions(self.directory / 'created'), previous)
+        self.assertEqual((self.directory / 'created/body').read_bytes(), b'another directory')
 
     def test_owner_read_only_restrictions_are_preserved(self):
         checkpoints = importlib.import_module('checkpoints')
@@ -372,18 +491,127 @@ class CheckpointPrivacyTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
     @unittest.skipUnless(sys.platform == 'darwin', 'macOS extended ACL regression')
-    def test_existing_and_inherited_acl_allow_entries_are_removed(self):
+    def test_existing_mode_and_acl_are_preserved_on_replacement(self):
         self.path.write_bytes(b'previous')
-        subprocess.run(['/bin/chmod', '+a',
-                        'everyone allow read,readattr,readextattr,readsecurity,file_inherit,directory_inherit',
-                        str(self.directory)], check=True, capture_output=True)
-        subprocess.run(['/bin/chmod', '+a', 'everyone allow read,readattr,readextattr,readsecurity',
-                        str(self.path)], check=True, capture_output=True)
-        self.generation.save(self.path)
-        for path in (self.directory, self.path):
-            listing = subprocess.run(['/bin/ls', '-led', str(path)], check=True,
-                                     capture_output=True, text=True).stdout
-            self.assertIsNone(re.search(r'^\s*\d+:\s', listing, re.MULTILINE))
+        self.directory.chmod(0o755)
+        self.path.chmod(0o640)
+        self.add_acl(self.directory,
+                     'everyone allow read,readattr,readextattr,readsecurity,file_inherit,directory_inherit')
+        self.add_acl(self.path, 'everyone deny writeextattr')
+        self.add_acl(self.path, 'everyone allow read,readattr,readextattr,readsecurity')
+        previous = {path: self.permissions(path) for path in (self.directory, self.path)}
+        for _ in range(2):
+            self.generation.save(self.path)
+            self.assertEqual(self.path.read_bytes(), b'synthetic checkpoint')
+            for path in previous:
+                self.assertEqual(self.permissions(path), previous[path])
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS extended ACL regression')
+    def test_acl_only_read_and_directory_access_survive_runtime_getters(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.path.write_bytes(b'previous')
+        self.add_acl(self.path, 'everyone allow read,readattr,readextattr,readsecurity')
+        self.add_acl(self.directory, 'everyone allow list,search,readattr,readextattr,readsecurity')
+        self.path.chmod(0o000)
+        self.directory.chmod(0o300)
+        self.addCleanup(self.directory.chmod, 0o700)
+        previous = {path: self.permissions(path) for path in (self.directory, self.path)}
+        self.assertEqual(self.path.read_bytes(), b'previous')
+        self.assertIn(self.path.name, os.listdir(self.directory))
+        for _ in range(2):
+            checkpoints.prepare_state_directory(self.directory)
+            self.assertIsNotNone(checkpoints.checkpoint_token(self.directory, self.path.stem))
+            self.assertEqual(len(checkpoints.checkpoint_records(self.directory)), 1)
+            self.assertEqual(checkpoints.load_checkpoint(self.path, lambda path: Path(path).read_bytes()),
+                             b'previous')
+            for path in previous:
+                self.assertEqual(self.permissions(path), previous[path])
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS extended ACL regression')
+    def test_new_inherited_allow_is_removed_and_deny_is_preserved(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.directory.chmod(0o755)
+        self.add_acl(self.directory,
+                     'everyone allow read,readattr,readextattr,readsecurity,file_inherit,directory_inherit')
+        self.add_acl(self.directory, 'everyone deny writeextattr,file_inherit,directory_inherit')
+        previous = self.permissions(self.directory)
+        path = self.directory / 'new' / 'nested' / self.path.name
+        checkpoints.atomic_checkpoint(path, self.write)
+        self.assertEqual(self.permissions(self.directory), previous)
+        for created, mode in ((path.parent.parent, 0o700), (path.parent, 0o700), (path, 0o600)):
+            self.assertEqual(stat.S_IMODE(created.stat().st_mode), mode)
+            entries = self.acl_entries(created)
+            self.assertTrue(any('deny writeextattr' in entry for entry in entries))
+            self.assertFalse(any(' allow ' in ' ' + entry for entry in entries))
+        self.assertEqual(path.read_bytes(), b'synthetic checkpoint')
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS extended ACL regression')
+    def test_replacement_preserves_new_inherited_denials_idempotently(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.path.write_bytes(b'previous')
+        self.path.chmod(0o644)
+        self.add_acl(self.path, 'everyone allow read,readattr,readextattr,readsecurity')
+        old_entries = self.acl_entries(self.path)
+        self.add_acl(self.directory, 'everyone deny writeextattr,file_inherit,directory_inherit')
+        parent_permissions = self.permissions(self.directory)
+        snapshots = []
+        for _ in range(2):
+            checkpoints.atomic_checkpoint(self.path, self.write)
+            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
+            self.assertEqual(self.permissions(self.directory), parent_permissions)
+            entries = self.acl_entries(self.path)
+            self.assertEqual(entries[:len(old_entries)], old_entries)
+            self.assertTrue(any('deny writeextattr' in entry for entry in entries))
+            snapshots.append(entries)
+        self.assertEqual(snapshots[0], snapshots[1])
+        self.assertEqual(self.path.read_bytes(), b'synthetic checkpoint')
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS extended ACL regression')
+    def test_acl_deny_write_is_rejected_before_serialization(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.path.write_bytes(b'previous')
+        self.path.chmod(0o600)
+        self.add_acl(self.path, 'everyone deny write,append')
+        previous = self.path.stat().st_ino, self.permissions(self.path)
+        self.assert_kernel_write_denied()
+        writes = []
+        with self.assertRaises(PermissionError):
+            checkpoints.atomic_checkpoint(self.path, lambda path: writes.append(path))
+        self.assertEqual(writes, [])
+        self.assertEqual((self.path.stat().st_ino, self.permissions(self.path)), previous)
+        self.assertEqual(self.path.read_bytes(), b'previous')
+        self.assertEqual(list(self.directory.glob('*.pending.safetensors')), [])
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS extended ACL regression')
+    def test_acl_granted_write_preserves_mode_and_effective_access(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.path.write_bytes(b'previous')
+        self.path.chmod(0o400)
+        self.add_acl(self.path, 'everyone allow read,write,append,readattr,readextattr,readsecurity')
+        previous = self.permissions(self.path)
+        fd = os.open(self.path, os.O_WRONLY | os.O_NOFOLLOW)
+        os.close(fd)
+        checkpoints.atomic_checkpoint(self.path, self.write)
+        self.assertEqual(self.permissions(self.path), previous)
+        self.assertEqual(self.path.read_bytes(), b'synthetic checkpoint')
+        fd = os.open(self.path, os.O_WRONLY | os.O_NOFOLLOW)
+        os.close(fd)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS extended ACL regression')
+    def test_acl_write_revoked_during_serialization_keeps_old_bytes(self):
+        checkpoints = importlib.import_module('checkpoints')
+        self.path.write_bytes(b'previous')
+        inode = self.path.stat().st_ino
+        def revoke_write(path):
+            self.write(path)
+            self.add_acl(self.path, 'everyone deny write,append')
+        with self.assertRaises(PermissionError):
+            checkpoints.atomic_checkpoint(self.path, revoke_write)
+        self.assertEqual(self.path.stat().st_ino, inode)
+        self.assertEqual(self.path.read_bytes(), b'previous')
+        self.assertTrue(any('deny write,append' in entry for entry in self.acl_entries(self.path)))
+        self.assert_kernel_write_denied()
+        self.assertEqual(list(self.directory.glob('*.pending.safetensors')), [])
 
     @unittest.skipUnless(sys.platform == 'darwin', 'macOS extended ACL regression')
     def test_acl_denials_are_preserved_idempotently(self):
