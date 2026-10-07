@@ -53,3 +53,6 @@ else
   printf 'Built %s/livelingo-cli-translation-failure-tests\n' "$output"
  fi
 fi
+
+# Offline converter data, provenance and licenses use the same adjacent layout.
+cp -R "$root/LiveLingo/Resources/ZhVariants" "$output/ZhVariants"

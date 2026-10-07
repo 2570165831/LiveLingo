@@ -1,0 +1,13 @@
+OpenCC dictionary data and conversion fixtures
+Source: https://github.com/BYVoid/OpenCC
+Tag: ver.1.1.9
+Commit: 556ed22496d650bd0b13b6c163be9814637970ae
+Copyright OpenCC contributors; upstream source attributes Carbo Kuo.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The upstream tag contains no root NOTICE. This attribution file was written
+by LiveLingo; it is not an upstream NOTICE. All copied upstream files are
+unmodified. LiveLingo's Swift/Python converters are independent implementations
+of the documented conversion chain and longest-prefix segmentation.
+The three TWPhrases source files remain separate, as supplied upstream.
+Project phrase/subject overlays are separate and pending native-speaker review.

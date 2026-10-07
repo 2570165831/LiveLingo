@@ -109,6 +109,10 @@
 		B76600000000000000000001 /* CourseOutputLanguageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B76600000000000000000002 /* CourseOutputLanguageTests.swift */; };
 		B75700000000000000000001 /* TargetExportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B75700000000000000000002 /* TargetExportTests.swift */; };
 		B75800000000000000000001 /* TargetReviewRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B75800000000000000000002 /* TargetReviewRegressionTests.swift */; };
+		C70400000000000000000001 /* ChineseScriptConverter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70400000000000000000002 /* ChineseScriptConverter.swift */; };
+		C70400000000000000000003 /* ChineseScriptConverterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70400000000000000000004 /* ChineseScriptConverterTests.swift */; };
+		C70400000000000000000005 /* ZhVariants in Resources */ = {isa = PBXBuildFile; fileRef = C70400000000000000000006 /* ZhVariants */; };
+		C70400000000000000000007 /* ZhVariantFixtures in Resources */ = {isa = PBXBuildFile; fileRef = C70400000000000000000008 /* ZhVariantFixtures */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -229,6 +233,10 @@
 		B76600000000000000000002 /* CourseOutputLanguageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CourseOutputLanguageTests.swift; sourceTree = "<group>"; };
 		B75700000000000000000002 /* TargetExportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetExportTests.swift; sourceTree = "<group>"; };
 		B75800000000000000000002 /* TargetReviewRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetReviewRegressionTests.swift; sourceTree = "<group>"; };
+		C70400000000000000000002 /* ChineseScriptConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChineseScriptConverter.swift; sourceTree = "<group>"; };
+		C70400000000000000000004 /* ChineseScriptConverterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChineseScriptConverterTests.swift; sourceTree = "<group>"; };
+		C70400000000000000000006 /* ZhVariants */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ZhVariants; sourceTree = "<group>"; };
+		C70400000000000000000008 /* ZhVariantFixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ZhVariantFixtures; path = "../Scripts/Fixtures/zh-variants-v1"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -258,6 +266,7 @@
 		A70000000000000000000003 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				C70400000000000000000002 /* ChineseScriptConverter.swift */,
 				910000000000000000000002 /* FloatingSubtitlePreferences.swift */,
 				930000000000000000000002 /* FloatingSubtitleWindow.swift */,
 				940000000000000000000002 /* FullScreenClassMode.swift */,
@@ -299,6 +308,7 @@
 		A70000000000000000000004 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				C70400000000000000000006 /* ZhVariants */,
 				A20000000000000000000009 /* Info.plist */,
 				A20000000000000000000015 /* AppIcon.icon */,
 				A2000000000000000000000A /* LiveLingo.entitlements */,
@@ -309,6 +319,8 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				C70400000000000000000008 /* ZhVariantFixtures */,
+				C70400000000000000000004 /* ChineseScriptConverterTests.swift */,
 				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
 				B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */,
 				B71800000000000000000002 /* EnglishTargetTests.swift */,
@@ -424,8 +436,8 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		AA0000000000000000000001 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000015 /* AppIcon.icon in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
-		AA0000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B70000000000000000000005 /* default-target-golden.json in Resources */, B70000000000000000000009 /* acceptance-verdicts-zh-Hans.json in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		AA0000000000000000000001 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (C70400000000000000000005 /* ZhVariants in Resources */, A10000000000000000000015 /* AppIcon.icon in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		AA0000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (C70400000000000000000007 /* ZhVariantFixtures in Resources */, B70000000000000000000005 /* default-target-golden.json in Resources */, B70000000000000000000009 /* acceptance-verdicts-zh-Hans.json in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -442,6 +454,7 @@
 		B72600000000000000000001 /* LatinLearningPrompts.swift in Sources */,
 				B72600000000000000000003 /* LatinLearningText.swift in Sources */,
 				B70500000000000000000001 /* OutputLanguage.swift in Sources */,
+				C70400000000000000000001 /* ChineseScriptConverter.swift in Sources */,
 				900000000000000000000001 /* CaptionPresentation.swift in Sources */,
 				04F78613ACCF181FC7155CCF /* ReviewReportCollection.swift in Sources */,
 				BFEA359EEB395F257C15B7E0 /* ReviewIdentity.swift in Sources */,
@@ -494,6 +507,7 @@
 				B75600000000000000000001 /* TargetPersistenceTests.swift in Sources */,
 				B70000000000000000000007 /* AcceptanceVerdictSnapshotTests.swift in Sources */,
 				B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */,
+				C70400000000000000000003 /* ChineseScriptConverterTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,
 				910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */,
 				930000000000000000000003 /* FloatingSubtitleWindowTests.swift in Sources */,

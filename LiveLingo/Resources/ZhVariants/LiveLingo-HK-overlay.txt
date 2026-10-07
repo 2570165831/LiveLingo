@@ -1,0 +1,3 @@
+# 待母語者審閱 — no active mappings
+# Format: source<TAB>target; add subject, reviewer and source as a preceding comment.
+# Unapproved example (comment only): 電離能 → [待母語者審閱]; source: project Simplified Chinese prompt term 电离能
