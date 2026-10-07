@@ -39,6 +39,55 @@ final class TargetPipelineRefactorTests: XCTestCase {
         XCTAssertNil(LearningDraft(checkpoint: checkpoint, snapshot: snapshot, model: "synthetic", systemPrompt: prompt))
     }
 
+    func testTraditionalInstructionMarkersUseIndependentInspectionFolding() {
+        let target = CaptionTranslationTarget.simplifiedChinese
+        for marker in ["源語言：西班牙語", "原文語言：日語", "翻譯元數據"] {
+            // zh-Hans already normalized instruction markers before step 15.
+            XCTAssertTrue(target.containsInstructionLeak(marker), marker)
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: marker, source: "El agua fluye.",
+                sourceLanguage: "es", target: target), .promptLeak, marker)
+            for code in ["en", "es", "fr"] {
+                XCTAssertTrue(TranslationCheckText.containsInstructionLeak(marker, targetCode: code,
+                    normalizeOutput: { $0 }), code)
+            }
+        }
+        XCTAssertFalse(target.containsInstructionLeak("熱量會傳遞。"))
+        XCTAssertEqual(TranslationCheckText.inspectionCopy("熱量會傳遞。", targetCode: "zh-Hans"), "熱量會傳遞。")
+        XCTAssertEqual(TranslationCheckText.inspectionCopy("熱量會傳遞。", targetCode: "en"), "热量会传递。")
+    }
+
+    func testTraditionalSelfDescriptionKeepsSimplifiedTargetVerdictsFrozen() {
+        let reply = "作為一個語言模型，我不能處理這個請求。"
+        for (source, language) in [("The water is cold.", "en"), ("水は冷たいです。", "ja")] {
+            XCTAssertFalse(TranslationAcceptance.isModelReply(reply, source: source))
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: reply, source: source, sourceLanguage: language))
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: CaptionTranslationTarget.simplifiedChinese.normalize(reply),
+                source: source, sourceLanguage: language), .modelReply)
+        }
+        for code in ["en", "es", "fr"] {
+            XCTAssertTrue(TranslationAcceptance.isModelReply(reply, source: "The water is cold.", targetCode: code), code)
+        }
+        let source = "他說：作為一個語言模型，我不能處理這個請求。"
+        for code in ["zh-Hans", "en", "es", "fr"] {
+            XCTAssertFalse(TranslationAcceptance.isModelReply(source, source: source, targetCode: code))
+            XCTAssertFalse(TranslationAcceptance.isModelReply("我不能打開這個盒子。", source: "I cannot open this box.", targetCode: code))
+        }
+    }
+
+    func testTraditionalWrittenMagnitudesFoldOnlyForNonSimplifiedTargets() {
+        XCTAssertEqual(RepairNumericNovelty.assess(candidate: "20000", support: ["兩萬"]),
+            .init(unsupported: [], undecidable: true))
+        XCTAssertEqual(RepairNumericNovelty.assess(candidate: "兩萬", support: []),
+            .init(unsupported: [], undecidable: false))
+        for code in ["en", "es", "fr"] {
+            XCTAssertEqual(RepairNumericNovelty.assess(candidate: "20000", support: ["兩萬"], targetCode: code),
+                .init(unsupported: [], undecidable: false))
+            XCTAssertEqual(RepairNumericNovelty.assess(candidate: "30000", support: ["兩萬"], targetCode: code),
+                .init(unsupported: ["30000"], undecidable: false))
+            XCTAssertTrue(RepairNumericNovelty.assess(candidate: "兩萬", support: [], targetCode: code).undecidable)
+        }
+    }
+
     func testNonDefaultNoteAndReviewPromptsKeepTheirWorkerPurposes() async throws {
         let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
             .appendingPathComponent("TargetPipeline-\(UUID())", isDirectory: true)

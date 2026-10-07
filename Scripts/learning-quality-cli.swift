@@ -271,10 +271,10 @@ struct LearningQualityCLI {
                         try save()
                         var note = try LearningNote.decode(response)
                         note = LearningPrompts.resolvingFollowUps(note, targets: pending.map(\.id))
-                        note.topic = SimplifiedChineseNormalizer.normalize(note.topic)
+                        note.topic = target.normalize(note.topic)
                         note.sourceVersion = 2
                         for index in note.points.indices {
-                            note.points[index].text = SimplifiedChineseNormalizer.normalize(note.points[index].text)
+                            note.points[index].text = target.normalize(note.points[index].text)
                         }
                         requests[number - 1].normalizedNote = note
                         try notebook.append(evidence: current, note: note)

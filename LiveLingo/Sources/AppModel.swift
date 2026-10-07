@@ -583,7 +583,7 @@ final class AppModel: ObservableObject {
                 isSuperseded: { self.previewRunToken != runToken },
                 translate: { try await session.translate($0).targetText },
                 deliver: { source, translated, timing in
-                    self.previewChinese = SimplifiedChineseNormalizer.normalize(translated)
+                    self.previewChinese = self.captionTarget.normalize(translated)
                     self.previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
                     Self.tracePreview("delivered", characters: source.text.count, timing: timing)
                 },
@@ -2479,7 +2479,7 @@ final class AppModel: ObservableObject {
                 self.manualTranslationStatus = thinking ? "精确翻译中 · 思考已开启 · \(modelName)" : "翻译中 · \(modelName)"
                 let result = try await QwenTranslationClient.translateTypedText(text, modelName: modelName, thinking: thinking)
                 try Task.checkCancellation()
-                self.manualTranslationOutput = SimplifiedChineseNormalizer.normalize(result)
+                self.manualTranslationOutput = self.captionTarget.normalize(result)
                 self.manualTranslationStatus = thinking ? "精确翻译完成 · \(modelName)" : "已完成 · \(modelName)"
             } catch is CancellationError {
                 self.manualTranslationStatus = "已取消"
@@ -2652,7 +2652,7 @@ final class AppModel: ObservableObject {
                                      at previousIndex: Int, started: TimeInterval) {
         if let revised = result.previous,
            self.segments.indices.contains(previousIndex) {
-            let normalized = SimplifiedChineseNormalizer.normalize(revised)
+            let normalized = captionTarget.normalize(revised)
             // 2026-09-18：相邻修复**一次处理两段** ✗，模型多回半句就会把两段内容
             // 塞进前一段 ✗（缺陷文档 round-359 的收敛结论 ✓）。
             // 因此：修复结果若相对**前一段自己的英文**长得离谱 ✗，就**丢弃这次修复** ✓
@@ -2875,12 +2875,12 @@ final class AppModel: ObservableObject {
                                       let previousIndex = self.translationInputIndex(previousInput,
                                           session: currentSession, epoch: currentGeneration, worker: workerID),
                                       self.segments[previousIndex].chinese == previousInput.chinese else { return }
-                                if TranslationAcceptance.isModelReply(current, source: normalizedInput) {
+                                if TranslationAcceptance.isModelReply(current, source: normalizedInput, targetCode: target.rawValue) {
                                     self.clearTranslationPreview()
                                     return
                                 }
                                 guard let accepted = try? TranslationAcceptance.validatedCaption(
-                                    SimplifiedChineseNormalizer.normalize(current), source: normalizedInput, target: target) else { return }
+                                    target.normalize(current), source: normalizedInput, target: target) else { return }
                                 self.streamingDependencyIDs = [input.id, previousInput.id]
                                 self.streamingChinese = accepted
                                 Self.traceTranslation("current_preview", id: input.id,
@@ -2933,9 +2933,8 @@ final class AppModel: ObservableObject {
                                   self.translationInputIndex(input, session: currentSession,
                                       epoch: currentGeneration, worker: workerID) != nil else { return }
                             let restored = protectedInput.restorePartial(in: partial)
-                            let draft = sourceLanguage == nil ? SimplifiedChineseNormalizer.normalize(restored)
-                                : target.normalize(restored)
-                            if TranslationAcceptance.isModelReply(draft, source: normalizedInput) {
+                            let draft = target.normalize(restored)
+                            if TranslationAcceptance.isModelReply(draft, source: normalizedInput, targetCode: target.rawValue) {
                                 self.clearTranslationPreview()
                                 return
                             }
@@ -2955,8 +2954,7 @@ final class AppModel: ObservableObject {
                     let restored = previousIndex == nil ? try protectedInput.validatedRestore(in: response) : response
                     // The restore step must not turn a technical answer into an
                     // English sentence after the model output was accepted.
-                    let normalized = sourceLanguage == nil ? SimplifiedChineseNormalizer.normalize(restored)
-                        : target.normalize(restored)
+                    let normalized = target.normalize(restored)
                     let chinese = try TranslationAcceptance.validatedCaption(
                         normalized, source: normalizedInput, sourceLanguage: sourceLanguage, target: target)
                     guard currentGeneration == self.generation, currentSession == self.sessionID,
@@ -3025,8 +3023,7 @@ final class AppModel: ObservableObject {
                     if let recovered {
                         do {
                             let restored = try protectedInput.validatedRestore(in: recovered)
-                            let normalized = sourceLanguage == nil ? SimplifiedChineseNormalizer.normalize(restored)
-                                : target.normalize(restored)
+                            let normalized = target.normalize(restored)
                             accepted = try TranslationAcceptance.validatedCaption(
                                 normalized, source: normalizedInput, sourceLanguage: sourceLanguage, target: target)
                         } catch {
@@ -3433,10 +3430,10 @@ final class AppModel: ObservableObject {
                     return
                 }
                 note = LearningPrompts.resolvingFollowUps(note, targets: draft.pendingTargets)
-                note.topic = SimplifiedChineseNormalizer.normalize(note.topic)
+                note.topic = captionTarget.normalize(note.topic)
                 note.sourceVersion = 2
                 for index in note.points.indices {
-                    note.points[index].text = SimplifiedChineseNormalizer.normalize(note.points[index].text)
+                    note.points[index].text = captionTarget.normalize(note.points[index].text)
                 }
                 try learningNotebook.append(evidence: inputSnapshot, note: note)
                 learningDraft = nil

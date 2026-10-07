@@ -62,6 +62,28 @@ enum PowerSourceMonitor {
     }
 }
 
+/// Inspection copies have a fixed script, independent of the output target.
+/// Never use these copies as the generated or stored caption.
+enum TranslationCheckText {
+    static func simplified(_ text: String) -> String { SimplifiedChineseNormalizer.normalize(text) }
+
+    /// Keep the default target's frozen checks. Future targets inspect a
+    /// separate Simplified Chinese copy without changing their output text.
+    static func inspectionCopy(_ text: String, targetCode: String) -> String {
+        targetCode == "zh-Hans" ? text : simplified(text)
+    }
+
+    static func containsInstructionLeak(_ text: String, targetCode: String,
+                                        normalizeOutput: (String) -> String) -> Bool {
+        let folded = (targetCode == "zh-Hans" ? normalizeOutput(text) : simplified(text)).lowercased()
+        return ["translation_instruction", "source_text_to_translate", "source language",
+                "源语言", "原文语言", "translate the quoted lecture content",
+                "将引用的讲座内容翻译", "把引用的讲座内容翻译", "standard written mandarin wording",
+                "标准书面普通话", "end translation metadata", "begin quoted lecture content",
+                "end quoted lecture content", "翻译元数据"].contains(where: folded.contains)
+    }
+}
+
 /// The new source-to-target path has one output policy. Future output languages
 /// belong here; the existing English prompts remain frozen for compatibility.
 enum CaptionTranslationTarget: String, Sendable {
@@ -105,7 +127,7 @@ enum CaptionTranslationTarget: String, Sendable {
     private static let cantonesePhrases = ["呢个", "呢啲"]
 
     private func containsCantoneseWording(_ text: String) -> Bool {
-        let simplified = SimplifiedChineseNormalizer.normalize(text)
+        let simplified = TranslationCheckText.simplified(text)
         return text.contains(where: Self.cantoneseCharacters.contains)
             || Self.cantonesePhrases.contains(where: simplified.contains)
     }
@@ -135,12 +157,7 @@ enum CaptionTranslationTarget: String, Sendable {
     }
 
     func containsInstructionLeak(_ text: String) -> Bool {
-        let folded = normalize(text).lowercased()
-        return ["translation_instruction", "source_text_to_translate", "source language",
-                "源语言", "原文语言", "translate the quoted lecture content",
-                "将引用的讲座内容翻译", "把引用的讲座内容翻译", "standard written mandarin wording",
-                "标准书面普通话", "end translation metadata", "begin quoted lecture content",
-                "end quoted lecture content", "翻译元数据"].contains(where: folded.contains)
+        TranslationCheckText.containsInstructionLeak(text, targetCode: rawValue, normalizeOutput: normalize)
     }
 
     func containsOutputScript(_ text: String) -> Bool {
@@ -289,17 +306,17 @@ enum TranslationAcceptance {
     }
 
     private static func unsupportedModelSelfDescription(in foldedCandidate: String,
-                                                        source: String) -> Bool {
-        containsModelSelfDescription(foldedCandidate)
-            && !containsModelSelfDescription(source.folding(
+                                                        source: String, targetCode: String = "zh-Hans") -> Bool {
+        containsModelSelfDescription(TranslationCheckText.inspectionCopy(foldedCandidate, targetCode: targetCode))
+            && !containsModelSelfDescription(TranslationCheckText.inspectionCopy(source, targetCode: targetCode).folding(
                 options: [.widthInsensitive, .diacriticInsensitive], locale: nil))
     }
 
     /// A narrow structural check for unfinished previews. Do not apply the
     /// complete-prose gate to text whose remaining tokens have not arrived.
-    static func isModelReply(_ candidate: String, source: String) -> Bool {
+    static func isModelReply(_ candidate: String, source: String, targetCode: String = "zh-Hans") -> Bool {
         unsupportedModelSelfDescription(in: candidate.folding(
-            options: [.widthInsensitive, .diacriticInsensitive], locale: nil), source: source)
+            options: [.widthInsensitive, .diacriticInsensitive], locale: nil), source: source, targetCode: targetCode)
     }
 
     static let formulaNotice = "【公式待核对】"
@@ -695,7 +712,7 @@ enum TranslationAcceptance {
             let text = folded as NSString
             let unit = text.substring(with: match.range(at: 2))
             let lookupUnit = symbolicOnly || quantityUnitFamilies[unit] != nil
-                ? unit : SimplifiedChineseNormalizer.normalize(unit)
+                ? unit : TranslationCheckText.simplified(unit)
             guard !symbolicOnly || symbolicQuantityUnits.contains(unit), let family = quantityUnitFamilies[lookupUnit],
                   let number = quantityNumberIdentity(text.substring(with: match.range(at: 1))) else { return nil }
             return (number, family)
@@ -703,7 +720,7 @@ enum TranslationAcceptance {
         guard !symbolicOnly else { return nil }
         // Longest unit first: 四千克 is four kg, not four thousand g.
         // Normalize this lookup copy only; replacements use the source token.
-        let lookup = SimplifiedChineseNormalizer.normalize(folded)
+        let lookup = TranslationCheckText.simplified(folded)
         for unit in quantityUnitSuffixes where lookup.hasSuffix(unit) {
             let numeral = String(lookup.dropLast(unit.count)).trimmingCharacters(in: .whitespaces)
             if let arabic = chineseQuantityNumber(numeral), let number = quantityNumberIdentity(arabic) {
@@ -787,7 +804,7 @@ enum TranslationAcceptance {
             var replacements: [(NSRange, String)] = []
             for value in values {
                 guard let raw = object[value.id] else { throw fail() }
-                let text = SimplifiedChineseNormalizer.normalize(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = target.normalize(raw).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard containsHan(text), !containsKanaOrHangul(text), text.count <= 160,
                       text.rangeOfCharacter(from: CharacterSet(charactersIn: "\"'“”‘’`\r\n")) == nil
                 else { throw fail() }
@@ -954,7 +971,7 @@ enum TranslationAcceptance {
             var replacements: [(NSRange, String)] = []
             for value in values {
                 guard let raw = object[value.id] else { throw fail() }
-                let translation = SimplifiedChineseNormalizer.normalize(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+                let translation = target.normalize(raw).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !translation.isEmpty, translation.count <= 32, containsHan(translation),
                       // The prose tokenizer also includes Han letters. Inspect
                       // scripts directly so Chinese itself is not rejected.
@@ -1142,7 +1159,7 @@ enum TranslationAcceptance {
         let folded = body.folding(options: [.widthInsensitive, .diacriticInsensitive], locale: nil)
         if let structural = structuralRejection(in: folded, source: source, originalIsEmpty: body.isEmpty,
             containsLeak: { text in leakMarkers.contains(where: text.contains) },
-            containsSelfReply: { text, source in unsupportedModelSelfDescription(in: text, source: source) }) {
+            containsSelfReply: { text, source in unsupportedModelSelfDescription(in: text, source: source, targetCode: target.rawValue) }) {
             return structural
         }
         if target.containsInstructionLeak(body) { return .promptLeak }
@@ -1195,7 +1212,7 @@ enum TranslationAcceptance {
                                                     target: target) {
                 return .failure(rejection)
             }
-        } else if let rejection = contentRejection(candidate: candidate, source: source) { return .failure(rejection) }
+        } else if let rejection = contentRejection(candidate: candidate, source: source, targetCode: target.rawValue) { return .failure(rejection) }
         guard source.contains("{") else { return .success(candidate) }
         guard preservesSourceJSON(in: bodyWithoutApplicationNotice(candidate), source: source) else {
             return .failure(.jsonStructure)
@@ -1209,7 +1226,7 @@ enum TranslationAcceptance {
         catch { return .failure(.jsonQuantity) }
     }
 
-    private static func contentRejection(candidate: String, source: String) -> Rejection? {
+    private static func contentRejection(candidate: String, source: String, targetCode: String) -> Rejection? {
         // Application status text is not evidence that the model translated the
         // body. This also applies when restored/retried captions are revalidated.
         let trimmed = bodyWithoutApplicationNotice(candidate).folding(
@@ -1217,7 +1234,7 @@ enum TranslationAcceptance {
         )
         if let structural = structuralRejection(in: trimmed, source: source,
             containsLeak: { text in leakMarkers.contains(where: text.contains) },
-            containsSelfReply: { text, source in unsupportedModelSelfDescription(in: text, source: source) }) {
+            containsSelfReply: { text, source in unsupportedModelSelfDescription(in: text, source: source, targetCode: targetCode) }) {
             return structural
         }
 
@@ -2217,15 +2234,18 @@ enum RepairNumericNovelty {
         return result
     }
 
-    static func rejection(candidate: String, requestJSON: String, existingChinese: String) -> String? {
+    static func rejection(candidate: String, requestJSON: String, existingChinese: String,
+                          targetCode: String = "zh-Hans") -> String? {
         guard let fields = (try? JSONSerialization.jsonObject(with: Data(requestJSON.utf8))) as? [String: String],
               let target = fields["target_translate_only"], let before = fields["context_before_do_not_translate"],
               let after = fields["context_after_do_not_translate"] else { return nil }
-        let result = assess(candidate: candidate, support: [target, existingChinese, before, after])
+        let result = assess(candidate: candidate, support: [target, existingChinese, before, after], targetCode: targetCode)
         return result.unsupported.isEmpty ? nil : "重译增加了没有依据的新数值，已保留原译文"
     }
 
-    static func assess(candidate: String, support: [String]) -> Assessment {
+    static func assess(candidate: String, support: [String], targetCode: String = "zh-Hans") -> Assessment {
+        let candidate = TranslationCheckText.inspectionCopy(candidate, targetCode: targetCode)
+        let support = support.map { TranslationCheckText.inspectionCopy($0, targetCode: targetCode) }
         let proposed = digitInventory(candidate)
         guard !proposed.values.isEmpty else {
             let hasChinese = chinese.firstMatch(in: candidate, range: NSRange(candidate.startIndex..., in: candidate)) != nil
@@ -2609,7 +2629,7 @@ enum QwenTranslationClient {
             }
             return (output, protected.unmaskedFailure(in: output)
                 ?? RepairNumericNovelty.rejection(candidate: output, requestJSON: input,
-                                                  existingChinese: previousChinese))
+                                                  existingChinese: previousChinese, targetCode: target.rawValue))
         }
         let prefix = stableTranslationPrefix(previousChinese)
         let source = previous.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2644,7 +2664,7 @@ enum QwenTranslationClient {
         let repairSource = canRepairTail ? tail : previous
         let previousRejection = previousOutput.rejection
             ?? TranslationAcceptance.rejection(candidate: previousTranslation, source: repairSource, target: target)?.reason
-        let normalizedPrevious = SimplifiedChineseNormalizer.normalize(previousTranslation)
+        let normalizedPrevious = target.normalize(previousTranslation)
         let revisedPrevious: String?
         if previousRejection != nil {
             // Keep the Chinese line that is already on screen.
