@@ -114,6 +114,8 @@
 		C70400000000000000000005 /* ZhVariants in Resources */ = {isa = PBXBuildFile; fileRef = C70400000000000000000006 /* ZhVariants */; };
 		C70400000000000000000007 /* ZhVariantFixtures in Resources */ = {isa = PBXBuildFile; fileRef = C70400000000000000000008 /* ZhVariantFixtures */; };
 		C70800000000000000000001 /* TraditionalCaptionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */; };
+		C70900000000000000000001 /* ClassroomMarkdownRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70900000000000000000002 /* ClassroomMarkdownRendering.swift */; };
+		C70900000000000000000003 /* TraditionalMarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -239,6 +241,8 @@
 		C70400000000000000000006 /* ZhVariants */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ZhVariants; sourceTree = "<group>"; };
 		C70400000000000000000008 /* ZhVariantFixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ZhVariantFixtures; path = "../Scripts/Fixtures/zh-variants-v1"; sourceTree = "<group>"; };
 		C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraditionalCaptionPresentationTests.swift; sourceTree = "<group>"; };
+		C70900000000000000000002 /* ClassroomMarkdownRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassroomMarkdownRendering.swift; sourceTree = "<group>"; };
+		C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraditionalMarkdownRenderingTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -269,6 +273,7 @@
 			isa = PBXGroup;
 			children = (
 				C70400000000000000000002 /* ChineseScriptConverter.swift */,
+				C70900000000000000000002 /* ClassroomMarkdownRendering.swift */,
 				910000000000000000000002 /* FloatingSubtitlePreferences.swift */,
 				930000000000000000000002 /* FloatingSubtitleWindow.swift */,
 				940000000000000000000002 /* FullScreenClassMode.swift */,
@@ -322,6 +327,7 @@
 			isa = PBXGroup;
 			children = (
 				C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */,
+				C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */,
 				C70400000000000000000008 /* ZhVariantFixtures */,
 				C70400000000000000000004 /* ChineseScriptConverterTests.swift */,
 				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
@@ -458,6 +464,7 @@
 				B72600000000000000000003 /* LatinLearningText.swift in Sources */,
 				B70500000000000000000001 /* OutputLanguage.swift in Sources */,
 				C70400000000000000000001 /* ChineseScriptConverter.swift in Sources */,
+				C70900000000000000000001 /* ClassroomMarkdownRendering.swift in Sources */,
 				900000000000000000000001 /* CaptionPresentation.swift in Sources */,
 				04F78613ACCF181FC7155CCF /* ReviewReportCollection.swift in Sources */,
 				BFEA359EEB395F257C15B7E0 /* ReviewIdentity.swift in Sources */,
@@ -511,6 +518,7 @@
 				B70000000000000000000007 /* AcceptanceVerdictSnapshotTests.swift in Sources */,
 				B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */,
 				C70800000000000000000001 /* TraditionalCaptionPresentationTests.swift in Sources */,
+				C70900000000000000000003 /* TraditionalMarkdownRenderingTests.swift in Sources */,
 				C70400000000000000000003 /* ChineseScriptConverterTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,
 				910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */,

@@ -1385,6 +1385,20 @@ final class AppModel: ObservableObject {
         await finishing.value
     }
 
+    /// Legacy regional files have no Simplified Chinese notebook draft.
+    /// Their Markdown has already been rendered by its original exporter.
+    var summaryIsLegacyRendered: Bool {
+        outputLanguage.profile.renderer != .identity && learningNotebook.batches.isEmpty
+            && sessionSnapshot?.legacyMarkdown != nil
+    }
+
+    /// Frozen note evidence disambiguates schedule fields even after a later
+    /// transcript repair, and when transcript export is switched off.
+    var notesScheduleEvidence: [TranscriptSegment] {
+        guard outputLanguage.profile.renderer != .identity else { return [] }
+        return learningNotebook.batches.flatMap(\.evidence) + segments
+    }
+
     // MARK: - 摘要导出
 
     var exportDirectory: URL? {

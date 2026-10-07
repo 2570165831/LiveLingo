@@ -76,3 +76,18 @@ neither direction is called correct merely because it differs.
   The regional UI now retains the original UI failure wording; a creation
   fixture also now sets the real creation preference. Focused and full reruns
   passed. Failed build/test evidence remains in the task scratch directory.
+
+### Step 9
+
+- Added structural Markdown rendering for notes and review displays. Original
+  and proposed review text both render; source evidence, including trailing
+  whitespace and non-Han scalars, is preserved. Disclosure titles stay in the
+  interface language. Classification always reads the Simplified Chinese draft.
+- Schedule rows render only the target field. Frozen evidence disambiguates
+  separators inside either field. Already rendered regional legacy summaries
+  bypass conversion.
+- Full final Xcode run: XCTest 1176, one skipped, zero failures; Swift Testing
+  166. Warning checker: zero. Preference cleanup: 296 created and cleaned.
+  Log: `step9-final-xcode.log`. Eight new Markdown tests passed.
+- Python: 674 tests, six skipped, zero failures. Existing multilingual CLI:
+  20 groups; target review: six groups. G0 frozen-source diff remains empty.

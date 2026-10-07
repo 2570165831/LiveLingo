@@ -565,12 +565,16 @@ struct ContentView: View {
                             Text("这一批没有新增学习要点，先前内容保留在整课笔记中。")
                                 .foregroundStyle(.secondary)
                         } else {
-                            SummaryMarkdownView(text: wholeLessonNotes ? model.lectureSummary : model.latestSummaryUpdate)
+                            SummaryMarkdownView(text: wholeLessonNotes ? model.lectureSummary : model.latestSummaryUpdate,
+                                language: model.captionDisplayLanguage,
+                                isLegacyRendered: wholeLessonNotes && model.summaryIsLegacyRendered,
+                                scheduleEvidence: model.notesScheduleEvidence, converter: model.chineseScriptConverter)
                         }
                         if !model.reviewAdvice.isEmpty {
                             Divider()
                             DisclosureGroup("核对意见 · 正文已保留") {
-                                SummaryMarkdownView(text: model.reviewAdvice)
+                                SummaryMarkdownView(text: model.reviewAdvice, language: model.captionDisplayLanguage,
+                                    scheduleEvidence: model.notesScheduleEvidence, converter: model.chineseScriptConverter)
                             }
                         }
                     }
@@ -1990,6 +1994,10 @@ private struct RecordingMeterView: View {
 
 private struct SummaryMarkdownView: View {
     let text: String
+    var language: OutputLanguage = .simplifiedChinese
+    var isLegacyRendered = false
+    var scheduleEvidence: [TranscriptSegment] = []
+    var converter: ChineseScriptConverter = .shared
 
     private var lines: [String] {
         #if DEBUG
@@ -2005,7 +2013,8 @@ private struct SummaryMarkdownView: View {
         let lines = self.lines
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, _ in
-                switch SummaryMarkdownLine.classify(lines, at: index) {
+                switch SummaryMarkdownLine.displayed(lines, at: index, language: language,
+                    isLegacyRendered: isLegacyRendered, scheduleEvidence: scheduleEvidence, converter: converter) {
                 case let .reviewChange(original, proposed):
                     ReviewChangeView(original: original, proposed: proposed)
                 case .hidden, .blank:
