@@ -23,6 +23,53 @@ enum ClassroomPalette {
     }
 }
 
+/// Sonoma's native controls still use the accent-color environment, and its
+/// toolbar can discard the native prominent bezel. Keep newer systems native.
+enum ClassroomAppearanceCompatibility {
+    static func needsLegacyControls(on version: OperatingSystemVersion) -> Bool {
+        version.majorVersion == 14
+    }
+}
+
+extension View {
+    @ViewBuilder
+    func classroomTint(_ color: Color, legacyColor: Color? = nil,
+                       on version: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion) -> some View {
+        if ClassroomAppearanceCompatibility.needsLegacyControls(on: version) {
+            let accent = legacyColor ?? color
+            self.tint(accent).accentColor(accent)
+        } else {
+            self.tint(color)
+        }
+    }
+
+    @ViewBuilder
+    func classroomToolbarPrimaryStyle(
+        on version: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
+    ) -> some View {
+        if ClassroomAppearanceCompatibility.needsLegacyControls(on: version) {
+            self.buttonStyle(ClassroomLegacyPrimaryButtonStyle())
+        } else {
+            self.buttonStyle(.borderedProminent)
+        }
+    }
+}
+
+private struct ClassroomLegacyPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(ClassroomPalette.accent, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.45)
+    }
+}
+
 #if DEBUG
 /// Counts work in isolated view tests; no classroom text is collected.
 @MainActor
@@ -120,7 +167,7 @@ struct ContentView: View {
         }) { sheet in
             classroomSheet(sheet)
                 .environmentObject(model)
-                .tint(ClassroomPalette.accent)
+                .classroomTint(ClassroomPalette.accent)
                 .onAppear {
                     FilePanelPresentation.registerSheet(id: sheetPresentationID) {
                         activeSheet = nil
@@ -128,7 +175,7 @@ struct ContentView: View {
                 }
         }
         .modifier(ApplePreviewTranslationHost())
-        .tint(ClassroomPalette.accent)
+        .classroomTint(ClassroomPalette.accent)
     }
 
     /// The window title names the current lesson; the app name stays in the menu bar.
@@ -170,8 +217,8 @@ struct ContentView: View {
                       systemImage: model.hasActiveSession ? "stop.circle.fill" : "record.circle")
                     .labelStyle(.titleAndIcon)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(ClassroomPalette.accent)
+            .classroomToolbarPrimaryStyle()
+            .classroomTint(ClassroomPalette.accent)
             .disabled(!model.canToggleRecording)
             .accessibilityIdentifier("classroom-record-stop")
         }
@@ -352,7 +399,7 @@ struct ContentView: View {
                 Toggle("跟随最新", isOn: $followLatest)
                     .toggleStyle(.button)
                     .controlSize(.small)
-                    .tint(.gray)
+                    .classroomTint(.gray, legacyColor: ClassroomPalette.accent)
                     .help("关闭后可阅读先前字幕，新内容不会自动滚动到顶部")
                     .accessibilityIdentifier("classroom-follow-latest")
             }
@@ -832,7 +879,7 @@ struct ClassroomSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .tint(ClassroomPalette.accent)
+        .classroomTint(ClassroomPalette.accent)
         .frame(width: 520)
         .frame(minHeight: 480)
     }
