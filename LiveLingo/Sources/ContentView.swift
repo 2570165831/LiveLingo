@@ -9,6 +9,10 @@ import SwiftUI
 /// icons only; text keeps its normal color.
 enum ClassroomPalette {
     static let accent = dynamic(light: 0x636366, dark: 0x747479)
+    static let onAccent = Color(nsColor: .alternateSelectedControlTextColor)
+    static let inactiveAccent = Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
+    static let onInactiveAccent = Color(nsColor: .unemphasizedSelectedTextColor)
+    static let accentOutline = Color(nsColor: .labelColor)
     static let recording = dynamic(light: 0xDE2910, dark: 0xDE2910)
     static let failure = recording
     static let attention = dynamic(light: 0xD9603A, dark: 0xF48A61)
@@ -33,11 +37,10 @@ enum ClassroomAppearanceCompatibility {
 
 extension View {
     @ViewBuilder
-    func classroomTint(_ color: Color, legacyColor: Color? = nil,
+    func classroomTint(_ color: Color,
                        on version: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion) -> some View {
         if ClassroomAppearanceCompatibility.needsLegacyControls(on: version) {
-            let accent = legacyColor ?? color
-            self.tint(accent).accentColor(accent)
+            self.tint(color).accentColor(color)
         } else {
             self.tint(color)
         }
@@ -55,16 +58,41 @@ extension View {
     }
 }
 
-private struct ClassroomLegacyPrimaryButtonStyle: ButtonStyle {
+struct ClassroomLegacyPrimaryButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.controlActiveState) private var activeState
+
+    #if DEBUG
+    // SwiftUI's contrast environment is read-only. Hosted tests exercise the
+    // same drawing branch without changing system accessibility preferences.
+    private var contrastForTesting: ColorSchemeContrast?
+    init(contrastForTesting: ColorSchemeContrast? = nil) {
+        self.contrastForTesting = contrastForTesting
+    }
+    #endif
+
+    private var needsOutline: Bool {
+        #if DEBUG
+        if let contrastForTesting { return contrastForTesting == .increased }
+        #endif
+        return contrast == .increased
+    }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(.white)
+            .font(.body)
+            .foregroundStyle(activeState == .inactive ? ClassroomPalette.onInactiveAccent : ClassroomPalette.onAccent)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(ClassroomPalette.accent, in: RoundedRectangle(cornerRadius: 6))
+            .background(activeState == .inactive ? ClassroomPalette.inactiveAccent : ClassroomPalette.accent,
+                        in: RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                if needsOutline {
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(ClassroomPalette.accentOutline, lineWidth: 1)
+                }
+            }
             .contentShape(RoundedRectangle(cornerRadius: 6))
             .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.45)
     }
@@ -399,7 +427,7 @@ struct ContentView: View {
                 Toggle("跟随最新", isOn: $followLatest)
                     .toggleStyle(.button)
                     .controlSize(.small)
-                    .classroomTint(.gray, legacyColor: ClassroomPalette.accent)
+                    .classroomTint(.gray)
                     .help("关闭后可阅读先前字幕，新内容不会自动滚动到顶部")
                     .accessibilityIdentifier("classroom-follow-latest")
             }
