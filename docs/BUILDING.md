@@ -59,11 +59,14 @@ xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo \
 
 ## 签名、公证与 DMG
 
-签名材料和公证凭据不存入仓库。发布者必须显式提供自己的 Developer ID 身份、证书及钥匙串路径；证书须有效，并与钥匙串中可用的私钥匹配。公证只使用发布者本机已有的 `notarytool` keychain profile，不接受仓库内的密码、API key 或凭据文件。
+签名材料和公证凭据不存入仓库。发布者须提供有效的 Developer ID Application 身份、匹配证书和含私钥的签名钥匙串。公证只使用本机已有的 `notarytool` keychain profile；脚本不创建、导入或解锁钥匙串，不接受仓库内的密码、API key 或凭据文件。
 
-本文沿用原脚本的 `<你的 profile>` 占位写法；这个源码起点没有记录具体 profile 名，不能据此猜测发布者本机的配置。真实运行时必须把它替换为已有名称，也可用 `LIVELINGO_NOTARY_PROFILE` 指定。占位符或空名称会在提交前报错；脚本不创建、导入或解锁钥匙串。
+`--keychain` 只指定 **DMG 签名**的钥匙串。独立的 `--notary-keychain`（或 `LIVELINGO_NOTARY_KEYCHAIN`）指定公证 profile 所在钥匙串，默认省略，让 notarytool 使用正常搜索范围；用 `--sync` 保存的 profile 不应被强制限定到签名钥匙串。源码未记录发布者的 profile 名，不能猜测；下面先用 `read` 输入已有的真实名称，空值和旧文档占位符 `<你的 profile>` 都会被拒绝。
 
 ```sh
+read -r LIVELINGO_NOTARY_PROFILE
+export LIVELINGO_NOTARY_PROFILE
+
 ./Scripts/sign-offline-app.py --app work/OfflineCandidate/LiveLingo.app \
   --identity 'Developer ID Application: Example Name (TEAMID)' \
   --certificate /absolute/path/to/developer-id.cer \
@@ -72,69 +75,115 @@ xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo \
 ./Scripts/build-offline-dmg.sh --app work/OfflineCandidate/LiveLingo.app \
   --identity 'Developer ID Application: Example Name (TEAMID)' \
   --keychain /absolute/path/to/login.keychain-db \
-  --notary-profile '<你的 profile>' \
+  --notary-profile "$LIVELINGO_NOTARY_PROFILE" \
   --output work/OfflineDMG/LiveLingo-next-macOS14+-arm64.dmg
 ```
 
-`build-offline-dmg.sh` 的正常运行会签名 DMG 并向苹果上传两件发布产物，须在真实发布已获授权、凭据已准备好后执行。App 签名仍由前一条 `sign-offline-app.py` 命令完成，打包脚本不会补签或降低签名要求。完整顺序是：
+身份、证书和路径也要换成发布者的实际配置。正常打包会签名 DMG，向苹果上传 App 公证容器及最终 DMG，必须已获真实发布授权后才运行。完整顺序是：
 
-1. 完整签名 App，校验签名、entitlements、自包含依赖与 macOS 14 最低版本。
-2. 复制到独立暂存目录，原输入 App 保持只读。用 `ditto -c -k --sequesterRsrc --keepParent` 把暂存 App 打成 ZIP，保留资源和目录结构；不拿最终 DMG 代替 App 的公证容器。
-3. 提交 App ZIP，用返回的 submission ID 查询到 `Accepted`。
-4. 对同一暂存 App 执行 `xcrun stapler staple`、`xcrun stapler validate` 和 `codesign --verify --deep --strict`。任何一步失败都不生成 DMG，装订后不再修改或重新签名 App。
-5. 用已装订的 App 创建 DMG，然后签名并校验 DMG。
-6. 提交签名后的 DMG，仍按 submission ID 查询到 `Accepted`，再对 DMG 装订票据。
-7. 检查最终 DMG 的票据、严格签名和镜像完整性，只读挂载它，对**镜像内的 App**执行 `stapler validate`、`codesign --verify --deep --strict` 和 `spctl --assess --type execute`；成功卸载后才报告发布自检通过。
+1. 校验已完整签名 App 的 entitlements、自包含依赖、签名身份和 macOS 14 最低版本。
+2. 复制到私有暂存目录，再做结构检查和 `codesign --verify --deep --strict`。只含 `LiveLingo.app` 的目录生成 App 公证临时 DMG（UDZO）；不再用 `ditto -c -k` ZIP，helper 也直接拒绝 ZIP 新上传，避免超过 4 GiB 文件的 ZIP64 风险。复制仍保留资源和扩展属性。
+3. 打印容器的实际字节数，提交一次，逐行保存输出；收到 `id:` 立即原子写入回执。只有上传正常退出且出现完成标志，才开始按 ID 查询及计处理时限。
+4. `Accepted` 后对原暂存 App 装订、验证票据，再严格校验签名。装订最多尝试 4 次，默认等待 5、10、20 秒；可用 `--staple-max-attempts`、`--staple-retry-delay` 调整。失败保留暂存供续跑。
+5. 将“应用程序”快捷方式和使用说明加入同一暂存目录，用已装订 App 创建正式发布镜像，**先放在暂存中**，签名时使用 `--timestamp`，校验签名身份和镜像完整性。
+6. 公证签名后的发布 DMG，按 ID 查询到 `Accepted`。保留该已上传镜像不变，在同卷工作副本上以同样重试规则装订；副本装订/严格校验及哈希保存后才记录完成。装订后中断也能从未改变的已上传镜像恢复。
+7. 检查 DMG 与内置 App 的票据、严格签名及预期 Authority；对 DMG 执行 `spctl --assess --type open --context context:primary-signature`，要求返回 `Notarized Developer ID`。只读挂载后检查真实内置 App 的票据、严格签名和执行评估。按 `attach -plist` 返回的镜像设备号卸载，最多尝试 3 次；成功后清理空挂载目录。
+8. 全部自检通过且卸载成功后，才移动到正式 `--output` 文件名；已有文件或悬空链接均拒绝覆盖。半成品留在暂存，不占正式文件名。
 
-DMG 顶层仍只有 App、“应用程序”快捷方式和使用说明。App ZIP、提交编号、苹果返回的日志都在 `work/OfflineDMG/stage-.../` 的包内容之外，不进入 DMG，也不提交到 Git。APFS 暂存可复用文件块，但 ZIP 和 DMG 会另占空间，发布前须准备足够的临时空间。暂存 App 用于核对票据，ZIP 对应 App 提交，日志用于故障诊断；验收完成且不再需要恢复该次发布后，再按授权清理这些中间产物。
+正式 DMG 顶层只有 App、“应用程序”快捷方式和使用说明；公证临时 DMG、回执、日志、状态及工具路径记录均在 payload 外。输出、暂存和挂载点拒绝使用 `/Applications`、系统目录、主目录根或卷根，也会解析目录链接后检查。暂存与输出不能放进原输入 App，须位于同卷以保证最终移动原子完成。生产工具使用绝对路径，stapler/notarytool 经系统 xcrun 解析并记录实际路径；不从普通 PATH 获取发布工具。`LIVELINGO_TEST_TOOL_DIR` 是明确的离线测试替身入口，真实发布须取消它和测试用 `LIVELINGO_PYTHON`。
 
-该流程用于下一次发布，不能证明旧安装包的 App 已有票据，也不改变 0.2.0 用户首次打开时需要联网查询的发布说明。签名、公证服务返回 `Accepted`、票据装订和实际离线启动分别验证；挂载自检也不能代替干净 macOS 14 的离线 Gatekeeper 与模型功能测试。
+APFS 同卷暂存和 DMG 装订工作副本可共享文件块，但 App 公证镜像与发布镜像各自占用空间；不支持克隆的卷还需为工作副本预留额外空间。镜像容量按文件的逻辑长度、每个目录项的 8 KiB 元数据余量，再加 20% 和 256 MiB 估算，避免稀疏文件让自动容量估算偏小；这不是实际占用保证。暂存 App 是唯一 App 装订副本，App 临时 DMG 对应第一次提交，未改变的已上传发布 DMG 用于中断恢复，装订工作副本及日志用于自检/复核；完成真实验收且不再需要恢复后，按授权清理这些中间件。脚本不会自动删除它们。
 
-### 不使用 `--wait`：有界轮询与恢复
+### 上传和处理分别计时，不使用 `--wait`
 
-0.2.0 发布时，`notarytool --wait` 曾以退出码 **138** 崩溃，还有一次提交停留在处理中约 **9 小时**。这两件事不代表苹果已经拒绝该提交，也不能直接认定是同一个原因。新流程由 `Scripts/notarize-artifact.py` 执行：`notarytool submit ... --output-format json` 后保存 ID，再用 `notarytool info <ID> ... --output-format json` 轮询；不使用 `--wait`，不自动重复上传。
+0.2.0 发布记录中，`notarytool --wait` 曾以退出码 138 崩溃，还有提交处理约 9 小时的情况；这些历史现象不证明同一原因或已被拒绝。新 helper 使用普通文本 `submit --no-progress`，`info --output-format json`，不使用 `--wait`，不自动重传。
 
 | 参数 | 默认值 | 范围 |
 | --- | --- | --- |
-| `--notary-timeout` | 3600 秒 | 每件产物从提交开始的总时限，包含上传与查询 |
-| `--notary-command-timeout` | 600 秒 | 单次命令时限，最多使用总时限的剩余时间 |
-| `--notary-poll-interval` | 30 秒 | 相邻查询的等待间隔 |
-| `--notary-max-polls` | 120 次 | 每件产物的查询总次数，失败查询也计数 |
-| `--notary-max-retries` | 3 次 | 连续查询失败后的重试次数；成功查询重置此计数，提交不重试 |
+| `--notary-submit-timeout` | 0（不限） | 只限制上传；正数为上传秒数上限 |
+| `--notary-timeout` | 3600 秒 | 每件产物**上传完成后**的处理总时限；续查时重新计处理时限 |
+| `--notary-command-timeout` | 60 秒 | 仅 info/log，最多使用处理时限的剩余时间 |
+| `--notary-poll-interval` | 30 秒 | 相邻查询间隔 |
+| `--notary-max-polls` | 120 次 | 查询总次数，失败查询也计数 |
+| `--notary-max-retries` | 3 次 | 连续 info 失败、log 获取失败的额外重试次数；submit 不重试 |
 
-上传大文件时，可按实际连接速度显式调整超时；这些数值是停止条件，不是预计公证完成时间。`Invalid`、`Rejected`、编号不匹配或未知状态都会停止，拒绝时在剩余时限内尝试保存苹果诊断日志；达到时限、次数或重试上限也会停止。未通过完整流程的 DMG 不能当作发布通过。
-
-如果上传报错、超时或返回无法解析的内容，结果可能不明，不能假定未上传就重跑。先读取对应 `notary-app/` 或 `notary-dmg/` 中的输出和 `receipt.json`；没有 ID 时，用相同 profile 的 `notarytool history` 核对该次提交。已有 ID 可继续查询，不再次上传：
+默认上传不限时，不再受原来的 600 秒/3600 秒限制。若要显式限定上传，以 **14.3 GB = 14,300,000,000 字节**、假设持续上行 **2 Mbit/s** 计算：`14,300,000,000 × 8 ÷ 2,000,000 = 57,200 秒`，即 **15 小时 53 分 20 秒**，尚未计协议开销、停顿和重试。这是带宽假设下的估算，不保证实际速度。可以给每件上传 20 小时、处理 1 小时，并保持查询短超时：
 
 ```sh
-./Scripts/notarize-artifact.py \
-  --submission-id '<原提交编号>' --profile '<你的 profile>' \
+./Scripts/build-offline-dmg.sh --app work/OfflineCandidate/LiveLingo.app \
+  --identity 'Developer ID Application: Example Name (TEAMID)' \
   --keychain /absolute/path/to/login.keychain-db \
-  --receipt-dir work/notary-resume-new-run
+  --notary-profile "$LIVELINGO_NOTARY_PROFILE" \
+  --notary-submit-timeout 72000 --notary-timeout 3600 \
+  --notary-command-timeout 60 \
+  --output work/OfflineDMG/LiveLingo-next-macOS14+-arm64.dmg
 ```
 
-恢复查询的日志目录必须是新目录。此命令只查询状态，不装订票据、不生成 DMG；得到 `Accepted` 后须继续处理原暂存 App 或原 DMG，并重新检查最终版本。失败的 DMG 会保留，打包脚本拒绝覆盖已有输出，不应通过盲目重跑来恢复。
+两件容器分别上传。实际更慢时提高上传上限或用默认 0；参数是停止条件，不是公证完成时间预测。认证失败/找不到 profile 会单独报告，并打印 stderr 摘要；其他上传失败归为结果不明。`Invalid`/`Rejected` 会尝试获取日志，获取失败也明确报告。查询次数、重试次数或处理时限耗尽都不会放行产物。
+
+### 从暂存或已知提交编号续跑
+
+每次运行保存新回执目录，状态文件与产物 SHA-256 用于检查复用的容器没有改变；不要手工改暂存 App、镜像或状态。切换续查回执时原子保留已确认的查询编号和旧回执引用，即使新回执尚未生成就中断，也只继续查询，不重传。下例的目录和编号必须替换为本次发布实际值。续跑会复查 App，复用 Accepted 的回执，或只查询已完成上传的编号，再自动执行剩余装订、打包及自检步骤：
+
+```sh
+./Scripts/build-offline-dmg.sh --resume-stage work/OfflineDMG/stage-ACTUAL-RUN \
+  --notary-profile "$LIVELINGO_NOTARY_PROFILE"
+
+# 仅在已确认上传完成、但需要补入编号时指定；两个选项可分别使用。
+./Scripts/build-offline-dmg.sh --resume-stage work/OfflineDMG/stage-ACTUAL-RUN \
+  --notary-profile "$LIVELINGO_NOTARY_PROFILE" \
+  --app-submission-id ACTUAL-COMPLETED-APP-UUID \
+  --dmg-submission-id ACTUAL-COMPLETED-DMG-UUID
+```
+
+**上传被中断的编号不能续查，必须重新提交。** 收到 ID 只说明苹果分配了编号，不证明上传完成；不能从 history 找到 ID 就轮询。`receipt.json` 中 `uploadComplete: false` 的上传回执，脚本拒绝续用编号，且不会自动重传。检查原 stdout/stderr，确认需要重新上传后，用 `--resume-stage ... --resubmit-incomplete` 明确发起新提交；它保留旧回执，不复用未完成的编号。仅认证/profile 配置失败也可修正配置后按此方式重试；认证失败不等于已经发生上传。
+
+`--app-submission-id` / `--dmg-submission-id` 是调用者声明**已知完成上传**的入口，必须属于对应的同一产物，不能拿未完成的 ID 绕过回执检查。单独 helper 的 `--submission-id` 也有同一前提；query-only 回执保留 `submissionMode: explicit-resume`，不谎称本次 helper 亲自完成上传。Accepted 查询结果可用于继续装订。
+
+```sh
+./Scripts/notarize-artifact.py --submission-id ACTUAL-COMPLETED-UUID \
+  --profile "$LIVELINGO_NOTARY_PROFILE" \
+  --receipt-dir work/notary-resume-NEW-RUN
+```
+
+helper 本身只查询；要完成剩余发布步骤优先使用打包脚本的 `--resume-stage`。该入口支持本版生成的 `release-state.json`，旧版无状态的暂存不能直接套用。SIGHUP/SIGINT/SIGTERM 会停止本次 notarytool 进程组并记录中断及已收到编号；SIGKILL/掉电无法保证最后状态已写入。暂存锁防止同目录并发执行；如有遗留 `.release-lock`，先核实没有本次执行者，再处理锁，不能盲删锁或重复提交。
 
 ### 发布前自检与无凭据自测
 
-完整打包流程会自动调用以下独立检查，也可在分发前对同一份最终 DMG 重跑：
-
 ```sh
-./Scripts/verify-release-dmg.sh --dmg work/OfflineDMG/LiveLingo-next-macOS14+-arm64.dmg
-```
+./Scripts/verify-release-dmg.sh --dmg work/OfflineDMG/LiveLingo-next-macOS14+-arm64.dmg \
+  --identity 'Developer ID Application: Example Name (TEAMID)'
 
-检查会验证 DMG 的票据、签名和完整性，随后只读挂载，检查镜像内 App 的票据、严格签名和 `spctl` 结果；检查失败也会尝试卸载，卸载失败会报告挂载目录并返回失败。未给 `--dmg` 或使用 `--dry-run` 时明确说明**跳过真实产物检查**，不算验收通过；显式给出的文件不存在会报错。真实发布必须给出最终文件，不能使用跳过结果放行。
-
-不需要凭据和真实产物时，使用：
-
-```sh
 ./Scripts/build-offline-dmg.sh --dry-run
 /bin/zsh -n Scripts/build-offline-dmg.sh
 /bin/zsh -n Scripts/verify-release-dmg.sh
-python3 Scripts/test-release-flow.py
+/bin/bash -n Scripts/build-offline-dmg.sh
+/bin/bash -n Scripts/verify-release-dmg.sh
+PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/python3.13 Scripts/test-release-flow.py
 ```
 
-打桩自测在当前 worktree 的 `work/release-flow-tests/` 下创建最小假 App 和假钥匙串文件，把假 `xcrun`、`notarytool`、`stapler`、`codesign`、`hdiutil`、`spctl` 放在 PATH 前面；结构签名预检也由明确的测试替身处理。它验证步骤顺序、按 ID 轮询、查询恢复、超时和重试上限、拒绝后停止、挂载检查失败后的卸载、原 App 不变及已有输出保护。命令轨迹和结果保留在该目录，不删除其他文件、不访问真实钥匙串、不上传文件，也不验证真实签名、公证或 Gatekeeper 可用性。真实发布仍须发布者用有效身份和已有 profile 执行完整流程，再完成干净 macOS 14 离线安装与功能验收。
+独立自检的 `--identity` 可选，提供时逐行精确匹配 DMG 与挂载 App 的 Authority；打包流程总是传入预期身份。卸载资源忙时有限重试，不自动强制卸载；耗尽时保留设备号和挂载点供处理，返回失败。attach 尚未返回就中断时，使用 `hdiutil info -plist` 查回**同时匹配本次镜像与新挂载点**的设备，再有限重试卸载；没有找到设备时不对普通目录执行 detach，查询失败会明确报告。没有 `--dmg` 或 `--dry-run` 会明确跳过，不能当真实验收。
+
+打桩自测使用 `/private/tmp` 中的最小 App 和非钥匙串文本夹具，显式提供绝对路径的假 notarytool、stapler、codesign、hdiutil、spctl、ditto，以及结构校验替身。假镜像保存**创建当时的内容快照**，挂载检查不会偷读后来改变的暂存 App。测试核对 timestamp、签名身份/钥匙串、profile、严格签名、镜像验证、装订目标和步骤顺序；覆盖两阶段查询失败/拒绝、装订退避、续跑、未知上传、信号中断、部分 attach、忙碌 detach 及正式输出保护。关键参数删除和顺序破坏另有变异测试。超时使用可控逻辑时钟、模拟进程/管道，不依赖 Python 启动必须赶在 0.2 秒内；信号测试等到回执/挂载事件后才发信号。真实 App 签名命令构造通过工具调用拦截检查 hardened runtime 和 timestamp，绝不真实签名。测试结束删除本次临时夹具，不访问真实发布产物或凭据。
+
+本地大文件镜像实验可单独运行：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/python3.13 Scripts/test-large-app-dmg.py
+```
+
+2026-10-07 本机实测：稀疏文件逻辑大小 **5,136,696,107 字节**，源与 ditto 副本各实际分配 **53,248 字节**；显式镜像容量 **6,432,549,428 字节**。只含 App 的 UDZO 为 **406,172 字节**（零数据易压缩，不代表真实权重包大小）；镜像校验、只读挂载后读回大小及整文件 SHA-256 均通过，SHA-256 为 `6cdad844203ac789e7762c1354bc6b0bbff0169021eb731ec2f62bd953901707`。按设备号卸载后临时目录已删除。自动容量版本曾返回“设备上无剩余空间”，显式容量版本通过；实验没有签名或连接苹果服务。
+
+### 首次真实发布检查清单
+
+以下事项无法靠打桩或稀疏文件实验代替，首次真实发布仍须逐项实测：
+
+- 用户确认本次签名、公证上传和最终对外发布的具体产物/范围；准备可用私钥与已有 profile，确认 profile 的实际搜索范围及钥匙串锁定状态。脚本不会自行解锁或创建凭据。
+- 选择已安装且稳定的 Xcode/CLT，必要时显式设置 `DEVELOPER_DIR`；检查记录的 notarytool/stapler 真实路径和版本。历史 beta 工具与退出码 138 不能证明当前工具有同一故障。
+- 对含真实大权重的 App-only DMG 做第一次真实公证，确认提交文本的 ID/上传完成标志能被本版解析，以及服务为内置 App 生成可用票据；实测 App 装订和有限退避。稀疏大文件实验只证明本地容器大小和读回正确。
+- 对最终 DMG 装订并只读挂载，确认实际 stapler 版本能在只读卷上 validate；实测镜像与 App 的 Authority、严格签名、Gatekeeper，以及忙碌卷卸载。线上 validate/spctl 通过不等于离线票据证明。
+- 在干净 macOS 14 测试环境，对带下载隔离属性的最终文件做离线 Gatekeeper、安装、启动和模型功能验收；验证无需联网查询票据。记录测试对象的版本与校验和。
+- 对最终对外文件检查隐私元数据、嵌入内容及随包文件，排除钥匙串/回执/日志/本机路径；保留必要许可证。实际上传或发布前再次核对这就是已自检的最终版本。
 
 `Scripts/run-qwen-service.sh`、`Scripts/install-qwen-service.sh` 和 `Packaging/*.command` 是历史服务与旧安装布局的辅助脚本，不属于当前安装步骤。
 

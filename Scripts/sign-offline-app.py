@@ -19,7 +19,7 @@ Guarantees and boundaries:
     library locations, and symlinks escaping the bundle, are rejected: the
     candidate must be self-contained.
   * No notarization credentials are embedded. Continue with
-    Scripts/build-offline-dmg.sh: notarize an App ZIP, staple/validate the App,
+    Scripts/build-offline-dmg.sh: notarize an App-only DMG, staple/validate the App,
     then build/sign/notarize/staple the DMG and check its mounted App. That flow
     polls by submission ID with deadlines, never notarytool --wait. This signing
     script never downloads or uploads anything.
@@ -610,7 +610,7 @@ def main():
                     "appEntitlements": result["entitlements"],
                     "notarization": "next: Scripts/build-offline-dmg.sh --app <this app> "
                                     "--identity <identity> --keychain <keychain> --notary-profile <profile>; "
-                                    "App ZIP notarization and App staple/validate precede DMG creation; "
+                                    "App-only DMG notarization and App staple/validate precede release DMG creation; "
                                     "poll by submission ID, never --wait; no credentials are stored here"})
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
