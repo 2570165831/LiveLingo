@@ -993,6 +993,51 @@ struct LiveLingoCLI {
  }
 
  /// Claim a new body-bearing output without following or replacing a leaf.
+ static func privatizeNewDescriptor(_ descriptor: Int32, mode: mode_t) throws {
+  guard let empty = acl_init(0) else { throw CLIError.isolationFailed }
+  defer { acl_free(UnsafeMutableRawPointer(empty)) }
+  guard acl_set_fd(descriptor, empty) == 0, fchmod(descriptor, mode) == 0 else {
+   throw CLIError.isolationFailed
+  }
+  // macOS reports a missing extended ACL as ENOENT. Any surviving entry,
+  // including an inherited allow, prevents writing content to this new inode.
+  if let actual = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) {
+   defer { acl_free(UnsafeMutableRawPointer(actual)) }
+   var entry: acl_entry_t?
+   guard acl_get_entry(actual, ACL_FIRST_ENTRY.rawValue, &entry) == 1 else {
+    throw CLIError.isolationFailed
+   }
+  } else if errno != ENOENT { throw CLIError.isolationFailed }
+  var state = stat()
+  guard fstat(descriptor, &state) == 0, state.st_uid == getuid(),
+        state.st_mode & 0o7777 == mode else { throw CLIError.isolationFailed }
+ }
+
+ /// Only an exclusively claimed new directory is changed. Existing parents
+ /// are left intact; a symlink ancestor is rejected rather than resolved away.
+ static func createPrivateDirectory(_ url: URL) throws {
+  let parent = url.deletingLastPathComponent()
+  guard parent.resolvingSymlinksInPath() == parent else { throw CLIError.isolationFailed }
+  guard mkdir(url.path, 0o700) == 0 else {
+   throw errno == EEXIST ? CLIError.outputExists : CLIError.isolationFailed
+  }
+  let descriptor = Darwin.open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+  guard descriptor >= 0 else { throw CLIError.isolationFailed }
+  defer { Darwin.close(descriptor) }
+  try privatizeNewDescriptor(descriptor, mode: 0o700)
+ }
+
+ static func createPrivateParents(_ url: URL) throws {
+  guard url.resolvingSymlinksInPath() == url else { throw CLIError.isolationFailed }
+  var isDirectory: ObjCBool = false
+  if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+   guard isDirectory.boolValue else { throw CLIError.isolationFailed }
+   return
+  }
+  try createPrivateParents(url.deletingLastPathComponent())
+  try createPrivateDirectory(url)
+ }
+
  static func createPrivateFile(_ url: URL) throws -> FileHandle {
   let path = url.standardizedFileURL
   guard path.deletingLastPathComponent().resolvingSymlinksInPath() == path.deletingLastPathComponent() else {
@@ -1000,6 +1045,8 @@ struct LiveLingoCLI {
   }
   let descriptor = Darwin.open(path.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
   guard descriptor >= 0 else { throw errno == EEXIST ? CLIError.outputExists : CLIError.isolationFailed }
+  do { try privatizeNewDescriptor(descriptor, mode: 0o600) }
+  catch { Darwin.close(descriptor); throw error }
   return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
  }
 
@@ -1032,17 +1079,15 @@ struct LiveLingoCLI {
    let resolved = url.standardizedFileURL.resolvingSymlinksInPath().path
    return resolved == "/Applications" || resolved.hasPrefix("/Applications/")
   }) else { throw CLIError.installedAppForbidden }
-  try FileManager.default.createDirectory(at: directory.deletingLastPathComponent(), withIntermediateDirectories: true)
+  try createPrivateParents(directory.deletingLastPathComponent())
   // Claim the final directory exclusively, even if another CLI chose the same
   // path between the initial existence check and this operation.
-  guard mkdir(directory.path, 0o700) == 0 else {
-   throw errno == EEXIST ? CLIError.outputExists : CLIError.isolationFailed
-  }
+  try createPrivateDirectory(directory)
   let runtime = directory.appendingPathComponent(".cli-runtime", isDirectory: true)
   let data = runtime.appendingPathComponent("data", isDirectory: true)
   let checkpoints = runtime.appendingPathComponent("checkpoints", isDirectory: true)
   for folder in [runtime, data, checkpoints] {
-   guard mkdir(folder.path, 0o700) == 0 else { throw CLIError.isolationFailed }
+   try createPrivateDirectory(folder)
   }
   let marker = try newMarker(directory: directory, runID: runID, source: source)
   for (key, value) in ["LIVELINGO_PREFERENCES_SUITE": marker.preferencesSuite,

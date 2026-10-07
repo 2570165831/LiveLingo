@@ -222,10 +222,11 @@ class CorpusReviewTests(unittest.TestCase):
         mkdir.assert_not_called()
 
     def test_unset_root_cli_errors_precede_input_reads(self):
-        output = self.root / "unset" / "report.json"
-        commands = ((c.main, ["un", "--input", "must-not-be-read", "--output", str(output)],
+        raw_input = "SYNTHETIC_PRIVATE_REVIEW_INPUT_R10_89BA"
+        output = self.root / ("unset-" + raw_input) / "report.json"
+        commands = ((c.main, ["un", "--input", raw_input, "--output", str(output)],
                      c, "read_un"),
-                    (m.main, ["score", "must-not-be-read", "--output", str(output)],
+                    (m.main, ["score", raw_input, "--output", str(output)],
                      m, "read_examples"))
         with patch.dict(os.environ):
             os.environ.pop(c.OUTPUT_ROOT_ENV, None)
@@ -236,7 +237,10 @@ class CorpusReviewTests(unittest.TestCase):
                         self.assertRaises(SystemExit) as error:
                     main(arguments)
                 self.assertEqual(error.exception.code, 2)
-                self.assertIn(f"{c.OUTPUT_ROOT_ENV} is required", stderr.getvalue())
+                self.assertIn("invalid_arguments; use --help for usage.", stderr.getvalue())
+                self.assertNotIn(f"{c.OUTPUT_ROOT_ENV} is required", stderr.getvalue())
+                self.assertNotIn(raw_input, stderr.getvalue())
+                self.assertNotIn(str(output), stderr.getvalue())
                 self.assertNotIn("Traceback", stderr.getvalue())
                 reader.assert_not_called()
                 mkdir.assert_not_called()
@@ -325,15 +329,21 @@ class CorpusReviewTests(unittest.TestCase):
 
     def test_cli_reports_bad_terms_without_tracebacks_or_output_creation(self):
         row = MetricReviewTests().example()
+        raw_input = "SYNTHETIC_PRIVATE_REVIEW_INPUT_R10_89BA"
+        row["source"] = raw_input
         for terms in (None, 1, True, "aa", {"aa": True}):
             with self.subTest(terms=terms):
-                source = self.write("input.jsonl", json.dumps(dict(row, terms=terms)) + "\n")
+                source = self.write(raw_input + ".jsonl", json.dumps(dict(row, terms=terms)) + "\n")
                 output = self.root / "report.json"
                 stderr = io.StringIO()
                 with redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
                     m.main(["score", str(source), "--output", str(output)])
                 self.assertEqual(error.exception.code, 2)
-                self.assertIn("terms must be a list", stderr.getvalue())
+                self.assertIn("invalid_arguments; use --help for usage.", stderr.getvalue())
+                self.assertNotIn("terms must be a list", stderr.getvalue())
+                self.assertNotIn(raw_input, stderr.getvalue())
+                self.assertNotIn(str(source), stderr.getvalue())
+                self.assertNotIn(str(output), stderr.getvalue())
                 self.assertNotIn("Traceback", stderr.getvalue())
                 self.assertFalse(output.exists())
 

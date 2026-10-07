@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
@@ -41,7 +42,10 @@ class PrivacyPackageTests(unittest.TestCase):
     def write(self, relative, text=CANARY, root=None):
         path = (root or self.source) / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text)
         return path
 
     def manifest(self, python="python"):
@@ -154,9 +158,10 @@ class PrivacyPackageTests(unittest.TestCase):
         privacy.copy_distribution_tree(self.source, self.output)
 
     def test_portable_python_required_files_and_hidden_dylibs_are_preserved(self):
-        required = {"bin/python3.13": "synthetic interpreter", "lib/libpython3.13.dylib": "synthetic dylib",
+        native = b"\xcf\xfa\xed\xfe" + b"\x00" * 28
+        required = {"bin/python3.13": "synthetic interpreter", "lib/libpython3.13.dylib": native,
                     "lib/python3.13/os.py": "# synthetic stdlib", "lib/python3.13/encodings/__init__.py": "# encodings",
-                    "lib/python3.13/site-packages/sklearn/.dylibs/libomp.dylib": "synthetic OpenMP",
+                    "lib/python3.13/site-packages/sklearn/.dylibs/libomp.dylib": native,
                     "lib/python3.13/site-packages/fixture/data/required.txt": "synthetic package data",
                     "lib/python3.13/site-packages/fixture-1.dist-info/METADATA": "Name: fixture\nVersion: 1\n",
                     "lib/python3.13/site-packages/fixture-1.dist-info/LICENSE": "synthetic license",
@@ -201,7 +206,8 @@ class PrivacyPackageTests(unittest.TestCase):
                 self.assertFalse(self.output.exists())
 
     def test_unknown_app_resource_is_refused_without_reading_body(self):
-        self.write("Contents/Info.plist", "synthetic plist")
+        info = self.write("Contents/Info.plist", "")
+        info.write_bytes(plistlib.dumps({"CFBundleIdentifier": "fixture.app"}))
         self.write("Contents/Resources/handout.txt")
         with self.assertRaisesRegex(privacy.PrivacyError, "unexpected-app-resource"):
             privacy.copy_distribution_tree(self.source, self.output)
@@ -424,7 +430,8 @@ class PrivacyPackageTests(unittest.TestCase):
         script.write_text(source)
         derived = self.root / "derived"
         app = derived / "Build/Products/Release/LiveLingo.app"
-        self.write("Contents/Info.plist", "synthetic plist", app)
+        info = self.write("Contents/Info.plist", "", app)
+        info.write_bytes(plistlib.dumps({"CFBundleIdentifier": "fixture.app"}))
         env = {"LIVELINGO_DERIVED_DATA_PATH": str(derived), "LIVELINGO_PYTHON": sys.executable,
                "TMPDIR": str(self.root), "PYTHONDONTWRITEBYTECODE": "1", "PATH": "/usr/bin:/bin"}
         result = subprocess.run(["/bin/bash", str(script)], capture_output=True, text=True, env=env)
@@ -437,6 +444,303 @@ class PrivacyPackageTests(unittest.TestCase):
         self.assertIn("privacy-package:", result.stderr)
         self.assertNotIn("Set LIVELINGO_CERTIFICATE_PATH", result.stderr)
         self.assertEqual(private.read_text(), CANARY)
+
+
+class PrivacyPackageMetadataTests(unittest.TestCase):
+    """All payloads are synthetic; inspect and copy must agree on coverage."""
+
+    setUp = PrivacyPackageTests.setUp
+    tearDown = PrivacyPackageTests.tearDown
+
+    def case(self, payload, filename="metadata.plist"):
+        directory = Path(tempfile.mkdtemp(prefix="metadata-case-", dir=self.source))
+        path = directory / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return directory, path, self.root / (directory.name + "-delivery")
+
+    def reject(self, payload, filename="metadata.plist", reason=None):
+        directory, path, destination = self.case(payload, filename)
+        before = path.lstat()
+        for operation in (lambda: privacy.inspect_tree(directory),
+                          lambda: privacy.copy_distribution_tree(directory, destination)):
+            with self.assertRaisesRegex(privacy.PrivacyError, reason or ".+"):
+                operation()
+        self.assertFalse(destination.exists())
+        self.assertEqual(path.read_bytes(), payload)
+        after = path.lstat()
+        self.assertEqual((before.st_ino, before.st_mode, before.st_mtime_ns),
+                         (after.st_ino, after.st_mode, after.st_mtime_ns))
+
+    def check_plist(self, value, fmt, reason):
+        self.reject(plistlib.dumps(value, fmt=fmt), reason=reason)
+
+    def test_xml_plist_rejects_nested_private_key(self):
+        self.check_plist({"outer": [{"translated_text": CANARY}]}, plistlib.FMT_XML,
+                         "classroom-content-metadata")
+
+    def test_binary_plist_rejects_nested_private_key(self):
+        self.check_plist({"outer": [{"transcriptSegments": [CANARY]}]}, plistlib.FMT_BINARY,
+                         "classroom-content-metadata")
+
+    def test_xml_plist_rejects_nested_local_path_key(self):
+        self.check_plist({"outer": [{"/private": "public"}]}, plistlib.FMT_XML,
+                         "local-path-metadata")
+
+    def test_binary_plist_rejects_nested_local_path_key(self):
+        self.check_plist({"outer": [{"generated in /private": "public"}]}, plistlib.FMT_BINARY,
+                         "local-path-metadata")
+
+    def test_xml_plist_rejects_nested_local_path_string(self):
+        self.check_plist({"outer": [{"description": "generated in /private"}]}, plistlib.FMT_XML,
+                         "local-path-metadata")
+
+    def test_binary_plist_rejects_nested_local_path_string(self):
+        self.check_plist({"outer": [{"description": "generated in /private"}]}, plistlib.FMT_BINARY,
+                         "local-path-metadata")
+
+    def check_path_data(self, fmt):
+        for encoding in ("utf-8", "utf-16", "utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                self.check_plist({"outer": [{"data": "generated in /private".encode(encoding)}]},
+                                 fmt, "local-path-metadata")
+
+    def test_xml_plist_rejects_nested_local_path_data(self):
+        self.check_path_data(plistlib.FMT_XML)
+
+    def test_binary_plist_rejects_nested_local_path_data(self):
+        self.check_path_data(plistlib.FMT_BINARY)
+
+    def test_plist_data_rejects_embedded_structured_content(self):
+        for fmt in (plistlib.FMT_XML, plistlib.FMT_BINARY):
+            for data in (json.dumps({"rawText": CANARY}).encode(),
+                         plistlib.dumps({"nested": [{"transcript": CANARY}]}, fmt=fmt)):
+                with self.subTest(format=fmt, prefix=data[:8]):
+                    self.check_plist({"outer": [{"data": data}]}, fmt,
+                                     "classroom-content-metadata")
+
+    def test_plist_data_rejects_unidentified_binary(self):
+        for fmt in (plistlib.FMT_XML, plistlib.FMT_BINARY):
+            with self.subTest(format=fmt):
+                self.check_plist({"outer": [{"data": b"\xff\x00\xfe\x81"}]}, fmt,
+                                 "unreviewed-metadata-data")
+
+    def test_json_rejects_single_component_paths_in_keys_and_prose(self):
+        for value in ({"note": "generated in /private"}, {"outer": [{"/secret": "public"}]},
+                      {"note": "generated in C:/private"}, {"note": "from file:///secret"}):
+            with self.subTest(value=value):
+                self.reject(json.dumps(value).encode(), "metadata.json", "local-path-metadata")
+
+    def test_normal_info_plist_fields_and_public_data_survive_copy(self):
+        value = {"CFBundleIdentifier": "invalid.example.fixture", "CFBundleExecutable": "LiveLingo",
+                 "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
+                 "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True,
+                 "NSMicrophoneUsageDescription": "Synthetic public microphone purpose",
+                 "CFBundleURLTypes": [{"CFBundleURLSchemes": ["fixture"]}],
+                 "publicData": b"public fixture", "source": "https://example.invalid/source",
+                 "relative": "Resources/fixture"}
+        for fmt in (plistlib.FMT_XML, plistlib.FMT_BINARY):
+            with self.subTest(format=fmt):
+                payload = plistlib.dumps(value, fmt=fmt)
+                directory, path, destination = self.case(payload, "Contents/Info.plist")
+                before = path.lstat()
+                counts = privacy.copy_distribution_tree(directory, destination)
+                self.assertEqual(counts["metadata_files"], 1)
+                self.assertEqual(counts["opaque_binary_files"], 0)
+                delivered = destination / "Contents/Info.plist"
+                self.assertEqual(delivered.read_bytes(), payload)
+                self.assertEqual(plistlib.loads(delivered.read_bytes()), value)
+                self.assertEqual(privacy.inspect_tree(destination)["metadata_files"], 1)
+                self.assertEqual(path.lstat().st_mode, before.st_mode)
+                self.assertEqual(delivered.lstat().st_mode, before.st_mode)
+
+    def test_info_plist_functional_field_is_not_a_privacy_exemption(self):
+        self.check_plist({"CFBundleIdentifier": "generated in /private"}, plistlib.FMT_XML,
+                         "local-path-metadata")
+
+    def test_malformed_json_and_plist_fail_before_copy(self):
+        for filename, data in (("metadata.json", b'{"nested":'),
+                               ("metadata.plist", b"not a plist"),
+                               ("metadata.plist", b"bplist00broken"),
+                               ("metadata.plist", b"<?xml version='1.0'?><plist><dict>")):
+            with self.subTest(filename=filename, data=data):
+                self.reject(data, filename, "invalid-package-(json|plist)")
+
+    def test_metadata_signatures_are_checked_without_known_suffix(self):
+        for payload in (plistlib.dumps({"rawText": CANARY}, fmt=plistlib.FMT_XML),
+                        plistlib.dumps({"transcript": CANARY}, fmt=plistlib.FMT_BINARY),
+                        json.dumps({"learningNotes": CANARY}).encode()):
+            with self.subTest(prefix=payload[:8]):
+                self.reject(payload, "public.resource", "classroom-content-metadata")
+
+    def test_unsupported_structured_formats_are_not_passed(self):
+        for filename, payload in (("metadata.xml", b'<metadata path="/private"/>'),
+                                  ("metadata.yaml", b"description: generated in /private"),
+                                  ("metadata.toml", b'description = "generated in /private"'),
+                                  ("InfoPlist.strings", b'"description" = "public";'),
+                                  ("metadata.resource", b"bplist01unknown"),
+                                  ("metadata.resource", b"<?xml broken"),
+                                  ("metadata.resource", b'{"rawText":')):
+            with self.subTest(filename=filename, prefix=payload[:8]):
+                self.reject(payload, filename)
+
+    def test_plist_symlink_cannot_bypass_metadata_checks(self):
+        directory, target, destination = self.case(plistlib.dumps({"transcript": CANARY}), "opaque.txt")
+        (directory / "metadata.plist").symlink_to("opaque.txt")
+        with self.assertRaisesRegex(privacy.PrivacyError, "structured-metadata-symlink"):
+            privacy.copy_distribution_tree(directory, destination)
+        self.assertFalse(destination.exists())
+        self.assertEqual(plistlib.loads(target.read_bytes()), {"transcript": CANARY})
+
+    def test_metadata_size_limit_covers_plist_and_renamed_payloads(self):
+        for filename in ("metadata.plist", "metadata.resource"):
+            for fmt in (plistlib.FMT_XML, plistlib.FMT_BINARY):
+                with self.subTest(filename=filename, format=fmt), patch.object(privacy, "JSON_LIMIT", 128):
+                    self.reject(plistlib.dumps({"public": "x" * 200}, fmt=fmt), filename,
+                                "unreviewed-large-metadata")
+
+    def test_known_app_binaries_are_reported_as_opaque(self):
+        fixtures = {"Contents/MacOS/LiveLingo": b"\xcf\xfa\xed\xfe" + b"\x00" * 28,
+                    "Contents/PkgInfo": b"APPL????",
+                    "Contents/Resources/Assets.car": b"BOMStore" + b"\x00" * 24,
+                    "Contents/Resources/AppIcon.icns": b"icns\x00\x00\x00\x08",
+                    "runtime/libfixture.dylib": b"\xcf\xfa\xed\xfe" + b"\x00" * 28,
+                    "runtime/default.metallib": b"MTLB" + b"\x00" * 28,
+                    "Contents/Resources/AppIcon.icon/Assets/fixture.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 24}
+        for filename, payload in fixtures.items():
+            with self.subTest(filename=filename):
+                directory, _, destination = self.case(payload, filename)
+                counts = privacy.copy_distribution_tree(directory, destination)
+                self.assertEqual(counts["files"], 1)
+                self.assertEqual(counts["opaque_binary_files"], 1)
+                self.assertEqual(counts["metadata_files"], 0)
+                self.assertEqual((destination / filename).read_bytes(), payload)
+
+    def test_unknown_binary_and_disguised_known_suffix_are_rejected(self):
+        for filename in ("metadata.bin", "runtime/libfixture.dylib", "Contents/Resources/Assets.car"):
+            with self.subTest(filename=filename):
+                self.reject(b"\x00\xff\x81synthetic opaque bytes", filename,
+                            "unreviewed-binary-package-entry")
+
+    def test_code_resources_hash_data_has_an_explicit_opaque_boundary(self):
+        value = {"files": {"Resources/LICENSE": b"\xff" * 20},
+                 "files2": {"Resources/LICENSE": {"hash": b"\xfe" * 20, "hash2": b"\xfd" * 32}}}
+        directory, _, destination = self.case(plistlib.dumps(value), "Contents/_CodeSignature/CodeResources")
+        counts = privacy.copy_distribution_tree(directory, destination)
+        self.assertEqual(counts["metadata_files"], 1)
+        self.assertEqual(counts["opaque_metadata_fields"], 3)
+        self.assertEqual(plistlib.loads((destination / "Contents/_CodeSignature/CodeResources").read_bytes()), value)
+
+    def test_hash_named_field_does_not_exempt_unrelated_binary_data(self):
+        self.check_plist({"hash": b"\xff" * 20}, plistlib.FMT_BINARY, "unreviewed-metadata-data")
+        self.reject(plistlib.dumps({"extra": {"hash": b"\xff" * 20}}),
+                    "Contents/_CodeSignature/CodeResources", "unreviewed-metadata-data")
+
+    def test_plain_files_are_counted_without_claiming_content_review(self):
+        directory, _, destination = self.case(b"Synthetic public license", "LICENSE")
+        counts = privacy.copy_distribution_tree(directory, destination)
+        self.assertEqual(counts["unreviewed_text_files"], 1)
+        self.assertEqual(counts["metadata_files"], 0)
+        self.assertEqual(counts["opaque_binary_files"], 0)
+
+    def test_safetensors_header_is_checked_without_reviewing_tensor_payload(self):
+        header = json.dumps({"weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+                             "__metadata__": {"source": "https://example.invalid/model"}}).encode()
+        payload = struct.pack("<Q", len(header)) + header + b"\x00" * 4
+        directory, _, destination = self.case(payload, "weights.safetensors")
+        counts = privacy.copy_distribution_tree(directory, destination)
+        self.assertEqual(counts["metadata_files"], 1)
+        self.assertEqual(counts["opaque_binary_files"], 1)
+        self.assertEqual((destination / "weights.safetensors").read_bytes(), payload)
+        for value in ({"__metadata__": {"description": "generated in /private"}},
+                      {"__metadata__": {"rawText": CANARY}}):
+            header = json.dumps(value).encode()
+            self.reject(struct.pack("<Q", len(header)) + header + b"\x00" * 4,
+                        "weights.safetensors")
+        self.reject(b"\x00\xffinvalid safetensors", "weights.safetensors")
+
+    def test_metadata_unknown_types_and_cycles_fail_with_fixed_reasons(self):
+        cyclic = []
+        cyclic.append(cyclic)
+        for value in ({"value": object()}, cyclic):
+            with self.subTest(value_type=type(value).__name__):
+                with self.assertRaises(privacy.PrivacyError):
+                    privacy.validate_metadata(value)
+        with self.assertRaisesRegex(privacy.PrivacyError, "local-path-metadata"):
+            privacy.validate_metadata({b"generated in /private": ("public",)})
+
+    def test_excluded_private_plist_is_not_read_or_copied(self):
+        directory, path, destination = self.case(b"invalid private plist", ".migration-source-fixture/private.plist")
+        def guard(operation):
+            def checked(candidate, *args, **kwargs):
+                if ".migration-source-fixture" in candidate.parts:
+                    raise AssertionError("excluded private metadata must not be read")
+                return operation(candidate, *args, **kwargs)
+            return checked
+        with patch.object(Path, "read_bytes", guard(Path.read_bytes)), \
+             patch.object(Path, "open", guard(Path.open)):
+            counts = privacy.copy_distribution_tree(directory, destination)
+        self.assertEqual(counts["excluded"], 1)
+        self.assertEqual(counts["metadata_files"], 0)
+        self.assertFalse((destination / ".migration-source-fixture").exists())
+        self.assertEqual(path.read_bytes(), b"invalid private plist")
+
+    def test_text_prefix_does_not_hide_unknown_binary_or_delayed_metadata(self):
+        self.reject(b"public " * 700 + b"\x00\xff", "metadata.resource",
+                    "unreviewed-binary-package-entry")
+        self.reject(b" " * 5000 + json.dumps({"transcript": CANARY}).encode(),
+                    "metadata.resource", "classroom-content-metadata")
+
+    def test_printable_signature_hash_is_still_reported_as_opaque(self):
+        value = {"files": {"Resources/LICENSE": b"a" * 20}}
+        directory, _, destination = self.case(plistlib.dumps(value), "Contents/_CodeSignature/CodeResources")
+        self.assertEqual(privacy.copy_distribution_tree(directory, destination)["opaque_metadata_fields"], 1)
+
+    def test_binary_exemption_cannot_cover_metadata_or_data_attachments(self):
+        payload = b"\xcf\xfa\xed\xfe" + b"\x00" * 28
+        for filename in ("metadata.plist", "metadata.json", "metadata.yaml", "metadata.data"):
+            with self.subTest(filename=filename):
+                self.reject(payload, filename)
+        self.check_plist({"data": payload}, plistlib.FMT_BINARY, "unreviewed-metadata-data")
+
+    def test_package_cli_uses_fixed_private_parser(self):
+        for arguments in (["check", "--root", str(self.source), CANARY],
+                          ["check", "--root", str(self.source), "--layout", CANARY], [CANARY]):
+            with self.subTest(arguments=arguments):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.object(sys, "argv", [CANARY, *arguments]), \
+                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                     self.assertRaises(SystemExit) as error:
+                    privacy.main()
+                self.assertEqual(error.exception.code, 2)
+                self.assertNotIn(CANARY, stdout.getvalue() + stderr.getvalue())
+                self.assertNotIn(str(self.source), stdout.getvalue() + stderr.getvalue())
+                self.assertIn("invalid_arguments", stderr.getvalue())
+                self.assertIn("privacy-package", stderr.getvalue())
+
+    def test_unknown_decodable_file_formats_fail_closed(self):
+        for filename in ("metadata.blob", "metadata.payload", "metadata.data", "metadata.bin", "opaque"):
+            with self.subTest(filename=filename):
+                self.reject(b"opaque synthetic metadata text", filename, "unsupported-package-file-format")
+
+    def test_known_script_license_and_prose_formats_keep_unreviewed_boundary(self):
+        for filename in ("LICENSE", "README", "fixture-LICENSE", "notices.txt", "script.py", "tool.sh",
+                         "fixture-1.dist-info/METADATA", "bin/python3.13"):
+            with self.subTest(filename=filename):
+                payload = b"Synthetic public fixture"
+                directory, _, destination = self.case(payload, filename)
+                counts = privacy.copy_distribution_tree(directory, destination)
+                self.assertEqual(counts["unreviewed_text_files"], 1)
+                self.assertEqual(counts["metadata_files"], 0)
+                self.assertEqual((destination / filename).read_bytes(), payload)
+
+    def test_generic_interface_keys_are_not_classroom_content(self):
+        value = {"CFBundleIdentifier": "invalid.example.fixture", "prompt": "Public dialog purpose",
+                 "input": {"description": "Public interface"}, "output": "Public format"}
+        for fmt in (plistlib.FMT_XML, plistlib.FMT_BINARY):
+            with self.subTest(format=fmt):
+                directory, _, destination = self.case(plistlib.dumps(value, fmt=fmt), "Contents/Info.plist")
+                self.assertEqual(privacy.copy_distribution_tree(directory, destination)["metadata_files"], 1)
 
 
 if __name__ == "__main__":

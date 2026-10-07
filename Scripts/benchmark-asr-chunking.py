@@ -5,7 +5,6 @@ Run with the ASR runtime's Python dependencies on PYTHONPATH. Input must be a
 16 kHz mono PCM16 WAV. Reference captions, if used for later scoring, require
 independent review: this tool does not calculate an accuracy score.
 """
-import argparse
 import hashlib
 import importlib.metadata
 import json
@@ -14,6 +13,15 @@ import os
 from pathlib import Path
 import time
 import wave
+
+try:
+    from Scripts.privacy_cli import PrivateArgumentParser
+    from Scripts.private_files import create_private_file
+except ModuleNotFoundError as error:
+    if error.name != 'Scripts':
+        raise
+    from privacy_cli import PrivateArgumentParser
+    from private_files import create_private_file
 
 
 def audio_info(source):
@@ -147,7 +155,7 @@ def run(args, windows, rate, report):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PrivateArgumentParser(prog='benchmark-asr-chunking.py', description=__doc__)
     parser.add_argument('--audio', type=Path, required=True)
     parser.add_argument('--model', type=Path, required=True, help='Existing local Parakeet directory; no downloads')
     parser.add_argument('--output', type=Path, required=True, help='New JSON result file; existing files are never overwritten')
@@ -167,11 +175,9 @@ def main():
         frames, rate = audio_info(str(args.audio))
         windows = frame_windows(frames, rate, args.start_seconds, args.duration_seconds,
                                 args.chunk_seconds, args.overlap_seconds)
-        # Exclusive creation also handles symlinks and a race with another run.
-        if args.output.parent.resolve() != args.output.parent.absolute():
-            raise ValueError('Output parent must not use symlinks')
-        args.output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        # Bind all parent components and verify the new file's mode and ACL
+        # before writing. Existing parent permissions are never changed.
+        descriptor = create_private_file(args.output)
         output = os.fdopen(descriptor, 'w', encoding='utf-8')
     except (OSError, ValueError, wave.Error) as error:
         parser.error('benchmark_preflight_failed; raw diagnostics omitted')

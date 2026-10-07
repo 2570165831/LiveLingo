@@ -19,7 +19,6 @@ display and other unselected rails. Fallback busy times are proxies, never J:
 CPU uses aggregate core seconds; GPU uses residency or sampled utilization.
 """
 
-import argparse
 import copy
 import ctypes
 import datetime
@@ -35,6 +34,13 @@ import sys
 import tempfile
 import threading
 import time
+
+try:
+    from Scripts.privacy_cli import PrivateArgumentParser
+except ModuleNotFoundError as error:
+    if error.name != "Scripts":
+        raise
+    from privacy_cli import PrivateArgumentParser
 
 RAILS = ("cpu", "gpu", "ane")
 ENERGY_UNITS = {"J": 1.0, "mJ": 1e-3, "uJ": 1e-6, "µJ": 1e-6,
@@ -803,7 +809,7 @@ class PowerSampler:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PrivateArgumentParser(prog="scoreboard-energy", description=__doc__)
     parser.add_argument("--helper", type=Path)
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--seconds", type=float, default=6.0)

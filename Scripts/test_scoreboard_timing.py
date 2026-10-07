@@ -2,7 +2,7 @@
 """Numeric timing and real service/worker control flow with artificial models.
 
 Run: python3 -B Scripts/test_scoreboard_timing.py
-Small fixtures and receipts are retained in this checkout's work/timing-tests.
+Small fixtures and receipts are retained under TMPDIR/LiveLingo-timing-tests.
 No MLX, weights, GPU, network listener or third-party dependency is used.
 """
 import ast
@@ -29,7 +29,7 @@ sys.path.insert(0, str(SCRIPTS))
 sys.dont_write_bytecode = True
 import scoreboard_timing as timing
 
-TEST_ROOT = SCRIPTS.parent / "work/timing-tests"
+TEST_ROOT = Path(tempfile.gettempdir()).resolve() / "LiveLingo-timing-tests"
 PRIVATE = "private-input-output-id-error-should-never-appear"
 FIELDS = {"stage", "wall_seconds", "process_cpu_seconds", "start_mono", "end_mono", "completed"}
 

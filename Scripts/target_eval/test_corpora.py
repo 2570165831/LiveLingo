@@ -5,6 +5,9 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -200,6 +203,109 @@ class CorporaTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             c.write_jsonl([], path)
         self.assertEqual(path.read_bytes(), before)
+
+    @staticmethod
+    def acl(path):
+        result = subprocess.run(["/bin/ls", "-lde", str(path)], check=True,
+                                capture_output=True, text=True)
+        return result.stdout.splitlines()[1:]
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS inherited ACL")
+    def test_writers_clear_inherited_acl_on_new_ancestors_and_body_files(self):
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read,write,file_inherit,directory_inherit",
+                        str(self.root)], check=True, capture_output=True)
+        canary = self.write("acl-canary", "synthetic")
+        self.assertTrue(any("everyone inherited allow" in row for row in self.acl(canary)))
+        out = self.root / "nested" / "private"
+        unit = c.ParallelUnit("synthetic:1", "synthetic", {"en": "Synthetic body."})
+        c.write_jsonl([unit], out / "corpus.jsonl")
+        c.write_json({"text": "Synthetic body."}, out / "report.json")
+        c._write_text(out / "summary.md", "Synthetic body.\n")
+        for path in (out.parent, out):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+            self.assertEqual(self.acl(path), [])
+        for name in ("corpus.jsonl", "report.json", "summary.md"):
+            self.assertEqual(stat.S_IMODE((out / name).stat().st_mode), 0o600)
+            self.assertEqual(self.acl(out / name), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS existing ACL")
+    def test_writer_preserves_existing_parent_and_clears_new_file_acl(self):
+        parent = self.root / "existing"
+        parent.mkdir(mode=0o700)
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read,write,file_inherit,directory_inherit",
+                        str(parent)], check=True, capture_output=True)
+        before = parent.stat().st_mode, self.acl(parent)
+        c.write_json({"text": "synthetic"}, parent / "body.json")
+        self.assertEqual((parent.stat().st_mode, self.acl(parent)), before)
+        self.assertEqual(self.acl(parent / "body.json"), [])
+        self.assertEqual(stat.S_IMODE((parent / "body.json").stat().st_mode), 0o600)
+
+    def test_writer_refuses_existing_readonly_objects_without_permission_upgrade(self):
+        parent = self.root / "readonly"
+        parent.mkdir(mode=0o500)
+        before = parent.stat().st_mode
+        with self.assertRaises((OSError, ValueError)):
+            c.write_json({}, parent / "body.json")
+        self.assertEqual(parent.stat().st_mode, before)
+        self.assertFalse((parent / "body.json").exists())
+        destination = self.write("readonly.json", "synthetic retained body")
+        destination.chmod(0o400)
+        before = destination.stat().st_mode, destination.read_bytes()
+        with self.assertRaises((OSError, ValueError)):
+            c.write_json({}, destination)
+        self.assertEqual((destination.stat().st_mode, destination.read_bytes()), before)
+
+    def test_parser_errors_use_fixed_prog_and_omit_private_arguments(self):
+        sentinel = "SYNTHETIC_PRIVATE_ARGUMENT"
+        with patch.object(sys, "argv", ["synthetic-program-" + sentinel]), \
+                redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit):
+            c.main([sentinel, "--output", str(self.root / "out.jsonl")])
+        self.assertNotIn(sentinel, error.getvalue())
+        self.assertIn("target-eval-corpora", error.getvalue())
+
+    def test_cli_io_error_does_not_print_private_input_path(self):
+        sentinel = "SYNTHETIC_PRIVATE_INPUT"
+        with redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit):
+            c.main(["cs50", "--locale-file", "en=" + str(self.root / sentinel),
+                    "--locale-file", "fr=" + str(self.root / "missing"),
+                    "--document-id", "synthetic", "--output", str(self.root / "out.jsonl")])
+        self.assertNotIn(sentinel, error.getvalue())
+        self.assertIn("target-eval-corpora", error.getvalue())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS deny ACL")
+    def test_writer_preserves_private_parent_deny_acl(self):
+        parent = self.root / "deny-acl"
+        parent.mkdir(mode=0o700)
+        subprocess.run(["/bin/chmod", "+a", "everyone deny delete", str(parent)],
+                       check=True, capture_output=True)
+        self.addCleanup(subprocess.run, ["/bin/chmod", "-a", "everyone deny delete", str(parent)],
+                        check=True, capture_output=True)
+        before = parent.stat().st_mode, self.acl(parent)
+        c.write_json({"text": "synthetic body"}, parent / "body.json")
+        self.assertEqual((parent.stat().st_mode, self.acl(parent)), before)
+        self.assertEqual(stat.S_IMODE((parent / "body.json").stat().st_mode), 0o600)
+        self.assertEqual(self.acl(parent / "body.json"), [])
+
+    def test_cli_entrypoints_direct_scripts_and_alias_preserve_private_parser(self):
+        scripts = Path(c.__file__).resolve().parents[1]
+        environment = {"PYTHONPATH": str(scripts), "PYTHONDONTWRITEBYTECODE": "1",
+                       "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
+        sentinel = "SYNTHETIC_PRIVATE_ARGUMENT"
+        prefixes = ([sys.executable, "-B", str(scripts / "target_eval/corpora.py")],
+                    [sys.executable, "-B", "-m", "Scripts.target_eval.corpora"],
+                    [sys.executable, "-B", "-m", "target_eval.corpora"])
+        for prefix in prefixes:
+            with self.subTest(entry=prefix[-1]):
+                help_result = subprocess.run([*prefix, "--help"], cwd=scripts.parent, env=environment,
+                                             capture_output=True, text=True, timeout=10)
+                self.assertEqual(help_result.returncode, 0)
+                self.assertIn("target-eval-corpora", help_result.stdout)
+                result = subprocess.run([*prefix, "--unknown-" + sentinel], cwd=scripts.parent, env=environment,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 2)
+                self.assertNotIn(sentinel, result.stdout + result.stderr)
+                self.assertNotIn(str(scripts), result.stdout + result.stderr)
+                self.assertIn("invalid_arguments", result.stderr)
 
     def test_cli_synthetic_export_retains_incomplete_diagnostics(self):
         data = deepcopy(self.meeting())

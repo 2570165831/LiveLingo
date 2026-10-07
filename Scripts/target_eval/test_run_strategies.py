@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -216,6 +217,173 @@ class RunnerTests(unittest.TestCase):
                     self.assertIsNone(call["exact_first_token_seconds"])
                     self.assertIsNone(call["energy"]["gross_j"])
         self.assertNotIn(str(self.root), json.dumps(report))
+
+    @staticmethod
+    def acl(path):
+        result = subprocess.run(["/bin/ls", "-lde", str(path)], check=True,
+                                capture_output=True, text=True)
+        return result.stdout.splitlines()[1:]
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS inherited ACL")
+    def test_dry_run_clears_inherited_acl_on_output_and_body_reports(self):
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read,write,file_inherit,directory_inherit",
+                        str(self.root)], check=True, capture_output=True)
+        canary = self.root / "acl-canary"
+        canary.write_text("synthetic")
+        self.assertTrue(any("everyone inherited allow" in row for row in self.acl(canary)))
+        out = self.root / "nested" / "result"
+        self.run_fake(self.args("--output-dir", str(out)))
+        for path in (out.parent, out):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+            self.assertEqual(self.acl(path), [])
+        for name in ("report.json", "summary.md"):
+            self.assertEqual(stat.S_IMODE((out / name).stat().st_mode), 0o600)
+            self.assertEqual(self.acl(out / name), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS inherited ACL")
+    def test_worker_state_root_is_private_before_synthetic_spawn(self):
+        parent = self.root / "state-parent"
+        parent.mkdir(mode=0o700)
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read,write,file_inherit,directory_inherit",
+                        str(parent)], check=True, capture_output=True)
+        state = parent / "worker-state"
+        script = self.root / "fake-worker.py"
+        script.write_text(FAKE_PROTOCOL)
+        transport = a.MLXWorker(sys.executable, script, self.root / "unused-model", state, "9b", 3, 160)
+        original = subprocess.Popen
+        inspected = []
+
+        def spawn(*args, **kwargs):
+            if args[0] == transport.command:
+                self.assertTrue(state.is_dir())
+                self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
+                self.assertEqual(self.acl(state), [])
+                inspected.append(True)
+            return original(*args, **kwargs)
+
+        with patch.object(a.subprocess, "Popen", side_effect=spawn):
+            with transport:
+                pass
+        self.assertEqual(inspected, [True])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS existing ACL")
+    def test_existing_unsafe_or_readonly_state_is_refused_before_spawn(self):
+        for index, (mode, acl) in enumerate(((0o755, False), (0o700, True), (0o500, False), (0o700, "deny-allow"))):
+            with self.subTest(mode=mode, acl=acl):
+                state = self.root / f"existing-state-{index}"
+                state.mkdir(mode=mode)
+                if acl == "deny-allow":
+                    subprocess.run(["/bin/chmod", "+a", "everyone deny delete", str(state)],
+                                   check=True, capture_output=True)
+                    self.addCleanup(subprocess.run, ["/bin/chmod", "-a", "everyone deny delete", str(state)],
+                                    check=True, capture_output=True)
+                if acl:
+                    subprocess.run(["/bin/chmod", "+a", "everyone allow read,write", str(state)],
+                                   check=True, capture_output=True)
+                before = state.stat().st_mode, self.acl(state)
+                transport = a.MLXWorker(sys.executable, self.root / "unused-worker", self.root / "unused-model",
+                                        state, "9b", 3, 160)
+                with patch.object(a.subprocess, "Popen", side_effect=AssertionError("spawned before state validation")) as spawn, \
+                        self.assertRaises((OSError, ValueError, RuntimeError)):
+                    transport.__enter__()
+                spawn.assert_not_called()
+                self.assertEqual((state.stat().st_mode, self.acl(state)), before)
+
+    def test_existing_readonly_output_is_refused_without_permission_upgrade(self):
+        out = self.root / "readonly-output"
+        out.mkdir(mode=0o500)
+        before = out.stat().st_mode
+        with self.assertRaises(FileExistsError):
+            self.run_fake(self.args("--output-dir", str(out)))
+        self.assertEqual(out.stat().st_mode, before)
+
+    def test_parser_errors_use_fixed_prog_and_omit_private_arguments(self):
+        sentinel = "SYNTHETIC_PRIVATE_ARGUMENT"
+        with patch.object(sys, "argv", ["synthetic-program-" + sentinel]), \
+                patch.object(a.sys, "stderr", new_callable=io.StringIO) as error, self.assertRaises(SystemExit):
+            a.parser().parse_args(["--final-budget", sentinel])
+        self.assertNotIn(sentinel, error.getvalue())
+        self.assertIn("target-eval-run-strategies", error.getvalue())
+
+    def test_main_error_does_not_print_private_exception_text(self):
+        sentinel = "SYNTHETIC_PRIVATE_INPUT"
+        with patch.object(a, "run", side_effect=OSError(sentinel)), \
+                patch.object(a.sys, "stderr", new_callable=io.StringIO) as error, self.assertRaises(SystemExit):
+            a.main(["--prompts-dir", str(self.prompts), "--targets", "es", "--routes", "direct",
+                    "--output-dir", str(self.root / "result"), "--dry-run"])
+        self.assertNotIn(sentinel, error.getvalue())
+        self.assertIn("target-eval-run-strategies", error.getvalue())
+
+    def test_output_identity_drift_is_refused_before_acl_or_mode_changes(self):
+        for index, drift in enumerate(("replacement", "owner", "device")):
+            with self.subTest(drift=drift):
+                out = self.root / f"claimed-{index}"
+                replacement = self.root / f"replacement-{index}"
+                replacement.mkdir(mode=0o755)
+                before = replacement.stat().st_mode, replacement.stat().st_ino
+                original_open, original_fstat = os.open, os.fstat
+                opened_fd = []
+
+                def open_output(name, flags, *args, **kwargs):
+                    if name == out.name and flags & os.O_DIRECTORY:
+                        if drift == "replacement":
+                            out.rename(self.root / f"superseded-claimed-{index}")
+                            replacement.rename(out)
+                        descriptor = original_open(name, flags, *args, **kwargs)
+                        opened_fd.append(descriptor)
+                        return descriptor
+                    return original_open(name, flags, *args, **kwargs)
+
+                def fstat_output(descriptor):
+                    state = original_fstat(descriptor)
+                    if descriptor in opened_fd and drift in ("owner", "device"):
+                        values = list(state)
+                        values[4 if drift == "owner" else 2] += 1
+                        return os.stat_result(values)
+                    return state
+
+                with patch.object(a.os, "open", side_effect=open_output), \
+                        patch.object(a.os, "fstat", side_effect=fstat_output), \
+                        patch.object(a, "privatize_new", wraps=a.privatize_new) as privatize, \
+                        self.assertRaises((OSError, ValueError, a.scoreboard.Rejected)):
+                    self.run_fake(self.args("--output-dir", str(out)))
+                privatize.assert_not_called()
+                if drift == "replacement":
+                    self.assertEqual((out.stat().st_mode, out.stat().st_ino), before)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS deny ACL")
+    def test_existing_private_worker_state_deny_acl_is_preserved(self):
+        state = self.root / "state"
+        state.mkdir(mode=0o700)
+        subprocess.run(["/bin/chmod", "+a", "everyone deny delete", str(state)],
+                       check=True, capture_output=True)
+        self.addCleanup(subprocess.run, ["/bin/chmod", "-a", "everyone deny delete", str(state)],
+                        check=True, capture_output=True)
+        before = state.stat().st_mode, self.acl(state)
+        with self.transport():
+            pass
+        self.assertEqual((state.stat().st_mode, self.acl(state)), before)
+
+    def test_cli_entrypoints_direct_scripts_and_alias_preserve_private_parser(self):
+        scripts = Path(a.__file__).resolve().parents[1]
+        environment = {"PYTHONPATH": str(scripts), "PYTHONDONTWRITEBYTECODE": "1",
+                       "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
+        sentinel = "SYNTHETIC_PRIVATE_ARGUMENT"
+        prefixes = ([sys.executable, "-B", str(scripts / "target_eval/run_strategies.py")],
+                    [sys.executable, "-B", "-m", "Scripts.target_eval.run_strategies"],
+                    [sys.executable, "-B", "-m", "target_eval.run_strategies"])
+        for prefix in prefixes:
+            with self.subTest(entry=prefix[-1]):
+                help_result = subprocess.run([*prefix, "--help"], cwd=scripts.parent, env=environment,
+                                             capture_output=True, text=True, timeout=10)
+                self.assertEqual(help_result.returncode, 0)
+                self.assertIn("target-eval-run-strategies", help_result.stdout)
+                result = subprocess.run([*prefix, "--unknown-" + sentinel], cwd=scripts.parent, env=environment,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 2)
+                self.assertNotIn(sentinel, result.stdout + result.stderr)
+                self.assertNotIn(str(scripts), result.stdout + result.stderr)
+                self.assertIn("invalid_arguments", result.stderr)
 
     def test_dry_run_never_starts_process_sampler_or_reads_models(self):
         with patch.object(a.subprocess, "Popen", side_effect=AssertionError("unexpected process")), \

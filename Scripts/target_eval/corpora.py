@@ -1,7 +1,6 @@
 """Read explicitly supplied local public corpora and export only to task work space."""
 from __future__ import annotations
 
-import argparse
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 import gzip
@@ -10,12 +9,23 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Callable, Iterable, Mapping, Sequence
 import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    __package__ = "Scripts.target_eval"
+
 from .reference_annotations import apply_reference_annotations
+if __package__ == "target_eval":
+    from private_files import create_private_file
+    from privacy_cli import PrivateArgumentParser
+else:
+    from ..private_files import create_private_file
+    from ..privacy_cli import PrivateArgumentParser
 
 UN_LOCALES = ("ar", "zh", "en", "fr", "ru", "es")
 OUTPUT_ROOT_ENV = "LIVELINGO_TARGET_EVAL_OUTPUT_ROOT"
@@ -95,10 +105,8 @@ def validate_output_path(path: str | Path) -> Path:
 
 def _write_text(path: str | Path, content: str) -> Path:
     destination = validate_output_path(path)
-    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    validate_output_path(destination)
     # Exclusive creation also refuses existing files and dangling leaf symlinks.
-    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    descriptor = create_private_file(destination)
     with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(content)
     return destination
@@ -593,7 +601,7 @@ def _locale_files(values: Sequence[str]) -> dict[str, Path]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PrivateArgumentParser(prog="target-eval-corpora", description=__doc__)
     parser.add_argument("corpus", choices=("un", "cs50", "ted", "flores-plus"))
     parser.add_argument("--input", help="local UN data root")
     parser.add_argument("--locale-file", action="append", default=[], metavar="LOCALE=PATH")

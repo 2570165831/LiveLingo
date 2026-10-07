@@ -5,17 +5,23 @@ Recovery originals, run records and diagnostics stay in the source tree. Only a
 new copy may receive a public runtime manifest. Signed/stapled inputs use check,
 never in-place cleanup. This is a packaging boundary, not a claim that arbitrary
 binaries or renamed classroom text can be identified by a content scanner.
+JSON and XML/binary plists are recursively checked. Known binary formats are
+identified, not content-reviewed; allowed scripts/licenses/prose are unreviewed.
+Unsupported structured formats and unidentified binary data stop the check.
 """
-import argparse
 import copy
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
+from xml.parsers.expat import ExpatError
 
 
 class PrivacyError(ValueError):
@@ -44,14 +50,79 @@ CONTENT_NAMES = frozenset({
 })
 CONTENT_SUFFIXES = (".srt", ".vtt", ".wav", ".m4a", ".mp3", ".aiff", ".flac", ".jsonl")
 JSON_LIMIT = 64 * 1024 * 1024
+FILE_PROBE_LIMIT = 4096
+PLIST_SUFFIXES = frozenset({".plist", ".stringsdict", ".entitlements", ".xcent"})
+UNSUPPORTED_METADATA_SUFFIXES = frozenset({".xml", ".yaml", ".yml", ".toml", ".strings"})
+STRUCTURED_SUFFIXES = PLIST_SUFFIXES | UNSUPPORTED_METADATA_SUFFIXES | {".json", ".safetensors"}
+TEXT_SUFFIXES = frozenset({".py", ".pyi", ".sh", ".bash", ".zsh", ".md", ".rst", ".txt",
+                           ".c", ".h", ".cpp", ".hpp", ".tcl"})
+TEXT_NAMES = frozenset({"license", "licence", "copying", "notice", "copyright", "readme",
+                        "authors", "changes", "changelog", "install", "thanks"})
 APP_RESOURCES = frozenset({
     "LanguageRuntime", "ASRRuntime", "Models", "LICENSE", "THIRD_PARTY_NOTICES.md",
     "Assets.car", "AppIcon.icns", "AppIcon.icon", "InfoPlist.strings",
 })
 # URL provenance is allowed. Local absolute paths (including file URLs and
 # Windows paths) in structured metadata are not distribution provenance.
-URL = re.compile(r"https?://[^\s\"<>]+")
-LOCAL_PATH = re.compile(r"(?<![\w:/.])/(?:[^/\s\"<>]+/)[^\s\"<>]*|file://|~[/\\]|[A-Za-z]:\\")
+URL = re.compile(r"https?://[^\s\"<>]+", re.IGNORECASE)
+LOCAL_PATH = re.compile(r"(?<![\w:/.])/[^\s\"<>]+|file://|~[/\\]|[A-Za-z]:[/\\]", re.IGNORECASE)
+
+
+def decode_metadata_text(data):
+    """Strict text only; an undecodable or control-bearing blob is not reviewed."""
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        encoding = "utf-32"
+    elif data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encoding = "utf-16"
+    elif b"\x00" in data:
+        # Accept BOM-less ASCII UTF-16 only when every code unit has the
+        # expected zero high byte. Do not guess encodings for arbitrary blobs.
+        if len(data) % 2:
+            return None
+        if all(byte == 0 for byte in data[1::2]) and all(9 <= byte <= 126 for byte in data[::2]):
+            encoding = "utf-16-le"
+        elif all(byte == 0 for byte in data[::2]) and all(9 <= byte <= 126 for byte in data[1::2]):
+            encoding = "utf-16-be"
+        else:
+            return None
+    else:
+        encoding = "utf-8-sig"
+    try:
+        text = data.decode(encoding)
+    except UnicodeError:
+        return None
+    return text if all(char.isprintable() or char in "\t\r\n" for char in text) else None
+
+
+def metadata_kind(data):
+    if data.lstrip().startswith(b"bplist"):
+        return "plist"  # Unsupported versions must fail parsing, not pass as opaque.
+    text = decode_metadata_text(data)
+    if text is not None:
+        text = text.lstrip()
+        if text.startswith(("<?xml", "<!DOCTYPE plist", "<plist")):
+            return "plist"
+        if re.match(r'^\{\s*(?:"|})|^\[\s*(?:[\[{"\d-]|true|false|null|])', text):
+            return "json"
+    return None
+
+
+def parse_metadata(data, kind):
+    try:
+        return json.loads(data) if kind == "json" else plistlib.loads(data)
+    except (UnicodeError, ValueError, TypeError, OverflowError, RecursionError,
+            plistlib.InvalidFileException, ExpatError, struct.error):
+        raise PrivacyError("invalid-package-" + kind) from None
+
+
+def signature_hash_data(data, trail):
+    # CodeResources requires these opaque digests. No other plist data field
+    # is exempt, and these are counted separately from inspected values.
+    if len(trail) == 2 and trail[0] == "files":
+        return len(data) == 20
+    if len(trail) == 3 and trail[0] in ("files", "files2"):
+        return len(data) == {"hash": 20, "hash2": 32, "cdhash": 20}.get(trail[-1])
+    return False
 
 
 def excluded(name):
@@ -61,22 +132,55 @@ def excluded(name):
             or name.endswith((".log", ".pyc", ".pyo", ".bak", ".tmp")))
 
 
-def validate_metadata(value, field=None):
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if re.sub(r"[_-]", "", key.lower()) in CONTENT_KEYS:
-                raise PrivacyError("classroom-content-metadata")
-            validate_metadata(key)
-            validate_metadata(item, key)
-    elif isinstance(value, list):
-        for item in value:
-            validate_metadata(item)
+def validate_metadata(value, field=None, *, signature=False, trail=(), _active=None, _depth=0):
+    """Return the number of explicitly permitted opaque signature data fields."""
+    if _depth > 100:
+        raise PrivacyError("metadata-too-deep-or-cyclic")
+    active = set() if _active is None else _active
+
+    def recurse(item, item_field=None, item_trail=trail):
+        return validate_metadata(item, item_field, signature=signature, trail=item_trail,
+                                 _active=active, _depth=_depth + 1)
+
+    if isinstance(value, (dict, list, tuple)):
+        if id(value) in active:
+            raise PrivacyError("metadata-too-deep-or-cyclic")
+        active.add(id(value))
+        try:
+            opaque = 0
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    text_key = decode_metadata_text(key) if isinstance(key, bytes) else key
+                    if isinstance(text_key, str) and re.sub(r"[_-]", "", text_key.lower()) in CONTENT_KEYS:
+                        raise PrivacyError("classroom-content-metadata")
+                    opaque += recurse(key)
+                    opaque += recurse(item, key, trail + (key,))
+            else:
+                for index, item in enumerate(value):
+                    opaque += recurse(item, field, trail + (index,))
+            return opaque
+        finally:
+            active.remove(id(value))
+    elif isinstance(value, bytes):
+        kind = metadata_kind(value)
+        if kind:
+            return recurse(parse_metadata(value, kind))
+        text = decode_metadata_text(value)
+        if text is not None:
+            recurse(text, field)
+            return int(signature and signature_hash_data(value, trail))
+        if signature and signature_hash_data(value, trail):
+            return 1
+        raise PrivacyError("unreviewed-metadata-data")
     elif isinstance(value, str):
         if field in ("url", "download_url", "sourceURL", "sourceUrl") and re.fullmatch(
                 r"//[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+(?::[0-9]+)?(?:/[^\s]*)?", value):
             value = "https:" + value  # Validate an upstream network-path URL; do not rewrite it.
         if value.startswith("/") or LOCAL_PATH.search(URL.sub("", value)):
             raise PrivacyError("local-path-metadata")
+    elif value is not None and not isinstance(value, (bool, int, float, datetime, plistlib.UID)):
+        raise PrivacyError("unsupported-metadata-value")
+    return 0
 
 
 def distribution_manifest(manifest):
@@ -89,10 +193,7 @@ def distribution_manifest(manifest):
 
 
 def read_json(path):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (UnicodeError, ValueError):
-        raise PrivacyError("invalid-package-json") from None
+    return parse_metadata(path.read_bytes(), "json")
 
 
 def validate_json_metadata(value, filename):
@@ -144,6 +245,136 @@ def validate_link(path, root, allow_applications=False):
         raise PrivacyError("symlink-to-private-record")
 
 
+def known_binary(path, prefix, size):
+    """Format identification only; never assert that embedded content is safe.
+
+    Native code, Metal libraries, compiled asset catalogs and image resources
+    are opaque. An extension alone is insufficient. Archives, pickle/protobuf
+    models and other unidentified formats have no exemption.
+    """
+    suffix = path.suffix.lower()
+    if path.name == "PkgInfo" and path.parent.name == "Contents" and size == 8:
+        return prefix[:4] in (b"APPL", b"BNDL", b"FMWK")
+    macho = prefix[:4] in (b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+                          b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+                          b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca")
+    if macho and size >= 28 and (suffix in (".dylib", ".so")
+                                or path.parent.name in ("MacOS", "bin")
+                                or any(part.endswith(".framework") for part in path.parts)):
+        return True
+    if suffix == ".a" and prefix.startswith(b"!<arch>\n"):
+        return True
+    if suffix == ".metallib" and prefix.startswith(b"MTLB") and size >= 16:
+        return True
+    if path.name == "Assets.car" and prefix.startswith(b"BOMStore") and size >= 16:
+        return True
+    if suffix == ".icns" and prefix.startswith(b"icns") and size >= 8:
+        return int.from_bytes(prefix[4:8], "big") == size
+    return ((suffix == ".png" and prefix.startswith(b"\x89PNG\r\n\x1a\n"))
+            or (suffix in (".jpg", ".jpeg") and prefix.startswith(b"\xff\xd8\xff"))
+            or (suffix == ".gif" and prefix.startswith((b"GIF87a", b"GIF89a")))
+            or (suffix in (".tif", ".tiff") and prefix.startswith((b"II\x2a\x00", b"MM\x00\x2a"))))
+
+
+def allowed_text_file(path, data):
+    """A bounded packaging exemption, not a claim to review its text content."""
+    if path.suffix.lower() in TEXT_SUFFIXES or path.name.lower() in TEXT_NAMES:
+        return True
+    if re.fullmatch(r"[\w.+-]+-(?:LICENSE|LICENCE|NOTICE)", path.name, re.IGNORECASE):
+        return True
+    if path.parent.name.endswith(".dist-info") and path.name in (
+            "METADATA", "WHEEL", "RECORD", "INSTALLER", "REQUESTED"):
+        return True
+    if path.parent.name.endswith(".egg-info") and path.name == "PKG-INFO":
+        return True
+    if path.parent.name == "bin":
+        return (re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", path.name) is not None
+                or (not path.suffix and data.startswith(b"#!")))
+    return False
+
+
+def inspect_safetensors(path, size, counts):
+    # Read only the bounded JSON header, never load tensor/model data. Tensor
+    # bytes remain opaque even when the header passes the metadata policy.
+    with path.open("rb") as stream:
+        length_bytes = stream.read(8)
+        if len(length_bytes) != 8:
+            raise PrivacyError("invalid-package-safetensors")
+        length = int.from_bytes(length_bytes, "little")
+        if length > JSON_LIMIT:
+            raise PrivacyError("unreviewed-large-metadata")
+        if length < 2 or length > size - 8:
+            raise PrivacyError("invalid-package-safetensors")
+        header = parse_metadata(stream.read(length), "json")
+    validate_metadata(header)
+    if not isinstance(header, dict):
+        raise PrivacyError("invalid-package-safetensors")
+    for name, tensor in header.items():
+        if name == "__metadata__":
+            if not isinstance(tensor, dict) or not all(isinstance(item, str) for item in tensor.values()):
+                raise PrivacyError("invalid-package-safetensors")
+            continue
+        if not isinstance(tensor, dict) or not isinstance(tensor.get("dtype"), str):
+            raise PrivacyError("invalid-package-safetensors")
+        shape, offsets = tensor.get("shape"), tensor.get("data_offsets")
+        if (not isinstance(shape, list) or not all(type(n) is int and n >= 0 for n in shape)
+                or not isinstance(offsets, list) or len(offsets) != 2
+                or not all(type(n) is int for n in offsets)
+                or not 0 <= offsets[0] <= offsets[1] <= size - 8 - length):
+            raise PrivacyError("invalid-package-safetensors")
+    counts["metadata_files"] += 1
+    counts["opaque_binary_files"] += 1
+
+
+def inspect_metadata_file(path, counts, public_copy):
+    suffix = path.suffix.lower()
+    size = path.stat().st_size
+    if suffix == ".safetensors":
+        inspect_safetensors(path, size, counts)
+        return
+    signature = path.name == "CodeResources" and path.parent.name == "_CodeSignature"
+    if suffix == ".json":
+        kind = "json"
+    elif suffix in PLIST_SUFFIXES or signature:
+        kind = "plist"
+    else:
+        with path.open("rb") as stream:
+            prefix = stream.read(FILE_PROBE_LIMIT)
+        kind = metadata_kind(prefix)
+        if not kind and suffix in UNSUPPORTED_METADATA_SUFFIXES:
+            raise PrivacyError("unsupported-package-metadata-format")
+        if not kind:
+            if known_binary(path, prefix, size):
+                counts["opaque_binary_files"] += 1
+                return
+            if size > JSON_LIMIT:
+                raise PrivacyError("unreviewed-large-unknown-file")
+            # Check the whole bounded unknown file's encoding and signature.
+            # A textual prefix cannot hide later binary or structured data.
+            data = path.read_bytes()
+            kind = metadata_kind(data)
+            if not kind:
+                if decode_metadata_text(data) is None:
+                    raise PrivacyError("unreviewed-binary-package-entry")
+                if not allowed_text_file(path, data):
+                    raise PrivacyError("unsupported-package-file-format")
+                counts["unreviewed_text_files"] += 1
+                return
+    if size > JSON_LIMIT:
+        raise PrivacyError("unreviewed-large-json" if suffix == ".json" else "unreviewed-large-metadata")
+    value = parse_metadata(path.read_bytes(), kind)
+    if path.name == "runtime-manifest.json":
+        public = distribution_manifest(value)
+        if not public_copy and value != public:
+            raise PrivacyError("nonpublic-runtime-manifest")
+        counts["manifests"] += 1
+    elif kind == "json":
+        validate_json_metadata(value, path.name)
+    else:
+        counts["opaque_metadata_fields"] += validate_metadata(value, signature=signature)
+    counts["metadata_files"] += 1
+
+
 def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
@@ -159,10 +390,21 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                                 or not (root / "使用说明.txt").is_file()
                                 or (root / "使用说明.txt").is_symlink()):
             raise PrivacyError("invalid-dmg-install-entries")
-    counts = {"files": 0, "excluded": 0, "manifests": 0}
+    # files is an inventory, not a content-review count. The other counts make
+    # exemptions and incomplete coverage visible to release callers.
+    counts = {"files": 0, "excluded": 0, "manifests": 0, "metadata_files": 0,
+              "opaque_metadata_fields": 0, "opaque_binary_files": 0, "unreviewed_text_files": 0}
 
     def walk(directory):
-        for path in sorted(directory.iterdir()):
+        entries = sorted(directory.iterdir())
+        # Reject metadata links before reading their same-directory targets;
+        # their error must not depend on the filename sort order.
+        for path in entries:
+            if (not excluded(path.name) and path.is_symlink()
+                    and (path.suffix.lower() in STRUCTURED_SUFFIXES
+                         or (path.name == "CodeResources" and directory.name == "_CodeSignature"))):
+                raise PrivacyError("structured-metadata-symlink")
+        for path in entries:
             if excluded(path.name):
                 if not omit_private:
                     raise PrivacyError("private-or-unrelated-package-entry")
@@ -173,7 +415,7 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                     raise PrivacyError("unexpected-app-resource")
             mode = path.lstat().st_mode
             if stat.S_ISLNK(mode):
-                if path.suffix.lower() == ".json":
+                if path.suffix.lower() in STRUCTURED_SUFFIXES:
                     raise PrivacyError("structured-metadata-symlink")
                 validate_link(path, root, layout == "dmg")
             elif stat.S_ISDIR(mode):
@@ -182,17 +424,7 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                 counts["files"] += 1
                 if path.name.lower() in CONTENT_NAMES or path.name.lower().endswith(CONTENT_SUFFIXES):
                     raise PrivacyError("classroom-content-file")
-                if path.suffix.lower() == ".json":
-                    if path.stat().st_size > JSON_LIMIT:
-                        raise PrivacyError("unreviewed-large-json")
-                    value = read_json(path)
-                    if path.name == "runtime-manifest.json":
-                        public = distribution_manifest(value)
-                        if not public_copy and value != public:
-                            raise PrivacyError("nonpublic-runtime-manifest")
-                        counts["manifests"] += 1
-                    else:
-                        validate_json_metadata(value, path.name)
+                inspect_metadata_file(path, counts, public_copy)
             else:
                 raise PrivacyError("special-package-entry")
 
@@ -233,7 +465,11 @@ def copy_distribution_tree(source, destination, *, clone_files=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    if __package__:
+        from .privacy_cli import PrivateArgumentParser
+    else:
+        from privacy_cli import PrivateArgumentParser
+    parser = PrivateArgumentParser(prog="privacy-package", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     check = sub.add_parser("check", help="read-only; rejects signed-package residues without editing them")
     check.add_argument("--root", type=Path, required=True)
@@ -252,7 +488,8 @@ def main():
         # Do not echo arbitrary source names, paths, contents or exception text.
         print("privacy-package: rejected; inspect the local input and rebuild an unsigned copy", file=sys.stderr)
         return 1
-    print(json.dumps({"privacyPackage": "passed", "operation": args.command, **counts}))
+    print(json.dumps({"privacyPackage": "passed", "operation": args.command,
+                      "scope": "structured-metadata-and-entry-policy", **counts}))
     return 0
 
 

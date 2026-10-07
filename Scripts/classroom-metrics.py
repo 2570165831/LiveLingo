@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Local classroom measurement reader. Missing evidence is never a zero result."""
-import argparse
 import base64
 import csv
 import hashlib
@@ -12,6 +11,13 @@ import statistics
 import subprocess
 import time
 from pathlib import Path
+
+try:
+    from Scripts.privacy_cli import PrivateArgumentParser
+except ModuleNotFoundError as error:
+    if error.name != 'Scripts':
+        raise
+    from privacy_cli import PrivateArgumentParser
 
 
 def number(value, label, positive=False):
@@ -327,7 +333,7 @@ def rss_metrics(rows):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PrivateArgumentParser(prog='classroom-metrics.py', description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     report = sub.add_parser('report', help='Read measurements; create a new JSON report without changing inputs')
     for name in ('gold-manifest', 'powermetrics', 'snapshot', 'latency-jsonl', 'rss-jsonl'):

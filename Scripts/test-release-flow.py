@@ -11,6 +11,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,8 @@ ROOT = Path(__file__).resolve().parent.parent
 APP_ID = "11111111-1111-4111-8111-111111111111"
 DMG_ID = "22222222-2222-4222-8222-222222222222"
 IDENTITY = "Developer ID Application: Fixture (TESTTEAM)"
+# Recognizable ARM64 MH_EXECUTE header only; no fixture native code is executed.
+NATIVE_FIXTURE = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0)
 FAKE_TOOL = r'''
 import json, os, pathlib, plistlib, shutil, signal, sys, time
 name = pathlib.Path(sys.argv[0]).name
@@ -142,7 +145,7 @@ elif name == "stapler":
         assert prior("notarytool", lambda e: e.get("phase") == phase and e.get("status") == "Accepted")
         if scenario == phase + "-staple-failure": fail("ticket service unavailable", 68)
         if scenario == phase + "-staple-transient" and count == 1: fail("ticket service unavailable", 68)
-        if phase == "app": marker.write_text("fixture ticket")
+        if phase == "app": marker.write_text(json.dumps({"fixture": "notarization ticket"}))
         else:
             data = image(target); assert data["signed"]; data["stapled"] = True; save_image(target, data)
     elif args[0] == "validate":
@@ -289,13 +292,15 @@ class ReleaseFlowTests(unittest.TestCase):
         app = case / "input with spaces/LiveLingo.app"
         contents = app / "Contents"; contents.mkdir(parents=True)
         (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "LiveLingo"}))
-        (contents / ".fake-signature").write_text("not a real signature")
+        (contents / ".fake-signature").write_text(json.dumps({"fixture": "not a real signature"}))
         for relative in ("LanguageRuntime/worker.py", "LanguageRuntime/runtime-manifest.json", "ASRRuntime/qwen_asr_service.py",
                          "ASRRuntime/python/bin/python3", "THIRD_PARTY_NOTICES.md", "LICENSE",
                          "Models/mlx-community/Qwen3.5-4B-MLX-8bit/config.json", "Models/lmstudio-community/Qwen3.5-9B-MLX-4bit/config.json",
                          "Models/mlx-community/parakeet-tdt-0.6b-v2/config.json", "Models/mlx-community/Qwen3-ASR-1.7B-4bit/config.json"):
             item = contents / "Resources" / relative; item.parent.mkdir(parents=True, exist_ok=True); item.write_text("fixture")
-            if item.suffix == ".json":
+            if relative == "ASRRuntime/python/bin/python3":
+                item.write_bytes(NATIVE_FIXTURE)
+            elif item.suffix == ".json":
                 item.write_text(json.dumps({"components": [], "python": "python"}
                                            if item.name == "runtime-manifest.json" else {}))
         keychain = case / "fixture.keychain-db"; keychain.write_text("not a keychain")
@@ -713,8 +718,8 @@ class ReleaseFlowTests(unittest.TestCase):
     def test_signing_arguments_without_real_signing(self):
         signing = module("sign_offline_fixture", ROOT / "Scripts/sign-offline-app.py")
         case, app, env, unused = self.fixture("sign-arguments")
-        main = app / "Contents/MacOS/LiveLingo"; main.parent.mkdir(); main.write_text("fixture")
-        helper = app / "Contents/MacOS/helper"; helper.write_text("fixture")
+        main = app / "Contents/MacOS/LiveLingo"; main.parent.mkdir(); main.write_bytes(NATIVE_FIXTURE)
+        helper = app / "Contents/MacOS/helper"; helper.write_bytes(NATIVE_FIXTURE)
         # Exercise the real signing command construction, intercept every tool call.
         commands = []
         with patch.object(signing, "run", side_effect=lambda c, **kw: commands.append(c)), \

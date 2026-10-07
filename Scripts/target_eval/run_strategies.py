@@ -8,7 +8,6 @@ No downloads, automatic route selection or helper builds occur.
 """
 from __future__ import annotations
 
-import argparse
 from collections import Counter
 from dataclasses import dataclass
 import hashlib
@@ -18,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import queue
+import stat
 import subprocess
 import sys
 import threading
@@ -25,8 +25,19 @@ import time
 from typing import Sequence
 import re
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    __package__ = "Scripts.target_eval"
+
 from . import corpora as c, metrics as m
-from .. import scoreboard_energy as energy
+if __package__ == "target_eval":
+    import scoreboard_energy as energy
+    from private_files import make_private_directory, open_directory, privatize_new
+    from privacy_cli import PrivateArgumentParser
+else:
+    from .. import scoreboard_energy as energy
+    from ..private_files import make_private_directory, open_directory, privatize_new
+    from ..privacy_cli import PrivateArgumentParser
 
 TARGETS = ("zh-Hans", "zh-Hant-TW", "zh-Hant-HK", "en", "es", "fr")
 ROUTES = ("direct", "via-en", "hans-convert")
@@ -43,7 +54,10 @@ UNKNOWN_STATS = ("exact_first_token_seconds",)
 # es/fr choices are owned by the same Swift constants used by the App. Reading
 # these literal sets performs no compiler, worker, model or network operation.
 def _latin_pass_through_sources():
-    from ..latin_learning import pass_through_sources
+    if __package__ == "target_eval":
+        from latin_learning import pass_through_sources
+    else:
+        from ..latin_learning import pass_through_sources
     return pass_through_sources()
 
 
@@ -281,6 +295,7 @@ class WorkerFailure(RuntimeError):
 class MLXWorker:
     def __init__(self, python, worker, model, state, profile, timeout=120, final_budget=160):
         self.command = [str(python), "-u", "-B", str(worker), "--model", str(model), "--state-directory", str(state)]
+        self.state = Path(state)
         self.profile, self.timeout, self.final_budget = profile, timeout, final_budget
         self.process = None
         self.events = queue.Queue()
@@ -339,6 +354,8 @@ class MLXWorker:
             return
 
     def __enter__(self):
+        # The worker must never create a state root using its inherited umask/ACL.
+        make_private_directory(self.state)
         env = dict(os.environ)
         for key in ("PYTHONHOME", "PYTHONPATH", "LIVELINGO_SCOREBOARD_TIMINGS"):
             env.pop(key, None)
@@ -637,9 +654,23 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
         scoreboard.preflight_processes(provider)
         if not args.dry_run:
             guard_other_workers(worker_path)
-        out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        c.validate_output_path(out)
-        out.mkdir(mode=0o700)  # atomic reservation; refuse files, dirs and races
+        with open_directory(out.parent, create=True) as parent:
+            c.validate_output_path(out)
+            parent.require_bound()
+            os.mkdir(out.name, mode=0o700, dir_fd=parent.fd)  # exclusive reservation
+            claimed = os.stat(out.name, dir_fd=parent.fd, follow_symlinks=False)
+            fd = os.open(out.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent.fd)
+            try:
+                opened = os.fstat(fd)
+                if (not stat.S_ISDIR(claimed.st_mode)
+                        or (opened.st_dev, opened.st_ino, opened.st_uid)
+                        != (claimed.st_dev, claimed.st_ino, claimed.st_uid)
+                        or opened.st_uid != os.getuid()):
+                    raise PermissionError("new directory was replaced before binding")
+                privatize_new(fd, 0o700)
+                parent.require_bound()
+            finally:
+                os.close(fd)
         factory = worker_factory or (FakeWorker if args.dry_run or not has_calls else
             lambda: MLXWorker(python, worker_path, model, out / "worker-state", args.profile,
                               args.timeout_seconds, args.final_budget))
@@ -887,7 +918,7 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
 
 
 def parser():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = PrivateArgumentParser(prog="target-eval-run-strategies", description=__doc__)
     p.add_argument("--prompts-dir", required=True, type=Path)
     p.add_argument("--corpus", choices=("un", "jsonl", "cs50", "ted", "flores-plus"), default="un")
     p.add_argument("--input", type=Path)

@@ -35,6 +35,7 @@ stdout 默认只写汇总和显式指定的扫描/输出路径，不列会话/�
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import os
 import stat
 import struct
@@ -42,6 +43,9 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Iterator, NamedTuple
+
+from private_files import BoundDirectory, open_directory, privatize_new, validate_ancestors
+from privacy_cli import PrivateArgumentParser as FixedArgumentParser
 
 FMT_NAMES = {1: "PCM 整数", 3: "IEEE float", 6: "A-law", 7: "µ-law", 0xFFFE: "扩展格式"}
 
@@ -222,21 +226,34 @@ def require_unchanged_source(source: Path, handle, layout: Layout) -> None:
 
 
 def preserve_incomplete(target: Path, identity: tuple[int, int] | None, *,
-                        include_sensitive_diagnostics: bool = False) -> None:
+                        include_sensitive_diagnostics: bool = False,
+                        directory: BoundDirectory | None = None) -> None:
     """仅改名本次创建的文件；别人替换的目标不动，也不删除失败数据。"""
     if identity is None:
         return
     try:
-        current = target.lstat()
+        current = (target.lstat() if directory is None else
+                   os.stat(target.name, dir_fd=directory.fd, follow_symlinks=False))
         if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != identity:
             if include_sensitive_diagnostics:
                 print(f"    输出路径已被替换，未改动：{str(target)!r}", file=sys.stderr)
             return
         # UUID 名称避免与已有失败结果冲突；不复用固定的 .incomplete 名称。
         incomplete = target.with_name(f"{target.name}.{uuid.uuid4().hex}.incomplete")
-        if incomplete.exists() or incomplete.is_symlink():
-            raise FileExistsError(f"不完整输出路径已存在：{incomplete}")
-        target.rename(incomplete)
+        if directory is None:
+            if incomplete.exists() or incomplete.is_symlink():
+                raise FileExistsError(f"不完整输出路径已存在：{incomplete}")
+            target.rename(incomplete)
+        else:
+            # Operate on the originally opened output, even when its path moved.
+            try:
+                os.stat(incomplete.name, dir_fd=directory.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise FileExistsError("不完整输出名称已存在")
+            os.rename(target.name, incomplete.name, src_dir_fd=directory.fd,
+                      dst_dir_fd=directory.fd)
         if include_sensitive_diagnostics:
             print(f"    不完整输出已保留：{str(incomplete)!r}", file=sys.stderr)
     except OSError as error:
@@ -245,8 +262,15 @@ def preserve_incomplete(target: Path, identity: tuple[int, int] | None, *,
 
 
 def export_recording(source: Path, layout: Layout, target: Path, *,
-                     include_sensitive_diagnostics: bool = False) -> int:
+                     include_sensitive_diagnostics: bool = False,
+                     directory: BoundDirectory | None = None) -> int:
     """按块读取源 PCM 原样写出；不覆盖已存在文件，源文件保持只读。"""
+    if directory is None:
+        with open_directory(target.parent) as bound:
+            return export_recording(source, layout, target, directory=bound,
+                                    include_sensitive_diagnostics=include_sensitive_diagnostics)
+    if target.parent != directory.path:
+        raise ValueError("输出路径不属于绑定目录")
     with source.open("rb") as handle:
         require_unchanged_source(source, handle, layout)
         handle.seek(layout.data_offset)
@@ -254,11 +278,13 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
         created_identity = None
         try:
             # 以 0600 原子创建；O_EXCL 也拒绝已有软链接，不先创建宽权限文件再收紧。
-            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            directory.require_bound()
+            descriptor = os.open(target.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=directory.fd)
             with os.fdopen(descriptor, "wb") as output:
                 created = os.fstat(output.fileno())
                 created_identity = (created.st_dev, created.st_ino)
-                os.fchmod(output.fileno(), 0o600)
+                privatize_new(output.fileno(), 0o600)
                 output.write(header_bytes(layout.fmt_chunk, remaining))
                 while remaining > 0:
                     block = handle.read(min(COPY_BLOCK, remaining))
@@ -267,12 +293,14 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
                     output.write(block)
                     remaining -= len(block)
             require_unchanged_source(source, handle, layout)
-            final_target = target.lstat()
+            directory.require_bound()
+            final_target = os.stat(target.name, dir_fd=directory.fd, follow_symlinks=False)
             if not stat.S_ISREG(final_target.st_mode) or (final_target.st_dev, final_target.st_ino) != created_identity:
                 raise OSError("输出路径在导出过程中被替换，本次结果不能确认为成功")
         except BaseException:
             preserve_incomplete(target, created_identity,
-                                include_sensitive_diagnostics=include_sensitive_diagnostics)
+                                include_sensitive_diagnostics=include_sensitive_diagnostics,
+                                directory=directory)
             raise
     return layout.usable
 
@@ -289,29 +317,25 @@ def candidates(roots: list[Path]) -> Iterator[Path]:
                 yield recording
 
 
-def prepare_output_directory(output: Path) -> None:
+def prepare_output_directory(output: Path) -> BoundDirectory:
     """只创建缺失目录；已有目录不改权限、不覆盖，也不接受软链接作为输出。"""
-    missing = []
-    parent = output
-    while not parent.exists() and not parent.is_symlink():
-        missing.append(parent)
-        parent = parent.parent
-    for directory in reversed(missing):
-        directory.mkdir(mode=0o700)
-    state = output.lstat()
-    if (not stat.S_ISDIR(state.st_mode) or state.st_uid != os.getuid()
-            or stat.S_IMODE(state.st_mode) != 0o700):
-        raise PermissionError("导出目录必须属于当前用户、不是软链接且权限为 0700")
+    return open_directory(output, create=True, private=True)
 
 
-class PrivateArgumentParser(argparse.ArgumentParser):
+class PrivateArgumentParser(FixedArgumentParser):
     def error(self, message: str) -> None:
         # argparse 的原始错误可能带上用户误传的正文；只给固定的参数提示。
-        super().error("参数无效：必须显式指定 --root；导出还需 --export 和 --output。"
-                      "请用 --help 查看用法。")
+        argparse.ArgumentParser.error(self, "invalid_arguments; use --help for usage. "
+                                      "参数无效：必须显式指定 --root；导出还需 --export 和 --output。"
+                                      "请用 --help 查看用法。")
 
 
 def main(argv: list[str] | None = None) -> int:
+    with ExitStack() as directories:
+        return _main(argv, directories)
+
+
+def _main(argv: list[str] | None, directories: ExitStack) -> int:
     parser = PrivateArgumentParser(prog="recover-orphan-recordings.py", description=__doc__,
                                    formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", type=Path, action="append", required=True,
@@ -324,9 +348,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.export and args.output is None:
         parser.error("--export 必须同时显式指定 --output")
     try:
-        roots = [root.expanduser().resolve() for root in args.root]
+        roots = []
+        for root in args.root:
+            checked = validate_ancestors(root)
+            if checked.resolve() != checked:
+                raise ValueError("扫描目录在祖先校验后被重定向")
+            roots.append(checked)
         # 不解析输出末级软链接；prepare_output_directory 会拒绝它，避免改动其目标。
-        output = args.output.expanduser().absolute() if args.output is not None else None
+        output = validate_ancestors(args.output) if args.output is not None else None
+        root_bindings = []
+        for root in roots:
+            try:
+                bound = directories.enter_context(open_directory(root))
+            except FileNotFoundError:
+                continue
+            root_bindings.append(bound)
     except Exception as error:
         print("无法解析显式指定的目录；未开始扫描。", file=sys.stderr)
         if args.include_sensitive_diagnostics:
@@ -343,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"导出位置：{str(output)!r}；目录 0700，文件 0600。"
               "文件名保留会话名，录音与失败输出可能敏感；源文件不修改，已有输出不覆盖。")
         try:
-            prepare_output_directory(output)
+            output_binding = directories.enter_context(prepare_output_directory(output))
         except Exception as error:
             print("未导出：无法准备私有输出目录；需当前用户拥有、非软链接且权限为 0700 的目录。"
                   "未开始扫描；已有目录不会被改权限。", file=sys.stderr)
@@ -357,6 +393,8 @@ def main(argv: list[str] | None = None) -> int:
     scan_failed = False
     try:
         for recording in candidates(roots):
+            for bound in root_bindings:
+                bound.require_bound()
             found += 1
             try:
                 layout = inspect(recording)
@@ -374,7 +412,8 @@ def main(argv: list[str] | None = None) -> int:
             target = output / f"{recording.parent.name}.wav"
             try:
                 written = export_recording(recording, layout, target,
-                                           include_sensitive_diagnostics=args.include_sensitive_diagnostics)
+                                           include_sensitive_diagnostics=args.include_sensitive_diagnostics,
+                                           directory=output_binding)
             except Exception as error:
                 failed += 1
                 existing += isinstance(error, FileExistsError)

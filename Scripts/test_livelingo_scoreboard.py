@@ -10,9 +10,11 @@ import os
 from pathlib import Path
 import select
 import signal
+import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -66,6 +68,329 @@ with pathlib.Path(os.environ['LIVELINGO_SCOREBOARD_TIMINGS']).open('a') as f:
 time.sleep(.22)
 sys.exit(1)
 '''
+
+
+class ScoreboardPrivateOutputTests(unittest.TestCase):
+    """Synthetic filesystem evidence; no build, classroom input or runtime."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="scoreboard-private-")).resolve()
+        self.enterContext(patch.object(m, "WORK", self.root))
+        self.enterContext(patch.object(m, "DEFAULT", self.root / "history"))
+
+    @staticmethod
+    def acl(path):
+        result = subprocess.run(["/bin/ls", "-lde", str(path)], check=True,
+                                capture_output=True, text=True)
+        return result.stdout.splitlines()[1:]
+
+    def inherited_acl(self, path):
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read,write,file_inherit,directory_inherit",
+                        str(path)], check=True, capture_output=True)
+        canary = path / "acl-canary"
+        canary.write_text("synthetic")
+        self.assertTrue(any("everyone inherited allow" in row for row in self.acl(canary)))
+
+    def snapshot(self, path):
+        info = path.stat()
+        return stat.S_IMODE(info.st_mode), info.st_uid, info.st_ino, self.acl(path)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS inherited ACL")
+    def test_new_directory_clears_inherited_acl_before_private_writes(self):
+        self.inherited_acl(self.root)
+        out = m.new_directory(self.root / "nested" / "result")
+        m.write_json(out / "body.json", {"text": "synthetic private body"})
+        with m.exclusive(out / "body.bin", binary=True) as stream:
+            stream.write(b"synthetic private body")
+        for directory in (out.parent, out):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+            self.assertEqual(self.acl(directory), [])
+        for name in ("body.json", "body.bin"):
+            self.assertEqual(stat.S_IMODE((out / name).stat().st_mode), 0o600)
+            self.assertEqual(self.acl(out / name), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS inherited ACL")
+    def test_exclusive_clears_new_file_acl_without_changing_existing_parent(self):
+        parent = self.root / "existing"
+        parent.mkdir(mode=0o700)
+        self.inherited_acl(parent)
+        before = self.snapshot(parent)
+        m.write_json(parent / "body.json", {"text": "synthetic"})
+        self.assertEqual(self.snapshot(parent), before)
+        self.assertEqual(self.acl(parent / "body.json"), [])
+        self.assertEqual(stat.S_IMODE((parent / "body.json").stat().st_mode), 0o600)
+
+    def test_private_readonly_directory_and_file_are_not_upgraded(self):
+        parent = self.root / "readonly"
+        parent.mkdir(mode=0o500)
+        before = parent.stat().st_mode
+        with self.assertRaises((m.Rejected, OSError, ValueError)):
+            m.new_directory(parent / "child")
+        self.assertEqual(parent.stat().st_mode, before)
+        self.assertFalse((parent / "child").exists())
+        output = m.new_directory(self.root / "output")
+        body = output / "body.json"
+        body.write_text("synthetic retained body")
+        body.chmod(0o400)
+        before = body.stat().st_mode, body.read_bytes()
+        with self.assertRaises((m.Rejected, OSError, ValueError)):
+            m.write_json(body, {"text": "replacement"})
+        self.assertEqual((body.stat().st_mode, body.read_bytes()), before)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS inherited ACL")
+    def test_history_and_lock_creation_clear_inherited_acl(self):
+        self.inherited_acl(self.root)
+        out = m.new_directory(self.root / "result")
+        with patch.object(m, "markdown", return_value="synthetic report\n"):
+            m.write_report(out, {"headline": {"runs_total": 0}})
+        lock_directory = self.root / "lock"
+        with m.session_lock(lock_directory):
+            pass
+        lock = lock_directory / ".lock"
+        before = self.snapshot(lock)
+        with m.session_lock(lock_directory):
+            pass
+        self.assertEqual(self.snapshot(lock), before)
+        for path in (m.DEFAULT, lock_directory):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+            self.assertEqual(self.acl(path), [])
+        for path in (m.DEFAULT / "history.jsonl", lock):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(self.acl(path), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL validation")
+    def test_history_append_refuses_public_allow_acl_and_readonly_files(self):
+        for index, (mode, acl) in enumerate(((0o644, False), (0o600, True), (0o400, False), (0o600, "deny-allow"))):
+            with self.subTest(mode=mode, acl=acl):
+                directory = self.root / f"history-{index}"
+                directory.mkdir(mode=0o700)
+                history = directory / "history.jsonl"
+                history.write_text("synthetic retained prefix\n")
+                history.chmod(mode)
+                if acl == "deny-allow":
+                    subprocess.run(["/bin/chmod", "+a", "everyone deny execute", str(history)],
+                                   check=True, capture_output=True)
+                if acl:
+                    subprocess.run(["/bin/chmod", "+a", "everyone allow read,write", str(history)],
+                                   check=True, capture_output=True)
+                before = self.snapshot(history), history.read_bytes()
+                out = m.new_directory(self.root / f"report-{index}")
+                with patch.object(m, "DEFAULT", directory), patch.object(m, "markdown", return_value="synthetic\n"), \
+                        self.assertRaises((m.Rejected, OSError, ValueError)):
+                    m.write_report(out, {"headline": {"runs_total": 0}})
+                self.assertEqual((self.snapshot(history), history.read_bytes()), before)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL validation")
+    def test_history_append_preserves_existing_private_file(self):
+        m.DEFAULT.mkdir(mode=0o700)
+        history = m.DEFAULT / "history.jsonl"
+        history.write_text("synthetic retained prefix\n")
+        history.chmod(0o600)
+        before = self.snapshot(history)
+        out = m.new_directory(self.root / "report")
+        with patch.object(m, "markdown", return_value="synthetic\n"):
+            m.write_report(out, {"headline": {"runs_total": 0}})
+        self.assertEqual(self.snapshot(history), before)
+        self.assertTrue(history.read_text().startswith("synthetic retained prefix\n"))
+        self.assertEqual(len(history.read_text().splitlines()), 2)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL validation")
+    def test_lock_refuses_public_allow_acl_and_readonly_files(self):
+        for index, (mode, acl) in enumerate(((0o644, False), (0o600, True), (0o400, False), (0o600, "deny-allow"))):
+            with self.subTest(mode=mode, acl=acl):
+                directory = self.root / f"lock-{index}"
+                directory.mkdir(mode=0o700)
+                lock = directory / ".lock"
+                lock.write_text("synthetic retained lock")
+                lock.chmod(mode)
+                if acl == "deny-allow":
+                    subprocess.run(["/bin/chmod", "+a", "everyone deny execute", str(lock)],
+                                   check=True, capture_output=True)
+                if acl:
+                    subprocess.run(["/bin/chmod", "+a", "everyone allow read,write", str(lock)],
+                                   check=True, capture_output=True)
+                before = self.snapshot(lock), lock.read_bytes()
+                with self.assertRaises((m.Rejected, OSError, ValueError)):
+                    with m.session_lock(directory):
+                        pass
+                self.assertEqual((self.snapshot(lock), lock.read_bytes()), before)
+
+    def test_parser_errors_use_fixed_prog_and_omit_private_arguments(self):
+        with patch.object(sys, "argv", ["synthetic-program-" + SENTINEL]), \
+                contextlib.redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit):
+            m.parser().parse_args(["run", "--repeats", SENTINEL])
+        self.assertNotIn(SENTINEL, error.getvalue())
+        self.assertIn("livelingo-scoreboard", error.getvalue())
+
+    def test_public_code_parent_is_unchanged_when_creating_private_file(self):
+        parent = self.root / "public-code"
+        parent.mkdir(mode=0o755)
+        before = parent.stat().st_mode
+        with m.exclusive(parent / "synthetic.py") as stream:
+            stream.write("# public synthetic code\n")
+        self.assertEqual(parent.stat().st_mode, before)
+        self.assertEqual(stat.S_IMODE((parent / "synthetic.py").stat().st_mode), 0o600)
+
+    def test_directory_reservation_race_refuses_existing_inode_without_mutation(self):
+        out = self.root / "already-reserved"
+        out.mkdir(mode=0o700)
+        sentinel = out / "retained"
+        sentinel.write_text("synthetic retained content")
+        before = out.stat().st_mode, out.stat().st_ino, sentinel.read_bytes()
+        with patch.object(Path, "exists", return_value=False), self.assertRaises(FileExistsError):
+            m.new_directory(out)
+        self.assertEqual((out.stat().st_mode, out.stat().st_ino, sentinel.read_bytes()), before)
+
+    def test_lock_refuses_symlink_ancestor_above_immediate_parent(self):
+        target = self.root / "synthetic-lock-target"
+        target.mkdir(mode=0o700)
+        link = self.root / "redirect"
+        link.symlink_to(target, target_is_directory=True)
+        directory = link / "middle" / "parent" / "lock"
+        with patch.object(m, "default_machine_lock_directory", return_value=directory), \
+                self.assertRaises(m.Rejected):
+            with m.session_lock():
+                pass
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_new_directory_identity_drift_is_refused_before_acl_or_mode_changes(self):
+        for index, drift in enumerate(("replacement", "owner", "device")):
+            with self.subTest(drift=drift):
+                out = self.root / f"claimed-{index}"
+                replacement = self.root / f"replacement-{index}"
+                replacement.mkdir(mode=0o755)
+                before = replacement.stat().st_mode, replacement.stat().st_ino
+                original_open, original_fstat = os.open, os.fstat
+                opened_fd = []
+
+                def open_output(name, flags, *args, **kwargs):
+                    if name == out.name and flags & os.O_DIRECTORY:
+                        if drift == "replacement":
+                            out.rename(self.root / f"superseded-claimed-{index}")
+                            replacement.rename(out)
+                        descriptor = original_open(name, flags, *args, **kwargs)
+                        opened_fd.append(descriptor)
+                        return descriptor
+                    return original_open(name, flags, *args, **kwargs)
+
+                def fstat_output(descriptor):
+                    state = original_fstat(descriptor)
+                    if descriptor in opened_fd and drift in ("owner", "device"):
+                        values = list(state)
+                        values[4 if drift == "owner" else 2] += 1
+                        return os.stat_result(values)
+                    return state
+
+                with patch.object(m.os, "open", side_effect=open_output), \
+                        patch.object(m.os, "fstat", side_effect=fstat_output), \
+                        patch.object(m, "privatize_new", wraps=m.privatize_new) as privatize, \
+                        self.assertRaises((OSError, m.Rejected)):
+                    m.new_directory(out)
+                privatize.assert_not_called()
+                if drift == "replacement":
+                    self.assertEqual((out.stat().st_mode, out.stat().st_ino), before)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS deny ACL")
+    def test_private_history_and_lock_deny_acl_is_preserved(self):
+        directory = self.root / "deny-acl"
+        directory.mkdir(mode=0o700)
+        subprocess.run(["/bin/chmod", "+a", "everyone deny delete", str(directory)],
+                       check=True, capture_output=True)
+        paths = [directory / "history.jsonl", directory / ".lock"]
+        for path in paths:
+            path.write_text("synthetic retained prefix\n")
+            path.chmod(0o600)
+            subprocess.run(["/bin/chmod", "+a", "everyone deny execute", str(path)],
+                           check=True, capture_output=True)
+        before = [self.snapshot(path) for path in (directory, *paths)]
+        with m.session_lock(directory):
+            pass
+        out = m.new_directory(self.root / "deny-report")
+        with patch.object(m, "DEFAULT", directory), patch.object(m, "markdown", return_value="synthetic\n"):
+            m.write_report(out, {"headline": {"runs_total": 0}})
+        self.assertEqual([self.snapshot(path) for path in (directory, *paths)], before)
+        self.assertTrue(paths[0].read_text().startswith("synthetic retained prefix\n"))
+
+    def test_history_and_lock_refuse_hardlinks_without_modifying_shared_inode(self):
+        for name in ("history.jsonl", ".lock"):
+            with self.subTest(name=name):
+                directory = self.root / ("history-hardlink" if name == "history.jsonl" else "lock-hardlink")
+                directory.mkdir(mode=0o700)
+                path = directory / name
+                path.write_text("synthetic shared inode\n")
+                path.chmod(0o600)
+                alias = directory / "alias"
+                os.link(path, alias)
+                before = path.stat().st_mode, path.stat().st_nlink, path.read_bytes()
+                if name == "history.jsonl":
+                    out = m.new_directory(self.root / "hardlink-report")
+                    with patch.object(m, "DEFAULT", directory), patch.object(m, "markdown", return_value="synthetic\n"), \
+                            self.assertRaises(m.Rejected):
+                        m.write_report(out, {"headline": {"runs_total": 0}})
+                else:
+                    with self.assertRaises(m.Rejected):
+                        with m.session_lock(directory):
+                            pass
+                self.assertEqual((path.stat().st_mode, path.stat().st_nlink, path.read_bytes()), before)
+                self.assertEqual(alias.read_bytes(), before[2])
+
+    def test_build_copy_allows_public_code_with_synthetic_compiler_only(self):
+        archive_bytes = io.BytesIO()
+        files = {"Scripts/mlx_runtime/worker.py": b"# synthetic worker\n",
+                 "Scripts/qwen_asr_service.py": b"# synthetic service\n",
+                 "Scripts/scoreboard_timing.py": b"# synthetic timing\n"}
+        with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+            for name in ("Scripts", "Scripts/mlx_runtime"):
+                entry = tarfile.TarInfo(name)
+                entry.type, entry.mode = tarfile.DIRTYPE, 0o755
+                archive.addfile(entry)
+            for name, content in files.items():
+                entry = tarfile.TarInfo(name)
+                entry.size, entry.mode = len(content), 0o644
+                archive.addfile(entry, io.BytesIO(content))
+        runtime = self.root / "synthetic-runtime"
+        runtime.mkdir(mode=0o755)
+        python = runtime / "python"
+        python.write_bytes(b"synthetic executable; never executed")
+        config = {"python": str(python), "models": str(runtime),
+                  "asr_site_packages": str(runtime), "language_site_packages": str(runtime)}
+        original_run = subprocess.run
+
+        def fake_compile(arguments, **kwargs):
+            if arguments[0] != "bash":
+                return original_run(arguments, **kwargs)
+            compiled = Path(arguments[2])
+            compiled.mkdir(mode=0o700)
+            for name in ("livelingo-cli", "livelingo-virtual-player"):
+                binary = compiled / name
+                binary.write_bytes(b"synthetic binary; never executed")
+                binary.chmod(0o755)
+            source = Path(kwargs["cwd"])
+            for name in files:
+                (source / name).chmod(0o644)
+            (source / "Scripts/mlx_runtime").chmod(0o755)
+            return subprocess.CompletedProcess(arguments, 0)
+
+        def fake_command(arguments, **kwargs):
+            if arguments[:2] == ["git", "archive"]:
+                return archive_bytes.getvalue()
+            if arguments == ["xcrun", "swiftc", "--version"]:
+                return b"synthetic compiler version"
+            self.fail("unexpected command in synthetic build")
+
+        out = self.root / "synthetic-build"
+        with patch.object(m, "DERIVED", self.root / "derived"), \
+                patch.object(m, "runtime_config", return_value=config), \
+                patch.object(m, "git", return_value="a" * 40), \
+                patch.object(m, "command", side_effect=fake_command), \
+                patch.object(m.subprocess, "run", side_effect=fake_compile), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.build(m.argparse.Namespace(runtime=runtime, commit="synthetic", out=out)), out)
+        self.assertEqual(stat.S_IMODE(out.stat().st_mode), 0o700)
+        for name in ("mlx_runtime/worker.py", "ASRRuntime/qwen_asr_service.py", "mlx_runtime/scoreboard_timing.py"):
+            self.assertEqual(stat.S_IMODE((out / name).stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(runtime.stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((out / "build-provenance.json").stat().st_mode), 0o600)
 
 
 class ScoreboardOrchestrationTests(unittest.TestCase):

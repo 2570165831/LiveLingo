@@ -12,7 +12,6 @@ these tests do not constitute a run against an installed sacreBLEU.
 """
 from __future__ import annotations
 
-import argparse
 from collections import Counter
 import json
 import math
@@ -21,9 +20,20 @@ import random
 import re
 import statistics
 import string
+import sys
 from typing import Callable, Iterable, Sequence
 import unicodedata
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    __package__ = "Scripts.target_eval"
+
+try:
+    from Scripts.privacy_cli import PrivateArgumentParser
+except ModuleNotFoundError as error:
+    if error.name != "Scripts":
+        raise
+    from privacy_cli import PrivateArgumentParser
 from .corpora import validate_output_path, write_json
 
 
@@ -425,7 +435,7 @@ def compare(baseline: Sequence[dict], candidate: Sequence[dict], *, iterations: 
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PrivateArgumentParser(prog="target-eval-metrics", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     score = subparsers.add_parser("score", help="score a local public/synthetic metric JSONL")
     score.add_argument("input")

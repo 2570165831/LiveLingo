@@ -307,9 +307,9 @@ struct TargetAcceptanceCLI {
             prompts["caption-adjacent-repair-\(key)"] = try await captionPrompt(model: model, previous: true, target: target)
             prompts["typed-\(key)"] = try await captionPrompt(model: model, typed: true, target: target)
         }
-        try FileManager.default.createDirectory(at: directory.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try LiveLingoCLI.createPrivateParents(directory.deletingLastPathComponent())
         _ = try checkedOutput(path)
-        guard Darwin.mkdir(directory.path, 0o700) == 0 else { throw Failure.outputExists }
+        try LiveLingoCLI.createPrivateDirectory(directory)
         var entries: [[String: Any]] = []
         for name in prompts.keys.sorted() {
             let data = Data(prompts[name]!.utf8), fileName = "\(target.rawValue)-\(name).utf8"

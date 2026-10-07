@@ -5,13 +5,21 @@ Loads only a specified local model, never recordings. Measures synchronous save
 and restore latency, verifies uninterrupted/resumed token equality, and keeps
 one checkpoint per measured state for inspection. This is not an energy test.
 """
-import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import sys
 import time
+
+try:
+    from Scripts.privacy_cli import PrivateArgumentParser
+    from Scripts.private_files import make_private_directory
+except ModuleNotFoundError as error:
+    if error.name != 'Scripts':
+        raise
+    from privacy_cli import PrivateArgumentParser
+    from private_files import make_private_directory
 
 os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
                   PYTHONDONTWRITEBYTECODE='1', TOKENIZERS_PARALLELISM='false')
@@ -43,13 +51,13 @@ def note_request(repeats=1):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PrivateArgumentParser(prog='benchmark-checkpoints.py', description=__doc__)
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if not args.model.is_dir():
         parser.error('An existing local model directory is required')
-    args.output.mkdir(parents=True, exist_ok=False)
+    make_private_directory(args.output, exclusive=True)
     source = ROOT / 'Scripts/mlx_runtime/engine.py'
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     from engine import Engine, Generation

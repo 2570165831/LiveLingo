@@ -8,7 +8,6 @@ Old probe files are retained as old evidence and must never be silently upgraded
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import math
@@ -17,6 +16,15 @@ from pathlib import Path
 import re
 import sys
 import uuid
+
+try:
+    from Scripts.privacy_cli import PrivateArgumentParser
+    from Scripts.private_files import create_private_file
+except ModuleNotFoundError as error:
+    if error.name != "Scripts":
+        raise
+    from privacy_cli import PrivateArgumentParser
+    from private_files import create_private_file
 
 KINDS = {"核心结论", "概念关系", "例子", "易错点", "补充理解", "待确认"}
 NUMERIC_CONTEXT = "请核对原文中数值对应的对象、属性、单位和条件；表面数值差异不代表事实错误。"
@@ -1114,7 +1122,7 @@ def delivery_report(value: dict, *, include_content: bool = False) -> dict:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PrivateArgumentParser(prog="evaluate-learning-quality.py", description=__doc__)
     parser.add_argument("--corpus", required=True, type=Path)
     parser.add_argument("--results", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -1134,10 +1142,7 @@ def main(argv=None) -> int:
         value = {"version": 2, "integrityStatus": "failed", "error": "evaluation_failed",
                  "overallAcceptance": "pending-semantic-readback-and-baseline-comparison"}
     value = delivery_report(value, include_content=args.include_content)
-    if args.output.parent.resolve() != args.output.parent.absolute():
-        parser.error("output_parent_unsafe")
-    args.output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    descriptor = create_private_file(args.output)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         json.dump(value, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
@@ -1149,6 +1154,6 @@ def main(argv=None) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except OSError as error:
+    except (OSError, ValueError) as error:
         print("Scorer execution failed; raw diagnostics omitted", file=sys.stderr)
         sys.exit(1)

@@ -33,8 +33,17 @@ import time
 import uuid
 
 sys.dont_write_bytecode = True
-import scoreboard_metrics as metrics
-import scoreboard_energy as energy
+if __package__:
+    from . import scoreboard_metrics as metrics, scoreboard_energy as energy
+    from .private_files import (create_private_file, make_private_directory, open_directory,
+                                privatize_new, require_private_acl)
+    from .privacy_cli import PrivateArgumentParser
+else:
+    import scoreboard_metrics as metrics
+    import scoreboard_energy as energy
+    from private_files import (create_private_file, make_private_directory, open_directory,
+                               privatize_new, require_private_acl)
+    from privacy_cli import PrivateArgumentParser
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "work"
@@ -118,19 +127,68 @@ def new_directory(path):
     path = writable(path)
     if path.exists():
         raise Rejected("output_exists")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.mkdir(mode=0o700)
+    # Keep the original exclusive reservation, then strip only the new inode.
+    with open_directory(path.parent, create=True) as parent:
+        parent.require_bound()
+        os.mkdir(path.name, mode=0o700, dir_fd=parent.fd)
+        claimed = os.stat(path.name, dir_fd=parent.fd, follow_symlinks=False)
+        fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent.fd)
+        try:
+            opened = os.fstat(fd)
+            if (not stat.S_ISDIR(claimed.st_mode)
+                    or (opened.st_dev, opened.st_ino, opened.st_uid)
+                    != (claimed.st_dev, claimed.st_ino, claimed.st_uid)
+                    or opened.st_uid != os.getuid()):
+                raise PermissionError("new directory was replaced before binding")
+            privatize_new(fd, 0o700)
+            parent.require_bound()
+        finally:
+            os.close(fd)
     return path
 
 
 def exclusive(path, binary=False):
     path = writable(path)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags, 0o600)
-    except OSError:
+        fd = create_private_file(path)
+    except (OSError, ValueError):
         raise Rejected("output_exists_or_unwritable") from None
     return os.fdopen(fd, "wb" if binary else "w", **({} if binary else {"encoding": "utf-8"}))
+
+
+@contextlib.contextmanager
+def private_persistent_file(path, flags, reason):
+    """Append/lock only a checked inode; never repair an existing object."""
+    try:
+        directory = open_directory(path.parent, create=True, private=True)
+    except (OSError, ValueError):
+        raise Rejected(reason) from None
+    with directory:
+        try:
+            try:
+                fd = directory.create_file(path.name, flags)
+            except FileExistsError:
+                directory.require_bound()
+                # NONBLOCK lets the type check refuse FIFOs without hanging.
+                fd = os.open(path.name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory.fd)
+        except (OSError, ValueError):
+            raise Rejected(reason) from None
+        try:
+            try:
+                opened = os.fstat(fd)
+                if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
+                        or stat.S_IMODE(opened.st_mode) != 0o600 or opened.st_nlink != 1):
+                    raise Rejected(reason)
+                require_private_acl(fd)
+                directory.require_bound()
+                current = os.stat(path.name, dir_fd=directory.fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                    raise Rejected(reason)
+            except (OSError, ValueError):
+                raise Rejected(reason) from None
+            yield fd
+        finally:
+            os.close(fd)
 
 
 def write_json(path, value):
@@ -175,19 +233,13 @@ def session_lock(directory=None):
                 raise Rejected("symlink_output")
     else:
         path = writable(Path(directory) / ".lock")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise Rejected("invalid_lock")
+    with private_persistent_file(path, os.O_RDWR, "invalid_lock") as fd:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Rejected("scoreboard_busy") from None
         # The persistent lock is never unlinked, avoiding inode-replacement races.
         yield
-    finally:
-        os.close(fd)
 
 
 def command(arguments, *, cwd=ROOT, timeout=120, env=None):
@@ -300,8 +352,8 @@ def prepare(args):
         raise Rejected("ffmpeg_unavailable")
     out = new_directory(args.out)
     reusable = verify_fixtures(args.reuse) if args.reuse else None
-    (out / "references").mkdir(mode=0o700)
-    (out / "rules").mkdir(mode=0o700)
+    make_private_directory(out / "references")
+    make_private_directory(out / "rules")
     files, clips = {}, []
     for name in ("ruler.json", "normalizer-v1.json", "cs50-glossary-v1.json", "translation-authored-80.json"):
         target = out / "rules" / name
@@ -446,7 +498,7 @@ def shell_host(path, python, packages):
         stream.write("export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1\n")
         stream.write("export PYTHONPATH=" + shlex.quote(packages) + "\n")
         stream.write("exec " + shlex.quote(python) + ' -B "$@"\n')
-    path.chmod(0o700)
+        os.fchmod(stream.fileno(), 0o700)
 
 
 def build(args):
@@ -455,7 +507,7 @@ def build(args):
     dirty = bool(git("status", "--porcelain", "--untracked-files=normal")) if args.commit == "HEAD" else False
     out = new_directory(args.out)
     source = out / "source"
-    source.mkdir(mode=0o700)
+    make_private_directory(source)
     source_hash = hashlib.sha256()
     if dirty:
         names = command(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"]).split(b"\0")
@@ -472,7 +524,6 @@ def build(args):
             data = original.read_bytes()
             source_hash.update(raw + b"\0" + hashlib.sha256(data).digest())
             target = source / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
             with exclusive(target, True) as stream:
                 stream.write(data)
     else:
@@ -483,19 +534,19 @@ def build(args):
                 if entry.issym() or entry.islnk() or not target.resolve().is_relative_to(source.resolve()):
                     raise Rejected("unsafe_source_archive")
                 if entry.isdir():
-                    target.mkdir(parents=True, exist_ok=True)
+                    make_private_directory(target)
                 elif entry.isfile():
-                    target.parent.mkdir(parents=True, exist_ok=True)
                     with exclusive(target, True) as stream:
                         stream.write(archive.extractfile(entry).read())
                 else:
                     raise Rejected("unsafe_source_archive")
     cache = DERIVED / "ModuleCache"
-    writable(cache, derived=True).mkdir(parents=True, exist_ok=True)
+    with open_directory(writable(cache, derived=True), create=True):
+        pass  # Public compiler cache entries contain no classroom body.
     compile_out = out / "compiled"
     env = os.environ.copy()
     env.update(TMPDIR=str(WORK / "tmp"), CLANG_MODULE_CACHE_PATH=str(cache), SWIFT_MODULECACHE_PATH=str(cache))
-    (WORK / "tmp").mkdir(parents=True, exist_ok=True)
+    make_private_directory(WORK / "tmp")
     with exclusive(out / "build.log", True) as log:
         result = subprocess.run(["bash", str(source / "Scripts/build-cli.sh"), str(compile_out),
                                  "--module-cache", str(cache)], cwd=source, env=env, stdout=log, stderr=log)
@@ -503,7 +554,7 @@ def build(args):
         raise Rejected("build_failed")
     for name in ("livelingo-cli", "livelingo-virtual-player"):
         shutil.copy2(compile_out / name, out / name)
-    (out / "ASRRuntime/python/bin").mkdir(parents=True)
+    make_private_directory(out / "ASRRuntime/python/bin")
     shell_host(out / "ASRRuntime/python/bin/python3", config["python"], config["asr_site_packages"])
     shell_host(out / "language-python-host", config["python"], config["language_site_packages"])
     shutil.copytree(source / "Scripts/mlx_runtime", out / "mlx_runtime", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -690,8 +741,8 @@ def runtime_environment(cli, run_dir):
                TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", TOKENIZERS_PARALLELISM="false",
                TMPDIR=str(run_dir / "tmp"), XDG_CACHE_HOME=str(run_dir / "cache"),
                HF_HOME=str(run_dir / "cache/huggingface"))
-    (run_dir / "tmp").mkdir(mode=0o700)
-    (run_dir / "cache").mkdir(mode=0o700)
+    make_private_directory(run_dir / "tmp")
+    make_private_directory(run_dir / "cache")
     for key, name in (("LIVELINGO_MLX_PYTHON", "language-python-host"),
                       ("LIVELINGO_MLX_WORKER", "mlx_runtime/worker.py"), ("LIVELINGO_MLX_MODELS", "Models")):
         path = cli.parent / name
@@ -1184,16 +1235,10 @@ def write_report(out, report, history=True):
         stream.write(markdown(report))
     if history:
         path = writable(DEFAULT / "history.jsonl")
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise Rejected("invalid_history_file")
+        with private_persistent_file(path, os.O_WRONLY | os.O_APPEND, "invalid_history_file") as fd:
             row = dict(report_id=hashlib.sha256(str(out.relative_to(WORK)).encode()).hexdigest(),
                        sha256=sha256(out / "scoreboard.json"), headline=report["headline"])
             os.write(fd, (json.dumps(row, sort_keys=True) + "\n").encode())
-        finally:
-            os.close(fd)
 
 
 def pause_window(seconds):
@@ -1221,8 +1266,8 @@ def run(args, provider=read_processes, log_collector=collect_oslog):
     profiles = ["9b", "4b"] if args.profile == "both" else [args.profile]
     with session_lock():
         out = new_directory(args.out)
-        (out / "clips").mkdir(mode=0o700)
-        (out / "power").mkdir(mode=0o700)
+        make_private_directory(out / "clips")
+        make_private_directory(out / "power")
         build_paths, provenances = {}, {}
         for label, value in zip("AB", builds_requested):
             if value == "auto":
@@ -1248,7 +1293,7 @@ def run(args, provider=read_processes, log_collector=collect_oslog):
                         preflight_processes(provider)
                         run_id = f"{clip['id']}-{label}-{profile}-r{counts[label]}"
                         directory = out / "clips" / run_id
-                        directory.mkdir(mode=0o700)
+                        new_directory(directory)
                         cli = build_paths[label]
                         arguments = ["--replay", str(fixture_path(args.fixtures, clip["audio"])),
                                      "--output", str(directory / "session")]
@@ -1282,10 +1327,10 @@ def run(args, provider=read_processes, log_collector=collect_oslog):
                         while cursor < len(cases):
                             preflight_processes(provider)
                             directory = out / f"translate-{label}-{profile}-{attempts:03d}"
-                            directory.mkdir(mode=0o700)
+                            new_directory(directory)
                             remaining = "||".join(case["text"] for case in cases[cursor:])
                             content_directory = directory / ".translation-content"
-                            content_directory.mkdir(mode=0o700)
+                            make_private_directory(content_directory)
                             input_file = content_directory / "input.txt"
                             output_file = content_directory / "translations.jsonl"
                             with exclusive(input_file) as stream:
@@ -1379,7 +1424,7 @@ def score(args):
                                    record["clip"]["audio_seconds"]) if local.get("energy_enabled") else None
         record["metrics"] = score_clip(record["clip"], fixtures, root / directory, execution, measured, samples)
         new_detail = out / directory
-        new_detail.mkdir(parents=True, mode=0o700)
+        new_directory(new_detail)
         save_metrics(new_detail, record["metrics"], execution)
     report = aggregate(local["records"], manifest, fixtures, local["builds"], local["tier"], local["repeats"])
     report["translate_authored80"] = local.get("translate_authored80", [])
@@ -1489,7 +1534,7 @@ def calibrate(args):
 
 
 def parser():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = PrivateArgumentParser(prog="livelingo-scoreboard", description=__doc__)
     sub = p.add_subparsers(dest="operation", required=True)
     prep = sub.add_parser("prepare", help="freeze local sources without playing audio")
     prep.add_argument("--sources", type=Path, default=DEFAULT / "sources.json")

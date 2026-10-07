@@ -6,7 +6,6 @@ request timing includes construction, prefill, and decoding. Alternating order
 reduces drift. Saved token equality is a regression check, not an accuracy score
 or a measurement of whole-device electricity use.
 """
-import argparse
 import gc
 import hashlib
 import importlib.util
@@ -19,6 +18,15 @@ import statistics
 import sys
 import textwrap
 import time
+
+try:
+    from Scripts.privacy_cli import PrivateArgumentParser
+    from Scripts.private_files import make_private_directory
+except ModuleNotFoundError as error:
+    if error.name != 'Scripts':
+        raise
+    from privacy_cli import PrivateArgumentParser
+    from private_files import make_private_directory
 
 os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
                   PYTHONDONTWRITEBYTECODE='1', TOKENIZERS_PARALLELISM='false')
@@ -95,7 +103,7 @@ def run(generation_type, engine, text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PrivateArgumentParser(prog='benchmark-prefix-cache.py', description=__doc__)
     parser.add_argument('--model', required=True, type=Path)
     parser.add_argument('--baseline-engine', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
@@ -105,7 +113,7 @@ def main():
         parser.error('Local model and original engine file are required')
     if not 1 <= args.limit <= len(CAPTIONS):
         parser.error('limit must be within the synthetic caption corpus')
-    args.output.mkdir(parents=True, exist_ok=False)
+    make_private_directory(args.output, exclusive=True)
     candidate_path = ROOT / 'Scripts/mlx_runtime/engine.py'
     candidate_sha = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
     original_sha = hashlib.sha256(args.baseline_engine.read_bytes()).hexdigest()

@@ -8,7 +8,6 @@ are never overwritten.
 """
 from __future__ import annotations
 
-import argparse
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,6 +22,16 @@ import sys
 from typing import Callable, Iterable, Sequence
 import unicodedata
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    __package__ = "Scripts.target_eval"
+
+try:
+    from Scripts.privacy_cli import PrivateArgumentParser
+except ModuleNotFoundError as error:
+    if error.name != "Scripts":
+        raise
+    from privacy_cli import PrivateArgumentParser
 from . import corpora as c
 from . import clusters
 from . import metrics as m
@@ -805,7 +814,7 @@ def calibrate_public(*, cli: str | Path, manifest: str | Path, output: str | Pat
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PrivateArgumentParser(prog="target-eval-calibrate", description=__doc__)
     parser.add_argument("--cli", required=True, type=Path)
     parser.add_argument("--un-root", type=Path, default=c.repository_root().parent / "data" / "un")
     parser.add_argument("--public-manifest", type=Path,
