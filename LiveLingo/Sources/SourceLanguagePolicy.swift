@@ -1,6 +1,31 @@
 import Foundation
 import NaturalLanguage
 
+/// Decisions about a source belong to the generation target. The distinction
+/// between an implicit English segment and a raw "en" gate input is frozen.
+struct CaptionSourcePolicy: Equatable, Sendable {
+    let keepsSourceAsCaption: Bool
+    let usesEnglishTranslationPipeline: Bool
+    let hasAutomaticNoteGateRisk: Bool
+    let targetEvidenceLanguage: String
+
+    var learningEvidenceLanguages: [String] {
+        usesEnglishTranslationPipeline ? ["en", targetEvidenceLanguage] : [targetEvidenceLanguage]
+    }
+    var includesReviewWarning: Bool { usesEnglishTranslationPipeline }
+    var usesIndexedPendingEvidence: Bool { !usesEnglishTranslationPipeline }
+}
+
+extension CaptionTranslationTarget {
+    func sourcePolicy(for sourceLanguage: String?) -> CaptionSourcePolicy {
+        let keepsSource = keepsSourceAsCaption(language: sourceLanguage)
+        return .init(keepsSourceAsCaption: keepsSource,
+            usesEnglishTranslationPipeline: sourceLanguage == nil && !keepsSource,
+            hasAutomaticNoteGateRisk: (sourceLanguage == nil || sourceLanguage == "en") && !keepsSource,
+            targetEvidenceLanguage: rawValue == "zh-Hans" ? "zh" : rawValue)
+    }
+}
+
 enum SourceLanguagePolicy {
     // Mirrored by qwen_asr_service.py; the Python test reads these declarations.
     static let nonLatinMinProbability = 0.90

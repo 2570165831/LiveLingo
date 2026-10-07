@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */; };
 		B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71400000000000000000002 /* TargetPipelineRefactorTests.swift */; };
 		B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */; };
 		B71900000000000000000001 /* TargetAcceptance.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71900000000000000000002 /* TargetAcceptance.swift */; };
@@ -110,6 +111,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetSourcePolicyRefactorTests.swift; sourceTree = "<group>"; };
 		B71400000000000000000002 /* TargetPipelineRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetPipelineRefactorTests.swift; sourceTree = "<group>"; };
 		B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatinTargetAcceptanceTests.swift; sourceTree = "<group>"; };
 		B71900000000000000000002 /* TargetAcceptance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetAcceptance.swift; sourceTree = "<group>"; };
@@ -281,6 +283,7 @@
 			isa = PBXGroup;
 			children = (
 				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
+				B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */,
 				B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */,
 				B75500000000000000000002 /* TargetDefaultingTests.swift */,
 				B75700000000000000000002 /* TargetExportTests.swift */,
@@ -440,6 +443,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */,
+				B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */,
 				B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */,
 				B75500000000000000000001 /* TargetDefaultingTests.swift in Sources */,
 				B75700000000000000000001 /* TargetExportTests.swift in Sources */,

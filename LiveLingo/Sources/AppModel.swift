@@ -514,8 +514,10 @@ final class AppModel: ObservableObject {
     }
 
     var previewTranslationSource: String {
+        guard captionTarget.sourcePolicy(for: nil).usesEnglishTranslationPipeline else { return "" }
         if !volatileEnglish.isEmpty { return volatileEnglish }
-        guard let last = segments.last, last.sourceLanguage == nil else { return "" }
+        guard let last = segments.last,
+              captionTarget.sourcePolicy(for: last.sourceLanguage).usesEnglishTranslationPipeline else { return "" }
         return last.english
     }
 
@@ -2427,14 +2429,15 @@ final class AppModel: ObservableObject {
     private func appendConfirmedCaption(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint]) {
             var segment = segment
             let target = captionTarget
-            let sourceOnly = target.keepsSourceAsCaption(language: segment.sourceLanguage)
+            let policy = target.sourcePolicy(for: segment.sourceLanguage)
+            let sourceOnly = policy.keepsSourceAsCaption
             if sourceOnly { segment.completeTranslation(target.renderPassThrough(segment.english)) }
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
             volatileEnglish = ""
             markCaptionActivity()
             segments.append(segment)
             segments.sort { $0.startTime == $1.startTime ? $0.id.uuidString < $1.id.uuidString : $0.startTime < $1.startTime }
-            if segment.sourceLanguage == nil { translationHints[segment.id] = hints }
+            if policy.usesEnglishTranslationPipeline { translationHints[segment.id] = hints }
             if lectureSummary.isEmpty, summaryTask == nil {
                 summaryStatus = "正在积累课堂上下文"
             }
@@ -2690,9 +2693,10 @@ final class AppModel: ObservableObject {
             }
         }
         guard let previousIndex = pending.previousIndex(in: segments, session: session),
-              pending.previous.sourceLanguage == nil, pending.current.sourceLanguage == nil,
-              segments[previousIndex].sourceLanguage == nil,
-              segments[previousIndex + 1].sourceLanguage == nil else {
+              captionTarget.sourcePolicy(for: pending.previous.sourceLanguage).usesEnglishTranslationPipeline,
+              captionTarget.sourcePolicy(for: pending.current.sourceLanguage).usesEnglishTranslationPipeline,
+              captionTarget.sourcePolicy(for: segments[previousIndex].sourceLanguage).usesEnglishTranslationPipeline,
+              captionTarget.sourcePolicy(for: segments[previousIndex + 1].sourceLanguage).usesEnglishTranslationPipeline else {
             pendingCaptionRepairs.removeFirst()
             persistCurrentSession()
             return
@@ -2828,12 +2832,14 @@ final class AppModel: ObservableObject {
                 self.segments[index].beginTranslation()
                 let english = self.segments[index].english
                 let recentContext = self.segments[..<index].suffix(6)
-                    .filter { $0.sourceLanguage == nil && self.segments[index].startTime - $0.endTime <= 60 }
+                    .filter { target.sourcePolicy(for: $0.sourceLanguage).usesEnglishTranslationPipeline
+                        && self.segments[index].startTime - $0.endTime <= 60 }
                     .map(\.english).joined(separator: " ")
                 let sourceLanguage = input.sourceLanguage
-                let normalizedInput = sourceLanguage == nil
+                let policy = target.sourcePolicy(for: sourceLanguage)
+                let normalizedInput = policy.usesEnglishTranslationPipeline
                     ? AcademicInputNormalizer.normalize(english, recentContext: recentContext) : english
-                let protectedInput = sourceLanguage == nil ? ChemistryTranslationProtector.prepare(normalizedInput)
+                let protectedInput = policy.usesEnglishTranslationPipeline ? ChemistryTranslationProtector.prepare(normalizedInput)
                     : ProtectedChemistryTranslationInput(text: normalizedInput, replacements: [])
                 let translationModel = self.effectiveProfile.translationModel
                 let hints = protectedInput.translationHints(from: self.translationHints.removeValue(forKey: id) ?? [])
@@ -2846,7 +2852,8 @@ final class AppModel: ObservableObject {
                 do {
                     let response: String
                     let previousIndex = index > 0 && self.segments[index].startTime - self.segments[index - 1].endTime <= 2
-                        && input.sourceLanguage == nil && self.segments[index - 1].sourceLanguage == nil
+                        && policy.usesEnglishTranslationPipeline
+                        && target.sourcePolicy(for: self.segments[index - 1].sourceLanguage).usesEnglishTranslationPipeline
                         && self.segments[index - 1].hasUsableTranslation ? index - 1 : nil
                     if let previousIndex {
                         let previousInput = self.segments[previousIndex]
@@ -2862,7 +2869,8 @@ final class AppModel: ObservableObject {
                             previousInput.english,
                             previousInput.chinese,
                             normalizedInput,
-                            repairContext.filter { $0.sourceLanguage == nil }.map(\.english).joined(separator: " "),
+                            repairContext.filter { target.sourcePolicy(for: $0.sourceLanguage).usesEnglishTranslationPipeline }
+                                .map(\.english).joined(separator: " "),
                             translationModel,
                             previousInput.endTime - previousInput.startTime >= 9.5
                                 || !".!?".contains(previousInput.english.last ?? " ")
@@ -3171,7 +3179,7 @@ final class AppModel: ObservableObject {
         }.map { $0.previous.id }).union(inlineCaptionRepairTargets.values)
         return noteAdmission.evaluate(.init(captions: captions, covered: summarizedSegmentIDs,
             unsettledSuccessors: unsettled, repairTargets: repairs,
-            producerDrained: noteInputProducerDrained, paused: processingPaused), now: summaryClock())
+            producerDrained: noteInputProducerDrained, paused: processingPaused, target: captionTarget), now: summaryClock())
     }
 
     private func waitForNoteAdmission(_ decision: CaptionNoteGate.Decision,
@@ -3379,7 +3387,8 @@ final class AppModel: ObservableObject {
                     learningNotebook = plannedNotebook
                     learningDraft = LearningDraft(
                         evidence: inputSnapshot, model: modelName,
-                        input: try LearningPrompts.input(evidence: inputSnapshot, topics: learningNotebook.topics, pending: pending),
+                        input: try LearningPrompts.input(evidence: inputSnapshot, topics: learningNotebook.topics,
+                            pending: pending, target: captionTarget),
                         systemPrompt: captionTarget.learningNotePrompt,
                         pendingTargets: pending.map(\.id), contextRevision: learningNotebook.revision,
                         dependencyIDs: dependencies

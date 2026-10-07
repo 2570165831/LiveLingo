@@ -29,6 +29,7 @@ struct CaptionNoteGate {
         var producerDrained = false
         var enabled = true
         var paused = false
+        var target: CaptionTranslationTarget = .simplifiedChinese
     }
 
     struct Decision: Equatable {
@@ -53,13 +54,14 @@ struct CaptionNoteGate {
         var result = c.repairTargets
         for index in c.captions.indices {
             let caption = c.captions[index]
-            guard caption.usable, caption.isEnglishSource else { continue }
+            guard caption.usable, c.target.sourcePolicy(for: caption.sourceLanguage).hasAutomaticNoteGateRisk else { continue }
             if index == c.captions.count - 1 {
                 if !c.producerDrained { result.insert(caption.id) }
             } else {
                 let successor = c.captions[index + 1]
                 // Only English pairs can repair their predecessor. End punctuation does not seal an English tail.
-                if successor.isEnglishSource, successor.start - caption.end <= 2,
+                if c.target.sourcePolicy(for: successor.sourceLanguage).hasAutomaticNoteGateRisk,
+                   successor.start - caption.end <= 2,
                    c.unsettledSuccessors.contains(successor.id) {
                     result.insert(caption.id)
                 }

@@ -245,7 +245,8 @@ struct LearningQualityCLI {
                     guard !selected.isEmpty else { throw Failure.noProgress }
                     let current = evidence.filter { selected.contains($0.id) }
                     let pending = notebook.selectPendingPoints(for: current)
-                    let prepared = try LearningPrompts.input(evidence: current, topics: notebook.topics, pending: pending)
+                    let prepared = try LearningPrompts.input(evidence: current, topics: notebook.topics,
+                        pending: pending, target: target)
                     let number = requests.count + 1
                     let inputFile = "input-\(number).json"
                     try Data(prepared.utf8).write(to: output.appendingPathComponent(inputFile), options: .atomic)
