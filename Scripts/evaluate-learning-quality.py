@@ -22,6 +22,8 @@ NUMERIC_CONTEXT = "请核对原文中数值对应的对象、属性、单位和�
 SOURCE_POLICY = "fixture-uuid-v1/12s-start/10s-duration/revision-0/session-none"
 DISPLAY_CONTRACT = "production-point-and-rendered-membership-v1"
 PENDING = "pending-independent-readback"
+PENDING_EVIDENCE_RULE = ("quoteIDs 和 candidateQuoteIDs 引用 priorEvidence 的旧原文或 evidence 的当前原文。"
+                         "h 编号只作历史上下文，不能用于当前正文 sourceIDs；旧引文不作为本批新知识重复整理。")
 # Mirror CaptionTranslationTarget.current and SpokenLanguage.all. Source-unit
 # labels stay en/zh even when the spoken source uses a different language.
 CAPTION_TRANSLATION_TARGET = "zh-Hans"
@@ -583,6 +585,64 @@ def placements(batches: list[dict], latest=False) -> dict[str, str]:
     return result
 
 
+def verify_pending_points(prepared: dict, targets: list[str], references: dict[str, dict],
+                          reference_batches: dict[str, dict], units: dict[str, dict]) -> None:
+    followups = object_list(prepared.get("pendingPoints"), "pendingPoints")
+    require([p.get("id") for p in followups] == [f"q{i}" for i in range(len(targets))], "pending-alias-order")
+    indexed = ("priorEvidence" in prepared or "pendingEvidenceRule" in prepared
+               or any("quoteIDs" in p or "candidateQuoteIDs" in p for p in followups))
+    catalog = None
+    if indexed:
+        require(prepared.get("pendingEvidenceRule") == PENDING_EVIDENCE_RULE, "pending-evidence-rule")
+        prior = object_list(prepared.get("priorEvidence"), "priorEvidence")
+        require(all(isinstance(p.get("id"), str) and re.fullmatch(r"h(?:0|[1-9][0-9]*)", p["id"])
+                    and p.get("scope") == "prior" and isinstance(p.get("text"), str) and p["text"].strip()
+                    for p in prior), "prior-evidence-shape")
+        unique([p["id"] for p in prior], "prior-evidence-ID")
+        catalog = {key: unit["text"] for key, unit in units.items()}
+        catalog.update({p["id"]: p["text"] for p in prior})
+
+    def texts(followup, key, id_key):
+        if catalog is None:
+            return followup.get(key)
+        require(followup.get(key) == [], "indexed-pending-inline-quotes")
+        ids = followup.get(id_key)
+        require(isinstance(ids, list) and all(isinstance(x, str) and x in catalog for x in ids),
+                f"pending-{id_key}-unknown-or-invalid")
+        unique(ids, f"pending-{id_key}")
+        # One frozen candidate can name several identical current fragments.
+        # Bound the number of distinct quoted texts, not the expanded ID list.
+        return list(dict.fromkeys(catalog[x] for x in ids))
+
+    for followup, target in zip(followups, targets):
+        old = references[target]
+        eligible = old.get("referenceState") in ("pending", "awaitingContext", "numericDifference") or bool(old.get("needsContext")) or (old.get("sourceHasPronoun") is True and old.get("referenceState") == "linked")
+        require(eligible, "pending-target-not-eligible")
+        quotes = texts(followup, "quotes", "quoteIDs")
+        original_quotes = [s["quote"] for s in old.get("sources", [])]
+        if not original_quotes:
+            original_quotes = []
+            for source in reference_batches[target]["evidence"]:
+                language = source_language(source) if indexed else None
+                if language in CAPTION_PASS_THROUGH_LANGUAGE_CODES:
+                    text = source["chinese"] if has_usable_translation(source) else render_pass_through(source["english"])
+                elif language is not None:
+                    text = source["chinese"]
+                else:
+                    text = source["english"] or source["chinese"]
+                original_quotes.append(text)
+        require(isinstance(quotes, list) and quotes and len(quotes) <= 2
+                and all(isinstance(q, str) and q and any(s.startswith(q) for s in original_quotes) for q in quotes),
+                "pending-quotes-not-bound-to-target")
+        candidates = texts(followup, "candidateQuotes", "candidateQuoteIDs")
+        candidate_sources = [s["quote"] for p in references.values() if p.get("clarifies") == target
+                             for s in p.get("sources", [])]
+        require(isinstance(candidates, list) and len(candidates) <= 2
+                and all(isinstance(q, str) and q and any(s.startswith(q) for s in candidate_sources) for q in candidates),
+                "pending-candidate-quotes-not-bound")
+        require(type(followup.get("referenceCheck")) is bool, "pending-referenceCheck-type")
+
+
 def verify_followups(raw: dict, normalized: dict, batch: dict, targets: list[str],
                      units: dict[str, dict], revision: int) -> None:
     aliases = [f"q{i}" for i in range(len(targets))]
@@ -607,6 +667,10 @@ def verify_followups(raw: dict, normalized: dict, batch: dict, targets: list[str
     require(isinstance(resolved, list) and isinstance(committed, list)
             and len(resolved) == len(committed) == len(targets), "followup-record-count")
     for index, (prepared, saved) in enumerate(zip(resolved, committed)):
+        for record in (prepared, saved):
+            ids = record.get("sourceIDs") if isinstance(record, dict) else None
+            require(not (isinstance(ids, list) and any(isinstance(x, str) and x.startswith("h") for x in ids)),
+                    "historical-followup-source-ID")
         alias, target = aliases[index], targets[index]
         raw_item = model.get(alias) if model is not None else None
         expected_state = raw_item["state"] if raw_item is not None else "缺信息"
@@ -716,26 +780,7 @@ def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
             unique(targets, "pending-target")
             require(not set(targets) & retired_questions(batches[:batches.index(batch)]),
                     "pending-target-already-retired")
-            followups = object_list(prepared.get("pendingPoints"), "pendingPoints")
-            require([p.get("id") for p in followups] == [f"q{i}" for i in range(len(targets))], "pending-alias-order")
-            for followup, target in zip(followups, targets):
-                old = references[target]
-                eligible = old.get("referenceState") in ("pending", "awaitingContext", "numericDifference") or bool(old.get("needsContext")) or (old.get("sourceHasPronoun") is True and old.get("referenceState") == "linked")
-                require(eligible, "pending-target-not-eligible")
-                quotes = followup.get("quotes")
-                original_quotes = [s["quote"] for s in old.get("sources", [])]
-                if not original_quotes:
-                    original_quotes = [s["english"] or s["chinese"] for s in reference_batches[target]["evidence"]]
-                require(isinstance(quotes, list) and quotes and len(quotes) <= 2
-                        and all(isinstance(q, str) and q and any(s.startswith(q) for s in original_quotes) for q in quotes),
-                        "pending-quotes-not-bound-to-target")
-                candidates = followup.get("candidateQuotes")
-                candidate_sources = [s["quote"] for p in references.values() if p.get("clarifies") == target
-                                     for s in p.get("sources", [])]
-                require(isinstance(candidates, list) and len(candidates) <= 2
-                        and all(isinstance(q, str) and q and any(s.startswith(q) for s in candidate_sources) for q in candidates),
-                        "pending-candidate-quotes-not-bound")
-                require(type(followup.get("referenceCheck")) is bool, "pending-referenceCheck-type")
+            verify_pending_points(prepared, targets, references, reference_batches, units)
             raw = decode(artifact(directory, request.get("responseFile"), request.get("responseSHA256")))
             normal = request.get("normalizedNote")
             validate_note(raw); validate_note(normal); validate_note(batch.get("note"))
