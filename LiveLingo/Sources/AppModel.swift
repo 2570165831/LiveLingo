@@ -490,7 +490,16 @@ final class AppModel: ObservableObject {
     /// 因此能算上「请求在途期间新文本已经到达并等待」的那段时间。
     private var previewSourceChangedAt: TimeInterval = 0
 
-    var captionTarget: CaptionTranslationTarget = .simplifiedChinese
+    @Published private(set) var outputLanguage: OutputLanguage = .simplifiedChinese
+    var captionTarget: CaptionTranslationTarget {
+        // Unsupported generation targets are rejected before restoring work.
+        outputLanguage.generationTarget ?? .simplifiedChinese
+    }
+
+    private func captureNewCourseOutputLanguage(_ explicit: OutputLanguage? = nil) {
+        outputLanguage = explicit ?? preferences.string(forKey: "LiveLingo.outputLanguage")
+            .flatMap(OutputLanguage.releasedLanguage) ?? .simplifiedChinese
+    }
 
     var previewTranslationSource: String {
         if !volatileEnglish.isEmpty { return volatileEnglish }
@@ -1155,6 +1164,7 @@ final class AppModel: ObservableObject {
             return
         }
         resetSessionStateForNewRun()
+        captureNewCourseOutputLanguage()
         let importSession = sessionID, importEpoch = generation
         activeStorageMode = .saveSession
         sessionNotice = nil
@@ -1393,7 +1403,8 @@ final class AppModel: ObservableObject {
     private func bindSessionArchive(to directory: URL, restored: SessionSnapshot? = nil) {
         var snapshot = restored ?? SessionSnapshot(sessionID: sessionID,
             audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)],
-            transcriptionJournalPath: DurableTranscriptionJournal.directoryName + "/work.jsonl")
+            transcriptionJournalPath: DurableTranscriptionJournal.directoryName + "/work.jsonl",
+            targetLocale: outputLanguage.persistedLocale)
         snapshot.generation = generation
         sessionSnapshot = snapshot
         let saver = SessionSaveCoordinator(directory: directory, sessionID: sessionID, restored: restored)
@@ -1592,7 +1603,12 @@ final class AppModel: ObservableObject {
         catch { recoveryError = error.localizedDescription }
         let notebook = try recoveredNotebook ?? LearningNotebook(snapshot: snapshot)
         if recoveredNotebook != nil { notebook.writeState(to: &snapshot) }
+        let restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot)
+        guard restoredLanguage.generationTarget != nil else {
+            throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
+        }
         resetSessionStateForNewRun()
+        outputLanguage = restoredLanguage
         sessionID = snapshot.sessionID
         sessionDirectory = directory
         pendingCaptionRepairs = snapshot.processing.pendingCaptionRepairs ?? []
@@ -1767,6 +1783,7 @@ final class AppModel: ObservableObject {
 
     private func startSession() async {
         resetSessionStateForNewRun()
+        captureNewCourseOutputLanguage()
         let startingSession = sessionID, startingEpoch = generation
         let storageMode = selectedStorageMode
         let inputMode = selectedInputMode
@@ -4480,8 +4497,13 @@ extension AppModel {
 
     func cliRun(file: URL?, seconds: Double, directory: URL, highQuality: Bool,
                 paced: Bool = true, exportNotes: Bool = false, runReview: Bool = false,
+                target: OutputLanguage = .simplifiedChinese,
                 report: @escaping @MainActor (String, [String: Any]) -> Void) async throws {
+        guard target.isReleased, target.generationTarget != nil else {
+            throw SessionStoreError.invalidState("输出语言尚未开放")
+        }
         resetSessionStateForNewRun()
+        captureNewCourseOutputLanguage(target)
         installCLITranslationFailureReporter(report)
         defer { translationFailureReporter = nil }
         effectiveProfile = highQuality ? .highQuality : .energySaver

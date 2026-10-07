@@ -18,6 +18,8 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
     static let currentSchemaVersion = 1
     var schemaVersion: Int = currentSchemaVersion
     var sessionID: UUID
+    /// Nil is the frozen Simplified Chinese format; omitted by Codable.
+    var targetLocale: String? = nil
     var inputRevision: Int
     var segments: [TranscriptSegment]
     var batches: [LearningNoteBatch]
@@ -51,9 +53,11 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
         processing: SessionProcessingState = .init(),
         audioFiles: [SessionAudioMetadata] = [], audioRanges: [SessionAudioRange] = [],
         transcriptionJournalPath: String? = nil, revisionHistory: [SessionInputRevision] = [],
-        createdAt: Date = Date(), updatedAt: Date? = nil
+        createdAt: Date = Date(), updatedAt: Date? = nil,
+        targetLocale: String? = nil
     ) {
         self.sessionID = sessionID; self.inputRevision = inputRevision
+        self.targetLocale = Self.normalizedTargetLocale(targetLocale)
         self.segments = segments; self.batches = batches
         self.latestEvidenceIDs = latestEvidenceIDs; self.legacyMarkdown = legacyMarkdown
         self.notebookRevision = notebookRevision; self.notebookSelectionRound = notebookSelectionRound
@@ -64,6 +68,12 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
         self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt
     }
 
+    static func normalizedTargetLocale(_ locale: String?) -> String? {
+        locale == "zh-Hans" ? nil : locale
+    }
+
+    var effectiveTargetLocale: String { Self.normalizedTargetLocale(targetLocale) ?? "zh-Hans" }
+
     /// Paths and runtime progress are excluded. Frozen review input is included.
     func inputFingerprint() throws -> String {
         struct Input: Encodable {
@@ -73,17 +83,21 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
             let batches: [LearningNoteBatch]
             let latestEvidenceIDs: [UUID]
             let legacyMarkdown: String?
+            let targetLocale: String?
         }
         return SessionArchiveCoding.digest(try SessionArchiveCoding.encode(Input(
             sessionID: sessionID, inputRevision: inputRevision, segments: segments.map(\.withoutTranslationFailures),
             batches: batches, latestEvidenceIDs: latestEvidenceIDs.sorted { $0.uuidString < $1.uuidString },
-            legacyMarkdown: legacyMarkdown
+            legacyMarkdown: legacyMarkdown, targetLocale: Self.normalizedTargetLocale(targetLocale)
         )))
     }
 
     func validate() throws {
         guard schemaVersion == Self.currentSchemaVersion else {
             throw SessionStoreError.unsupportedSchema(schemaVersion)
+        }
+        guard OutputLanguage(rawValue: effectiveTargetLocale) != nil else {
+            throw SessionStoreError.invalidState("课程输出语言无效")
         }
         guard inputRevision >= 0, inputRevision < Int.max, storageRevision >= 0, storageRevision < Int.max,
               lastJournalSequence >= 0, lastJournalSequence < Int.max,
@@ -796,6 +810,9 @@ final class SessionStore: @unchecked Sendable {
     }
 
     static func validatePreservation(from old: SessionSnapshot, to new: SessionSnapshot) throws {
+        guard old.effectiveTargetLocale == new.effectiveTargetLocale else {
+            throw SessionStoreError.invalidState("已有课程的输出语言不可更改")
+        }
         guard new.inputRevision >= old.inputRevision,
               old.revisionHistory.allSatisfy({ new.revisionHistory.contains($0) }),
               old.legacyMarkdown == nil || new.legacyMarkdown == old.legacyMarkdown else {

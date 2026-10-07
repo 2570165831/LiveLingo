@@ -411,6 +411,7 @@ struct LiveLingoCLI {
   var audioSampleRate: Double
   var journalIncompleteTailBytes: Int
   var boundAt: String
+  var targetLocale: String? = nil
  }
 
  struct CLIRunMarker: Codable, Equatable, Sendable {
@@ -585,7 +586,7 @@ struct LiveLingoCLI {
                             latestEvidenceIDs: snapshot.latestEvidenceIDs.map(\.uuidString).sorted(),
                             audioFrames: frames, audioSampleRate: rate,
                             journalIncompleteTailBytes: loaded.incompleteTailBytes,
-                            boundAt: ISO8601DateFormatter().string(from: Date()))
+                            boundAt: ISO8601DateFormatter().string(from: Date()), targetLocale: snapshot.targetLocale)
   var updated = marker
   updated.source = source
   updated.session = bound
@@ -636,7 +637,8 @@ struct LiveLingoCLI {
  static func verifyRetention(bound: CLIRunSession, observed: CLIObservedSession) throws {
   guard observed.sessionID.uuidString == bound.sessionID,
         observed.snapshot.sessionID == observed.sessionID else { throw CLIError.sessionIdentityMismatch }
-  guard observed.snapshot.inputRevision >= bound.inputRevision else { throw CLIError.sessionIdentityMismatch }
+  guard observed.snapshot.inputRevision >= bound.inputRevision,
+        (observed.snapshot.targetLocale ?? "zh-Hans") == (bound.targetLocale ?? "zh-Hans") else { throw CLIError.sessionIdentityMismatch }
   let segmentIDs = Set(observed.snapshot.segments.map { $0.id.uuidString })
   guard Set(bound.segmentIDs).isSubset(of: segmentIDs), !bound.segmentIDs.isEmpty else {
    throw CLIError.sessionIdentityMismatch

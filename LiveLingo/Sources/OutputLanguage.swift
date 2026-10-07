@@ -60,4 +60,24 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         guard let language = Self(rawValue: locale), language.isReleased else { return nil }
         return language
     }
+    static func storedLanguage(_ locale: String?) throws -> Self {
+        guard let locale else { return .simplifiedChinese }
+        guard let language = Self(rawValue: locale) else {
+            throw SessionStoreError.invalidState("课程输出语言不受支持")
+        }
+        return language
+    }
+
+    /// Course data owns this choice. Preferences apply only at creation.
+    static func savedLanguage(in directory: URL, snapshot: SessionSnapshot) throws -> Self {
+        if let locale = snapshot.targetLocale { return try storedLanguage(locale) }
+        struct Metadata: Decodable { let targetLocale: String? }
+        let manifest = directory.appendingPathComponent("manifest.json")
+        if FileManager.default.fileExists(atPath: manifest.path) {
+            let data = try Data(contentsOf: manifest)
+            return try storedLanguage(JSONDecoder().decode(Metadata.self, from: data).targetLocale)
+        }
+        return .simplifiedChinese
+    }
+
 }

@@ -3057,6 +3057,8 @@ final class LearningReviewQueue: ObservableObject {
         var reports: [String] = []
         var failure: String?
         var prompt: String? = LearningPrompts.review
+        /// Nil retains the old Simplified Chinese journal bytes.
+        var targetLocale: String? = nil
         var directoryBookmark: Data? = nil
         /// 未完成思考前缀的绑定指纹：实际输入 JSON + 提示词 + 协议版本。
         /// 缺失（旧日志）或对不上（输入/提示词/版本变了）时，前缀作废重来，其它进度照旧。
@@ -3080,6 +3082,30 @@ final class LearningReviewQueue: ObservableObject {
         var supersededByRevision: Int? = nil
 
         var resolvedScope: LearningReviewScope { scope ?? .wholeLesson }
+    }
+
+    /// Unreleased locales may be stored, but cannot borrow another target's
+    /// instructions. Traditional Chinese shares the Simplified Chinese model.
+    static func reviewPrompt(for targetLocale: String?) -> String? {
+        guard let language = OutputLanguage(rawValue: targetLocale ?? "zh-Hans"),
+              language.profile.generationLocale == "zh-Hans" else { return nil }
+        return LearningPrompts.review
+    }
+
+    static func resolvedTargetLocale(_ requested: String?, snapshot: SessionSnapshot?) throws -> String? {
+        let resolved = SessionSnapshot.normalizedTargetLocale(requested ?? snapshot?.targetLocale)
+        try validateTargetLocale(resolved, snapshot: snapshot)
+        return resolved
+    }
+
+    static func validateTargetLocale(_ targetLocale: String?, snapshot: SessionSnapshot?) throws {
+        let normalized = SessionSnapshot.normalizedTargetLocale(targetLocale)
+        guard OutputLanguage(rawValue: normalized ?? "zh-Hans") != nil else {
+            throw ReviewIdentityError.conflict("复查输出语言未知")
+        }
+        if let snapshot, normalized != SessionSnapshot.normalizedTargetLocale(snapshot.targetLocale) {
+            throw ReviewIdentityError.conflict("复查任务与课程的输出语言不同，不能继续生成")
+        }
     }
 
     /// A bounded automatic retry that is waiting for its backoff window.
@@ -3376,8 +3402,11 @@ final class LearningReviewQueue: ObservableObject {
 
     /// 未完成思考前缀的绑定指纹（**纯函数** ✓，可单测 ✓）：实际输入 JSON + 提示词 + 协议版本。
     /// 只要这三项里有一项变了，前缀就不能接着用 ✓（它的续写上下文已经对不上了 ✓）。
-    static func prefixDigest(json: String, prompt: String?) -> String {
-        let bound = "reviewVersion:\(PreparedReviewInput.version)\n" + (prompt ?? LearningPrompts.review) + "\n\u{0}" + json
+    static func prefixDigest(json: String, prompt: String?, targetLocale: String? = nil) -> String {
+        let target = SessionSnapshot.normalizedTargetLocale(targetLocale)
+        let binding = target.map { "targetLocale:\($0)\n" } ?? ""
+        let bound = binding + "reviewVersion:\(PreparedReviewInput.version)\n"
+            + (prompt ?? reviewPrompt(for: target) ?? "") + "\n\u{0}" + json
         return SHA256.hash(data: Data(bound.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -3389,6 +3418,8 @@ final class LearningReviewQueue: ObservableObject {
         let target = SessionDirectoryLocation.canonical(directory)
         let candidates = (jobs + retiredJobs).filter {
             $0.resolvedScope.isWholeLesson && !$0.batches.isEmpty
+                && SessionSnapshot.normalizedTargetLocale($0.targetLocale)
+                    == SessionSnapshot.normalizedTargetLocale(snapshot.targetLocale)
                 && SessionDirectoryLocation.canonical($0.directory) == target
                 && $0.original.trimmingCharacters(in: .newlines) == markdown.trimmingCharacters(in: .newlines)
         }
@@ -3421,7 +3452,7 @@ final class LearningReviewQueue: ObservableObject {
               let prepared = try? LearningPrompts.reviewInput(job.batches[job.next],
                                                               laterBatches: Array(job.batches.dropFirst(job.next + 1)))
         else { return nil }
-        let digest = prefixDigest(json: prepared.json, prompt: job.prompt)
+        let digest = prefixDigest(json: prepared.json, prompt: job.prompt, targetLocale: job.targetLocale)
         guard let identity = job.identity else { return digest }
         return ReviewInputBinding.digest(Data((identity.key + "\n" + (job.inputDigest ?? "") + "\n" + digest).utf8))
     }
@@ -3472,11 +3503,13 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     private func validateLocation(_ job: Job, at directory: URL, allowHistorical: Bool) throws {
+        let snapshot = try ReviewInputBinding.snapshot(in: directory)
+        try Self.validateTargetLocale(job.targetLocale, snapshot: snapshot)
         try ReviewInputBinding.validate(identity: job.identity, scope: job.resolvedScope,
             batches: job.batches, digest: job.inputDigest, original: job.original,
             in: directory, allowHistorical: allowHistorical)
         if let identity = job.identity, let fingerprint = job.courseInputDigest,
-           let snapshot = try ReviewInputBinding.snapshot(in: directory),
+           let snapshot,
            snapshot.inputRevision == identity.inputRevision {
             let all = snapshot.batches.filter { !$0.note.points.isEmpty }
             if let revision = identity.notebookRevision, snapshot.notebookRevision > revision,
@@ -3646,6 +3679,27 @@ final class LearningReviewQueue: ObservableObject {
                 // 已完成批次、报告、思考前缀、暂停选择全部保留 ✓，不删除任何历史复查 ✓。
                 let legacyJournal = journal.version == nil
                 for index in jobs.indices {
+                    do {
+                        if try upgradeTargetLocale(&jobs[index]) { repaired = true }
+                    } catch {
+                        jobs[index].failure = error.localizedDescription
+                        jobs[index].retryPending = nil
+                        repaired = true
+                        continue
+                    }
+                    guard let expectedPrompt = Self.reviewPrompt(for: jobs[index].targetLocale) else {
+                        // Keep the original prompt and wire prefix. These may
+                        // become resumable when this language is implemented.
+                        if jobs[index].next < jobs[index].batches.count {
+                            let message = "输出语言 \(jobs[index].targetLocale ?? "zh-Hans") 尚无复查提示词，已暂停并保留原任务"
+                            if jobs[index].failure != message || jobs[index].retryPending != nil {
+                                jobs[index].failure = message
+                                jobs[index].retryPending = nil
+                                repaired = true
+                            }
+                        }
+                        continue
+                    }
                     let previousIdentity = jobs[index].identity
                     try upgradeIdentity(&jobs[index])
                     if previousIdentity != jobs[index].identity { repaired = true }
@@ -3657,12 +3711,12 @@ final class LearningReviewQueue: ObservableObject {
                                                      detail: "legacy_journal"), at: index)
                         repaired = true
                     }
-                    if jobs[index].prompt != LearningPrompts.review {
+                    if jobs[index].prompt != expectedPrompt {
                         // A changed instruction prefix invalidates only unfinished
                         // inference, not the already reviewed evidence batches.
                         jobs[index].prefix = ""
                         jobs[index].prefixInputDigest = nil
-                        jobs[index].prompt = LearningPrompts.review
+                        jobs[index].prompt = expectedPrompt
                         recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "prefix_dropped",
                                                      batch: jobs[index].next, batchCount: jobs[index].batches.count,
                                                      detail: "prompt_changed"), at: index)
@@ -3688,6 +3742,7 @@ final class LearningReviewQueue: ObservableObject {
                     }
                 }
                 for index in retiredJobs.indices {
+                    if try upgradeTargetLocale(&retiredJobs[index]) { repaired = true }
                     guard retiredJobs[index].supersededByRevision != nil else {
                         throw ReviewIdentityError.conflict("历史任务缺少停止续写标记")
                     }
@@ -3739,6 +3794,17 @@ final class LearningReviewQueue: ObservableObject {
         refreshStatus()
     }
 
+    /// Old jobs inherit only their own saved course target, never preferences.
+    private func upgradeTargetLocale(_ job: inout Job) throws -> Bool {
+        let snapshot = try ReviewInputBinding.snapshot(in: job.directory)
+        let previous = job.targetLocale
+        if job.targetLocale == nil {
+            job.targetLocale = SessionSnapshot.normalizedTargetLocale(snapshot?.targetLocale)
+        }
+        try Self.validateTargetLocale(job.targetLocale, snapshot: snapshot)
+        return previous != job.targetLocale
+    }
+
     /// Old queue evidence already has stable UUIDs. Bind it only when a saved
     /// snapshot proves the exact batches; otherwise leave the legacy job intact.
     private func upgradeIdentity(_ job: inout Job) throws {
@@ -3786,11 +3852,15 @@ final class LearningReviewQueue: ObservableObject {
     /// 2026-09-20：录音结束/导入结束不再自动调用这里 ✓；只有用户明确选择范围时才会调用 ✓。
     /// 同一目录的同一范围不重复入队 ✓，不同范围可以并存 ✓（整课报告与局部报告各有各的文件 ✓）。
     func enqueue(directory: URL, notebook: LearningNotebook, scope: LearningReviewScope = .wholeLesson,
-                 sessionID: UUID? = nil, inputRevision: Int? = nil) throws {
+                 sessionID: UUID? = nil, inputRevision: Int? = nil, targetLocale: String? = nil) throws {
         guard managementPending == 0 else { throw ReviewIdentityError.conflict("课程目录切换尚未完成，请稍后发起复查") }
         let reviewable = notebook.batches.filter { !$0.note.points.isEmpty }
         guard persistenceFailure == nil else { throw QwenRuntimeError.requestFailed(persistenceFailure!) }
         let snapshot = try ReviewInputBinding.snapshot(in: directory)
+        let resolvedTarget = try Self.resolvedTargetLocale(targetLocale, snapshot: snapshot)
+        guard let prompt = Self.reviewPrompt(for: resolvedTarget) else {
+            throw QwenRuntimeError.requestFailed("输出语言 \(resolvedTarget ?? "zh-Hans") 尚无复查提示词，不能开始生成")
+        }
         let requestedID = sessionID ?? snapshot?.sessionID
         let requestedRevision = inputRevision ?? snapshot?.inputRevision
         guard (requestedID == nil) == (requestedRevision == nil) else {
@@ -3816,7 +3886,7 @@ final class LearningReviewQueue: ObservableObject {
         let bookmark = try? directory.bookmarkData(options: .withSecurityScope,
             includingResourceValuesForKeys: nil, relativeTo: nil)
         let candidate = Job(directory: directory, batches: batches, original: notebook.markdown(),
-            directoryBookmark: bookmark, scope: resolvedScope, identity: identity,
+            prompt: prompt, targetLocale: resolvedTarget, directoryBookmark: bookmark, scope: resolvedScope, identity: identity,
             inputDigest: digest, courseInputDigest: courseDigest,
             courseBatchDigests: try Dictionary(uniqueKeysWithValues: reviewable.map {
                 ($0.id.uuidString, try ReviewInputBinding.digest([$0]))
@@ -4092,6 +4162,10 @@ final class LearningReviewQueue: ObservableObject {
             }
             try validateLocation(job, at: accessURL, allowHistorical: false)
             if job.next < job.batches.count {
+                guard let prompt = Self.reviewPrompt(for: job.targetLocale), job.prompt == prompt else {
+                    throw ReviewFailure(stage: .input, code: "unsupported_target",
+                        detail: "当前输出语言尚无可用的复查提示词；已保留原任务，未生成简体复查")
+                }
                 let batch = job.batches[job.next]
                 generationAttempted = true
                 phase = .input
