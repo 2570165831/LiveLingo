@@ -12,12 +12,16 @@ private struct FloatingSubtitleContent: View {
     @ObservedObject var model: AppModel
     @ObservedObject var stream: LiveCaptionState
 
-    @AppStorage("floatingTextSize") private var textSize = 24.0
+    private var preferences = FloatingSubtitlePreferences()
 
     var body: some View {
         #if DEBUG
         let _ = SummaryRenderingDiagnostics.record(\.floatingBodies)
         #endif
+        let presentation = FloatingSubtitlePresentation(sourceText: model.previewEnglishDisplay,
+                                                        translatedText: model.previewChineseDisplay,
+                                                        caption: model.nonEnglishPreviewPresentation,
+                                                        mode: preferences.displayMode)
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
@@ -26,7 +30,8 @@ private struct FloatingSubtitleContent: View {
                     .foregroundStyle(Color(white: 0.8))
                 Spacer()
                 Menu {
-                    Picker("悬浮字幕字号", selection: $textSize) {
+                    Picker("悬浮字幕字号", selection: Binding(get: { preferences.sizePreset },
+                                                        set: { preferences.sizePreset = $0 })) {
                         Text("标准").tag(24.0)
                         Text("大").tag(28.0)
                         Text("特大").tag(32.0)
@@ -36,56 +41,63 @@ private struct FloatingSubtitleContent: View {
                 .fixedSize()
                 .help("悬浮字幕字号")
             }
-            if let caption = model.nonEnglishPreviewPresentation, caption.isSourceOnly {
-                Color.clear.frame(height: 88).accessibilityHidden(true)
-                subtitle(chinese, size: textSize, weight: .medium, color: .white, height: 138,
-                         languageName: caption.languageName)
-            } else {
-                subtitle(english, size: textSize - 3, weight: .regular, color: Color(white: 0.9), height: 88,
-                         languageName: model.nonEnglishPreviewPresentation?.languageName)
-                subtitle(chinese, size: textSize, weight: .medium, color: .white, height: 138)
-            }
+            // Keep both scroll containers mounted across mode switches, including
+            // source-only Chinese. Hidden bodies cannot be selected or accessed.
+            subtitle(presentation.source?.text ?? (model.nonEnglishPreviewPresentation?.isSourceOnly == true
+                        ? model.previewChineseDisplay : model.previewEnglishDisplay),
+                     size: preferences.sourceTextSize, weight: .regular, color: Color(white: 0.9), height: 88,
+                     languageName: model.nonEnglishPreviewPresentation?.languageName,
+                     visible: presentation.source != nil)
+            subtitle(model.previewChineseDisplay, size: preferences.translationTextSize, weight: .medium,
+                     color: .white, height: 138, languageName: presentation.translation?.languageName,
+                     visible: presentation.translation != nil)
         }
         .padding(22)
         .frame(minWidth: 640, maxWidth: 640, alignment: .leading)
-        .background(Color(white: 0.08))
+        .background(Color(white: 0.08).opacity(preferences.backgroundOpacity))
         .preferredColorScheme(.dark)
-        .background(FloatingWindowLevel())
+        .background(FloatingWindowLevel(backgroundOpacity: preferences.backgroundOpacity))
     }
 
     private func subtitle(_ text: String, size: Double, weight: Font.Weight, color: Color, height: CGFloat,
-                          languageName: String? = nil) -> some View {
+                          languageName: String? = nil, visible: Bool) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if let languageName {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            CaptionLanguageLabel(name: languageName, subtitleSize: size)
-                            subtitleText(text, size: size, weight: weight, color: color)
+                            CaptionLanguageLabel(name: languageName, subtitleSize: size, color: Color(white: 0.6))
+                            subtitleText(text, size: size, weight: weight, color: color, selectable: visible)
                         }
                         .accessibilityElement(children: .contain)
                     } else {
-                        subtitleText(text, size: size, weight: weight, color: color)
+                        subtitleText(text, size: size, weight: weight, color: color, selectable: visible)
                     }
                     Color.clear.frame(height: 1).id("tail")
                 }
             }
             .frame(height: height)
+            .opacity(visible ? 1 : 0)
+            .accessibilityHidden(!visible)
+            .allowsHitTesting(visible)
             .onChange(of: text) { proxy.scrollTo("tail", anchor: .bottom) }
         }
     }
 
-    private func subtitleText(_ text: String, size: Double, weight: Font.Weight, color: Color) -> some View {
-        Text(text)
+    @ViewBuilder
+    private func subtitleText(_ text: String, size: Double, weight: Font.Weight, color: Color,
+                              selectable: Bool) -> some View {
+        let body = Text(text)
             .font(.system(size: size, weight: weight))
             .foregroundStyle(color)
             .lineSpacing(5)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .textSelection(.enabled)
+        if selectable {
+            body.textSelection(.enabled)
+        } else {
+            body.textSelection(.disabled)
+        }
     }
-
-    private var english: String { model.previewEnglishDisplay }
-    private var chinese: String { model.previewChineseDisplay }
 }
 
 /// Preview wording shared by the classroom window and floating captions.
@@ -120,12 +132,52 @@ extension AppModel {
 }
 
 private struct FloatingWindowLevel: NSViewRepresentable {
+    let backgroundOpacity: Double
+
     final class View: NSView {
+        var backgroundOpacity = 1.0
+        private weak var configuredWindow: NSWindow?
+        private var originalIsOpaque = true
+        private var originalBackgroundColor: NSColor?
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if configuredWindow !== newWindow { restoreBackground() }
+            super.viewWillMove(toWindow: newWindow)
+        }
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            window?.level = .floating
+            configureWindow()
+        }
+
+        func configureWindow() {
+            guard let window else { return }
+            if configuredWindow !== window {
+                configuredWindow = window
+                originalIsOpaque = window.isOpaque
+                originalBackgroundColor = window.backgroundColor
+            }
+            window.level = .floating
+            if backgroundOpacity < 1 {
+                window.isOpaque = false
+                window.backgroundColor = .clear
+            } else {
+                restoreBackground()
+            }
+        }
+
+        private func restoreBackground() {
+            configuredWindow?.isOpaque = originalIsOpaque
+            if let originalBackgroundColor { configuredWindow?.backgroundColor = originalBackgroundColor }
         }
     }
-    func makeNSView(context: Context) -> View { View() }
-    func updateNSView(_ nsView: View, context: Context) { nsView.window?.level = .floating }
+    func makeNSView(context: Context) -> View {
+        let view = View()
+        view.backgroundOpacity = backgroundOpacity
+        return view
+    }
+    func updateNSView(_ nsView: View, context: Context) {
+        nsView.backgroundOpacity = backgroundOpacity
+        nsView.configureWindow()
+    }
 }

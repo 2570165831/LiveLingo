@@ -746,6 +746,7 @@ private struct ReviewEntryButton: View {
 /// session is running; controls that would disturb it stay disabled.
 struct ClassroomSettingsView: View {
     @EnvironmentObject private var model: AppModel
+    private var subtitles = FloatingSubtitlePreferences()
 
     var body: some View {
         Form {
@@ -794,6 +795,30 @@ struct ClassroomSettingsView: View {
                 }
                 .font(.callout)
             }
+            Section("悬浮字幕") {
+                Picker("显示模式", selection: Binding(get: { subtitles.displayMode },
+                                                    set: { subtitles.displayMode = $0 })) {
+                    ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                subtitleSlider("原文字号", value: Binding(get: { subtitles.sourceTextSize },
+                                                     set: { subtitles.sourceTextSize = $0 }),
+                               range: FloatingSubtitlePreferences.fontSizeRange, step: 1,
+                               label: "\(Int(subtitles.sourceTextSize)) pt")
+                subtitleSlider("译文字号", value: Binding(get: { subtitles.translationTextSize },
+                                                     set: { subtitles.translationTextSize = $0 }),
+                               range: FloatingSubtitlePreferences.fontSizeRange, step: 1,
+                               label: "\(Int(subtitles.translationTextSize)) pt")
+                subtitleSlider("背景不透明度", value: Binding(get: { subtitles.backgroundOpacity },
+                                                         set: { subtitles.backgroundOpacity = $0 }),
+                               range: FloatingSubtitlePreferences.opacityRange, step: 0.05,
+                               label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
+                Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Section("笔记整理") {
                 Picker("每次整理的内容量", selection: $model.noteBatchCharacters) {
                     Text("较少 · 约 2500 字").tag(2_500)
@@ -809,6 +834,17 @@ struct ClassroomSettingsView: View {
         .tint(ClassroomPalette.accent)
         .frame(width: 520)
         .frame(minHeight: 480)
+    }
+
+    private func subtitleSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
+                                step: Double, label: String) -> some View {
+        LabeledContent(title) {
+            HStack {
+                Slider(value: value, in: range, step: step)
+                    .accessibilityLabel(title)
+                Text(label).monospacedDigit().foregroundStyle(.secondary).frame(width: 48, alignment: .trailing)
+            }
+        }
     }
 }
 
