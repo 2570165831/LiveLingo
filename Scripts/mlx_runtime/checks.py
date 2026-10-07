@@ -10,6 +10,7 @@ from chempy import Substance
 UNITS = pint.UnitRegistry()
 NUMBER = r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d{1,2})?'
 QUANTITY = re.compile(rf'^({NUMBER})\s+([A-Za-z][A-Za-z0-9/*^ .-]{{0,32}})$')
+UNIT_EXPONENT = re.compile(r'(?:\^|\*\*)\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)')
 
 
 def arithmetic(text):
@@ -72,6 +73,10 @@ def check(expression, language=None):
             quantities = [QUANTITY.fullmatch(side) for side in (left,right)]
             if all(quantities):
                 if any(int(n) > 12 for m in quantities for n in re.findall(r'\d+',m[2])):
+                    raise ValueError('单位指数超出核算范围')
+                # Locale normalization may turn 20 into 2e1. Check the whole
+                # exponent's exact value before Pint constructs the quantities.
+                if any(abs(sp.Rational(n)) > 12 for m in quantities for n in UNIT_EXPONENT.findall(m[2])):
                     raise ValueError('单位指数超出核算范围')
                 a,b = [UNITS.Quantity(float(m[1]),m[2]) for m in quantities]
                 if a.dimensionality != b.dimensionality:

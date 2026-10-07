@@ -1101,27 +1101,41 @@ enum LatinTargetAcceptance {
             }
             let unchanged = echoForm(candidate) == echoForm(source)
             let foreignSource = sourceCode(sourceLanguage) != target.rawValue
-            // Recognition alone also calls names foreign. Resolve portable
-            // entities before using lexical or language evidence against a copy.
-            let language = identifyLanguage(candidate, target: target, sourceLanguage: sourceLanguage)
+            // Order matters (int-fix2 L1/R1, tl2526 medium 1/2): structural
+            // terms first; then source-backed nominal entities/book titles,
+            // with greetings/actions vetoing false entity tags; finally judge
+            // the remaining prose. Never invent "The name is ..." context or
+            // let capitalization alone exempt a copy. Recognition of a name's
+            // language is not evidence that the surrounding prose is translated.
+            let protected = protectedSourceLiterals(source, target: target, sourceLanguage: sourceLanguage)
+            let proseCandidate = removingProtectedLiterals(protected, from: candidate)
+            let proseSource = removingProtectedLiterals(protected, from: source)
+            let language = identifyLanguage(proseCandidate, target: target, sourceLanguage: sourceLanguage)
             let portableCopy = unchanged && isPortableSourceCopy(candidate, target: target,
-                sourceLanguage: sourceLanguage, assessment: language)
+                sourceLanguage: sourceLanguage, unprotected: proseCandidate)
+            // Two unprotected words are enough for an unchanged foreign
+            // fragment: tl2526 "Good Morning", int-fix2 "Producto Escalar"
+            // and "Matrice Inverse". This is a copy-policy bound, not an OS
+            // confidence claim. Single words retain shared-word/name evidence
+            // and the existing 0.8 recognition fallback. General wrong-language
+            // thresholds (0.8 / >5 words, forced classification 0.9) stay intact.
             if foreignSource, unchanged, !portableCopy,
-               sourceContentWords(source).count >= 3
-                || hasShortSourceProseEvidence(candidate, target: target, sourceLanguage: sourceLanguage)
+               words(proseCandidate).count >= 2
+                || hasShortSourceProseEvidence(proseCandidate, target: target, sourceLanguage: sourceLanguage)
                 || (language.detectedLanguage != target.rawValue && language.detectedConfidence >= 0.8) {
                 return .sourceEcho
             }
             if !portableCopy, isForcedClassification(language) { return .wrongLanguage }
             // A missing function word alone is not evidence against a
             // translated short caption; unchanged foreign prose is different.
-            if !portableCopy, words(candidate).count > 5, language.detectedLanguage != target.rawValue,
+            if !portableCopy, words(proseCandidate).count > 5, language.detectedLanguage != target.rawValue,
                language.detectedConfidence >= 0.8 { return .wrongLanguage }
-            if target != .english, containsEnglishClause(candidate, target: target, sourceLanguage: sourceLanguage) {
+            if target != .english, containsEnglishClause(proseCandidate, target: target, sourceLanguage: sourceLanguage) {
                 return .mixedEnglishProse
             }
-            if !portableCopy, hasCompetingEvidence(candidate, target: target) { return .wrongLanguage }
-            if !portableCopy, foreignSource, containsCopiedProse(candidate: candidate, source: source) { return .sourceProse }
+            if !portableCopy, hasCompetingEvidence(proseCandidate, target: target) { return .wrongLanguage }
+            if !portableCopy, foreignSource, containsCopiedProse(candidate: proseCandidate, source: proseSource,
+                target: target, sourceLanguage: sourceLanguage) { return .sourceProse }
 
         }
         guard LatinTargetLengthGuard.isPlausible(candidate: candidate, source: source, target: target,
@@ -1243,12 +1257,15 @@ enum LatinTargetAcceptance {
     private static func isSharedEnglishWord(_ tokens: [String], target: Target, source: Target) -> Bool {
         guard tokens.count == 1 else { return false }
         if target == .english { return sharedEnglishWordForms[source, default: []].contains(tokens[0]) }
-        return source == .english && sharedEnglishWordForms[target, default: []].contains(tokens[0])
+        if source == .english { return sharedEnglishWordForms[target, default: []].contains(tokens[0]) }
+        return sharedEnglishWordForms[source, default: []].contains(tokens[0])
+            && sharedEnglishWordForms[target, default: []].contains(tokens[0])
     }
     private static func hasShortSourceProseEvidence(_ text: String, target: Target, sourceLanguage: String?) -> Bool {
         guard let source = Target(rawValue: sourceCode(sourceLanguage)), source != target else { return false }
         let tokens = words(text)
         if isSharedEnglishWord(tokens, target: target, source: source) { return false }
+        if source == .english, tokens.contains(where: englishActions.contains) { return true }
         if tokens.contains(where: { shortSourceProseWords[source, default: []].contains($0) }) { return true }
         if tokens.contains(where: { evidence[source, default: []].contains($0) && !evidence[target, default: []].contains($0) }) {
             return true
@@ -1265,9 +1282,9 @@ enum LatinTargetAcceptance {
     }
     private static let portableIdentifier = try! NSRegularExpression(pattern:
         #"^[A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+|[0-9][A-Za-z0-9_]*|[a-z][A-Z][A-Za-z0-9_]*)[.!?]?$"#)
-    // Only suspected, unchanged copies use this second check. Requiring both
-    // constrained and unconstrained recognition avoids a forced source label.
-    // One/two-word fragments remain governed by short-prose/name evidence.
+    // Legacy strong-evidence predicate retained for its diagnostic callers.
+    // The copy gate no longer requires 0.98/three words before rejecting an
+    // unprotected fragment; these scores are not calibrated probabilities.
     static func hasConfidentForeignCopyLanguage(_ assessment: LanguageAssessment, target: Target,
                                                  sourceLanguage: String?, tokenCount: Int) -> Bool {
         let source = sourceCode(sourceLanguage)
@@ -1276,66 +1293,285 @@ enum LatinTargetAcceptance {
             && assessment.unconstrainedLanguage == source && assessment.unconstrainedConfidence >= 0.98
     }
 
-    /// Use the bundled English named-entity tagger in a fixed carrier sentence
-    /// so short standalone names get context (e.g. Jean de La Fontaine). Every
-    /// letter of the candidate must belong to an entity, not just a name inside
-    /// prose. No asset requests, network, hints, or mutable recognizer are used.
-    private static func isRecognizedPortableName(_ text: String) -> Bool {
-        let carrier = "The name is "
-        let input = carrier + text + "."
-        let start = input.index(input.startIndex, offsetBy: carrier.count)
-        let end = input.index(start, offsetBy: text.count)
-        let tagger = NLTagger(tagSchemes: [.nameType])
+    private static let nameConnectors = Set("de del du des la le les el los las of the van von da di".split(separator: " ").map(String.init))
+    private static let institutionHeads = Set("university université universidad institute institut instituto".split(separator: " ").map(String.init))
+    private static let greetings: [Target: Set<String>] = [
+        .english: Set("hello hi thanks goodbye".split(separator: " ").map(String.init)),
+        .spanish: Set("hola adiós gracias perdón disculpa disculpe".split(separator: " ").map(String.init)),
+        .french: Set("bonjour bonsoir salut merci pardon désolé désolée".split(separator: " ").map(String.init))
+    ]
+    private static func hasNominalVeto(_ text: String, target: Target, sourceLanguage: String?,
+                                       checkOrdinaryWord: Bool = true) -> Bool {
+        let tokens = words(text)
+        let source = Target(rawValue: sourceCode(sourceLanguage))
+        if let source, !isSharedEnglishWord(tokens, target: target, source: source),
+           tokens.contains(where: { greetings[source, default: []].contains($0) }) { return true }
+        if source == .english, tokens.contains(where: englishActions.contains) { return true }
+        // Tag lexical classes on the actual fragment, in its declared source
+        // language. No synthesized sentence, asset request or language hints.
+        // Verb evidence also prevents extending a name into a capitalized clause.
+        // In a real name-particle extension, retain the source word's spelling:
+        // lowercased standalone "jean" can be tagged as a verb, while the
+        // source's Jean has a proper-noun lemma. The full nominal span is still
+        // checked below; this does not recase ordinary source prose as a name.
+        let input = checkOrdinaryWord ? languageIdentificationText(text) : text.precomposedStringWithCanonicalMapping
+        guard !input.isEmpty else { return false }
+        let tagger = NLTagger(tagSchemes: [.lexicalClass, .lemma])
         tagger.string = input
-        tagger.setLanguage(.english, range: input.startIndex..<input.endIndex)
-        let letters = text.unicodeScalars.filter(isLetter).count
-        var covered = 0
-        tagger.enumerateTags(in: input.startIndex..<input.endIndex, unit: .word, scheme: .nameType,
-                             options: [.joinNames, .omitWhitespace, .omitPunctuation]) { tag, range in
-            if let tag, [NLTag.personalName, .placeName, .organizationName].contains(tag),
-               range.lowerBound >= start, range.upperBound <= end {
-                covered += input[range].unicodeScalars.filter(isLetter).count
-            }
+        tagger.setLanguage(NLLanguage(rawValue: sourceCode(sourceLanguage)), range: input.startIndex..<input.endIndex)
+        var predicate = false
+        tagger.enumerateTags(in: input.startIndex..<input.endIndex, unit: .word, scheme: .lexicalClass,
+                             options: [.omitWhitespace, .omitPunctuation]) { tag, _ in
+            predicate = predicate || tag == .verb
+            return !predicate
+        }
+        if predicate { return true }
+        if checkOrdinaryWord, tokens.count == 1, let source, source != target,
+           !isSharedEnglishWord(tokens, target: target, source: source),
+           let lemma = tagger.tag(at: input.startIndex, unit: .word, scheme: .lemma).0?.rawValue,
+           !lemma.isEmpty, !lemma.contains(where: \.isUppercase) {
+            let language = identifyLanguage(text, target: target, sourceLanguage: sourceLanguage)
+            // The existing 0.8 source-language evidence now combines with a
+            // known ordinary lemma before a single-word name tag can exempt
+            // e.g. STUDY/REST. Unknown names and shared words remain portable.
+            if language.unconstrainedLanguage == source.rawValue,
+               language.unconstrainedConfidence >= 0.8 { return true }
+        }
+        return false
+    }
+
+    /// A foreign tagger can misread two ordinary inflected adjectives as a
+    /// surname (int-fix2: Linéaires Homogènes). Known lowercase source lemmas
+    /// plus adjective syntax veto that cross-language label. Unknown lemmas
+    /// and a genuine source-language entity label remain independent evidence;
+    /// this is morphology on source text, not a list of forbidden titles.
+    private static func hasOrdinaryNominalMorphology(_ text: String, sourceLanguage: String?) -> Bool {
+        let input = languageIdentificationText(text)
+        let tagger = NLTagger(tagSchemes: [.lexicalClass, .lemma]); tagger.string = input
+        guard !input.isEmpty else { return false }
+        tagger.setLanguage(NLLanguage(rawValue: sourceCode(sourceLanguage)), range: input.startIndex..<input.endIndex)
+        var known = 0, adjective = false, unknown = false
+        tagger.enumerateTags(in: input.startIndex..<input.endIndex, unit: .word, scheme: .lexicalClass,
+                             options: [.omitWhitespace, .omitPunctuation]) { tag, range in
+            let word = String(input[range])
+            if nameConnectors.contains(word) { return true }
+            let lemma = tagger.tag(at: range.lowerBound, unit: .word, scheme: .lemma).0?.rawValue
+            if let lemma, !lemma.isEmpty, !lemma.contains(where: \.isUppercase), tag == .noun || tag == .adjective {
+                known += 1
+                adjective = adjective || tag == .adjective
+            } else { unknown = true }
             return true
         }
-        return letters > 0 && covered == letters
+        return known >= 2 && adjective && !unknown
+    }
+
+    private static func canExtendNameBackward(_ token: String, nextToken: String, target: Target,
+                                              sourceLanguage: String?) -> Bool {
+        let lower = languageIdentificationText(token)
+        if nameConnectors.contains(lower) || institutionHeads.contains(lower) { return true }
+        // Jean is also the French noun for jeans. An actual entity fragment
+        // linked by a source name particle supplies the missing nominal context;
+        // greetings/actions/verbs still veto it. English title prepositions
+        // such as To/Of do not supply this personal-name relationship.
+        let nameParticle = ["de", "van", "von", "da", "di"].contains(nextToken)
+        guard token.first?.isUppercase == true,
+              !hasNominalVeto(token, target: target, sourceLanguage: sourceLanguage,
+                              checkOrdinaryWord: !nameParticle) else { return false }
+        // A capitalized prefix must itself have source-fragment entity or
+        // proper-noun lemma evidence (Jean before de La Fontaine). Ordinary title words before New York,
+        // such as Introduction To, cannot ride along with the place name.
+        let spelling = token.contains(where: \.isLowercase) ? token : token.capitalized(with: Locale(identifier: "en_US_POSIX"))
+        for language in Set(["en", sourceCode(sourceLanguage)]).sorted() {
+            let tagger = NLTagger(tagSchemes: [.nameType, .lemma]); tagger.string = spelling
+            tagger.setLanguage(NLLanguage(rawValue: language), range: spelling.startIndex..<spelling.endIndex)
+            if let tag = tagger.tag(at: spelling.startIndex, unit: .word, scheme: .nameType).0,
+               [NLTag.personalName, .placeName, .organizationName].contains(tag) { return true }
+            if nameParticle, let lemma = tagger.tag(at: spelling.startIndex, unit: .word, scheme: .lemma).0?.rawValue,
+               lemma.contains(where: \.isUppercase) { return true }
+        }
+        return false
+    }
+
+    private struct ProtectedSourceLiteral: Hashable {
+        let text: String
+        let quotedTitle: Bool
+    }
+    private static let literalQuotes = try! NSRegularExpression(pattern: #""([^"]+)"|“([^”]+)”|«\s*([^»]+?)\s*»"#)
+    private static let literalTitleRole = try! NSRegularExpression(pattern:
+        #"(?i)(?:book\s+title|title\s+of\s+the\s+book|titre\s+du\s+livre|título\s+del\s+libro|(?:book|novel|livre|libro)\s+(?:is\s+)?(?:titled|called))\s*(?:is|es|est|[:=])?\s*$"#)
+
+    /// Entities must occur in the real source. Query fresh, local taggers on
+    /// that text and a casing view of the SAME text, never a carrier sentence.
+    /// The casing view keeps LOS ANGELES / JEAN DE LA FONTAINE usable, but its
+    /// labels do not suffice: greetings/predicates are vetoed and only nominal
+    /// connectors may extend a labelled core. An unlabelled title gets no
+    /// exemption. Source book-title roles and typed institutions provide
+    /// separate, explicit evidence when the OS lacks a complete entity label.
+    private static func protectedSourceLiterals(_ source: String, target: Target,
+                                                sourceLanguage: String?) -> [ProtectedSourceLiteral] {
+        let text = source.precomposedStringWithCanonicalMapping
+        let ranges = wordExpression.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            .compactMap { Range($0.range, in: text) }
+        let tokens = ranges.map { String(text[$0]) }
+        let lower = tokens.map { languageIdentificationText($0) }
+        let entityTokens = lower.map { $0.hasSuffix("’s") || $0.hasSuffix("'s") ? String($0.dropLast(2)) : $0 }
+        var literals = Set<ProtectedSourceLiteral>()
+        func nominal(_ start: Int, _ end: Int) -> Bool {
+            !hasNominalVeto(String(text[ranges[start].lowerBound..<ranges[end].upperBound]),
+                            target: target, sourceLanguage: sourceLanguage)
+        }
+        func adjacent(_ left: Int, _ right: Int) -> Bool {
+            text[ranges[left].upperBound..<ranges[right].lowerBound].allSatisfy(\.isWhitespace)
+        }
+        // Recasing all-uppercase source names must not turn ordinary lowercase
+        // source prose (e.g. bonjour tout le monde) into fabricated title names.
+        let allUppercase = !text.contains(where: \.isLowercase)
+        let views = Set(allUppercase ? [text, text.capitalized(with: Locale(identifier: "en_US_POSIX"))] : [text]).sorted()
+        let languages = Set(["en", sourceCode(sourceLanguage)]).sorted()
+        var properSourceTokens = Set<Int>()
+        if lower.contains(where: institutionHeads.contains) {
+            let view = allUppercase ? text.capitalized(with: Locale(identifier: "en_US_POSIX")) : text
+            let viewRanges = wordExpression.matches(in: view, range: NSRange(view.startIndex..., in: view))
+                .compactMap { Range($0.range, in: view) }
+            let tagger = NLTagger(tagSchemes: [.lexicalClass, .lemma]); tagger.string = view
+            tagger.setLanguage(NLLanguage(rawValue: sourceCode(sourceLanguage)), range: view.startIndex..<view.endIndex)
+            if viewRanges.count == ranges.count {
+                for (index, range) in viewRanges.enumerated() {
+                    if tagger.tag(at: range.lowerBound, unit: .word, scheme: .lexicalClass).0 == .noun,
+                       let lemma = tagger.tag(at: range.lowerBound, unit: .word, scheme: .lemma).0?.rawValue,
+                       lemma.contains(where: \.isUppercase) { properSourceTokens.insert(index) }
+                }
+            }
+        }
+        for view in views where !view.isEmpty {
+            for language in languages {
+                let tagger = NLTagger(tagSchemes: [.nameType])
+                tagger.string = view
+                tagger.setLanguage(NLLanguage(rawValue: language), range: view.startIndex..<view.endIndex)
+                tagger.enumerateTags(in: view.startIndex..<view.endIndex, unit: .word, scheme: .nameType,
+                    options: [.joinNames, .omitWhitespace, .omitPunctuation]) { tag, range in
+                    guard let tag, [NLTag.personalName, .placeName, .organizationName].contains(tag) else { return true }
+                    let core = words(String(view[range]))
+                    guard !core.isEmpty, core.count <= lower.count else { return true }
+                    if language != sourceCode(sourceLanguage),
+                       hasOrdinaryNominalMorphology(core.joined(separator: " "), sourceLanguage: sourceLanguage) { return true }
+                    for index in 0...(lower.count - core.count) where Array(entityTokens[index..<index + core.count]) == core {
+                        var start = index
+                        var end = index + core.count - 1
+                        let scientificHeads: Set<String> = ["law", "laws", "principle", "principles", "theorem", "equation", "equations"]
+                        let scientificTitle = tag == .personalName
+                            && (lower[end].hasSuffix("’s") || lower[end].hasSuffix("'s"))
+                            && end + 1 < tokens.count && adjacent(end, end + 1)
+                            && scientificHeads.contains(lower[end + 1])
+                        guard nominal(start, end) || (scientificTitle && nominal(start, end + 1)) else { continue }
+                        // Expand backwards only: Jean de [La Fontaine], The
+                        // University of [New South Wales]. Forward title words
+                        // may be untranslated prose after a real/false name.
+                        while start > 0, adjacent(start - 1, start),
+                              canExtendNameBackward(tokens[start - 1], nextToken: lower[start],
+                                  target: target, sourceLanguage: sourceLanguage) {
+                            guard nominal(start - 1, end) else { break }
+                            start -= 1
+                        }
+                        // A real source person in a possessive, typed scientific
+                        // title licenses Newton’s Laws of Motion. A capitalized
+                        // statement after Newton does not get this extension.
+                        if scientificTitle {
+                            while end + 1 < tokens.count, adjacent(end, end + 1),
+                                  nameConnectors.contains(lower[end + 1]) || tokens[end + 1].first?.isUppercase == true {
+                                guard nominal(start, end + 1) else { break }
+                                end += 1
+                            }
+                        }
+                        literals.insert(.init(text: String(text[ranges[start].lowerBound..<ranges[end].upperBound]), quotedTitle: false))
+                    }
+                    return true
+                }
+            }
+        }
+        // A typed institution also needs a proper-noun lemma in the actual
+        // source (Wales/Polynésie), not merely a capitalized internal word.
+        // Otherwise University Students/Pressure would hide ordinary headings.
+        // Actual source entity labels above independently protect known names.
+        for start in tokens.indices where institutionHeads.contains(lower[start]) {
+            var end = start, proper = false
+            while end + 1 < tokens.count, adjacent(end, end + 1) {
+                let next = end + 1
+                let capital = tokens[next].first?.isUppercase == true
+                let connector = nameConnectors.contains(lower[next])
+                // A trailing source-language adjective belongs to a typed
+                // institution (e.g. Polynésie française), not a new clause.
+                var adjective = false
+                if proper, !capital, !connector {
+                    let word = lower[next]
+                    let tagger = NLTagger(tagSchemes: [.lexicalClass]); tagger.string = word
+                    tagger.setLanguage(NLLanguage(rawValue: sourceCode(sourceLanguage)), range: word.startIndex..<word.endIndex)
+                    adjective = tagger.tag(at: word.startIndex, unit: .word, scheme: .lexicalClass).0 == .adjective
+                }
+                guard capital || connector || adjective, nominal(start, next) else { break }
+                proper = proper || (capital && properSourceTokens.contains(next))
+                end = next
+            }
+            if proper {
+                var beginning = start
+                if start > 0, adjacent(start - 1, start), ["the", "la", "le", "el"].contains(lower[start - 1]) {
+                    beginning -= 1
+                }
+                literals.insert(.init(text: String(text[ranges[beginning].lowerBound..<ranges[end].upperBound]), quotedTitle: false))
+            }
+        }
+        for match in literalQuotes.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            guard let full = Range(match.range, in: text) else { continue }
+            let prefix = String(text[..<full.lowerBound])
+            guard literalTitleRole.firstMatch(in: prefix, range: NSRange(prefix.startIndex..., in: prefix)) != nil else { continue }
+            for group in 1..<match.numberOfRanges {
+                if let range = Range(match.range(at: group), in: text) {
+                    literals.insert(.init(text: String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines), quotedTitle: true))
+                }
+            }
+        }
+        return literals.sorted {
+            if $0.text.count != $1.text.count { return $0.text.count > $1.text.count }
+            if $0.text != $1.text { return $0.text < $1.text }
+            return $0.quotedTitle && !$1.quotedTitle
+        }
+    }
+
+    private static func removingProtectedLiterals(_ literals: [ProtectedSourceLiteral], from text: String) -> String {
+        var result = text.precomposedStringWithCanonicalMapping
+        for literal in literals {
+            let expression = try! NSRegularExpression(pattern:
+                #"(?<![\p{L}\p{N}_])"# + NSRegularExpression.escapedPattern(for: literal.text) + #"(?![\p{L}\p{N}_])"#,
+                options: [.caseInsensitive])
+            let quoteRanges = literalQuotes.matches(in: result, range: NSRange(result.startIndex..., in: result))
+                .flatMap { match in (1..<match.numberOfRanges).map { match.range(at: $0) } }
+                .filter { $0.location != NSNotFound }
+            // A book title protects its quoted/title-role occurrence only.
+            // Identical words in a later ordinary sentence remain prose; a
+            // global string replacement would silently hide that source copy.
+            for match in expression.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed() {
+                guard let range = Range(match.range, in: result) else { continue }
+                if literal.quotedTitle {
+                    let quoted = quoteRanges.contains {
+                        match.range.location >= $0.location && NSMaxRange(match.range) <= NSMaxRange($0)
+                    }
+                    let prefix = String(result[..<range.lowerBound])
+                    guard quoted || literalTitleRole.firstMatch(in: prefix,
+                        range: NSRange(prefix.startIndex..., in: prefix)) != nil else { continue }
+                }
+                result.replaceSubrange(range, with: " ")
+            }
+        }
+        return result
     }
 
     private static func isPortableSourceCopy(_ text: String, target: Target, sourceLanguage: String?,
-                                             assessment: LanguageAssessment) -> Bool {
+                                             unprotected: String) -> Bool {
         let canonical = text.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         if portableIdentifier.firstMatch(in: canonical, range: NSRange(canonical.startIndex..., in: canonical)) != nil { return true }
         let tokens = words(canonical)
         if let source = Target(rawValue: sourceCode(sourceLanguage)), isSharedEnglishWord(tokens, target: target, source: source) { return true }
-        if isRecognizedPortableName(canonical) { return true }
-        guard !hasShortSourceProseEvidence(canonical, target: target, sourceLanguage: sourceLanguage) else { return false }
-        guard !hasConfidentForeignCopyLanguage(assessment, target: target,
-            sourceLanguage: sourceLanguage, tokenCount: tokens.count) else { return false }
-        // Retain the historical spelling fallback only for uncertain fragments.
-        // Title case cannot overrule confident foreign-prose recognition.
-        let names = wordExpression.matches(in: canonical, range: NSRange(canonical.startIndex..., in: canonical))
-            .compactMap { Range($0.range, in: canonical).map { String(canonical[$0]) } }
-        return !names.isEmpty && names.allSatisfy {
-            $0.first?.isUppercase == true && $0.dropFirst().contains(where: \.isLowercase)
-        }
-    }
-    private static func sourceContentWords(_ text: String) -> [String] {
-        let tokens = wordExpression.matches(in: text, range: NSRange(text.startIndex..., in: text))
-            .compactMap { Range($0.range, in: text).map { String(text[$0]) } }
-        let lowered = tokens.map { $0.lowercased() }
-        let grammatical = lowered.contains { token in
-            Target.allCases.contains { evidence[$0, default: []].contains(token) } || englishActions.contains(token)
-        }
-        return tokens.enumerated().compactMap { index, token in
-            guard token.count >= 3 || (grammatical && evidence[.english, default: []].contains(token.lowercased())) else { return nil }
-            // Preserve names, symbols, units and acronyms. All-uppercase prose
-            // still counts when a grammatical/action word establishes a clause.
-            if token.allSatisfy({ !$0.isLowercase }) && !grammatical { return nil }
-            if token.first?.isUppercase == true, token.dropFirst().contains(where: \.isLowercase),
-               index > 0 || !grammatical { return nil }
-            if isTerminologyOnly(token), !(grammatical && tokens.count >= 3 && token.allSatisfy({ !$0.isLowercase })) { return nil }
-            return token
-        }
+        return !tokens.isEmpty && words(unprotected).isEmpty
     }
     private static func containsEnglishClause(_ text: String, target: Target, sourceLanguage: String?) -> Bool {
         let clauses = text.components(separatedBy: CharacterSet(charactersIn: ".!?;:,\n—"))
@@ -1356,15 +1592,31 @@ enum LatinTargetAcceptance {
         }
         return false
     }
-    private static func containsCopiedProse(candidate: String, source: String) -> Bool {
+    private static func containsCopiedProse(candidate: String, source: String, target: Target,
+                                            sourceLanguage: String?) -> Bool {
         let original = words(source), output = words(candidate)
-        guard original.count >= 4, output.count >= 4 else { return false }
-        let grams = Set((0...(original.count - 4)).map { original[$0..<($0 + 4)].joined(separator: " ") })
-        return (0...(output.count - 4)).contains { index in
-            let span = Array(output[index..<index + 4])
-            return grams.contains(span.joined(separator: " "))
-                && Target.allCases.contains { score(span, target: $0) >= 2 }
+        guard original.count >= 3, output.count >= 3 else { return false }
+        // Retain the old four-word/function-word proof, then cover three-word
+        // copies with language evidence. Three is a bounded clause window
+        // chosen from the reviewed short mixtures, not a calibrated error rate;
+        // portable entities were removed first. Two-word academic borrowings
+        // are intentionally not treated as copied clauses by this scan.
+        for width in [4, 3] where original.count >= width && output.count >= width {
+            let grams = Set((0...(original.count - width)).map { original[$0..<($0 + width)].joined(separator: " ") })
+            for index in 0...(output.count - width) {
+                let span = Array(output[index..<index + width])
+                let text = span.joined(separator: " ")
+                guard grams.contains(text) else { continue }
+                if width == 4, Target.allCases.contains(where: { score(span, target: $0) >= 2 }) { return true }
+                let language = identifyLanguage(text, target: target, sourceLanguage: sourceLanguage)
+                if language.detectedLanguage == sourceCode(sourceLanguage),
+                   language.detectedLanguage != target.rawValue, language.detectedConfidence >= 0.8,
+                   width == 4 || hasShortSourceProseEvidence(text, target: target, sourceLanguage: sourceLanguage) {
+                    return true
+                }
+            }
         }
+        return false
     }
     private static let elementSymbols = "H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg Cn Nh Fl Mc Lv Ts Og"
         .split(separator: " ").map(String.init)
@@ -1375,17 +1627,59 @@ enum LatinTargetAcceptance {
         // No/He/In/As/At/Am and OK are words as well as possible symbols.
         // A numeric suffix or a larger formula disambiguates those elements.
         let chemical = "(?!(?:OK|No|He|In|As|At|Am)(?=$|[^\\p{L}\\p{N}_]))(?:(?:" + elements + ")" + indices + ")+"
-        let acronym = "(?!(?:OK|HI|NO|GO|IT|IS)(?=$|[^\\p{L}\\p{N}_]))[A-Z][A-Z0-9]{1,11}"
-        let symbols = "[πΔμµΩΩλ]" + indices + "[A-Za-z]{0,2}" + indices
+        // Only a bounded 2..5-character acronym can qualify by spelling.
+        // The reviewed DNA/ATP/FTIR/NASA/NADH controls fit this bound; long
+        // capitalized words (STUDENTS/PRESSURE/ESTUDIANTES) must face the prose
+        // gate. Longer real organizations can still supply source entity
+        // evidence, while formulas/chemical symbols have independent syntax.
+        let acronym = "(?!(?:OK|HI|NO|GO|IT|IS)(?=$|[^\\p{L}\\p{N}_]))[A-Z][A-Z0-9]{1,4}"
+        let symbols = "[πΔμµΩΩλρ]" + indices + "[A-Za-z]{0,2}" + indices
             + "|[A-Za-z]{1,2}[0-9₀-₉⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]+|[A-Za-zα-ωΑ-Ω]" + indices
             + "|d[A-Za-z](?=\\s*/)|(?<=/)d[A-Za-z]"
         return try! NSRegularExpression(pattern: "(?<![\\p{L}_])(?:" + acronym + "|" + chemical + "|" + units + "|" + symbols + ")(?=$|[^\\p{L}\\p{N}_])")
     }()
     static func isTerminologyOnly(_ text: String) -> Bool {
         LatinAcceptanceInstrumentation.record(.terms)
-        let tokens = words(text)
+        func bareWords(_ value: String) -> [String] {
+            wordExpression.matches(in: value, range: NSRange(value.startIndex..., in: value)).compactMap { match in
+                guard let range = Range(match.range, in: value) else { return nil }
+                if range.upperBound < value.endIndex {
+                    let next = value[range.upperBound]
+                    if next.isNumber || next == "_" { return nil }
+                }
+                if range.lowerBound > value.startIndex, value[value.index(before: range.lowerBound)] == "_" { return nil }
+                return String(value[range])
+            }
+        }
+        let tokens = bareWords(text).map { languageIdentificationText($0) }
         if tokens.count >= 2, score(tokens, target: .english) >= 2 { return false }
-        if tokens.count >= 3, tokens.contains(where: englishActions.contains) { return false }
+        if tokens.contains(where: englishActions.contains) { return false }
+        if Target.allCases.contains(where: { target in
+            tokens.contains { greetings[target, default: []].contains($0)
+                && !sharedEnglishWordForms[target, default: []].contains($0) }
+        }) { return false }
+        // Short uppercase ordinary words still are prose. Use local dictionary
+        // lemmas, not a growing action blacklist or just the acronym length:
+        // STUDY/REST have ordinary lemmas; DNA/FTIR/ATP do not. Formula atoms,
+        // mixed-case chemical symbols and numeric identifiers keep their own
+        // syntax. This only disambiguates bare alphabetic acronym spellings.
+        let bareAcronym = try! NSRegularExpression(pattern: #"^[A-Z]{2,5}$"#)
+        // VE in the explicitly written O(VE) is a formula atom, not the French
+        // inflection "ve" returned by a dictionary. Keep that structural proof
+        // ahead of the bare-acronym lexical check.
+        let complexity = try! NSRegularExpression(pattern: #"(?<![\p{L}_])O\([A-Z]{1,5}\)(?![\p{L}_])"#)
+        let spellingText = complexity.stringByReplacingMatches(in: text,
+            range: NSRange(text.startIndex..., in: text), withTemplate: "")
+        let spelling = bareWords(spellingText)
+        for token in spelling where bareAcronym.firstMatch(in: token, range: NSRange(token.startIndex..., in: token)) != nil {
+            let input = token.lowercased()
+            for language in ["en", "es", "fr"] {
+                let tagger = NLTagger(tagSchemes: [.lemma]); tagger.string = input
+                tagger.setLanguage(NLLanguage(rawValue: language), range: input.startIndex..<input.endIndex)
+                if let lemma = tagger.tag(at: input.startIndex, unit: .word, scheme: .lemma).0?.rawValue,
+                   !lemma.isEmpty, !lemma.contains(where: \.isUppercase) { return false }
+            }
+        }
         let stripped = termExpression.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
         return text.unicodeScalars.contains(where: { isLetter($0) || (0x30...0x39).contains($0.value) })
             && !stripped.unicodeScalars.contains(where: { isLetter($0) || CharacterSet.nonBaseCharacters.contains($0) })
@@ -1406,7 +1700,15 @@ enum LatinTargetLengthGuard {
     static let englishFromHanMaximumRatio = 4.57
 
     /// Four local UN meetings, 85 fully extracted aligned turns. Values follow
-    /// the reference letter-ratio p99.5 rounded UP to 0.01. Step 25 corrects
+    /// the reference letter-ratio p99.5 rounded UP to 0.01, except es/zh is
+    /// now stratified by the existing 24-letter source floor (tl2526 low 2).
+    /// Its 83 long sources give p99.5 4.947313799104824 => 4.95; all 85 ratios
+    /// using max(sourceLetters, 24) independently give 4.946933924302552 =>
+    /// 4.95. The two repeated 16-letter sources belong to a separate short
+    /// stratum, not the long-source multiplier. With +12, one long reference
+    /// exceeds this provisional boundary by 0.85 letters; no holdout claim.
+    /// Scripts/target_eval/recompute_es_zh_length.py binds the raw input hashes,
+    /// deduplication, strata and exact-fraction interpolation. Step 25 corrects
     /// the unsubstantiated historical fr/ru 1.20 to its measured ceiling 1.19
     /// (Scripts/target_eval/PROVENANCE.md). These are provisional in-sample parameters;
     /// expanded meetings/sources and an independent holdout must establish
@@ -1416,7 +1718,7 @@ enum LatinTargetLengthGuard {
         let source = sourceLanguage?.lowercased().split(separator: "-").first.map(String.init) ?? "en"
         let ratios: [LatinTargetAcceptance.Target: [String: Double]] = [
             .english: ["es": 1.10, "fr": 1.13, "zh": englishFromHanMaximumRatio, "ar": 1.89, "ru": 1.08],
-            .spanish: ["en": 1.26, "fr": 1.23, "zh": 5.44, "ar": 2.25, "ru": 1.24],
+            .spanish: ["en": 1.26, "fr": 1.23, "zh": 4.95, "ar": 2.25, "ru": 1.24],
             .french: ["en": 1.26, "es": 1.10, "zh": 4.96, "ar": 1.84, "ru": 1.19]
         ]
         return ratios[target]?[source] ?? (["zh", "ja", "ko", "yue"].contains(source) ? 6 : 2)
