@@ -1,8 +1,10 @@
 # Offline target-language evaluation
 
-These standard-library tools read explicitly supplied local files. They do not
-download corpora, import model runtimes, load models or alter the app's English
-lecture / Simplified Chinese production path. All regression text is synthetic.
+These standard-library tools read explicitly supplied local files and never
+download corpora or alter the app's English lecture / Simplified Chinese
+production path. Calibration and metric tools do not load models. The route
+runner described below loads local MLX weights only in normal mode; its
+`--dry-run` and every regression test use synthetic workers and no GPU.
 
 ## Output location and tests
 
@@ -38,6 +40,121 @@ validation function. The aggregate runner and root-level `test_target_eval`
 discovery bridge load all corpus, metric, review and calibration regressions without path
 overrides, filtering or skips. Temporary synthetic fixtures and environment
 changes are cleaned up by unittest. No UserDefaults suites are used.
+
+## Route runner (PLAN step 24)
+
+`python -m Scripts.target_eval.run_strategies` consumes step 19's `prompts`
+directory, validates its manifest/SHA-256/byte counts, and preserves the exact
+UTF-8 system prompt, including whitespace. It selects `caption-9b` or
+`caption-4b`; no prompt is derived by replacing a different target's words.
+The current exporter only supplies **zh-Hans**. En/es/fr and direct Traditional
+Chinese runs fail before worker/output creation until their App prompt exports
+exist. Synthetic test manifests exercise those future routes without claiming
+that the App already exports them.
+
+| Route | Definition | PLAN |
+|---|---|---|
+| `direct` | One generation in the target language. `en` source to `en` target passes through with zero calls. | I.7; II.en and II.es/fr; Traditional direct generation is an evaluation control only. |
+| `via-en` | Non-English source → generated English → es/fr, using the exported English and target prompts. Two sequential calls, with no reference text fed to either call. | I.7; II.es/fr; step 25. |
+| `hans-convert` | One zh-Hans generation → caller-supplied reviewed TW/HK converter. | I.7; II.zh-Hant-TW/HK. |
+
+`--targets` and `--routes` form a Cartesian list; unsupported combinations fail.
+For a direct/pivot pair, `--sources` must exclude English. Without `--sources`,
+the common corpus source locales are selected, excluding target locales and,
+for pivots, English. Non-English source=target policies are outside this runner.
+Traditional references must explicitly use `zh-Hant-TW` or `zh-Hant-HK`; generic
+`zh-Hant` gold is not silently assigned a regional label.
+
+Use `--corpus un --input LOCAL_UN_ROOT` for the existing curated UN reader.
+Other choices reuse `corpora.py`: `cs50`/`ted` take repeated
+`--locale-file LOCALE=PATH` and `--document-id`; `flores-plus` takes locale files;
+`jsonl --input FILE` reads `corpora.py`'s exported `ParallelUnit` rows. UN turns
+and SRT overlap groups remain intact, rather than inventing aligned sentences.
+Optional JSONL `metadata.terms` maps each target to the required term list used
+by `metrics.terminology_hit_rate`; absent terms have an unknown hit rate.
+
+All calls run sequentially in one persistent worker, alternating requested
+routes for each input unit/source. The lock is **exactly this checkout's
+scoreboard `work/scoreboard/.lock`**, with the original path checks and persistent
+inode. The original App/CLI census is checked before startup and every call;
+standalone MLX workers are also refused (the runner's owned child is excluded).
+Other checkouts' standalone workers are caught by the census; no process is
+stopped to make room. The lock does not control unrelated GPU applications.
+
+Set `LIVELINGO_MLX_PYTHON` and `LIVELINGO_MLX_MODELS` to the existing App-compatible
+Python and model-root directory. `LIVELINGO_MLX_WORKER` optionally selects the
+worker script (default: this checkout's `Scripts/mlx_runtime/worker.py`). Flags
+`--python`, `--models-root`, `--worker` override those variables. The runner uses
+an isolated checkpoint directory inside the new output directory, never the
+App's `LIVELINGO_MLX_STATE` or paused jobs. HF/Transformers offline mode is forced.
+
+Normal runs require `--energy-helper EXISTING_IOREPORT_EXECUTABLE` or explicit
+`--no-energy`. This runner never compiles a helper, installs anything or uses
+root. `scoreboard_energy.PowerSampler` provides sanitized interval samples;
+`window_energy` integrates each invocation and input unit after stopping/flushing
+the sampler. Missing rails/coverage or busy-time fallback remain unknown joules.
+Gross energy includes other processes and has **no idle subtraction**. Thermal,
+AC and interference are unverified, so energy comparability stays false.
+
+Protocol v2 exposes `finalTokens` and `thinkingTokens`; their sum is output
+tokens excluding EOS. Input tokens and `reused_prefix_tokens` are not emitted,
+despite the latter existing inside `Generation`; both stay `null`. Exact TTFT
+also stays `null`. `first_token_seconds` is labelled as the first nonempty
+snapshot/done receipt, with snapshots throttled to 100 ms; it is a visible-output
+proxy. Per-call time includes lazy model load on the first generation and ends
+at `done`; per-unit time includes guards, ACK waits and conversion. Per-unit
+first-output time for a pivot includes the first hop. Nonstreaming conversion's
+first-output time is unknown. p95 uses nearest rank.
+
+`hans-convert` needs an explicit local `--converter` executable, once the reviewed
+converter exists. This worktree has no converter or reviewed tables. The adapter
+contract is one stdin JSON object `{"targetLocale":"zh-Hant-TW","text":"..."}`
+and one stdout JSON object `{"text":"..."}` per invocation. Its binary SHA-256
+is recorded. The runner implements no conversion rules; dry runs use a labelled
+fake conversion and never execute that adapter.
+
+`--output-dir` must name a **new** descendant of the existing directory in
+`LIVELINGO_TARGET_EVAL_OUTPUT_ROOT`. Existing files/directories, symlinks and
+repository outputs are refused; the leaf is reserved atomically. A successful
+run writes `report.json` (all input/reference/output text, per-call/unit stats,
+route summaries, samples and paired chrF++ 95% bootstrap) and `summary.md`.
+Failed attempts keep their reserved directory and are not published as completed
+reports; retry with a new output path. These files are local public-corpus
+evidence, not the numeric-only scoreboard reports. Worker stderr is drained and
+hashed in memory, never copied into the report. Dry-run scores/times are synthetic.
+There is no App acceptance/retry loop or audited simplified-only inventory, so
+language rejection, Traditional simplified residue and the full G3/G4 switch
+gates are not established. Production route constants are never changed.
+
+Current-export dry-run example (replace all placeholders with existing paths):
+
+```sh
+export LIVELINGO_TARGET_EVAL_OUTPUT_ROOT="<authorized-existing-output-root>"
+PYTHONDONTWRITEBYTECODE=1 python3.13 -m Scripts.target_eval.run_strategies \
+  --prompts-dir "<step-19-export>" --corpus un --input "<local-un-root>" \
+  --targets zh-Hans --routes direct --sources en --profile 9b \
+  --output-dir "$LIVELINGO_TARGET_EVAL_OUTPUT_ROOT/new-dry-run" --dry-run
+```
+
+Real comparison example, **after** en/es/fr prompt exports exist and the machine
+is free of other LiveLingo runtimes (this command loads weights/GPU):
+
+```sh
+export LIVELINGO_MLX_PYTHON="<existing-app-runtime-python>"
+export LIVELINGO_MLX_MODELS="<existing-models-root>"
+export LIVELINGO_TARGET_EVAL_OUTPUT_ROOT="<authorized-existing-output-root>"
+PYTHONDONTWRITEBYTECODE=1 python3.13 -m Scripts.target_eval.run_strategies \
+  --prompts-dir "<future-app-export-with-en-es-fr>" --corpus un --input "<local-un-root>" \
+  --targets es fr --routes direct via-en --sources zh ru ar --profile 9b \
+  --final-budget 4096 --energy-helper "<existing-scoreboard-ioreport>" \
+  --output-dir "$LIVELINGO_TARGET_EVAL_OUTPUT_ROOT/new-real-comparison"
+```
+
+`--final-budget` defaults to the App's 160-token caption budget (max 4096).
+Long UN turns can exceed even 4096; budget exhaustion is a failure, never a
+completed translation. This command is an invocation example, not a measured
+claim about those turns or future targets. For current zh-Hans exports use
+`--targets zh-Hans --routes direct --sources en` instead.
 
 To run the task's explicit module selection from the repository root:
 

@@ -6,10 +6,10 @@ sets the output-root environment variable to its own temporary directory; set
 """
 import unittest
 
-from . import test_calibrate, test_corpora, test_metrics, test_review, test_review_sidecar
+from . import test_calibrate, test_corpora, test_metrics, test_review, test_review_sidecar, test_run_strategies
 
 
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(loader.loadTestsFromModule(module)
                               for module in (test_corpora, test_metrics, test_review,
-                                             test_calibrate, test_review_sidecar))
+                                             test_calibrate, test_review_sidecar, test_run_strategies))
