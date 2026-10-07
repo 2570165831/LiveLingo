@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -21,7 +22,8 @@ SENTINEL = "PRIVATE_SENTINEL_never_emit_机密原文"
 SESSION_ID = "11111111-1111-4111-8111-111111111111"
 ID1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 ID2 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-LL4 = Path("/Users/li/Documents/Codex/2026-09-23/live-lingo-specialist-4/work/cs50-reference-20261003")
+# Optional local evidence: the frozen CS50 benchmark lives outside the repository.
+LL4 = Path(os.environ["LIVELINGO_CS50_REFERENCE_DIR"]) if os.environ.get("LIVELINGO_CS50_REFERENCE_DIR") else None
 
 
 def envelope(data):
@@ -363,6 +365,8 @@ class ASRTests(unittest.TestCase):
         self.assertNotIn(ID1, encoded)
 
     def test_ll4_raw_parakeet_129_of_2010_and_qwen_135(self):
+        if LL4 is None:
+            self.skipTest("set LIVELINGO_CS50_REFERENCE_DIR to the frozen CS50 benchmark")
         paths = [LL4 / "benchmark.json", LL4 / "benchmark-results.json"]
         if not all(path.is_file() for path in paths):
             self.skipTest("LL4 frozen benchmark unavailable")
