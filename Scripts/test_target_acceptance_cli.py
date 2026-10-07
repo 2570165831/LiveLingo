@@ -327,6 +327,7 @@ class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
                                 'json.dumps({"args": args, "tmp": os.environ["TMPDIR"]}))\n')
             compiler.chmod(0o700)
             environment = dict(os.environ, PATH=str(tools) + ":" + os.environ.get("PATH", ""))
+            environment.pop("LIVELINGO_TARGET_EVAL_DERIVED_ROOT", None)
             destination = root / "build"
             def build(_):
                 return subprocess.run(["/bin/bash", str(script), str(destination)], env=environment,

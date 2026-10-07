@@ -2493,6 +2493,8 @@ final class AppModel: ObservableObject {
             if sourceOnly { scheduleSummaryRefresh(force: summaryRefreshRequested) }
     }
 
+    private var typedTranslationRequest: QwenTranslationClient.TypedRequest?
+
     func translateTypedText(thinking: Bool = false) {
         guard manualTranslationTask == nil else { return }
         let text = manualTranslationInput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2500,6 +2502,7 @@ final class AppModel: ObservableObject {
             manualTranslationStatus = "请输入 1–2000 字符的英文内容"
             return
         }
+        let target = captionTarget
         isManualTranslating = true
         manualTranslationOutput = ""
         manualTranslationStatus = thinking ? "精确翻译：等待当前字幕翻译或摘要完成…" : "等待当前字幕翻译或摘要完成…"
@@ -2522,9 +2525,10 @@ final class AppModel: ObservableObject {
                 self.manualRequestInFlight = true
                 let modelName = self.effectiveProfile.translationModel
                 self.manualTranslationStatus = thinking ? "精确翻译中 · 思考已开启 · \(modelName)" : "翻译中 · \(modelName)"
-                let result = try await QwenTranslationClient.translateTypedText(text, modelName: modelName, thinking: thinking)
+                let result = try await QwenTranslationClient.translateTypedText(text, modelName: modelName, thinking: thinking,
+                    target: target, request: self.typedTranslationRequest)
                 try Task.checkCancellation()
-                self.manualTranslationOutput = self.captionTarget.normalize(result)
+                self.manualTranslationOutput = target.normalize(result)
                 self.manualTranslationStatus = thinking ? "精确翻译完成 · \(modelName)" : "已完成 · \(modelName)"
             } catch is CancellationError {
                 self.manualTranslationStatus = "已取消"
@@ -2537,6 +2541,11 @@ final class AppModel: ObservableObject {
     func cancelTypedTranslation() { manualTranslationTask?.cancel() }
 
     #if DEBUG
+    func setTypedTranslationRequestForTesting(_ request: @escaping QwenTranslationClient.TypedRequest) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        typedTranslationRequest = request
+    }
+
     /// Changes only the creation-time release lookup in an isolated test host.
     func setReleasedOutputLanguagesForTesting(_ languages: Set<OutputLanguage>) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)

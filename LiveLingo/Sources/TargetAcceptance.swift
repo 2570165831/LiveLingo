@@ -138,7 +138,7 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
     private static let modelSelfDescriptionExpression = try! NSRegularExpression(pattern:
         #"(?i)(?:(?:作为|我是)\s*(?:一(?:个|名)\s*)?(?:(?:人工智能|AI)\s*(?:语言\s*)?(?:助手|模型)|(?:大型\s*)?语言\s*模型)|(?<![\p{L}\p{N}_])(?:as|being|i\s+am|i['’]m)\s+(?:(?:an?|the)\s+)?(?:(?:ai|artificial\s+intelligence)\s+(?:language\s+)?(?:assistant|model)|(?:large\s+)?language\s+model))"#)
 
-    private static func containsModelSelfDescription(_ text: String) -> Bool {
+    static func containsModelSelfDescription(_ text: String) -> Bool {
         modelSelfDescriptionExpression.firstMatch(in: text,
             range: NSRange(text.startIndex..., in: text)) != nil
     }
@@ -985,8 +985,8 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
     }
 }
 
-/// Standalone policies for future Latin targets. No production caller selects
-/// them yet; CaptionTranslationTarget and the zh-Hans path remain unchanged.
+/// Shared Latin acceptance; English selects it through the production adapter.
+/// Spanish and French remain prepared policies without generation targets.
 enum LatinTargetAcceptance {
     enum Target: String, CaseIterable, Codable, Sendable {
         case english = "en", spanish = "es", french = "fr"
@@ -1133,9 +1133,9 @@ enum LatinTargetAcceptance {
         case .modelReply: return .modelReply
         case .jsonStructure, .jsonQuantity: return .jsonStructure
         case .sourceEcho, .sourceCopy: return .sourceEcho
-        case .englishProse: return .wrongLanguage
+        case .englishProse, .wrongTargetLanguage: return .wrongLanguage
         case .mixedEnglishProse: return .mixedEnglishProse
-        case .nonChineseText: return .nonLatinScript
+        case .nonChineseText, .nonTargetScript: return .nonLatinScript
         case .incompleteProse: return .incompleteProse
         case .sourceProse: return .sourceProse
         case .disproportionateLength: return .disproportionateLength
@@ -1148,11 +1148,16 @@ enum LatinTargetAcceptance {
         #"(?im)^[ \t]*(?:[{"]?[ \t]*["']?(?:source language|idioma de origen|langue source|langue d['’]origine|translation_instruction|source_text_to_translate|target_translate_only|context_before_do_not_translate|context_after_do_not_translate)["']?[ \t]*[:=]|(?:here is the translation|aquí está la traducción|voici la traduction)[ \t]*:|---[ \t]*(?:end translation metadata|begin quoted lecture content|end quoted lecture content)\b|```)|(?<![\p{L}\p{N}_])["'](?:translation_instruction|source_text_to_translate|target_translate_only|context_before_do_not_translate|context_after_do_not_translate)["'][ \t]*:"#)
     private static func hasInstructionLeak(_ text: String) -> Bool {
         instructionLeak.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+            || TranslationCheckText.containsInstructionLeak(text, targetCode: "en", normalizeOutput: { $0 })
     }
     private static let selfDescription = try! NSRegularExpression(pattern:
         #"(?i)(?:\b(?:as|being|i\s+am|i['’]m)\s+(?:(?:an?|the)\s+)?(?:(?:ai|artificial\s+intelligence)\s+(?:language\s+)?(?:assistant|model)\b|(?:large\s+)?language\s+model\b)|\b(?:como|soy)\s+(?:(?:un|una)\s+)?(?:modelo\b de lenguaje\b|modelo lingüístico\b|asistente\b de (?:ia|inteligencia artificial)\b)|\b(?:en tant que|je suis)\s+(?:(?:un|une)\s+)?(?:modèle\b (?:de langage|linguistique)\b|assistant\b (?:ia|d['’]intelligence artificielle)\b))"#)
-    private static func hasSelfDescription(_ text: String) -> Bool {
-        selfDescription.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    static func hasSelfDescription(_ text: String) -> Bool {
+        let folded = TranslationCheckText.inspectionCopy(text, targetCode: "en")
+            .folding(options: [.widthInsensitive], locale: nil)
+        return selfDescription.firstMatch(in: folded, range: NSRange(folded.startIndex..., in: folded)) != nil
+            || (folded.unicodeScalars.contains(where: TranslationAcceptance.isHan)
+                && HanTargetAcceptance.containsModelSelfDescription(folded))
     }
     static func isForcedClassification(_ assessment: LanguageAssessment) -> Bool {
         guard let language = assessment.unconstrainedLanguage else { return false }
@@ -1293,6 +1298,10 @@ enum LatinTargetAcceptance {
 enum LatinTargetLengthGuard {
     static let minimumSourceLetters = 24
     static let absoluteLetterAllowance = 12
+    /// Local UN S/PV.10142/10153/10168/10192, 85 complete aligned turns.
+    /// English letters / Han scalars: p99.5 4.56732296137339, ceiling to 0.01.
+    /// Scripts/target_eval/calibrate.py plus the local Han-count audit; in-sample only.
+    static let englishFromHanMaximumRatio = 4.57
 
     /// Four local UN meetings, 85 fully extracted aligned turns. Values follow
     /// the reference letter-ratio p99.5 rounded UP to 0.01, except the retained
@@ -1304,7 +1313,7 @@ enum LatinTargetLengthGuard {
         LatinAcceptanceInstrumentation.record(.maximumRatio)
         let source = sourceLanguage?.lowercased().split(separator: "-").first.map(String.init) ?? "en"
         let ratios: [LatinTargetAcceptance.Target: [String: Double]] = [
-            .english: ["es": 1.10, "fr": 1.13, "zh": 4.57, "ar": 1.89, "ru": 1.08],
+            .english: ["es": 1.10, "fr": 1.13, "zh": englishFromHanMaximumRatio, "ar": 1.89, "ru": 1.08],
             .spanish: ["en": 1.26, "fr": 1.23, "zh": 5.44, "ar": 2.25, "ru": 1.24],
             .french: ["en": 1.26, "es": 1.10, "zh": 4.96, "ar": 1.84, "ru": 1.20]
         ]
@@ -1444,4 +1453,78 @@ enum LatinAcceptanceInstrumentation {
         storage.record(function.rawValue)
         #endif
     }
+}
+
+
+/// Production English target adapter. The Chinese gate remains independent.
+enum EnglishTargetAcceptance: TargetAcceptancePolicy {
+    static func isModelReply(_ candidate: String, source: String, targetCode: String) -> Bool {
+        LatinTargetAcceptance.hasSelfDescription(candidate) && !LatinTargetAcceptance.hasSelfDescription(source)
+    }
+    static func rejection(candidate: String, source: String, sourceLanguage: String?, target: CaptionTranslationTarget) -> TranslationAcceptance.Rejection? {
+        // Typed text has no ASR language tag. Use the calibrated Han bound
+        // when its source contains Han, without changing standalone policies.
+        let language = sourceLanguage ?? (source.unicodeScalars.contains(where: TranslationAcceptance.isHan) ? "zh" : nil)
+        return LatinTargetAcceptance.rejection(candidate: candidate, source: source, target: .english,
+            sourceLanguage: language).map(mapRejection)
+    }
+    private static func mapRejection(_ value: LatinTargetAcceptance.Rejection) -> TranslationAcceptance.Rejection {
+        switch value {
+        case .empty: return .empty
+        case .controlMarker: return .controlMarker
+        case .promptLeak: return .promptLeak
+        case .modelReply: return .modelReply
+        case .jsonStructure: return .jsonStructure
+        case .sourceEcho: return .sourceCopy
+        case .wrongLanguage: return .wrongTargetLanguage
+        case .mixedEnglishProse: return .mixedEnglishProse
+        case .sourceProse: return .sourceProse
+        case .nonLatinScript: return .nonTargetScript
+        case .incompleteProse: return .incompleteProse
+        case .disproportionateLength: return .disproportionateLength
+        }
+    }
+    static func validated(_ candidate: String, source: String, sourceLanguage: String?, target: CaptionTranslationTarget) throws -> String {
+        let text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reason = rejection(candidate: text, source: source, sourceLanguage: sourceLanguage, target: target) {
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason.reason)。")
+        }
+        return text
+    }
+    static func validatedCaption(_ candidate: String, source: String, sourceLanguage: String?, target: CaptionTranslationTarget) throws -> String {
+        try validated(candidate, source: source, sourceLanguage: sourceLanguage, target: target)
+    }
+    static func foreignProseRejection(candidate: String, source: String) -> TranslationAcceptance.Rejection? {
+        let value = rejection(candidate: candidate, source: source, sourceLanguage: nil, target: .english)
+        switch value {
+        case .wrongTargetLanguage, .nonTargetScript, .sourceProse: return value
+        default: return nil
+        }
+    }
+    static func targetForeignProseRejection(candidate: String, source: String) -> TranslationAcceptance.Rejection? {
+        foreignProseRejection(candidate: candidate, source: source)
+    }
+    static func permitsNormalizedSourceCopy(_ source: String, language: SpokenLanguage) -> Bool { language.code == "en" }
+    static func containsOutputScript(_ text: String) -> Bool {
+        text.range(of: #"\p{Latin}"#, options: .regularExpression) != nil
+    }
+    static func requiresSourceScriptRemoval(_ code: String) -> Bool { code != "en" }
+    static func sourceResidueRejection(candidate: String, source: String, language: SpokenLanguage) -> TranslationAcceptance.Rejection? {
+        let value = rejection(candidate: candidate, source: source, sourceLanguage: language.code, target: .english)
+        switch value {
+        case .nonTargetScript, .sourceCopy, .sourceProse: return value
+        default: return nil
+        }
+    }
+    static func maximumOutputCharacters(source: String, language: SpokenLanguage) -> Double {
+        LatinTargetLengthGuard.maximumOutputLetters(source: source, target: .english, sourceLanguage: language.code)
+    }
+    static func isPlausible(output: String, source: String) -> Bool {
+        let hasHan = source.unicodeScalars.contains(where: TranslationAcceptance.isHan)
+        return LatinTargetLengthGuard.isPlausible(candidate: output, source: source, target: .english,
+            sourceLanguage: hasHan ? "zh" : nil)
+    }
+    static func stableTranslationPrefix(_ text: String) -> String { LatinStableTranslationPrefix.prefix(text) }
+    static func quotedTranslationRepairPlan(candidate: String, source: String) -> TranslationAcceptance.QuotedTranslationRepairPlan? { nil }
+    static func jsonStatusRepairPlan(candidate: String, source: String) -> TranslationAcceptance.JSONStatusRepairPlan? { nil }
 }

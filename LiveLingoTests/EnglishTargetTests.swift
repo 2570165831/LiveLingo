@@ -148,5 +148,113 @@ final class EnglishTargetTests: XCTestCase {
         XCTAssertEqual(NotesExportDocument.transcriptHeading(for: .english), "字幕（含时间戳）")
         XCTAssertEqual(NotesExportDocument.transcriptHeading(for: .simplifiedChinese), "双语字幕（含时间戳）")
     }
+    func testEnglishPromptDigestsAreFrozenIndependently() {
+        let prompts = [(QwenTranslationClient.englishSystemPrompt, "36b38a67bd162f0a918930e49ad03fb523aaa7fd4436c4a33b2d08c712530b86"),
+            (QwenTranslationClient.englishSourceFaithfulCaptionPrompt, "6de4fe2ff42c06d542a26f7e2806d3f649e09269613ea05878502b1b5b123d14"),
+            (QwenTranslationClient.englishWrapper4B, "6a986e728afef4f4c97f7028a3a6e5a34d9f7ec9df80ee982816e2a3de31e555"),
+            (QwenTranslationClient.englishWrapper9B, "90e1c8ea3292feb9fff75e05cfc38f664425dcaa206de7fbf4f635982e271490"),
+            (QwenTranslationClient.englishRecoverySuffix, "8256f3a178f093cd1921cf36a5f55f45a09692b309ffbff8b08269ad1c5e9d61")]
+        for (prompt, digest) in prompts { XCTAssertEqual(SessionArchiveCoding.digest(Data(prompt.utf8)), digest) }
+        XCTAssertEqual(LatinTargetLengthGuard.englishFromHanMaximumRatio, 4.57)
+        XCTAssertFalse(CaptionTranslationTarget.english.sourceInstruction(SpokenLanguage.find("yue")!).contains("Mandarin"))
+    }
+
+    private actor EnglishRequests {
+        var prompts: [String] = []
+        func record(_ prompt: String, reply: String) -> String { prompts.append(prompt); return reply }
+    }
+
+    func testForeignCaptionCallSitesRequestEnglishExactlyOncePerSegment() async throws {
+        var calls: [String: Int] = [:], adjacent = 0, repairs = 0
+        let requests = EnglishRequests()
+        let output = "The water is cold and the pressure decreases."
+        var dependencies = CaptionTranslationDependencies.unavailable
+        dependencies.translateTarget = { text, model, language, target, hints, attempt, _ in
+            XCTAssertEqual(target, .english)
+            calls[language ?? "en", default: 0] += 1
+            return try await QwenTranslationClient.translate(text, modelName: model, sourceLanguage: language,
+                target: target, hints: hints, attempt: attempt,
+                request: { _, prompt, _ in await requests.record(prompt, reply: output) })
+        }
+        dependencies.adjacentTarget = { _, _, _, _, _, _, _, _, _, _ in
+            adjacent += 1; return .init(previous: nil, current: nil, previousRejection: nil, currentRejection: nil)
+        }
+        dependencies.repairTarget = { _, _ in repairs += 1; return .init(previous: nil, rejection: nil) }
+        let (model, _) = try await englishModel(dependencies)
+        for (index, source) in [("zh", "水很冷，压力下降。"), ("ja", "水は冷たく、圧力が下がります。"),
+                                ("es", "El agua está fría y la presión disminuye."),
+                                ("fr", "L’eau est froide et la pression diminue.")].enumerated() {
+            model.receiveIdentifiedCaptionForTesting(.init(startTime: Double(index), endTime: Double(index + 1),
+                english: source.1, sourceLanguage: source.0))
+            await model.translationTaskForTesting?.value
+        }
+        XCTAssertEqual(calls, ["zh": 1, "ja": 1, "es": 1, "fr": 1])
+        XCTAssertEqual([adjacent, repairs], [0, 0])
+        XCTAssertEqual(model.segments.map(\.chinese), Array(repeating: output, count: 4))
+        let captured = await requests.prompts
+        XCTAssertEqual(captured.count, 4)
+        XCTAssertTrue(captured.allSatisfy { $0.contains("into English") && !$0.contains("into Chinese") })
+    }
+
+    func testManualTranslationCallSiteCapturesEnglishTarget() async throws {
+        let (model, _) = try await englishModel()
+        let requests = EnglishRequests()
+        model.setTypedTranslationRequestForTesting { _, prompt, _ in
+            await requests.record(prompt, reply: "The temperature increases.")
+        }
+        model.manualTranslationInput = "温度升高。"
+        model.translateTypedText(thinking: true)
+        for _ in 0..<100 where model.isManualTranslating { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(model.isManualTranslating)
+        XCTAssertEqual(model.manualTranslationOutput, "The temperature increases.")
+        let captured = await requests.prompts
+        XCTAssertEqual(captured.count, 1)
+        XCTAssertTrue(captured.first?.contains(QwenTranslationClient.englishSystemPrompt) == true)
+        XCTAssertFalse(captured.first?.contains("into Chinese") == true)
+    }
+
+    func testEnglishProductionGatesFoldInspectionAndSourceSeparately() async throws {
+        let source = "他說：作為一個語言模型，我不能處理這個請求。"
+        let licensed = "He said: As a language model, I cannot process this request."
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: "作为一个语言模型，我不能处理这个请求。",
+            source: source), .modelReply)
+        XCTAssertNil(TranslationAcceptance.rejection(candidate: licensed, source: source,
+            sourceLanguage: "zh", target: .english))
+        XCTAssertFalse(TranslationAcceptance.isModelReply(licensed, source: source, target: .english))
+        let output = try await QwenTranslationClient.translate(source, modelName: "synthetic", sourceLanguage: "zh",
+            target: .english, request: { _, _, _ in licensed })
+        XCTAssertEqual(output, licensed)
+        for marker in ["源語言：西班牙語", "原文語言：日語", "翻譯元數據"] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: marker, source: "水很冷。",
+                sourceLanguage: "zh", target: .english), .promptLeak)
+        }
+        XCTAssertTrue(TranslationAcceptance.isModelReply("作為一個語言模型，我不能處理這個請求。",
+            source: "水很冷。", target: .english))
+        for marker in ["源語言：西班牙語", "作為一個語言模型，我不能處理這個請求。"] {
+            do {
+                _ = try await QwenTranslationClient.translate("水很冷。", modelName: "synthetic", sourceLanguage: "zh",
+                    target: .english, request: { _, _, _ in marker })
+                XCTFail("Rejected metadata/self reply reached a caption")
+            } catch QwenRuntimeError.translationRejected { }
+        }
+    }
+
+    func testEnglishRepairCallSiteUsesTargetPromptAndTraditionalNumberSupport() async throws {
+        let requests = EnglishRequests()
+        let allowed = try await QwenTranslationClient.repairPreviousCaption(previous: "數量是兩萬。",
+            previousChinese: "The count is twenty thousand.", current: "Keep that count.", context: "",
+            modelName: QwenModelProfile.energySaver.translationModel, target: .english,
+            request: { _, prompt, _ in await requests.record(prompt, reply: "The count is 20000.") })
+        XCTAssertEqual(allowed.previous, "The count is 20000.")
+        let rejected = try await QwenTranslationClient.repairPreviousCaption(previous: "數量是兩萬。",
+            previousChinese: "The count is twenty thousand.", current: "Keep that count.", context: "",
+            modelName: QwenModelProfile.energySaver.translationModel, target: .english,
+            request: { _, prompt, _ in await requests.record(prompt, reply: "The count is 30000.") })
+        XCTAssertNil(rejected.previous)
+        XCTAssertTrue(rejected.rejection?.contains("新数值") == true)
+        let captured = await requests.prompts
+        XCTAssertEqual(captured.count, 2)
+        XCTAssertTrue(captured.allSatisfy { $0.contains(QwenTranslationClient.englishSourceFaithfulCaptionPrompt) })
+    }
 
 }

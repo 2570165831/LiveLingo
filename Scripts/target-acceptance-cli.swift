@@ -75,6 +75,9 @@ struct TargetAcceptanceCLI {
             }
         } else if arguments.count == 3, arguments[0] == "prompts", arguments[1] == "--output-dir" {
             try await exportPrompts(arguments[2])
+        } else if arguments.count == 5, arguments[0] == "prompts", arguments[1] == "--output-dir",
+                  arguments[3] == "--target", arguments[4] == "en" {
+            try await exportPrompts(arguments[2], target: .english)
         } else { throw Failure.usage
         }
     }
@@ -208,18 +211,21 @@ struct TargetAcceptanceCLI {
         func read() throws -> String { guard let value else { throw Failure.promptCapture }; return value }
     }
     static func captionPrompt(model: String, attempt: CaptionTranslationAttempt = .standard,
-                              previous: Bool = false, typed: Bool = false) async throws -> String {
+                              previous: Bool = false, typed: Bool = false,
+                              target: CaptionTranslationTarget = .simplifiedChinese) async throws -> String {
         let capture = CapturedPrompt()
+        let source = target == .english ? "温度升高。" : "The temperature increases."
+        let translated = target == .english ? "The temperature increases." : "温度升高。"
         if typed {
-            _ = try await QwenTranslationClient.translateTypedText("The temperature increases.", modelName: model,
-                request: { _, prompt, _ in await capture.capture(prompt); return "温度升高。" })
+            _ = try await QwenTranslationClient.translateTypedText(source, modelName: model, target: target,
+                request: { _, prompt, _ in await capture.capture(prompt); return translated })
         } else if previous {
-            _ = try await QwenTranslationClient.repairPreviousCaption(previous: "The temperature increases.",
-                previousChinese: "温度升高。", current: "The pressure decreases.", context: "", modelName: model,
-                request: { _, prompt, _ in await capture.capture(prompt); return "温度升高。" })
+            _ = try await QwenTranslationClient.repairPreviousCaption(previous: source,
+                previousChinese: translated, current: "The pressure decreases.", context: "", modelName: model, target: target,
+                request: { _, prompt, _ in await capture.capture(prompt); return translated })
         } else {
-            _ = try await QwenTranslationClient.translate("The temperature increases.", modelName: model,
-                attempt: attempt, request: { _, prompt, _ in await capture.capture(prompt); return "温度升高。" })
+            _ = try await QwenTranslationClient.translate(source, modelName: model, sourceLanguage: target == .english ? "zh" : nil, target: target,
+                attempt: attempt, request: { _, prompt, _ in await capture.capture(prompt); return translated })
         }
         return try await capture.read()
     }
@@ -253,7 +259,7 @@ struct TargetAcceptanceCLI {
         }
         return destination
     }
-    static func exportPrompts(_ path: String) async throws {
+    static func exportPrompts(_ path: String, target: CaptionTranslationTarget = .simplifiedChinese) async throws {
         let directory = try checkedOutput(path)
         guard !FileManager.default.fileExists(atPath: directory.path) else { throw Failure.outputExists }
         // Request substitutes capture private/constructed prompts from the App;
@@ -267,28 +273,35 @@ struct TargetAcceptanceCLI {
             "quoted-value-repair": TranslationAcceptance.QuotedTranslationRepairPlan.prompt,
             "json-status-repair": TranslationAcceptance.JSONStatusRepairPlan.prompt
         ]
+        if target == .english {
+            prompts = ["caption-base": QwenTranslationClient.englishSystemPrompt,
+                "caption-base-4b": QwenTranslationClient.englishSourceFaithfulCaptionPrompt,
+                "wrapper-4b": QwenTranslationClient.englishWrapper4B,
+                "wrapper-9b": QwenTranslationClient.englishWrapper9B,
+                "recovery": QwenTranslationClient.englishRecoverySuffix]
+        }
         for (key, model) in models {
-            prompts["caption-\(key)"] = try await captionPrompt(model: model)
-            prompts["caption-content-repair-\(key)"] = try await captionPrompt(model: model, attempt: .repairContent)
-            prompts["caption-adjacent-repair-\(key)"] = try await captionPrompt(model: model, previous: true)
-            prompts["typed-\(key)"] = try await captionPrompt(model: model, typed: true)
+            prompts["caption-\(key)"] = try await captionPrompt(model: model, target: target)
+            prompts["caption-content-repair-\(key)"] = try await captionPrompt(model: model, attempt: .repairContent, target: target)
+            prompts["caption-adjacent-repair-\(key)"] = try await captionPrompt(model: model, previous: true, target: target)
+            prompts["typed-\(key)"] = try await captionPrompt(model: model, typed: true, target: target)
         }
         try FileManager.default.createDirectory(at: directory.deletingLastPathComponent(), withIntermediateDirectories: true)
         _ = try checkedOutput(path)
         guard Darwin.mkdir(directory.path, 0o700) == 0 else { throw Failure.outputExists }
         var entries: [[String: Any]] = []
         for name in prompts.keys.sorted() {
-            let data = Data(prompts[name]!.utf8), fileName = "zh-Hans-\(name).utf8"
+            let data = Data(prompts[name]!.utf8), fileName = "\(target.rawValue)-\(name).utf8"
             let file = try checkedOutput(directory.appendingPathComponent(fileName).path)
             try data.write(to: file, options: .withoutOverwriting)
             // Bind metadata to re-read bytes, not just intended content.
             let reread = try Data(contentsOf: file)
             guard reread == data else { throw Failure.promptCapture }
-            entries.append(["targetLocale": "zh-Hans", "name": name, "file": fileName,
+            entries.append(["targetLocale": target.rawValue, "name": name, "file": fileName,
                             "byteCount": reread.count, "sha256": SHA256.hash(data: reread).map { String(format: "%02x", $0) }.joined()])
         }
         let manifest: [String: Any] = ["schemaVersion": 1, "encoding": "UTF-8", "addedTrailingNewline": false,
-            "targetsWithPrompts": ["zh-Hans"], "targetsWithoutPrompts": ["en", "es", "fr"],
+            "targetsWithPrompts": [target.rawValue], "targetsWithoutPrompts": target == .english ? ["es", "fr"] : ["en", "es", "fr"],
             "capture": "App constants and injected request substitutes; no model or network", "prompts": entries]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         try data.write(to: try checkedOutput(directory.appendingPathComponent("manifest.json").path), options: .withoutOverwriting)

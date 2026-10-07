@@ -4,13 +4,14 @@ task_source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 task_output="${1:?Usage: build-target-eval-cli.sh NEW_DIRECTORY_UNDER_CONFIGURED_OUTPUT_ROOT}"
 if [[ $# != 1 ]]; then printf 'Expected one output directory.\n' >&2; exit 1; fi
 task_lab_root="$(dirname "$task_source_root")"
-task_derived="$task_lab_root/work/dd-latin/target-acceptance-cli/$(basename "$task_output")"
+task_derived_root="${LIVELINGO_TARGET_EVAL_DERIVED_ROOT:-$task_lab_root/work/dd-latin/target-acceptance-cli}"
+task_derived="$task_derived_root/$(basename "$task_output")"
 task_cache="$task_derived/ModuleCache.noindex"
 task_temp="$task_derived/tmp"
-PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - "$task_source_root" "$task_lab_root" "$task_output" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - "$task_source_root" "$task_lab_root" "$task_output" "$task_derived_root" <<'PY'
 from pathlib import Path
 import sys
-source, lab, destination = map(Path, sys.argv[1:])
+source, lab, destination, derived_root = map(Path, sys.argv[1:])
 sys.path.insert(0, str(source))
 from Scripts.target_eval.corpora import validate_output_path
 if not destination.is_absolute():
@@ -21,7 +22,13 @@ except ValueError as error:
     raise SystemExit(str(error)) from None
 if destination.exists() or destination.is_symlink():
     raise SystemExit('Output exists; refusing to overwrite.')
-derived = lab / 'work' / 'dd-latin' / 'target-acceptance-cli' / destination.name
+if not derived_root.is_absolute() or derived_root.resolve() != derived_root or '..' in derived_root.parts:
+    raise SystemExit('Derived root must be an absolute directory without symlinks or parent traversal.')
+# An override uses the same explicitly configured external output boundary.
+import os
+if os.environ.get('LIVELINGO_TARGET_EVAL_DERIVED_ROOT'):
+    derived_root = validate_output_path(derived_root)
+derived = derived_root / destination.name
 for path in (derived, derived / 'ModuleCache.noindex', derived / 'tmp'):
     if path.resolve() != path or path.is_symlink():
         raise SystemExit('DerivedData paths must not use symlinks.')
