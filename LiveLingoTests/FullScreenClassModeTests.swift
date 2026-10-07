@@ -8,6 +8,59 @@ import XCTest
 /// injected. The only native windows created here are never ordered onscreen.
 @MainActor
 final class FullScreenClassModeTests: XCTestCase {
+    func testDestroyedNativePopupsReleaseProtectionWithoutCloseNotifications() throws {
+        for isPopover in [false, true] {
+            let f = try FSCFixture(testCase: self)
+            f.controller.setEnabled(true)
+            f.subtitles.setLockedExternally(true)
+            let behavior = f.subtitles.surface.collectionBehavior
+            weak var released: NSObject?
+            autoreleasepool {
+                let popup: NSObject = isPopover ? NSPopover() : NSMenu(title: "Unpaired menu")
+                released = popup
+                f.notifications.post(name: isPopover ? NSPopover.willShowNotification : NSMenu.didBeginTrackingNotification,
+                                     object: popup)
+                XCTAssertEqual(f.subtitles.surface.level, .floating)
+            }
+            XCTAssertNil(released, "Tracking must not retain the native control")
+            f.popupLifetimeChecks.send(())
+            XCTAssertEqual(f.subtitles.surface.level, FloatingSubtitleWindowSettings.fullScreenLevel)
+            XCTAssertTrue(f.subtitles.isLocked)
+            XCTAssertTrue(f.subtitles.surface.ignoresMouseEvents)
+            XCTAssertEqual(f.subtitles.surface.collectionBehavior, behavior)
+            f.controller.setEnabled(false)
+            f.controller.setEnabled(true)
+            XCTAssertEqual(f.subtitles.surface.level, FloatingSubtitleWindowSettings.fullScreenLevel)
+        }
+    }
+
+    func testDestroyedNativePopupPreservesOverlappingLiveAndExplicitProtection() throws {
+        let f = try FSCFixture(testCase: self)
+        f.controller.setEnabled(true)
+        let liveMenu = NSMenu(title: "Still tracking")
+        let explicit = UUID()
+        f.notifications.post(name: NSMenu.didBeginTrackingNotification, object: liveMenu)
+        f.controller.setPresentedPopup(explicit, isPresented: true)
+        weak var released: NSPopover?
+        autoreleasepool {
+            let popup = NSPopover()
+            released = popup
+            f.notifications.post(name: NSPopover.willShowNotification, object: popup)
+        }
+        XCTAssertNil(released)
+        f.popupLifetimeChecks.send(())
+        XCTAssertEqual(f.subtitles.surface.level, .floating)
+        f.notifications.post(name: NSMenu.didEndTrackingNotification, object: liveMenu)
+        XCTAssertEqual(f.subtitles.surface.level, .floating)
+        f.controller.setPresentedPopup(explicit, isPresented: false)
+        XCTAssertEqual(f.subtitles.surface.level, FloatingSubtitleWindowSettings.fullScreenLevel)
+        let changes = f.subtitles.menuTrackingChanges
+        f.controller.shutdown()
+        f.popupLifetimeChecks.send(())
+        XCTAssertEqual(f.subtitles.menuTrackingChanges, changes)
+        assertRestored(f.subtitles.surface, f.subtitles.original)
+    }
+
     func testAllAppMenusLowerSubtitlesUntilTheLastMenuCloses() throws {
         let f = try FSCFixture(testCase: self)
         f.controller.setEnabled(true)
@@ -475,6 +528,23 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertFalse(window.isKeyWindow)
     }
 
+    func testFailedDisablePreservesPendingMainWindowRegistration() throws {
+        let f = try FSCFixture(testCase: self, savedEnabled: true)
+        f.controller.start()
+        f.scheduler.drain()
+        let window = hiddenWindow(size: NSSize(width: 400, height: 300))
+        defer { window.close() }
+        f.controller.registerMainWindow(window, reopen: {})
+        f.application.rejectedPolicy = .regular
+        f.controller.setEnabled(false)
+        XCTAssertTrue(f.controller.isEnabled)
+        XCTAssertNotNil(f.controller.errorMessage)
+        f.scheduler.drain()
+        XCTAssertEqual(f.application.showCount, 1, "A failed switch must retain the active mode's queued registration")
+        XCTAssertFalse(window.isVisible)
+        XCTAssertFalse(window.isKeyWindow)
+    }
+
     func testDelayedMainWindowRegistrationRespectsANewerUserFocusDecision() throws {
         let f = try FSCFixture(testCase: self, savedEnabled: true)
         f.controller.start()
@@ -865,6 +935,171 @@ final class FullScreenClassModeTests: XCTestCase {
 /// multiwindow/sheet restoration is exercised without showing native windows.
 @MainActor
 final class FullScreenWindowRestorationTests: XCTestCase {
+    func testFailedDisablePreservesPendingRecoveryForTheEnabledMode() throws {
+        try assertPendingRecoverySurvivesFailedSwitch(disabling: true, statusFailure: false)
+    }
+
+    func testFailedStatusReenablePreservesPendingRecoveryForOrdinaryMode() throws {
+        try assertPendingRecoverySurvivesFailedSwitch(disabling: false, statusFailure: true)
+    }
+
+    func testFailedPolicyReenablePreservesPendingRecoveryForOrdinaryMode() throws {
+        try assertPendingRecoverySurvivesFailedSwitch(disabling: false, statusFailure: false)
+    }
+
+    private func assertPendingRecoverySurvivesFailedSwitch(disabling: Bool, statusFailure: Bool,
+                                                         file: StaticString = #filePath, line: UInt = #line) throws {
+        let f = try FSCFixture(testCase: self)
+        let system = FSCWindowSystem()
+        let application = LiveFullScreenApplication(environment: system.environment, notifications: system.notifications)
+        let controller = FullScreenClassModeController(defaults: f.defaults, application: application,
+            statusItem: f.status, subtitles: f.subtitles, notifications: f.notifications,
+            schedule: { f.scheduler.enqueue($0) })
+        defer { controller.shutdown() }
+        controller.setEnabled(true)
+        if !disabling {
+            f.scheduler.drain()
+            controller.setEnabled(false)
+        }
+        let policy = system.policy
+        let preference = f.defaults.bool(forKey: FullScreenClassModeController.preferenceKey)
+        let activations = system.activationCalls
+        if statusFailure { f.status.installSucceeds = false }
+        else { system.rejectedPolicy = disabling ? .regular : .accessory }
+        controller.setEnabled(!disabling)
+        XCTAssertNotNil(controller.errorMessage, file: file, line: line)
+        XCTAssertEqual(controller.isEnabled, disabling, file: file, line: line)
+        XCTAssertEqual(system.policy, policy, file: file, line: line)
+        XCTAssertEqual(f.defaults.bool(forKey: FullScreenClassModeController.preferenceKey), preference, file: file, line: line)
+        // The last successful transform's late effects arrive AFTER the failed
+        // attempt. Exercise the production snapshot, not a fake restore token.
+        system.allWindows.forEach { $0.orderOut(nil) }
+        system.keyWindow = nil
+        system.mainWindow = nil
+        f.scheduler.drain()
+        XCTAssertTrue(system.main.isVisible, file: file, line: line)
+        XCTAssertTrue(system.settings.isVisible, file: file, line: line)
+        XCTAssertTrue(system.subtitles.isVisible, file: file, line: line)
+        XCTAssertEqual(system.orderedNumbers, [3, 2, 1], file: file, line: line)
+        XCTAssertTrue(system.keyWindow === system.main, file: file, line: line)
+        XCTAssertTrue(system.mainWindow === system.main, file: file, line: line)
+        XCTAssertEqual(system.activationCalls, activations + 1, file: file, line: line)
+        XCTAssertEqual(controller.isEnabled, disabling, file: file, line: line)
+        XCTAssertEqual(f.status.isInstalled, disabling, file: file, line: line)
+        if !disabling { XCTAssertEqual(f.subtitles.surface.level, .floating, file: file, line: line) }
+    }
+
+    func testFailedSwitchDoesNotReviveRecoveryCancelledByANewerUserDecision() throws {
+        let f = try FSCFixture(testCase: self)
+        let system = FSCWindowSystem()
+        let application = LiveFullScreenApplication(environment: system.environment, notifications: system.notifications)
+        let controller = FullScreenClassModeController(defaults: f.defaults, application: application,
+            statusItem: f.status, subtitles: f.subtitles, notifications: f.notifications,
+            schedule: { f.scheduler.enqueue($0) })
+        defer { controller.shutdown() }
+        controller.setEnabled(true)
+        let activations = system.activationCalls
+        system.userInput.send(())
+        system.rejectedPolicy = .regular
+        controller.setEnabled(false)
+        system.settings.orderOut(nil)
+        system.keyWindow = system.subtitles
+        f.scheduler.drain()
+        XCTAssertTrue(controller.isEnabled)
+        XCTAssertFalse(system.settings.isVisible)
+        XCTAssertTrue(system.keyWindow === system.subtitles)
+        XCTAssertEqual(system.activationCalls, activations)
+    }
+
+    func testHideWithoutLocalInputCancelsRecoveryWithOrWithoutNotification() {
+        for postsNotification in [false, true] {
+            let system = FSCWindowSystem()
+            let snapshot = restoredSnapshot(system)
+            system.settings.orderOut(nil)
+            if postsNotification {
+                system.notifications.post(name: NSWindow.didChangeOcclusionStateNotification, object: system.settings)
+            }
+            XCTAssertFalse(snapshot.canRestore(), "A new window hide needs no mouse/key token")
+            snapshot.restore()
+            XCTAssertFalse(system.settings.isVisible)
+            XCTAssertTrue(system.main.isVisible)
+            XCTAssertTrue(system.subtitles.isVisible)
+            XCTAssertTrue(system.keyWindow === system.main)
+            snapshot.cancel()
+        }
+    }
+
+    func testMinimizeWithoutLocalInputCancelsRecoveryWithOrWithoutNotification() {
+        for postsNotification in [false, true] {
+            let system = FSCWindowSystem()
+            let snapshot = restoredSnapshot(system)
+            system.settings.miniaturize(nil)
+            if postsNotification {
+                system.notifications.post(name: NSWindow.didMiniaturizeNotification, object: system.settings)
+            }
+            XCTAssertFalse(snapshot.canRestore(), "A new minimization needs no mouse/key token")
+            snapshot.restore()
+            XCTAssertTrue(system.settings.isMiniaturized)
+            XCTAssertFalse(system.settings.isVisible)
+            XCTAssertTrue(system.keyWindow === system.main)
+            snapshot.cancel()
+        }
+    }
+
+    func testVisibilityRoundTripWithoutLocalInputPermanentlyCancelsRecovery() {
+        let system = FSCWindowSystem()
+        let snapshot = restoredSnapshot(system)
+        system.settings.orderOut(nil)
+        system.notifications.post(name: NSWindow.didChangeOcclusionStateNotification, object: system.settings)
+        system.settings.orderFrontRegardless()
+        system.notifications.post(name: NSWindow.didChangeOcclusionStateNotification, object: system.settings)
+        XCTAssertFalse(snapshot.canRestore(), "Returning to the old visibility must not revive a new window decision")
+        system.allWindows.forEach { $0.orderOut(nil) }
+        system.keyWindow = nil
+        system.mainWindow = nil
+        XCTAssertFalse(snapshot.canRestore())
+        snapshot.cancel()
+    }
+
+    func testPolicyHidingNotificationsStillAllowRecoveryAfterTheWholeCohortLosesFocus() {
+        let system = FSCWindowSystem()
+        let snapshot = restoredSnapshot(system)
+        // Notifications can be delivered one window at a time during a single
+        // policy effect. Do not classify the first event as a user decision.
+        for window in system.allWindows {
+            window.orderOut(nil)
+            system.notifications.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        }
+        system.keyWindow = nil
+        system.mainWindow = nil
+        XCTAssertTrue(snapshot.canRestore())
+        snapshot.restore()
+        XCTAssertEqual(system.orderedNumbers, [3, 2, 1])
+        XCTAssertTrue(system.keyWindow === system.main)
+        snapshot.cancel()
+    }
+
+    func testRetainedClosedWindowIsNeverRevealedByGlobalUnhideDuringRecovery() {
+        let system = FSCWindowSystem()
+        system.unhideShowsAllWindows = true
+        system.onPolicyChange = {
+            system.notifications.post(name: NSWindow.willCloseNotification, object: system.main)
+        }
+        defer { system.onPolicyChange = nil }
+        let application = LiveFullScreenApplication(environment: system.environment, notifications: system.notifications)
+        let snapshot = application.windowSnapshot()
+        XCTAssertTrue(application.setActivationPolicy(.accessory))
+        let closedWindowShows = system.main.orderFrontCalls
+        snapshot.restore()
+        XCTAssertFalse(system.main.isVisible)
+        XCTAssertEqual(system.main.orderFrontCalls, closedWindowShows, "Recovery must not transiently reveal a retained closed object")
+        XCTAssertTrue(system.settings.isVisible)
+        XCTAssertTrue(system.subtitles.isVisible)
+        XCTAssertNil(system.keyWindow)
+        XCTAssertEqual(system.orderedNumbers, [3, 2])
+        snapshot.cancel()
+    }
+
     func testPollingBeforeOwnActivationDoesNotConsumeItsFutureFocus() {
         let system = FSCWindowSystem()
         system.isActive = false
@@ -1162,6 +1397,7 @@ private final class FSCWindowSystem {
     var isActive = true
     var foregroundPID: Int32 = 10
     var policy: NSApplication.ActivationPolicy = .regular
+    var rejectedPolicy: NSApplication.ActivationPolicy?
     var unhideShowsAllWindows = false
     var parentsRevealChildren = false
     var onPolicyChange: (() -> Void)?
@@ -1201,6 +1437,7 @@ private final class FSCWindowSystem {
             orderedWindowNumbers: { self.orderedNumbers }, mainWindow: { self.mainWindow },
             keyWindow: { self.keyWindow }, isActive: { self.isActive }, activationPolicy: { self.policy },
             setActivationPolicy: { policy in
+                guard policy != self.rejectedPolicy else { return false }
                 self.onPolicyChange?()
                 self.policy = policy
                 for window in self.allWindows {
@@ -1229,6 +1466,7 @@ private final class FSCWindow: FullScreenRestorableWindow {
     let windowNumber: Int
     var isVisible = true
     var isMiniaturized = false
+    private(set) var orderFrontCalls = 0
     var firstResponder: NSResponder?
     weak var parent: FSCWindow?
     var children: [FSCWindow] = []
@@ -1237,6 +1475,7 @@ private final class FSCWindow: FullScreenRestorableWindow {
     var restorationChildren: [any FullScreenRestorableWindow] { children }
     init(number: Int) { windowNumber = number }
     func orderFrontRegardless() {
+        orderFrontCalls += 1
         isVisible = true
         system?.orderedNumbers.removeAll { $0 == windowNumber }
         system?.orderedNumbers.insert(windowNumber, at: 0)
@@ -1274,6 +1513,7 @@ private final class FSCFixture {
     let scheduler: FSCScheduler
     let controller: FullScreenClassModeController
     let notifications = NotificationCenter()
+    let popupLifetimeChecks = PassthroughSubject<Void, Never>()
 
     init(testCase: XCTestCase, savedEnabled: Bool? = nil,
          policy: NSApplication.ActivationPolicy = .regular) throws {
@@ -1296,6 +1536,7 @@ private final class FSCFixture {
         let scheduler = FSCScheduler()
         let controller = FullScreenClassModeController(defaults: defaults, application: application,
             statusItem: status, subtitles: subtitles, notifications: notifications,
+            observePopupLifetimes: { [popupLifetimeChecks] action in popupLifetimeChecks.sink { action() } },
             schedule: { scheduler.enqueue($0) })
         controller.connect(model: base.model, recording: recording.commands)
         self.application = application

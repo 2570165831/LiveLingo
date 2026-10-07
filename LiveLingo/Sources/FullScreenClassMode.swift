@@ -167,6 +167,8 @@ private final class FullScreenWindowRestoration {
         let identity: ObjectIdentifier
         let parent: ObjectIdentifier?
         let responder: ObjectIdentifier?
+        let visible: Bool
+        let minimized: Bool
     }
 
     private struct Checkpoint: Equatable {
@@ -189,6 +191,7 @@ private final class FullScreenWindowRestoration {
     private var activationFocusMayChange = false
     private let wasActive: Bool
     private var closed: Set<ObjectIdentifier> = []
+    private var observedHiddenWindows: Set<ObjectIdentifier> = []
     private var observers: [AnyCancellable] = []
     private var checkpoint: Checkpoint?
     private var cancelled = false
@@ -242,6 +245,23 @@ private final class FullScreenWindowRestoration {
                 } else if identity != expected { self.cancel() }
             })
         }
+        for name in [NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+                     NSWindow.didChangeOcclusionStateNotification] {
+            observers.append(notifications.publisher(for: name).sink { [weak self] event in
+                guard let self, let checkpoint = self.checkpoint, !self.restoring,
+                      let window = event.object as? any FullScreenRestorableWindow,
+                      let old = checkpoint.windows.first(where: { $0.identity == ObjectIdentifier(window) }) else { return }
+                if window.isMiniaturized != old.minimized || !old.visible && window.isVisible {
+                    self.cancel()
+                } else if old.visible && !window.isVisible {
+                    // Wait for the complete state: the policy may hide the
+                    // whole cohort and clear focus through separate events.
+                    self.observedHiddenWindows.insert(old.identity)
+                } else if self.observedHiddenWindows.contains(old.identity) {
+                    self.cancel() // A hide/show round trip is a newer decision.
+                }
+            })
+        }
         observers.append(environment.observeUserInput { [weak self] in
             guard let self, self.checkpoint != nil, !self.restoring else { return }
             self.cancel()
@@ -273,7 +293,9 @@ private final class FullScreenWindowRestoration {
         guard !cancelled else { return }
         restoring = true
         defer { restoring = false }
-        if entries.contains(where: { $0.visible && !$0.minimized }) { environment.unhide() }
+        // Global unhide can reveal a retained, closed window before any of the
+        // per-window guards run. In that case reveal only surviving windows.
+        if closed.isEmpty && entries.contains(where: { $0.visible && !$0.minimized }) { environment.unhide() }
         // Preserve hidden/minimized windows too: unhide can reveal windows that
         // were deliberately ordered out before the transition.
         for entry in entries {
@@ -322,7 +344,8 @@ private final class FullScreenWindowRestoration {
     private func currentCheckpoint() -> Checkpoint {
         Checkpoint(windows: Self.windows(in: environment, including: activationTarget).map {
             WindowState(identity: ObjectIdentifier($0), parent: $0.restorationParent.map(ObjectIdentifier.init),
-                        responder: $0.firstResponder.map(ObjectIdentifier.init))
+                        responder: $0.firstResponder.map(ObjectIdentifier.init),
+                        visible: $0.isVisible, minimized: $0.isMiniaturized)
         }, active: environment.isActive(),
            key: environment.keyWindow().map(ObjectIdentifier.init), main: environment.mainWindow().map(ObjectIdentifier.init),
            foregroundApplicationPID: environment.foregroundApplicationPID())
@@ -362,6 +385,24 @@ private final class FullScreenWindowRestoration {
             guard let new = current.windows.first(where: { $0.identity == old.identity }),
                   old.parent == new.parent,
                   new.responder == nil || new.responder == old.responder || new.responder == new.identity else { return false }
+            if old.minimized != new.minimized || !old.visible && new.visible {
+                cancel()
+                return false
+            }
+        }
+        let hiddenWindows = checkpoint.windows.filter { old in
+            old.visible && current.windows.contains { $0.identity == old.identity && !$0.visible }
+        }
+        if !hiddenWindows.isEmpty {
+            let visibleWindows = checkpoint.windows.filter { $0.visible && !$0.minimized }
+            // Only the complete policy-hiding shape is recoverable. A single
+            // window disappearing while the other windows/focus remain is a
+            // newer decision, even without a local mouse/key event.
+            guard hiddenWindows.count == visibleWindows.count,
+                  current.key == nil, current.main == nil else {
+                cancel()
+                return false
+            }
         }
         // Polling while activation is still pending must not consume its one
         // future focus with the inactive app's existing main window.
@@ -369,9 +410,8 @@ private final class FullScreenWindowRestoration {
             if let key = environment.keyWindow(), acceptsActivationFocus(ObjectIdentifier(key), isMain: false) { activationKeyWindow = key }
             if let main = environment.mainWindow(), acceptsActivationFocus(ObjectIdentifier(main), isMain: true) { activationMainWindow = main }
         }
-        // Policy-generated orderOut/key clearing is exactly why this second
-        // pass exists. Input, close and focus tokens distinguish it from a user's
-        // hide/minimize/order decision; comparing visibility alone cannot.
+        // A whole-cohort hide with cleared focus can still be a late policy
+        // effect. App hide, input, minimize and focus tokens take precedence.
         return true
     }
     func cancel() { cancelled = true; observers.removeAll() }
@@ -496,6 +536,9 @@ enum FullScreenMenuAction: String, CaseIterable {
 /// Construction only reads preferences; starting/changing policy is explicit.
 @MainActor
 final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDelegate {
+    private struct NativePopup {
+        weak var object: AnyObject?
+    }
     static let preferenceKey = "fullScreenClassModeEnabled"
     static let explanation = "开启后 Dock 图标和 App 菜单栏消失，⌘Tab 中不再出现；用顶部菜单栏的 LiveLingo 图标操作。用于尝试在其他 App 的原生全屏中显示字幕，真机效果以实际为准。字幕可能遮挡系统菜单或通知，可移到底部或隐藏。"
 
@@ -511,6 +554,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     private let statusItem: any FullScreenStatusItemPresenting
     private let subtitles: any FullScreenSubtitleControlling
     private let schedule: (@escaping @MainActor () -> Void) -> Void
+    private let observePopupLifetimes: (@escaping @MainActor () -> Void) -> AnyCancellable
     private let originalActivationPolicy: NSApplication.ActivationPolicy
     private var model: AppModel?
     private var recording = FullScreenRecordingCommands(state: { FullScreenRecordingState() }, toggle: {})
@@ -522,7 +566,8 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     private var needsMainWindow = false
     private weak var registeredMainWindow: NSWindow?
     private var lastAppearance: FullScreenStatusAppearance?
-    private var openNativePopups: Set<ObjectIdentifier> = []
+    private var openNativePopups: [ObjectIdentifier: NativePopup] = [:]
+    private var popupLifetimeObserver: AnyCancellable?
     private var openPresentedPopups: Set<UUID> = []
     private var popupProtectionIsActive = false
     private var cancelWindowRestoration: (() -> Void)?
@@ -531,6 +576,11 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     init(defaults: UserDefaults, application: any FullScreenApplicationControlling,
          statusItem: any FullScreenStatusItemPresenting, subtitles: any FullScreenSubtitleControlling,
          notifications: NotificationCenter = .default,
+         observePopupLifetimes: @escaping (@escaping @MainActor () -> Void) -> AnyCancellable = { action in
+             Timer.publish(every: 0.25, on: .main, in: .common).autoconnect().sink { _ in
+                 MainActor.assumeIsolated { action() }
+             }
+         },
          schedule: @escaping (@escaping @MainActor () -> Void) -> Void = { action in
              DispatchQueue.main.async { action() }
          }) {
@@ -539,6 +589,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         self.statusItem = statusItem
         self.subtitles = subtitles
         self.schedule = schedule
+        self.observePopupLifetimes = observePopupLifetimes
         originalActivationPolicy = application.activationPolicy
         super.init()
         menu.autoenablesItems = false
@@ -623,10 +674,6 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
 
     func setEnabled(_ enabled: Bool, persist: Bool = true) {
         guard !terminated, enabled != isEnabled else { return }
-        cancelWindowRestoration?()
-        cancelWindowRestoration = nil
-        cancelMainWindowRegistration?()
-        cancelMainWindowRegistration = nil
         let snapshot = application.windowSnapshot()
         if enabled && !statusItem.install(menu: menu, appearance: appearance) {
             snapshot.cancel()
@@ -639,6 +686,13 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
             errorMessage = "macOS 未能切换 App 显示方式，请重试。"
             return
         }
+        // A failed attempt leaves the previous successful mode and its queued
+        // recovery/registration valid. Replace them only after policy success;
+        // their own user-decision cancellation still takes precedence.
+        cancelWindowRestoration?()
+        cancelWindowRestoration = nil
+        cancelMainWindowRegistration?()
+        cancelMainWindowRegistration = nil
         generation += 1
         let expected = generation
         isEnabled = enabled
@@ -678,6 +732,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         cancelMainWindowRegistration?()
         cancelWindowRestoration = nil
         cancelMainWindowRegistration = nil
+        popupLifetimeObserver = nil
         openNativePopups.removeAll()
         openPresentedPopups.removeAll()
         popupProtectionIsActive = false
@@ -704,6 +759,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
 
     func refresh() {
         guard !terminated else { return }
+        updatePopupProtection()
         let state = recording.state()
         item(for: .showMainWindow)?.title = "显示主窗口"
         item(for: .toggleSubtitles)?.title = subtitles.isVisible ? "隐藏浮动字幕" : "显示浮动字幕"
@@ -764,8 +820,8 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     private func nativePopupChanged(_ popup: AnyObject, open: Bool) {
         guard !terminated else { return }
         let identity = ObjectIdentifier(popup)
-        if open { openNativePopups.insert(identity) }
-        else { openNativePopups.remove(identity) }
+        if open { openNativePopups[identity] = NativePopup(object: popup) }
+        else { openNativePopups.removeValue(forKey: identity) }
         updatePopupProtection()
     }
 
@@ -777,6 +833,17 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     }
 
     private func updatePopupProtection() {
+        openNativePopups = openNativePopups.filter { $0.value.object != nil }
+        // Track lifetimes only while the elevated mode needs this protection.
+        // A lost close notification must not leave a dead control registered.
+        if isEnabled && !openNativePopups.isEmpty {
+            if popupLifetimeObserver == nil {
+                popupLifetimeObserver = observePopupLifetimes { [weak self] in
+                    guard let self, !self.terminated else { return }
+                    self.updatePopupProtection()
+                }
+            }
+        } else { popupLifetimeObserver = nil }
         let open = !openNativePopups.isEmpty || !openPresentedPopups.isEmpty
         guard open != popupProtectionIsActive else { return }
         popupProtectionIsActive = open
