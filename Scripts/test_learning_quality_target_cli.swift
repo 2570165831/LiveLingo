@@ -55,7 +55,7 @@ struct LearningQualityTargetCLITests {
         let parsed = try LearningQualityCLI.options(["--input", "fixture.json", "--output", "results"])
         try check(parsed.target == .simplifiedChinese && !parsed.dryRun, "default option")
         for invalid in [
-            ["--input", "fixture.json", "--output", "results", "--target", "fr"],
+            ["--input", "fixture.json", "--output", "results", "--target", "de"],
             ["--input", "fixture.json", "--output", "results", "--dry-run", "--dry-run"],
             ["--input", "fixture.json", "--input", "other.json", "--output", "results"]
         ] {

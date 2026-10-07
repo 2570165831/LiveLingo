@@ -1,0 +1,259 @@
+{
+  "version": 1,
+  "targetLocale": "fr",
+  "authorship": "Self-authored synthetic bilingual examples from stable public textbook concepts. Prepared without any generated model output, network lookup or private course material.",
+  "limits": "Shared author for captions and expectations; no original lecture comparison, independent native-language review or evaluated model run. The field chinese stores target-language text. Regex matches are coverage hints only. This is a development fixture, not a release holdout.",
+  "gates": {
+    "knownFactualErrorsAllowed": 0,
+    "independentCoverageRegressionAllowed": 0,
+    "requiresSemanticReadback": true
+  },
+  "referenceVerification": {
+    "networkUsed": false,
+    "localReferenceRead": false,
+    "originalSubtitleRead": false,
+    "status": "synthetic-candidate-awaiting-independent-reference-review"
+  },
+  "cases": [
+    {
+      "id": "decimal-mass",
+      "split": "development",
+      "categories": [
+        "self-authored",
+        "synthetic",
+        "fr",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "decimal-mass-1-1",
+          "meaning": "A mass of 3.14 grams is the same mass as 0.00314 kilograms.",
+          "patterns": [
+            "Une\\ masse\\ de\\ 3,14\\ grammes\\ est\\ la\\ même\\ masse\\ que\\ 0,00314\\ kilogramme\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        },
+        {
+          "id": "decimal-mass-1-2",
+          "meaning": "Conversion changes the unit, not the object.",
+          "patterns": [
+            "La\\ conversion\\ change\\ l’unité,\\ pas\\ l’objet\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        },
+        {
+          "id": "decimal-mass-2-1",
+          "meaning": "One thousand grams equals one kilogram.",
+          "patterns": [
+            "1 000\\ grammes\\ équivalent\\ à\\ 1\\ kilogramme\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        },
+        {
+          "id": "decimal-mass-2-2",
+          "meaning": "The decimal separator does not change the magnitude.",
+          "patterns": [
+            "Le\\ séparateur\\ décimal\\ ne\\ change\\ pas\\ la\\ grandeur\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ownership-context",
+      "split": "development",
+      "categories": [
+        "self-authored",
+        "synthetic",
+        "fr",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "ownership-context-1-1",
+          "meaning": "The container and the sample are distinct objects.",
+          "patterns": [
+            "Le\\ récipient\\ et\\ l’échantillon\\ sont\\ des\\ objets\\ distincts\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        },
+        {
+          "id": "ownership-context-1-2",
+          "meaning": "Its temperature is not assigned to either object without an explicit reference.",
+          "patterns": [
+            "Sa\\ température\\ n’est\\ attribuée\\ à\\ aucun\\ des\\ deux\\ sans\\ référence\\ explicite\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        },
+        {
+          "id": "ownership-context-2-1",
+          "meaning": "The next sentence explicitly names the sample as the owner of the temperature measurement.",
+          "patterns": [
+            "La\\ phrase\\ suivante\\ nomme\\ explicitement\\ l’échantillon\\ comme\\ objet\\ de\\ la\\ mesure\\ de\\ température\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        },
+        {
+          "id": "ownership-context-2-2",
+          "meaning": "A matching number alone does not establish ownership.",
+          "patterns": [
+            "Un\\ nombre\\ identique\\ ne\\ suffit\\ pas\\ à\\ établir\\ cette\\ attribution\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "algorithm-conditions",
+      "split": "development",
+      "categories": [
+        "self-authored",
+        "synthetic",
+        "fr",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "algorithm-conditions-1-1",
+          "meaning": "Binary search requires sorted input.",
+          "patterns": [
+            "La\\ recherche\\ binaire\\ exige\\ des\\ données\\ triées\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        },
+        {
+          "id": "algorithm-conditions-1-2",
+          "meaning": "It repeatedly discards half of the remaining search interval.",
+          "patterns": [
+            "Elle\\ élimine\\ à\\ chaque\\ étape\\ la\\ moitié\\ de\\ l’intervalle\\ de\\ recherche\\ restant\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        },
+        {
+          "id": "algorithm-conditions-2-1",
+          "meaning": "Sorting has a separate cost.",
+          "patterns": [
+            "Le\\ tri\\ a\\ un\\ coût\\ distinct\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        },
+        {
+          "id": "algorithm-conditions-2-2",
+          "meaning": "A faster search does not make the preparation cost disappear.",
+          "patterns": [
+            "Une\\ recherche\\ plus\\ rapide\\ ne\\ supprime\\ pas\\ le\\ coût\\ de\\ préparation\\."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 1
+            }
+          ],
+          "semanticChecks": [
+            "Check the complete condition, negation, object, value and unit independently; matching words alone are not factual proof."
+          ]
+        }
+      ]
+    }
+  ]
+}

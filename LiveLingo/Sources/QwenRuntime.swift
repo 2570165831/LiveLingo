@@ -98,8 +98,8 @@ enum CaptionTranslationTarget: String, Sendable {
         switch self {
         case .simplifiedChinese: return LearningPrompts.generate
         case .english: return LearningPrompts.generateEnglish
-        // Note/review registration follows in step 26; neither is released.
-        case .spanish, .french: return ""
+        case .spanish: return LatinLearningPrompts.generateSpanish
+        case .french: return LatinLearningPrompts.generateFrench
         }
     }
 
@@ -107,7 +107,8 @@ enum CaptionTranslationTarget: String, Sendable {
         switch self {
         case .simplifiedChinese: return LearningPrompts.review
         case .english: return LearningPrompts.reviewEnglish
-        case .spanish, .french: return ""
+        case .spanish: return LatinLearningPrompts.reviewSpanish
+        case .french: return LatinLearningPrompts.reviewFrench
         }
     }
 
@@ -1412,16 +1413,73 @@ enum RepairNumericNovelty {
         return result
     }
 
+    private static func localeInventory(_ input: String, language: String) -> Inventory {
+        let text = folded(input)
+        let literals = LatinNumericParser.literals(in: text, language: language)
+        var result = Inventory()
+        let masked = NSMutableString(string: text)
+        for literal in literals.reversed() {
+            masked.replaceCharacters(in: literal.range, with: "0")
+            let value = literal.value.hasPrefix("-") ? String(literal.value.dropFirst()) : literal.value
+            result.values.insert(value); result.raw[value] = literal.text
+        }
+        // Retain uncertainty for conversions, dates, fractions and unsupported notation.
+        result.uncertain = unknown.firstMatch(in: String(masked), range: NSRange(location: 0, length: masked.length)) != nil
+        let unsupportedLocaleNotation = language == "es"
+            ? #"(?i)\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|mil|millón|millones|mitad|cuarto|porcentaje)\b"#
+            : #"(?i)\b(?:zéro|un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|dix|mille|million|millions|moitié|quart|pourcentage)\b"#
+        if language == "es" || language == "fr", text.range(of: unsupportedLocaleNotation, options: .regularExpression) != nil {
+            result.uncertain = true
+        }
+        for mention in LatinLearningText.mentions(in: text, language: language, excluding: []) {
+            if let unit = mention.unit { result.units.insert(unit) }
+        }
+        return result
+    }
+    private static func assessLatin(candidate: String, support: [String], targetCode: String,
+                                    supportLanguages: [String]?) -> Assessment {
+        let candidate = TranslationCheckText.inspectionCopy(candidate, targetCode: targetCode)
+        let support = support.map { TranslationCheckText.inspectionCopy($0, targetCode: targetCode) }
+        let proposed = localeInventory(candidate, language: targetCode)
+        guard !proposed.values.isEmpty else {
+            let hasChinese = chinese.firstMatch(in: candidate, range: NSRange(candidate.startIndex..., in: candidate)) != nil
+            return Assessment(unsupported: [], undecidable: hasChinese)
+        }
+        var known = Set<String>(), units = Set<String>(), uncertain = proposed.uncertain
+        for (index, text) in support.enumerated() {
+            let language = supportLanguages?.indices.contains(index) == true ? supportLanguages![index] : targetCode
+            let inventory = localeInventory(text, language: language)
+            known.formUnion(inventory.values); units.formUnion(inventory.units); uncertain = uncertain || inventory.uncertain
+            // Written English/Han magnitudes can support Arabic candidates, never veto written candidates.
+            let masked = NSMutableString(string: folded(text))
+            for literal in LatinNumericParser.literals(in: folded(text), language: language).reversed() {
+                masked.replaceCharacters(in: literal.range, with: " ")
+            }
+            let written = writtenValues(String(masked))
+            known.formUnion(written.values); uncertain = uncertain || written.uncertain
+        }
+        if proposed.units != units { uncertain = true }
+        let missing = proposed.values.subtracting(known)
+        if missing.isEmpty { return Assessment(unsupported: [], undecidable: false) }
+        return Assessment(unsupported: uncertain ? [] : missing.sorted().compactMap { proposed.raw[$0] }, undecidable: uncertain)
+    }
+
     static func rejection(candidate: String, requestJSON: String, existingChinese: String,
                           targetCode: String = "zh-Hans") -> String? {
         guard let fields = (try? JSONSerialization.jsonObject(with: Data(requestJSON.utf8))) as? [String: String],
               let target = fields["target_translate_only"], let before = fields["context_before_do_not_translate"],
               let after = fields["context_after_do_not_translate"] else { return nil }
-        let result = assess(candidate: candidate, support: [target, existingChinese, before, after], targetCode: targetCode)
+        let result = assess(candidate: candidate, support: [target, existingChinese, before, after], targetCode: targetCode,
+            supportLanguages: ["en", targetCode, "en", "en"])
         return result.unsupported.isEmpty ? nil : "重译增加了没有依据的新数值，已保留原译文"
     }
 
-    static func assess(candidate: String, support: [String], targetCode: String = "zh-Hans") -> Assessment {
+    static func assess(candidate: String, support: [String], targetCode: String = "zh-Hans",
+                       supportLanguages: [String]? = nil) -> Assessment {
+        if targetCode == "es" || targetCode == "fr" {
+            return assessLatin(candidate: candidate, support: support, targetCode: targetCode,
+                supportLanguages: supportLanguages)
+        }
         let candidate = TranslationCheckText.inspectionCopy(candidate, targetCode: targetCode)
         let support = support.map { TranslationCheckText.inspectionCopy($0, targetCode: targetCode) }
         let proposed = digitInventory(candidate)

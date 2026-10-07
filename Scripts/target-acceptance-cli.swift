@@ -293,7 +293,9 @@ struct TargetAcceptanceCLI {
                 "caption-base-4b": LatinCaptionPrompts.system(for: target, faithful: true),
                 "wrapper-4b": LatinCaptionPrompts.wrapper(for: target, smallModel: true),
                 "wrapper-9b": LatinCaptionPrompts.wrapper(for: target, smallModel: false),
-                "recovery": LatinCaptionPrompts.recovery(for: target)]
+                "recovery": LatinCaptionPrompts.recovery(for: target),
+                "note-generate": target.learningNotePrompt, "note-review": target.learningReviewPrompt,
+                "note-recovery": LearningPrompts.generationPrompt(target: target, recoveringAfterOutputLimit: true)]
         }
         for (key, model) in models {
             prompts["caption-\(key)"] = try await captionPrompt(model: model, target: target)

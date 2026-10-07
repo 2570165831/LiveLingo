@@ -139,7 +139,7 @@ class InputProblemTests(unittest.TestCase):
 
     def test_quote_language_and_text_are_checked(self):
         cases = [
-            (payload(units=[evidence(0, quotes=[quote(0, language='fr')])]), 'evidence[0].quotes[0].language'),
+            (payload(units=[evidence(0, quotes=[quote(0, language='de')])]), 'evidence[0].quotes[0].language'),
             (payload(units=[evidence(0, quotes=[{**quote(0), 'language': 2}])]), 'evidence[0].quotes[0].language'),
             (payload(units=[evidence(0, quotes=[quote(0, text='')])]), 'evidence[0].quotes[0].text'),
             (payload(units=[evidence(0, quotes=[quote(0, text=None)])]), 'evidence[0].quotes[0].text'),

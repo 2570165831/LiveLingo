@@ -42,7 +42,7 @@ ASR_MODELS = (
     ("mlx-community/parakeet-tdt-0.6b-v2", "CC-BY-4.0.txt", "Parakeet-tdt-0.6b-v2-original-README.md"),
     ("mlx-community/Qwen3-ASR-1.7B-4bit", "Qwen3-ASR-1.7B-LICENSE", "Qwen3-ASR-1.7B-4bit-README.md"),
 )
-RUNTIME_MODULES = ("worker.py", "engine.py", "schemas.py", "checks.py", "review_diagnostics.py", "grammar_vocabulary.py")
+RUNTIME_MODULES = ("worker.py", "engine.py", "schemas.py", "checks.py", "review_diagnostics.py", "grammar_vocabulary.py", "latin_numbers.py")
 
 # Test artifacts that must never reach the candidate. "virtual-player" alone does
 # not match "virtual-audio-player.swift", so all spellings are listed.

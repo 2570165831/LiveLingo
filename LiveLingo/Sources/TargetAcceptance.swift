@@ -1496,8 +1496,12 @@ enum LatinNumericParser {
 
     /// Exact signed coefficient/exponent strings, not floating point: nearby
     /// large integers and re-expressions of the same number stay distinguishable.
+    struct Literal { let text: String; let range: NSRange; let value: String }
     static func numbers(in text: String, language: String) -> [String] {
         LatinAcceptanceInstrumentation.record(.numbers)
+        return literals(in: text, language: language).map(\.value)
+    }
+    static func literals(in text: String, language: String) -> [Literal] {
         let code = language.lowercased().split(separator: "-").first.map(String.init) ?? language
         let expression = code == "es" ? spanish : (["fr", "ru"].contains(code) ? french : english)
         return expression.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
@@ -1512,7 +1516,8 @@ enum LatinNumericParser {
                 token = token.replacingOccurrences(of: ",", with: ".")
             } else if ["fr", "ru"].contains(code) { token = token.replacingOccurrences(of: ",", with: ".") }
             else { token = token.replacingOccurrences(of: ",", with: "") }
-            return identity(token)
+            guard let value = identity(token) else { return nil }
+            return Literal(text: String(text[range]), range: match.range, value: value)
         }
     }
     private static func identity(_ token: String) -> String? {

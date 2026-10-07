@@ -1,0 +1,17 @@
+{
+  "id": "decimal-mass",
+  "stages": [
+    [
+      {
+        "english": "A mass of 3.14 grams is the same mass as 0.00314 kilograms. Conversion changes the unit, not the object.",
+        "chinese": "Une masse de 3,14 grammes est la même masse que 0,00314 kilogramme. La conversion change l’unité, pas l’objet."
+      }
+    ],
+    [
+      {
+        "english": "One thousand grams equals one kilogram. The decimal separator does not change the magnitude.",
+        "chinese": "1 000 grammes équivalent à 1 kilogramme. Le séparateur décimal ne change pas la grandeur."
+      }
+    ]
+  ]
+}

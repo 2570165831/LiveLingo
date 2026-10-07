@@ -21,13 +21,13 @@ MAX_FIELD = 80
 _FIELD = re.compile(r'[^A-Za-z0-9_.\[\]/=:-]')
 
 REVIEW_VERSION = 2
-QUOTE_LANGUAGES = ('en', 'zh')
+QUOTE_LANGUAGES = ('en', 'zh', 'es', 'fr')
 # Short-ID bound: quote IDs are literals inside the response grammar (DFA), so
 # they must stay short, ASCII and free of payload text. Fragment text itself is
 # never copied into the grammar.
 MAX_QUOTE_ID = 64
 _QUOTE_ID = re.compile(r'[A-Za-z0-9_.:-]{1,%d}' % MAX_QUOTE_ID)
-_QUOTE_ID_PARTS = re.compile(r'e(\d+)\.(en|zh)\.\d+')
+_QUOTE_ID_PARTS = re.compile(r'e(\d+)\.(en|zh|es|fr)\.\d+')
 QUOTE_FIELDS = ('id', 'language', 'text')
 EVIDENCE_FIELDS = ('index', 'quotes', 'chineseWarning')
 # Fields that only existed before review v2; never mix them with v2 quotes.
@@ -101,7 +101,7 @@ def _quote_problem(evidence_position, unit_index, quote_index, quote, seen_ids):
         return ('invalid_item', f'{field}.id', 'quote id must be unique across the review input')
     language = quote['language']
     if not isinstance(language, str) or language not in QUOTE_LANGUAGES:
-        return ('invalid_item', f'{field}.language', 'quote language must be en or zh')
+        return ('invalid_item', f'{field}.language', 'quote language must be en, zh, es or fr')
     parts = _QUOTE_ID_PARTS.fullmatch(identifier)
     if parts is not None and parts.group(2) != language:
         return ('invalid_item', f'{field}.id', 'quote id language does not match its language field')

@@ -7,7 +7,10 @@
 
 /* Begin PBXBuildFile section */
 		B72500000000000000000101 /* SpanishFrenchCaptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72500000000000000000102 /* SpanishFrenchCaptionTests.swift */; };
+		B72600000000000000000101 /* SpanishFrenchLearningNotesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72600000000000000000102 /* SpanishFrenchLearningNotesTests.swift */; };
 		B72500000000000000000001 /* LatinCaptionPrompts.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72500000000000000000002 /* LatinCaptionPrompts.swift */; };
+		B72600000000000000000001 /* LatinLearningPrompts.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72600000000000000000002 /* LatinLearningPrompts.swift */; };
+		B72600000000000000000003 /* LatinLearningText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72600000000000000000004 /* LatinLearningText.swift */; };
 		B71800000000000000000001 /* EnglishTargetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71800000000000000000002 /* EnglishTargetTests.swift */; };
 		B72200000000000000000001 /* EnglishLearningNotesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72200000000000000000002 /* EnglishLearningNotesTests.swift */; };
 		B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */; };
@@ -118,7 +121,10 @@
 
 /* Begin PBXFileReference section */
 		B72500000000000000000102 /* SpanishFrenchCaptionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpanishFrenchCaptionTests.swift; sourceTree = "<group>"; };
+		B72600000000000000000102 /* SpanishFrenchLearningNotesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpanishFrenchLearningNotesTests.swift; sourceTree = "<group>"; };
 		B72500000000000000000002 /* LatinCaptionPrompts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatinCaptionPrompts.swift; sourceTree = "<group>"; };
+		B72600000000000000000002 /* LatinLearningPrompts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatinLearningPrompts.swift; sourceTree = "<group>"; };
+		B72600000000000000000004 /* LatinLearningText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatinLearningText.swift; sourceTree = "<group>"; };
 		B71800000000000000000002 /* EnglishTargetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnglishTargetTests.swift; sourceTree = "<group>"; };
 		B72200000000000000000002 /* EnglishLearningNotesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnglishLearningNotesTests.swift; sourceTree = "<group>"; };
 		B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetSourcePolicyRefactorTests.swift; sourceTree = "<group>"; };
@@ -253,6 +259,8 @@
 				CA0000000000000000000102 /* CaptureHealth.swift */,
 				B71900000000000000000002 /* TargetAcceptance.swift */,
 				B72500000000000000000002 /* LatinCaptionPrompts.swift */,
+		B72600000000000000000002 /* LatinLearningPrompts.swift */,
+				B72600000000000000000004 /* LatinLearningText.swift */,
 				B70500000000000000000002 /* OutputLanguage.swift */,
 				900000000000000000000002 /* CaptionPresentation.swift */,
 				EA33EF11F70BAA832EBE7D3D /* ReviewReportCollection.swift */,
@@ -300,6 +308,7 @@
 				B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */,
 				B71800000000000000000002 /* EnglishTargetTests.swift */,
 				B72500000000000000000102 /* SpanishFrenchCaptionTests.swift */,
+		B72600000000000000000102 /* SpanishFrenchLearningNotesTests.swift */,
 				B72200000000000000000002 /* EnglishLearningNotesTests.swift */,
 				B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */,
 				B75500000000000000000002 /* TargetDefaultingTests.swift */,
@@ -423,6 +432,8 @@
 				CA0000000000000000000101 /* CaptureHealth.swift in Sources */,
 				B71900000000000000000001 /* TargetAcceptance.swift in Sources */,
 				B72500000000000000000001 /* LatinCaptionPrompts.swift in Sources */,
+		B72600000000000000000001 /* LatinLearningPrompts.swift in Sources */,
+				B72600000000000000000003 /* LatinLearningText.swift in Sources */,
 				B70500000000000000000001 /* OutputLanguage.swift in Sources */,
 				900000000000000000000001 /* CaptionPresentation.swift in Sources */,
 				04F78613ACCF181FC7155CCF /* ReviewReportCollection.swift in Sources */,
@@ -466,6 +477,7 @@
 				B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */,
 				B71800000000000000000001 /* EnglishTargetTests.swift in Sources */,
 				B72500000000000000000101 /* SpanishFrenchCaptionTests.swift in Sources */,
+		B72600000000000000000101 /* SpanishFrenchLearningNotesTests.swift in Sources */,
 				B72200000000000000000001 /* EnglishLearningNotesTests.swift in Sources */,
 				B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */,
 				B75500000000000000000001 /* TargetDefaultingTests.swift in Sources */,

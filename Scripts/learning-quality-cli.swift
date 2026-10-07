@@ -98,7 +98,7 @@ struct LearningQualityCLI {
         }
         guard let input = values["--input"], let output = values["--output"] else { throw Failure.arguments }
         let code = values["--target"] ?? defaultTarget.rawValue
-        guard ["zh-Hans", "en"].contains(code),
+        guard ["zh-Hans", "en", "es", "fr"].contains(code),
               let target = CaptionTranslationTarget(rawValue: code) else { throw Failure.unsupportedTarget }
         return Options(input: URL(fileURLWithPath: input),
             output: URL(fileURLWithPath: output, isDirectory: true), target: target, dryRun: dryRun)

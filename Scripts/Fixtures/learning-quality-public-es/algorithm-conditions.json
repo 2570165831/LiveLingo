@@ -1,0 +1,17 @@
+{
+  "id": "algorithm-conditions",
+  "stages": [
+    [
+      {
+        "english": "Binary search requires sorted input. It repeatedly discards half of the remaining search interval.",
+        "chinese": "La búsqueda binaria requiere datos ordenados. Descarta repetidamente la mitad del intervalo de búsqueda restante."
+      }
+    ],
+    [
+      {
+        "english": "Sorting has a separate cost. A faster search does not make the preparation cost disappear.",
+        "chinese": "Ordenar tiene un coste adicional. Una búsqueda más rápida no elimina el coste de preparación."
+      }
+    ]
+  ]
+}

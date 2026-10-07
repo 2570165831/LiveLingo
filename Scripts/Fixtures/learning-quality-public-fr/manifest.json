@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "id": "decimal-mass",
+      "file": "decimal-mass.json",
+      "sha256": "dddeed7c4544c1d31b4e8044c51c85c826d36e999086fb82ad26e7f0d0833002"
+    },
+    {
+      "id": "ownership-context",
+      "file": "ownership-context.json",
+      "sha256": "fadd756e669339998f9d79cbe40b10d29230c0c755c55b1a194e8fc5e88979c2"
+    },
+    {
+      "id": "algorithm-conditions",
+      "file": "algorithm-conditions.json",
+      "sha256": "dcea5d10e420f5505e6d81d895db46842525fa879aa43a24e85df051909ecc33"
+    },
+    {
+      "file": "gold.json",
+      "sha256": "44509f71318d3bd76cf24ab8b7aeb9ee20989e14cd961912f6172afea723869e"
+    }
+  ]
+}

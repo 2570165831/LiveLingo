@@ -27,7 +27,7 @@ PENDING_EVIDENCE_RULE = ("quoteIDs 和 candidateQuoteIDs 引用 priorEvidence �
 # Mirror the default CaptionTranslationTarget.simplifiedChinese and SpokenLanguage.all. Source-unit
 # labels stay en/zh even when the spoken source uses a different language.
 CAPTION_TRANSLATION_TARGET = "zh-Hans"
-CAPTION_TRANSLATION_TARGETS = frozenset({"zh-Hans", "en"})
+CAPTION_TRANSLATION_TARGETS = frozenset({"zh-Hans", "en", "es", "fr"})
 KIND_DISPLAY_LABELS_EN = {
     "核心结论": "Key finding", "概念关系": "Concept relationship", "例子": "Example",
     "易错点": "Common pitfall", "补充理解": "Background", "待确认": "Needs clarification",
@@ -104,6 +104,21 @@ UNIT_ALIASES = [
     ("newtons", "N"), ("newton", "N"), ("牛顿", "N"), ("牛", "N"), ("N", "N"),
     ("kilohertz", "kHz"), ("kHz", "kHz"), ("hertz", "Hz"), ("赫兹", "Hz"), ("Hz", "Hz"),
 ]
+
+KIND_DISPLAY_LABELS_LATIN = {
+    "en": KIND_DISPLAY_LABELS_EN,
+    "es": dict(zip(["核心结论", "概念关系", "例子", "易错点", "补充理解", "待确认"], ["Conclusión clave", "Relación conceptual", "Ejemplo", "Error frecuente", "Contexto", "Por aclarar"])),
+    "fr": dict(zip(["核心结论", "概念关系", "例子", "易错点", "补充理解", "待确认"], ["Conclusion clé", "Relation conceptuelle", "Exemple", "Piège courant", "Éclairage complémentaire", "À clarifier"])),
+}
+FOLLOWUP_DISPLAY_LABELS_LATIN = {
+    "en": FOLLOWUP_DISPLAY_LABELS_EN,
+    "es": dict(zip(["缺信息", "后文补充", "前后冲突", "关系不明"], ["Falta información", "Aclaración posterior", "Versiones contradictorias", "Relación incierta"])),
+    "fr": dict(zip(["缺信息", "后文补充", "前后冲突", "关系不明"], ["Informations manquantes", "Précision ultérieure", "Versions contradictoires", "Relation incertaine"])),
+}
+PENDING_EVIDENCE_RULE_LATIN = {
+    "es": "quoteIDs y candidateQuoteIDs remiten a priorEvidence o evidence actual. Los identificadores h son solo contexto histórico: nunca los uses en sourceIDs de puntos actuales ni repitas citas anteriores como conocimiento nuevo.",
+    "fr": "quoteIDs et candidateQuoteIDs renvoient à priorEvidence ou aux evidence actuelles. Les identifiants h servent uniquement de contexte historique : ne les utilise jamais dans les sourceIDs des points actuels et ne répète pas les anciennes citations comme connaissances nouvelles.",
+}
 
 
 COUNT_SUFFIXES = set("个份条项组种类名位次扇件张本枚颗台座间只瓶盒行列人")
@@ -255,14 +270,23 @@ def numeric_mentions(text: str, preserving_count_scalars: bool = False) -> list[
 
 
 def numeric_report(claim: str, cited: list[str], segment_texts: list[str],
-                   batch_texts: list[str]) -> tuple[bool, str | None]:
-    own = [mention for text in cited + segment_texts for mention in numeric_mentions(text, preserving_count_scalars=True)]
-    batch = [mention for text in batch_texts for mention in numeric_mentions(text, preserving_count_scalars=True)]
+                   batch_texts: list[str], *, target: str = CAPTION_TRANSLATION_TARGET,
+                   language_groups: list[tuple[str, str]] = ()) -> tuple[bool, str | None]:
+    def parse(text, source=False):
+        if target not in ("es", "fr"):
+            return numeric_mentions(text, preserving_count_scalars=source)
+        from latin_learning import mentions
+        languages = {language for language, original in language_groups if text in original} if source else {target}
+        if len(languages) > 1:
+            return []
+        return list(mentions(text, next(iter(languages)) if languages else target, UNIT_ALIASES))
+    own = [mention for text in cited + segment_texts for mention in parse(text, source=True)]
+    batch = [mention for text in batch_texts for mention in parse(text, source=True)]
     gaps, decidable = [], False
     def push(message):
         if len(gaps) < 3 and message not in gaps:
             gaps.append(message)
-    for value, unit, role, excerpt in numeric_mentions(claim):
+    for value, unit, role, excerpt in parse(claim):
         if role == "designator":
             continue
         if role == "count":
@@ -401,16 +425,16 @@ def open_question(point: dict) -> bool:
 def followup_state_label(state: str, *, target: str = CAPTION_TRANSLATION_TARGET) -> str:
     """Display only; wire follow-up states remain their fixed Chinese codes."""
     require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
-    return FOLLOWUP_DISPLAY_LABELS_EN.get(state, state) if target == "en" else state
+    return FOLLOWUP_DISPLAY_LABELS_LATIN.get(target, {}).get(state, state)
 
 
 def point_line(point: dict, *, target: str = CAPTION_TRANSLATION_TARGET) -> str:
     require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
     kind = point["kind"]
-    if target == "en":
-        kind_label = KIND_DISPLAY_LABELS_EN.get(kind, kind)
+    if target != "zh-Hans":
+        kind_label = KIND_DISPLAY_LABELS_LATIN[target].get(kind, kind)
         if open_question(point):
-            pending = KIND_DISPLAY_LABELS_EN["待确认"]
+            pending = KIND_DISPLAY_LABELS_LATIN[target]["待确认"]
             label = pending if kind in ("", "核心结论", "待确认") else f"{kind_label} ({pending})"
             return f"- **{label}**: {point['text']}"
         return "- " + ("" if kind == "核心结论" else f"**{kind_label}**: ") + point["text"]
@@ -464,7 +488,7 @@ def render_pass_through(text: str, *, target: str = CAPTION_TRANSLATION_TARGET) 
     system API is unavailable, withhold integrity credit rather than guess.
     """
     require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
-    if target == "en":
+    if target != "zh-Hans":
         return text
     import ctypes
     import ctypes.util
@@ -526,6 +550,13 @@ def source_text_groups(source: dict, *, target: str = CAPTION_TRANSLATION_TARGET
         text = (render_pass_through(source["english"], target=target) if language_code is None
                 else source.get("chinese", ""))
         return [("en", text)]
+    if target in ("es", "fr"):
+        from latin_learning import pass_through_sources
+        if language_code in pass_through_sources()[target]:
+            return [(target, source["english"])]
+        if language_code is None:
+            return [("en", source["english"]), (target, source.get("chinese", ""))]
+        return [(target, source.get("chinese", ""))]
     groups = (("en", "english"), ("zh", "chinese")) if language_code is None else (("zh", "chinese"),)
     return [(language, (source["chinese"] if has_usable_translation(source)
                        else render_pass_through(source["english"], target=target))
@@ -538,7 +569,7 @@ def verify_units(units: list[dict], evidence: list[dict], *,
     require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
     units = object_list(units, "sourceUnits")
     unique([x.get("id") for x in units], "sourceUnits")
-    require(all(integer(x.get("index")) and x["index"] < len(evidence) and x.get("language") in ("en", "zh")
+    require(all(integer(x.get("index")) and x["index"] < len(evidence) and x.get("language") in (("en", "zh", target) if target in ("es", "fr") else ("en", "zh"))
                 for x in units), "source-unit-owner")
     expected_order = []
     for index, source in enumerate(evidence):
@@ -641,7 +672,9 @@ def verify_pending_points(prepared: dict, targets: list[str], references: dict[s
                or any("quoteIDs" in p or "candidateQuoteIDs" in p for p in followups))
     catalog = None
     if indexed:
-        accepted_rules = (PENDING_EVIDENCE_RULE, PENDING_EVIDENCE_RULE_EN) if target == "en" else (PENDING_EVIDENCE_RULE,)
+        accepted_rules = ((PENDING_EVIDENCE_RULE, PENDING_EVIDENCE_RULE_EN) if target == "en"
+                          else (PENDING_EVIDENCE_RULE_LATIN[target],) if target in ("es", "fr")
+                          else (PENDING_EVIDENCE_RULE,))
         require(prepared.get("pendingEvidenceRule") in accepted_rules, "pending-evidence-rule")
         prior = object_list(prepared.get("priorEvidence"), "priorEvidence")
         require(all(isinstance(p.get("id"), str) and re.fullmatch(r"h(?:0|[1-9][0-9]*)", p["id"])
@@ -675,6 +708,9 @@ def verify_pending_points(prepared: dict, targets: list[str], references: dict[s
                 language = source_language(source) if indexed else None
                 if target == "en":
                     text = source_text_groups(source, target=target)[0][1]
+                elif target in ("es", "fr"):
+                    original_quotes.extend(text for _, text in source_text_groups(source, target=target) if text)
+                    continue
                 elif language in CAPTION_PASS_THROUGH_LANGUAGE_CODES:
                     text = source["chinese"] if has_usable_translation(source) else render_pass_through(source["english"])
                 elif language is not None:
@@ -867,7 +903,9 @@ def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
                 own_segments = [text for owner in owner_indices
                                 for text in segment_texts[owner]]
                 difference, gap = numeric_report(point["text"], [s["quote"] for s in linked],
-                                                  own_segments, all_segments)
+                                                  own_segments, all_segments, target=target,
+                                                  language_groups=[group for source in batch["evidence"]
+                                                                   for group in source_text_groups(source, target=target)])
                 if not linked and point["kind"] == "补充理解":
                     state = None
                 elif question:

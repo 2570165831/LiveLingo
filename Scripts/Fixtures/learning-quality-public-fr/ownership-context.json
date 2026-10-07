@@ -1,0 +1,17 @@
+{
+  "id": "ownership-context",
+  "stages": [
+    [
+      {
+        "english": "The container and the sample are distinct objects. Its temperature is not assigned to either object without an explicit reference.",
+        "chinese": "Le récipient et l’échantillon sont des objets distincts. Sa température n’est attribuée à aucun des deux sans référence explicite."
+      }
+    ],
+    [
+      {
+        "english": "The next sentence explicitly names the sample as the owner of the temperature measurement. A matching number alone does not establish ownership.",
+        "chinese": "La phrase suivante nomme explicitement l’échantillon comme objet de la mesure de température. Un nombre identique ne suffit pas à établir cette attribution."
+      }
+    ]
+  ]
+}

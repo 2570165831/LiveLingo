@@ -1,0 +1,17 @@
+{
+  "id": "algorithm-conditions",
+  "stages": [
+    [
+      {
+        "english": "Binary search requires sorted input. It repeatedly discards half of the remaining search interval.",
+        "chinese": "La recherche binaire exige des données triées. Elle élimine à chaque étape la moitié de l’intervalle de recherche restant."
+      }
+    ],
+    [
+      {
+        "english": "Sorting has a separate cost. A faster search does not make the preparation cost disappear.",
+        "chinese": "Le tri a un coût distinct. Une recherche plus rapide ne supprime pas le coût de préparation."
+      }
+    ]
+  ]
+}

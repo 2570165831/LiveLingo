@@ -56,13 +56,16 @@ def reaction(expression):
     return totals[0] == totals[1], '仅核对元素与电荷守恒，不判断反应能否发生或条件是否成立'
 
 
-def check(expression):
+def check(expression, language=None):
     expression = expression.strip()
     result = dict(expression=expression, status='unable', scope='无法核算')
     try:
         if '->' in expression or '→' in expression:
             ok, scope = reaction(expression); method='ChemPy'
         else:
+            if language in ('es', 'fr'):
+                from latin_numbers import normalize_expression
+                expression = normalize_expression(expression, language)
             sides = expression.split('=')
             if len(sides)!=2: raise ValueError('需要明确等号两侧的表达式')
             left, right = (s.strip() for s in sides)
@@ -89,6 +92,9 @@ def check(expression):
 
 def review_checks(data):
     results=[]
+    languages = {q.get('language') for item in data.get('evidence', []) for q in item.get('quotes', [])}
+    latin_targets = languages & {'es', 'fr'}
+    language = next(iter(latin_targets)) if len(latin_targets) == 1 else None
     for point in data.get('note',{}).get('points',[]):
         text=point.get('text','')
         # Only a whole explicitly delimited equation. Do not fish plausible
@@ -99,6 +105,6 @@ def review_checks(data):
             expressions=[text]
         for expression in expressions[:4]:
             if '=' in expression or '→' in expression or '->' in expression:
-                results.append(dict(pointIndex=point['index'],**check(expression)))
+                results.append(dict(pointIndex=point['index'],**check(expression, language=language)))
         if len(results)>=32:break
     return dict(version=1, boundary='These checks only concern explicit expressions. They do not verify subject matter, object identity, assumptions, or the truth of source evidence. unable means no conclusion. Never treat matches as proof that the whole note is correct.',results=results[:32])

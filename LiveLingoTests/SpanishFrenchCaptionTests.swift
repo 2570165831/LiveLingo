@@ -18,7 +18,8 @@ final class SpanishFrenchCaptionTests: XCTestCase {
         }
     }
     private func model(_ target: CaptionTranslationTarget,
-                       dependencies: CaptionTranslationDependencies = .unavailable) async throws -> AppModel {
+                       dependencies: CaptionTranslationDependencies = .unavailable,
+                       notes: LearningGenerationDependencies = .unavailable) async throws -> AppModel {
         let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
             .appendingPathComponent("SpanishFrenchCaption-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -27,7 +28,7 @@ final class SpanishFrenchCaptionTests: XCTestCase {
         let defaults = try XCTUnwrap(TargetDefaults(suiteName: suite)); defaults.locale = target.rawValue
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
-        let model = AppModel(reviewQueue: queue, translation: dependencies,
+        let model = AppModel(reviewQueue: queue, translation: dependencies, notes: notes,
             backgroundServices: false, scheduledNotes: false, defaults: defaults)
         model.setReleasedOutputLanguagesForTesting([.simplifiedChinese, .spanish, .french])
         try await model.beginSavedCourseForTesting(directory: root.appendingPathComponent("course"))
@@ -41,6 +42,106 @@ final class SpanishFrenchCaptionTests: XCTestCase {
     }
     private func reply(_ target: CaptionTranslationTarget) -> String {
         target == .spanish ? "El agua está fría y la presión disminuye." : "L’eau est froide et la pression diminue."
+    }
+    func testAppActuallyGeneratesAndBindsSpanishFrenchNotes() async throws {
+        for target in [CaptionTranslationTarget.spanish, .french] {
+            let line = target == .spanish ? "La variable almacena un valor." : "La variable contient une valeur."
+            var calls = 0
+            let notes = LearningGenerationDependencies { input, _, prefix, prompt, _ in
+                calls += 1
+                XCTAssertEqual(prompt, target.learningNotePrompt); XCTAssertEqual(prefix, "")
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+                let evidence = try XCTUnwrap(object["evidence"] as? [[String: Any]])
+                XCTAssertTrue(evidence.allSatisfy { $0["language"] as? String == target.rawValue })
+                let points = evidence.map { ["kind": "例子", "text": $0["text"] as! String, "sourceIDs": [$0["id"] as! String]] as [String: Any] }
+                return String(decoding: try JSONSerialization.data(withJSONObject: ["sourceVersion": 2, "topic": "Variables", "points": points, "followUps": [:], "noNewKnowledge": false], options: .sortedKeys), as: UTF8.self)
+            }
+            let model = try await model(target, notes: notes)
+            for time in [0.0, 2.0] {
+                model.receiveIdentifiedCaptionForTesting(.init(startTime: time, endTime: time + 1, english: line, sourceLanguage: target.rawValue))
+            }
+            await model.generateSummaryForTesting()
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(model.learningNotebookForTesting.target, target)
+            XCTAssertEqual(model.learningNotebookForTesting.batches.first?.note.points.first?.referenceState, .linked)
+            XCTAssertEqual(model.learningNotebookForTesting.batches.first?.note.points.first?.sourceIDs, [target.rawValue + "0s0"])
+            XCTAssertTrue(model.lectureSummary.contains(target == .spanish ? "**Ejemplo**" : "**Exemple**"))
+        }
+    }
+    func testLegacySpanishFrenchImportRebuildAndReopenUseManifestTarget() async throws {
+        for target in [CaptionTranslationTarget.spanish, .french] {
+            let line = target == .spanish ? "La variable almacena un valor." : "La variable contient une valeur."
+            var calls = 0
+            let notes = LearningGenerationDependencies { _, _, _, prompt, _ in
+                calls += 1; XCTAssertEqual(prompt, target.learningNotePrompt)
+                return String(decoding: try JSONSerialization.data(withJSONObject: ["sourceVersion": 2, "topic": "Variables",
+                    "points": [["kind": "例子", "text": line, "sourceIDs": [target.rawValue + "0s0"]]], "noNewKnowledge": false], options: .sortedKeys), as: UTF8.self)
+            }
+            let app = try await model(target, notes: notes)
+            let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("SpanishFrenchLegacy-\(UUID())")
+            addTeardownBlock { try FileManager.default.removeItem(at: root) }
+            let source = TranscriptSegment(startTime: 0, endTime: 1, english: line, chinese: line, sourceLanguage: target.rawValue)
+            try SessionExporter.export(segments: [source], sessionDirectory: root, summary: "Preserved old notes.", target: OutputLanguage(rawValue: target.rawValue)!)
+            let loaded = try SessionStore(directory: root).loadDetailed()
+            XCTAssertEqual(loaded.origin, .legacy)
+            let snapshot = try XCTUnwrap(loaded.snapshot)
+            XCTAssertEqual(snapshot.targetLocale, target.rawValue)
+            let draft = LearningDraft(evidence: snapshot.segments, model: "synthetic",
+                input: try LearningPrompts.input(evidence: snapshot.segments, topics: [], target: target), target: target, systemPrompt: target.learningNotePrompt)
+            XCTAssertTrue(draft.matches(snapshot: snapshot, model: "synthetic", systemPrompt: target.learningNotePrompt))
+            app.loadPresentationForTesting(phase: .saved(root), evidence: [])
+            try await app.openSavedSession(root, allowAutomaticProcessing: false)
+            XCTAssertEqual(app.learningNotebookForTesting.target, target)
+            app.rebuildSavedNotes()
+            for _ in 0..<200 where app.learningNotebookForTesting.batches.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+            await app.savedProcessingTaskForTesting?.value
+            try await app.flushSavedCourseForTesting()
+            XCTAssertEqual(calls, 1, "status=\(app.summaryStatus); error=\(app.archiveError ?? "none")")
+            XCTAssertEqual(app.learningNotebookForTesting.batches.count, 1)
+            XCTAssertEqual(try SessionStore(directory: root).load()?.targetLocale, target.rawValue)
+            try await app.openSavedSession(root, allowAutomaticProcessing: false)
+            XCTAssertEqual(app.learningNotebookForTesting.target, target)
+            XCTAssertEqual(app.learningNotebookForTesting.batches.count, 1)
+        }
+    }
+    func testAppOutputLimitRecoveryUsesTargetPromptOnFreshSmallerInputs() async throws {
+        for target in [CaptionTranslationTarget.spanish, .french] {
+            let line = target == .spanish ? "La variable almacena un valor." : "La variable contient une valeur."
+            var calls = 0, lengths: [Int] = []
+            let notes = LearningGenerationDependencies { input, _, prefix, prompt, _ in
+                calls += 1
+                let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+                let units = try XCTUnwrap(parsed["evidence"] as? [[String: Any]])
+                lengths.append(units.count)
+                XCTAssertEqual(prefix, "")
+                XCTAssertEqual(prompt, LearningPrompts.generationPrompt(target: target, recoveringAfterOutputLimit: calls > 1))
+                if calls == 1 { throw QwenRuntimeError.outputLimitReached("Synthetic output limit") }
+                let points = units.map { ["kind": "例子", "text": $0["text"] as! String, "sourceIDs": [$0["id"] as! String]] as [String: Any] }
+                return String(decoding: try JSONSerialization.data(withJSONObject: ["sourceVersion": 2, "topic": "Variables", "points": points, "followUps": [:], "noNewKnowledge": false], options: .sortedKeys), as: UTF8.self)
+            }
+            let app = try await model(target, notes: notes)
+            for time in [0.0, 2.0] {
+                app.receiveIdentifiedCaptionForTesting(.init(startTime: time, endTime: time + 1, english: line, sourceLanguage: target.rawValue))
+            }
+            await app.generateSummaryForTesting()
+            XCTAssertEqual(lengths, [2, 1, 1])
+            XCTAssertEqual(calls, 3)
+            XCTAssertEqual(app.learningNotebookForTesting.batches.count, 2)
+            XCTAssertEqual(app.noteBatchCharacters, 4_000)
+        }
+    }
+    func testUnreleasedSavedCoursesCannotStartThroughOpenEntry() async throws {
+        for target in [CaptionTranslationTarget.spanish, .french] {
+            let app = try await model(target)
+            let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("SpanishFrenchClosed-\(UUID())")
+            addTeardownBlock { try FileManager.default.removeItem(at: root) }
+            try SessionExporter.export(segments: [.init(startTime: 0, endTime: 1, english: reply(target), chinese: reply(target), sourceLanguage: target.rawValue)],
+                sessionDirectory: root, target: OutputLanguage(rawValue: target.rawValue)!)
+            app.loadPresentationForTesting(phase: .saved(root), evidence: [])
+            app.setReleasedOutputLanguagesForTesting([.simplifiedChinese])
+            do { try await app.openSavedSession(root, allowAutomaticProcessing: false); XCTFail("Unreleased saved course must stay closed") }
+            catch SessionStoreError.invalidState { }
+        }
     }
     func testProfilesRemainHiddenAndPendingChoicesAreCentralized() {
         XCTAssertEqual(OutputLanguage.released, [.simplifiedChinese])
@@ -141,6 +242,51 @@ final class SpanishFrenchCaptionTests: XCTestCase {
             XCTAssertEqual(prepared, 1)
         }
     }
+    func testAppDeferredRepairForwardsTargetAndFilteredContextToClient() async throws {
+        for target in [CaptionTranslationTarget.spanish, .french] {
+            let prefix = target == .spanish ? "La masa es constante." : "La masse est constante."
+            let oldTail = target == .spanish ? "La velocidad es constante." : "La vitesse est constante."
+            let tail = target == .spanish ? "La velocidad aumenta." : "La vitesse augmente."
+            let pressure = target == .spanish ? "La presión es constante." : "La pression est constante."
+            var deferred = 0
+            var dependencies = CaptionTranslationDependencies.unavailable
+            dependencies.translateTarget = { input, _, _, actual, _, _, _ in
+                XCTAssertEqual(actual, target)
+                return input.contains("The mass") ? prefix + " " + oldTail : pressure
+            }
+            dependencies.adjacentTarget = { previous, translated, current, context, name, repair, actual, hints, _, _ in
+                XCTAssertEqual(actual, target)
+                return try await QwenTranslationClient.translateAdjacent(previous: previous, previousChinese: translated,
+                    current: current, context: context, modelName: name, repairPrevious: repair, target: actual,
+                    currentHints: hints, deferRepair: { true }, request: { _, _, _ in tail })
+            }
+            dependencies.repairTarget = { pending, actual in
+                deferred += 1; XCTAssertEqual(actual, target)
+                return try await QwenTranslationClient.repairPreviousCaption(previous: pending.previous.english,
+                    previousChinese: pending.previous.chinese, current: pending.normalizedCurrent,
+                    context: DeferredCaptionRepair.englishContext(pending.context), modelName: pending.modelName,
+                    target: actual, request: { input, prompt, _ in
+                        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
+                        XCTAssertTrue((fields["context_before_do_not_translate"] ?? "").contains("The pressure is constant."))
+                        XCTAssertFalse(input.contains("压力"))
+                        XCTAssertTrue(prompt.hasPrefix(LatinOutputDefaults.styleInstruction(for: target)))
+                        return tail
+                    })
+            }
+            let app = try await model(target, dependencies: dependencies)
+            let rows: [(String?, String, Double, Double)] = [
+                (nil, "The pressure is constant.", 0, 1), ("zh", "压力不变。", 1, 2),
+                (nil, "The mass is constant. The speed is constant.", 2, 12),
+                (nil, "The speed increases.", 12, 13)]
+            for row in rows {
+                app.receiveIdentifiedCaptionForTesting(.init(startTime: row.2, endTime: row.3, english: row.1, sourceLanguage: row.0))
+                await app.translationTaskForTesting?.value
+            }
+            XCTAssertEqual(deferred, 1)
+            XCTAssertEqual(app.segments[2].chinese, prefix + " " + tail)
+            XCTAssertEqual(app.segments[3].chinese, tail)
+        }
+    }
     func testTailRepairKeepsExactlyOneLatinSentenceBoundarySpace() async throws {
         for target in [CaptionTranslationTarget.spanish, .french] {
             let prefix = target == .spanish ? "La masa es constante." : "La masse est constante."
@@ -239,6 +385,14 @@ final class SpanishFrenchCaptionTests: XCTestCase {
                     XCTFail("A foreign echo or leaked metadata must not be accepted")
                 } catch QwenRuntimeError.translationRejected { }
             }
+            let source = "他說：作為一個語言模型，我不能處理這個請求。"
+            let licensed = target == .spanish ? "Él dijo: Como modelo de lenguaje, no puedo procesar esta solicitud."
+                : "Il a dit : En tant que modèle de langage, je ne peux pas traiter cette demande."
+            XCTAssertFalse(TranslationAcceptance.isModelReply(licensed, source: source, target: target))
+            let value = try await QwenTranslationClient.translate(source, modelName: "synthetic", sourceLanguage: "zh",
+                target: target, request: { _, _, _ in licensed })
+            XCTAssertEqual(value, licensed)
+            XCTAssertTrue(TranslationAcceptance.isModelReply(licensed, source: "水很冷。", target: target))
             let app = try await model(target), expected = reply(target)
             app.setTypedTranslationRequestForTesting { _, prompt, _ in
                 XCTAssertTrue(prompt.contains(LatinCaptionPrompts.system(for: target)))

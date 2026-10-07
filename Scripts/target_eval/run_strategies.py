@@ -43,14 +43,8 @@ UNKNOWN_STATS = ("exact_first_token_seconds",)
 # es/fr choices are owned by the same Swift constants used by the App. Reading
 # these literal sets performs no compiler, worker, model or network operation.
 def _latin_pass_through_sources():
-    swift = (Path(__file__).resolve().parents[2] / "LiveLingo/Sources/OutputLanguage.swift").read_text()
-    result = {}
-    for locale, name in (("es", "spanish"), ("fr", "french")):
-        match = re.search(rf'static let {name}PassThroughSources: Set<String> = \[([^\]]*)\]', swift)
-        if not match:
-            raise ValueError(f"missing literal {name} pass-through policy")
-        result[locale] = frozenset(re.findall(r'"([^"]+)"', match[1]))
-    return result
+    from ..latin_learning import pass_through_sources
+    return pass_through_sources()
 
 
 # All six profiles are verified by a source-parsing regression test.

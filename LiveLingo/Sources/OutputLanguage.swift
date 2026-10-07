@@ -236,18 +236,18 @@ enum ClassroomFixedText: String, CaseIterable {
         .sourceCheckHeading: ["zh": "来源检查", "en": "Source checks"],
         .sourceText: ["zh": "原文", "en": "Source"],
         .earlierSourceText: ["zh": "先前原文", "en": "Earlier source"],
-        .kindCore: ["zh": "核心结论", "en": "Key finding"],
-        .kindRelationship: ["zh": "概念关系", "en": "Concept relationship"],
-        .kindExample: ["zh": "例子", "en": "Example"],
-        .kindPitfall: ["zh": "易错点", "en": "Common pitfall"],
-        .kindBackground: ["zh": "补充理解", "en": "Background"],
-        .kindPending: ["zh": "待确认", "en": "Needs clarification"],
-        .stateMissing: ["zh": "缺信息", "en": "Missing information"],
-        .stateSupplemented: ["zh": "后文补充", "en": "Later clarification"],
-        .stateConflict: ["zh": "前后冲突", "en": "Conflicting accounts"],
-        .stateUnclear: ["zh": "关系不明", "en": "Relationship unclear"],
-        .neutralQuestion: ["zh": "当前原文是否明确补充了所引原文中的同一对象、属性、条件或指代关系？没有新依据就不重复旧问题。", "en": "Does the current source explicitly clarify the same object, property, condition or reference as the cited source? Do not repeat an old question without new evidence."],
-        .priorEvidenceRule: ["zh": "quoteIDs 和 candidateQuoteIDs 引用 priorEvidence 的旧原文或 evidence 的当前原文。h 编号只作历史上下文，不能用于当前正文 sourceIDs；旧引文不作为本批新知识重复整理。", "en": "quoteIDs and candidateQuoteIDs refer to priorEvidence or current evidence. Historical h IDs are context only: never use them in current point sourceIDs or repeat old quotations as new knowledge."],
+        .kindCore: ["zh": "核心结论", "en": "Key finding", "es": "Conclusión clave", "fr": "Conclusion clé"],
+        .kindRelationship: ["zh": "概念关系", "en": "Concept relationship", "es": "Relación conceptual", "fr": "Relation conceptuelle"],
+        .kindExample: ["zh": "例子", "en": "Example", "es": "Ejemplo", "fr": "Exemple"],
+        .kindPitfall: ["zh": "易错点", "en": "Common pitfall", "es": "Error frecuente", "fr": "Piège courant"],
+        .kindBackground: ["zh": "补充理解", "en": "Background", "es": "Contexto", "fr": "Éclairage complémentaire"],
+        .kindPending: ["zh": "待确认", "en": "Needs clarification", "es": "Por aclarar", "fr": "À clarifier"],
+        .stateMissing: ["zh": "缺信息", "en": "Missing information", "es": "Falta información", "fr": "Informations manquantes"],
+        .stateSupplemented: ["zh": "后文补充", "en": "Later clarification", "es": "Aclaración posterior", "fr": "Précision ultérieure"],
+        .stateConflict: ["zh": "前后冲突", "en": "Conflicting accounts", "es": "Versiones contradictorias", "fr": "Versions contradictoires"],
+        .stateUnclear: ["zh": "关系不明", "en": "Relationship unclear", "es": "Relación incierta", "fr": "Relation incertaine"],
+        .neutralQuestion: ["zh": "当前原文是否明确补充了所引原文中的同一对象、属性、条件或指代关系？没有新依据就不重复旧问题。", "en": "Does the current source explicitly clarify the same object, property, condition or reference as the cited source? Do not repeat an old question without new evidence.", "es": "¿La fuente actual aclara explícitamente el mismo objeto, propiedad, condición o referencia de la fuente citada? No repitas una pregunta anterior sin nuevas pruebas.", "fr": "La source actuelle précise-t-elle explicitement le même objet, la même propriété, condition ou référence que la source citée ? Ne répète pas une ancienne question sans nouveaux éléments."],
+        .priorEvidenceRule: ["zh": "quoteIDs 和 candidateQuoteIDs 引用 priorEvidence 的旧原文或 evidence 的当前原文。h 编号只作历史上下文，不能用于当前正文 sourceIDs；旧引文不作为本批新知识重复整理。", "en": "quoteIDs and candidateQuoteIDs refer to priorEvidence or current evidence. Historical h IDs are context only: never use them in current point sourceIDs or repeat old quotations as new knowledge.", "es": "quoteIDs y candidateQuoteIDs remiten a priorEvidence o evidence actual. Los identificadores h son solo contexto histórico: nunca los uses en sourceIDs de puntos actuales ni repitas citas anteriores como conocimiento nuevo.", "fr": "quoteIDs et candidateQuoteIDs renvoient à priorEvidence ou aux evidence actuelles. Les identifiants h servent uniquement de contexte historique : ne les utilise jamais dans les sourceIDs des points actuels et ne répète pas les anciennes citations comme connaissances nouvelles."],
         .pendingQuestion: ["zh": "原文中有哪项关系需要澄清？请仅依据原文判断。", "en": "Which relationship in the source needs clarification? Use only the source."],
         .missingFollowUp: ["zh": "本次响应没有给出这条跟进判断，旧问题仍然保留。", "en": "This response supplied no follow-up decision for this question; the original question remains open."],
         .supplementedDetail: ["zh": "后文明确补充了同一对象、同一属性的信息。", "en": "Later source text explicitly adds information about the same object and property."],
@@ -354,6 +354,6 @@ enum ClassroomFixedText: String, CaseIterable {
         default: key = nil
         }
         // Wire kind codes stay Chinese; English kind display is task-specific.
-        return key?.text(targetCode: target.rawValue, useTargetLanguage: target == .english) ?? kind
+        return key?.text(targetCode: target.rawValue, useTargetLanguage: target != .simplifiedChinese) ?? kind
     }
 }

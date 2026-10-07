@@ -1672,7 +1672,7 @@ final class AppModel: ObservableObject {
         guard var snapshot = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
         _ = try LearningNotebook(snapshot: snapshot)
         var restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)
-        guard restoredLanguage.generationTarget != nil, restoredLanguage != .english || releasedOutputLanguage("en") != nil else {
+        guard restoredLanguage.generationTarget != nil, ![OutputLanguage.english, .spanish, .french].contains(restoredLanguage) || releasedOutputLanguage(restoredLanguage.rawValue) != nil else {
             throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
         }
         let sameDirectory = sessionDirectory.map(SessionDirectoryLocation.canonical)
@@ -1684,7 +1684,7 @@ final class AppModel: ObservableObject {
             guard let latest = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
             snapshot = latest
             restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)
-            guard restoredLanguage.generationTarget != nil, restoredLanguage != .english || releasedOutputLanguage("en") != nil else {
+            guard restoredLanguage.generationTarget != nil, ![OutputLanguage.english, .spanish, .french].contains(restoredLanguage) || releasedOutputLanguage(restoredLanguage.rawValue) != nil else {
                 throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
             }
         }
@@ -2169,10 +2169,10 @@ final class AppModel: ObservableObject {
                 if let processingPauseTask { try await processingPauseTask.value }
                 guard sessionID == identity, generation == epoch else { return }
                 if pipeline.transcriptionState()?.sessionID != identity {
-                    // Freeze an English legacy import's identity and target
+                    // Freeze a Latin legacy import's identity and target
                     // before the transcription restorer rereads its course.
                     // Legacy captions may not carry their own session ID.
-                    if captionTarget == .english, sessionSnapshot?.storageRevision == 0 {
+                    if captionTarget != .simplifiedChinese, sessionSnapshot?.storageRevision == 0 {
                         try await flushSessionArchive()
                     }
                     if let snapshot = sessionSnapshot {
@@ -3485,7 +3485,7 @@ final class AppModel: ObservableObject {
                 guard ids.isDisjoint(with: summarizedSegmentIDs),
                       draft.matches(evidence: segments.filter { ids.contains($0.id) }, model: modelName,
                                     systemPrompt: LearningPrompts.generationPrompt(target: captionTarget,
-                                        recoveringAfterOutputLimit: captionTarget == .english && summaryRecoveryCharacters != nil)),
+                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil)),
                       sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName, systemPrompt: draft.systemPrompt) }) ?? true else { return nil }
                 return draft
             }
@@ -3526,7 +3526,7 @@ final class AppModel: ObservableObject {
                             pending: pending, target: captionTarget),
                         target: captionTarget,
                         systemPrompt: LearningPrompts.generationPrompt(target: captionTarget,
-                                        recoveringAfterOutputLimit: captionTarget == .english && summaryRecoveryCharacters != nil),
+                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil),
                         pendingTargets: pending.map(\.id), contextRevision: learningNotebook.revision,
                         dependencyIDs: dependencies
                     )

@@ -79,7 +79,7 @@ struct LearningPoint: Codable, Equatable, Sendable {
 
 
     func markdown(target: CaptionTranslationTarget = .simplifiedChinese) -> String {
-        guard target == .english else { return markdown }
+        guard target != .simplifiedChinese else { return markdown }
         let kindLabel = ClassroomFixedText.kindLabel(kind, target: target)
         if hasOpenQuestion {
             let pending = ClassroomFixedText.kindPending.text(targetCode: target.rawValue, useTargetLanguage: true)
@@ -124,7 +124,7 @@ struct LearningFollowUp: Codable, Equatable, Sendable {
             case .conflict: key = .stateConflict
             case .unclear: key = .stateUnclear
             }
-            return key.text(targetCode: target.rawValue, useTargetLanguage: target == .english)
+            return key.text(targetCode: target.rawValue, useTargetLanguage: target != .simplifiedChinese)
         }
     }
 
@@ -251,7 +251,7 @@ struct LearningNote: Codable, Equatable, Sendable {
     }
 
     func markdown(target: CaptionTranslationTarget) -> String {
-        guard target == .english else { return markdown }
+        guard target != .simplifiedChinese else { return markdown }
         if noNewKnowledge == true { return "" }
         return "## \(topic)\n" + points.map { $0.markdown(target: target) }.joined(separator: "\n")
     }
@@ -264,7 +264,8 @@ struct LearningNote: Codable, Equatable, Sendable {
         let units = Dictionary(uniqueKeysWithValues: LearningSourceUnit.make(evidence, target: target).map { ($0.id, $0) })
         // One frozen evidence snapshot, one binding call; never retained by the note/notebook.
         var numericSources = LearningNumericProvenance.SourceIndex(
-            batchTexts: evidence.flatMap { LearningSourceUnit.bindingTexts(for: $0, target: target) })
+            batchTexts: evidence.flatMap { LearningSourceUnit.bindingTexts(for: $0, target: target) }, target: target,
+            languageGroups: evidence.flatMap { LearningSourceUnit.textGroups(for: $0, target: target) })
         for index in result.points.indices {
             var point = result.points[index]
             // Version 2 returns IDs, not copied quotes. Resolve against the frozen input only.
@@ -320,6 +321,15 @@ struct LearningNote: Codable, Equatable, Sendable {
 
     private static func hasReference(_ source: LearningPoint.Source, evidence: [TranscriptSegment], target: CaptionTranslationTarget) -> Bool {
         // This is an informational source hint, never a semantic ambiguity verdict.
+        if target.isSpanishOrFrench {
+            for group in LearningSourceUnit.textGroups(for: evidence[source.index], target: target) {
+                guard let range = group.text.range(of: source.quote) else { continue }
+                if source.quote.range(of: LatinLearningText.referencePattern(language: group.language), options: .regularExpression) != nil { return true }
+                let before = String(group.text[..<range.lowerBound].suffix(24))
+                if before.range(of: LatinLearningText.referencePattern(language: group.language, atEnd: true), options: .regularExpression) != nil { return true }
+            }
+            return false
+        }
         let pattern = #"(?i)\b(its|their)\b|它的|其(?:质量|浓度|温度|速度|密度|复杂度|长度|条件)"#
         if source.quote.range(of: pattern, options: .regularExpression) != nil { return true }
         // A quote starting just after "Its" must not hide that the owner is a pronoun.
@@ -756,6 +766,8 @@ enum LearningNumericProvenance {
     /// The batch snapshot cannot be replaced; start a new index for every new binding.
     fileprivate struct SourceIndex {
         private let batchTexts: [String]
+        private let target: CaptionTranslationTarget
+        private let languageGroups: [(language: String, text: String)]
         // Byte keys avoid conflating canonically equivalent but differently encoded text.
         private var parsedTexts: [Data: [Mention]] = [:]
         private var parsedBatch: [Mention]?
@@ -764,14 +776,26 @@ enum LearningNumericProvenance {
         private var indexTexts: [Data: [CodeIndex]] = [:]
         private var indexBatch: Set<String>?
 
-        init(batchTexts: [String]) { self.batchTexts = batchTexts }
+        init(batchTexts: [String], target: CaptionTranslationTarget = .simplifiedChinese,
+             languageGroups: [(language: String, text: String)] = []) {
+            self.batchTexts = batchTexts; self.target = target; self.languageGroups = languageGroups
+        }
 
         mutating func mentions(in texts: [String]) -> [Mention] {
             texts.flatMap { text in
                 let key = Data(text.utf8)
                 if let parsed = parsedTexts[key] { return parsed }
-                let parsed = LearningNumericProvenance.numericMentions(in: text, preservingCountScalars: true,
+                let parsed: [Mention]
+                if target.isSpanishOrFrench {
+                    let languages = Set(languageGroups.filter { $0.text.contains(text) }.map(\.language))
+                    // A shared literal with conflicting language conventions is not reliable support.
+                    let language = languages.count == 1 ? languages.first! : target.rawValue
+                    parsed = languages.count > 1 ? [] : LatinLearningText.mentions(in: text, language: language,
+                        excluding: codeIndexes(in: text).map(\.range))
+                } else {
+                    parsed = LearningNumericProvenance.numericMentions(in: text, preservingCountScalars: true,
                                                                       indexes: codeIndexes(in: text))
+                }
                 parsedTexts[key] = parsed
                 return parsed
             }
@@ -852,7 +876,7 @@ enum LearningNumericProvenance {
     /// 和**本次生成的整批输入**是否站得住 ✓（分级规则见类型文档 ✓）。
     static func report(claim: String, cited: [String], segmentTexts: [String],
                        batchTexts: [String] = [], target: CaptionTranslationTarget = .simplifiedChinese) -> Report {
-        var sources = SourceIndex(batchTexts: batchTexts)
+        var sources = SourceIndex(batchTexts: batchTexts, target: target)
         return report(claim: claim, cited: cited, segmentTexts: segmentTexts, sources: &sources, target: target)
     }
 
@@ -873,7 +897,11 @@ enum LearningNumericProvenance {
         // "50 marks" must still support the existing unitless score rule.
         let own = sources.mentions(in: cited + segmentTexts)
         let batch = sources.batchMentions()
-        for mention in numericMentions(in: claim, preservingCountScalars: false, indexes: indexes) where mention.role != .designator {
+        let claimMentions = target.isSpanishOrFrench
+            ? LatinLearningText.mentions(in: claim, language: target.rawValue,
+                excluding: indexes.map(\.range) + numberLiterals(in: claim).map(\.range))
+            : numericMentions(in: claim, preservingCountScalars: false, indexes: indexes)
+        for mention in claimMentions where mention.role != .designator {
             if mention.role == .count {
                 if own.contains(where: { $0.value == mention.value && $0.role == .count }) { continue }
                 let location = batch.contains(where: { $0.value == mention.value && $0.role == .count })
@@ -954,8 +982,8 @@ struct LearningSourceUnit: Encodable, Equatable, Sendable {
     /// only the target group; pass-through speech uses target-normalized text.
     static func textGroups(for segment: TranscriptSegment, target: CaptionTranslationTarget = .simplifiedChinese) -> [(language: String, text: String)] {
         let policy = target.sourcePolicy(for: segment.sourceLanguage)
-        if target == .english, policy.keepsSourceAsCaption {
-            return [("en", target.renderPassThrough(segment.english))]
+        if target != .simplifiedChinese, policy.keepsSourceAsCaption {
+            return [(target.rawValue, target.renderPassThrough(segment.english))]
         }
         if policy.usesEnglishTranslationPipeline {
             return [("en", segment.english), (policy.targetEvidenceLanguage, segment.chinese)]
@@ -1220,11 +1248,16 @@ struct LearningNotebook: Sendable {
                     self.target == .simplifiedChinese || (batch.evidence.indices.contains(source.index) && LearningSourceUnit.bindingTexts(for: batch.evidence[source.index], target: self.target).contains { $0.contains(source.quote) })
                 }
                 let quotes = sources.map(\.quote)
-                let context = quotes.isEmpty ? batch.evidence.map { segment in
-                    if self.target == .english { return LearningSourceUnit.textGroups(for: segment, target: self.target).first?.text ?? "" }
-                    if segment.sourceLanguage != nil { return LearningSourceUnit.textGroups(for: segment).first?.text ?? "" }
-                    return segment.english.isEmpty ? segment.chinese : segment.english
-                } : quotes
+                let fallbackGroups = self.target.isSpanishOrFrench ? batch.evidence.enumerated().flatMap { index, segment in
+                    LearningSourceUnit.textGroups(for: segment, target: self.target).filter { !$0.text.isEmpty }
+                        .map { (index: index, text: $0.text) }
+                } : []
+                let context = quotes.isEmpty && self.target.isSpanishOrFrench ? fallbackGroups.map(\.text)
+                    : quotes.isEmpty ? batch.evidence.map { segment in
+                        if self.target == .english { return LearningSourceUnit.textGroups(for: segment, target: self.target).first?.text ?? "" }
+                        if segment.sourceLanguage != nil { return LearningSourceUnit.textGroups(for: segment).first?.text ?? "" }
+                        return segment.english.isEmpty ? segment.chinese : segment.english
+                    } : quotes
                 let candidateSources = Array((candidates[id] ?? []).suffix(2).flatMap { candidate in
                     (candidate.point.sources ?? []).filter { source in
                         self.target == .simplifiedChinese || (candidate.batch.evidence.indices.contains(source.index) && LearningSourceUnit.bindingTexts(for: candidate.batch.evidence[source.index], target: self.target).contains { $0.contains(source.quote) })
@@ -1241,7 +1274,8 @@ struct LearningNotebook: Sendable {
                 let frozenQuotes = Array(context.prefix(2)).map { String($0.prefix(600)) }
                 let origins = frozenQuotes.enumerated().map { position, quote in
                     Self.quoteOrigins(quote, in: batch, number: offset + 1,
-                                      index: quotes.isEmpty ? position : sources[position].index, target: self.target)
+                                      index: quotes.isEmpty ? (self.target.isSpanishOrFrench ? fallbackGroups[position].index : position)
+                                          : sources[position].index, target: self.target)
                 }
                 return PendingPoint(id: id, question: point.needsContext ?? ClassroomFixedText.pendingQuestion.noteText(target: self.target),
                                     quotes: frozenQuotes,
@@ -1262,9 +1296,9 @@ struct LearningNotebook: Sendable {
         let current = Self.terms(evidence.map { segment in
             self.target == .simplifiedChinese ? segment.english + " " + segment.chinese
                 : LearningSourceUnit.textGroups(for: segment, target: self.target).map(\.text).joined(separator: " ")
-        }.joined(separator: " "))
+        }.joined(separator: " "), target: self.target)
         let scored = pending.enumerated().map { index, point in
-            (index: index, point: point, score: current.intersection(Self.terms(point.quotes.joined(separator: " ") + " " + point.question)).count)
+            (index: index, point: point, score: current.intersection(Self.terms(point.quotes.joined(separator: " ") + " " + point.question, target: self.target)).count)
         }
         var selected = scored.filter { $0.score > 0 }.sorted {
             if $0.point.referenceCheck != $1.point.referenceCheck { return !$0.point.referenceCheck }
@@ -1281,7 +1315,8 @@ struct LearningNotebook: Sendable {
         return selected
     }
 
-    fileprivate static func terms(_ text: String) -> Set<String> {
+    static func terms(_ text: String, target: CaptionTranslationTarget = .simplifiedChinese) -> Set<String> {
+        if target.isSpanishOrFrench { return LatinLearningText.terms(text, target: target) }
         // Retrieval only: overlap never establishes ownership or correctness.
         let regex = try! NSRegularExpression(pattern: #"[a-z]{2,}|[\p{Han}]{2}"#)
         let text = text.lowercased()
@@ -1451,17 +1486,17 @@ struct LearningNotebook: Sendable {
             case .supplemented:
                 guard let index = entry.record.pointIndex, entry.batch.note.points.indices.contains(index) else { return "" }
                 let text = entry.batch.note.points[index].text
-                let line = self.target == .english ? stateLine(text)
+                let line = self.target != .simplifiedChinese ? stateLine(text)
                     : "\n\(indentation)- " + ClassroomFixedText.followUpSupplementLine.noteFormat([head, text], target: self.target)
                 return line
                     + "\n\(indentation)  - " + ClassroomFixedText.retiredExplanation.noteText(target: self.target)
             case .conflict:
-                if self.target == .english {
+                if self.target != .simplifiedChinese {
                     return stateLine(entry.record.detail ?? ClassroomFixedText.conflictFallback.noteText(target: self.target))
                 }
                 return "\n\(indentation)- " + ClassroomFixedText.followUpConflictLine.noteFormat([head, entry.record.detail ?? ClassroomFixedText.conflictFallback.noteText(target: self.target)], target: self.target)
             case .unclear:
-                if self.target == .english {
+                if self.target != .simplifiedChinese {
                     return stateLine(entry.record.detail ?? ClassroomFixedText.unclearFallback.noteText(target: self.target))
                 }
                 return "\n\(indentation)- " + ClassroomFixedText.followUpUnclearLine.noteFormat([head, entry.record.detail ?? ClassroomFixedText.unclearFallback.noteText(target: self.target)], target: self.target)
@@ -2665,10 +2700,11 @@ struct LearningDraft: Sendable {
           systemPrompt: String? = nil) {
         guard let target = (try? OutputLanguage.storedLanguage(snapshot.targetLocale))?.generationTarget else { return nil }
         let defaultPrompt: String
-        if target == .english {
-            let recoveryDigest = SessionArchiveCoding.digest(Data(LearningPrompts.recoveryEnglish.utf8))
+        if target != .simplifiedChinese {
+            let recovery = LearningPrompts.generationPrompt(target: target, recoveringAfterOutputLimit: true)
+            let recoveryDigest = SessionArchiveCoding.digest(Data(recovery.utf8))
             defaultPrompt = checkpoint.promptDigest == recoveryDigest
-                ? LearningPrompts.recoveryEnglish : LearningPrompts.generateEnglish
+                ? recovery : target.learningNotePrompt
         } else {
             defaultPrompt = target.learningNotePrompt
         }
@@ -2893,7 +2929,8 @@ enum LearningPrompts {
         switch target {
         case .simplifiedChinese: return generate
         case .english: return recoveringAfterOutputLimit ? recoveryEnglish : generateEnglish
-        case .spanish, .french: return "" // Registered by step 26.
+        case .spanish: return recoveringAfterOutputLimit ? LatinLearningPrompts.recoverySpanish : LatinLearningPrompts.generateSpanish
+        case .french: return recoveringAfterOutputLimit ? LatinLearningPrompts.recoveryFrench : LatinLearningPrompts.generateFrench
         }
     }
 
@@ -2905,7 +2942,7 @@ enum LearningPrompts {
         encoder.outputFormatting = .sortedKeys
         // The legacy branch below is byte-frozen, including English requests
         // with follow-ups. Current evidence and the response grammar stay unchanged.
-        if (target == .english || evidence.contains(where: { target.sourcePolicy(for: $0.sourceLanguage).usesIndexedPendingEvidence })), !pending.isEmpty {
+        if (target != .simplifiedChinese || evidence.contains(where: { target.sourcePolicy(for: $0.sourceLanguage).usesIndexedPendingEvidence })), !pending.isEmpty {
             struct PriorEvidence: Encodable {
                 let id: String
                 let scope = "prior"
@@ -2968,10 +3005,10 @@ enum LearningPrompts {
                 let quoteIDs = references(point.quotes, origins: point.quoteOrigins, allowCurrent: false)
                 let candidateIDs = references(point.candidateQuotes, origins: point.candidateQuoteOrigins, allowCurrent: true)
                 return IndexedFollowUp(id: "q\(index)",
-                    question: ClassroomFixedText.neutralQuestion.text(targetCode: target.rawValue, useTargetLanguage: target == .english),
+                    question: ClassroomFixedText.neutralQuestion.text(targetCode: target.rawValue, useTargetLanguage: target != .simplifiedChinese),
                     quoteIDs: quoteIDs, candidateQuoteIDs: candidateIDs, referenceCheck: point.referenceCheck)
             }
-            if target == .english {
+            if target != .simplifiedChinese {
                 return String(decoding: try encoder.encode(EnglishIndexedInput(evidence: units, pendingPoints: indexed,
                     priorEvidence: prior, pendingEvidenceRule: ClassroomFixedText.priorEvidenceRule.text(
                         targetCode: target.rawValue, useTargetLanguage: true))), as: UTF8.self)
@@ -2982,7 +3019,7 @@ enum LearningPrompts {
         // Do not feed generated titles or old assertions back as premises. Questions
         // are neutral too: a model-written question can itself contain a false premise.
         let followUps = pending.prefix(4).enumerated().map { index, point in
-            FollowUp(id: "q\(index)", question: ClassroomFixedText.neutralQuestion.text(targetCode: target.rawValue, useTargetLanguage: target == .english),
+            FollowUp(id: "q\(index)", question: ClassroomFixedText.neutralQuestion.text(targetCode: target.rawValue, useTargetLanguage: target != .simplifiedChinese),
                      quotes: point.quotes, candidateQuotes: point.candidateQuotes, referenceCheck: point.referenceCheck)
         }
         return String(decoding: try encoder.encode(Input(evidence: LearningSourceUnit.make(evidence, target: target), pendingPoints: followUps)), as: UTF8.self)
@@ -3085,13 +3122,13 @@ enum LearningPrompts {
         }
         let terms = LearningNotebook.terms(batch.evidence.map {
             LearningSourceUnit.textGroups(for: $0, target: target).map(\.text).joined(separator: " ")
-        }.joined(separator: " "))
+        }.joined(separator: " "), target: target)
         let available = laterBatches.enumerated().flatMap { index, subsequent in
             LearningSourceUnit.make(subsequent.evidence, target: target).map { LaterEvidence(batchOffset: index + 1, source: $0) }
         }
         var ranked: [(index: Int, item: LaterEvidence, score: Int)] = []
         for (index, item) in available.enumerated() {
-            let score = terms.intersection(LearningNotebook.terms(item.source.text)).count
+            let score = terms.intersection(LearningNotebook.terms(item.source.text, target: target)).count
             if score > 0 { ranked.append((index, item, score)) }
         }
         ranked.sort {
@@ -3268,7 +3305,9 @@ final class LearningReviewQueue: ObservableObject {
         case .english:
             guard allowUnreleased || language.isReleased else { return nil }
             return LearningPrompts.reviewEnglish
-        case .spanish, .french: return nil // Registered by step 26.
+        case .spanish, .french:
+            guard allowUnreleased || language.isReleased else { return nil }
+            return target.learningReviewPrompt
         }
     }
 

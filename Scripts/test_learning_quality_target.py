@@ -88,9 +88,9 @@ class TargetSourceUnitTests(unittest.TestCase):
 
     def test_unknown_target_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported-caption-target"):
-            scorer.verify_units([], [], target="fr")
+            scorer.verify_units([], [], target="de")
         with self.assertRaisesRegex(ValueError, "unsupported-caption-target"):
-            scorer.source_text_groups({"english": "Water.", "chinese": "Water."}, target="fr")
+            scorer.source_text_groups({"english": "Water.", "chinese": "Water."}, target="de")
 
     def test_pending_fallback_quotes_bind_to_english_target(self):
         reference = "old:0"
@@ -202,9 +202,9 @@ class TargetDisplayTests(unittest.TestCase):
 
     def test_display_helpers_reject_unknown_target(self):
         for function in (
-            lambda: scorer.point_line(self.point(), target="fr"),
-            lambda: scorer.followup_state_label("缺信息", target="fr"),
-            lambda: scorer.rendered_contains("- x", "body", "- x", target="fr")
+            lambda: scorer.point_line(self.point(), target="de"),
+            lambda: scorer.followup_state_label("缺信息", target="de"),
+            lambda: scorer.rendered_contains("- x", "body", "- x", target="de")
         ):
             with self.assertRaisesRegex(ValueError, "unsupported-caption-target"):
                 function()

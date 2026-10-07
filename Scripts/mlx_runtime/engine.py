@@ -137,7 +137,7 @@ class Engine:
             raise ValueError('Thinking delimiter must be one token for this adapter')
         identity = [('runtime', [(name, version(name)) for name in
                     ('mlx', 'mlx-lm', 'outlines', 'outlines_core', 'transformers')])]
-        for name in ('engine.py', 'schemas.py', 'checks.py', 'worker.py', 'grammar_vocabulary.py', 'review_diagnostics.py'):
+        for name in ('engine.py', 'schemas.py', 'checks.py', 'worker.py', 'grammar_vocabulary.py', 'review_diagnostics.py', 'latin_numbers.py'):
             source = Path(__file__).with_name(name)
             if source.is_file():
                 identity.append((name, hashlib.sha256(source.read_bytes()).hexdigest()))
