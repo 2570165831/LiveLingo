@@ -96,6 +96,7 @@ final class CaptionIdentityTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveLingo-CaptionIdentity-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-CaptionIdentity-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
@@ -104,7 +105,7 @@ final class CaptionIdentityTests: XCTestCase {
             }
         addTeardownBlock {
             await queue.shutdownForTesting()
-            UserDefaults.standard.removePersistentDomain(forName: suite)
+            try preferenceCleanup.remove()
             if FileManager.default.fileExists(atPath: root.path) {
                 try FileManager.default.removeItem(at: root)
             }

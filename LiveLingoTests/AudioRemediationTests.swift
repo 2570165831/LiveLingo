@@ -1202,9 +1202,14 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         let reviews = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _ in
             throw CancellationError()
         }
-        addTeardownBlock { await reviews.shutdownForTesting() }
-        let model = AppModel(reviewQueue: reviews, backgroundServices: false,
-                             defaults: UserDefaults(suiteName: "LiveLingo-Test-\(UUID())")!)
+        let suite = "LiveLingo-Test-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock {
+            await reviews.shutdownForTesting()
+            try preferenceCleanup.remove()
+        }
+        let model = AppModel(reviewQueue: reviews, backgroundServices: false, defaults: defaults)
         model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: 750, end: 760,
             message: "此处尚未得到可靠的英文转写，音频已保留。"))
         XCTAssertEqual(model.sessionNotice, "12:30–12:40 · 此处尚未得到可靠的英文转写，音频已保留。")

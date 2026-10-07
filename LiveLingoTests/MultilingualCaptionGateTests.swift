@@ -25,6 +25,7 @@ final class MultilingualCaptionGateTests: XCTestCase {
                                                      isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let suite = "LiveLingo-MultilingualCaptionGate-\(UUID().uuidString)"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
                                        observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
@@ -33,7 +34,7 @@ final class MultilingualCaptionGateTests: XCTestCase {
         }
         addTeardownBlock {
             await queue.shutdownForTesting()
-            UserDefaults.standard.removePersistentDomain(forName: suite)
+            try preferenceCleanup.remove()
             try FileManager.default.removeItem(at: directory)
         }
         // No preference setters: the isolated suite is read without persisting values.

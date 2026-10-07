@@ -152,11 +152,12 @@ final class MultilingualPreviewPresentationTests: XCTestCase {
     private var artifactDirectory: URL?
 
     private func model() throws -> AppModel {
-        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("work/step9-presentation-\(UUID().uuidString)", isDirectory: true)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("step9-presentation-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         artifactDirectory = directory
         let suite = "MultilingualPreview-\(UUID().uuidString)"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         // Avoid changing any persistent app or system preference.
         defaults.setVolatileDomain(["transcriptTextSize": 18.0, "floatingTextSize": 24.0], forName: suite)
@@ -171,6 +172,7 @@ final class MultilingualPreviewPresentationTests: XCTestCase {
         addTeardownBlock {
             await model.resetTranslationSessionForTesting()?.value
             await queue.shutdownForTesting()
+            try preferenceCleanup.remove()
         }
         return model
     }

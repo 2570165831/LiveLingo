@@ -75,7 +75,7 @@ final class CaptionStabilityPublicationTests: XCTestCase {
     private var releases: [@MainActor () -> Void] = []
     private var invocations: [PublicationSummaryInvocation] = []
     private var retainedTasks: [Task<Void, Never>] = []
-    private var fixtures: [(model: AppModel, queue: LearningReviewQueue, root: URL, suite: String)] = []
+    private var fixtures: [(model: AppModel, queue: LearningReviewQueue, root: URL, preferenceCleanup: TestPreferenceCleanup)] = []
     private var completedArchives: Set<URL> = []
     private var teardownRegistered = false
 
@@ -138,7 +138,7 @@ final class CaptionStabilityPublicationTests: XCTestCase {
         for fixture in fixtures {
             let shutdown = Task { @MainActor in await fixture.queue.shutdownForTesting() }
             try await join(shutdown, "The isolated review queue did not shut down")
-            UserDefaults.standard.removePersistentDomain(forName: fixture.suite)
+            try fixture.preferenceCleanup.remove()
             // A completed archive has also observed its final persisted state.
             // Preserve an interrupted archive for inspection rather than race
             // an unexposed SessionSaveCoordinator writer with directory removal.
@@ -158,6 +158,7 @@ final class CaptionStabilityPublicationTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveLingo-Publication-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-Publication-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
@@ -168,7 +169,7 @@ final class CaptionStabilityPublicationTests: XCTestCase {
                              backgroundServices: false, scheduledNotes: false, defaults: defaults)
         model.resetTranslationSessionForTesting()
         model.configureNoteSchedulingForTesting(now: { 100 }, sleep: { _ in throw CancellationError() })
-        fixtures.append((model, queue, root, suite))
+        fixtures.append((model, queue, root, preferenceCleanup))
         return model
     }
 

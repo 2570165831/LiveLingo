@@ -155,7 +155,7 @@ private final class CaptionSchedulingFixture {
     let model: AppModel
     let root: URL
     let queue: LearningReviewQueue
-    let suite: String
+    private let preferenceCleanup: TestPreferenceCleanup
     var repairGate: CaptionSchedulingRepairGate?
     var retainedTasks: [Task<Void, Never>] = []
 
@@ -163,7 +163,8 @@ private final class CaptionSchedulingFixture {
          translation: CaptionTranslationDependencies? = nil) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "LiveLingo-CaptionScheduling-\(UUID())", isDirectory: true)
-        suite = "LiveLingo-CaptionScheduling-\(UUID())"
+        let suite = "LiveLingo-CaptionScheduling-\(UUID())"
+        preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review-queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
@@ -235,7 +236,7 @@ private final class CaptionSchedulingFixture {
         model.resetTranslationSessionForTesting()
         for task in owned { await task.value }
         await queue.shutdownForTesting()
-        UserDefaults.standard.removePersistentDomain(forName: suite)
+        try preferenceCleanup.remove()
         if FileManager.default.fileExists(atPath: root.path) {
             try FileManager.default.removeItem(at: root)
         }

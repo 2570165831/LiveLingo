@@ -535,6 +535,7 @@ final class MultilingualLearningNotesTests: XCTestCase {
     func testV2bOutputLimitRecoveryRebuildsPriorAndCurrentReferencesForEveryRequest() async throws {
         let fixture = try multilingualV2bFixture()
         let suite = "LiveLingo-V2bRecovery-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveLingo-V2bRecovery-\(UUID())", isDirectory: true)
@@ -572,7 +573,7 @@ final class MultilingualLearningNotesTests: XCTestCase {
         addTeardownBlock {
             await model.resetTranslationSessionForTesting()?.value
             await queue.shutdownForTesting()
-            UserDefaults.standard.removePersistentDomain(forName: suite)
+            try preferenceCleanup.remove()
             if FileManager.default.fileExists(atPath: directory.path) {
                 try FileManager.default.removeItem(at: directory)
             }

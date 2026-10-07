@@ -183,6 +183,7 @@ final class CaptionStabilityLifecycleTests: XCTestCase {
             .appendingPathComponent("LiveLingo-StabilityLifecycle-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let suite = "LiveLingo-StabilityLifecycle-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let probe = StabilityNoteProbe(captionCount: captionCount, failFirst: failFirst, gate: gate)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review-queue.json"),
@@ -201,7 +202,7 @@ final class CaptionStabilityLifecycleTests: XCTestCase {
 
         addTeardownBlock { @MainActor [self] in
             clock.shutdown()
-            await cleanup(model: model, queue: queue, root: root, suite: suite, gate: gate)
+            try await cleanup(model: model, queue: queue, root: root, preferenceCleanup: preferenceCleanup, gate: gate)
         }
         var snapshot = SessionSnapshot()
         snapshot.segments = [TranscriptSegment(startTime: 0, endTime: 8,
@@ -248,7 +249,7 @@ final class CaptionStabilityLifecycleTests: XCTestCase {
     }
 
     private func cleanup(model: AppModel, queue: LearningReviewQueue, root: URL,
-                         suite: String, gate: StabilityNoteGate?) async {
+                         preferenceCleanup: TestPreferenceCleanup, gate: StabilityNoteGate?) async throws {
         let ownedTasks = [model.savedProcessingTaskForTesting, model.translationTaskForTesting,
                           model.summaryTaskForTesting, model.summaryWakeTaskForTesting].compactMap { $0 }
         let oldPause = model.savedPauseTaskForTesting
@@ -274,7 +275,7 @@ final class CaptionStabilityLifecycleTests: XCTestCase {
             }
         }
         await queue.shutdownForTesting()
-        UserDefaults.standard.removePersistentDomain(forName: suite)
+        try preferenceCleanup.remove()
         // Do not remove the fixture while a failed park could still be writing.
         if parked, FileManager.default.fileExists(atPath: root.path) {
             do { try FileManager.default.removeItem(at: root) }

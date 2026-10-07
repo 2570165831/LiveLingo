@@ -33,6 +33,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveLingo-StabilityDraft-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-StabilityDraft-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
@@ -49,7 +50,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
         addTeardownBlock {
             _ = await MainActor.run { model.resetTranslationSessionForTesting() }
             await queue.shutdownForTesting()
-            UserDefaults.standard.removePersistentDomain(forName: suite)
+            try preferenceCleanup.remove()
             if FileManager.default.fileExists(atPath: root.path) {
                 try FileManager.default.removeItem(at: root)
             }

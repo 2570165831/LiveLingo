@@ -25,8 +25,13 @@ final class OutputLanguageBaselineTests: XCTestCase {
                 throw CancellationError()
             }
         await queue.shutdownForTesting()
-        let defaults = try XCTUnwrap(ReadOnlyDefaults(suiteName: "OutputLanguageBaseline-\(UUID())"))
-        addTeardownBlock { try FileManager.default.removeItem(at: directory) }
+        let suite = "OutputLanguageBaseline-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(ReadOnlyDefaults(suiteName: suite))
+        addTeardownBlock {
+            try preferenceCleanup.remove()
+            try FileManager.default.removeItem(at: directory)
+        }
         return AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
                         backgroundServices: false, scheduledNotes: false, defaults: defaults)
     }

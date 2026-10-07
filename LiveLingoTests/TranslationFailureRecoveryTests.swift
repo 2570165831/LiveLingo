@@ -33,7 +33,9 @@ final class TranslationFailureRecoveryTests: XCTestCase {
 
     private func fixture(_ dependencies: CaptionTranslationDependencies) throws -> (AppModel, URL) {
         let root = try directory()
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "LiveLingo-Item7-\(UUID())"))
+        let suite = "LiveLingo-Item7-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         // Volatile overrides avoid changing a persistent preference domain.
         defaults.setVolatileDomain(["LiveLingo.modelMode": ModelMode.energySaver.rawValue], forName: UserDefaults.argumentDomain)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
@@ -47,6 +49,7 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         addTeardownBlock {
             await model.resetTranslationSessionForTesting()?.value
             await queue.shutdownForTesting()
+            try preferenceCleanup.remove()
         }
         return (model, root)
     }

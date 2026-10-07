@@ -39,9 +39,8 @@ final class TranslationRetirementRegressionTests: XCTestCase {
     private func fixture(controlTimeout: TimeInterval = 0.3, holdControl: Bool = true)
         throws -> (MLXRuntime, URL, TranslationRetirementProbe) {
         // Keep all fixtures within this task's allowed DerivedData directory.
-        let lab = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let root = lab.appendingPathComponent("work/dd/translation-retirement-\(UUID())", isDirectory: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("translation-retirement-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let script = root.appendingPathComponent("fake-retirement-worker.pl")
         try Self.fakeWorker.write(to: script, atomically: true, encoding: .utf8)

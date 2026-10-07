@@ -13,8 +13,6 @@ import unittest
 from Scripts.target_eval import corpora as c
 
 SOURCE = Path(__file__).resolve().parents[1]
-LAB = SOURCE.parent
-DERIVED = LAB / "work" / "dd-latin" / "target-acceptance-cli"
 
 
 class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
@@ -242,16 +240,16 @@ class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
             self.assertFalse((root / "escape").exists())
 
     def test_prompt_output_root_comes_from_environment_not_cwd(self):
-        with tempfile.TemporaryDirectory(prefix="synthetic-cli-runtime-", dir=self.output) as scratch:
+        with tempfile.TemporaryDirectory(prefix="synthetic-cli-runtime-", dir=self.output) as scratch, \
+                tempfile.TemporaryDirectory(prefix="synthetic-cli-cwd-") as cwd:
             destination = Path(scratch) / "prompts"
             reply = subprocess.run([str(self.cli), "prompts", "--output-dir", str(destination)],
-                                   cwd=LAB / "work" / "dd-latin", capture_output=True, text=True, timeout=60)
+                                   cwd=cwd, capture_output=True, text=True, timeout=60)
             self.assertEqual(reply.returncode, 0, reply.stderr)
             self.assertTrue((destination / "manifest.json").is_file())
 
     def test_prompt_export_uses_configured_root_after_binary_relocation(self):
-        DERIVED.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="synthetic-relocated-", dir=DERIVED) as scratch:
+        with tempfile.TemporaryDirectory(prefix="synthetic-relocated-") as scratch:
             relocated = Path(scratch) / "target-acceptance-cli"
             relocated.write_bytes(self.cli.read_bytes())
             relocated.chmod(0o700)
@@ -305,9 +303,18 @@ class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(len(json.loads((Path(path) / "manifest.json").read_text())["prompts"]), 14)
 
     def test_build_directory_creation_is_exclusive_and_rejects_checkout(self):
-        script = Path(__file__).resolve().parent / "build-target-eval-cli.sh"
         with tempfile.TemporaryDirectory(prefix="synthetic-build-exclusive-", dir=self.output) as scratch:
             root = Path(scratch)
+            # Run the unmodified build script from a temporary checkout so its
+            # derived directories also stay inside the configured output root.
+            source = root / "source"
+            scripts = source / "Scripts"
+            (scripts / "target_eval").mkdir(parents=True)
+            for name in ("build-target-eval-cli.sh", "target_eval/__init__.py",
+                         "target_eval/corpora.py", "target_eval/reference_annotations.py"):
+                (scripts / name).write_bytes((SOURCE / "Scripts" / name).read_bytes())
+            script = scripts / "build-target-eval-cli.sh"
+            derived = source.parent / "work" / "dd-latin" / "target-acceptance-cli"
             tools = root / "bin"
             tools.mkdir()
             # Synthetic compiler only verifies directory reservation. It writes
@@ -331,8 +338,8 @@ class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
             invocation = json.loads((destination / "synthetic-build-arguments.json").read_text())
             args = invocation["args"]
             self.assertEqual(args[args.index("-file-prefix-map") + 1], str(script.parent.parent) + "=.")
-            self.assertEqual(Path(args[args.index("-module-cache-path") + 1]), DERIVED / destination.name / "ModuleCache.noindex")
-            self.assertEqual(Path(invocation["tmp"]), DERIVED / destination.name / "tmp")
+            self.assertEqual(Path(args[args.index("-module-cache-path") + 1]), derived / destination.name / "ModuleCache.noindex")
+            self.assertEqual(Path(invocation["tmp"]), derived / destination.name / "tmp")
             environment.pop(c.OUTPUT_ROOT_ENV)
             rejected = subprocess.run(["/bin/bash", str(script), str(root / "unset-root")],
                                       env=environment, capture_output=True, timeout=20)
@@ -340,10 +347,10 @@ class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
             self.assertIn(c.OUTPUT_ROOT_ENV.encode(), rejected.stderr)
             self.assertFalse((root / "unset-root").exists())
             environment[c.OUTPUT_ROOT_ENV] = str(self.output)
-            rejected = subprocess.run(["/bin/bash", str(script), str(SOURCE / "forbidden-build-output")],
+            rejected = subprocess.run(["/bin/bash", str(script), str(source / "forbidden-build-output")],
                                       env=environment, capture_output=True, timeout=20)
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertFalse((SOURCE / "forbidden-build-output").exists())
+            self.assertFalse((source / "forbidden-build-output").exists())
 
 
 if __name__ == "__main__":

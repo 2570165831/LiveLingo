@@ -368,9 +368,8 @@ final class LatinTargetAcceptanceTests: XCTestCase {
             .appendingPathComponent("LatinDefaultPipeline-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let suite = "LiveLingo-LatinDefaultPipeline-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        let preferenceFile = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Preferences/" + suite + ".plist")
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
                 XCTFail("Caption tests must not load models or create notes")
@@ -397,13 +396,7 @@ final class LatinTargetAcceptanceTests: XCTestCase {
         addTeardownBlock {
             await model.resetTranslationSessionForTesting()?.value
             await queue.shutdownForTesting()
-            let teardownDefaults = UserDefaults(suiteName: suite)
-            teardownDefaults?.removePersistentDomain(forName: suite)
-            teardownDefaults?.synchronize()
-            if FileManager.default.fileExists(atPath: preferenceFile.path) {
-                try FileManager.default.removeItem(at: preferenceFile)
-            }
-            XCTAssertFalse(FileManager.default.fileExists(atPath: preferenceFile.path))
+            try preferenceCleanup.remove()
             try FileManager.default.removeItem(at: directory)
         }
         model.receiveCaptionForTesting("The temperature increases.", start: 0, end: 1)

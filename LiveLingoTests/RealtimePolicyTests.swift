@@ -689,8 +689,14 @@ final class RealtimePolicyTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingoLearningTests-\(UUID())")
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _ in throw CancellationError() }
-        addTeardownBlock { await queue.shutdownForTesting() }
-        let model = AppModel(reviewQueue: queue, backgroundServices: false, defaults: UserDefaults(suiteName: "LiveLingo-Test-\(UUID())")!)
+        let suite = "LiveLingo-Test-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock {
+            await queue.shutdownForTesting()
+            try preferenceCleanup.remove()
+        }
+        let model = AppModel(reviewQueue: queue, backgroundServices: false, defaults: defaults)
         XCTAssertNotNil(queue.onUpdate)
         queue.onUpdate?(root, "旧录音建议", "复查完成")
         XCTAssertEqual(model.reviewAdvice, "")
@@ -1748,6 +1754,8 @@ final class CaptionLifecycleTests: XCTestCase {
                     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-Race-\(UUID())")
                     addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
                     let suite = "LiveLingo-Race-\(UUID())"
+                    let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
+                    addTeardownBlock { try preferenceCleanup.remove() }
                     let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
                     let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
                                                     observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
@@ -1789,7 +1797,6 @@ final class CaptionLifecycleTests: XCTestCase {
                         XCTAssertTrue(model.segments.isEmpty)
                         XCTAssertNil(model.translationTaskForTesting)
                     }
-                    defaults.removePersistentDomain(forName: suite)
                 }
             }
         }

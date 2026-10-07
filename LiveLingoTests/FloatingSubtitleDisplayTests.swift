@@ -6,8 +6,8 @@ import XCTest
 /// Synthetic hosted views only; no capture, model, translation service or real preferences.
 @MainActor
 final class FloatingSubtitleDisplayTests: XCTestCase {
-    private let artifacts = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        .deletingLastPathComponent().appendingPathComponent("work/display-options", isDirectory: true)
+    private let artifacts = FileManager.default.temporaryDirectory
+        .appendingPathComponent("display-options", isDirectory: true)
 
     private func defaults() throws -> (UserDefaults, String) {
         let suite = "FloatingSubtitleDisplay-\(UUID().uuidString)"

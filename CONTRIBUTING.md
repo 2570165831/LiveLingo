@@ -27,6 +27,7 @@ xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo -configuration Debug \
 ```
 
 - 测试位于 `LiveLingoTests/`，属于发布内容，请不要删除或跳过。
+- 完整测试请将标准输出和错误输出一起保存为日志（例如在上述 `test` 命令末尾加 `> "$TMPDIR/xcodebuild-test.log" 2>&1`），结束后运行 `python3 Scripts/check_test_preferences.py "$TMPDIR/xcodebuild-test.log"`。守护会逐个核对 `TEST_PREFERENCE_CREATED` / `TEST_PREFERENCE_CLEANED` 的 UUID 套件名，并只读确认真实用户的偏好目录中对应文件不存在；缺少成功结束标记、缺失或重复事件、文件残留都会报错。新建偏好套件必须先注册 `TestPreferenceCleanup`，在本测试的任务停止后调用它清理；辅助只接受列明前缀、事先不存在的 UUID 套件和普通文件，不处理历史文件。`TMPDIR` 应指向本次获准的临时目录。
 - 未签名 Release 构建：`./Scripts/build-release.sh`。
 - 签名、DMG 与离线候选组装都需要显式传入路径和签名身份。身份缺失时脚本必须报错；不要添加自动挑选本机身份或降级为 ad-hoc 签名的回退逻辑。
 - 新增或修改脚本请先做语法检查（`zsh -n`、`bash -n`、`python3 -m py_compile`），并在本地实际跑一遍对应流程。

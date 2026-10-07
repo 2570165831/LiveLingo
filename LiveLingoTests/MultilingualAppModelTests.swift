@@ -9,6 +9,7 @@ final class MultilingualAppModelTests: XCTestCase {
             .appendingPathComponent("MultilingualAppModel-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let suite = "LiveLingo-MultilingualAppModel-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
@@ -21,7 +22,7 @@ final class MultilingualAppModelTests: XCTestCase {
         addTeardownBlock {
             await model.resetTranslationSessionForTesting()?.value
             await queue.shutdownForTesting()
-            UserDefaults.standard.removePersistentDomain(forName: suite)
+            try preferenceCleanup.remove()
             try FileManager.default.removeItem(at: directory)
         }
         return (model, directory)

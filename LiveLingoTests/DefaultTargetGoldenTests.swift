@@ -320,17 +320,9 @@ final class DefaultTargetGoldenTests: XCTestCase {
             observeSleep: false, diagnostics: .disabled) { _, _, _, _ in throw CancellationError() }
         await queue.shutdownForTesting()
         let suite = "DefaultTargetGolden-\(UUID())"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(GoldenDefaults(suiteName: suite))
-        addTeardownBlock {
-            UserDefaults.standard.removePersistentDomain(forName: suite)
-            UserDefaults.standard.synchronize()
-            let plist = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Preferences/\(suite).plist")
-            if FileManager.default.fileExists(atPath: plist.path) {
-                try FileManager.default.removeItem(at: plist)
-            }
-            XCTAssertFalse(FileManager.default.fileExists(atPath: plist.path))
-        }
+        addTeardownBlock { try preferenceCleanup.remove() }
         // Live adapters include retry and deferred-repair routing. Only the
         // process at the end of that production path is replaced by a double.
         let model = AppModel(reviewQueue: queue, translation: .live, notes: .live,
