@@ -230,60 +230,89 @@ class AutoLanguageTests(unittest.TestCase):
 
 
 class ProbePrecisionTests(unittest.TestCase):
+    cases = ((16.0, 12.5, -8.0), (1000.0, 992.0, 968.0), (-1000.0, -1008.0, -1024.0))
+
+    def setUp(self):
+        self.tokenizer = AutoLanguageTests.Tokenizer()
+        self.chinese = self.tokenizer.encode(' Chinese')[0]
+        self.english = self.tokenizer.encode(' English')[0]
+        self.check = {'labels': frozenset(service.LANGUAGE_CODES) | {'None'},
+                      'english_token': self.english,
+                      'heads': {tokens[0]: [label] for label, tokens in self.tokenizer.heads.items()}}
+
+    def probe_probabilities(self, mx, fixture):
+        logits = mx.array(fixture, dtype=mx.bfloat16)
+        captured = []
+        real_softmax = mx.softmax
+
+        def normalize(values):
+            probabilities = real_softmax(values)
+            mx.eval(probabilities)
+            captured.append((values.dtype, np.asarray(probabilities)))
+            return probabilities
+
+        class Inner(AutoLanguageTests.Inner):
+            def __call__(self, ids, cache, input_embeddings=None):
+                position = cache['position']
+                cache['position'] += 1
+                if position == 0:
+                    return logits[None, None, :]
+                tail = np.full(151800, -np.inf, dtype=np.float32)
+                tail[service.ASR_TEXT_TOKEN] = 0
+                return mx.array(tail)[None, None, :]
+
+        model = SimpleNamespace(_model=Inner(self.tokenizer, 'Chinese', .95, .02))
+        with patch.dict(sys.modules, {
+            'mlx_audio.stt.utils': SimpleNamespace(load_audio=Mock(return_value=np.zeros(16))),
+        }), patch.object(mx, 'softmax', side_effect=normalize):
+            probe = service.probe_language(model, 'raw.wav', self.check)
+        self.assertEqual(len(captured), 1)
+        dtype, probabilities = captured[0]
+        self.assertEqual(dtype, mx.float32)
+        self.assertEqual(probabilities.dtype, np.float32)
+        return logits, probabilities, probe
+
     def test_bfloat16_logits_normalize_to_one_with_float32_precision(self):
         import mlx.core as mx
 
-        tokenizer = AutoLanguageTests.Tokenizer()
-        chinese = tokenizer.encode(' Chinese')[0]
-        english = tokenizer.encode(' English')[0]
-        check = {'labels': frozenset(service.LANGUAGE_CODES) | {'None'},
-                 'english_token': english,
-                 'heads': {tokens[0]: [label] for label, tokens in tokenizer.heads.items()}}
-        for top, runner_up, floor in ((16.0, 12.5, -8.0),
-                                     (1000.0, 992.0, 968.0),
-                                     (-1000.0, -1008.0, -1024.0)):
-            with self.subTest(top=top):
-                fixture = np.full(151800, floor, dtype=np.float32)
-                fixture[chinese], fixture[english] = top, runner_up
-                logits = mx.array(fixture, dtype=mx.bfloat16)
-                quantized = np.asarray(logits.astype(mx.float32)).astype(np.float64)
-                weights = np.exp(quantized - quantized.max())
-                expected = weights / weights.sum()
-                captured = []
-                real_softmax = mx.softmax
+        for device in (mx.cpu, mx.gpu):
+            with mx.stream(device):
+                for top, runner_up, floor in self.cases:
+                    with self.subTest(device=device, top=top):
+                        # Three finite logits isolate the bfloat16 partition-function
+                        # regression from backend-dependent long float32 reductions.
+                        fixture = np.full(151800, -np.inf, dtype=np.float32)
+                        fixture[self.chinese], fixture[self.english], fixture[999] = top, runner_up, floor
+                        logits, probabilities, probe = self.probe_probabilities(mx, fixture)
+                        quantized = np.asarray(logits.astype(mx.float32)).astype(np.float64)
+                        weights = np.exp(quantized - quantized.max())
+                        expected = weights / weights.sum()
+                        self.assertAlmostEqual(float(probabilities.sum(dtype=np.float64)), 1.0, places=6)
+                        np.testing.assert_allclose(probabilities, expected, rtol=1e-6, atol=1e-9)
+                        self.assertAlmostEqual(probe['language_probability'], expected[self.chinese], places=6)
+                        self.assertAlmostEqual(probe['english_probability'], expected[self.english], places=7)
+                        if top == 16.0:
+                            legacy = mx.exp(logits - mx.logsumexp(logits)).astype(mx.float32)
+                            self.assertGreater(abs(float(mx.sum(legacy).item()) - 1.0), .01)
 
-                def normalize(values):
-                    probabilities = real_softmax(values)
-                    mx.eval(probabilities)
-                    captured.append((values.dtype, np.asarray(probabilities)))
-                    return probabilities
+    def test_dense_bfloat16_logits_match_backend_float32_softmax(self):
+        import mlx.core as mx
 
-                class Inner(AutoLanguageTests.Inner):
-                    def __call__(self, ids, cache, input_embeddings=None):
-                        position = cache['position']
-                        cache['position'] += 1
-                        if position == 0:
-                            return logits[None, None, :]
-                        tail = np.full(151800, -np.inf, dtype=np.float32)
-                        tail[service.ASR_TEXT_TOKEN] = 0
-                        return mx.array(tail)[None, None, :]
-
-                model = SimpleNamespace(_model=Inner(tokenizer, 'Chinese', .95, .02))
-                with patch.dict(sys.modules, {
-                    'mlx_audio.stt.utils': SimpleNamespace(load_audio=Mock(return_value=np.zeros(16))),
-                }), patch.object(mx, 'softmax', side_effect=normalize):
-                    probe = service.probe_language(model, 'raw.wav', check)
-                self.assertEqual(len(captured), 1)
-                dtype, probabilities = captured[0]
-                self.assertEqual(dtype, mx.float32)
-                self.assertEqual(probabilities.dtype, np.float32)
-                self.assertAlmostEqual(float(probabilities.sum(dtype=np.float64)), 1.0, places=6)
-                np.testing.assert_allclose(probabilities, expected, rtol=1e-6, atol=1e-9)
-                self.assertAlmostEqual(probe['language_probability'], expected[chinese], places=6)
-                self.assertAlmostEqual(probe['english_probability'], expected[english], places=7)
-                if top == 16.0:
-                    legacy = mx.exp(logits - mx.logsumexp(logits)).astype(mx.float32)
-                    self.assertGreater(abs(float(mx.sum(legacy).item()) - 1.0), .01)
+        for device in (mx.cpu, mx.gpu):
+            with mx.stream(device):
+                for top, runner_up, floor in self.cases:
+                    with self.subTest(device=device, top=top):
+                        fixture = np.full(151800, floor, dtype=np.float32)
+                        fixture[self.chinese], fixture[self.english] = top, runner_up
+                        logits, probabilities, probe = self.probe_probabilities(mx, fixture)
+                        # The CPU and GPU kernels have different float32 reduction
+                        # errors over 151800 finite entries. Match the backend's
+                        # float32 result exactly, rather than imposing GPU error
+                        # bounds on the CPU or weakening the cast regression above.
+                        expected = np.asarray(mx.softmax(logits.astype(mx.float32)))
+                        np.testing.assert_array_equal(probabilities, expected)
+                        self.assertEqual(probe['language_probability'], float(expected[self.chinese]))
+                        self.assertEqual(probe['english_probability'], float(expected[self.english]))
 
 
 class ServiceResponsivenessTests(unittest.TestCase):
