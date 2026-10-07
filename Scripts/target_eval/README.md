@@ -28,6 +28,7 @@ Use the aggregate suite from the repository root:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error \
+PYTHONPATH="Scripts" \
 TMPDIR="<lab>/work/dd-target-eval" \
 python3.13 -m unittest Scripts.target_eval.run_tests
 ```
@@ -40,6 +41,79 @@ validation function. The aggregate runner and root-level `test_target_eval`
 discovery bridge load all corpus, metric, review and calibration regressions without path
 overrides, filtering or skips. Temporary synthetic fixtures and environment
 changes are cleaned up by unittest. No UserDefaults suites are used.
+
+## Independent public-corpus length calibration
+
+`calibrate --public-manifest` reads only the explicitly supplied local manifest.
+It does not open the legacy UN default or discover recordings, sessions or
+classroom files. Downloads and license verification are separate caller-owned
+steps; no network, model, tokenizer or GPU is used by this mode.
+
+```sh
+LIVELINGO_TARGET_EVAL_OUTPUT_ROOT="<authorized-work>" \
+TMPDIR="<authorized-work>/tmp" PYTHONDONTWRITEBYTECODE=1 \
+python3.13 -m Scripts.target_eval.calibrate \
+  --cli "<authorized-work>/cli/target-acceptance-cli" \
+  --public-manifest "<public-data>/public-manifest.json" \
+  --output "<authorized-work>/public-calibration.json" --batch-size 2048
+```
+
+The manifest has `schema_version: 1` and a `corpora` array. File paths are caller
+parameters, relative to the manifest directory or absolute. Supported formats:
+
+- `opus-ted2020`: `raw` maps en/es/fr/zh/ru/ar to raw ZIPs. Five `alignments`
+  objects contain `source`, `target` (OPUS raw locale codes), `locale` (mapped
+  evaluation locale), and `path` (XCES XML gzip). Each has one English pivot.
+  Only identical English sentence-ID tuples shared by all five alignments join;
+  many-to-many ID order and talk identity are preserved. No ZIP is extracted.
+- `cs50-srt`: `document_id`, `files` locale map, and explicit `reference_status`.
+  SRTs use the existing positive time-overlap component alignment. This is not
+  an assertion of semantic alignment or human authorship.
+- `flores-plus-jsonl`: `files` locale map to official JSONL containing `split`,
+  `id`, `text` and source article `url`. Join by split/ID, then use article URL
+  as the split group across official dev/devtest boundaries. Plain line files
+  without article metadata cannot establish a document-isolated holdout.
+
+Only `human` or `community-human` references qualify for fitting and the primary
+holdout; other explicit statuses remain auxiliary diagnostics. These labels
+must be supported by the external provenance audit. Selection retains one
+SHA-256-ranked nonduplicate reference per talk/article, independently of length
+and verdict. Entire documents, including all language directions, share the
+same SHA-256 split (default seed 20261008; modulo 3 selects the holdout). Repeated
+NFC reference text across documents does not increase sample size. TED first
+ranks exact anchors by SHA-256 and chooses the first whose six locale texts are
+unique; later partitioning again prevents duplicates between corpus sources.
+
+Production `CLI judge` supplies all acceptance verdicts and counts. NFC Unicode
+letter scalars (Lu/Ll/Lt/Lm/Lo) are checked against Python on every reply. Both
+raw target/source ratios and effective required-policy ratios report p01, p05,
+p50, p90, p95, p99, p99.5 and max. The proposed ratio is the training p99.5 of
+`max(0, (targetLetters - existingAllowance) / max(sourceLetters, existingFloor))`,
+rounded up to 0.01 without added margin. Existing floor/absolute allowance are
+incorporated into this formula; they are not newly fitted or independently
+justified. Proposals remain frozen after the training phase. Fewer than 600
+distinct documents per direction in either split prevents sample eligibility
+for a production update. The Python code never edits Swift constants.
+
+The report separates reference length rejection from complete acceptance
+rejection, and includes unchanged-source and wrong-language interception on
+the same held-out documents. Negative candidates equal to the human target
+reference are labelled ambiguous and retained visibly in the raw metrics.
+For correlated comparisons (e.g. two Latin sources share a target reference),
+confidence uses the conservative event "any rejection in this document",
+not an inflated comparison count. One-sided exact 95% Clopper-Pearson bounds
+remain positive with zero failures. Negative diagnostics report bounds on
+missed interception. These bounds assume approximately independent documents,
+are per direction/stratum, and do not establish a simultaneous 15-direction
+or classroom population guarantee. Repeated speakers/translators, domain,
+direction and unspecified regional variants remain limitations.
+
+Input and CLI SHA-256 checks bind each run; inputs are hashed before reading and
+again after judging. The report hashes the Python implementation and each new
+JSONL verdict sidecar. Existing report/sidecar files are never overwritten;
+all generated evaluation outputs use the configured external output boundary.
+`PYTHONPATH=Scripts` in the aggregate-test command supports the existing
+`latin_learning` absolute import without importing any MLX/weights module.
 
 ## Route runner (PLAN step 24)
 

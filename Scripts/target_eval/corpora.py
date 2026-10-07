@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
+import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
+import unicodedata
+import xml.etree.ElementTree as ET
+import zipfile
 
 from .reference_annotations import apply_reference_annotations
 
@@ -337,6 +343,209 @@ def read_ted_srts(paths: Mapping[str, str | Path], *, document_id: str) -> Subti
     """Local SRT interface only; no downloads, language guessing or license assertion."""
     return align_subtitles({locale: read_srt(path) for locale, path in paths.items()},
                            corpus="ted", document_id=document_id)
+
+
+def _opus_document(value: str, locale: str) -> str:
+    """OPUS language directories differ; the stable talk basename must agree."""
+    path = Path(value)
+    if (path.is_absolute() or ".." in path.parts or len(path.parts) != 2
+            or path.parts[0] != locale or not path.name.endswith(".xml.gz")):
+        raise ValueError("invalid OPUS document identity")
+    return path.name.removesuffix(".xml.gz")
+
+
+def _opus_links(path: Path, source: str, target: str) -> dict:
+    documents = {}
+    with gzip.open(path, "rb") as handle:
+        for _, group in ET.iterparse(handle, events=("end",)):
+            if group.tag != "linkGrp":
+                continue
+            document = _opus_document(group.attrib.get("fromDoc", ""), source)
+            if document != _opus_document(group.attrib.get("toDoc", ""), target):
+                raise ValueError("OPUS alignment joins different talks")
+            if document in documents:
+                raise ValueError("duplicate OPUS talk alignment")
+            links = {}
+            for link in group.findall("link"):
+                fields = link.attrib.get("xtargets", "").split(";")
+                if len(fields) != 2:
+                    raise ValueError("invalid OPUS xtargets")
+                left, right = (tuple(field.split()) for field in fields)
+                # Empty alignments are omissions, not translations.
+                if not left or not right:
+                    continue
+                if len(set(left)) != len(left) or len(set(right)) != len(right):
+                    raise ValueError("duplicate OPUS sentence ID within an alignment")
+                pivot, translated = (left, right) if source == "en" else (right, left)
+                if pivot in links:
+                    raise ValueError("ambiguous duplicate OPUS English anchor")
+                links[pivot] = translated
+            documents[document] = links
+            group.clear()
+    return documents
+
+
+def _opus_sentences(archive: zipfile.ZipFile, locale: str, document: str) -> dict[str, str]:
+    member = f"TED2020/raw/{locale}/{document}.xml"
+    if archive.namelist().count(member) != 1:
+        raise ValueError("OPUS raw talk must have exactly one archive member")
+    # Read a known member in memory; never extract files or fetch external DTDs.
+    data = archive.read(member)
+    if b"<!ENTITY" in data:
+        raise ValueError("OPUS XML entity declarations are unsupported")
+    texts = {}
+    for sentence in ET.fromstring(data).iter("s"):
+        identity = _text(sentence.attrib.get("id"), "OPUS sentence ID")
+        if identity in texts:
+            raise ValueError("duplicate OPUS raw sentence ID")
+        texts[identity] = _text("".join(sentence.itertext()), "OPUS sentence")
+    return texts
+
+
+def read_ted_opus(raw_paths: Mapping[str, str | Path], alignment_paths: Sequence[dict]) -> CorpusResult:
+    """One deterministic, text-deduplicated six-way reference per TED talk.
+
+    Use only exact English sentence-ID tuples shared by all five official XCES
+    alignments. Concatenate a many-to-many alignment in its supplied ID order;
+    never guess sentence matches from text or length. Selection is independent
+    of text length, verdicts and the later document-level holdout split.
+    """
+    if set(raw_paths) != set(UN_LOCALES):
+        raise ValueError("OPUS calibration requires raw en/es/fr/zh/ru/ar archives")
+    mappings, raw_locales = {}, {"en": "en"}
+    for spec in alignment_paths:
+        source, target = spec["source"], spec["target"]
+        if (source == "en") == (target == "en"):
+            raise ValueError("OPUS calibration alignments must have one English pivot")
+        locale = spec["locale"]
+        if locale not in set(UN_LOCALES) - {"en"} or locale in mappings:
+            raise ValueError("duplicate or unsupported OPUS mapped locale")
+        raw_locales[locale] = target if source == "en" else source
+        mappings[locale] = _opus_links(Path(spec["path"]), source, target)
+    if set(mappings) != set(UN_LOCALES) - {"en"}:
+        raise ValueError("OPUS requires five distinct English-pivot alignments")
+    documents = sorted(set.union(*(set(mapping) for mapping in mappings.values())))
+    seen_texts = {locale: set() for locale in UN_LOCALES}
+    units, excluded = [], []
+    with ExitStack() as stack:
+        archives = {locale: stack.enter_context(zipfile.ZipFile(path))
+                    for locale, path in raw_paths.items()}
+        for document in documents:
+            if any(document not in mapping for mapping in mappings.values()):
+                excluded.append({"document_id": document, "reason": "missing_parallel_talk"})
+                continue
+            anchors = set.intersection(*(set(mapping[document]) for mapping in mappings.values()))
+            ordered = sorted(anchors, key=lambda ids: hashlib.sha256(json.dumps(
+                [document, ids], separators=(",", ":")).encode()).digest())
+            if not ordered:
+                excluded.append({"document_id": document, "reason": "no_exact_common_anchor"})
+                continue
+            sentences = {locale: _opus_sentences(archives[locale], raw_locales[locale], document)
+                         for locale in UN_LOCALES}
+            duplicate_candidates = 0
+            for pivot in ordered:
+                ids = {"en": pivot, **{locale: mapping[document][pivot]
+                                        for locale, mapping in mappings.items()}}
+                try:
+                    texts = {locale: " ".join(sentences[locale][identity] for identity in values)
+                             for locale, values in ids.items()}
+                except KeyError as error:
+                    raise ValueError("OPUS alignment refers to a missing raw sentence") from error
+                normalized = {locale: " ".join(unicodedata.normalize("NFC", text).split())
+                              for locale, text in texts.items()}
+                if any(text in seen_texts[locale] for locale, text in normalized.items()):
+                    duplicate_candidates += 1
+                    continue
+                for locale, text in normalized.items():
+                    seen_texts[locale].add(text)
+                identity = json.dumps(["ted2020", document, pivot], separators=(",", ":"))
+                units.append(ParallelUnit(identity, "ted2020", texts, {
+                    "document_id": document, "split_group": f"ted2020:{document}",
+                    "alignment": "exact-common-English-XCES-anchor", "sentence_ids": ids,
+                    "reference_status": "community-human", "eligible_anchor_count": len(anchors),
+                    "duplicate_candidates_skipped": duplicate_candidates,
+                    "selection": "first SHA-256-ranked anchor with unique NFC text in every locale"}))
+                break
+            else:
+                excluded.append({"document_id": document, "reason": "only_duplicate_references"})
+    return CorpusResult(tuple(units), tuple(excluded))
+
+
+def read_public_manifest(path: str | Path, *,
+                         on_input: Callable[[Path], None] | None = None) -> tuple[CorpusResult, list[Path]]:
+    """Only explicitly listed public files; no discovery of classroom/UN data.
+
+    Relative paths resolve against the manifest directory. Unknown reference
+    authorship stays visible and is excluded from fitting by calibrate.py.
+    FLORES+ JSONL preserves article URLs as split groups, across dev/devtest.
+    """
+    manifest = Path(path).resolve()
+    if on_input:
+        on_input(manifest)
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    if (type(data.get("schema_version")) is not int or data["schema_version"] != 1
+            or not isinstance(data.get("corpora"), list)):
+        raise ValueError("public manifest requires schema_version 1 and corpora list")
+    files, units, excluded = [manifest], [], []
+
+    def local(value):
+        candidate = Path(_text(value, "manifest input path"))
+        resolved = (candidate if candidate.is_absolute() else manifest.parent / candidate).resolve()
+        if not resolved.is_file():
+            raise ValueError("manifest input file is missing")
+        if on_input and resolved not in files:
+            on_input(resolved)
+        files.append(resolved)
+        return resolved
+
+    for spec in data["corpora"]:
+        name = spec["format"]
+        if name == "opus-ted2020":
+            raw = {locale: local(value) for locale, value in spec["raw"].items()}
+            alignments = [{**item, "path": local(item["path"])} for item in spec["alignments"]]
+            result = read_ted_opus(raw, alignments)
+            units.extend(result.units)
+            excluded.extend(result.excluded)
+        elif name == "cs50-srt":
+            document = _text(spec["document_id"], "CS50 document ID")
+            result = read_cs50_srts({locale: local(value) for locale, value in spec["files"].items()},
+                                    document_id=document)
+            status = _text(spec["reference_status"], "CS50 reference status")
+            for unit in result.units:
+                units.append(ParallelUnit(unit.id, unit.corpus, unit.texts, {
+                    **unit.metadata, "document_id": document, "split_group": f"cs50:{document}",
+                    "reference_status": status}))
+            excluded.append({"document_id": document, "unmatched_cues": result.unmatched})
+        elif name == "flores-plus-jsonl":
+            rows = {}
+            for locale, value in spec["files"].items():
+                rows[locale] = {}
+                for line in local(value).read_text(encoding="utf-8").splitlines():
+                    row = json.loads(line)
+                    key = (row["split"], str(row["id"]))
+                    if key in rows[locale]:
+                        raise ValueError("duplicate FLORES+ split/ID")
+                    _text(row.get("text"), "FLORES+ text")
+                    _text(row.get("url"), "FLORES+ article URL required for holdout")
+                    rows[locale][key] = row
+            if len(rows) < 2 or not all(set(values) == set(next(iter(rows.values())))
+                                        for values in rows.values()):
+                raise ValueError("FLORES+ JSONL locales must have identical split/ID keys")
+            for key in sorted(next(iter(rows.values()))):
+                articles = {values[key]["url"] for values in rows.values()}
+                if len(articles) != 1:
+                    raise ValueError("FLORES+ locales disagree on source article")
+                article = articles.pop()
+                identity = json.dumps(["flores-plus", *key], separators=(",", ":"))
+                units.append(ParallelUnit(identity, "flores-plus",
+                    {locale: values[key]["text"] for locale, values in rows.items()}, {
+                        "document_id": article, "split_group": f"flores-plus:{article}",
+                        "reference_status": "human", "alignment": "explicit-split-ID"}))
+        else:
+            raise ValueError("unsupported public corpus manifest format")
+    if not units or len({unit.id for unit in units}) != len(units):
+        raise ValueError("public manifest has no units or duplicate identities")
+    return CorpusResult(tuple(units), tuple(excluded)), sorted(set(files))
 
 
 def read_flores_plus(paths: Mapping[str, str | Path], *, split: str = "devtest") -> tuple[ParallelUnit, ...]:

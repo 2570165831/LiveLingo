@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -18,7 +19,8 @@ import os
 from pathlib import Path
 import platform
 import subprocess
-from typing import Iterable, Sequence
+import sys
+from typing import Callable, Iterable, Sequence
 import unicodedata
 
 from . import corpora as c
@@ -218,7 +220,8 @@ def _validate_verdict(row: object, case: CalibrationCase) -> dict:
 
 
 def judge_cases(cli: Path, cases: Sequence[CalibrationCase], *, batch_size: int = 128,
-                timeout_seconds: float = 120) -> tuple[list[dict], list[dict]]:
+                timeout_seconds: float = 120,
+                on_batch: Callable[[int, int], None] | None = None) -> tuple[list[dict], list[dict]]:
     """subprocess.run uses communicate to drain both pipes while sending input."""
     _positive_integer(batch_size, "batch size")
     _positive_number(timeout_seconds, "timeout seconds")
@@ -261,6 +264,8 @@ def judge_cases(cli: Path, cases: Sequence[CalibrationCase], *, batch_size: int 
                             "case_kind": case.kind,
                             "source_language": case.request["sourceLanguage"],
                             "candidate_language": case.candidate_language})
+        if on_batch:
+            on_batch(offset + len(batch), len(cases))
     return records, diagnostics
 
 
@@ -486,10 +491,313 @@ def calibrate(*, cli: str | Path, un_root: str | Path, output: str | Path,
     return report
 
 
+SOURCE_STRATA = {"zh": "han", "en": "latin", "es": "latin", "fr": "latin",
+                 "ru": "cyrillic", "ar": "arabic"}
+PUBLIC_MINIMUM_SAMPLES = 600
+PUBLIC_SPLIT_SEED = 20261008
+
+
+def binomial_upper95(failures: int, count: int) -> float | None:
+    """One-sided exact Clopper-Pearson upper bound, including zero failures.
+
+    Used on one observation per document, or on the conservative event 'any
+    failed comparison in this document'. Never count reused language pairs as
+    independent observations. Independence between documents remains assumed.
+    """
+    if (type(count) is not int or type(failures) is not int
+            or count < 0 or failures < 0 or failures > count):
+        raise ValueError("invalid binomial counts")
+    if not count:
+        return None
+    if failures == count:
+        return 1.0
+    if failures == 0:
+        return -math.expm1(math.log(.05) / count)
+    coefficients = [math.lgamma(count + 1) - math.lgamma(i + 1)
+                    - math.lgamma(count - i + 1) for i in range(failures + 1)]
+    low, high = 0.0, 1.0
+    for _ in range(60):
+        p = (low + high) / 2
+        terms = [value + i * math.log(p) + (count - i) * math.log1p(-p)
+                 for i, value in enumerate(coefficients)]
+        peak = max(terms)
+        log_cdf = peak + math.log(math.fsum(math.exp(value - peak) for value in terms))
+        if log_cdf > math.log(.05):
+            low = p
+        else:
+            high = p
+    return high
+
+
+def partition_public_units(units: Sequence[c.ParallelUnit], *, seed: int = PUBLIC_SPLIT_SEED) -> dict:
+    """Whole article/talk split, one unit per group, no length/verdict filtering."""
+    if type(seed) is not int:
+        raise ValueError("split seed must be an integer")
+    groups = {}
+    for unit in units:
+        group = c._text(unit.metadata.get("split_group"), "public split group")
+        groups.setdefault(group, []).append(unit)
+    result = {"training": [], "holdout": [], "auxiliary": []}
+    seen = {locale: set() for locale in c.UN_LOCALES}
+    duplicates = 0
+    for group, rows in sorted(groups.items()):
+        statuses = {row.metadata.get("reference_status") for row in rows}
+        if len(statuses) != 1:
+            raise ValueError("one public document has conflicting reference statuses")
+        qualified = statuses.issubset({"human", "community-human"})
+        split = ("holdout" if int(hashlib.sha256(json.dumps([seed, group],
+                 separators=(",", ":")).encode()).hexdigest(), 16) % 3 == 0 else "training")
+        if not qualified:
+            split = "auxiliary"
+        ordered = sorted(rows, key=lambda row: hashlib.sha256(row.id.encode()).digest())
+        for row in ordered:
+            normalized = {locale: " ".join(unicodedata.normalize("NFC", text).split())
+                          for locale, text in row.texts.items()}
+            if any(locale not in c.UN_LOCALES for locale in normalized):
+                raise ValueError("public calibration supports explicit en/es/fr/zh/ru/ar locales")
+            if qualified and any(text in seen[locale] for locale, text in normalized.items()):
+                duplicates += 1
+                continue
+            if qualified:
+                for locale, text in normalized.items():
+                    seen[locale].add(text)
+            result[split].append(row)
+            break
+    return {**result, "duplicate_candidates_skipped": duplicates,
+            "input_group_count": len(groups)}
+
+
+def make_public_cases(units: Sequence[c.ParallelUnit], *, targets: Sequence[str] = TARGET_LOCALES,
+                      negatives: bool = True, ratios: dict | None = None) -> tuple[CalibrationCase, ...]:
+    if not targets or len(set(targets)) != len(targets) or any(t not in TARGET_LOCALES for t in targets):
+        raise ValueError("targets must be distinct en/es/fr locales")
+    cases = []
+    for unit in units:
+        for target in targets:
+            if target not in unit.texts:
+                continue
+            for source in sorted(unit.texts):
+                if source == target:
+                    continue
+                candidates = [("good", target)]
+                if negatives:
+                    candidates += [("echo", source)] + [("wrong", locale) for locale in sorted(unit.texts)
+                                                         if locale not in (source, target)]
+                for kind, locale in candidates:
+                    identity = json.dumps([unit.id, target, source, kind, locale], separators=(",", ":"))
+                    request = {"id": identity, "targetLocale": target, "sourceLanguage": source,
+                               "source": unit.texts[source], "candidate": unit.texts[locale]}
+                    ratio = (ratios or {}).get(target, {}).get(source)
+                    if ratio is not None:
+                        request["maximumLengthRatio"] = _positive_number(ratio, "public ratio")
+                    cases.append(CalibrationCase(unit.id, kind, locale, request))
+    return tuple(cases)
+
+
+def public_quantiles(values: Iterable[float | None]) -> dict:
+    observed = list(values)
+    measured = sorted(value for value in observed if value is not None)
+    return {"sample_count": len(observed), "defined_count": len(measured),
+            "undefined_count": len(observed) - len(measured),
+            **{name: m._percentile(measured, q) if measured else None for name, q in
+               (("p01", .01), ("p05", .05), ("p50", .5), ("p90", .9),
+                ("p95", .95), ("p99", .99), ("p99.5", .995))},
+            "max": measured[-1] if measured else None}
+
+
+def fit_public_ratios(records: Sequence[dict], *, minimum_samples: int = PUBLIC_MINIMUM_SAMPLES) -> dict:
+    _positive_integer(minimum_samples, "minimum independent samples")
+    result = {target: {} for target in TARGET_LOCALES}
+    for target in TARGET_LOCALES:
+        for source in c.UN_LOCALES:
+            if source == target:
+                continue
+            rows = [row for row in records if row["targetLocale"] == target
+                    and row["source_language"] == source and row["case_kind"] == "good"]
+            if len({row["group_id"] for row in rows}) != len(rows):
+                raise ValueError("fitting must have at most one reference per document/direction")
+            policies = {(row["minimumSourceLetters"], row["absoluteLetterAllowance"]) for row in rows}
+            if len(policies) > 1:
+                raise ValueError("CLI source floor/absolute allowance changed during fitting")
+            required = [max(0.0, (row["candidateLetters"] - row["absoluteLetterAllowance"])
+                            / max(row["sourceLetters"], row["minimumSourceLetters"])) for row in rows]
+            quantiles = public_quantiles(required)
+            value = quantiles["p99.5"]
+            proposed = math.ceil(value * 100) / 100 if value is not None and value > 0 else None
+            sufficient = len(rows) >= minimum_samples and proposed is not None
+            result[target][source] = {
+                "training_documents": len(rows), "source_stratum": SOURCE_STRATA[source],
+                "raw_letter_ratio": public_quantiles(row["lengthRatio"] for row in rows),
+                "required_policy_ratio": quantiles, "proposed_ratio": proposed,
+                "candidate_ratio": proposed if sufficient else None,
+                "sample_sufficient": sufficient,
+                "retained_floor_and_allowance": list(next(iter(policies))) if policies else None}
+    return result
+
+
+def _public_rate(rows: Sequence[dict], *, kind: str, length_only: bool = False) -> dict:
+    selected = [row for row in rows if row["case_kind"] == kind]
+    failed = [row for row in selected if not row["lengthAccepted" if length_only else "accepted"]]
+    groups = {row["group_id"] for row in selected}
+    affected = {row["group_id"] for row in failed}
+    return {**_rate(len(failed), len(selected)),
+            "documents": len(groups), "documents_with_any_rejection": len(affected),
+            "document_any_rejection_rate": len(affected) / len(groups) if groups else None,
+            "upper95": binomial_upper95(len(affected), len(groups)),
+            "upper95_scope": "any rejection per document; conservative bound for comparison rate; IID documents assumed",
+            "rejection_counts": dict(sorted(Counter(row["rejection"] for row in failed).items(),
+                                            key=lambda item: str(item[0])))}
+
+
+def summarize_public(records: Sequence[dict], targets: Sequence[str]) -> dict:
+    def negative(rows, kind):
+        selected = [row for row in rows if row["case_kind"] == kind]
+        intercepted = [row for row in selected if not row["accepted"]]
+        groups = {row["group_id"] for row in selected}
+        missed = {row["group_id"] for row in selected if row["accepted"]}
+        return {"numerator": len(intercepted), "denominator": len(selected),
+                "interception_rate": len(intercepted) / len(selected) if selected else None,
+                "documents": len(groups), "documents_with_any_missed_negative": len(missed),
+                "miss_upper95": binomial_upper95(len(missed), len(groups)),
+                "miss_upper95_scope": "any accepted negative per document, IID documents assumed",
+                "ambiguous_label_count": sum(row.get("label_ambiguous", False) for row in selected),
+                "rejection_counts": dict(sorted(Counter(row["rejection"] for row in intercepted).items()))}
+
+    def summary(rows):
+        return {"reference_false_rejection": _public_rate(rows, kind="good"),
+                "reference_length_false_rejection": _public_rate(rows, kind="good", length_only=True),
+                "echo_interception": negative(rows, "echo"),
+                "wrong_language_interception": negative(rows, "wrong")}
+    result = {}
+    for target in targets:
+        rows = [row for row in records if row["targetLocale"] == target]
+        result[target] = {**summary(rows),
+            "by_source": {source: summary([row for row in rows if row["source_language"] == source])
+                          for source in c.UN_LOCALES if source != target},
+            "by_stratum": {stratum: summary([row for row in rows if row["source_stratum"] == stratum])
+                           for stratum in ("han", "latin", "cyrillic", "arabic")},
+            "wrong_by_candidate": {
+                locale: negative([row for row in rows if row["candidate_language"] == locale], "wrong")
+                for locale in sorted({row["candidate_language"] for row in rows if row["case_kind"] == "wrong"})}}
+    return result
+
+
+def calibrate_public(*, cli: str | Path, manifest: str | Path, output: str | Path,
+                     targets: Sequence[str] = TARGET_LOCALES, batch_size: int = 512,
+                     timeout_seconds: float = 120, seed: int = PUBLIC_SPLIT_SEED,
+                     minimum_samples: int = PUBLIC_MINIMUM_SAMPLES) -> dict:
+    """Fit once on training documents; evaluate unchanged and proposed guards.
+
+    This function never edits Swift constants or changes the fitted quantile
+    after reading the holdout. All full acceptance decisions use CLI judge.
+    """
+    destination = c.validate_output_path(output)
+    if destination.exists():
+        raise FileExistsError("public calibration output already exists")
+    executable = Path(cli).resolve()
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError("--cli must be an executable Swift target-acceptance CLI")
+    cli_hash = sha256_file(executable)
+    python_hashes = {name: sha256_file(Path(__file__).with_name(name))
+                     for name in ("calibrate.py", "corpora.py", "metrics.py")}
+    snapshots = {}
+    manifest_root = Path(manifest).resolve().parent
+
+    def observe(path):
+        snapshots[path] = {"file": (path.relative_to(manifest_root).as_posix()
+                                   if path.is_relative_to(manifest_root) else path.name),
+                           "bytes": path.stat().st_size, "sha256": sha256_file(path)}
+
+    corpus, files = c.read_public_manifest(manifest, on_input=observe)
+    inputs = [snapshots[path] for path in files]
+    partitions = partition_public_units(corpus.units, seed=seed)
+    unit_metadata = {unit.id: {"group_id": unit.metadata["split_group"], "corpus": unit.corpus,
+                     "reference_status": unit.metadata["reference_status"]} for unit in corpus.units}
+    diagnostics = []
+    receipts = []
+
+    def run(name, units, *, negatives, ratios=None):
+        cases = make_public_cases(units, targets=targets, negatives=negatives, ratios=ratios)
+        print(f"public calibration: starting {name}, {len(cases)} cases", file=sys.stderr, flush=True)
+        records, messages = judge_cases(executable, cases, batch_size=batch_size,
+            timeout_seconds=timeout_seconds,
+            on_batch=lambda done, total: print(f"public calibration: {name} {done}/{total}",
+                                               file=sys.stderr, flush=True))
+        by_case = {case.request["id"]: case for case in cases}
+        unit_texts = {unit.id: unit.texts for unit in units}
+        for row in records:
+            row.update(unit_metadata[row["turn_id"]])
+            row["source_stratum"] = SOURCE_STRATA[row["source_language"]]
+            case = by_case[row["id"]]
+            row["label_ambiguous"] = (case.kind != "good" and unicodedata.normalize("NFC", case.request["candidate"])
+                == unicodedata.normalize("NFC", unit_texts[case.turn_id][case.request["targetLocale"]]))
+        diagnostics.extend({"phase": name, **message} for message in messages)
+        sidecar = c.validate_output_path(destination.with_name(destination.stem + "-" + name + ".jsonl"))
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        c.validate_output_path(sidecar)
+        with sidecar.open("x", encoding="utf-8", newline="\n") as handle:
+            for row in records:
+                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n")
+        receipts.append({"phase": name, "file": sidecar.name, "case_count": len(records),
+                         "sha256": sha256_file(sidecar)})
+        print(f"public calibration: {name}, {len(records)} Swift verdicts", file=sys.stderr, flush=True)
+        return records
+
+    training = run("training", partitions["training"], negatives=False)
+    fits = fit_public_ratios(training, minimum_samples=minimum_samples)
+    ratios = {target: {source: fit["candidate_ratio"] for source, fit in sources.items()
+                       if fit["candidate_ratio"] is not None} for target, sources in fits.items()}
+    baseline = summarize_public(run("holdout-baseline", partitions["holdout"], negatives=True), targets)
+    candidate = summarize_public(run("holdout-candidate", partitions["holdout"], negatives=True, ratios=ratios), targets)
+    auxiliary = summarize_public(run("auxiliary", partitions["auxiliary"], negatives=True), targets)
+    for target, sources in fits.items():
+        if target not in targets:
+            continue
+        for source, fit in sources.items():
+            validation = candidate[target]["by_source"][source]["reference_length_false_rejection"]
+            fit["holdout_documents"] = validation["documents"]
+            fit["holdout_sample_sufficient"] = validation["documents"] >= minimum_samples
+            fit["length_one_percent_bound_established"] = (validation["upper95"] is not None
+                                                           and validation["upper95"] <= .01)
+            fit["sample_eligible_for_update"] = fit["sample_sufficient"] and fit["holdout_sample_sufficient"]
+    if cli_hash != sha256_file(executable) or any(row["sha256"] != sha256_file(path)
+                                               for row, path in zip(inputs, files)):
+        raise ValueError("public input or Swift CLI changed during calibration")
+    if any(digest != sha256_file(Path(__file__).with_name(name)) for name, digest in python_hashes.items()):
+        raise ValueError("Python calibration code changed during execution")
+    report = {"schema_version": 1, "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "input_files": inputs, "cli_sha256": cli_hash,
+        "python_file_sha256": python_hashes,
+        "methods": {
+            "letters": "NFC Unicode Lu/Ll/Lt/Lm/Lo scalars, cross-checked on every Swift verdict",
+            "strata": SOURCE_STRATA, "quantiles": "linear interpolation at (n - 1) * q",
+            "fit": "ceil(training p99.5 of max(0, (targetLetters - existingAllowance) / max(sourceLetters, existingFloor)) * 100) / 100; no added margin",
+            "floor_allowance": "existing Swift values retained, not independently calibrated; incorporated in required-policy-ratio fitting",
+            "split": "SHA-256 of JSON [seed, corpus:document] modulo 3 == 0 is holdout; all language directions share the same split",
+            "seed": seed, "minimum_documents_per_direction_per_split": minimum_samples,
+            "selection": "one nonduplicate reference per document, selected by SHA-256 independently of lengths/verdicts; no sentence-random split",
+            "confidence": "one-sided 95% exact Clopper-Pearson on independent document events; multi-comparison summaries bound any rejection per document; no simultaneous 15-direction claim",
+            "negatives": "unchanged non-target source, and other human-language references of the same aligned segment; source == target excluded",
+            "limitations": "approximate document independence only; repeated speakers/translators unmodeled; volunteer subtitle alignment is not classroom-oral or semantic-quality validation; reverse and non-English directions often invert/pivot English-authored references; locale variants may be unspecified",
+            "holdout_use": "proposed constants frozen before holdout; no retuning from holdout outcomes; Swift edits require separate review of sample sufficiency and limitations"},
+        "corpus": {"input_units": len(corpus.units), "excluded": list(corpus.excluded),
+                   "partition_duplicate_candidates_skipped": partitions["duplicate_candidates_skipped"],
+                   "input_groups": partitions["input_group_count"]},
+        "partitions": {split: [{"id": unit.id, "group_id": unit.metadata["split_group"], "corpus": unit.corpus,
+                                "reference_status": unit.metadata["reference_status"]} for unit in partitions[split]]
+                       for split in ("training", "holdout", "auxiliary")},
+        "fits": fits, "holdout_baseline": baseline, "holdout_candidate": candidate,
+        "auxiliary_unverified_references": auxiliary, "verdict_files": receipts, "cli_stderr": diagnostics}
+    c.write_json(report, destination)
+    return report
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", required=True, type=Path)
     parser.add_argument("--un-root", type=Path, default=c.repository_root().parent / "data" / "un")
+    parser.add_argument("--public-manifest", type=Path,
+                        help="explicit local public-corpus manifest; bypasses UN/default input discovery")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--targets", nargs="+", choices=TARGET_LOCALES, default=TARGET_LOCALES)
     parser.add_argument("--include-partial", action="store_true")
@@ -498,8 +806,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--timeout-seconds", type=float, default=120)
     parser.add_argument("--bootstrap-resamples", type=int, default=clusters.DEFAULT_RESAMPLES)
     parser.add_argument("--bootstrap-seed", type=int, default=clusters.DEFAULT_SEED)
+    parser.add_argument("--split-seed", type=int, default=PUBLIC_SPLIT_SEED)
+    parser.add_argument("--minimum-samples", type=int, default=PUBLIC_MINIMUM_SAMPLES)
     args = parser.parse_args(argv)
     try:
+        if args.public_manifest:
+            if args.include_partial or args.maximum_length_ratio is not None:
+                raise ValueError("public holdout mode does not accept UN partials or a pre-tuned ratio override")
+            report = calibrate_public(cli=args.cli, manifest=args.public_manifest, output=args.output,
+                                      targets=args.targets, batch_size=args.batch_size,
+                                      timeout_seconds=args.timeout_seconds, seed=args.split_seed,
+                                      minimum_samples=args.minimum_samples)
+            print(json.dumps({"output": Path(args.output).name,
+                              "documents": {key: len(value) for key, value in report["partitions"].items()},
+                              "candidate_ratios": {target: {source: fit["candidate_ratio"]
+                                                    for source, fit in sources.items()}
+                                                   for target, sources in report["fits"].items()}}, sort_keys=True))
+            return 0
         report = calibrate(cli=args.cli, un_root=args.un_root, output=args.output,
                            targets=args.targets, include_partial=args.include_partial,
                            maximum_length_ratio=args.maximum_length_ratio,
