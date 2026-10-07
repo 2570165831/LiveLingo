@@ -20,7 +20,7 @@ extension CaptionTranslationTarget {
     func sourcePolicy(for sourceLanguage: String?) -> CaptionSourcePolicy {
         let keepsSource = keepsSourceAsCaption(language: sourceLanguage)
         return .init(keepsSourceAsCaption: keepsSource,
-            usesEnglishTranslationPipeline: sourceLanguage == nil && !keepsSource,
+            usesEnglishTranslationPipeline: (sourceLanguage == nil || (isSpanishOrFrench && sourceLanguage == "en")) && !keepsSource,
             hasAutomaticNoteGateRisk: (sourceLanguage == nil || sourceLanguage == "en") && !keepsSource,
             targetEvidenceLanguage: rawValue == "zh-Hans" ? "zh" : rawValue)
     }

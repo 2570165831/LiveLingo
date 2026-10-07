@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 from typing import Sequence
+import re
 
 from . import corpora as c, metrics as m
 from .. import scoreboard_energy as energy
@@ -39,10 +40,23 @@ SOURCE_NAMES = {"ar": "Arabic", "zh": "Chinese", "en": "English", "fr": "French"
                 "ko": "Korean", "de": "German", "hi": "Hindi", "th": "Thai"}
 CONTROL_MARKERS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>")
 UNKNOWN_STATS = ("exact_first_token_seconds",)
-# Verified against OutputLanguage.profiles by a source-parsing regression test.
+# es/fr choices are owned by the same Swift constants used by the App. Reading
+# these literal sets performs no compiler, worker, model or network operation.
+def _latin_pass_through_sources():
+    swift = (Path(__file__).resolve().parents[2] / "LiveLingo/Sources/OutputLanguage.swift").read_text()
+    result = {}
+    for locale, name in (("es", "spanish"), ("fr", "french")):
+        match = re.search(rf'static let {name}PassThroughSources: Set<String> = \[([^\]]*)\]', swift)
+        if not match:
+            raise ValueError(f"missing literal {name} pass-through policy")
+        result[locale] = frozenset(re.findall(r'"([^"]+)"', match[1]))
+    return result
+
+
+# All six profiles are verified by a source-parsing regression test.
 PASS_THROUGH_SOURCES = {"zh-Hans": frozenset({"zh"}), "zh-Hant-TW": frozenset({"zh"}),
                         "zh-Hant-HK": frozenset({"zh"}), "en": frozenset({"en"}),
-                        "es": frozenset(), "fr": frozenset()}
+                        **_latin_pass_through_sources()}
 
 
 def _load_scoreboard():

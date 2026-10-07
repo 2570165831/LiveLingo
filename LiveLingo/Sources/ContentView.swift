@@ -2130,8 +2130,9 @@ private struct ApplePreviewTranslationHost: ViewModifier {
 
     @available(macOS 15.0, *)
     private var configuration: TranslationSession.Configuration {
-        let source = Locale.Language(identifier: "en")
-        let target = Locale.Language(identifier: "zh-Hans")
+        let pair = model.applePreviewLanguagePair ?? .init(source: "en", target: "zh-Hans")
+        let source = Locale.Language(identifier: pair.source)
+        let target = Locale.Language(identifier: pair.target)
         if #available(macOS 26.4, *) {
             return .init(source: source, target: target, preferredStrategy: .lowLatency)
         }

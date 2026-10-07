@@ -760,8 +760,15 @@ class RunnerTests(unittest.TestCase):
         swift = (sources / "OutputLanguage.swift").read_text()
         enum_cases = dict(re.findall(r'case (\w+) = "([^"]+)"', swift))
         table = swift.split("private static let profiles:", 1)[1].split("\n    ]", 1)[0]
-        matches = re.findall(r'\.(\w+): \.init\(.*?passThroughSources: \[([^\]]*)\]', table, re.DOTALL)
-        actual = {enum_cases[name]: frozenset(re.findall(r'"([^"]+)"', codes)) for name, codes in matches}
+        matches = re.findall(r'\.(\w+): \.init\(.*?passThroughSources: (\[[^\]]*\]|LatinOutputDefaults\.\w+)', table, re.DOTALL)
+        actual = {}
+        for name, codes in matches:
+            if codes.startswith("LatinOutputDefaults."):
+                constant = codes.split(".")[1]
+                value = re.search(rf'static let {constant}: Set<String> = (\[[^\]]*\])', swift)
+                self.assertIsNotNone(value)
+                codes = value[1]
+            actual[enum_cases[name]] = frozenset(re.findall(r'"([^"]+)"', codes))
         self.assertEqual(len(matches), len(enum_cases))
         self.assertEqual(actual, a.PASS_THROUGH_SOURCES)
 

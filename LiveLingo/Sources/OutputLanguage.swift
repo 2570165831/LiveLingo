@@ -1,5 +1,21 @@
 import Foundation
 
+/// Pending user choices live here. Changing a route requires the G3 comparison.
+enum LatinOutputDefaults {
+    static let spanishPromptName = "Spanish"
+    static let frenchPromptName = "French"
+    static let spanishStyleInstruction = "Use neutral Spanish wording without selecting a regional variety."
+    static let frenchStyleInstruction = "Use neutral French wording without selecting a regional variety."
+    static let spanishPassThroughSources: Set<String> = ["es"]
+    static let frenchPassThroughSources: Set<String> = ["fr"]
+    static let translationRoute: CaptionTranslationRoute = .direct
+    static func styleInstruction(for target: CaptionTranslationTarget) -> String {
+        target == .spanish ? spanishStyleInstruction : frenchStyleInstruction
+    }
+}
+
+enum CaptionTranslationRoute: Sendable { case direct, viaEnglish }
+
 /// Output metadata is independent of the language generated and stored by the
 /// model. Only released profiles can be selected for a new course.
 enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
@@ -40,11 +56,11 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         .english: .init(autonym: "English", promptName: "English", script: .latin,
             generationLocale: "en", renderer: .identity, passThroughSources: ["en"],
             appleLanguagePair: nil, isReleased: false),
-        .spanish: .init(autonym: "Español", promptName: "Spanish", script: .latin,
-            generationLocale: "es", renderer: .identity, passThroughSources: [],
+        .spanish: .init(autonym: "Español", promptName: LatinOutputDefaults.spanishPromptName, script: .latin,
+            generationLocale: "es", renderer: .identity, passThroughSources: LatinOutputDefaults.spanishPassThroughSources,
             appleLanguagePair: .init(source: "en", target: "es"), isReleased: false),
-        .french: .init(autonym: "Français", promptName: "French", script: .latin,
-            generationLocale: "fr", renderer: .identity, passThroughSources: [],
+        .french: .init(autonym: "Français", promptName: LatinOutputDefaults.frenchPromptName, script: .latin,
+            generationLocale: "fr", renderer: .identity, passThroughSources: LatinOutputDefaults.frenchPassThroughSources,
             appleLanguagePair: .init(source: "en", target: "fr"), isReleased: false),
     ]
 

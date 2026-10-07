@@ -550,10 +550,26 @@ final class AppModel: ObservableObject {
 
     var applePreviewLanguagePair: OutputLanguage.AppleLanguagePair? { outputLanguage.profile.appleLanguagePair }
 
+    enum PreviewPackageAvailability { case installed, supported, unsupported }
+
+    /// es/fr never request a download dialog during a lecture. A missing
+    /// package falls back to the independent formal translation worker.
+    @discardableResult
+    func allowPreviewPackage(_ availability: PreviewPackageAvailability) -> Bool {
+        guard captionTarget.isSpanishOrFrench else { return true }
+        guard availability == .installed else {
+            previewChinese = ""
+            previewTranslationStatus = "初译语言包未就绪，只等正式译文"
+            return false
+        }
+        return true
+    }
+
     /// The real Apple session preparation and its injected tests use this gate.
     @discardableResult
-    func preparePreviewTranslationIfEligible(_ prepare: () async throws -> Void) async throws -> Bool {
-        guard applePreviewLanguagePair != nil else { return false }
+    func preparePreviewTranslationIfEligible(availability: PreviewPackageAvailability = .installed,
+                                             _ prepare: () async throws -> Void) async throws -> Bool {
+        guard applePreviewLanguagePair != nil, allowPreviewPackage(availability) else { return false }
         try await prepare()
         return true
     }
@@ -600,7 +616,19 @@ final class AppModel: ObservableObject {
         markPreviewSourceChanged()
         previewTranslationStatus = "准备初译语言包…"
         do {
-            guard try await preparePreviewTranslationIfEligible({ try await session.prepareTranslation() }) else { return }
+            var availability = PreviewPackageAvailability.installed
+            if captionTarget.isSpanishOrFrench, let pair = applePreviewLanguagePair {
+                let status = await LanguageAvailability().status(from: Locale.Language(identifier: pair.source),
+                    to: Locale.Language(identifier: pair.target))
+                guard previewRunToken == runToken else { return }
+                switch status {
+                case .installed: availability = .installed
+                case .supported: availability = .supported
+                case .unsupported: availability = .unsupported
+                @unknown default: availability = .unsupported
+                }
+            }
+            guard try await preparePreviewTranslationIfEligible(availability: availability, { try await session.prepareTranslation() }) else { return }
             try Task.checkCancellation()
             // prepare 期间可能已经有更新的会话接替：旧会话直接退出，不改状态。
             guard previewRunToken == runToken else { return }
@@ -646,7 +674,8 @@ final class AppModel: ObservableObject {
             // 旧 prepare 的错误同样不能改新会话的状态。
             guard previewRunToken == runToken else { return }
             if !Task.isCancelled {
-                previewTranslationStatus = "初译未就绪：\(error.localizedDescription)"
+                previewTranslationStatus = captionTarget.isSpanishOrFrench
+                    ? "初译语言包未就绪，只等正式译文" : "初译未就绪：\(error.localizedDescription)"
             }
         }
     }

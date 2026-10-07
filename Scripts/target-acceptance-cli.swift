@@ -76,8 +76,8 @@ struct TargetAcceptanceCLI {
         } else if arguments.count == 3, arguments[0] == "prompts", arguments[1] == "--output-dir" {
             try await exportPrompts(arguments[2])
         } else if arguments.count == 5, arguments[0] == "prompts", arguments[1] == "--output-dir",
-                  arguments[3] == "--target", arguments[4] == "en" {
-            try await exportPrompts(arguments[2], target: .english)
+                  arguments[3] == "--target", let target = CaptionTranslationTarget(rawValue: arguments[4]), target != .simplifiedChinese {
+            try await exportPrompts(arguments[2], target: target)
         } else { throw Failure.usage
         }
     }
@@ -215,7 +215,13 @@ struct TargetAcceptanceCLI {
                               target: CaptionTranslationTarget = .simplifiedChinese) async throws -> String {
         let capture = CapturedPrompt()
         let source = target == .english ? "温度升高。" : "The temperature increases."
-        let translated = target == .english ? "The temperature increases." : "温度升高。"
+        let translated: String
+        switch target {
+        case .simplifiedChinese: translated = "温度升高。"
+        case .english: translated = "The temperature increases."
+        case .spanish: translated = "La temperatura aumenta."
+        case .french: translated = "La température augmente."
+        }
         if typed {
             _ = try await QwenTranslationClient.translateTypedText(source, modelName: model, target: target,
                 request: { _, prompt, _ in await capture.capture(prompt); return translated })
@@ -282,6 +288,12 @@ struct TargetAcceptanceCLI {
                 "note-generate": LearningPrompts.generateEnglish,
                 "note-review": LearningPrompts.reviewEnglish,
                 "note-recovery": LearningPrompts.recoveryEnglish]
+        } else if target.isSpanishOrFrench {
+            prompts = ["caption-base": LatinCaptionPrompts.system(for: target),
+                "caption-base-4b": LatinCaptionPrompts.system(for: target, faithful: true),
+                "wrapper-4b": LatinCaptionPrompts.wrapper(for: target, smallModel: true),
+                "wrapper-9b": LatinCaptionPrompts.wrapper(for: target, smallModel: false),
+                "recovery": LatinCaptionPrompts.recovery(for: target)]
         }
         for (key, model) in models {
             prompts["caption-\(key)"] = try await captionPrompt(model: model, target: target)
@@ -304,7 +316,8 @@ struct TargetAcceptanceCLI {
                             "byteCount": reread.count, "sha256": SHA256.hash(data: reread).map { String(format: "%02x", $0) }.joined()])
         }
         let manifest: [String: Any] = ["schemaVersion": 1, "encoding": "UTF-8", "addedTrailingNewline": false,
-            "targetsWithPrompts": [target.rawValue], "targetsWithoutPrompts": target == .english ? ["es", "fr"] : ["en", "es", "fr"],
+            "targetsWithPrompts": [target.rawValue], "targetsWithoutPrompts": target == .english ? ["es", "fr"]
+                : target == .spanish ? ["en", "fr"] : target == .french ? ["en", "es"] : ["en", "es", "fr"],
             "capture": "App constants and injected request substitutes; no model or network", "prompts": entries]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         try data.write(to: try checkedOutput(directory.appendingPathComponent("manifest.json").path), options: .withoutOverwriting)

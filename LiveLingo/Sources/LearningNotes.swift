@@ -2893,6 +2893,7 @@ enum LearningPrompts {
         switch target {
         case .simplifiedChinese: return generate
         case .english: return recoveringAfterOutputLimit ? recoveryEnglish : generateEnglish
+        case .spanish, .french: return "" // Registered by step 26.
         }
     }
 
@@ -3267,6 +3268,7 @@ final class LearningReviewQueue: ObservableObject {
         case .english:
             guard allowUnreleased || language.isReleased else { return nil }
             return LearningPrompts.reviewEnglish
+        case .spanish, .french: return nil // Registered by step 26.
         }
     }
 

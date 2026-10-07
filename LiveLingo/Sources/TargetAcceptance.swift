@@ -17,8 +17,14 @@ protocol TargetAcceptancePolicy {
     static func maximumOutputCharacters(source: String, language: SpokenLanguage) -> Double
     static func isPlausible(output: String, source: String) -> Bool
     static func stableTranslationPrefix(_ text: String) -> String
+    static func joinStablePrefix(_ prefix: String, tail: String) -> String
     static func quotedTranslationRepairPlan(candidate: String, source: String) -> TranslationAcceptance.QuotedTranslationRepairPlan?
     static func jsonStatusRepairPlan(candidate: String, source: String) -> TranslationAcceptance.JSONStatusRepairPlan?
+}
+
+extension TargetAcceptancePolicy {
+    /// Keep frozen Han and English client behavior. es/fr opt into spacing.
+    static func joinStablePrefix(_ prefix: String, tail: String) -> String { prefix + tail }
 }
 
 /// Frozen Chinese rules, moved without changing their decision order or data.
@@ -1400,10 +1406,9 @@ enum LatinTargetLengthGuard {
     static let englishFromHanMaximumRatio = 4.57
 
     /// Four local UN meetings, 85 fully extracted aligned turns. Values follow
-    /// the reference letter-ratio p99.5 rounded UP to 0.01, except the retained
-    /// historical fr/ru 1.20: its empirical ceiling is 1.19 and the extra 0.01
-    /// has no recovered derivation (Scripts/target_eval/PROVENANCE.md). This
-    /// review changes no ratio. These are provisional in-sample parameters;
+    /// the reference letter-ratio p99.5 rounded UP to 0.01. Step 25 corrects
+    /// the unsubstantiated historical fr/ru 1.20 to its measured ceiling 1.19
+    /// (Scripts/target_eval/PROVENANCE.md). These are provisional in-sample parameters;
     /// expanded meetings/sources and an independent holdout must establish
     /// their replacement, not this sample or a subtitle guarantee.
     static func maximumRatio(target: LatinTargetAcceptance.Target, sourceLanguage: String?) -> Double {
@@ -1412,7 +1417,7 @@ enum LatinTargetLengthGuard {
         let ratios: [LatinTargetAcceptance.Target: [String: Double]] = [
             .english: ["es": 1.10, "fr": 1.13, "zh": englishFromHanMaximumRatio, "ar": 1.89, "ru": 1.08],
             .spanish: ["en": 1.26, "fr": 1.23, "zh": 5.44, "ar": 2.25, "ru": 1.24],
-            .french: ["en": 1.26, "es": 1.10, "zh": 4.96, "ar": 1.84, "ru": 1.20]
+            .french: ["en": 1.26, "es": 1.10, "zh": 4.96, "ar": 1.84, "ru": 1.19]
         ]
         return ratios[target]?[source] ?? (["zh", "ja", "ko", "yue"].contains(source) ? 6 : 2)
     }
@@ -1565,7 +1570,7 @@ enum EnglishTargetAcceptance: TargetAcceptancePolicy {
         return LatinTargetAcceptance.rejection(candidate: candidate, source: source, target: .english,
             sourceLanguage: language).map(mapRejection)
     }
-    private static func mapRejection(_ value: LatinTargetAcceptance.Rejection) -> TranslationAcceptance.Rejection {
+    static func mapRejection(_ value: LatinTargetAcceptance.Rejection) -> TranslationAcceptance.Rejection {
         switch value {
         case .empty: return .empty
         case .controlMarker: return .controlMarker
@@ -1624,4 +1629,72 @@ enum EnglishTargetAcceptance: TargetAcceptancePolicy {
     static func stableTranslationPrefix(_ text: String) -> String { LatinStableTranslationPrefix.prefix(text) }
     static func quotedTranslationRepairPlan(candidate: String, source: String) -> TranslationAcceptance.QuotedTranslationRepairPlan? { nil }
     static func jsonStatusRepairPlan(candidate: String, source: String) -> TranslationAcceptance.JSONStatusRepairPlan? { nil }
+}
+
+/// Separate adapters keep every frozen English decision on its existing path.
+protocol SpanishFrenchAcceptancePolicy: TargetAcceptancePolicy {
+    static var target: CaptionTranslationTarget { get }
+}
+extension SpanishFrenchAcceptancePolicy {
+    private static var latinTarget: LatinTargetAcceptance.Target { .init(rawValue: target.rawValue)! }
+    static func isModelReply(_ candidate: String, source: String, targetCode: String) -> Bool {
+        LatinTargetAcceptance.hasSelfDescription(candidate) && !LatinTargetAcceptance.hasSelfDescription(source)
+    }
+    static func rejection(candidate: String, source: String, sourceLanguage: String?, target: CaptionTranslationTarget) -> TranslationAcceptance.Rejection? {
+        let language = sourceLanguage ?? (source.unicodeScalars.contains(where: TranslationAcceptance.isHan) ? "zh" : nil)
+        return LatinTargetAcceptance.rejection(candidate: candidate, source: source, target: latinTarget,
+            sourceLanguage: language).map(EnglishTargetAcceptance.mapRejection)
+    }
+    static func validated(_ candidate: String, source: String, sourceLanguage: String?, target: CaptionTranslationTarget) throws -> String {
+        let text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reason = rejection(candidate: text, source: source, sourceLanguage: sourceLanguage, target: target) {
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason.reason)。")
+        }
+        return text
+    }
+    static func validatedCaption(_ candidate: String, source: String, sourceLanguage: String?, target: CaptionTranslationTarget) throws -> String {
+        try validated(candidate, source: source, sourceLanguage: sourceLanguage, target: target)
+    }
+    static func foreignProseRejection(candidate: String, source: String) -> TranslationAcceptance.Rejection? {
+        let value = rejection(candidate: candidate, source: source, sourceLanguage: nil, target: target)
+        switch value {
+        case .wrongTargetLanguage, .nonTargetScript, .sourceProse: return value
+        default: return nil
+        }
+    }
+    static func targetForeignProseRejection(candidate: String, source: String) -> TranslationAcceptance.Rejection? {
+        foreignProseRejection(candidate: candidate, source: source)
+    }
+    static func permitsNormalizedSourceCopy(_ source: String, language: SpokenLanguage) -> Bool { language.code == target.rawValue }
+    static func containsOutputScript(_ text: String) -> Bool { EnglishTargetAcceptance.containsOutputScript(text) }
+    static func requiresSourceScriptRemoval(_ code: String) -> Bool { code != target.rawValue }
+    static func sourceResidueRejection(candidate: String, source: String, language: SpokenLanguage) -> TranslationAcceptance.Rejection? {
+        let value = rejection(candidate: candidate, source: source, sourceLanguage: language.code, target: target)
+        switch value {
+        case .nonTargetScript, .sourceCopy, .sourceProse: return value
+        default: return nil
+        }
+    }
+    static func maximumOutputCharacters(source: String, language: SpokenLanguage) -> Double {
+        LatinTargetLengthGuard.maximumOutputLetters(source: source, target: latinTarget, sourceLanguage: language.code)
+    }
+    static func isPlausible(output: String, source: String) -> Bool {
+        let hasHan = source.unicodeScalars.contains(where: TranslationAcceptance.isHan)
+        return LatinTargetLengthGuard.isPlausible(candidate: output, source: source, target: latinTarget,
+            sourceLanguage: hasHan ? "zh" : nil)
+    }
+    static func stableTranslationPrefix(_ text: String) -> String { LatinStableTranslationPrefix.prefix(text) }
+    static func joinStablePrefix(_ prefix: String, tail: String) -> String {
+        let prefix = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return [prefix, tail].filter { !$0.isEmpty }.joined(separator: " ")
+    }
+    static func quotedTranslationRepairPlan(candidate: String, source: String) -> TranslationAcceptance.QuotedTranslationRepairPlan? { nil }
+    static func jsonStatusRepairPlan(candidate: String, source: String) -> TranslationAcceptance.JSONStatusRepairPlan? { nil }
+}
+enum SpanishTargetAcceptance: SpanishFrenchAcceptancePolicy {
+    static let target = CaptionTranslationTarget.spanish
+}
+enum FrenchTargetAcceptance: SpanishFrenchAcceptancePolicy {
+    static let target = CaptionTranslationTarget.french
 }
