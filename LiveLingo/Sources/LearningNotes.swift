@@ -2892,7 +2892,7 @@ enum LearningPrompts {
     static func chineseWarning(chinese: String, english: String, sourceLanguage: String? = nil,
                                target: CaptionTranslationTarget = .simplifiedChinese) -> String? {
         guard target.sourcePolicy(for: sourceLanguage).includesReviewWarning, !chinese.isEmpty,
-              !TranslationLengthGuard.isPlausible(chinese: chinese, english: english) else { return nil }
+              !TranslationLengthGuard.isPlausible(chinese: chinese, english: english, target: target) else { return nil }
         return chineseWarningText
     }
 

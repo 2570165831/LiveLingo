@@ -2662,7 +2662,7 @@ final class AppModel: ObservableObject {
             // —— 保留原有中文 ✓（等价于从未修复 ✓），只会更保守 ✓，不会改坏 ✓。
             let repairPlausible = TranslationLengthGuard.isPlausible(
                 chinese: normalized,
-                english: self.segments[previousIndex].english)
+                english: self.segments[previousIndex].english, target: captionTarget)
             if !repairPlausible {
                 Self.traceTranslation("adjacent_repair", id: self.segments[previousIndex].id,
                                       elapsed: ProcessInfo.processInfo.systemUptime - started,
@@ -2883,7 +2883,7 @@ final class AppModel: ObservableObject {
                                       let previousIndex = self.translationInputIndex(previousInput,
                                           session: currentSession, epoch: currentGeneration, worker: workerID),
                                       self.segments[previousIndex].chinese == previousInput.chinese else { return }
-                                if TranslationAcceptance.isModelReply(current, source: normalizedInput, targetCode: target.rawValue) {
+                                if TranslationAcceptance.isModelReply(current, source: normalizedInput, target: target) {
                                     self.clearTranslationPreview()
                                     return
                                 }
@@ -2942,7 +2942,7 @@ final class AppModel: ObservableObject {
                                       epoch: currentGeneration, worker: workerID) != nil else { return }
                             let restored = protectedInput.restorePartial(in: partial)
                             let draft = target.normalize(restored)
-                            if TranslationAcceptance.isModelReply(draft, source: normalizedInput, targetCode: target.rawValue) {
+                            if TranslationAcceptance.isModelReply(draft, source: normalizedInput, target: target) {
                                 self.clearTranslationPreview()
                                 return
                             }
