@@ -18,9 +18,11 @@ Guarantees and boundaries:
   * Absolute install names that point outside the app and outside system
     library locations, and symlinks escaping the bundle, are rejected: the
     candidate must be self-contained.
-  * No notarization credentials are embedded. Notarize and staple outside this
-    script (xcrun notarytool submit ... --keychain-profile ... ; xcrun stapler
-    staple ...). This script never downloads anything.
+  * No notarization credentials are embedded. Continue with
+    Scripts/build-offline-dmg.sh: notarize an App ZIP, staple/validate the App,
+    then build/sign/notarize/staple the DMG and check its mounted App. That flow
+    polls by submission ID with deadlines, never notarytool --wait. This signing
+    script never downloads or uploads anything.
 
 Modes:
   default        sign the app inside-out, then verify it
@@ -606,9 +608,10 @@ def main():
     result = verify(app_root, args.identity, max_minos, found, main_rpaths)
     summary.update({"signed": True, "verified": True, "helperExecutables": result["helpers"],
                     "appEntitlements": result["entitlements"],
-                    "notarization": "external: xcrun notarytool submit <dmg> --keychain-profile <profile> "
-                                    "--wait && xcrun stapler staple <dmg>; no credentials are stored by "
-                                    "this script"})
+                    "notarization": "next: Scripts/build-offline-dmg.sh --app <this app> "
+                                    "--identity <identity> --keychain <keychain> --notary-profile <profile>; "
+                                    "App ZIP notarization and App staple/validate precede DMG creation; "
+                                    "poll by submission ID, never --wait; no credentials are stored here"})
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
