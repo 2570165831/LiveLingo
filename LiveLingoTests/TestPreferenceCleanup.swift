@@ -10,6 +10,7 @@ struct TestPreferenceCleanup: Sendable {
     init(suite: String) throws {
         let prefixes = [
             "SpanishFrenchTarget-",
+            "FullScreenClassMode-",
             "FloatingSubtitleDisplay-",
             "EnglishTargetPanel-",
             "ClassroomPresentation-",

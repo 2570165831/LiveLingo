@@ -6,14 +6,28 @@ struct FloatingSubtitleWindowSettings: Equatable {
     var showsAcrossSpaces = true
     var isLocked = false
     var backgroundOpacity = 1.0
+    var fullScreenClassMode = false
+    var statusMenuIsOpen = false
+
+    // Apple DTS, forums/thread/826308: floating and statusBar remain below
+    // other apps' full-screen content; screenSaver is the lowest named level
+    // demonstrated to work in that answer, not a proven numerical minimum.
+    // It can cover system menus/notifications. Keep subtitles away from those
+    // surfaces; temporarily lower them while our recovery menu is tracking.
+    // This single constant is the adjustment point for real-device validation.
+    static let fullScreenLevel: NSWindow.Level = .screenSaver
+
+    var level: NSWindow.Level {
+        fullScreenClassMode && !statusMenuIsOpen ? Self.fullScreenLevel : .floating
+    }
 
     func collectionBehavior(restoring original: NSWindow.CollectionBehavior) -> NSWindow.CollectionBehavior {
-        guard showsAcrossSpaces else { return original }
+        guard showsAcrossSpaces || fullScreenClassMode else { return original }
         var behavior = original
         // Join every desktop, including during Space switches. Auxiliary roles
         // make the panel eligible for compatible window sets; they do not let a
-        // regular foreground app cover another app's full-screen Space. We keep
-        // the app's regular activation policy, Dock icon and menu bar.
+        // regular foreground app cover another app's full-screen Space. Only
+        // the opt-in class mode changes activation policy and window level.
         // Remove mutually exclusive roles; moveToActiveSpace is unnecessary
         // when the same panel already joins every desktop.
         behavior.subtract([.moveToActiveSpace, .fullScreenPrimary, .fullScreenNone, .primary, .auxiliary])
@@ -22,32 +36,52 @@ struct FloatingSubtitleWindowSettings: Equatable {
     }
 }
 
+/// Injectable window properties; test doubles never touch a visible panel.
+@MainActor
+protocol FloatingSubtitleWindowSurface: AnyObject {
+    var level: NSWindow.Level { get set }
+    var collectionBehavior: NSWindow.CollectionBehavior { get set }
+    var ignoresMouseEvents: Bool { get set }
+    var isOpaque: Bool { get set }
+    var subtitleBackgroundColor: NSColor? { get set }
+    func invalidateShadow()
+}
+
+extension NSWindow: FloatingSubtitleWindowSurface {
+    // AppKit imports this null-resettable property with asymmetric getter and
+    // setter optionality; an explicit adapter preserves protocol conformance.
+    var subtitleBackgroundColor: NSColor? {
+        get { backgroundColor }
+        set { backgroundColor = newValue }
+    }
+}
+
 /// Owns only the changes to one subtitle window, including its original values.
 @MainActor
 final class FloatingSubtitleWindowConfiguration {
-    private(set) weak var window: NSWindow?
+    private(set) weak var window: (any FloatingSubtitleWindowSurface)?
     private let originalLevel: NSWindow.Level
     private let originalCollectionBehavior: NSWindow.CollectionBehavior
     private let originalIgnoresMouseEvents: Bool
     private let originalIsOpaque: Bool
-    private let originalBackgroundColor: NSColor
+    private let originalBackgroundColor: NSColor?
 
-    init(window: NSWindow) {
+    init(window: any FloatingSubtitleWindowSurface) {
         self.window = window
         originalLevel = window.level
         originalCollectionBehavior = window.collectionBehavior
         originalIgnoresMouseEvents = window.ignoresMouseEvents
         originalIsOpaque = window.isOpaque
-        originalBackgroundColor = window.backgroundColor
+        originalBackgroundColor = window.subtitleBackgroundColor
     }
 
     func apply(_ settings: FloatingSubtitleWindowSettings) {
         guard let window else { return }
-        window.level = .floating
+        window.level = settings.level
         window.collectionBehavior = settings.collectionBehavior(restoring: originalCollectionBehavior)
         window.ignoresMouseEvents = settings.isLocked || originalIgnoresMouseEvents
         window.isOpaque = settings.backgroundOpacity < 1 ? false : originalIsOpaque
-        window.backgroundColor = settings.backgroundOpacity < 1 ? .clear : originalBackgroundColor
+        window.subtitleBackgroundColor = settings.backgroundOpacity < 1 ? .clear : originalBackgroundColor
         window.invalidateShadow()
     }
 
@@ -57,7 +91,7 @@ final class FloatingSubtitleWindowConfiguration {
         window.collectionBehavior = originalCollectionBehavior
         window.ignoresMouseEvents = originalIgnoresMouseEvents
         window.isOpaque = originalIsOpaque
-        window.backgroundColor = originalBackgroundColor
+        window.subtitleBackgroundColor = originalBackgroundColor
         window.invalidateShadow()
     }
 }
@@ -80,10 +114,18 @@ struct FloatingSubtitleWindowScreens {
     var windowVisibleFrame: (NSWindow) -> NSRect?
     var mainVisibleFrame: () -> NSRect?
     var firstVisibleFrame: () -> NSRect?
+    var menuBarSafeMaxY: (NSWindow) -> CGFloat? = { _ in nil }
 
     static let live = Self(windowVisibleFrame: { $0.screen?.visibleFrame },
                            mainVisibleFrame: { NSScreen.main?.visibleFrame },
-                           firstVisibleFrame: { NSScreen.screens.first?.visibleFrame })
+                           firstVisibleFrame: { NSScreen.screens.first?.visibleFrame },
+                           menuBarSafeMaxY: { window in
+                               guard let screen = window.screen ?? NSScreen.main ?? NSScreen.screens.first else { return nil }
+                               // Reserve the reveal area even when a full-screen
+                               // app currently hides its menu bar. Also avoid a notch.
+                               return min(screen.visibleFrame.maxY, screen.frame.maxY
+                                          - max(NSStatusBar.system.thickness, screen.safeAreaInsets.top))
+                           })
 
     func visibleFrame(for window: NSWindow) -> NSRect? {
         windowVisibleFrame(window) ?? mainVisibleFrame() ?? firstVisibleFrame()
@@ -100,12 +142,14 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     static let frameDefaultsKey = "NSWindow Frame subtitles"
 
     @Published private(set) var isLocked = false
+    @Published private(set) var isVisible = false
     private let defaults: UserDefaults
     private let screens: FloatingSubtitleWindowScreens
     private let notificationCenter: NotificationCenter
     private var configuration: FloatingSubtitleWindowConfiguration?
     private var settings = FloatingSubtitleWindowSettings()
     private var pendingBottomPlacement = false
+    private var adjustingMenuBarClearance = false
 
     #if DEBUG
     // Tests can observe the owned panel without replacing its configuration or content.
@@ -141,6 +185,9 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         if let panel { return panel }
 
         let panel = makePanel()
+        // Setting isFloatingPanel can change the level itself. Capture factory
+        // values before any owned policy so shutdown restores the real original.
+        let panelConfiguration = FloatingSubtitleWindowConfiguration(window: panel)
         panel.title = "浮动字幕"
         panel.identifier = NSUserInterfaceItemIdentifier(Self.frameAutosaveName)
         panel.isFloatingPanel = true
@@ -177,8 +224,9 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         // Restore the old top-left position, keeping the content's fixed size.
         panel.setContentSize(size)
         window = panel
-        configuration = FloatingSubtitleWindowConfiguration(window: panel)
+        configuration = panelConfiguration
         configuration?.apply(settings)
+        keepClearOfMenuBar()
         panel.delegate = self
         if pendingBottomPlacement {
             pendingBottomPlacement = false
@@ -200,11 +248,13 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         let panel = prepareWindow(model: model)
         if panel.isMiniaturized { panel.deminiaturize(nil) }
         panel.orderFront(nil)
+        isVisible = true
         configuration?.apply(settings)
     }
 
     func hide() {
         panel?.orderOut(nil)
+        isVisible = false
         configuration?.apply(settings)
     }
 
@@ -223,8 +273,31 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     /// view elsewhere must not let it configure the classroom/main window.
     func updateSettings(showsAcrossSpaces: Bool, backgroundOpacity: Double) {
         settings = FloatingSubtitleWindowSettings(showsAcrossSpaces: showsAcrossSpaces,
-                                                  isLocked: isLocked, backgroundOpacity: backgroundOpacity)
+                                                  isLocked: isLocked, backgroundOpacity: backgroundOpacity,
+                                                  fullScreenClassMode: settings.fullScreenClassMode,
+                                                  statusMenuIsOpen: settings.statusMenuIsOpen)
         configuration?.apply(settings)
+    }
+
+    func setFullScreenClassMode(_ enabled: Bool) {
+        settings.fullScreenClassMode = enabled
+        settings.statusMenuIsOpen = false
+        configuration?.apply(settings)
+        keepClearOfMenuBar()
+    }
+
+    func setStatusMenuIsOpen(_ open: Bool) {
+        settings.statusMenuIsOpen = open
+        configuration?.apply(settings)
+    }
+
+    func shutdown() {
+        configuration?.restore()
+        close()
+        isVisible = false
+        isLocked = false
+        settings = FloatingSubtitleWindowSettings()
+        pendingBottomPlacement = false
     }
 
     @objc private func applicationVisibilityChanged(_ notification: Notification) {
@@ -234,6 +307,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     }
 
     func windowWillClose(_ notification: Notification) {
+        isVisible = false
         saveFrame()
         // Unregister the native name before a replacement panel is created,
         // even if AppKit still retains the just-closed panel for this runloop.
@@ -245,12 +319,25 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         configuration = nil
         window = nil
     }
-    func windowDidMove(_ notification: Notification) { saveFrame() }
-    func windowDidResize(_ notification: Notification) { saveFrame() }
+    func windowDidMove(_ notification: Notification) { keepClearOfMenuBar(); saveFrame() }
+    func windowDidResize(_ notification: Notification) { keepClearOfMenuBar(); saveFrame() }
+    func windowDidMiniaturize(_ notification: Notification) { isVisible = false }
+    func windowDidDeminiaturize(_ notification: Notification) { isVisible = true }
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        isVisible = panel?.isVisible == true && panel?.isMiniaturized == false
+    }
 
     private func saveFrame() {
         guard let panel else { return }
         defaults.set(panel.frameDescriptor, forKey: Self.frameDefaultsKey)
+    }
+
+    private func keepClearOfMenuBar() {
+        guard settings.fullScreenClassMode, !adjustingMenuBarClearance, let panel,
+              let top = screens.menuBarSafeMaxY(panel), panel.frame.maxY > top else { return }
+        adjustingMenuBarClearance = true
+        defer { adjustingMenuBarClearance = false }
+        panel.setFrameOrigin(NSPoint(x: panel.frame.minX, y: top - panel.frame.height))
     }
 
     func moveToScreenBottom() {

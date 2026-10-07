@@ -13,6 +13,8 @@
 		B72600000000000000000003 /* LatinLearningText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72600000000000000000004 /* LatinLearningText.swift */; };
 		B71800000000000000000001 /* EnglishTargetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71800000000000000000002 /* EnglishTargetTests.swift */; };
 		B72200000000000000000001 /* EnglishLearningNotesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72200000000000000000002 /* EnglishLearningNotesTests.swift */; };
+		940000000000000000000001 /* FullScreenClassMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 940000000000000000000002 /* FullScreenClassMode.swift */; };
+		940000000000000000000003 /* FullScreenClassModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 940000000000000000000004 /* FullScreenClassModeTests.swift */; };
 		B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */; };
 		B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71400000000000000000002 /* TargetPipelineRefactorTests.swift */; };
 		930000000000000000000001 /* FloatingSubtitleWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000002 /* FloatingSubtitleWindow.swift */; };
@@ -127,6 +129,8 @@
 		B72600000000000000000004 /* LatinLearningText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatinLearningText.swift; sourceTree = "<group>"; };
 		B71800000000000000000002 /* EnglishTargetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnglishTargetTests.swift; sourceTree = "<group>"; };
 		B72200000000000000000002 /* EnglishLearningNotesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnglishLearningNotesTests.swift; sourceTree = "<group>"; };
+		940000000000000000000002 /* FullScreenClassMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullScreenClassMode.swift; sourceTree = "<group>"; };
+		940000000000000000000004 /* FullScreenClassModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullScreenClassModeTests.swift; sourceTree = "<group>"; };
 		B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetSourcePolicyRefactorTests.swift; sourceTree = "<group>"; };
 		B71400000000000000000002 /* TargetPipelineRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetPipelineRefactorTests.swift; sourceTree = "<group>"; };
 		930000000000000000000002 /* FloatingSubtitleWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingSubtitleWindow.swift; sourceTree = "<group>"; };
@@ -256,6 +260,7 @@
 			children = (
 				910000000000000000000002 /* FloatingSubtitlePreferences.swift */,
 				930000000000000000000002 /* FloatingSubtitleWindow.swift */,
+				940000000000000000000002 /* FullScreenClassMode.swift */,
 				CA0000000000000000000102 /* CaptureHealth.swift */,
 				B71900000000000000000002 /* TargetAcceptance.swift */,
 				B72500000000000000000002 /* LatinCaptionPrompts.swift */,
@@ -323,6 +328,7 @@
 				B70000000000000000000002 /* DefaultTargetGoldenTests.swift */,
 				910000000000000000000004 /* FloatingSubtitleDisplayTests.swift */,
 				930000000000000000000004 /* FloatingSubtitleWindowTests.swift */,
+				940000000000000000000004 /* FullScreenClassModeTests.swift */,
 				920000000000000000000002 /* TestPreferenceCleanup.swift */,
 				14C010000000000000000002 /* ClassroomAppearanceTests.swift */,
 				CA0000000000000000000104 /* CaptureHealthTests.swift */,
@@ -429,6 +435,7 @@
 			files = (
 				910000000000000000000001 /* FloatingSubtitlePreferences.swift in Sources */,
 				930000000000000000000001 /* FloatingSubtitleWindow.swift in Sources */,
+				940000000000000000000001 /* FullScreenClassMode.swift in Sources */,
 				CA0000000000000000000101 /* CaptureHealth.swift in Sources */,
 				B71900000000000000000001 /* TargetAcceptance.swift in Sources */,
 				B72500000000000000000001 /* LatinCaptionPrompts.swift in Sources */,
@@ -490,6 +497,7 @@
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,
 				910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */,
 				930000000000000000000003 /* FloatingSubtitleWindowTests.swift in Sources */,
+				940000000000000000000003 /* FullScreenClassModeTests.swift in Sources */,
 				920000000000000000000001 /* TestPreferenceCleanup.swift in Sources */,
 				14C010000000000000000001 /* ClassroomAppearanceTests.swift in Sources */,
 				CA0000000000000000000103 /* CaptureHealthTests.swift in Sources */,

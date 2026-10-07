@@ -830,6 +830,7 @@ private struct ReviewEntryButton: View {
 struct ClassroomSettingsView: View {
     @EnvironmentObject private var model: AppModel
     private var subtitles = FloatingSubtitlePreferences()
+    var fullScreenMode: FullScreenClassModeController? = nil
 
     var body: some View {
         Form {
@@ -901,13 +902,14 @@ struct ClassroomSettingsView: View {
                                label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
                 Toggle("在所有桌面显示", isOn: subtitles.showsAcrossSpacesBinding)
                     .accessibilityIdentifier("floating-all-spaces")
-                Text("在所有桌面（含切换桌面时）保持显示。其他 App 进入全屏时，macOS 不允许普通 App 的窗口盖在上面；可让网课窗口用非全屏的最大化或分屏。")
+                Text("在所有普通桌面（含切换桌面时）保持显示。全屏网课模式开启时，字幕会强制加入所有桌面；关闭后恢复此开关的设置。")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                FullScreenClassModeSettings(controller: fullScreenMode)
                 Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("锁定后点击会穿过字幕窗；可在主窗口或“录音”菜单解锁（⌘⇧L）。每次启动默认未锁定。")
+                Text("锁定后点击会穿过字幕窗；可在主窗口或“录音”菜单解锁（⌘⇧L，仅 App 在前台时有效）。全屏网课模式下也可用顶部菜单栏图标解锁。每次启动默认未锁定。")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

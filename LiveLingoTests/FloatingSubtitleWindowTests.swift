@@ -7,6 +7,112 @@ import XCTest
 /// orderFront regression orders a panel, at zero alpha and without activation.
 @MainActor
 final class FloatingSubtitleWindowTests: XCTestCase {
+    func testFullScreenPanelAvoidsTheMenuBarRevealAreaEvenAfterDragging() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let screens = FloatingSubtitleWindowScreens(windowVisibleFrame: { _ in nil },
+                                                   mainVisibleFrame: { nil }, firstVisibleFrame: { nil },
+                                                   menuBarSafeMaxY: { _ in 680 })
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults, screens: screens)
+        let panel = controller.prepareWindow(model: fixture.model)
+        defer { controller.shutdown() }
+        panel.setFrameOrigin(NSPoint(x: -900, y: 700))
+        controller.setFullScreenClassMode(true)
+        XCTAssertEqual(panel.frame.maxY, 680)
+        XCTAssertEqual(panel.frame.minX, -900)
+        XCTAssertEqual(panel.level, FloatingSubtitleWindowSettings.fullScreenLevel)
+        panel.setFrameOrigin(NSPoint(x: -900, y: 800))
+        controller.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: panel))
+        XCTAssertEqual(panel.frame.maxY, 680)
+        controller.setFullScreenClassMode(false)
+        panel.setFrameOrigin(NSPoint(x: -900, y: 800))
+        controller.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: panel))
+        XCTAssertEqual(panel.frame.minY, 800, "Ordinary mode must not constrain the user's placement")
+        XCTAssertFalse(panel.isVisible)
+    }
+
+    func testFullScreenModeSurvivesPreferenceUpdatesAndRestoresNormalPanelPolicy() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let preferences = FloatingSubtitlePreferences(store: fixture.defaults)
+        preferences.showsAcrossSpaces = false
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        let panel = controller.prepareWindow(model: fixture.model)
+        defer { controller.shutdown() }
+        let normalBehavior = panel.collectionBehavior
+        controller.toggleLock()
+        controller.setFullScreenClassMode(true)
+        XCTAssertEqual(panel.level, FloatingSubtitleWindowSettings.fullScreenLevel)
+        XCTAssertTrue(panel.collectionBehavior.contains([.canJoinAllSpaces, .fullScreenAuxiliary]))
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        controller.updateSettings(showsAcrossSpaces: false, backgroundOpacity: 0.75)
+        XCTAssertEqual(panel.level, FloatingSubtitleWindowSettings.fullScreenLevel)
+        XCTAssertTrue(panel.collectionBehavior.contains(.canJoinAllSpaces))
+        XCTAssertFalse(panel.isOpaque)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        controller.setFullScreenClassMode(false)
+        XCTAssertEqual(panel.level, .floating)
+        XCTAssertEqual(panel.collectionBehavior, normalBehavior)
+        XCTAssertTrue(controller.isLocked)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        XCTAssertFalse(preferences.showsAcrossSpaces)
+        XCTAssertFalse(panel.isVisible)
+        XCTAssertFalse(panel.isKeyWindow)
+    }
+
+    func testFullScreenModeBeforePanelCreationReopenAndShutdownRestoreOriginalProperties() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        let originalBehavior: NSWindow.CollectionBehavior = [.moveToActiveSpace, .fullScreenNone, .primary]
+        controller.panelFactoryForTesting = { frame, style in
+            let panel = NSPanel(contentRect: frame, styleMask: style, backing: .buffered, defer: false)
+            panel.level = .modalPanel
+            panel.collectionBehavior = originalBehavior
+            panel.backgroundColor = .brown
+            panel.isOpaque = true
+            return panel
+        }
+        controller.setFullScreenClassMode(true)
+        controller.toggleLock()
+        let first = controller.prepareWindow(model: fixture.model)
+        XCTAssertEqual(first.level, FloatingSubtitleWindowSettings.fullScreenLevel)
+        controller.close()
+        let second = controller.prepareWindow(model: fixture.model)
+        XCTAssertFalse(first === second)
+        XCTAssertEqual(second.level, FloatingSubtitleWindowSettings.fullScreenLevel)
+        XCTAssertTrue(second.ignoresMouseEvents)
+        controller.shutdown()
+        XCTAssertEqual(second.level, .modalPanel)
+        XCTAssertEqual(second.collectionBehavior, originalBehavior)
+        XCTAssertEqual(second.backgroundColor, .brown)
+        XCTAssertTrue(second.isOpaque)
+        XCTAssertFalse(second.ignoresMouseEvents)
+        XCTAssertFalse(controller.isLocked)
+        XCTAssertFalse(controller.isVisible)
+        XCTAssertNil(controller.panel)
+    }
+
+    func testRecoveryMenuTemporarilyLowersOnlyTheSubtitleLevel() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        controller.setFullScreenClassMode(true)
+        controller.toggleLock()
+        let panel = controller.prepareWindow(model: fixture.model)
+        defer { controller.shutdown() }
+        let behavior = panel.collectionBehavior
+        controller.setStatusMenuIsOpen(true)
+        XCTAssertEqual(panel.level, .floating)
+        XCTAssertEqual(panel.collectionBehavior, behavior)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        controller.setStatusMenuIsOpen(false)
+        XCTAssertEqual(panel.level, FloatingSubtitleWindowSettings.fullScreenLevel)
+        controller.setStatusMenuIsOpen(true)
+        controller.setFullScreenClassMode(false)
+        controller.setStatusMenuIsOpen(false)
+        XCTAssertEqual(panel.level, .floating)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        XCTAssertFalse(panel.isVisible)
+    }
+
     private func defaults() throws -> (UserDefaults, String) {
         let suite = "FloatingSubtitleDisplay-\(UUID().uuidString)"
         let cleanup = try TestPreferenceCleanup(suite: suite)

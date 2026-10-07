@@ -115,6 +115,16 @@ enum FilePanelPresentation {
 
 @MainActor
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard !AppRuntimeEnvironment.isUnitTesting else { return }
+        FullScreenClassModeController.shared.start()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !AppRuntimeEnvironment.isUnitTesting else { return }
+        FullScreenClassModeController.shared.showMainWindowAfterLaunch()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         FilePanelPresentation.cancelAll()
         return .terminateNow
@@ -122,6 +132,7 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         guard !AppRuntimeEnvironment.isUnitTesting else { return }
+        FullScreenClassModeController.shared.shutdown()
         ASRRuntime.shared.stopBeforeApplicationExit()
     }
 }
@@ -130,7 +141,10 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 private final class AppModelHolder: ObservableObject {
     let model: AppModel?
-    init() { model = AppRuntimeEnvironment.isUnitTesting ? nil : AppModel() }
+    init() {
+        model = AppRuntimeEnvironment.isUnitTesting ? nil : AppModel()
+        if let model { FullScreenClassModeController.shared.connect(model: model) }
+    }
 }
 
 @main
@@ -139,10 +153,11 @@ struct LiveLingoApp: App {
     @StateObject private var holder = AppModelHolder()
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("LiveLingo", id: "classroom") {
             if let model = holder.model {
                 ContentView()
                     .environmentObject(model)
+                    .background(FullScreenMainWindowRegistration())
                     .task { await ASRRuntime.shared.warmUp() }
             } else {
                 EmptyView()
@@ -151,6 +166,9 @@ struct LiveLingoApp: App {
         .defaultSize(width: 1_260, height: 820)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .appSettings) {
+                if holder.model != nil { FullScreenClassModeMenuItem(controller: .shared) }
+            }
             CommandGroup(replacing: .appTermination) {
                 Button("退出 LiveLingo") { FilePanelPresentation.requestTermination() }
                     .keyboardShortcut("q", modifiers: .command)
@@ -166,7 +184,7 @@ struct LiveLingoApp: App {
 
         Settings {
             if let model = holder.model {
-                ClassroomSettingsView().environmentObject(model)
+                ClassroomSettingsView(fullScreenMode: .shared).environmentObject(model)
             } else {
                 EmptyView()
             }
