@@ -2,9 +2,13 @@
 
 chrF defaults: character order 6, beta 2, case sensitive, whitespace excluded,
 effective orders (orders with zero hypothesis or reference count are omitted).
-chrF++ additionally uses word orders 1 and 2, splitting ASCII punctuation at
-whitespace-token edges. Scores are 0..100; an empty hypothesis/reference scores 0.
-Corpus scoring pools n-gram counts, rather than averaging sentence scores.
+chrF++ additionally uses word orders 1 and 2. Like sacreBLEU 2.x CHRF, each
+whitespace token detaches one trailing ASCII punctuation character, or (only if
+there is none) one leading character. Reference-absent orders contribute zero
+hypothesis count before corpus pooling. Scores are 0..100; an empty
+hypothesis/reference scores 0. Corpus scoring pools n-gram counts, rather than
+averaging sentence scores. See README.md for source rules and hand-counted tests;
+these tests do not constitute a run against an installed sacreBLEU.
 """
 from __future__ import annotations
 
@@ -41,13 +45,12 @@ def _words(text: str) -> list[str]:
         if len(word) == 1:
             words.append(word)
             continue
-        suffix = word[-1] if word[-1] in string.punctuation else ""
-        if suffix:
-            word = word[:-1]
-        prefix = word[0] if word and word[0] in string.punctuation else ""
-        if prefix:
-            word = word[1:]
-        words.extend(part for part in (prefix, word, suffix) if part)
+        if word[-1] in string.punctuation:
+            words.extend((word[:-1], word[-1]))
+        elif word[0] in string.punctuation:
+            words.extend((word[0], word[1:]))
+        else:
+            words.append(word)
     return words
 
 
@@ -65,7 +68,7 @@ def _settings(char_order: int, word_order: int, beta: float) -> None:
 def chrf_statistics(hypothesis: str, reference: str, *, char_order: int = 6,
                     word_order: int = 0, whitespace: bool = False,
                     lowercase: bool = False) -> tuple[tuple[int, int, int], ...]:
-    """Return (hypothesis count, reference count, clipped matches) per order."""
+    """Return per-order counts, omitting hypotheses for reference-absent orders."""
     _settings(char_order, word_order, 2)
     if not isinstance(hypothesis, str) or not isinstance(reference, str):
         raise ValueError("chrF inputs must be strings")
@@ -78,7 +81,7 @@ def chrf_statistics(hypothesis: str, reference: str, *, char_order: int = 6,
                               (_words(hypothesis), _words(reference), word_order)):
         for order in range(1, maximum + 1):
             hyp_counts, ref_counts = _ngrams(hyp, order), _ngrams(ref, order)
-            stats.append((sum(hyp_counts.values()), sum(ref_counts.values()),
+            stats.append((sum(hyp_counts.values()) if ref_counts else 0, sum(ref_counts.values()),
                           sum((hyp_counts & ref_counts).values())))
     return tuple(stats)
 
@@ -152,7 +155,8 @@ def _contains_term(text: str, term: str) -> bool:
 
 def terminology_hit_rate(hypothesis: str, terms: Iterable[str | Sequence[str]]) -> dict:
     """Each required target concept earns one hit if any supplied alternative occurs."""
-    if not isinstance(hypothesis, str) or isinstance(terms, (str, bytes, dict)):
+    if (not isinstance(hypothesis, str) or not isinstance(terms, Iterable)
+            or isinstance(terms, (str, bytes, dict))):
         raise ValueError("terminology requires hypothesis text and an iterable of terms")
     text, hit_count, total, missing = _normalized(hypothesis), 0, 0, []
     for term in terms:
@@ -174,13 +178,15 @@ def _script(char: str) -> str:
     code = ord(char)
     if (0x3400 <= code <= 0x4DBF or 0x4E00 <= code <= 0x9FFF
             or 0xF900 <= code <= 0xFAFF or 0x20000 <= code <= 0x2FA1F
-            or 0x30000 <= code <= 0x323AF or char == "〇"):
+            or 0x30000 <= code <= 0x323AF or char in "〇々"):
         return "han"
     name = unicodedata.name(char, "")
     if "HIRAGANA" in name or "KATAKANA" in name:
         return "kana"
     if "HANGUL" in name:
         return "hangul"
+    if "GREEK" in name or char in "µºª":
+        return "scientific_symbol"
     for script in ("LATIN", "CYRILLIC", "ARABIC"):
         if script in name:
             return script.lower()
@@ -191,8 +197,10 @@ def text_purity(text: str, target_locale: str, *,
                 simplified_only_chars: Iterable[str] | None = None) -> dict:
     """Count writing systems; this cannot distinguish English/Spanish/French.
 
-    Chinese/Russian/Arabic permit Latin scientific symbols. Digits, punctuation
-    and combining marks do not enter the letter denominator. Simplified residue
+    Chinese/Russian/Arabic permit Latin scientific symbols. Greek letters and
+    µ/º/ª are allowed symbols in every supported target; 々 is Han. Other unknown
+    letter scripts remain forbidden. Digits, punctuation and combining marks do
+    not enter the letter denominator. Simplified residue
     for zh-Hant needs a caller-supplied audited *exclusive* character inventory;
     ambiguous/shared forms such as 后 must not be blindly treated as residue.
     Without that inventory the residue result is unknown, not zero.
@@ -206,10 +214,12 @@ def text_purity(text: str, target_locale: str, *,
                "ko": {"hangul", "han", "latin"}}
     if language not in allowed:
         raise ValueError("unsupported target writing system")
+    allowed[language].add("scientific_symbol")
     counts = {script: 0 for script in ("han", "kana", "hangul", "latin", "cyrillic", "arabic", "other")}
     for char in text:
         if unicodedata.category(char).startswith("L") or char == "〇":
-            counts[_script(char)] += 1
+            script = _script(char)
+            counts[script] = counts.get(script, 0) + 1
     letters = sum(counts.values())
     forbidden = sum(count for script, count in counts.items() if script not in allowed[language])
     residue, residue_rate = None, None
@@ -302,7 +312,13 @@ def paired_bootstrap_chrf(baseline: Sequence[str], candidate: Sequence[str], ref
                 - _score(_pool((a[i] for i in indices), char_order + word_order), beta))
     result = _bootstrap(len(references), delta, iterations=iterations, confidence=confidence, seed=seed)
     return {**result, "chrf_settings": {"char_order": char_order, "word_order": word_order,
-            "beta": beta, "whitespace": whitespace, "lowercase": lowercase, "effective_order": True}}
+            "beta": beta, "whitespace": whitespace, "lowercase": lowercase, "effective_order": True,
+            **_compatibility_settings()}}
+
+
+def _compatibility_settings() -> dict:
+    return {"reference_absent_hypothesis_count": "zero",
+            "word_tokenization": "ascii-single-edge-trailing-first"}
 
 
 def _validate_examples(examples: Sequence[dict]) -> None:
@@ -320,6 +336,8 @@ def _validate_examples(examples: Sequence[dict]) -> None:
         if row["id"] in seen:
             raise ValueError("duplicate metric example id")
         seen.add(row["id"])
+        if "terms" in row and not isinstance(row["terms"], list):
+            raise ValueError("metric terms must be a list")
 
 
 def read_examples(path: str | Path) -> list[dict]:
@@ -352,12 +370,26 @@ def evaluate(examples: Sequence[dict], *, simplified_only_chars: Iterable[str] |
                      "length": length_ratio(row["source"], hypothesis),
                      "letter_length": length_ratio(row["source"], hypothesis, unit="letters"),
                      "tokens": tokens})
-    hypotheses, references = [r["hypothesis"] for r in examples], [r["reference"] for r in examples]
-    return {"schema_version": 1, "sample_count": len(rows), "chrf": corpus_chrf(hypotheses, references),
-            "chrfpp": corpus_chrfpp(hypotheses, references),
-            "chrf_settings": {"char_order": 6, "pp_word_order": 2, "beta": 2,
-                              "whitespace": False, "lowercase": False, "effective_order": True},
-            "examples": rows}
+    groups = {}
+    for row in examples:
+        groups.setdefault(row["target_locale"], []).append(row)
+    scores = {}
+    for locale, group in sorted(groups.items()):
+        hypotheses, references = [r["hypothesis"] for r in group], [r["reference"] for r in group]
+        scores[locale] = {"sample_count": len(group),
+                          "source_locales": sorted({r["source_locale"] for r in group}),
+                          "chrf": corpus_chrf(hypotheses, references),
+                          "chrfpp": corpus_chrfpp(hypotheses, references)}
+    report = {"schema_version": 2, "sample_count": len(rows), "by_target_locale": scores,
+              "chrf_settings": {"char_order": 6, "pp_word_order": 2, "beta": 2,
+                                "whitespace": False, "lowercase": False, "effective_order": True,
+                                **_compatibility_settings()}, "examples": rows}
+    # Preserve the convenient single-locale fields without publishing a score
+    # pooled across different targets.
+    if len(scores) == 1:
+        score = next(iter(scores.values()))
+        report.update(chrf=score["chrf"], chrfpp=score["chrfpp"])
+    return report
 
 
 def compare(baseline: Sequence[dict], candidate: Sequence[dict], *, iterations: int = 10000,
@@ -373,10 +405,23 @@ def compare(baseline: Sequence[dict], candidate: Sequence[dict], *, iterations: 
         if any(a[identity].get(key) != b[identity].get(key)
                for key in ("source", "reference", "source_locale", "target_locale")):
             raise ValueError("paired routes must use identical sources, references and locales")
-    result = paired_bootstrap_chrf([a[i]["hypothesis"] for i in ids], [b[i]["hypothesis"] for i in ids],
-                                   [a[i]["reference"] for i in ids], iterations=iterations,
-                                   confidence=confidence, seed=seed)
-    return {"metric": "corpus-chrfpp", "example_ids": ids, **result}
+    groups = {}
+    for identity in ids:
+        groups.setdefault(a[identity]["target_locale"], []).append(identity)
+    comparisons = {}
+    for locale, group_ids in sorted(groups.items()):
+        result = paired_bootstrap_chrf([a[i]["hypothesis"] for i in group_ids],
+                                       [b[i]["hypothesis"] for i in group_ids],
+                                       [a[i]["reference"] for i in group_ids], iterations=iterations,
+                                       confidence=confidence, seed=seed)
+        comparisons[locale] = {"example_ids": group_ids,
+                               "source_locales": sorted({a[i]["source_locale"] for i in group_ids}),
+                               **result}
+    report = {"schema_version": 2, "metric": "corpus-chrfpp", "sample_count": len(ids),
+              "example_ids": ids, "by_target_locale": comparisons}
+    if len(comparisons) == 1:
+        report.update(next(iter(comparisons.values())))
+    return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:

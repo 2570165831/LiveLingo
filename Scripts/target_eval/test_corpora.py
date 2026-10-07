@@ -1,8 +1,9 @@
-"""Handwritten public-format stand-ins only; scratch stays in work/target-eval."""
+"""Handwritten public-format stand-ins with isolated temporary output roots."""
 from copy import deepcopy
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -13,11 +14,10 @@ from Scripts.target_eval import corpora as c
 
 class CorporaTests(unittest.TestCase):
     def setUp(self):
-        c.validate_output_path(c.output_root() / "fixture-sentinel")
-        c.output_root().mkdir(parents=True, exist_ok=True)
-        self.scratch = tempfile.TemporaryDirectory(prefix="synthetic-corpora-", dir=c.output_root())
+        self.scratch = tempfile.TemporaryDirectory(prefix="synthetic-corpora-")
         self.addCleanup(self.scratch.cleanup)
-        self.root = Path(self.scratch.name)
+        self.root = Path(self.scratch.name).resolve()
+        self.enterContext(patch.dict(os.environ, {c.OUTPUT_ROOT_ENV: str(self.root)}))
 
     def write(self, name, text):
         path = self.root / name
@@ -185,7 +185,7 @@ class CorporaTests(unittest.TestCase):
     def test_symlinked_output_root_cannot_redirect_writes(self):
         root_link = self.root / "root-link"
         root_link.symlink_to(c.repository_root(), target_is_directory=True)
-        with patch.object(c, "output_root", return_value=root_link), \
+        with patch.dict(os.environ, {c.OUTPUT_ROOT_ENV: str(root_link)}), \
                 self.assertRaises(ValueError), patch.object(Path, "mkdir") as mkdir:
             c.write_json({}, root_link / "forbidden.json")
         mkdir.assert_not_called()

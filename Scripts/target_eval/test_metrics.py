@@ -3,6 +3,7 @@ from contextlib import redirect_stderr
 from fractions import Fraction
 import io
 import json
+import os
 from pathlib import Path
 import random
 import tempfile
@@ -40,11 +41,18 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(m.chrfpp("ab cd", "ab ce", char_order=2), 100 * float(Fraction(23, 48)))
 
     def test_chrfpp_edge_punctuation_is_word_tokenized_internal_apostrophe_retained(self):
+        # sacreBLEU 2.x detaches at most one punctuation character per token,
+        # trailing edge first, and drops hypothesis counts for word orders the
+        # reference lacks: "(can't)," -> "(can't)", "," and "(can't)" ->
+        # "(can't", ")"; neither unigram equals "can't", and there are no
+        # reference bigrams.
         stats = m.chrf_statistics("(can't),", "can't", char_order=1, word_order=2)
-        # One punctuation character is detached at each edge: (, can't), ,.
-        self.assertEqual(stats[1:], ((3, 1, 0), (2, 0, 0)))
+        self.assertEqual(stats[1:], ((2, 1, 0), (0, 0, 0)))
         stats = m.chrf_statistics("(can't)", "can't", char_order=1, word_order=2)
-        self.assertEqual(stats[1:], ((3, 1, 1), (2, 0, 0)))
+        self.assertEqual(stats[1:], ((2, 1, 0), (0, 0, 0)))
+        # The internal apostrophe stays; only the trailing comma is detached.
+        stats = m.chrf_statistics("can't,", "can't", char_order=1, word_order=2)
+        self.assertEqual(stats[1:], ((2, 1, 1), (0, 0, 0)))
 
     def test_chrf_case_whitespace_and_diacritics_are_explicit(self):
         self.assertEqual(m.chrf("a b\n", "ab"), 100)
@@ -218,11 +226,10 @@ class MetricsTests(unittest.TestCase):
 
 class MetricCLITests(unittest.TestCase):
     def setUp(self):
-        c.validate_output_path(c.output_root() / "fixture-sentinel")
-        c.output_root().mkdir(parents=True, exist_ok=True)
-        self.scratch = tempfile.TemporaryDirectory(prefix="synthetic-metrics-", dir=c.output_root())
+        self.scratch = tempfile.TemporaryDirectory(prefix="synthetic-metrics-")
         self.addCleanup(self.scratch.cleanup)
-        self.root = Path(self.scratch.name)
+        self.root = Path(self.scratch.name).resolve()
+        self.enterContext(patch.dict(os.environ, {c.OUTPUT_ROOT_ENV: str(self.root)}))
         self.row = {"id": "synthetic:1", "source": "One example.", "reference": "Un exemple.",
                     "hypothesis": "Un exemple.", "source_locale": "en", "target_locale": "fr"}
 

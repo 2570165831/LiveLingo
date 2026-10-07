@@ -10,6 +10,7 @@ import re
 from typing import Iterable, Mapping, Sequence
 
 UN_LOCALES = ("ar", "zh", "en", "fr", "ru", "es")
+OUTPUT_ROOT_ENV = "LIVELINGO_TARGET_EVAL_OUTPUT_ROOT"
 
 
 @dataclass(frozen=True)
@@ -45,26 +46,37 @@ def repository_root() -> Path:
 
 
 def output_root() -> Path:
-    return repository_root().parent / "work" / "target-eval"
+    """Read a required external directory, independent of checkout placement."""
+    configured = os.environ.get(OUTPUT_ROOT_ENV)
+    if not configured:
+        raise ValueError(f"{OUTPUT_ROOT_ENV} is required; set it to an existing absolute "
+                         "directory outside the repository")
+    root = Path(configured)
+    if not root.is_absolute():
+        raise ValueError(f"{OUTPUT_ROOT_ENV} must be an absolute directory path")
+    if root.resolve() != root:
+        raise ValueError(f"{OUTPUT_ROOT_ENV} must not use symlinks or '..' components")
+    if root.is_relative_to(repository_root()):
+        raise ValueError(f"{OUTPUT_ROOT_ENV} must be outside the repository")
+    if not root.is_dir():
+        raise ValueError(f"{OUTPUT_ROOT_ENV} directory must already exist")
+    return root
 
 
 def validate_output_path(path: str | Path) -> Path:
-    """Reject the checkout, other work directories, traversal and symlink escapes.
+    """Reject the checkout, paths outside the configured root and symlinks.
 
-    Check before creating any directory. Do not allow a relocated/symlinked work
-    root to turn an approved location into an arbitrary write destination.
+    Check the environment root and destination before creating any directory.
     """
     destination = Path(os.path.abspath(path))
     root = output_root()
     resolved = destination.resolve()
-    if root.resolve() != root:
-        raise ValueError("work/target-eval must not be reached through a symlink")
     if resolved.is_relative_to(repository_root()):
         raise ValueError("evaluation output must not be written inside the repository")
     if destination == root or not destination.is_relative_to(root):
-        raise ValueError("evaluation output must be a file inside work/target-eval")
+        raise ValueError("evaluation output must be a file inside the configured output root")
     if not resolved.is_relative_to(root):
-        raise ValueError("evaluation output resolves outside work/target-eval")
+        raise ValueError("evaluation output resolves outside the configured output root")
     for ancestor in (destination, *destination.parents):
         if ancestor == root.parent:
             break
@@ -108,6 +120,32 @@ def _text(value: object, label: str) -> str:
     return value
 
 
+def _un_turn_notes(data: dict, turn_indices: set[int]) -> dict[str, dict[int, list[dict]]]:
+    """Index curated diagnostics without silently dropping malformed selectors."""
+    notes = {}
+    for field in ("language_note_conflicts", "mapping_corrections"):
+        entries = data.get(field, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"UN {field} must be a list")
+        by_turn = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"UN {field} entries must be objects")
+            if field == "language_note_conflicts":
+                indices = [_positive_integer(entry.get("index"), "UN conflict turn index")]
+            else:
+                indices = entry.get("affected_english_indices")
+                if not isinstance(indices, list) or not indices:
+                    raise ValueError("UN mapping correction requires affected_english_indices")
+                indices = [_positive_integer(i, "UN correction turn index") for i in indices]
+            if any(i not in turn_indices for i in indices):
+                raise ValueError(f"UN {field} refers to an unknown turn")
+            for index in dict.fromkeys(indices):
+                by_turn.setdefault(index, []).append(entry)
+        notes[field] = by_turn
+    return notes
+
+
 def read_un_meeting(path: str | Path, *, include_partial: bool = False) -> CorpusResult:
     """Use the local turns.json schema, preserving curated six-way mappings.
 
@@ -132,14 +170,16 @@ def read_un_meeting(path: str | Path, *, include_partial: bool = False) -> Corpu
             type(mapped_counts.get(locale)) is not int or mapped_counts[locale] != len(turns)
             for locale in UN_LOCALES)):
         raise ValueError("UN six-language mapped counts do not match")
-    seen, units, excluded = set(), [], []
+    indices = []
     for turn in turns:
         if not isinstance(turn, dict):
             raise ValueError("UN turn must be an object")
-        index = _positive_integer(turn.get("index"), "UN turn index")
-        if index in seen:
-            raise ValueError("duplicate UN turn index")
-        seen.add(index)
+        indices.append(_positive_integer(turn.get("index"), "UN turn index"))
+    if len(set(indices)) != len(indices):
+        raise ValueError("duplicate UN turn index")
+    notes = _un_turn_notes(data, set(indices))
+    units, excluded = [], []
+    for turn, index in zip(turns, indices, strict=True):
         texts, statuses = turn.get("texts"), turn.get("text_status")
         if not isinstance(texts, dict) or not isinstance(statuses, dict):
             raise ValueError("UN turn requires texts and text_status by locale")
@@ -150,16 +190,17 @@ def read_un_meeting(path: str | Path, *, include_partial: bool = False) -> Corpu
         unit_id = f"{meeting}:turn:{index}"
         partial = {locale: status for locale, status in six_statuses.items()
                    if status != "extracted"}
+        turn_notes = {field: by_turn.get(index, []) for field, by_turn in notes.items()}
         if partial:
             excluded.append({"id": unit_id, "text_status": partial,
-                             "included_by_request": include_partial})
+                             "included_by_request": include_partial, **turn_notes})
             if not include_partial:
                 continue
         metadata = {"turn_index": index, "text_status": six_statuses,
                     "original_language": turn.get("original_language"),
                     "original_languages": turn.get("original_languages", []),
                     "alignment": "curated-turn-index",
-                    "audio_alignment": "not-used"}
+                    "audio_alignment": "not-used", **turn_notes}
         units.append(ParallelUnit(unit_id, "un", six_texts, metadata))
     return CorpusResult(tuple(units), tuple(excluded))
 
@@ -209,7 +250,7 @@ def _validate_cues(cues: Sequence[Cue]) -> None:
 def read_srt(path: str | Path) -> tuple[Cue, ...]:
     """Parse UTF-8/BOM SRT, retaining multiline text and inline markup verbatim."""
     text = Path(path).read_text(encoding="utf-8-sig")
-    blocks = re.split(r"\n[ \t]*\n", text.strip()) if text.strip() else []
+    blocks = re.split(r"\n(?:[ \t]*\n)+", text.strip()) if text.strip() else []
     cues = []
     for block in blocks:
         lines = block.splitlines()
@@ -303,7 +344,15 @@ def read_flores_plus(paths: Mapping[str, str | Path], *, split: str = "devtest")
     lines = {}
     for locale, path in sorted(paths.items()):
         _text(locale, "FLORES+ locale")
-        lines[locale] = Path(path).read_text(encoding="utf-8-sig").splitlines()
+        # newline="" preserves bare CR so it can be rejected, while CRLF is an
+        # explicit supported newline convention rather than a hidden extra row.
+        with Path(path).open(encoding="utf-8-sig", newline="") as handle:
+            rows = handle.read().replace("\r\n", "\n").split("\n")
+        if rows[-1] == "":
+            rows.pop()
+        if any(re.search(r"[\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]", row) for row in rows):
+            raise ValueError(f"FLORES+ {locale} contains a non-newline line separator")
+        lines[locale] = rows
     lengths = {len(rows) for rows in lines.values()}
     if len(lengths) != 1 or 0 in lengths:
         raise ValueError("FLORES+ locale files must have equal, nonzero line counts")
@@ -334,7 +383,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--document-id", help="unique CS50/TED video identifier")
     parser.add_argument("--split", default="devtest")
     parser.add_argument("--include-partial", action="store_true", help="UN only; retain reported partial turns")
-    parser.add_argument("--output", required=True, help="new JSONL file inside work/target-eval")
+    parser.add_argument("--output", required=True,
+                        help=f"new JSONL file inside the directory set by {OUTPUT_ROOT_ENV}")
     args = parser.parse_args(argv)
     try:
         destination = validate_output_path(args.output)
