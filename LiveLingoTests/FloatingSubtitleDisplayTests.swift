@@ -1,4 +1,5 @@
 import AppKit
+import ObjectiveC
 import SwiftUI
 import XCTest
 @testable import LiveLingo
@@ -394,6 +395,131 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
     }
 
+    func testNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset() async throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let preferences = FloatingSubtitlePreferences(store: fixture.defaults)
+        fixture.model.loadPresentationForTesting(phase: .recording, evidence: [])
+        preferences.sourceTextSize = 18
+        preferences.translationTextSize = 36
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        let panel = controller.prepareWindow(model: fixture.model)
+        defer { controller.close() }
+        let view = try XCTUnwrap(panel.contentView)
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertTrue(panel.becomesKeyOnlyIfNeeded)
+        XCTAssertFalse(panel.ignoresMouseEvents)
+        panel.alphaValue = 0
+        controller.show(model: fixture.model)
+        try await settle(view)
+
+        let items = try inspectSizeMenu(in: view, selecting: "标准")
+        XCTAssertFalse(try XCTUnwrap(items.first { $0.title == "自定义" }).enabled)
+        for title in ["标准", "大", "特大"] {
+            XCTAssertEqual(try XCTUnwrap(items.first { $0.title == title }).state, .off)
+        }
+        try await settle(view)
+        let standard = FloatingSubtitlePreferences(store: fixture.defaults)
+        XCTAssertEqual(standard.sourceTextSize, 21)
+        XCTAssertEqual(standard.translationTextSize, 24)
+        XCTAssertEqual(fixture.defaults.double(forKey: "floatingSourceTextSize"), 0)
+        XCTAssertEqual(fixture.defaults.double(forKey: "floatingTranslationTextSize"), 0)
+        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view, selecting: "特大")
+            .first { $0.title == "标准" }).state, .on)
+        try await settle(view)
+        let extraLarge = FloatingSubtitlePreferences(store: fixture.defaults)
+        XCTAssertEqual(extraLarge.sourceTextSize, 29)
+        XCTAssertEqual(extraLarge.translationTextSize, 32)
+        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view).first { $0.title == "特大" }).state, .on)
+        XCTAssertTrue(controller.panel === panel)
+    }
+
+    func testNonactivatingPanelAccessibilitySeparatesLanguageLabelAndHidesUnselectedCaption() async throws {
+        try enableHostAccessibility()
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let preferences = FloatingSubtitlePreferences(store: fixture.defaults)
+        let source = "El agua está fría."
+        let translation = "水很冷。"
+        fixture.model.loadPresentationForTesting(phase: .recording, evidence: [
+            TranscriptSegment(startTime: 0, endTime: 2, english: source, chinese: translation, sourceLanguage: "es")
+        ])
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        let panel = controller.prepareWindow(model: fixture.model)
+        defer { controller.close() }
+        let view = try XCTUnwrap(panel.contentView)
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertTrue(panel.becomesKeyOnlyIfNeeded)
+        XCTAssertFalse(panel.ignoresMouseEvents)
+        panel.alphaValue = 0
+        controller.show(model: fixture.model)
+        try await settle(view)
+        for (mode, visible, hidden) in [(FloatingSubtitleDisplayMode.translationOnly, translation, source),
+                                        (.sourceOnly, source, translation)] {
+            preferences.displayMode = mode
+            try await settle(view)
+            NSAccessibility.post(element: panel, notification: .layoutChanged)
+            let nodes = accessibleNodes(from: [panel])
+            XCTAssertEqual(AccessibleNode(object: panel).value("accessibilityRole") as? String, "AXWindow")
+            let labelNode = try XCTUnwrap(nodes.first {
+                $0.value("accessibilityLabel") as? String == "语种：西班牙语"
+                    || $0.value("accessibilityValue") as? String == "语种：西班牙语"
+            }, "The production panel must expose the language label in its own AX tree")
+            XCTAssertEqual(labelNode.value("accessibilityRole") as? String, "AXStaticText")
+            let captionNode = try XCTUnwrap(nodes.first {
+                $0.value("accessibilityValue") as? String == visible
+                    || $0.value("accessibilityLabel") as? String == visible
+            }, "The production panel must expose the visible caption independently")
+            XCTAssertFalse(labelNode.object === captionNode.object)
+            let text = nodes.flatMap { node in
+                [node.value("accessibilityLabel") as? String, node.value("accessibilityValue") as? String].compactMap { $0 }
+            }
+            XCTAssertFalse(text.contains { $0.contains(hidden) }, "The unselected caption must be absent from the panel AX tree")
+            XCTAssertFalse(text.contains { $0.contains("西班牙语") && $0.contains(visible) },
+                           "The language label must not be merged with selectable caption text")
+        }
+    }
+
+    func testNonactivatingPanelTextControlsBecomeKeyAndCopyToPrivatePasteboard() async throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let source = "El agua está fría."
+        let translation = "水很冷。"
+        fixture.model.loadPresentationForTesting(phase: .recording, evidence: [
+            TranscriptSegment(startTime: 0, endTime: 2, english: source, chinese: translation, sourceLanguage: "es")
+        ])
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        let panel = controller.prepareWindow(model: fixture.model)
+        defer { controller.close() }
+        let view = try XCTUnwrap(panel.contentView)
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertTrue(panel.canBecomeKey)
+        XCTAssertTrue(panel.becomesKeyOnlyIfNeeded)
+        XCTAssertFalse(panel.ignoresMouseEvents)
+        panel.alphaValue = 0
+        controller.show(model: fixture.model)
+        try await settle(view)
+
+        let selectAll = NSSelectorFromString("selectAll:")
+        let copy = NSSelectorFromString("copy:")
+        let textControls = descendants(view).filter {
+            $0.responds(to: selectAll) && $0.responds(to: copy)
+        }
+        XCTAssertEqual(textControls.count, 2, "Both visible caption bodies must support selection and copying")
+        let pasteboard = NSPasteboard(name: .init("LiveLingoTests-FloatingSubtitleCopy-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        for (control, expected) in zip(textControls, [source, translation]) {
+            XCTAssertTrue(control.acceptsFirstResponder)
+            XCTAssertTrue(control.needsPanelToBecomeKey)
+            XCTAssertTrue(panel.makeFirstResponder(control))
+            XCTAssertTrue(panel.firstResponder === control)
+            panel.makeKey()
+            XCTAssertTrue(panel.isKeyWindow)
+            control.perform(selectAll, with: nil)
+            pasteboard.clearContents()
+            try copySelection(control, to: pasteboard)
+            XCTAssertEqual(pasteboard.string(forType: .string), expected,
+                           "Native copy: must write the selected caption body without its language label")
+        }
+    }
+
     func testSettingsSliderAccessibilityValuesMatchVisibleNumbers() async throws {
         try enableHostAccessibility()
         let (model, store) = try fixture()
@@ -544,37 +670,31 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         let preferences = FloatingSubtitlePreferences(store: store)
         model.loadPresentationForTesting(phase: .recording, evidence: [], preview: "The water is cold.")
         let windowController = FloatingSubtitleWindowController(defaults: store)
-        let window = windowController.prepareWindow(model: model)
+        windowController.panelFactoryForTesting = { rect, style in
+            ShadowTrackingPanel(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
+        }
+        let window = try XCTUnwrap(windowController.prepareWindow(model: model) as? ShadowTrackingPanel)
         defer { windowController.close() }
         let view = try XCTUnwrap(window.contentView as? NSHostingView<AnyView>)
         try await settle(view)
-        // The production controller owns a plain NSPanel. Count shadow refreshes
-        // on the concrete production configuration with a separate hidden probe.
-        let shadowWindow = ShadowTrackingWindow(contentRect: window.contentRect(forFrameRect: window.frame),
-                                               styleMask: [.titled], backing: .buffered, defer: false)
-        shadowWindow.isReleasedWhenClosed = false
-        defer { shadowWindow.close() }
-        let shadowConfiguration = FloatingSubtitleWindowConfiguration(window: shadowWindow)
-        shadowConfiguration.apply(.init())
         let originalIsOpaque = window.isOpaque
         let originalBackground = window.backgroundColor
         let originalHasShadow = window.hasShadow
         let initial = try bitmap(view)
         XCTAssertEqual(try XCTUnwrap(initial.colorAt(x: 2, y: 2)).alphaComponent, 1, accuracy: 0.02)
-        let shadowInvalidations = shadowWindow.shadowInvalidations
+        let shadowInvalidations = window.shadowInvalidations
         preferences.backgroundOpacity = 0.7
-        shadowConfiguration.apply(.init(backgroundOpacity: preferences.backgroundOpacity))
         try await settle(view)
         XCTAssertFalse(window.isOpaque)
         XCTAssertEqual(window.backgroundColor, .clear)
         XCTAssertEqual(window.hasShadow, originalHasShadow)
         XCTAssertFalse(window.isVisible)
-        XCTAssertFalse(shadowWindow.isVisible)
         XCTAssertTrue(windowController.panel === window)
         XCTAssertTrue(window.contentView === view)
         let translucent = try bitmap(view)
         XCTAssertEqual(try XCTUnwrap(translucent.colorAt(x: 2, y: 2)).alphaComponent, 0.7, accuracy: 0.02)
-        XCTAssertGreaterThan(shadowWindow.shadowInvalidations, shadowInvalidations)
+        XCTAssertGreaterThan(window.shadowInvalidations, shadowInvalidations,
+                             "Changing the preference must invalidate the actual subtitle panel's shadow")
         var opaqueWhitePixels = 0
         for y in stride(from: 30, to: translucent.pixelsHigh - 30, by: 2) {
             for x in stride(from: 30, to: translucent.pixelsWide - 30, by: 2) {
@@ -585,14 +705,14 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
         XCTAssertGreaterThan(opaqueWhitePixels, 0, "Only the background may fade; caption glyphs must remain opaque")
         try captureOpacity(view, directory: fixture.ddOverlay)
-        let translucentShadowInvalidations = shadowWindow.shadowInvalidations
+        let translucentShadowInvalidations = window.shadowInvalidations
         preferences.backgroundOpacity = 1
-        shadowConfiguration.apply(.init(backgroundOpacity: preferences.backgroundOpacity))
         try await settle(view)
         XCTAssertEqual(window.isOpaque, originalIsOpaque)
         XCTAssertEqual(window.backgroundColor, originalBackground)
         XCTAssertEqual(window.hasShadow, originalHasShadow)
-        XCTAssertGreaterThan(shadowWindow.shadowInvalidations, translucentShadowInvalidations)
+        XCTAssertGreaterThan(window.shadowInvalidations, translucentShadowInvalidations,
+                             "Restoring the preference must invalidate the same subtitle panel's shadow")
         XCTAssertTrue(try pixels(bitmap(view)) == pixels(initial), "Restoring 100% must restore the original pixels")
     }
 
@@ -875,13 +995,32 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
 
     private func accessibleNodes(in view: NSView) -> [AccessibleNode] {
         NSAccessibility.post(element: view, notification: .layoutChanged)
+        return accessibleNodes(from: descendants(view))
+    }
+
+    private func accessibleNodes(from roots: [NSObject]) -> [AccessibleNode] {
         var visited = Set<ObjectIdentifier>()
         func nodes(_ value: Any, depth: Int = 0) -> [AccessibleNode] {
             guard depth < 24, let object = value as? NSObject, visited.insert(ObjectIdentifier(object)).inserted else { return [] }
             let node = AccessibleNode(object: object)
             return [node] + ((node.value("accessibilityChildren") as? [Any]) ?? []).flatMap { nodes($0, depth: depth + 1) }
         }
-        return descendants(view).flatMap { nodes($0) }
+        return roots.flatMap { nodes($0) }
+    }
+
+    private func copySelection(_ responder: NSResponder, to pasteboard: NSPasteboard) throws {
+        // AppKit's native copy: uses the general-pasteboard accessor. Redirect
+        // that accessor synchronously in this test process; never read or write
+        // the user's general pasteboard, and restore it before yielding.
+        let accessor = try XCTUnwrap(class_getClassMethod(NSPasteboard.self, NSSelectorFromString("generalPasteboard")))
+        let replacement: @convention(block) (AnyObject) -> NSPasteboard = { _ in pasteboard }
+        let implementation = imp_implementationWithBlock(replacement)
+        let original = method_setImplementation(accessor, implementation)
+        defer {
+            method_setImplementation(accessor, original)
+            imp_removeBlock(implementation)
+        }
+        responder.perform(NSSelectorFromString("copy:"), with: nil)
     }
 
     private func hasVisibleText(_ bitmap: NSBitmapImageRep, scale: CGFloat, rows: Range<Int>) -> Bool {
@@ -908,6 +1047,14 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
 }
 
 private final class ShadowTrackingWindow: NSWindow {
+    private(set) var shadowInvalidations = 0
+    override func invalidateShadow() {
+        shadowInvalidations += 1
+        super.invalidateShadow()
+    }
+}
+
+private final class ShadowTrackingPanel: NSPanel {
     private(set) var shadowInvalidations = 0
     override func invalidateShadow() {
         shadowInvalidations += 1

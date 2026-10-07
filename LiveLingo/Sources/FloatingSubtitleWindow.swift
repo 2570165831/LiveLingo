@@ -106,6 +106,11 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     private var settings = FloatingSubtitleWindowSettings()
     private var pendingBottomPlacement = false
 
+    #if DEBUG
+    // Tests can observe the owned panel without replacing its configuration or content.
+    var panelFactoryForTesting: ((NSRect, NSWindow.StyleMask) -> NSPanel)?
+    #endif
+
     var panel: NSPanel? { window as? NSPanel }
     var lockActionTitle: String { isLocked ? "解锁浮动字幕" : "锁定浮动字幕" }
 
@@ -134,9 +139,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
                        backgroundOpacity: preferences.backgroundOpacity)
         if let panel { return panel }
 
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 350),
-                            styleMask: [.titled, .closable, .miniaturizable, .nonactivatingPanel],
-                            backing: .buffered, defer: false)
+        let panel = makePanel()
         panel.title = "浮动字幕"
         panel.identifier = NSUserInterfaceItemIdentifier(Self.frameAutosaveName)
         panel.isFloatingPanel = true
@@ -181,6 +184,15 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
             moveToScreenBottom()
         }
         return panel
+    }
+
+    private func makePanel() -> NSPanel {
+        let rect = NSRect(x: 0, y: 0, width: 640, height: 350)
+        let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .nonactivatingPanel]
+        #if DEBUG
+        if let panelFactoryForTesting { return panelFactoryForTesting(rect, style) }
+        #endif
+        return NSPanel(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
     }
 
     func show(model: AppModel) {
