@@ -21,6 +21,16 @@ from urllib.parse import parse_qs, urlparse
 # bundled runtime or the bundled service script.
 sys.dont_write_bytecode = True
 
+try:
+    from scoreboard_timing import measure
+except ImportError:
+    # Normal release bundles need not include the optional timing helper.
+    # Missing samples are unknown timings, never zero-duration measurements.
+    from contextlib import nullcontext
+
+    def measure(stage):
+        return nullcontext()
+
 import numpy as np
 import soundfile as sf
 from scipy.signal import butter, sosfilt, sosfiltfilt
@@ -124,7 +134,8 @@ def model_for(key: str):
 
         started = time.monotonic()
         print(f"ASR loading model={key}", flush=True)
-        loaded = load_model(str(path))
+        with measure("asr_load"):
+            loaded = load_model(str(path))
         with MODEL_STATE_LOCK:
             MODELS[key] = loaded
             MODEL_LAST_USED[key] = time.monotonic()
@@ -344,16 +355,17 @@ def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, 
     with MODEL_LOCK:
         try:
             model = model_for(model_key)
-            if language_mode == "auto":
-                return transcribe_auto(model, model_input_path, probe_input_path or model_input_path, model_key)
-            if model_key == "parakeet":
-                result = model.generate(model_input_path, verbose=False)
-            else:
-                result = model.generate(
-                    model_input_path, language="English", max_tokens=256,
-                    temperature=0.0, verbose=False,
-                )
-            return result.text.strip()
+            with measure("asr_inference"):
+                if language_mode == "auto":
+                    return transcribe_auto(model, model_input_path, probe_input_path or model_input_path, model_key)
+                if model_key == "parakeet":
+                    result = model.generate(model_input_path, verbose=False)
+                else:
+                    result = model.generate(
+                        model_input_path, language="English", max_tokens=256,
+                        temperature=0.0, verbose=False,
+                    )
+                return result.text.strip()
         finally:
             with MODEL_STATE_LOCK:
                 if model_key in MODELS: MODEL_LAST_USED[model_key] = time.monotonic()

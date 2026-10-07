@@ -2019,6 +2019,10 @@ extension SpeechPipeline {
         try transcriptionQueue.setCapturing(true)
         stateLock.withLock { capturePaused = false; isStopping = false; inputMode = .systemAudio }
         let start = ProcessInfo.processInfo.systemUptime
+        // T0 precedes the first PCM write; first-result latency includes startup
+        // after this anchor, rather than starting at the first result itself.
+        let replayClock = Logger(subsystem: "com.jianhongli.LiveLingo", category: "ReplayClock")
+        replayClock.notice("replay event=start sample_rate=\(Int(audio.processingFormat.sampleRate)) frames=\(audio.length)")
         while audio.framePosition < audio.length {
             try Task.checkCancellation()
             guard let buffer = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
@@ -2035,6 +2039,7 @@ extension SpeechPipeline {
             let delay = target - (ProcessInfo.processInfo.systemUptime-start)
             if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
         }
+        replayClock.notice("replay event=end fed_seconds=\(Double(audio.framePosition) / audio.processingFormat.sampleRate)")
     }
 }
 #endif

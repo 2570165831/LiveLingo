@@ -1,0 +1,83 @@
+{
+  "schema": "livelingo-ruler/1",
+  "id": "ruler-1",
+  "normalizer": "norm_v1",
+  "matching_window_seconds": 3.0,
+  "clips": [
+    {
+      "id": "cs50-w3-search",
+      "privacy": "public",
+      "start": 1140.439,
+      "end": 1738.54,
+      "sample_rate": 48000,
+      "channels": 2,
+      "cue_first": 535,
+      "cue_last": 803,
+      "tiers": [
+        "standard",
+        "full"
+      ]
+    },
+    {
+      "id": "cs50-w3-structures",
+      "privacy": "public",
+      "start": 3540.649,
+      "end": 4138.899,
+      "sample_rate": 48000,
+      "channels": 2,
+      "cue_first": 1661,
+      "cue_last": 2010,
+      "tiers": [
+        "standard",
+        "full"
+      ]
+    },
+    {
+      "id": "private-0928-30m",
+      "privacy": "private",
+      "start": 1800.0,
+      "end": 2400.0,
+      "sample_rate": 32000,
+      "channels": 1,
+      "tiers": [
+        "standard",
+        "full"
+      ]
+    },
+    {
+      "id": "cs50-w3-anchor2",
+      "privacy": "public",
+      "start": 3603.199,
+      "end": 3632.85,
+      "sample_rate": 48000,
+      "channels": 2,
+      "cue_first": 1691,
+      "cue_last": 1702,
+      "tiers": [
+        "smoke"
+      ]
+    },
+    {
+      "id": "private-0928-full",
+      "privacy": "private",
+      "start": 0.0,
+      "end": null,
+      "sample_rate": 32000,
+      "channels": 1,
+      "tiers": [
+        "full"
+      ]
+    }
+  ],
+  "official_srt_sha256": "0d46dd9b18631362503288e7642689ae074274cffc44fa91cc8f6f6a67ee6734",
+  "public_source_sha256": "5db2e7e83f3d1d6445fa54b83fb646d9a649227378f12c2ebe8a5671d8962ef0",
+  "authored80_sha256": "00e2e843c2dbdb154b0a257262178be1090a97e33a35756fbf13ffb7df215e2b",
+  "known_reference_errors": [
+    700,
+    1695,
+    1700,
+    1701
+  ],
+  "reference_status": "official_published_captions_not_human_gold",
+  "smoke_ranked": false
+}

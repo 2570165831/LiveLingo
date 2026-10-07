@@ -1,0 +1,27 @@
+{
+  "version": "cs50-glossary-v1",
+  "review_status": "draft_requires_human_review",
+  "entries": [
+    {"english": ["algorithm"], "chinese": ["算法"]},
+    {"english": ["linear search"], "chinese": ["线性查找", "线性搜索"]},
+    {"english": ["binary search"], "chinese": ["二分查找", "二分搜索", "二分法", "折半查找"]},
+    {"english": ["bubble sort"], "chinese": ["冒泡排序"]},
+    {"english": ["selection sort"], "chinese": ["选择排序"]},
+    {"english": ["merge sort"], "chinese": ["归并排序", "合并排序"]},
+    {"english": ["recursion", "recursive"], "chinese": ["递归"]},
+    {"english": ["base case"], "chinese": ["基本情况", "基线条件", "基础情形"]},
+    {"english": ["running time"], "chinese": ["运行时间"]},
+    {"english": ["upper bound"], "chinese": ["上界"]},
+    {"english": ["lower bound"], "chinese": ["下界"]},
+    {"english": ["pseudocode"], "chinese": ["伪代码"]},
+    {"english": ["array"], "chinese": ["数组"]},
+    {"english": ["struct"], "chinese": ["结构体", "结构"]},
+    {"english": ["data structure"], "chinese": ["数据结构"]},
+    {"english": ["phone book"], "chinese": ["电话簿", "电话本"]},
+    {"english": ["integer"], "chinese": ["整数"]},
+    {"english": ["string"], "chinese": ["字符串"]},
+    {"english": ["function"], "chinese": ["函数"]},
+    {"english": ["loop"], "chinese": ["循环"]},
+    {"english": ["memory"], "chinese": ["内存"]}
+  ]
+}

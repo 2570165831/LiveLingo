@@ -127,6 +127,8 @@ remain private classroom material. Keep them with the test data.
 failure markers separately, because the production workflow can save an
 incomplete summary. Capture duration accepts finite values from 0 (exclusive)
 to 3600 seconds. Replay duration is the input file's duration.
+`summaryStatus` and `phase` are free-form strings and are removed by the event
+whitelist; their presence in AppModel callbacks does not make them CLI fields.
 
 Only a zero exit status together with `run_verified` and confirmed runtime
 cleanup is a successful complete run. `--verify-saved` checks export integrity;
@@ -196,6 +198,160 @@ cancellation; saved-course pause/reopen coverage belongs to the app tests.
 For cleanup, first ensure the CLI has exited, keep the result/required logs,
 and move only its explicit test output/build paths to Trash. Never remove
 real session directories or the installed app as part of a CLI test.
+
+## Frozen scoreboard
+
+`python3 -B Scripts/livelingo-scoreboard.py run --build /absolute/build-directory`
+runs the frozen CS50 search/structures excerpts and private classroom excerpt,
+then the authored translation set, and writes `scoreboard.json` and a short
+`scoreboard.md`. The build directory must contain `livelingo-cli` and its isolated
+runtime. No model or fixture is downloaded. All generated files stay in this
+checkout's ignored `work/`; Swift caches use the lab's `work/dd-scoreboard`.
+It refuses another active LiveLingo CLI/app, an existing output directory,
+changed fixture hashes, symlink outputs, or runtime paths under `/Applications`.
+It never contacts the legacy ASR endpoint on port 18765.
+
+One-time configuration is local, private, and untracked. Create
+`work/scoreboard/sources.json` with these fields, replacing the example paths
+and SHA-256 values with the actual frozen local sources:
+
+```json
+{
+  "public_audio": {"path": "/absolute/cs50-audio.m4s", "sha256": "64 hex digits"},
+  "official_srt": {"path": "/absolute/lecture3.en.srt", "sha256": "64 hex digits"},
+  "private_audio": {"path": "/absolute/sealed-classroom-recording.wav", "sha256": "64 hex digits"},
+  "reference_checks": {
+    "cs50-w3-search": "/absolute/benchmark.json",
+    "cs50-w3-structures": "/absolute/heldout-plan.json"
+  }
+}
+```
+
+The public source and SRT must match the committed ruler hashes. The private
+source must be sealed 32 kHz mono f32 WAV; its content hash is local only.
+`reference_checks` compares tokenized excerpts with existing frozen LL4 reference
+text. Omitted checks are explicitly recorded as unchecked. Preparation checks
+every decoded frame count and subtitle boundary. It uses sample-based trimming:
+time-based AAC trimming produced 448 extra frames in the initial local test.
+The corrected smoke window is **3603.199–3632.850 s**, official cues 1691–1702
+(29.651 s); the draft's 3603.049–3633.000 window did not match those cues.
+
+For `build` / `run --build auto`, create `work/scoreboard/runtime.json`:
+
+```json
+{
+  "python": "/absolute/existing/python3.13",
+  "asr_site_packages": "/absolute/existing/ASRRuntime/site-packages",
+  "language_site_packages": "/absolute/existing/LanguageRuntime/site-packages",
+  "models": "/absolute/existing/Models"
+}
+```
+
+Paths must exist and resolve outside `/Applications`. Build assembly copies the
+selected commit (or hashes a current dirty snapshot) without changing branches,
+and hashes the CLI, worker/service, models and Python dependency contents. It
+includes the optional numeric timing helper in both child runtimes. Existing
+compatible builds can also be supplied directly; missing provenance is unknown.
+Before execution, recorded CLI/runtime hashes and external dependency manifests
+are checked again; changed files are refused. New build records also bind the
+Python executable and wrapper scripts. Older builds without those records retain
+`runtime_hashes_verified=false`. Absolute dependency paths stay in the local
+build record and are omitted from numeric reports.
+
+```sh
+python3 -B Scripts/livelingo-scoreboard.py prepare
+python3 -B Scripts/livelingo-scoreboard.py build --commit HEAD --out work/scoreboard/builds/candidate
+python3 -B Scripts/livelingo-scoreboard.py run --build work/scoreboard/builds/candidate --tier smoke
+python3 -B Scripts/livelingo-scoreboard.py run --build work/scoreboard/builds/candidate --profile both --repeats 3
+python3 -B Scripts/livelingo-scoreboard.py run --builds /absolute/build-A,/absolute/build-B --repeats 2 --order ABBA
+python3 -B Scripts/livelingo-scoreboard.py score --run-dir work/scoreboard/runs/EXISTING --out work/scoreboard/rescored-NEW
+python3 -B Scripts/livelingo-scoreboard.py calibrate --build work/scoreboard/builds/candidate --repeats 3
+python3 -B Scripts/livelingo-scoreboard.py compare /absolute/A/scoreboard.json /absolute/B/scoreboard.json --noise /absolute/noise-floor.json
+```
+
+`--tier standard` is the default; `full` also includes the whole private class.
+Smoke omits authored-80. Standard/full run its 80 sentences in a single batch,
+resuming after a failed sentence with a new CLI output directory and recording
+that sentence as an error. `--skip-authored` explicitly omits this proxy.
+`--profile 9b` passes `--high-quality`; `4b` omits it. Results for each build and
+profile stay separate, including paired A/B differences and repeat summaries.
+`calibrate` measures A/A variability, with the documented three-edit, 0.1 s and
+5% energy floors. Uncalibrated comparisons retain that label; only measured
+noise floors and supported paired confidence intervals permit direction claims.
+Authored-80 runs once per build/profile; it has no invented repeat variance.
+
+ASR numbers are **differences from official captions**, not human-gold WER.
+Both raw tokens and `norm_v1` are reported; the latter normalizes digits and
+expands `n't` (including `can't`/`cannot` → `can not`). Numbers are counted by
+digit. Token associations are limited to overlapping time spans ±3 seconds.
+Private audio has no reference transcript and therefore no ASR accuracy score.
+
+Latency is per **reference subtitle cue**, with content/time association to
+actual captions; private audio uses actual exported caption cues. First Chinese
+text uses the earliest event. A cue spanning several captions commits/finalizes
+at the latest required event; incomplete reference matching or any unfinished
+required caption remains right-censored. Missing logs are separately unmeasured.
+P50/nearest-rank P95 retain slow outliers and explicitly label observed,
+censored populations; they do not claim full-population quantiles. `ReplayClock`
+defines T0 immediately before the first PCM write. First-result latency starts
+at T0. Builds lacking this anchor have unknown latency, without an assumed
+preview/backend offset. Negative delays below −0.1 s invalidate latency.
+The details use numeric cue sequence numbers, not classroom text or IDs.
+
+State counts replay checksummed snapshot/journal metadata in disk sequence order.
+`pending` includes retryWaiting, exactly matching `needsWork`. Completed records
+with a candidate and finished runs with unresolved work each have separate
+`completed_with_unresolved` counts. Pending and unresolved may overlap.
+`appleEvidence` contains raw preview text: only empty/present/unknown counts
+are retained. Failure reasons, CLI events and OSLog fields use fixed allowlists.
+
+Energy defaults to **unprivileged IOReport** via the included C bridge,
+compiled with the already installed Apple compiler. No sudo, powermetrics,
+third-party installation, or system configuration change is used. One sampler
+covers the session, with adjacent idle subtraction, boundary-bin apportionment,
+coverage and baseline drift, gross/net rail joules per audio minute and phase
+energy when clock boundaries can be verified. CPU/GPU/ANE counters are whole
+machine OS estimates including background work; they exclude the screen and
+are not App-exclusive. Unsupported counters stay null. If IOReport is unavailable,
+CPU core busy seconds, GPU residency/utilization and wall time form an explicitly
+marked proxy; **no proxy value is converted to joules**. `--no-energy` disables
+sampling. Thermal, AC power and interference are currently unverified in the
+runner, so it conservatively reports `energy.comparable=false` and excludes
+energy from ranking. Zero/short idle windows do not establish a usable baseline.
+
+Model-call timing is opt-in through the runner's exclusively created numeric
+log. It separately measures ASR loading/inference, language model loading,
+and generation initialization/restore/steps. Calls exclude the ASR lock wait;
+wall time includes their tensor work, I/O and preprocessing, while CPU time
+is process-wide, not hardware GPU busy time. The existing completion protocol
+uses `text` for translation and other text work: those calls remain `text_step`,
+not a falsely claimed independent translation stage. Notes/review have their
+own fixed stage labels. Apple preview inference and uninstrumented builds are
+unknown. Missing optional helpers leave normal release behavior unchanged.
+
+Reports, numeric logs, stdout and stderr contain only counts, enum labels,
+sequence numbers and hashes. Raw `session/` exports still contain private
+classroom text and have a PRIVATE marker; keep that directory local. The
+scorer never deletes source recordings, results, installed apps, or services.
+A persistent advisory lock prevents concurrent writers; history is append-only.
+Timeout signals target only the exact freshly checked child, and residual or
+uncertain ownership stops subsequent workloads.
+
+Exit codes: 0 scored (even `processingIncomplete` is scored), 2 preflight refusal,
+3 invalid/changed ruler, 4 unavailable metrics or execution evidence. New output
+files are exclusively created. Rescoring never launches a model.
+
+Synthetic tests require no weights or audio devices:
+
+```sh
+python3 -B -m unittest discover -s Scripts -p 'test_scoreboard*.py'
+python3 -B -m unittest discover -s Scripts -p 'test_livelingo_scoreboard.py'
+```
+
+Implementation acceptance used these synthetic cases, a read-only LL4 raw-token
+compatibility check, compiled CLI, the complete app test suite and short rootless
+energy probes. It did **not** replay real classroom/model audio or run A/A
+calibration; those remain separate live acceptance steps.
 
 ## Silent virtual output for a real capture test
 

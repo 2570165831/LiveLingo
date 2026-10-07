@@ -1,0 +1,18 @@
+{
+  "version": "norm_v1",
+  "filler_words": ["uh", "um", "uhm", "er", "erm", "ah", "hmm", "mm", "mhm"],
+  "equivalents": {
+    "okay": ["ok"],
+    "alright": ["all", "right"],
+    "cannot": ["can", "not"],
+    "can't": ["can", "not"],
+    "won't": ["will", "not"],
+    "shan't": ["shall", "not"],
+    "ain't": ["is", "not"]
+  },
+  "negation": ["not", "no", "never", "nothing", "none", "nobody", "neither", "nor", "cannot"],
+  "code": ["int", "char", "string", "bool", "float", "double", "void", "return", "struct", "typedef", "printf", "malloc", "free", "null", "argv", "argc", "main", "include", "stdio", "if", "else", "for", "while", "true", "false", "array", "bracket", "semicolon"],
+  "number_policy": "integer_to_decimal_digits; ordinals_1_to_31_to_words; and_only_after_hundred",
+  "contraction_policy": "expand_regular_nt; irregular_forms_in_equivalents",
+  "number_error_unit": "decimal_digit"
+}

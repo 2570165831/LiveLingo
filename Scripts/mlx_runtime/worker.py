@@ -14,6 +14,27 @@ sys.dont_write_bytecode = True
 import threading
 import time
 
+try:
+    # Scoreboard bundles may put the optional helper alongside this script.
+    from scoreboard_timing import generation_stage, measure
+except ImportError:
+    # Source-tree execution has the helper one directory up, in Scripts/.
+    import importlib.util
+    try:
+        _timing_spec = importlib.util.spec_from_file_location(
+            'scoreboard_timing', Path(__file__).resolve().parent.parent / 'scoreboard_timing.py')
+        _timing_module = importlib.util.module_from_spec(_timing_spec)
+        _timing_spec.loader.exec_module(_timing_module)
+        generation_stage, measure = _timing_module.generation_stage, _timing_module.measure
+    except (ImportError, OSError):
+        # Normal releases omit the helper. No records means unknown timings,
+        # even when the caller sets LIVELINGO_SCOREBOARD_TIMINGS.
+        def generation_stage(purpose):
+            return None
+
+        def measure(stage):
+            return contextlib.nullcontext()
+
 from review_diagnostics import (bind_review_prompt, failure_line, generation_detail,
                                 parse_review_input, stage_error)
 
@@ -337,7 +358,8 @@ def main():
                 raise
         if engine is None:
             send('loading',request_id)
-            engine = Engine(args.model)
+            with measure('language_load'):
+                engine = Engine(args.model)
             send('model_state', loaded=True)
             memory.log_event('model-loaded', force=True)
         last_model_use = time.monotonic()
@@ -349,9 +371,10 @@ def main():
         final_budget=int(command.get('finalBudget',4096))
         if not 1<=thinking_budget<=16384 or not 1<=final_budget<=4096:
             raise ValueError('Invalid token budget')
-        generation=Generation(engine,prompt,schema,thinking=bool(command.get('thinking',False)),prefix=prefix,
-                              thinking_budget=thinking_budget,final_budget=final_budget,
-                              _use_prefix_cache=use_prefix_cache)
+        with measure(generation_stage(purpose)):
+            generation=Generation(engine,prompt,schema,thinking=bool(command.get('thinking',False)),prefix=prefix,
+                                  thinking_budget=thinking_budget,final_budget=final_budget,
+                                  _use_prefix_cache=use_prefix_cache)
         if any(item.identity == generation.identity for item in active.values()):
             raise ValueError('Identical generation already active')
         for old_id, identity in list(identities.items()):
@@ -362,7 +385,9 @@ def main():
         recovered=hot if prefix else None
         path=checkpoint_path(generation)
         if prefix and recovered is None and path.exists():
-            try: recovered=Generation.restore(engine,path,generation.identity)
+            try:
+                with measure(generation_stage(purpose)):
+                    recovered=Generation.restore(engine,path,generation.identity)
             except Exception as error: send('checkpoint_rejected',request_id,message=str(error))
         if recovered is not None:
             # A stale UI journal may lag the token checkpoint, or vice versa.
@@ -421,7 +446,8 @@ def main():
             request_id,generation=active.popitem(last=False)
             finished=None
             try:
-                state=generation.step()
+                with measure(generation_stage(purposes.get(request_id))):
+                    state=generation.step()
                 now=time.monotonic()
                 last_model_use = now
                 if state=='done':
