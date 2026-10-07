@@ -65,8 +65,7 @@ import Foundation
     }
 
     static func fileBytes(_ directory: URL) throws -> [String: Data] {
-        try Dictionary(uniqueKeysWithValues: FileManager.default.contentsOfDirectory(at: directory,
-            includingPropertiesForKeys: nil).map { ($0.lastPathComponent, try Data(contentsOf: $0)) })
+        try LiveLingoCLI.fixtureFiles(in: directory)
     }
 
     struct BinaryResult {
@@ -154,7 +153,7 @@ import Foundation
             try expect(try LiveLingoCLI.verifySaved(mixed, emit: false) == 4, "mixed_verify")
             try expect(try fileBytes(mixed) == before, "mixed_verify_is_read_only")
             try expect(Set(before.keys) == ["recording.wav", "manifest.json", "bilingual.jsonl", "bilingual.srt",
-                "transcript-en.txt", "transcript-zh-Hans.txt"], "mixed_adds_no_files")
+                "transcript-en.txt", "transcript-zh-Hans.txt", ".exports"], "mixed_adds_no_files")
             try expect(before["transcript-en.txt"] == Data("Air is clear.\n這個實驗需要兩個容器。\nEl agua fluye.\n水會流㗎。\n".utf8), "source_text_has_no_labels")
             try expect(before["transcript-zh-Hans.txt"] == Data("空气清澈。\n这个实验需要两个容器。\n水会流动。\n水会流动。\n".utf8), "target_text_uses_simplified_chinese")
             try expect(before["bilingual.srt"] == Data("1\n00:00:00,000 --> 00:00:01,000\nAir is clear.\n空气清澈。\n\n2\n00:00:01,000 --> 00:00:02,000\n这个实验需要两个容器。\n\n3\n00:00:02,000 --> 00:00:03,000\nEl agua fluye.\n水会流动。\n\n4\n00:00:03,000 --> 00:00:04,000\n水會流㗎。\n水会流动。\n".utf8), "mixed_srt_is_frozen")

@@ -15,6 +15,9 @@ struct ReviewReportEntry: Codable, Equatable, Sendable {
     var markdown: String
     /// Older valid latest-file bodies, for an interrupted manifest/alias write.
     var recognizedFileDigests: [String]? = nil
+    /// Frozen advisory bodies, independent of pause/failure/statistics headers.
+    var batchReports: [String]? = nil
+    var stats: LearningReviewQueue.JobStats? = nil
 
     var key: String {
         if let identity { return identity.key }
@@ -29,6 +32,7 @@ struct ReviewReportEntry: Codable, Equatable, Sendable {
               !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               updatedAt.timeIntervalSince1970.isFinite,
               fileName == scope.reportFileName,
+              (batchReports?.count ?? 0) <= completed,
               supersededByRevision == nil || supersededByRevision! >= 0 else {
             throw ReviewIdentityError.unreadable("报告的范围、进度或文件名无效")
         }
@@ -62,8 +66,21 @@ enum ReviewReportCollection {
             let prior = entries[index]
             guard prior.identity == entry.identity, prior.inputDigest == entry.inputDigest,
                   prior.scope.stableKey == entry.scope.stableKey,
+                  prior.total == entry.total,
                   entry.completed >= prior.completed else {
                 throw ReviewIdentityError.conflict("报告写入改变了已有任务的身份或完成进度")
+            }
+            if let before = prior.batchReports, let after = entry.batchReports {
+                guard Array(after.prefix(before.count)) == before else {
+                    throw ReviewIdentityError.conflict("报告写入改变了已完成批次的正文")
+                }
+                if entry.completed == prior.completed, after != before {
+                    throw ReviewIdentityError.conflict("相同完成进度对应不同报告正文")
+                }
+            } else if entry.completed == prior.completed, prior.completed > 0 {
+                guard entry.markdown == prior.markdown else {
+                    throw ReviewIdentityError.conflict("相同完成进度对应不同报告正文")
+                }
             }
             let previous = ReviewInputBinding.digest(Data(prior.markdown.trimmingCharacters(in: .newlines).utf8))
             entry.recognizedFileDigests = Array(Set((prior.recognizedFileDigests ?? []) + [previous])).sorted()
@@ -85,6 +102,15 @@ enum ReviewReportCollection {
         let scoped = directory.startAccessingSecurityScopedResource()
         defer { if scoped { directory.stopAccessingSecurityScopedResource() } }
         let snapshot = try ReviewInputBinding.snapshot(in: directory)
+        return try markdown(in: directory, queueReports: queueReports, validatedSnapshot: snapshot,
+                            sessionID: sessionID, inputRevision: inputRevision)
+    }
+
+    /// The caller validated this immutable snapshot off MainActor immediately
+    /// before its owned report commit. Do not acquire the storage lock again.
+    static func markdown(in directory: URL, queueReports: [ReviewReportEntry],
+                         validatedSnapshot snapshot: SessionSnapshot?,
+                         sessionID: UUID? = nil, inputRevision: Int? = nil) throws -> String? {
         if let sessionID, let snapshot, snapshot.sessionID != sessionID {
             throw ReviewIdentityError.conflict("导出目录的课程 ID 与当前课程不同")
         }
@@ -212,9 +238,17 @@ enum ReviewReportCollection {
 
     private static func checkConflicts(_ entries: [ReviewReportEntry]) throws {
         var digests: [String: String] = [:]
+        var bodies: [String: [String]] = [:]
         let sessions = Set(entries.compactMap { $0.identity?.sessionID })
         guard sessions.count <= 1 else { throw ReviewIdentityError.conflict("同一目录出现多个课程 ID") }
         for entry in entries {
+            if let reports = entry.batchReports {
+                let key = entry.jobID.uuidString + "/\(entry.completed)"
+                if let existing = bodies[key], existing != reports {
+                    throw ReviewIdentityError.conflict("相同任务和进度对应不同报告正文")
+                }
+                bodies[key] = reports
+            }
             guard entry.identity != nil, let digest = entry.inputDigest else { continue }
             if let existing = digests[entry.key], existing != digest {
                 throw ReviewIdentityError.conflict("同一范围和输入版本对应不同内容")

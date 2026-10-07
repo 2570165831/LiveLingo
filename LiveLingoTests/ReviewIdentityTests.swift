@@ -250,7 +250,12 @@ enum ReviewIdentityScenarios {
             var jobs = json["jobs"] as! [[String: Any]]
             jobs[0]["original"] = "局部笔记原文，与整课 Markdown 不同。"
             json["jobs"] = jobs
-            try JSONSerialization.data(withJSONObject: json).write(to: f.journal, options: .atomic)
+            // This is a valid synthetic journal with a deliberately different
+            // local original. Keep the identity assertion independent of byte
+            // corruption, which is covered by the checksum regression tests.
+            let journal = try JSONDecoder().decode(LearningReviewQueue.Journal.self,
+                from: JSONSerialization.data(withJSONObject: json))
+            try JSONEncoder().encode(journal).write(to: f.journal, options: .atomic)
             let queue = f.makeQueue()
             let moved = f.root.appendingPathComponent("local-moved")
             try FileManager.default.copyItem(at: f.directory, to: moved)

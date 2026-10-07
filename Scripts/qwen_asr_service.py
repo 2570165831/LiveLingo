@@ -54,6 +54,8 @@ READY_PREFIX = "LIVELINGO_ASR_READY"
 TOKEN_HEADER = "X-LiveLingo-Token"
 BEARER_PREFIX = "bearer "
 MAX_AUDIO_BYTES = 64 * 1024 * 1024
+BODY_TIMEOUT_SECONDS = 30.0
+INFERENCE_TIMEOUT_SECONDS = 120.0
 SPEECH_BAND_LOW_HZ = 120.0
 SPEECH_BAND_HIGH_HZ = 7_200.0
 TARGET_ACTIVE_RMS_DBFS = -23.0
@@ -601,6 +603,21 @@ def start_idle_maintenance():
 class Handler(BaseHTTPRequestHandler):
     server_version = "LiveLingoLocalASR/2.1"
 
+    def read_audio_body(self, size):
+        deadline = time.monotonic() + BODY_TIMEOUT_SECONDS
+        connection = getattr(self, 'connection', None)
+        read = getattr(self.rfile, 'read1', self.rfile.read)
+        audio = bytearray()
+        while len(audio) < size:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise TimeoutError('Audio upload deadline exceeded')
+            if connection is not None: connection.settimeout(remaining)
+            chunk = read(min(size - len(audio), 65536))
+            if time.monotonic() >= deadline: raise TimeoutError('Audio upload deadline exceeded')
+            if not chunk: raise ValueError('Incomplete audio request')
+            audio.extend(chunk)
+        return bytes(audio)
+
     def do_GET(self):
         if not self.require_authorized():
             return
@@ -670,10 +687,25 @@ class Handler(BaseHTTPRequestHandler):
             return
         temporary_path = None
         model_input_path = None
+        cleanup_deferred = False
+        receiving_audio = True
         enhancement = {"applied": False, "reason": "disabled"}
+
+        def cleanup():
+            finish_request(request_id, model_key)
+            INFERENCE_SLOTS.release()
+            for path in {temporary_path, model_input_path} - {None}:
+                try:
+                    release_temporary_audio(path)
+                except (OSError, ValueError):
+                    try:
+                        print('ASR cleanup failed code=temporary_audio_cleanup_failed', flush=True)
+                    except OSError:
+                        pass
+
         try:
-            audio = self.rfile.read(size)
-            if len(audio) != size: raise ValueError('Incomplete audio request')
+            audio = self.read_audio_body(size)
+            receiving_audio = False
             with temporary_audio('.wav') as temporary:
                 temporary_path = temporary.name
                 temporary.write(audio)
@@ -683,8 +715,22 @@ class Handler(BaseHTTPRequestHandler):
             started = time.monotonic()
             log_id = uuid.uuid4().hex
             print(f"ASR request id={log_id} model={model_key} bytes={size}", flush=True)
-            text = INFERENCE_WORKER.submit(run_registered_transcription, request_id, model_input_path, model_key,
-                                           language_mode, temporary_path).result()
+            future = INFERENCE_WORKER.submit(run_registered_transcription, request_id, model_input_path, model_key,
+                                             language_mode, temporary_path)
+            try:
+                text = future.result(timeout=INFERENCE_TIMEOUT_SECONDS)
+            except TimeoutError:
+                if future.done(): raise  # The inference itself raised, rather than a wait deadline.
+                if future.cancel():
+                    self.send_json(504, {"error": "ASR queue deadline exceeded", "request_id": request_id,
+                                         "model": model_key, "retryable": True})
+                    return
+                # A running tensor call cannot be cancelled by a HTTP timeout.
+                # Retain its input/slot until actual completion or process exit.
+                cleanup_deferred = True
+                future.add_done_callback(lambda finished: cleanup())
+                request_shutdown(self.server, 'inference deadline exceeded')
+                return
             print(f"ASR completed id={log_id} model={model_key} seconds={time.monotonic() - started:.3f}", flush=True)
             payload = {"text": text, "model": model_key, "request_id": request_id,
                        "audio_enhancement": enhancement}
@@ -695,19 +741,14 @@ class Handler(BaseHTTPRequestHandler):
                       f"p={text['language_probability']} p_en={text['english_probability']} "
                       f"decode={text['decode']}", flush=True)
             self.send_json(200, payload)
+        except TimeoutError as error:
+            self.send_json(408 if receiving_audio else 500,
+                           {"error": safe_exception_code(error), "request_id": request_id, "model": model_key})
         except Exception as error:
             self.send_json(500, {"error": safe_exception_code(error),
                                  "request_id": request_id, "model": model_key})
         finally:
-            finish_request(request_id, model_key)
-            INFERENCE_SLOTS.release()
-            for path in (model_input_path, temporary_path):
-                if not path:
-                    continue
-                try:
-                    release_temporary_audio(path)
-                except (OSError, ValueError):
-                    print('ASR cleanup failed code=temporary_audio_cleanup_failed', flush=True)
+            if not cleanup_deferred: cleanup()
 
     def supplied_token(self) -> str:
         token = self.headers.get(TOKEN_HEADER, "") or ""
@@ -836,17 +877,19 @@ def announce_ready(server, host: str) -> dict:
 
 def request_shutdown(server, reason: str) -> None:
     """Exit immediately; the parent is gone and this process must not linger."""
-    try:
-        # The parent may have closed stdout as well as stdin. Logging must not
-        # prevent this watchdog from exiting the orphaned inference process.
-        code = 'parent_stdin_closed' if reason == 'parent stdin closed' else 'parent_exited'
-        print(f"ASR shutdown reason={code}", flush=True)
-    except OSError:
-        pass
+    # An open, full stdout pipe blocks instead of raising. Never put synchronous
+    # diagnostics in front of this exit, including an inference-deadline exit.
     # No caller can use the service after its parent exits. A graceful server
     # close can wait for an in-flight inference, so it cannot be the exit gate.
-    cleanup_temporary_audio()
-    os._exit(0)
+    try:
+        # Normally cleanup finishes before exit. A writer holding _TEMP_LOCK or
+        # a blocked cleanup diagnostic must not defeat the watchdog deadline.
+        cleanup = threading.Thread(target=cleanup_temporary_audio,
+                                   name='asr-exit-cleanup', daemon=True)
+        cleanup.start()
+        cleanup.join(timeout=0.05)
+    finally:
+        os._exit(0)
 
 
 def start_parent_watchdog(server, parent_pid=None, poll_seconds: float = 1.0) -> tuple:

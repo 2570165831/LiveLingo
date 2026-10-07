@@ -137,7 +137,7 @@ def inspect(path: Path) -> Layout:
 
     单次打开、按块/按头读取：不反复读取整个文件。
     """
-    with path.open("rb") as handle:
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
         state = os.fstat(handle.fileno())
         if not stat.S_ISREG(state.st_mode):
             raise NotRecoverable("不是普通文件")
@@ -216,7 +216,7 @@ def require_unchanged_source(source: Path, handle, layout: Layout) -> None:
     expected = (layout.source_device, layout.source_inode, layout.source_size,
                 layout.source_mtime_ns, layout.source_ctime_ns)
     try:
-        states = (os.fstat(handle.fileno()), source.stat())
+        states = (os.fstat(handle.fileno()), source.lstat())
     except OSError as error:
         raise SourceChanged("源文件路径在处理过程中变化") from error
     for state in states:
@@ -265,13 +265,23 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
                      include_sensitive_diagnostics: bool = False,
                      directory: BoundDirectory | None = None) -> int:
     """按块读取源 PCM 原样写出；不覆盖已存在文件，源文件保持只读。"""
+    target = Path(target).absolute()
     if directory is None:
         with open_directory(target.parent) as bound:
             return export_recording(source, layout, target, directory=bound,
                                     include_sensitive_diagnostics=include_sensitive_diagnostics)
     if target.parent != directory.path:
         raise ValueError("输出路径不属于绑定目录")
-    with source.open("rb") as handle:
+    directory.require_bound()
+    try:
+        os.stat(target.name, dir_fd=directory.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError("输出路径已存在，不覆盖")
+    pending = target.with_name(f"{target.name}.{uuid.uuid4().hex}.pending")
+    published = False
+    with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
         require_unchanged_source(source, handle, layout)
         handle.seek(layout.data_offset)
         remaining = layout.usable
@@ -279,26 +289,49 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
         try:
             # 以 0600 原子创建；O_EXCL 也拒绝已有软链接，不先创建宽权限文件再收紧。
             directory.require_bound()
-            descriptor = os.open(target.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            descriptor = os.open(pending.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                  0o600, dir_fd=directory.fd)
             with os.fdopen(descriptor, "wb") as output:
                 created = os.fstat(output.fileno())
                 created_identity = (created.st_dev, created.st_ino)
                 privatize_new(output.fileno(), 0o600)
-                output.write(header_bytes(layout.fmt_chunk, remaining))
+                header = header_bytes(layout.fmt_chunk, remaining)
+                output.write(header)
                 while remaining > 0:
                     block = handle.read(min(COPY_BLOCK, remaining))
                     if not block:
                         raise SourceChanged("源文件在读取过程中变短")
                     output.write(block)
                     remaining -= len(block)
+                output.flush()
+                if os.fstat(output.fileno()).st_size != len(header) + layout.usable:
+                    raise OSError("输出长度与完整录音不一致")
+                os.fsync(output.fileno())
+            require_unchanged_source(source, handle, layout)
+            directory.require_bound()
+            pending_state = os.stat(pending.name, dir_fd=directory.fd, follow_symlinks=False)
+            if not stat.S_ISREG(pending_state.st_mode) or (pending_state.st_dev, pending_state.st_ino) != created_identity:
+                raise OSError("临时输出路径在导出过程中被替换")
+            # Hard-link publication fails atomically if another writer owns the
+            # final name. A crash during copying leaves only the pending name.
+            os.link(pending.name, target.name, src_dir_fd=directory.fd, dst_dir_fd=directory.fd,
+                    follow_symlinks=False)
+            published = True
+            final_target = os.stat(target.name, dir_fd=directory.fd, follow_symlinks=False)
+            if not stat.S_ISREG(final_target.st_mode) or (final_target.st_dev, final_target.st_ino) != created_identity:
+                raise OSError("输出路径在发布过程中被替换")
+            pending_state = os.stat(pending.name, dir_fd=directory.fd, follow_symlinks=False)
+            if not stat.S_ISREG(pending_state.st_mode) or (pending_state.st_dev, pending_state.st_ino) != created_identity:
+                raise OSError("临时输出路径在发布过程中被替换")
+            os.unlink(pending.name, dir_fd=directory.fd)  # 完整数据仍在 target。
+            os.fsync(directory.fd)
             require_unchanged_source(source, handle, layout)
             directory.require_bound()
             final_target = os.stat(target.name, dir_fd=directory.fd, follow_symlinks=False)
             if not stat.S_ISREG(final_target.st_mode) or (final_target.st_dev, final_target.st_ino) != created_identity:
                 raise OSError("输出路径在导出过程中被替换，本次结果不能确认为成功")
         except BaseException:
-            preserve_incomplete(target, created_identity,
+            preserve_incomplete(target if published else pending, created_identity,
                                 include_sensitive_diagnostics=include_sensitive_diagnostics,
                                 directory=directory)
             raise
@@ -307,13 +340,13 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
 
 def candidates(roots: list[Path]) -> Iterator[Path]:
     for root in roots:
-        if not root.is_dir():
+        if root.is_symlink() or not root.is_dir():
             continue
         for directory in sorted(root.glob("LiveLingo-Live-*")):
-            if directory.is_symlink() or not directory.is_dir():
+            if directory.is_symlink() or not directory.is_dir() or directory.resolve().parent != root.resolve():
                 continue
             recording = directory / "recording.wav"
-            if not recording.is_symlink() and recording.is_file():
+            if not recording.is_symlink() and recording.is_file() and recording.resolve().parent == directory.resolve():
                 yield recording
 
 
@@ -392,6 +425,8 @@ def _main(argv: list[str] | None, directories: ExitStack) -> int:
     found = restored = skipped = failed = existing = 0
     scan_failed = False
     try:
+        for bound in root_bindings:
+            bound.require_bound()
         for recording in candidates(roots):
             for bound in root_bindings:
                 bound.require_bound()
@@ -423,6 +458,8 @@ def _main(argv: list[str] | None, directories: ExitStack) -> int:
             restored += 1
             if args.include_sensitive_diagnostics:
                 print(f"    已写出: {str(target)!r}（{written} 字节，源文件未修改）")
+        for bound in root_bindings:
+            bound.require_bound()
     except Exception as error:
         scan_failed = True
         print("扫描未完成：无法枚举指定根目录；汇总仅包含已检查项目。", file=sys.stderr)

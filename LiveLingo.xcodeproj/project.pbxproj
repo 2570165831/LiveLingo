@@ -6,6 +6,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		DAFB00000000000000000005 /* DataSafetyRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAFA00000000000000000005 /* DataSafetyRuntimeTests.swift */; };
+		DAFB00000000000000000004 /* DataSafetyAudioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAFA00000000000000000004 /* DataSafetyAudioTests.swift */; };
+		DAFB00000000000000000003 /* DataSafetyReviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAFA00000000000000000003 /* DataSafetyReviewTests.swift */; };
+		DAFB00000000000000000002 /* DataSafetyAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAFA00000000000000000002 /* DataSafetyAppTests.swift */; };
+		DAFB00000000000000000001 /* DataSafetyStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAFA00000000000000000001 /* DataSafetyStorageTests.swift */; };
 		B72500000000000000000101 /* SpanishFrenchCaptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72500000000000000000102 /* SpanishFrenchCaptionTests.swift */; };
 		B72600000000000000000101 /* SpanishFrenchLearningNotesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72600000000000000000102 /* SpanishFrenchLearningNotesTests.swift */; };
 		B72500000000000000000001 /* LatinCaptionPrompts.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72500000000000000000002 /* LatinCaptionPrompts.swift */; };
@@ -142,6 +147,11 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		DAFA00000000000000000005 /* DataSafetyRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSafetyRuntimeTests.swift; sourceTree = "<group>"; };
+		DAFA00000000000000000004 /* DataSafetyAudioTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSafetyAudioTests.swift; sourceTree = "<group>"; };
+		DAFA00000000000000000003 /* DataSafetyReviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSafetyReviewTests.swift; sourceTree = "<group>"; };
+		DAFA00000000000000000002 /* DataSafetyAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSafetyAppTests.swift; sourceTree = "<group>"; };
+		DAFA00000000000000000001 /* DataSafetyStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSafetyStorageTests.swift; sourceTree = "<group>"; };
 		B72500000000000000000102 /* SpanishFrenchCaptionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpanishFrenchCaptionTests.swift; sourceTree = "<group>"; };
 		B72600000000000000000102 /* SpanishFrenchLearningNotesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpanishFrenchLearningNotesTests.swift; sourceTree = "<group>"; };
 		B72500000000000000000002 /* LatinCaptionPrompts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatinCaptionPrompts.swift; sourceTree = "<group>"; };
@@ -366,6 +376,11 @@
 				166D40F22F74343E38591F02 /* PrivacyAudioTests.swift */,
 				3D2DA7040395364E149F21DA /* PrivacyFollowupStorageTests.swift */,
 				E80500000000000000000002 /* PrivacyPermissionFailureTests.swift */,
+				DAFA00000000000000000005 /* DataSafetyRuntimeTests.swift */,
+				DAFA00000000000000000004 /* DataSafetyAudioTests.swift */,
+				DAFA00000000000000000003 /* DataSafetyReviewTests.swift */,
+				DAFA00000000000000000002 /* DataSafetyAppTests.swift */,
+				DAFA00000000000000000001 /* DataSafetyStorageTests.swift */,
 				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
 				B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */,
 				B71800000000000000000002 /* EnglishTargetTests.swift */,
@@ -549,6 +564,11 @@
 				A7D951F0B2D483A5B585DC18 /* PrivacyAudioTests.swift in Sources */,
 				8D49BE0052E8A8509EFF8CB7 /* PrivacyFollowupStorageTests.swift in Sources */,
 				E80500000000000000000001 /* PrivacyPermissionFailureTests.swift in Sources */,
+				DAFB00000000000000000005 /* DataSafetyRuntimeTests.swift in Sources */,
+				DAFB00000000000000000004 /* DataSafetyAudioTests.swift in Sources */,
+				DAFB00000000000000000003 /* DataSafetyReviewTests.swift in Sources */,
+				DAFB00000000000000000002 /* DataSafetyAppTests.swift in Sources */,
+				DAFB00000000000000000001 /* DataSafetyStorageTests.swift in Sources */,
 				B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */,
 				B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */,
 				B71800000000000000000001 /* EnglishTargetTests.swift in Sources */,

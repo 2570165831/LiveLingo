@@ -86,7 +86,23 @@ struct PrivacyStorageTests {
         try SessionExporter.export(segments: [segment], sessionDirectory: directory,
             summary: "合成笔记。", createdAt: Date(timeIntervalSince1970: 0))
         #expect(try mode(directory) == 0o755)
-        for name in names { #expect(try mode(directory.appendingPathComponent(name)) == 0o644) }
+        let generation = try SessionExporter.currentExportDirectory(in: directory)
+        for name in names {
+            let visible = directory.appendingPathComponent(name)
+            var info = stat()
+            try #require(lstat(visible.path, &info) == 0)
+            if info.st_mode & S_IFMT == S_IFLNK {
+                // lstat reports the alias's mode, not the exported file's.
+                // Accept only registered aliases into the validated generation.
+                let managed = try SessionExporter.managedExportLink(at: visible, in: directory, generation: generation)
+                try #require(managed != nil)
+            } else {
+                try #require(info.st_mode & S_IFMT == S_IFREG)
+                #expect(try mode(visible) == 0o644)
+            }
+            let exportedMode = try mode(generation.appendingPathComponent(name))
+            #expect(exportedMode == 0o644, "\(name) must preserve its existing file mode")
+        }
         #expect(try Data(contentsOf: sentinel) == kept)
         #expect(try mode(sentinel) == 0o640)
         #expect(try Data(contentsOf: directory.appendingPathComponent("transcript-en.txt")) == Data("Water flows.\n".utf8))

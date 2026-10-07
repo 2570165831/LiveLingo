@@ -3,6 +3,7 @@ import AppKit
 import Combine
 import CryptoKit
 import OSLog
+import Darwin
 
 struct LearningPoint: Codable, Equatable, Sendable {
     struct Source: Codable, Equatable, Sendable { let index: Int; let quote: String }
@@ -3314,7 +3315,7 @@ struct LearningReviewScope: Codable, Equatable, Sendable {
 
 @MainActor
 final class LearningReviewQueue: ObservableObject {
-    struct Job: Codable {
+    struct Job: Codable, Sendable {
         var id = UUID()
         var directory: URL
         let batches: [LearningNoteBatch]
@@ -3420,7 +3421,7 @@ final class LearningReviewQueue: ObservableObject {
         return resolved
     }
 
-    static func validateTargetLocale(_ targetLocale: String?, snapshot: SessionSnapshot?) throws {
+    nonisolated static func validateTargetLocale(_ targetLocale: String?, snapshot: SessionSnapshot?) throws {
         let normalized = SessionSnapshot.normalizedTargetLocale(targetLocale)
         guard OutputLanguage(rawValue: normalized ?? "zh-Hans") != nil else {
             throw ReviewIdentityError.conflict("复查输出语言未知")
@@ -3521,8 +3522,45 @@ final class LearningReviewQueue: ObservableObject {
         var userPaused: Bool
         var version: Int? = nil
         var retiredJobs: [Job]? = nil
+        var checksum: String? = nil
+
+        private struct Payload: Encodable {
+            var jobs: [Job]
+            var userPaused: Bool
+            var version: Int?
+            var retiredJobs: [Job]?
+        }
+        private enum CodingKeys: String, CodingKey { case jobs, userPaused, version, retiredJobs, checksum }
+
+        private func contentChecksum() throws -> String {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            return ReviewInputBinding.digest(try encoder.encode(Payload(jobs: jobs, userPaused: userPaused,
+                version: version, retiredJobs: retiredJobs)))
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var fields = encoder.container(keyedBy: CodingKeys.self)
+            try fields.encode(jobs, forKey: .jobs)
+            try fields.encode(userPaused, forKey: .userPaused)
+            try fields.encodeIfPresent(version, forKey: .version)
+            try fields.encodeIfPresent(retiredJobs, forKey: .retiredJobs)
+            if version == 4 { try fields.encode(contentChecksum(), forKey: .checksum) }
+            else { try fields.encodeIfPresent(checksum, forKey: .checksum) }
+        }
+
+        func validateIntegrity() throws {
+            guard version == nil || (1...4).contains(version!) else {
+                throw ReviewIdentityError.unreadable("复查日志版本不受支持，原文件已保留")
+            }
+            if version == 4 || checksum != nil {
+                guard checksum == (try contentChecksum()) else {
+                    throw ReviewIdentityError.unreadable("复查日志完整性校验失败，原文件已保留")
+                }
+            }
+        }
     }
-    static let journalVersion = 3
+    static let journalVersion = 4
     typealias Generator = @MainActor @Sendable (String, String, String, @escaping @Sendable (String) -> Void, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String
 
     @Published private(set) var status = ""
@@ -3537,10 +3575,14 @@ final class LearningReviewQueue: ObservableObject {
     private var task: Task<Void, Never>?
     private var sleeping = false
     private var retryTask: Task<Void, Never>?
+    private var retryTimerBinding: (id: UUID, deadline: TimeInterval)?
+    private var retryTimerToken: UUID?
     private let retryDelays: [TimeInterval]
     private var recordingBlocked = false
     private var resourceBlocked = false
     private var persistenceFailure: String?
+    private var restoreBlocked = false
+    private var storedJournalVersion: Int? = 4
     private let journalURL: URL
     private let generate: Generator
     private var allowUnreleasedTargets = false
@@ -3578,6 +3620,10 @@ final class LearningReviewQueue: ObservableObject {
     private var managementPending = 0
 
     private func editQueue(_ edit: @escaping @MainActor () throws -> Void) {
+        guard !restoreBlocked else {
+            managementError = "复查日志尚未通过读取校验，请恢复原文件后重新打开。"
+            return
+        }
         guard managementPending == 0 else {
             managementError = "上一项队列操作仍在保存，请稍后再试。"
             return
@@ -3834,14 +3880,52 @@ final class LearningReviewQueue: ObservableObject {
                                                    sessionID: boundID, inputRevision: inputRevision)
     }
 
+    /// Freeze queue state on MainActor, read and validate off the UI thread,
+    /// then reject results if the queue changed while storage was busy.
+    func collectedReviewReportMarkdownAsync(for directory: URL, sessionID: UUID? = nil,
+                                           inputRevision: Int? = nil) async throws -> String? {
+        let scoped = directory.startAccessingSecurityScopedResource()
+        defer { if scoped { directory.stopAccessingSecurityScopedResource() } }
+        let frozen = jobs + retiredJobs
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let binding = try encoder.encode(frozen)
+        let entries = frozen.map(Self.reportEntry)
+        let report = try await Task.detached {
+            let snapshot = try ReviewInputBinding.snapshot(in: directory)
+            let boundID = sessionID ?? snapshot?.sessionID
+            let target = SessionDirectoryLocation.canonical(directory)
+            let indices = frozen.indices.filter { index in
+                if let boundID, let identity = frozen[index].identity { return identity.sessionID == boundID }
+                return SessionDirectoryLocation.canonical(frozen[index].directory) == target
+            }
+            for index in indices where frozen[index].identity != nil {
+                _ = try Self.validatedSnapshot(frozen[index], at: directory, allowHistorical: true)
+            }
+            return try ReviewReportCollection.markdown(in: directory, queueReports: indices.map { entries[$0] },
+                validatedSnapshot: snapshot, sessionID: boundID, inputRevision: inputRevision)
+        }.value
+        try Task.checkCancellation()
+        guard try encoder.encode(jobs + retiredJobs) == binding else {
+            throw ReviewIdentityError.conflict("复查进度在读取期间已更新，请重新读取")
+        }
+        return report
+    }
+
     static func reportEntry(for job: Job) -> ReviewReportEntry {
         ReviewReportEntry(jobID: job.id, identity: job.identity, scope: job.resolvedScope,
             inputDigest: job.inputDigest, completed: job.next, total: job.batches.count,
             supersededByRevision: job.supersededByRevision, updatedAt: Date(),
-            fileName: job.resolvedScope.reportFileName, markdown: reportMarkdown(for: job))
+            fileName: job.resolvedScope.reportFileName, markdown: reportMarkdown(for: job),
+            batchReports: job.reports, stats: job.stats)
     }
 
     private func validateLocation(_ job: Job, at directory: URL, allowHistorical: Bool) throws {
+        _ = try Self.validatedSnapshot(job, at: directory, allowHistorical: allowHistorical)
+    }
+
+    private nonisolated static func validatedSnapshot(_ job: Job, at directory: URL,
+                                                     allowHistorical: Bool) throws -> SessionSnapshot? {
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireCourseDirectory(directory)
         #endif
@@ -3862,12 +3946,20 @@ final class LearningReviewQueue: ObservableObject {
                 guard bindings.allSatisfy({ current[$0.key] == $0.value }) else {
                     throw ReviewIdentityError.conflict("后续课程修改了已有批次，原复查依据已保留")
                 }
-                return
+                return snapshot
             }
             guard try ReviewInputBinding.digest(all) == fingerprint else {
                 throw ReviewIdentityError.conflict("同一课程 ID 与输入版本对应了不同的课程副本")
             }
         }
+        return snapshot
+    }
+
+    private func validatedSnapshotAsync(_ job: Job, at directory: URL,
+                                        allowHistorical: Bool) async throws -> SessionSnapshot? {
+        try await Task.detached {
+            try Self.validatedSnapshot(job, at: directory, allowHistorical: allowHistorical)
+        }.value
     }
 
     /// A source edit never starts 9B. It retires dependent unfinished scopes and
@@ -3971,6 +4063,7 @@ final class LearningReviewQueue: ObservableObject {
     /// 2026-09-20：升级后旧任务**不会自动跑** ✓（`blockReason == "manual"` ✓），
     /// 这是唯一能让它们开始的路径 ✓；已完成批次、报告、思考前缀、历史复查都不动 ✓。
     func startAwaitingJob() {
+        guard !restoreBlocked else { refreshStatus(); return }
         guard frontJobAwaitingManualStart || userPaused else { return }
         userPaused = false
         for index in jobs.indices { jobs[index].awaitingManualStart = false }
@@ -4018,8 +4111,33 @@ final class LearningReviewQueue: ObservableObject {
                                                                       onRequestIdentity: recordIdentity, onUpdate: update)
         }
         if FileManager.default.fileExists(atPath: self.journalURL.path) {
+            restoreBlocked = true
             do {
-                let journal = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: self.journalURL))
+                let bytes = try Self.journalBytes(at: self.journalURL)
+                guard let bytes else { throw ReviewIdentityError.unreadable("复查日志在读取期间消失") }
+                let journal = try JSONDecoder().decode(Journal.self, from: bytes)
+                // Pause is a user choice, preserved even when job validation
+                // fails. Invalid jobs are never installed as runnable state.
+                userPaused = journal.userPaused
+                try journal.validateIntegrity()
+                let all = journal.jobs + (journal.retiredJobs ?? [])
+                guard Set(all.map(\.id)).count == all.count else {
+                    throw ReviewIdentityError.conflict("复查日志含有重复任务 ID")
+                }
+                for entry in all {
+                    guard entry.next >= 0, entry.next <= entry.batches.count,
+                          entry.reports.count <= entry.next else {
+                        throw ReviewIdentityError.conflict("保存的复查进度无效")
+                    }
+                    if let identity = entry.identity {
+                        try identity.validate(scope: entry.resolvedScope, batches: entry.batches)
+                        guard entry.inputDigest == (try ReviewInputBinding.digest(entry.batches)) else {
+                            throw ReviewIdentityError.conflict("保存的复查输入校验失败")
+                        }
+                    }
+                }
+                lastPersistedJournalBytes = bytes
+                storedJournalVersion = journal.version
                 jobs = journal.jobs
                 retiredJobs = journal.retiredJobs ?? []
                 #if LIVELINGO_PREVIEW
@@ -4134,6 +4252,7 @@ final class LearningReviewQueue: ObservableObject {
                     }
                 }
                 userPaused = journal.userPaused
+                restoreBlocked = false
                 if repaired {
                     do { try save() }
                     catch { persistenceFailure = "复查进度保存失败，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
@@ -4147,6 +4266,9 @@ final class LearningReviewQueue: ObservableObject {
                                                  detail: "prefix_bytes=\(jobs[index].prefix.utf8.count)"), at: index)
                 }
             } catch {
+                jobs = []
+                retiredJobs = []
+                restoreBlocked = true
                 persistenceFailure = "复查进度读取失败，已保留现场：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
                 ReviewLog.failure("review event=restore_failed error_code=\((error as NSError).code)")
             }
@@ -4154,10 +4276,7 @@ final class LearningReviewQueue: ObservableObject {
         // A pending backoff window survives a restart; keep waiting it out
         // instead of leaving the job blocked with no timer.
         // 但"等待手动开始"的旧任务不需要计时器：它要等用户点"开始复查" ✓。
-        if let retry = jobs.first?.retryPending, jobs.first?.awaitingManualStart != true {
-            let remaining = retry.notBefore - Date().timeIntervalSince1970
-            scheduleRetry(after: max(0, remaining))
-        }
+        rebindRetryTimer()
         if observeSleep {
             let center = NSWorkspace.shared.notificationCenter
             observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -4395,12 +4514,21 @@ final class LearningReviewQueue: ObservableObject {
         reconcile()
     }
 
+    /// A persisted generation failure/manual-start choice does not prevent
+    /// quitting. Only an unconfirmed queue read/write blocks termination.
+    func pauseForApplicationTermination() async throws {
+        await pauseAndWait()
+        if let persistenceFailure { throw ReviewIdentityError.unreadable(persistenceFailure) }
+    }
+
     /// 仅测试用：停下后台复查任务并等它真正结束（不会改 `userPaused`，也不会动队列内容）。
     /// 测试结束前调用，避免假 generator 的队列在断言之后继续跑。
     func shutdownForTesting() async {
         testingStopped = true
         retryTask?.cancel()
         retryTask = nil
+        retryTimerBinding = nil
+        retryTimerToken = nil
         let active = task
         active?.cancel()
         await active?.value
@@ -4411,12 +4539,13 @@ final class LearningReviewQueue: ObservableObject {
 
     #if DEBUG
     var journalForTesting: Journal {
-        Journal(jobs: jobs, userPaused: userPaused, version: Self.journalVersion,
+        Journal(jobs: jobs, userPaused: userPaused, version: storedJournalVersion,
                 retiredJobs: retiredJobs.isEmpty ? nil : retiredJobs)
     }
     #endif
 
     func togglePause() {
+        guard !restoreBlocked else { refreshStatus(); return }
         if persistenceFailure != nil, !jobs.isEmpty { persistenceFailure = nil }
         else if userPaused { userPaused = false }
         else if jobs.first?.failure != nil {
@@ -4486,6 +4615,7 @@ final class LearningReviewQueue: ObservableObject {
             do { try save() }
             catch { jobs = before; persistenceFailure = "复查队列保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
         }
+        rebindRetryTimer()
         refreshStatus()
         let reason = blockReason
         if let reason, reason != "empty" {
@@ -4543,6 +4673,7 @@ final class LearningReviewQueue: ObservableObject {
         let batchCount = job.batches.count
         defer { if scoped { accessURL.stopAccessingSecurityScopedResource() } }
         do {
+            try Task.checkCancellation()
             if let bookmark = job.directoryBookmark {
                 var stale = false
                 accessURL = try URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale)
@@ -4566,7 +4697,9 @@ final class LearningReviewQueue: ObservableObject {
             // Now the bookmark is resolved. Finish deferred target/identity
             // upgrades before validating or sending a prompt to a generator.
             if job.targetLocale == nil {
-                let snapshot = try ReviewInputBinding.snapshot(in: accessURL)
+                let snapshot = try await ReviewInputBinding.snapshotAsync(in: accessURL)
+                try Task.checkCancellation()
+                guard ownsAttempt(job, identity) else { return }
                 var restored = jobs[0]
                 let targetChanged = upgradeTargetLocale(&restored, snapshot: snapshot)
                 let priorIdentity = restored.identity
@@ -4588,9 +4721,40 @@ final class LearningReviewQueue: ObservableObject {
                 }
                 jobs[0] = restored
                 job = restored
-                if repaired { try save() }
+                if repaired {
+                    phase = .journal
+                    try save()
+                    phase = .directory
+                }
             }
-            try validateLocation(job, at: accessURL, allowHistorical: false)
+            var validated = try await validatedSnapshotAsync(job, at: accessURL, allowHistorical: false)
+            try Task.checkCancellation()
+            guard ownsAttempt(job, identity) else { return }
+            // The report commits before the queue journal. If that last save
+            // failed, a restart must recover its frozen result without a model.
+            let reportDirectory = accessURL
+            let savedReports = try await Task.detached {
+                try ReviewReportCollection.read(in: reportDirectory)
+            }.value
+            try Task.checkCancellation()
+            guard ownsAttempt(job, identity) else { return }
+            if let completed = savedReports.first(where: { $0.jobID == job.id }), completed.completed > job.next {
+                guard completed.supersededByRevision == nil, completed.total == job.batches.count,
+                      completed.identity == job.identity, completed.inputDigest == job.inputDigest,
+                      completed.scope.stableKey == job.resolvedScope.stableKey,
+                      let reports = completed.batchReports else {
+                    throw ReviewIdentityError.conflict("已保存报告与队列进度不同，请核对原任务；未重复生成")
+                }
+                jobs[0].next = completed.completed
+                jobs[0].reports = reports
+                jobs[0].stats = completed.stats
+                jobs[0].prefix = ""
+                jobs[0].prefixInputDigest = nil
+                jobs[0].retryPending = nil
+                jobs[0].interruption = nil
+                jobs[0].failure = nil
+                job = jobs[0]
+            }
             if job.next < job.batches.count {
                 guard let prompt = Self.reviewPrompt(for: job.targetLocale, allowUnreleased: allowUnreleasedTargets), job.prompt == prompt,
                       let target = (try? OutputLanguage.storedLanguage(job.targetLocale))?.generationTarget else {
@@ -4612,9 +4776,12 @@ final class LearningReviewQueue: ObservableObject {
                 }
                 phase = .generation
                 let generationStarted = ProcessInfo.processInfo.systemUptime
+                try Task.checkCancellation()
+                guard persistenceFailure == nil, ownsAttempt(job, identity) else { return }
                 let response = try await generate(prepared.json, job.prefix, prompt, { identity.record($0) }) { [weak self] text in
-                    guard let self, self.jobs.first?.id == job.id, self.jobs[0].next == job.next else { return }
+                    guard let self, !Task.isCancelled, self.ownsAttempt(job, identity) else { return }
                     guard text.utf8.count <= 524_288 else { self.task?.cancel(); self.jobs[0].failure = "本批思考内容过长，已暂停复查"; return }
+                    guard text.utf8.starts(with: self.jobs[0].prefix.utf8) else { return }
                     self.jobs[0].prefix = text
                     let now = ProcessInfo.processInfo.systemUptime
                     if now - self.lastCheckpoint >= 1 {
@@ -4627,7 +4794,9 @@ final class LearningReviewQueue: ObservableObject {
                 guard jobs.first?.id == job.id, jobs[0].identity == job.identity,
                       jobs[0].inputDigest == job.inputDigest else { return }
                 phase = .input
-                try validateLocation(job, at: accessURL, allowHistorical: false)
+                validated = try await validatedSnapshotAsync(job, at: accessURL, allowHistorical: false)
+                try Task.checkCancellation()
+                guard ownsAttempt(job, identity) else { return }
                 receivedCompleteResponse = true
                 finalResponse = response
                 phase = .decode
@@ -4673,13 +4842,17 @@ final class LearningReviewQueue: ObservableObject {
             }
             phase = .output
             let outputStarted = ProcessInfo.processInfo.systemUptime
-            try writeOutputs(jobs[0])
+            try writeOutputs(jobs[0], validatedSnapshot: validated)
             timings["output"] = Self.milliseconds(since: outputStarted)
             let finishing = jobs[0].next == jobs[0].batches.count
-            if finishing { jobs.removeFirst() }
             phase = .journal
             let journalStarted = ProcessInfo.processInfo.systemUptime
-            try save()
+            let finished = finishing ? jobs.removeFirst() : nil
+            do { try save() }
+            catch {
+                if let finished { jobs.insert(finished, at: 0) }
+                throw error
+            }
             timings["journal"] = Self.milliseconds(since: journalStarted)
             ReviewLog.info("review timings_ms=\(Self.timingLine(timings))")
             if finishing {
@@ -4700,6 +4873,10 @@ final class LearningReviewQueue: ObservableObject {
             persistOrPause()
         } catch {
             timings[phase.rawValue] = Self.milliseconds(since: phaseStarted)
+            if phase == .journal {
+                persistenceFailure = "复查进度保存失败，已保留完成结果并暂停：\(error.localizedDescription)"
+                return
+            }
             // Progress preservation keeps its original rule: a completed (but
             // invalid) answer is discarded, while an interrupted generation may
             // resume from its checkpoint.
@@ -4758,23 +4935,63 @@ final class LearningReviewQueue: ObservableObject {
                 // A missing/unwritable directory cannot receive an error report.
                 // Keep the failure in the journal without adding the same error twice.
                 if failure.code != "directory_in_trash", FileManager.default.isWritableFile(atPath: jobs[0].directory.path) {
-                    do { try writeOutputs(jobs[0]) }
-                    catch { jobs[0].failure! += "；复查报告保存失败：\(ReviewFailure.sanitized(error.localizedDescription))" }
+                    do {
+                        let failed = jobs[0]
+                        let snapshot = try await validatedSnapshotAsync(failed, at: failed.directory, allowHistorical: true)
+                        if !Task.isCancelled, ownsAttempt(failed, identity) {
+                            try writeOutputs(failed, validatedSnapshot: snapshot)
+                        }
+                    } catch {
+                        if jobs.first?.id == job.id, jobs[0].failure != nil {
+                            jobs[0].failure! += "；复查报告保存失败：\(ReviewFailure.sanitized(error.localizedDescription))"
+                        }
+                    }
                 }
                 persistOrPause()
             }
         }
     }
 
+    private func ownsAttempt(_ job: Job, _ identity: ReviewRequestIdentityBox) -> Bool {
+        activeRequestIdentity === identity && jobs.first?.id == job.id
+            && jobs[0].next == job.next && jobs[0].identity == job.identity
+            && jobs[0].inputDigest == job.inputDigest
+    }
+
     /// Waits out the backoff window and then lets the normal reconcile pass
     /// decide whether the batch may run (recording, sleep and memory still win).
     private func scheduleRetry(after delay: TimeInterval) {
         retryTask?.cancel()
+        guard let job = jobs.first, let retry = job.retryPending else {
+            retryTask = nil; retryTimerBinding = nil; retryTimerToken = nil
+            return
+        }
+        let token = UUID()
+        let id = job.id
+        let deadline = retry.notBefore
+        retryTimerBinding = (id, deadline)
+        retryTimerToken = token
         retryTask = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(delay)) } catch { return }
-            guard let self, !Task.isCancelled else { return }
+            guard let self, !Task.isCancelled, self.retryTimerToken == token,
+                  self.jobs.first?.id == id, self.jobs.first?.retryPending?.notBefore == deadline else { return }
+            self.retryTask = nil
+            self.retryTimerBinding = nil
+            self.retryTimerToken = nil
             self.runScheduledRetry()
         }
+    }
+
+    private func rebindRetryTimer() {
+        guard !testingStopped, !restoreBlocked, persistenceFailure == nil, !userPaused,
+              let job = jobs.first, job.awaitingManualStart != true,
+              let retry = job.retryPending, retry.notBefore > Date().timeIntervalSince1970 else {
+            retryTask?.cancel()
+            retryTask = nil; retryTimerBinding = nil; retryTimerToken = nil
+            return
+        }
+        if retryTimerBinding?.id == job.id, retryTimerBinding?.deadline == retry.notBefore { return }
+        scheduleRetry(after: max(0, retry.notBefore - Date().timeIntervalSince1970))
     }
 
     private func runScheduledRetry() {
@@ -4852,11 +5069,15 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     private func writeOutputs(_ job: Job) throws {
+        let snapshot = try Self.validatedSnapshot(job, at: job.directory, allowHistorical: true)
+        try writeOutputs(job, validatedSnapshot: snapshot)
+    }
+
+    private func writeOutputs(_ job: Job, validatedSnapshot snapshot: SessionSnapshot?) throws {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: job.directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw QwenRuntimeError.requestFailed("录音目录已移动或不可用")
         }
-        try validateLocation(job, at: job.directory, allowHistorical: true)
         // 实测（2026-09-18，本机）：9B 思考复查约 306 秒/批（255 秒素材 2 批的平均）。
         let progress = Self.reportProgress(next: job.next, total: job.batches.count, scope: job.scope)
         try ReviewReportCollection.save(Self.reportEntry(for: job), in: job.directory)
@@ -4868,31 +5089,60 @@ final class LearningReviewQueue: ObservableObject {
                 try SensitiveFileIO.atomicWrite(Data((job.original + "\n").utf8), to: originalURL)
             }
         }
-        let report = try ReviewReportCollection.markdown(in: job.directory, queueReports: [],
+        let report = try ReviewReportCollection.markdown(in: job.directory, queueReports: [], validatedSnapshot: snapshot,
             sessionID: job.identity?.sessionID)
         onUpdate?(job.directory, report ?? Self.reportMarkdown(for: job), progress)
     }
 
     private func save() throws {
+        guard !restoreBlocked else {
+            throw ReviewIdentityError.unreadable("复查日志尚未通过读取校验，禁止写回")
+        }
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireContained(journalURL, in: PreviewDataIsolation.dataDirectory)
         #endif
         try SensitiveFileIO.prepareDirectory(journalURL.deletingLastPathComponent())
         try SensitiveFileIO.tightenFileIfPresent(journalURL)
-        // 2026-09-18：写前脏检查。
-        // 背景：电源监视器等每 5 秒会走一遍 reconcile() → persistOrPause() → save()，
-        // 此前**无条件整份重写**这个日志（实测 808 KB × ≈13 次/分钟 ≈ 14.7 GB/天，
-        // 而内容多数时候一字未变）。用稳定排序编码后比较，未变就不写。
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(Journal(jobs: jobs, userPaused: userPaused,
             version: Self.journalVersion, retiredJobs: retiredJobs.isEmpty ? nil : retiredJobs))
-        if data == lastPersistedJournalBytes,
-           FileManager.default.fileExists(atPath: journalURL.path) {
-            return
+        // Cooperating writers serialize the comparison and replacement. The
+        // byte comparison also detects non-cooperating external replacements.
+        let lockURL = journalURL.appendingPathExtension("lock")
+        let journalRoot = try SensitiveFileIO.Directory.open(at: journalURL.deletingLastPathComponent(), create: false, tighten: false)
+        let descriptor = try journalRoot.openRegularFile(named: lockURL.lastPathComponent, flags: O_RDWR, create: true)
+        defer { _ = Darwin.close(descriptor) }
+        var lockStatus = stat()
+        guard fstat(descriptor, &lockStatus) == 0, lockStatus.st_mode & S_IFMT == S_IFREG else {
+            throw ReviewIdentityError.unreadable("复查日志锁不是普通文件，未写回")
         }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        let onDisk = try Self.journalBytes(at: journalURL)
+        guard onDisk == lastPersistedJournalBytes else {
+            throw ReviewIdentityError.conflict("复查日志已被其他写者替换，未覆盖外部状态；请重新打开")
+        }
+        // 2026-09-18：写前脏检查。
+        // 背景：电源监视器等每 5 秒会走一遍 reconcile() → persistOrPause() → save()，
+        // 此前**无条件整份重写**这个日志（实测 808 KB × ≈13 次/分钟 ≈ 14.7 GB/天，
+        // 而内容多数时候一字未变）。用稳定排序编码后比较，未变就不写。
+        if data == onDisk { return }
         try SensitiveFileIO.atomicWrite(data, to: journalURL)
         lastPersistedJournalBytes = data
+        storedJournalVersion = Self.journalVersion
+    }
+
+    private nonisolated static func journalBytes(at url: URL) throws -> Data? {
+        var status = stat()
+        guard lstat(url.path, &status) == 0 else {
+            if errno == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard status.st_mode & S_IFMT == S_IFREG else {
+            throw ReviewIdentityError.unreadable("复查日志不是普通文件，未写回")
+        }
+        return try Data(contentsOf: url)
     }
 
     /// 上一次成功写出的日志内容（用于跳过内容未变的重复写入）。

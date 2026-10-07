@@ -232,6 +232,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     var hasRecordedAudio: Bool { stateLock.withLock { writtenFrames > 0 && sessionRecordingURL != nil } }
     private var recordingFile: SecureAudioWriter?
     private var chunkFile: SecureAudioWriter?
+    private var chunkOpenFailure: Error?
     private var chunkURL: URL?
     private var chunkDirectory: URL?
     private var inputFormat: AVAudioFormat?
@@ -255,6 +256,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         0.25 * pow(2, Double(max(0, attempt - 1)))
     }
     private var generation = UUID()
+    private var startupOwner: UUID?
+    private var cancelledStartup: UUID?
     private var sessionID = UUID()
     private var identifiedEvents = false
     private var captureConfigured = false
@@ -338,6 +341,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     )
 
     private let beforeAudioWrite: (@Sendable () throws -> Void)?
+    private let beforeChunkOpen: (@Sendable () throws -> Void)?
+    private let beforeChunkWrite: (@Sendable () throws -> Void)?
     private let enableAudioAnalysis: Bool
     private let captureSleepNotificationCenter: NotificationCenter
     private var captureSleepObserver: NSObjectProtocol?
@@ -357,6 +362,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     init(transcriber: TranscriptionQueue.Transcriber? = nil,
          beforeAudioWrite: (@Sendable () throws -> Void)? = nil,
+         beforeChunkOpen: (@Sendable () throws -> Void)? = nil,
+         beforeChunkWrite: (@Sendable () throws -> Void)? = nil,
          enableAudioAnalysis: Bool = true,
          captureSleepNotificationCenter: NotificationCenter? = nil,
          microphoneEngineFactory: @escaping @Sendable () -> any MicrophoneCaptureEngine = { SystemMicrophoneCaptureEngine() },
@@ -390,6 +397,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         self.microphoneRecoveryDelayScheduler = microphoneRecoveryDelayScheduler
         self.enableMicrophoneWatchdog = enableMicrophoneWatchdog
         self.beforeAudioWrite = beforeAudioWrite
+        self.beforeChunkOpen = beforeChunkOpen
+        self.beforeChunkWrite = beforeChunkWrite
         self.enableAudioAnalysis = enableAudioAnalysis
         self.captureSleepNotificationCenter = captureSleepNotificationCenter ?? NSWorkspace.shared.notificationCenter
         transcriptionQueue = transcriber.map { TranscriptionQueue(transcriber: $0) } ?? TranscriptionQueue()
@@ -401,6 +410,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     convenience init(transcriber: @escaping TranscriptionQueue.LegacyTranscriber,
          beforeAudioWrite: (@Sendable () throws -> Void)? = nil,
+         beforeChunkOpen: (@Sendable () throws -> Void)? = nil,
+         beforeChunkWrite: (@Sendable () throws -> Void)? = nil,
          enableAudioAnalysis: Bool = true,
          captureSleepNotificationCenter: NotificationCenter? = nil,
          microphoneEngineFactory: @escaping @Sendable () -> any MicrophoneCaptureEngine = { SystemMicrophoneCaptureEngine() },
@@ -422,6 +433,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
              try await Task.sleep(for: .seconds($0))
          }) {
         self.init(transcriber: TranscriptionQueue.englishOnly(transcriber), beforeAudioWrite: beforeAudioWrite,
+                  beforeChunkOpen: beforeChunkOpen, beforeChunkWrite: beforeChunkWrite,
                   enableAudioAnalysis: enableAudioAnalysis, captureSleepNotificationCenter: captureSleepNotificationCenter,
                   microphoneEngineFactory: microphoneEngineFactory, microphoneNotifications: microphoneNotifications,
                   microphoneRecoveryScheduler: microphoneRecoveryScheduler,
@@ -509,12 +521,17 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     /// Establishes the durable queue before capture; no audio callback performs
     /// file creation, JSON persistence, conversion, analysis, or model work.
     private func beginSession(recordingURL: URL?, sessionID requestedID: UUID?, persistsSession: Bool? = nil,
-                              eventHandler: @escaping @Sendable (Event) -> Void) async throws -> URL {
-        if stateLock.withLock({ captureConfigured || finalizerTask != nil }) {
-            await stopCapture(continueTranscribing: false)
-        }
-        let id = requestedID ?? UUID()
+                              syntheticDirectory: URL? = nil,
+                              eventHandler: @escaping @Sendable (Event) -> Void) async throws -> (directory: URL, generation: UUID) {
         let token = UUID()
+        let needsStop = try stateLock.withLock { () -> Bool in
+            guard startupOwner == nil else { throw PipelineError.importFailed("采集正在启动，请等待本次启动或停止完成。") }
+            startupOwner = token; cancelledStartup = nil
+            return captureConfigured || finalizerTask != nil
+        }
+        do {
+        if needsStop { await stopCapture(continueTranscribing: false, preservingStartup: token) }
+        let id = requestedID ?? UUID()
         let root: URL
         if let recordingURL {
             guard !FileManager.default.fileExists(atPath: recordingURL.path) else {
@@ -523,9 +540,19 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             root = recordingURL.deletingLastPathComponent()
             try SensitiveFileIO.prepareDirectory(root)
         } else {
+            #if DEBUG
+            if let syntheticDirectory {
+                root = syntheticDirectory
+                try SensitiveFileIO.prepareDirectory(root)
+            } else {
+                root = try SessionWorkspace.makeTemporarySessionDirectory(identifier: id)
+            }
+            #else
             root = try SessionWorkspace.makeTemporarySessionDirectory(identifier: id)
+            #endif
         }
-        stateLock.withLock {
+        try stateLock.withLock {
+            guard startupOwner == token, cancelledStartup != token, !Task.isCancelled else { throw CancellationError() }
             generation = token; sessionID = id; identifiedEvents = requestedID != nil
             self.eventHandler = eventHandler; capturePaused = false; isStopping = false
             terminalFailureSent = false; terminalFailureDetails = []; finalizerTask = nil; writtenFrames = 0
@@ -542,26 +569,65 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 if case .failure(let message) = event { self.failCapture(message, generation: token) }
                 else { eventHandler(event) }
             }
-        return root.appendingPathComponent(DurableTranscriptionJournal.directoryName, isDirectory: true)
+        try requireStartup(token)
+        return (root.appendingPathComponent(DurableTranscriptionJournal.directoryName, isDirectory: true), token)
+        } catch {
+            if stateLock.withLock({ generation == token }) { await stopCapture(continueTranscribing: false) }
+            releaseStartup(token)
+            throw error
+        }
+    }
+
+    private func requireStartup(_ token: UUID) throws {
+        try stateLock.withLock {
+            guard generation == token, startupOwner == token, cancelledStartup != token,
+                  !isStopping, !Task.isCancelled else { throw CancellationError() }
+        }
+    }
+    private func releaseStartup(_ token: UUID) {
+        stateLock.withLock {
+            if startupOwner == token { startupOwner = nil; cancelledStartup = nil }
+        }
+    }
+    private func markCaptureStarted(_ token: UUID) async throws {
+        // Device start and the capturing flag share the finalizer's serial lane.
+        // A stop that returned cannot be followed by a late capturing=true.
+        try Task.checkCancellation()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            microphoneRecoveryQueue.async { [self] in
+                do {
+                    try requireStartup(token)
+                    try transcriptionQueue.setCapturing(true)
+                    try requireStartup(token)
+                    continuation.resume()
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+        try requireStartup(token)
     }
 
     func start(inputMode: AudioInputMode, recordingURL: URL?, sessionID: UUID? = nil, persistsSession: Bool? = nil,
                eventHandler: @escaping @Sendable (Event) -> Void) async throws {
-        let directory = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
+        let session = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
             persistsSession: persistsSession, eventHandler: eventHandler)
-        stateLock.withLock {
-            self.inputMode = inputMode
-            captureHealth = CaptureHealthState(mode: inputMode, startedAt: captureUptime())
-        }
+        let token = session.generation
+        defer { releaseStartup(token) }
         do {
+            try requireStartup(token)
+            try stateLock.withLock {
+                guard generation == token, !isStopping, cancelledStartup != token else { throw CancellationError() }
+                self.inputMode = inputMode
+                captureHealth = CaptureHealthState(mode: inputMode, startedAt: captureUptime())
+            }
             await startStreamingPreviewIfAvailable()
+            try requireStartup(token)
             switch inputMode {
             case .microphone:
-                try await startMicrophoneCapture(recordingURL: recordingURL, temporaryDirectory: directory)
+                try await startMicrophoneCapture(recordingURL: recordingURL, temporaryDirectory: session.directory, generation: token)
             case .systemAudio:
-                try await startSystemAudioCapture(recordingURL: recordingURL, temporaryDirectory: directory)
+                try await startSystemAudioCapture(recordingURL: recordingURL, temporaryDirectory: session.directory, generation: token)
             }
-            try transcriptionQueue.setCapturing(true)
+            try await markCaptureStarted(token)
         } catch {
             await stopCapture(continueTranscribing: false)
             throw error
@@ -573,11 +639,16 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private func startMicrophoneCapture(
         recordingURL: URL?,
-        temporaryDirectory: URL
+        temporaryDirectory: URL,
+        generation token: UUID
     ) async throws {
         let engine = microphoneEngineFactory()
-        audioEngine = engine
+        try stateLock.withLock {
+            guard generation == token, !isStopping, cancelledStartup != token else { throw CancellationError() }
+            audioEngine = engine
+        }
         let format = engine.outputFormat
+        try requireStartup(token)
         guard format.channelCount > 0 else { throw PipelineError.noInputDevice }
         guard format.sampleRate > 0 else { throw PipelineError.invalidInputFormat }
 
@@ -594,13 +665,37 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         try configureSession(
             format: format,
             recordingFile: fullRecording,
-            chunkDirectory: temporaryDirectory
+            chunkDirectory: temporaryDirectory,
+            generation: token
         )
 
-        try installMicrophoneTap(on: engine, format: format)
-
-        engine.prepare()
-        try engine.start()
+        do {
+            try installMicrophoneTap(on: engine, format: format, generation: token)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                microphoneRecoveryQueue.async { [self] in
+                    do {
+                        try requireStartup(token)
+                        engine.prepare()
+                        try engine.start()
+                        try requireStartup(token)
+                        continuation.resume()
+                    } catch {
+                        engine.stop()
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } catch {
+            let remove = stateLock.withLock { () -> Bool in
+                guard generation == token, audioEngine === engine else { return false }
+                let installed = microphoneTapInstalled
+                microphoneTapInstalled = false
+                return installed
+            }
+            if remove { engine.removeTap() }
+            engine.stop()
+            throw error
+        }
     }
 
     private func makeIngress(format: AVAudioFormat) throws -> OwnedAudioCaptureBuffer {
@@ -622,20 +717,31 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             })
     }
 
-    private func installMicrophoneTap(on engine: any MicrophoneCaptureEngine, format: AVAudioFormat) throws {
+    private func installMicrophoneTap(on engine: any MicrophoneCaptureEngine, format: AVAudioFormat,
+                                      generation requestedToken: UUID? = nil) throws {
+        let token = requestedToken ?? stateLock.withLock { generation }
         let input = try makeIngress(format: format)
-        stateLock.withLock {
+        try stateLock.withLock {
+            guard generation == token, !isStopping, audioEngine === engine else { input.seal(); throw CancellationError() }
             input.setPaused(capturePaused)
-            if isStopping { input.seal() }
             ingress = input
         }
         try engine.installTap(format: format, input: input)
-        stateLock.withLock { microphoneTapInstalled = true }
+        let accepted = stateLock.withLock { () -> Bool in
+            guard generation == token, !isStopping, audioEngine === engine else { return false }
+            microphoneTapInstalled = true
+            return true
+        }
+        guard accepted else {
+            input.seal(); engine.removeTap(); engine.stop()
+            throw CancellationError()
+        }
     }
 
     private func startSystemAudioCapture(
         recordingURL: URL?,
-        temporaryDirectory: URL
+        temporaryDirectory: URL,
+        generation token: UUID
     ) async throws {
         let format = AVAudioFormat(
             standardFormatWithSampleRate: 48_000,
@@ -655,10 +761,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         try configureSession(
             format: format,
             recordingFile: fullRecording,
-            chunkDirectory: temporaryDirectory
+            chunkDirectory: temporaryDirectory,
+            generation: token
         )
 
-        try await openSystemAudioStream(generation: stateLock.withLock { generation })
+        try await openSystemAudioStream(generation: token)
     }
 
     private func openSystemAudioStream(generation token: UUID, recovering: Bool = false) async throws {
@@ -764,8 +871,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     /// Capture finalization is shared by stop, cancellation, and all errors.
     /// Only this task closes the writer and publishes the final chunk.
-    func stopCapture(continueTranscribing: Bool = true) async {
-        let token = stateLock.withLock { generation }
+    func stopCapture(continueTranscribing: Bool = true, preservingStartup reservation: UUID? = nil) async {
+        let token = stateLock.withLock { () -> UUID in
+            if startupOwner != reservation { cancelledStartup = startupOwner }
+            return generation
+        }
         // Pause before the final chunk is submitted: live-only stop must not
         // wake a new repair request during capture drain.
         if !continueTranscribing || !stateLock.withLock({ persistsSession }) {
@@ -903,7 +1013,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                     return closeError
                 }
                 if let recordingCloseError { reportQueueFailure(recordingCloseError) }
-                do { try transcriptionQueue.setCapturing(false) }
+                do {
+                    try transcriptionQueue.setCapturing(false)
+                    try transcriptionQueue.recoverRecordingTail()
+                }
                 catch { reportQueueFailure(error) }
                 continuation.resume()
             }
@@ -997,9 +1110,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             peak: statistics.peak, duration: Double(buffer.frameLength) / buffer.format.sampleRate)
         let waveformHandler = level == nil ? nil : eventHandler
         do {
+            guard let chunkFile else { throw chunkOpenFailure ?? PipelineError.noActiveSession }
             try beforeAudioWrite?()
             try recordingFile?.write(from: buffer)
-            try chunkFile?.write(from: buffer)
+            try beforeChunkWrite?()
+            try chunkFile.write(from: buffer)
             writtenFrames += Int64(buffer.frameLength)
             capturedAudioDuration = Double(writtenFrames) / buffer.format.sampleRate
             if chunkCaptureStart == nil { chunkCaptureStart = capturedSpan?.observedStart }
@@ -1163,13 +1278,20 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         let preview = LegacySpeechPreview(locale: locale) { [weak self] text, start, end in
             self?.emitStreamingPreview(text: text, start: start, end: end, generation: token)
         }
-        stateLock.withLock { legacyPreview = preview }
+        let accepted = stateLock.withLock { () -> Bool in
+            guard generation == token, !isStopping else { return false }
+            legacyPreview = preview
+            return true
+        }
+        if !accepted { preview.stop(); return }
         Self.previewLatencyLog.notice("preview event=backend backend=legacy")
     }
 
     @available(macOS 27, *)
     private func startModernPreview() async {
-        guard let locale = stateLock.withLock({ previewSupportedLocale }) else { return }
+        let (token, supportedLocale) = stateLock.withLock { (generation, previewSupportedLocale) }
+        guard let locale = supportedLocale else { return }
+        var preparedAnalyzer: SpeechAnalyzer?
 
         do {
             let transcriber = SpeechTranscriber(
@@ -1181,21 +1303,17 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 modules: modules,
                 options: .init(priority: .userInitiated, modelRetention: .whileInUse)
             )
+            preparedAnalyzer = analyzer
             let converter = try await AnalyzerInputConverter.converter(compatibleWith: modules)
+            try requireStartup(token)
             try await analyzer.prepareToAnalyze(in: nil)
+            try requireStartup(token)
+            let input = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(2))
+            let stream = input.stream
+            let inputContinuation = input.continuation
 
-            let token = stateLock.withLock { generation }
-            let stream = AsyncStream<AnalyzerInput>(bufferingPolicy: .bufferingNewest(2)) { continuation in
-                stateLock.withLock { previewInputContinuation = continuation }
-            }
-
-            stateLock.withLock {
-                previewTranscriber = transcriber
-                previewAnalyzer = analyzer
-                previewConverter = converter
-            }
-
-            previewResultTask = Task { [weak self] in
+            let resultTask = Task { [weak self] in
+                guard self?.ownsPreview(token) == true else { return }
                 do {
                     for try await result in transcriber.results {
                         guard !Task.isCancelled else { break }
@@ -1220,18 +1338,48 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 }
             }
 
-            previewAnalysisTask = Task {
+            let analysisTask = Task { [weak self] in
+                guard self?.ownsPreview(token) == true else { return }
                 do {
                     try await analyzer.start(inputSequence: stream)
                 } catch {
                     return
                 }
             }
+            let published = publishPreviewTasks(result: resultTask, analysis: analysisTask, generation: token) {
+                self.previewTranscriber = transcriber
+                self.previewAnalyzer = analyzer
+                self.previewConverter = converter
+                self.previewInputContinuation = inputContinuation
+            }
+            guard published else {
+                inputContinuation.finish()
+                await analyzer.cancelAndFinishNow()
+                return
+            }
             Self.previewLatencyLog.notice("preview event=backend backend=modern")
         } catch {
             Self.previewLatencyLog.notice("preview event=backend backend=none reason=modern_unavailable")
-            await cancelStreamingPreview()
+            await preparedAnalyzer?.cancelAndFinishNow()
+            if stateLock.withLock({ generation == token }) { await cancelStreamingPreview() }
         }
+    }
+
+    @discardableResult
+    private func publishPreviewTasks(result: Task<Void, Never>, analysis: Task<Void, Never>, generation token: UUID,
+                                      install: (() -> Void)? = nil) -> Bool {
+        let published = stateLock.withLock { () -> Bool in
+            guard generation == token, !isStopping, !Task.isCancelled else { return false }
+            install?()
+            previewResultTask = result
+            previewAnalysisTask = analysis
+            return true
+        }
+        if !published { result.cancel(); analysis.cancel() }
+        return published
+    }
+    private func ownsPreview(_ token: UUID) -> Bool {
+        stateLock.withLock { generation == token && !isStopping }
     }
 
     private func emitStreamingPreview(text: String, start: TimeInterval, end: TimeInterval, generation token: UUID) {
@@ -1333,7 +1481,6 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         _ = await state.resultTask?.result
         state.analysisTask?.cancel()
         state.resultTask?.cancel()
-        clearStreamingPreviewObjects()
     }
 
     private func cancelStreamingPreview() async {
@@ -1353,7 +1500,6 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         await state.analyzer?.cancelAndFinishNow()
         state.analysisTask?.cancel()
         state.resultTask?.cancel()
-        clearStreamingPreviewObjects()
     }
 
     @available(macOS 27, *)
@@ -1372,19 +1518,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             )
             previewInputContinuation = nil
             previewConverter = nil
-            return state
-        }
-    }
-
-    @available(macOS 27, *)
-    private func clearStreamingPreviewObjects() {
-        stateLock.withLock {
             previewTranscriber = nil
             previewAnalyzer = nil
-            previewConverter = nil
-            previewInputContinuation = nil
             previewAnalysisTask = nil
             previewResultTask = nil
+            return state
         }
     }
 
@@ -1977,9 +2115,9 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private func configureSession(
         format: AVAudioFormat,
         recordingFile: SecureAudioWriter?,
-        chunkDirectory: URL
+        chunkDirectory: URL,
+        generation token: UUID
     ) throws {
-        let token = stateLock.withLock { generation }
         let detector = SpeechActivityDetector()
         var detectorReady = false
         do {
@@ -1994,6 +2132,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         }
         do {
             try stateLock.withLock {
+                guard generation == token, !isStopping, cancelledStartup != token, !Task.isCancelled else { throw CancellationError() }
                 inputFormat = format
                 self.recordingFile = recordingFile
                 self.chunkDirectory = chunkDirectory
@@ -2002,6 +2141,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 previewObservations = []
                 boundaryPolicy = CausalBoundaryPolicy()
                 capturedAudioDuration = 0
+                chunkOpenFailure = nil
                 writtenFrames = 0; chunkStartFrame = 0
                 chunkCaptureStart = nil; lastCaptureEnd = nil
                 captureConfigured = true
@@ -2048,6 +2188,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             do {
                 try openNextChunkLocked()
             } catch {
+                chunkOpenFailure = error
+                ingress?.seal()
                 let token = generation
                 let message = "无法建立下一段音频：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
                 audioProcessingQueue.async { [weak self] in self?.failCapture(message, generation: token) }
@@ -2106,6 +2248,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         guard let chunkDirectory, let inputFormat else {
             throw PipelineError.temporaryDirectoryUnavailable
         }
+        try beforeChunkOpen?()
         chunkID = UUID()
         let url = chunkDirectory.appendingPathComponent("chunk-" + chunkID.uuidString + ".wav")
         try DurableTranscriptionJournal.stageCapture(CaptureChunkDescriptor(id: chunkID, sessionID: sessionID,
@@ -2127,6 +2270,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 enum DigitalSilenceGate {
     static func isSilent(_ url: URL) throws -> Bool {
         let file = try AVAudioFile(forReading: url)
+        guard file.length > 0 else { throw WAVContextClip.ClipError.recordingEmpty }
         guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4096),
               file.processingFormat.commonFormat == .pcmFormatFloat32 else { return false }
         while file.framePosition < file.length {
@@ -2286,24 +2430,25 @@ extension SpeechPipeline {
         eventHandler: @escaping @Sendable (Event) -> Void,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws {
-        let temporaryDirectory = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
+        let session = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
             persistsSession: persistsSession, eventHandler: eventHandler)
-        let token = stateLock.withLock { generation }
+        let token = session.generation
+        defer { releaseStartup(token) }
         let format = MediaFileImport.storageFormat
         do {
             let output = try recordingURL.map { try SecureAudioWriter(forWriting: $0, format: format) }
-            try configureSession(format: format, recordingFile: output, chunkDirectory: temporaryDirectory)
+            try configureSession(format: format, recordingFile: output, chunkDirectory: session.directory, generation: token)
+            try stateLock.withLock {
+                guard generation == token, !isStopping, cancelledStartup != token else { throw CancellationError() }
+                capturePaused = false
+            }
+            try await markCaptureStarted(token)
         } catch {
             await stopCapture(continueTranscribing: false)
             throw error
         }
 
-        stateLock.withLock {
-            capturePaused = false
-            isStopping = false
-        }
-
-        try transcriptionQueue.setCapturing(true)
+        releaseStartup(token)
         do {
             try await MediaFileImport.decode(fileURL, onProgress: onProgress) { [weak self] buffer in
                 guard let self else { throw CancellationError() }
@@ -2335,17 +2480,34 @@ extension SpeechPipeline {
 extension SpeechPipeline {
     /// Test-only input: no audio device, permission, recognizer, or model startup.
     func startSyntheticCapture(format: AVAudioFormat, recordingURL: URL?, sessionID: UUID, persistsSession: Bool? = nil,
+                               syntheticDirectory: URL? = nil,
                                inputMode: AudioInputMode? = nil,
                                eventHandler: @escaping @Sendable (Event) -> Void) async throws -> OwnedAudioCaptureBuffer {
-        let directory = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
-            persistsSession: persistsSession, eventHandler: eventHandler)
-        let file = try recordingURL.map { try SecureAudioWriter(forWriting: $0, format: format) }
-        try configureSession(format: format, recordingFile: file, chunkDirectory: directory)
-        let input = try makeIngress(format: format)
-        stateLock.withLock { ingress = input; self.inputMode = inputMode }
-        try transcriptionQueue.setCapturing(true)
-        startCaptureSleepMonitoring()
-        return input
+        let session = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
+            persistsSession: persistsSession, syntheticDirectory: syntheticDirectory, eventHandler: eventHandler)
+        let token = session.generation
+        defer { releaseStartup(token) }
+        do {
+            let file = try recordingURL.map { try SecureAudioWriter(forWriting: $0, format: format) }
+            try configureSession(format: format, recordingFile: file, chunkDirectory: session.directory, generation: token)
+            let input = try makeIngress(format: format)
+            try stateLock.withLock {
+                guard generation == token, !isStopping else { input.seal(); throw CancellationError() }
+                ingress = input; self.inputMode = inputMode
+            }
+            try await markCaptureStarted(token)
+            startCaptureSleepMonitoring()
+            return input
+        } catch {
+            await stopCapture(continueTranscribing: false)
+            throw error
+        }
+    }
+    func startSyntheticPreview(prepare: @Sendable () async -> Void,
+                               result: Task<Void, Never>, analysis: Task<Void, Never>) async {
+        let token = stateLock.withLock { generation }
+        await prepare()
+        publishPreviewTasks(result: result, analysis: analysis, generation: token)
     }
     func checkSyntheticCaptureHealth(now: TimeInterval) {
         let (token, mode) = stateLock.withLock { (generation, inputMode) }
@@ -2379,14 +2541,17 @@ extension SpeechPipeline {
     /// Feeds the same post-capture PCM path without opening an output device.
     func cliReplay(file: URL, recordingURL: URL, sessionID: UUID,
                    eventHandler: @escaping @Sendable (Event) -> Void) async throws {
-        let temporary = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
+        let session = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
                                                persistsSession: true, eventHandler: eventHandler)
+        let token = session.generation
+        defer { releaseStartup(token) }
         let audio = try AVAudioFile(forReading: file)
         let output = try SecureAudioWriter(forWriting: recordingURL, format: audio.processingFormat)
         await startStreamingPreviewIfAvailable()
-        try configureSession(format: audio.processingFormat, recordingFile: output, chunkDirectory: temporary)
-        try transcriptionQueue.setCapturing(true)
-        stateLock.withLock { capturePaused = false; isStopping = false; inputMode = .systemAudio }
+        try configureSession(format: audio.processingFormat, recordingFile: output, chunkDirectory: session.directory, generation: token)
+        try await markCaptureStarted(token)
+        releaseStartup(token)
+        stateLock.withLock { capturePaused = false; inputMode = .systemAudio }
         let start = ProcessInfo.processInfo.systemUptime
         // T0 precedes the first PCM write; first-result latency includes startup
         // after this anchor, rather than starting at the first result itself.
@@ -2548,14 +2713,15 @@ enum WAVContextClip {
                         start: TimeInterval, end: TimeInterval,
                         maximumSeconds: TimeInterval = maximumClipSeconds,
                         maximumBytes: Int = maximumClipBytes,
-                        padding: TimeInterval = 0.75) throws -> URL {
+                        padding: TimeInterval = 0.75,
+                        destinationDirectory: URL? = nil, frameRange: Range<Int>? = nil) throws -> URL {
         let layout = try readLayout(at: recordingURL)
         let rate = layout.sampleRate
         guard rate > 0, layout.blockAlign > 0, layout.frameCount > 0 else { throw ClipError.recordingEmpty }
 
-        let firstFrame = max(0, Int(((start - padding) * rate).rounded(.down)))
-        var lastFrame = min(layout.frameCount, Int(((end + padding) * rate).rounded(.up)))
-        guard firstFrame < layout.frameCount, lastFrame > firstFrame else { throw ClipError.rangeNotWrittenYet }
+        let firstFrame = frameRange?.lowerBound ?? max(0, Int(((start - padding) * rate).rounded(.down)))
+        var lastFrame = min(layout.frameCount, frameRange?.upperBound ?? Int(((end + padding) * rate).rounded(.up)))
+        guard firstFrame >= 0, firstFrame < layout.frameCount, lastFrame > firstFrame else { throw ClipError.rangeNotWrittenYet }
         let maximumFrames = Int(maximumSeconds * rate)
         if lastFrame - firstFrame > maximumFrames { lastFrame = firstFrame + maximumFrames }
         var byteCount = (lastFrame - firstFrame) * layout.blockAlign
@@ -2568,7 +2734,7 @@ enum WAVContextClip {
         let completeFrames = data.count / layout.blockAlign
         guard completeFrames > 0 else { throw ClipError.rangeNotWrittenYet }
         let payload = data.prefix(completeFrames * layout.blockAlign)
-        let url = try SessionWorkspace.temporaryRoot()
+        let url = try (destinationDirectory ?? SessionWorkspace.temporaryRoot())
             .appendingPathComponent("LiveLingo-retry-\(UUID().uuidString).wav")
         try write(payload: payload, layout: layout, to: url)
         return url

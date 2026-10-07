@@ -238,6 +238,7 @@ def main():
     active = OrderedDict()
     paused = OrderedDict()
     volatile_paused = OrderedDict()
+    unsaved = set()
     completed = {}
     identities = {}
     purposes = {}
@@ -275,6 +276,7 @@ def main():
         token = checkpoint_token(state_directory, generation.identity)
         if token is not None:
             owned_checkpoints[generation._request_id] = token
+        unsaved.discard(generation.identity)
         # Tensor caches are replaceable accelerators; the app owns the durable
         # text journal. Bound cold caches so paused jobs cannot fill the disk.
         # A done event is not a delivery receipt. Protect completed records
@@ -298,11 +300,15 @@ def main():
         control = {'controlID': command.get('controlID')}
         if op in ('shutdown','reader_error'):
             failures = []
-            for running_id, generation in active.items():
-                if running_id not in checkpointed: continue
+            for request, identity in identities.items():
+                if not retention.get(request, True): continue
+                generation = active.get(request)
+                if generation is None and identity in unsaved:
+                    generation = paused.get(identity)
+                if generation is None or (request not in checkpointed and identity not in unsaved): continue
                 try: persist(generation)
                 except Exception as error:
-                    failures.append(running_id)
+                    failures.append(request)
                     print('Checkpoint failure:', generation_detail(error), file=sys.stderr)
             send('shutdown', request_id, state='checkpoint_failed' if failures else 'ready_to_exit',
                  failedRequests=failures, **control)
@@ -319,6 +325,7 @@ def main():
             if identity is not None:
                 if was_retained:
                     paused.pop(identity, None)
+                    unsaved.discard(identity)
                 else:
                     volatile_paused.pop(request_id, None)
                 completed.pop(request_id, None)
@@ -331,6 +338,10 @@ def main():
             return True
         if op in ('pause','checkpoint'):
             generation = active.get(request_id)
+            if generation is None:
+                generation = (paused.get(identities.get(request_id))
+                              if retention.get(request_id, True)
+                              else volatile_paused.get(request_id))
             if generation is not None:
                 persist(generation)
                 if op != 'checkpoint':
@@ -346,7 +357,9 @@ def main():
                                 volatile_paused.popitem(last=False)
                         # Keep only the most recent paused task hot. Older tasks
                         # remain recoverable from their atomic checkpoint.
-                        while len(paused)>1: paused.popitem(last=False)
+                        while len(paused)>1:
+                            retired, _ = paused.popitem(last=False)
+                            unsaved.discard(retired)
                         # A paused task keeps its own tensors; only unused
                         # buffers are returned here.
                         memory.log_event('pause')
@@ -439,6 +452,8 @@ def main():
                else volatile_paused.pop(request_id, None))
         if hot is not None and hot.identity != generation.identity:
             hot = None
+        if retain_checkpoint:
+            unsaved.discard(generation.identity)
         recovered=hot if prefix else None
         path=checkpoint_path(generation)
         if retain_checkpoint and prefix and recovered is None and path.exists():
@@ -450,7 +465,7 @@ def main():
         if recovered is not None:
             # A stale UI journal may lag the token checkpoint, or vice versa.
             # Only reuse a checkpoint belonging to the same unfinished prefix.
-            if recovered.wire.startswith(prefix) or prefix.startswith(recovered.wire):
+            if recovered.wire.startswith(prefix):
                 generation=recovered
         active[request_id]=generation
         generation._retain_checkpoint = retain_checkpoint
@@ -476,7 +491,7 @@ def main():
                 # Wake only for an actual maintenance deadline or a command.
                 # Queue.put wakes an indefinite wait immediately, including EOF.
                 timeout = memory.seconds_until_idle_release()
-                if engine is not None and args.idle_model_seconds > 0:
+                if engine is not None and args.idle_model_seconds > 0 and not unsaved:
                     model_delay = max(0.0, last_model_use + args.idle_model_seconds - time.monotonic())
                     timeout = model_delay if timeout is None else min(timeout, model_delay)
                 if timeout is not None: timeout = min(timeout, threading.TIMEOUT_MAX)
@@ -492,6 +507,7 @@ def main():
             if not active:
                 memory.idle()
                 if (engine is not None and args.idle_model_seconds > 0
+                        and not unsaved
                         and time.monotonic()-last_model_use >= args.idle_model_seconds):
                     # Every hot paused generation has an atomic checkpoint.
                     # Dropping these tensors releases weights without deleting
@@ -534,6 +550,16 @@ def main():
                     memory.log_event('generating')
             except Exception as error:
                 finished='error'
+                if request_id in checkpointed and isinstance(error, OSError):
+                    # Keep one failed save hot for an explicit checkpoint retry.
+                    # Publish the full text before interruption so eviction never
+                    # hides progress from the caller's independent text journal.
+                    paused[generation.identity] = generation
+                    unsaved.add(generation.identity)
+                    while len(paused) > 1:
+                        retired, _ = paused.popitem(last=False)
+                        unsaved.discard(retired)
+                    send('snapshot', request_id, wire=generation.wire)
                 send('error',request_id,message=describe_request_error(request_id,error),
                      code='output_budget_exhausted' if getattr(error,'code',None)=='output_budget_exhausted' else None,
                      recoverable=not isinstance(error,(ValueError,KeyError,TypeError)))

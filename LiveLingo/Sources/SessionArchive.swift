@@ -419,7 +419,15 @@ enum SessionJournalEvent: Codable, Equatable, Sendable {
     case appendBatch(LearningNoteBatch)
     case processing(SessionProcessingState)
     case generationCheckpoint(SessionGenerationCheckpoint)
+    /// Removal is an explicit journal transaction tied to the exact progress
+    /// being retired. An ordinary, possibly stale UI snapshot cannot delete it.
+    case retireGenerationCheckpoint(SessionGenerationCheckpoint)
     case inputRevision(SessionInputRevision)
+
+    fileprivate var retiringCheckpointIDs: Set<UUID> {
+        if case .retireGenerationCheckpoint(let value) = self { return [value.id] }
+        return []
+    }
 
     fileprivate func apply(to snapshot: inout SessionSnapshot) throws {
         switch self {
@@ -447,6 +455,12 @@ enum SessionJournalEvent: Codable, Equatable, Sendable {
                 try checkpoint.validateContinuation(from: old)
                 snapshot.generationCheckpoints[index] = checkpoint
             } else { snapshot.generationCheckpoints.append(checkpoint) }
+        case .retireGenerationCheckpoint(let checkpoint):
+            guard let index = snapshot.generationCheckpoints.firstIndex(where: { $0.id == checkpoint.id }),
+                  snapshot.generationCheckpoints[index] == checkpoint else {
+                throw SessionStoreError.staleSnapshot
+            }
+            snapshot.generationCheckpoints.remove(at: index)
         case .inputRevision(let change):
             guard snapshot.inputRevision < Int.max,
                   change.fromRevision == snapshot.inputRevision,
@@ -551,6 +565,14 @@ final class SessionStore: @unchecked Sendable {
         try locked(writing: false) { try read().result }
     }
 
+    func loadDetailedAsync() async throws -> SessionLoadResult {
+        try await Task.detached { try self.loadDetailed() }.value
+    }
+
+    func loadAsync() async throws -> SessionSnapshot? {
+        try await loadDetailedAsync().snapshot
+    }
+
     @discardableResult
     func save(_ value: SessionSnapshot) throws -> SessionSnapshot {
         try locked(writing: true) {
@@ -593,7 +615,7 @@ final class SessionStore: @unchecked Sendable {
             saved.storageRevision += 1
             saved.updatedAt = Date()
             let payload = try SessionArchiveCoding.encode(saved)
-            let envelope = SnapshotEnvelope(schemaVersion: SessionSnapshot.currentSchemaVersion,
+            let envelope = SnapshotEnvelope(schemaVersion: try SessionArchiveCoding.minimumReaderVersion(for: payload),
                                             payload: payload, checksum: SessionArchiveCoding.digest(payload))
             try atomicWrite(try SessionArchiveCoding.encode(envelope), directory.appendingPathComponent(Self.snapshotFileName))
             // Date's epoch conversion can round fractional timestamps. Return
@@ -621,7 +643,7 @@ final class SessionStore: @unchecked Sendable {
                                         previousDigest: old.lastJournalDigest, event: event)
             let persistedEvent = try row.event(line: row.sequence)
             try persistedEvent.apply(to: &snapshot)
-            try Self.validatePreservation(from: old, to: snapshot)
+            try Self.validatePreservation(from: old, to: snapshot, retiringCheckpointIDs: persistedEvent.retiringCheckpointIDs)
             var bytes = try SessionArchiveCoding.encode(row)
             bytes.append(0x0A)
             let url = directory.appendingPathComponent(Self.journalFileName)
@@ -672,7 +694,8 @@ final class SessionStore: @unchecked Sendable {
             self.sequence = sequence; self.sessionID = sessionID
             self.baseStorageRevision = baseStorageRevision; self.previousDigest = previousDigest
             self.payload = try SessionArchiveCoding.encode(event)
-            self.checksum = Self.digest(version: 1, sequence: sequence, sessionID: sessionID,
+            self.schemaVersion = try SessionArchiveCoding.minimumReaderVersion(for: payload)
+            self.checksum = Self.digest(version: schemaVersion, sequence: sequence, sessionID: sessionID,
                                         revision: baseStorageRevision, previous: previousDigest, payload: payload)
         }
 
@@ -684,7 +707,7 @@ final class SessionStore: @unchecked Sendable {
         }
 
         func event(line: Int) throws -> SessionJournalEvent {
-            guard schemaVersion == 1 else { throw SessionStoreError.unsupportedSchema(schemaVersion) }
+            guard (1...SessionArchiveCoding.currentReaderVersion).contains(schemaVersion) else { throw SessionStoreError.unsupportedSchema(schemaVersion) }
             guard sequence > 0, sequence < Int.max, baseStorageRevision > 0, baseStorageRevision < Int.max,
                   checksum == Self.digest(version: schemaVersion, sequence: sequence, sessionID: sessionID,
                                           revision: baseStorageRevision, previous: previousDigest, payload: payload) else {
@@ -751,7 +774,7 @@ final class SessionStore: @unchecked Sendable {
                         }
                         var preview = snapshot
                         try event.apply(to: &preview)
-                        try Self.validatePreservation(from: snapshot, to: preview)
+                        try Self.validatePreservation(from: snapshot, to: preview, retiringCheckpointIDs: event.retiringCheckpointIDs)
                     }
                 }
                 tailCount = tail.count
@@ -777,7 +800,7 @@ final class SessionStore: @unchecked Sendable {
                 guard row.baseStorageRevision == snapshot.storageRevision else { throw SessionStoreError.staleSnapshot }
                 let old = snapshot
                 try event.apply(to: &snapshot)
-                try Self.validatePreservation(from: old, to: snapshot)
+                try Self.validatePreservation(from: old, to: snapshot, retiringCheckpointIDs: event.retiringCheckpointIDs)
                 snapshot.storageRevision += 1
                 snapshot.lastJournalSequence = sequence
                 snapshot.lastJournalDigest = digest
@@ -793,8 +816,9 @@ final class SessionStore: @unchecked Sendable {
     }
 
     private func readLegacy() throws -> SessionSnapshot? {
-        let jsonl = directory.appendingPathComponent("bilingual.jsonl")
-        let markdown = SessionExporter.savedSummaryURL(in: directory, targetLocale: nil)
+        let exports = try SessionExporter.currentExportDirectory(in: directory)
+        let jsonl = exports.appendingPathComponent("bilingual.jsonl")
+        let markdown = SessionExporter.savedSummaryURL(in: exports, targetLocale: nil)
         try SessionArchiveCoding.requireRegularFileIfPresent(jsonl)
         try SessionArchiveCoding.requireRegularFileIfPresent(markdown)
         let hasJSONL = FileManager.default.fileExists(atPath: jsonl.path)
@@ -822,7 +846,7 @@ final class SessionStore: @unchecked Sendable {
         // including regional Traditional manifests. Keep their fingerprints
         // and paused source ledgers frozen; savedLanguage still selects their
         // display locale. Non-Chinese imports must bind their own generator.
-        let language = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: .legacy)
+        let language = try OutputLanguage.savedLanguage(in: exports, snapshot: snapshot, origin: .legacy)
         if language.profile.generationLocale != "zh-Hans" {
             snapshot.targetLocale = language.persistedLocale
         }
@@ -830,7 +854,8 @@ final class SessionStore: @unchecked Sendable {
         return snapshot
     }
 
-    static func validatePreservation(from old: SessionSnapshot, to new: SessionSnapshot) throws {
+    static func validatePreservation(from old: SessionSnapshot, to new: SessionSnapshot,
+                                     retiringCheckpointIDs: Set<UUID> = []) throws {
         guard old.effectiveTargetLocale == new.effectiveTargetLocale else {
             throw SessionStoreError.invalidState("已有课程的输出语言不可更改")
         }
@@ -877,6 +902,8 @@ final class SessionStore: @unchecked Sendable {
         for checkpoint in old.generationCheckpoints {
             if let next = new.generationCheckpoints.first(where: { $0.id == checkpoint.id }) {
                 try next.validateContinuation(from: checkpoint)
+            } else if !retiringCheckpointIDs.contains(checkpoint.id) {
+                throw SessionStoreError.invalidState("删除生成检查点必须提供明确的退休记录")
             }
         }
     }
@@ -923,6 +950,21 @@ final class SessionStore: @unchecked Sendable {
 }
 
 enum SessionArchiveCoding {
+    static let currentReaderVersion = 2
+    /// Keep the frozen schema-1 payload and input fingerprints unchanged. The
+    /// envelope/row gates old readers before they can discard new semantics.
+    static func minimumReaderVersion(for data: Data) throws -> Int {
+        let modernKeys: Set<String> = ["targetLocale", "sourceLanguage", "captionAnnotation", "translationFailures",
+            "pendingCaptionRepairs", "lastErrorSource", "captureError", "retireGenerationCheckpoint"]
+        func containsModernField(_ value: Any) -> Bool {
+            if let object = value as? [String: Any] {
+                return !modernKeys.isDisjoint(with: object.keys) || object.values.contains(where: containsModernField)
+            }
+            if let array = value as? [Any] { return array.contains(where: containsModernField) }
+            return false
+        }
+        return containsModernField(try JSONSerialization.jsonObject(with: data)) ? currentReaderVersion : 1
+    }
     static let genesisDigest = String(repeating: "0", count: 64)
     static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     static func isDigest(_ text: String) -> Bool {
@@ -957,7 +999,7 @@ enum SessionArchiveCoding {
             if let journalLine { throw SessionStoreError.corruptJournal(line: journalLine) }
             throw SessionStoreError.corruptSnapshot
         }
-        guard number.intValue == SessionSnapshot.currentSchemaVersion else {
+        guard (1...currentReaderVersion).contains(number.intValue) else {
             throw SessionStoreError.unsupportedSchema(number.intValue)
         }
     }

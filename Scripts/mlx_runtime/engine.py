@@ -287,13 +287,26 @@ class Generation:
             key=self.key.tolist(), phase=self.phase, thinking_count=self.thinking_count,
             final_count=self.final_count, done=self.done)
         serialized = json.dumps(metadata, ensure_ascii=False)
-        def write(temporary):
-            if self.done:
-                # Completed requests replay their exact result without KV.
-                mx.save_safetensors(temporary, {}, {'livelingo.completed': serialized})
-            else:
-                save_prompt_cache(temporary, self.cache, {'generation': serialized})
-        atomic_checkpoint(path, write, file_object=True)
+        # Reuse the permission/ACL-safe atomic writer. Hold its directory through
+        # publication so the durability sync cannot follow a renamed ancestor.
+        from checkpoints import _state_fd
+        path = Path(os.path.abspath(path))
+        with _state_fd(path.parent) as directory:
+            written_identity = None
+            def write(temporary):
+                nonlocal written_identity
+                if self.done:
+                    # Completed requests replay their exact result without KV.
+                    mx.save_safetensors(temporary, {}, {'livelingo.completed': serialized})
+                else:
+                    save_prompt_cache(temporary, self.cache, {'generation': serialized})
+                info = os.fstat(temporary.fileno())
+                written_identity = (info.st_dev, info.st_ino)
+            atomic_checkpoint(path, write, file_object=True)
+            current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != written_identity:
+                raise ValueError('Checkpoint file changed')
+            os.fsync(directory)
 
     @classmethod
     def restore(cls, engine, path, expected_identity):

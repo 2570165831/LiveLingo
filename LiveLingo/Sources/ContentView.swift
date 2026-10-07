@@ -272,6 +272,16 @@ struct ContentView: View {
             }
             .disabled(!model.canOpenLesson)
             .accessibilityIdentifier("classroom-open-session")
+            if !model.recoverableRecordings.isEmpty {
+                Menu("恢复未完成的录音") {
+                    ForEach(model.recoverableRecordings) { recording in
+                        Button(recording.createdAt.formatted(date: .abbreviated, time: .shortened)) {
+                            Task { await model.recoverRecording(recording) }
+                        }
+                    }
+                }
+                .disabled(model.phase.isBusy)
+            }
             Button { model.chooseAndImportMediaFile() } label: {
                 Label("导入音频或视频…", systemImage: "square.and.arrow.down")
             }
@@ -300,7 +310,7 @@ struct ContentView: View {
             if !model.isLiveOnly {
                 Button("保存位置…") { Task { await model.chooseOutputDirectory() } }
                     .disabled(model.phase.isBusy)
-                if case .saved = model.phase {
+                if model.savedSessionDirectory != nil {
                     Button("录音处理…") { presentSheet(.processing) }
                         .accessibilityIdentifier("classroom-saved-processing")
                     Button("在访达中显示") { model.revealSavedSession() }
@@ -719,7 +729,7 @@ struct ContentView: View {
 
     private var saveDestinationStatus: String {
         if model.isLiveOnly { return "实时暂存 · 结束后不保留录音" }
-        if let directory = model.outputDirectory { return "保存到 \(directory.lastPathComponent)" }
+        if let directory = model.currentCourseDirectory ?? model.outputDirectory { return "保存到 \(directory.lastPathComponent)" }
         return "尚未选择保存位置"
     }
 
@@ -736,7 +746,7 @@ struct ContentView: View {
                 if let status = model.savedProcessingStatus { Text(status) }
                 if let notice = model.archiveNotice { Text(notice) }
                 Text(model.isLiveOnly ? "保存：实时暂存，结束后删除录音并清空"
-                     : "保存位置：\(model.outputDirectory?.lastPathComponent ?? "尚未选择")")
+                     : "保存位置：\(model.courseSaveDirectoryLabel)")
                 Text("音源：\(model.audioInputStatus)")
                 Text("识别：\(model.speechStatus)")
                 Text("翻译：\(model.translationStatus)")
@@ -861,7 +871,10 @@ struct ClassroomSettingsView: View {
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if !model.isLiveOnly {
-                    LabeledContent("保存位置", value: model.outputDirectory?.lastPathComponent ?? "尚未选择")
+                    if let directory = model.currentCourseDirectory {
+                        LabeledContent("当前课程目录", value: directory.path)
+                    }
+                    LabeledContent("下次录音保存位置", value: model.outputDirectory?.lastPathComponent ?? "尚未选择")
                     Button("选择保存位置…") { Task { await model.chooseOutputDirectory() } }
                         .disabled(model.phase.isBusy)
                 }

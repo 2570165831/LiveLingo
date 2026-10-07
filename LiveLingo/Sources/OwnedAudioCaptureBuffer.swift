@@ -265,9 +265,14 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
             } catch {
                 lock.withLock {
                     accepting = false
-                    failure = Failure(reason: "音频写入或处理失败：\(error.localizedDescription)",
-                        observedStart: span.observedStart, observedEnd: ProcessInfo.processInfo.systemUptime,
-                        rejectedFrames: Int64(occupiedFrames), processedFrames: processedFrames)
+                    let earlier = failure ?? closedRejection
+                    let reason = "音频写入或处理失败：\(error.localizedDescription)"
+                    failure = Failure(reason: earlier.map { $0.reason + " " + reason } ?? reason,
+                        observedStart: min(earlier?.observedStart ?? span.observedStart, span.observedStart),
+                        observedEnd: max(earlier?.observedEnd ?? 0, ProcessInfo.processInfo.systemUptime),
+                        rejectedFrames: Int64(occupiedFrames) + (earlier?.rejectedFrames ?? 0),
+                        processedFrames: processedFrames)
+                    closedRejection = nil
                     occupiedFrames = 0; spanCount = 0
                 }
                 break

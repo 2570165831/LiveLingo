@@ -102,6 +102,15 @@ enum ReviewInputBinding {
         return result.snapshot
     }
 
+    static func snapshotAsync(in directory: URL) async throws -> SessionSnapshot? {
+        let result = try await SessionStore(directory: directory).loadDetailedAsync()
+        guard result.origin == .snapshot else { return nil }
+        guard result.incompleteTailBytes == 0 else {
+            throw SessionStoreError.incompleteJournalTail(bytes: result.incompleteTailBytes)
+        }
+        return result.snapshot
+    }
+
     static func selected(_ batches: [LearningNoteBatch], scope: LearningReviewScope) throws -> [LearningNoteBatch] {
         let available = batches.filter { !$0.note.points.isEmpty }
         guard Set(available.map(\.id)).count == available.count else {

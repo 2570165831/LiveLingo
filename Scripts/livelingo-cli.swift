@@ -390,7 +390,86 @@ struct LiveLingoCLI {
  @discardableResult static func verifySaved(_ directory: URL, emit: Bool = true,
                          converter: ChineseScriptConverter = .shared) throws -> Int {
   let decoder=JSONDecoder();decoder.dateDecodingStrategy = .iso8601
-  let manifest=try decoder.decode(SessionExporter.Manifest.self,from:Data(contentsOf:directory.appendingPathComponent("manifest.json")))
+  let rootBinding: SensitiveFileIO.Directory
+  do { rootBinding = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false) }
+  catch { throw CLIError.inconsistentExport }
+  // Check the regional resource requirement before version/integrity errors,
+  // as the legacy verifier does. This reads only the fixed manifest member;
+  // every directory and file is opened without following an arbitrary link.
+  let preliminaryBinding: SensitiveFileIO.Directory
+  do {
+   let manifestURL = directory.appendingPathComponent("manifest.json")
+   var info = stat()
+   guard lstat(manifestURL.path, &info) == 0 else { throw CLIError.inconsistentExport }
+   if info.st_mode & S_IFMT == S_IFLNK {
+    guard try FileManager.default.destinationOfSymbolicLink(atPath: manifestURL.path)
+        == ".exports/current/manifest.json" else { throw CLIError.inconsistentExport }
+    let store = try rootBinding.subdirectory(named: ".exports", create: false)
+    let pointer = try FileManager.default.destinationOfSymbolicLink(
+        atPath: store.url.appendingPathComponent("current").path)
+    let parts = pointer.split(separator: "/")
+    guard parts.count == 2, parts[0] == "versions", UUID(uuidString: String(parts[1])) != nil else {
+     throw CLIError.inconsistentExport
+    }
+    preliminaryBinding = try store.subdirectory(named: "versions", create: false)
+        .subdirectory(named: String(parts[1]), create: false)
+   } else {
+    guard info.st_mode & S_IFMT == S_IFREG else { throw CLIError.inconsistentExport }
+    preliminaryBinding = rootBinding
+   }
+  } catch { throw CLIError.inconsistentExport }
+  let preliminaryFile = FileHandle(fileDescriptor: try preliminaryBinding.openRegularFile(named: "manifest.json",
+      flags: O_RDONLY, create: false), closeOnDealloc: true)
+  defer { try? preliminaryFile.close() }
+  let preliminaryManifest = try decoder.decode(SessionExporter.Manifest.self, from: preliminaryFile.readToEnd() ?? Data())
+  guard preliminaryManifest.recordingFile == "recording.wav" else { throw CLIError.inconsistentExport }
+  try preliminaryBinding.assertStillAtOriginalPath()
+  try rootBinding.assertStillAtOriginalPath()
+  if let language = OutputLanguage(rawValue: preliminaryManifest.targetLocale), language.profile.renderer != .identity {
+   do { try converter.prepare() } catch { throw CLIError.converterUnavailable }
+  }
+  let exportDirectory: URL
+  do { exportDirectory = try SessionExporter.currentExportDirectory(in: directory) }
+  catch { throw CLIError.inconsistentExport }
+  let exportBinding: SensitiveFileIO.Directory
+  do {
+   exportBinding = exportDirectory == directory ? rootBinding
+     : try SensitiveFileIO.Directory.open(at: exportDirectory, create: false, tighten: false)
+  } catch { throw CLIError.inconsistentExport }
+  // Keep one immutable generation for every read. Root aliases are accepted
+  // only when registered by the exporter and still expose those same bytes.
+  func exportData(_ name: String) throws -> Data {
+   do {
+    let selected = FileHandle(fileDescriptor: try exportBinding.openRegularFile(named: name,
+        flags: O_RDONLY, create: false), closeOnDealloc: true)
+    defer { try? selected.close() }
+    let bytes = try selected.readToEnd() ?? Data()
+    if exportDirectory != directory {
+     let root = directory.appendingPathComponent(name)
+     var info = stat()
+     guard lstat(root.path, &info) == 0 else { throw CLIError.inconsistentExport }
+     if info.st_mode & S_IFMT == S_IFLNK {
+      guard try SessionExporter.managedExportLink(at: root, in: directory,
+                generation: exportDirectory) != nil else { throw CLIError.inconsistentExport }
+     } else {
+      let visible = FileHandle(fileDescriptor: try rootBinding.openRegularFile(named: name,
+          flags: O_RDONLY, create: false), closeOnDealloc: true)
+      defer { try? visible.close() }
+      guard try visible.readToEnd() == bytes else { throw CLIError.inconsistentExport }
+     }
+    }
+    try exportBinding.assertStillAtOriginalPath()
+    try rootBinding.assertStillAtOriginalPath()
+    return bytes
+   } catch { throw CLIError.inconsistentExport }
+  }
+  func exportText(_ name: String) throws -> String {
+   guard let text = String(data: try exportData(name), encoding: .utf8) else {
+    throw CLIError.inconsistentExport
+   }
+   return text
+  }
+  let manifest=try decoder.decode(SessionExporter.Manifest.self,from:exportData("manifest.json"))
   guard manifest.recordingFile == "recording.wav" else { throw CLIError.inconsistentExport }
   let traditional = OutputLanguage(rawValue: manifest.targetLocale).flatMap {
    $0.profile.renderer == .identity ? nil : $0
@@ -416,7 +495,7 @@ struct LiveLingoCLI {
   }
   let targetTranscriptName = SessionExporter.targetTranscriptFileName(for: manifest.targetLocale)
   let targetSummaryName = SessionExporter.targetSummaryFileName(for: manifest.targetLocale)
-  let jsonl=try String(contentsOf:directory.appendingPathComponent("bilingual.jsonl"),encoding:.utf8)
+  let jsonl=try exportText("bilingual.jsonl")
   let rows = jsonl.split(separator:"\n")
   let segments=try rows.map { try decoder.decode(TranscriptSegment.self,from:Data($0.utf8)) }
   guard segments.count == manifest.segmentCount, Set(segments.map(\.id)).count == segments.count else { throw CLIError.inconsistentExport }
@@ -451,15 +530,15 @@ struct LiveLingoCLI {
    }
    return renderer.srtCue(segment, index: index)
   }
-  let english=try String(contentsOf:directory.appendingPathComponent("transcript-en.txt"),encoding:.utf8)
-  let chinese=try String(contentsOf:directory.appendingPathComponent(targetTranscriptName),encoding:.utf8)
+  let english=try exportText("transcript-en.txt")
+  let chinese=try exportText(targetTranscriptName)
   let targetLines = try usesLegacyFormat ? segments.map(legacyTargetLine) : segments.map { try renderedTarget($0) }
   guard english == segments.map(SessionExporter.sourceLine).joined(separator:"\n")+"\n",
         chinese == targetLines.joined(separator:"\n")+"\n" else { throw CLIError.inconsistentExport }
   let expectedSRT = try segments.enumerated().map { index, segment in
    try usesLegacyFormat ? legacySRTCue(segment, index: index) : renderedCue(segment, index: index)
   }.joined(separator: "\n\n") + "\n"
-  let savedSRT = try String(contentsOf: directory.appendingPathComponent("bilingual.srt"), encoding: .utf8)
+  let savedSRT = try exportText("bilingual.srt")
   if savedSRT != expectedSRT {
    // An old synthetic English fixture used two lines. Accept that complete
    // layout only for snapshot-free, unmarked exports, never for generation.
@@ -471,12 +550,21 @@ struct LiveLingoCLI {
   let audio=try AVAudioFile(forReading:directory.appendingPathComponent(manifest.recordingFile))
   guard audio.length>0, audio.processingFormat.sampleRate>0 else { throw CLIError.inconsistentExport }
   var names=["manifest.json","bilingual.jsonl","bilingual.srt","transcript-en.txt",targetTranscriptName,"recording.wav"]
-  if FileManager.default.fileExists(atPath:directory.appendingPathComponent(targetSummaryName).path) { names.append(targetSummaryName) }
+  if FileManager.default.fileExists(atPath:exportDirectory.appendingPathComponent(targetSummaryName).path) { names.append(targetSummaryName) }
   let files=try names.map { name -> [String:Any] in
-   let digest = try hashFile(directory.appendingPathComponent(name))
+   let digest: (bytes: UInt64, sha256: String)
+   if name == "recording.wav" { digest = try hashFile(directory.appendingPathComponent(name)) }
+   else { let bytes = try exportData(name); digest = (UInt64(bytes.count), digestData(bytes)) }
    guard digest.bytes > 0 else { throw CLIError.inconsistentExport }
    return ["name":name,"bytes":digest.bytes,"sha256":digest.sha256]
   }
+  do {
+   try rootBinding.assertStillAtOriginalPath()
+   try exportBinding.assertStillAtOriginalPath()
+   guard try SessionExporter.currentExportDirectory(in: directory) == exportDirectory else {
+    throw CLIError.inconsistentExport
+   }
+  } catch { throw CLIError.inconsistentExport }
   let receipt:[String:Any]=["event":"saved_verified", "scope": "export_integrity",
     "wholeRunVerified": false,
     "segments":segments.count,
@@ -991,6 +1079,50 @@ struct LiveLingoCLI {
   while let chunk = try file.read(upToCount: 1_048_576), !chunk.isEmpty { hash.update(data: chunk); count += UInt64(chunk.count) }
   return (count, hash.finalize().map { String(format: "%02x", $0) }.joined())
  }
+
+ #if LIVELINGO_CLI_LIFECYCLE_TESTS
+ /// Preserve the visible-file assertions while also capturing version-store
+ /// bytes and link structure. Fixture snapshots never follow a foreign link.
+ static func fixtureFiles(in directory: URL) throws -> [String: Data] {
+  let fm = FileManager.default
+  let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+  let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
+  func children(_ directory: URL) throws -> [String: Data] {
+   var result: [String: Data] = [:]
+   for file in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys)) {
+    let values = try file.resourceValues(forKeys: keys)
+    if values.isSymbolicLink == true {
+     result["link:" + file.lastPathComponent] = Data(try fm.destinationOfSymbolicLink(atPath: file.path).utf8)
+    } else if values.isDirectory == true {
+     result["directory:" + file.lastPathComponent] = try encoder.encode(children(file))
+    } else { result["file:" + file.lastPathComponent] = try Data(contentsOf: file) }
+   }
+   return result
+  }
+  let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+  var result: [String: Data] = [:], links: [String: Data] = [:]
+  for file in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys)) {
+   let name = file.lastPathComponent
+   let values = try file.resourceValues(forKeys: keys)
+   if values.isSymbolicLink == true {
+    links[name] = Data(try fm.destinationOfSymbolicLink(atPath: file.path).utf8)
+    let resolved = file.standardizedFileURL.resolvingSymlinksInPath()
+    var state = stat()
+    if resolved.path.hasPrefix(root.path + "/"), lstat(resolved.path, &state) == 0,
+       state.st_mode & S_IFMT == S_IFREG { result[name] = try Data(contentsOf: resolved) }
+    else { result[name] = Data() }
+   } else if values.isDirectory == true { result[name] = try encoder.encode(children(file)) }
+   else { result[name] = try Data(contentsOf: file) }
+  }
+  if !links.isEmpty {
+   let metadata = try encoder.encode(links)
+   if let store = result[".exports"] {
+    result[".exports"] = try encoder.encode(["generation": store, "rootLinks": metadata])
+   } else { result[".fixture-links"] = metadata }
+  }
+  return result
+ }
+ #endif
 
  /// Claim a new body-bearing output without following or replacing a leaf.
  static func privatizeNewDescriptor(_ descriptor: Int32, mode: mode_t) throws {

@@ -86,7 +86,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         // active request before claiming new ASR work, without delaying capture.
         try requestPause()
         let journal = try DurableTranscriptionJournal(sessionDirectory: directory, sessionID: sessionID)
-        if restoring { try Self.recoverUnsealedCaptures(journal) }
+        if restoring {
+            try Self.recoverUnsealedCaptures(journal)
+            try Self.recoverRecordingTails(journal)
+        }
         if restoring, let snapshot = try SessionStore(directory: directory).load() {
             try Self.reconcileAcceptedCandidates(journal, snapshot: snapshot)
         }
@@ -179,6 +182,13 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     func setCapturing(_ value: Bool) throws {
         try lock.withLock { try context?.journal.setCapturing(value) }
         publishState()
+    }
+    func recoverRecordingTail() throws {
+        try lock.withLock {
+            guard let context, context.persistent else { return }
+            try Self.recoverRecordingTails(context.journal)
+        }
+        publishState(); wake()
     }
     func addGap(_ gap: CaptureGap) throws {
         try lock.withLock {
@@ -297,7 +307,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             record.candidateLanguage = candidateLanguage
             record.candidateOrigin = "sameRangeRevision"
             try context.journal.put(record)
-            _ = try Self.materializeAudio(record, journal: context.journal)
+            if record.audioRetired == true {
+                _ = try Self.materializeAudio(record, journal: context.journal)
+            }
             emitCandidate(record)
         }
         publishState()
@@ -373,18 +385,34 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             }
             // A marker whose writer never opened has no samples to recover.
             guard FileManager.default.fileExists(atPath: original.path) else {
-                try journal.clearCaptureMarker(id: pending.id); continue
+                if pending.recordingFile == nil { try journal.clearCaptureMarker(id: pending.id) }
+                continue
             }
-            let layout = try WAVContextClip.readLayout(at: original)
-            guard layout.frameCount > 0 else { try journal.clearCaptureMarker(id: pending.id); continue }
-            guard layout.sampleRate == pending.sampleRate else { throw DurableTranscriptionJournal.JournalError.invalidRange }
+            let layout: WAVContextClip.Layout
+            do {
+                layout = try WAVContextClip.readLayout(at: original)
+                guard layout.frameCount > 0, layout.sampleRate == pending.sampleRate else {
+                    throw WAVContextClip.ClipError.recordingEmpty
+                }
+                guard Double(layout.frameCount) / layout.sampleRate <= WAVContextClip.maximumClipSeconds,
+                      layout.dataByteCount <= WAVContextClip.maximumClipBytes else {
+                    throw DurableTranscriptionJournal.JournalError.corrupt("未封口分块超出预期长度，原音频已保留")
+                }
+            } catch {
+                // Keep this file and marker, but do not let one damaged capture
+                // prevent independently valid chunks and committed text replaying.
+                if !journal.gaps.contains(where: { $0.id == pending.id }) {
+                    try journal.addGap(CaptureGap(id: pending.id, sessionID: pending.sessionID,
+                        lastWrittenFrame: pending.startFrame, sampleRate: pending.sampleRate,
+                        observedStart: 0, observedEnd: 0, rejectedFrames: nil,
+                        reason: "未封口音频无法恢复，原文件和标记已保留：" + error.localizedDescription))
+                }
+                continue
+            }
             let duration = Double(layout.frameCount) / layout.sampleRate
-            guard duration <= WAVContextClip.maximumClipSeconds,
-                  layout.dataByteCount <= WAVContextClip.maximumClipBytes else {
-                throw DurableTranscriptionJournal.JournalError.corrupt("未封口分块超出预期长度，原音频已保留")
-            }
-            let temporary = try WAVContextClip.extract(from: original, start: 0, end: duration, padding: 0)
-            defer { try? FileManager.default.removeItem(at: temporary) }
+            let temporary = try WAVContextClip.extract(from: original, start: 0, end: duration, padding: 0,
+                destinationDirectory: journal.directory, frameRange: 0..<layout.frameCount)
+            defer { preserveTemporary(temporary, in: journal.directory) }
             let recoveredName = "recovered-" + pending.id.uuidString + ".wav"
             let recovered = journal.directory.appendingPathComponent(recoveredName)
             if FileManager.default.fileExists(atPath: recovered.path) {
@@ -402,6 +430,72 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             try journal.put(record)
             try journal.clearCaptureMarker(id: pending.id)
         }
+    }
+
+    private static func recoverRecordingTails(_ journal: DurableTranscriptionJournal) throws {
+        let captures = try journal.unfinishedCaptures()
+        let references = journal.records.map {
+            CaptureChunkDescriptor(id: $0.id, sessionID: $0.sessionID, ordinal: $0.ordinal,
+                audioFile: $0.audioFile, recordingFile: $0.recordingFile, startFrame: $0.startFrame,
+                sampleRate: $0.sampleRate, modelKey: $0.modelKey, fallbackModelKey: $0.fallbackModelKey)
+        } + captures
+        var visited: Set<String> = []
+        for reference in references {
+            guard let file = reference.recordingFile, visited.insert(file).inserted else { continue }
+            let parent = journal.directory.deletingLastPathComponent()
+            let recording = parent.appendingPathComponent(file)
+            guard file == recording.lastPathComponent,
+                  recording.resolvingSymlinksInPath().deletingLastPathComponent() == parent.resolvingSymlinksInPath() else {
+                throw DurableTranscriptionJournal.JournalError.unsafePath
+            }
+            guard FileManager.default.fileExists(atPath: recording.path) else { continue }
+            let layout: WAVContextClip.Layout
+            do { layout = try WAVContextClip.readLayout(at: recording) }
+            catch WAVContextClip.ClipError.recordingEmpty {
+                // A cancelled startup can leave an empty, still-open WAV.
+                // Its marker remains available if actual audio later appears.
+                guard !journal.records.contains(where: { $0.recordingFile == file }) else { throw WAVContextClip.ClipError.recordingEmpty }
+                continue
+            }
+            guard layout.sampleRate == reference.sampleRate,
+                  references.filter({ $0.recordingFile == file }).allSatisfy({ $0.sampleRate == layout.sampleRate }) else {
+                throw DurableTranscriptionJournal.JournalError.invalidRange
+            }
+            var first = journal.records.filter { $0.recordingFile == file }.map(\.endFrame).max() ?? 0
+            let limit = min(Int64(WAVContextClip.maximumClipSeconds * layout.sampleRate),
+                            Int64(WAVContextClip.maximumClipBytes / layout.blockAlign))
+            guard limit > 0 else { throw DurableTranscriptionJournal.JournalError.invalidRange }
+            while first < Int64(layout.frameCount) {
+                let end = min(Int64(layout.frameCount), first + limit)
+                let id = UUID(), name = "recovered-tail-" + id.uuidString + ".wav"
+                let ordinal = (journal.records.map(\.ordinal).max() ?? -1) + 1
+                let descriptor = CaptureChunkDescriptor(id: id, sessionID: journal.sessionID,
+                    ordinal: ordinal, audioFile: name, recordingFile: file, startFrame: first,
+                    sampleRate: layout.sampleRate, modelKey: reference.modelKey, fallbackModelKey: reference.fallbackModelKey)
+                try DurableTranscriptionJournal.stageCapture(descriptor, directory: journal.directory)
+                let temporary = try WAVContextClip.extract(from: recording, start: Double(first) / layout.sampleRate,
+                    end: Double(end) / layout.sampleRate, padding: 0, destinationDirectory: journal.directory,
+                    frameRange: Int(first)..<Int(end))
+                defer { preserveTemporary(temporary, in: journal.directory) }
+                guard Int64(try WAVContextClip.readLayout(at: temporary).frameCount) == end - first else {
+                    throw DurableTranscriptionJournal.JournalError.invalidRange
+                }
+                try FileManager.default.moveItem(at: temporary, to: journal.directory.appendingPathComponent(name))
+                try journal.put(TranscriptionWorkRecord(id: id, sessionID: journal.sessionID,
+                    ordinal: ordinal, audioFile: name, startFrame: first, endFrame: end, sampleRate: layout.sampleRate,
+                    start: Double(first) / layout.sampleRate, end: Double(end) / layout.sampleRate,
+                    captureStart: nil, captureEnd: nil, modelKey: reference.modelKey,
+                    fallbackModelKey: reference.fallbackModelKey, appleEvidence: "", recordingFile: file))
+                try journal.clearCaptureMarker(id: id)
+                first = end
+            }
+        }
+    }
+
+    private static func preserveTemporary(_ url: URL, in directory: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try? FileManager.default.moveItem(at: url,
+            to: directory.appendingPathComponent("superseded-" + UUID().uuidString + ".wav"))
     }
 
     private func retireCompletedAudio(_ journal: DurableTranscriptionJournal) throws {
@@ -437,18 +531,51 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
 
     private static func materializeAudio(_ record: TranscriptionWorkRecord, journal: DurableTranscriptionJournal) throws -> URL {
         let url = try journal.audioURL(for: record)
-        guard !FileManager.default.fileExists(atPath: url.path), record.audioRetired == true else { return url }
+        if record.audioRetired != true {
+            let part = try WAVContextClip.readLayout(at: url)
+            guard part.sampleRate == record.sampleRate, Int64(part.frameCount) == record.endFrame - record.startFrame else {
+                throw DurableTranscriptionJournal.JournalError.invalidRange
+            }
+            return url
+        }
         guard let original = try journal.recordingURL(for: record) else { throw WAVContextClip.ClipError.fileMissing }
         let layout = try WAVContextClip.readLayout(at: original)
         guard layout.sampleRate == record.sampleRate, layout.frameCount >= record.endFrame else {
             throw WAVContextClip.ClipError.rangeNotWrittenYet
         }
-        let temporary = try WAVContextClip.extract(from: original, start: record.start, end: record.end, padding: 0)
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        try FileManager.default.copyItem(at: temporary, to: url)
+        let temporary = try WAVContextClip.extract(from: original, start: record.start, end: record.end, padding: 0,
+            destinationDirectory: journal.directory, frameRange: Int(record.startFrame)..<Int(record.endFrame))
+        defer { preserveTemporary(temporary, in: journal.directory) }
+        guard Int64(try WAVContextClip.readLayout(at: temporary).frameCount) == record.endFrame - record.startFrame else {
+            throw DurableTranscriptionJournal.JournalError.invalidRange
+        }
+        if FileManager.default.fileExists(atPath: url.path) {
+            if (try? samePCM(url, temporary)) != true {
+                try FileManager.default.moveItem(at: url,
+                    to: journal.directory.appendingPathComponent("invalid-audio-" + UUID().uuidString + ".wav"))
+                try FileManager.default.moveItem(at: temporary, to: url)
+            }
+        } else { try FileManager.default.moveItem(at: temporary, to: url) }
         var updated = record; updated.audioRetired = false
         try journal.put(updated)
         return url
+    }
+    private static func samePCM(_ left: URL, _ right: URL) throws -> Bool {
+        let a = try WAVContextClip.readLayout(at: left), b = try WAVContextClip.readLayout(at: right)
+        guard a.sampleRate == b.sampleRate, a.channelCount == b.channelCount,
+              a.formatTag == b.formatTag, a.bitsPerSample == b.bitsPerSample,
+              a.blockAlign == b.blockAlign, a.dataByteCount == b.dataByteCount, a.frameCount > 0 else { return false }
+        let lhs = try FileHandle(forReadingFrom: left), rhs = try FileHandle(forReadingFrom: right)
+        defer { try? lhs.close(); try? rhs.close() }
+        try lhs.seek(toOffset: UInt64(a.dataOffset)); try rhs.seek(toOffset: UInt64(b.dataOffset))
+        var remaining = a.dataByteCount
+        while remaining > 0 {
+            let count = min(remaining, 1 << 20)
+            guard let first = try lhs.read(upToCount: count), let second = try rhs.read(upToCount: count),
+                  first.count == count, first == second else { return false }
+            remaining -= count
+        }
+        return true
     }
     private func wake() {
         lock.withLock {

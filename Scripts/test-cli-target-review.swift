@@ -2,7 +2,7 @@ import AVFoundation
 import Darwin
 import Foundation
 
-/// Additional offline regressions; the existing CLI tests remain unchanged.
+/// Additional offline regressions using versioned and genuine legacy exports.
 @main @MainActor
 struct CLITargetReviewTests {
     struct Failure: Error { let check: String }
@@ -17,7 +17,7 @@ struct CLITargetReviewTests {
 
     static func fixture(_ root: URL, name: String, target: OutputLanguage = .simplifiedChinese,
                         body: String = "Air is clear.", snapshot: Bool = false,
-                        recordedTarget: String? = nil) throws -> (URL, TranscriptSegment) {
+                        recordedTarget: String? = nil, legacyEnglishFiles: Bool = false) throws -> (URL, TranscriptSegment) {
         let directory = root.appendingPathComponent(name)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
@@ -33,14 +33,32 @@ struct CLITargetReviewTests {
         if snapshot {
             try SessionStore(directory: directory).save(SessionSnapshot(segments: [segment], targetLocale: recordedTarget))
         }
-        try SessionExporter.export(segments: [segment], sessionDirectory: directory,
-            createdAt: Date(timeIntervalSince1970: 0), target: target)
+        if legacyEnglishFiles {
+            try expect(target == .english, "legacy_fixture_uses_english_target")
+            let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            let manifest = SessionExporter.Manifest(createdAt: Date(timeIntervalSince1970: 0),
+                sourceLocale: "en-US", targetLocale: "en", recordingFile: "recording.wav", segmentCount: 1)
+            let renderer = OutputLanguage.SavedRenderer.fixtureEnglishTwoLine
+            var jsonl = try encoder.encode(segment); jsonl.append(0x0A)
+            let members: [String: Data] = [
+                "manifest.json": try encoder.encode(manifest), "bilingual.jsonl": jsonl,
+                "transcript-en.txt": Data((SessionExporter.sourceLine(segment) + "\n").utf8),
+                "transcript-target-en.txt": Data((renderer.targetLine(segment) + "\n").utf8),
+                "bilingual.srt": Data((renderer.srtCue(segment, index: 0) + "\n").utf8)
+            ]
+            for (name, data) in members {
+                try data.write(to: directory.appendingPathComponent(name), options: .withoutOverwriting)
+            }
+        } else {
+            try SessionExporter.export(segments: [segment], sessionDirectory: directory,
+                createdAt: Date(timeIntervalSince1970: 0), target: target)
+        }
         return (directory, segment)
     }
 
     static func files(_ directory: URL) throws -> [String: Data] {
-        try Dictionary(uniqueKeysWithValues: FileManager.default.contentsOfDirectory(at: directory,
-            includingPropertiesForKeys: nil).map { ($0.lastPathComponent, try Data(contentsOf: $0)) })
+        try LiveLingoCLI.fixtureFiles(in: directory)
     }
 
     static func retentionChecks() throws {
@@ -135,13 +153,14 @@ struct CLITargetReviewTests {
             passed.append("snapshot_errors_map_to_inconsistent_export")
 
             for (index, body) in ["Air is clear.", "Clear air."].enumerated() {
-                let (directory, _) = try fixture(root, name: "fixture-english-\(index)", target: .english, body: body)
+                let (directory, _) = try fixture(root, name: "fixture-english-\(index)", target: .english,
+                    body: body, legacyEnglishFiles: true)
                 let srt = Data("1\n00:00:00,000 --> 00:00:01,000\nAir is clear.\n\(body)\n".utf8)
                 try srt
                     .write(to: directory.appendingPathComponent("bilingual.srt"))
                 try expect(try LiveLingoCLI.verifySaved(directory, emit: false) == 1, "explicit_fixture_two_line_layout")
                 let (recorded, _) = try fixture(root, name: "recorded-english-\(index)", target: .english,
-                    body: body, snapshot: true, recordedTarget: "en")
+                    body: body, snapshot: true, recordedTarget: "en", legacyEnglishFiles: true)
                 try srt.write(to: recorded.appendingPathComponent("bilingual.srt"))
                 try rejectsExport(recorded)
             }

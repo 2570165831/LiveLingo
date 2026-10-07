@@ -245,10 +245,29 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     private var index: [UUID: Int] = [:]
     private let sessionRoot: SensitiveFileIO.Directory
     private let workRoot: SensitiveFileIO.Directory
+    private var logURL: URL { directory.appendingPathComponent("work.jsonl") }
+    private var snapshotURL: URL { directory.appendingPathComponent("snapshot.json") }
+    private let writeLog: @Sendable (FileHandle, Data) throws -> Void
+    private struct FileIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+    }
+    private struct LogStamp: Equatable {
+        let identity: FileIdentity
+        let bytes: off_t
+        let seconds: Int
+        let nanoseconds: Int
+    }
+    private var logStamp: LogStamp?
+    private var directoryLockDepth = 0
+    private var directoryLockFD: Int32 = -1
+    private var appendFailure: String?
     private(set) var recoveredTruncatedTail = false
 
-    init(sessionDirectory: URL, sessionID: UUID) throws {
+    init(sessionDirectory: URL, sessionID: UUID,
+         writeLog: @escaping @Sendable (FileHandle, Data) throws -> Void = { try $0.write(contentsOf: $1) }) throws {
         self.sessionID = sessionID
+        self.writeLog = writeLog
         directory = sessionDirectory.appendingPathComponent(Self.directoryName, isDirectory: true)
         state = State(sessionID: sessionID)
         let root = try Self.privateIO {
@@ -256,15 +275,32 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
         }
         sessionRoot = root
         workRoot = try Self.privateIO { try root.subdirectory(named: Self.directoryName) }
+        try withDirectoryLock {
+        var damagedSnapshot = false
         if let data = try Self.privateIO({ try workRoot.readIfPresent(named: "snapshot.json") }) {
             do {
                 state = try JSONDecoder().decode(Envelope.self, from: data).decode(State.self)
-            } catch { throw JournalError.corrupt("快照：\(error.localizedDescription)") }
+            } catch {
+                // A snapshot is only a cache. Keep it until the complete log
+                // has independently passed checksum, sequence and identity checks.
+                state = State(sessionID: sessionID)
+                damagedSnapshot = true
+            }
             guard state.version == 1 else { throw JournalError.corrupt("不支持的快照版本") }
             guard state.sessionID == sessionID else { throw JournalError.sessionMismatch }
         }
-        try rebuildIndex()
+        do {
+            try rebuildIndex()
+            for record in state.records { try validateRecord(record) }
+        } catch JournalError.sessionMismatch {
+            throw JournalError.sessionMismatch
+        } catch {
+            state = State(sessionID: sessionID); index = [:]
+            damagedSnapshot = true
+        }
         if let data = try Self.privateIO({ try workRoot.readIfPresent(named: "work.jsonl") }) {
+            logStamp = try Self.stamp(at: logURL)
+            try verifyLog()
             let completeEnd = data.lastIndex(of: 0x0a).map { $0 + 1 } ?? 0
             var previousSequence = 0
             // Validate every complete row, including rows covered by snapshot.
@@ -280,6 +316,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
                 if change.sequence > state.sequence { try validate(change); apply(change) }
             }
             guard previousSequence >= state.sequence else { throw JournalError.corrupt("日志短于快照") }
+            guard !damagedSnapshot || previousSequence > 0 else { throw JournalError.corrupt("快照损坏且没有完整日志") }
             if completeEnd < data.count {
                 // Preserve the incomplete bytes before repairing only the tail.
                 let savedTail = "truncated-tail-\(UUID().uuidString).bin"
@@ -287,10 +324,15 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
                     try workRoot.atomicWrite(Data(data.suffix(from: completeEnd)), named: savedTail, requireAbsent: true)
                     try workRoot.truncate(named: "work.jsonl", to: UInt64(completeEnd))
                 }
+                logStamp = try Self.stamp(at: logURL)
                 recoveredTruncatedTail = true
             }
-        } else if state.sequence > 0 { throw JournalError.corrupt("缺少工作日志") }
+        } else if state.sequence > 0 || damagedSnapshot { throw JournalError.corrupt("缺少工作日志") }
         for record in state.records { try validateRecord(record) }
+        if damagedSnapshot {
+            try FileManager.default.moveItem(at: snapshotURL,
+                to: directory.appendingPathComponent("corrupt-snapshot-" + UUID().uuidString + ".json"))
+        }
         // Recording always requires a deliberate new start after reopening.
         if state.capturing { try setCapturing(false) }
         for var record in state.records where record.status == .active {
@@ -303,6 +345,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             try put(record)
         }
         if state.sequence == 0 { try setPaused(false) }
+        }
     }
 
     private static func privateIO<T>(_ action: () throws -> T) throws -> T {
@@ -314,6 +357,44 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
         }
     }
 
+    private static func stamp(at url: URL) throws -> LogStamp {
+        var value = stat()
+        guard lstat(url.path, &value) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard value.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else { throw JournalError.unsafePath }
+        return LogStamp(identity: FileIdentity(device: value.st_dev, inode: value.st_ino),
+            bytes: value.st_size, seconds: value.st_mtimespec.tv_sec, nanoseconds: value.st_mtimespec.tv_nsec)
+    }
+    private func withDirectoryLock<T>(_ body: () throws -> T) throws -> T {
+        try Self.privateIO { try workRoot.assertStillAtOriginalPath() }
+        if directoryLockDepth > 0 { return try body() }
+        let fd = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { _ = Darwin.close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { _ = flock(fd, LOCK_UN) }
+        var value = stat()
+        guard fstat(fd, &value) == 0,
+              SensitiveFileIO.Identity(value) == (try Self.privateIO { try workRoot.identity }) else {
+            throw JournalError.corrupt("工作目录身份已改变")
+        }
+        try Self.privateIO { try workRoot.assertStillAtOriginalPath() }
+        directoryLockDepth += 1
+        directoryLockFD = fd
+        defer { directoryLockDepth -= 1; directoryLockFD = -1 }
+        return try body()
+    }
+    private func verifyLog() throws {
+        if let appendFailure { throw JournalError.corrupt("上次日志写入未完成，请重新打开恢复：" + appendFailure) }
+        if let logStamp {
+            guard try Self.stamp(at: logURL) == logStamp else {
+                throw JournalError.corrupt("工作日志已被其他写入器修改或替换，请重新打开")
+            }
+        } else {
+            guard state.sequence == 0, !FileManager.default.fileExists(atPath: logURL.path) else {
+                throw JournalError.corrupt("工作日志身份已改变")
+            }
+        }
+    }
     private func rebuildIndex() throws {
         for (offset, record) in state.records.enumerated() {
             guard index.updateValue(offset, forKey: record.id) == nil else { throw JournalError.duplicateIdentity }
@@ -362,24 +443,55 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     }
     private func append(record: TranscriptionWorkRecord? = nil, gap: CaptureGap? = nil,
                         paused: Bool? = nil, capturing: Bool? = nil) throws {
+        try withDirectoryLock {
+        try verifyLog()
         let change = Mutation(version: 1, sessionID: sessionID, sequence: state.sequence + 1,
                               record: record, gap: gap, paused: paused, capturing: capturing)
         try validate(change)
         var data = try JSONEncoder().encode(Envelope(change)); data.append(0x0a)
-        try Self.privateIO {
-            if try workRoot.requireRegularFileIfPresent(named: "work.jsonl") {
-                try workRoot.append(data, named: "work.jsonl")
-            } else {
-                try workRoot.atomicWrite(data, named: "work.jsonl", requireAbsent: true)
+        do {
+            let creating = logStamp == nil
+            let fd = try Self.privateIO {
+                if creating { return try workRoot.createPrivateFile(named: "work.jsonl") }
+                return try workRoot.openRegularFile(named: "work.jsonl", flags: O_WRONLY | O_APPEND, create: false)
             }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            defer { try? handle.close() }
+            var value = stat()
+            guard fstat(fd, &value) == 0, value.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+                  creating || FileIdentity(device: value.st_dev, inode: value.st_ino) == logStamp?.identity else {
+                throw JournalError.corrupt("工作日志身份已改变")
+            }
+            let previousBytes = logStamp?.bytes ?? 0
+            guard fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_APPEND) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            try writeLog(handle, data)
+            try handle.synchronize()
+            if creating, fsync(directoryLockFD) != 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            let written = try Self.stamp(at: logURL)
+            guard written.identity == FileIdentity(device: value.st_dev, inode: value.st_ino),
+                  written.bytes == previousBytes + off_t(data.count) else {
+                throw JournalError.corrupt("工作日志追加未完整写入")
+            }
+            logStamp = written
+        } catch {
+            // Never append finalizer mutations behind an unknown partial row.
+            // Reopening preserves the failed tail before replaying the prefix.
+            appendFailure = error.localizedDescription
+            throw error
         }
         apply(change)
         if state.sequence % 128 == 0 { try checkpoint() }
+        }
     }
     func checkpoint() throws {
         try lock.withLock {
+            try withDirectoryLock {
+            try verifyLog()
             let data = try JSONEncoder().encode(Envelope(state))
             try Self.privateIO { try workRoot.atomicWrite(data, named: "snapshot.json") }
+            }
         }
     }
     static func stageCapture(_ descriptor: CaptureChunkDescriptor, directory: URL) throws {

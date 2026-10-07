@@ -141,6 +141,20 @@ actor ASRRuntime {
     // Bounded history handles callers that still hold a recently retired URL.
     private var exitedEndpoints: [Endpoint] = []
 
+    #if DEBUG
+    struct TestConfiguration: Sendable {
+        let interpreter: URL
+        let script: URL
+        let models: URL
+        var onChildLaunched: (@Sendable (Process) -> Void)?
+        var onCrashCleanup: (@Sendable () async -> Void)?
+    }
+    private let testConfiguration: TestConfiguration?
+    init(testConfiguration: TestConfiguration? = nil) {
+        self.testConfiguration = testConfiguration
+    }
+    #endif
+
     // MARK: - Public entry points
 
     /// Returns the endpoint of a running service, starting — or restarting
@@ -149,28 +163,41 @@ actor ASRRuntime {
     /// Concurrent callers share a single launch, and cancelling one caller
     /// never cancels that shared launch or the service itself.
     func endpoint() async throws -> Endpoint {
-        if let stopTask { await stopTask.value }
-        try Task.checkCancellation()
-        if let service, retiringServiceID == service.id, service.isAlive {
-            throw QwenRuntimeError.requestFailed("上一个转写进程尚未退出，任务已保留。")
-        }
-        if let service, let endpoint = service.endpoint, service.isAlive {
-            return endpoint
-        }
-        if let service {
-            // The child died between requests. Drop it and start a fresh one.
-            Self.logger.error(
-                "ASR service event=exited pid=\(service.processIdentifier)"
-            )
-            rememberExit(of: service)
-            self.service = nil
-            service.closePipes()
-            retiringServiceID = nil
-            if let endpoint = service.endpoint {
-                await ASRRequestCoordinator.shared.confirmServiceExited(endpoint)
+        while true {
+            if let stopTask {
+                await stopTask.value
+                try Task.checkCancellation()
+                continue
             }
+            try Task.checkCancellation()
+            if let service, retiringServiceID == service.id, service.isAlive {
+                throw QwenRuntimeError.requestFailed("上一个转写进程尚未退出，任务已保留。")
+            }
+            if let service, let endpoint = service.endpoint, service.isAlive {
+                return endpoint
+            }
+            if let service {
+                // Recheck admission after exit confirmation: another caller
+                // may have finished a replacement while this actor yielded.
+                Self.logger.error(
+                    "ASR service event=exited pid=\(service.processIdentifier)"
+                )
+                rememberExit(of: service)
+                self.service = nil
+                service.closePipes()
+                retiringServiceID = nil
+                if let endpoint = service.endpoint {
+                    #if DEBUG
+                    if let onCrashCleanup = testConfiguration?.onCrashCleanup { await onCrashCleanup() }
+                    #endif
+                    await ASRRequestCoordinator.shared.confirmServiceExited(endpoint)
+                }
+                continue
+            }
+            _ = try await start()
+            // Launch also yields. A stop or replacement must be admitted again
+            // before its endpoint can be returned to this caller.
         }
-        return try await start()
     }
 
     /// Best-effort start used by the app lifecycle; failures stay in the log
@@ -284,6 +311,11 @@ actor ASRRuntime {
     // MARK: - Launch
 
     private func start() async throws -> Endpoint {
+        try Task.checkCancellation()
+        if let service, retiringServiceID == service.id, service.isAlive {
+            throw QwenRuntimeError.requestFailed("上一个转写进程尚未退出，任务已保留。")
+        }
+        if let service, let endpoint = service.endpoint, service.isAlive { return endpoint }
         if let startTask {
             let endpoint = try await startTask.value
             // The caller may have been cancelled while waiting; the shared
@@ -308,7 +340,15 @@ actor ASRRuntime {
     }
 
     private func launch() async throws -> (service: Service, endpoint: Endpoint) {
-        let paths = try Self.resolvePaths()
+        let paths: Paths
+        #if DEBUG
+        if let testConfiguration {
+            paths = Paths(interpreter: testConfiguration.interpreter, service: testConfiguration.script,
+                          models: testConfiguration.models)
+        } else { paths = try Self.resolvePaths() }
+        #else
+        paths = try Self.resolvePaths()
+        #endif
         let token = Self.makeToken()
         let process = Process()
         let standardInput = Pipe()
@@ -327,8 +367,18 @@ actor ASRRuntime {
             "--port", "0",
             "--models-dir", paths.models.path,
         ]
+        #if DEBUG
+        if testConfiguration != nil {
+            process.environment = Self.serviceEnvironment(token: token, models: paths.models,
+                temporaryDirectory: temporaryDirectory.url, inherited: [:])
+        } else {
+            process.environment = Self.serviceEnvironment(token: token, models: paths.models,
+                temporaryDirectory: temporaryDirectory.url)
+        }
+        #else
         process.environment = Self.serviceEnvironment(token: token, models: paths.models,
-                                                      temporaryDirectory: temporaryDirectory.url)
+            temporaryDirectory: temporaryDirectory.url)
+        #endif
         process.standardInput = standardInput
         process.standardOutput = standardOutput
         process.standardError = standardError
@@ -345,6 +395,9 @@ actor ASRRuntime {
             _ = temporaryDirectory.removeAfterExit(!process.isRunning)
             throw QwenRuntimeError.requestFailed("内置 ASR 服务无法启动。")
         }
+        #if DEBUG
+        testConfiguration?.onChildLaunched?(process)
+        #endif
 
         Self.startReading(standardOutput.fileHandleForReading, into: log, fromStandardError: false)
         Self.startReading(standardError.fileHandleForReading, into: log, fromStandardError: true)
@@ -361,7 +414,7 @@ actor ASRRuntime {
 
         do {
             let announcement = try await Self.awaitAnnouncement(service)
-            let endpoint = try Self.endpoint(from: announcement, service: service)
+            let endpoint = try Self.endpoint(from: announcement, service: service, expectedModels: paths.models)
             service.setEndpoint(endpoint)
             Self.logger.notice(
                 "ASR service ready pid=\(service.processIdentifier) port=\(announcement.port) supervised=\(announcement.supervised)"
@@ -399,7 +452,8 @@ actor ASRRuntime {
 
     private static func endpoint(
         from announcement: ASRServiceAnnouncement,
-        service: Service
+        service: Service,
+        expectedModels: URL
     ) throws -> Endpoint {
         guard announcement.protocolVersion == protocolVersion else {
             throw failure(.protocolMismatch, service: service)
@@ -410,7 +464,6 @@ actor ASRRuntime {
         guard announcement.auth && announcement.supervised else {
             throw failure(.authorizationMissing, service: service)
         }
-        let expectedModels = try resolvePaths().models
         guard modelDirectoryMatches(announcement.modelsRoot, expected: expectedModels) else {
             throw failure(.modelDirectoryMismatch, service: service)
         }
@@ -561,8 +614,14 @@ actor ASRRuntime {
     // MARK: - Diagnostics
 
     private static func failure(_ reason: StartupFailure, service: Service) -> QwenRuntimeError {
-        startupFailure(reason, diagnostics: service.log.diagnostics(),
-                       processIdentifier: service.processIdentifier, running: service.isAlive)
+        let error = startupFailure(reason, diagnostics: service.log.diagnostics(),
+                                   processIdentifier: service.processIdentifier, running: service.isAlive)
+        if case .exitedBeforeReady = reason, let exit = service.exitDescription {
+            // Only Foundation's observed numeric exit status may supplement
+            // the fixed reason. Captured child output never reaches the UI.
+            return .requestFailed(reason.message + "\n退出状态：" + exit)
+        }
+        return error
     }
 
     static func startupFailure(_ reason: StartupFailure, diagnostics: (output: String, error: String),
@@ -602,7 +661,6 @@ actor ASRRuntime {
 
         private let lock = NSLock()
         private var storedEndpoint: Endpoint?
-        private var exitSummary: String?
 
         init(
             process: Process,
@@ -639,21 +697,12 @@ actor ASRRuntime {
         }
 
         var exitDescription: String? {
-            lock.lock()
-            defer { lock.unlock() }
-            return exitSummary
-        }
-
-        func recordExit(status: Int32, reason: Process.TerminationReason) {
-            let description: String
-            switch reason {
-            case .exit: description = "exit code \(status)"
-            case .uncaughtSignal: description = "signal \(status)"
-            @unknown default: description = "status \(status)"
+            guard !process.isRunning else { return nil }
+            switch process.terminationReason {
+            case .exit: return "exit code \(process.terminationStatus)"
+            case .uncaughtSignal: return "signal \(process.terminationStatus)"
+            @unknown default: return "status \(process.terminationStatus)"
             }
-            lock.lock()
-            exitSummary = description
-            lock.unlock()
         }
 
         /// Closing the parent's end of the pipe is what asks the supervised

@@ -3,7 +3,7 @@ import CryptoKit
 import Darwin
 
 struct SessionTreeEntry: Codable, Equatable, Sendable {
-    enum Kind: String, Codable, Sendable { case directory, file }
+    enum Kind: String, Codable, Sendable { case directory, file, symbolicLink }
     let relativePath: String
     let kind: Kind
     let byteCount: UInt64
@@ -186,6 +186,7 @@ enum SessionTreeMigration {
         let rootInfo = try information(requestedRoot)
         guard rootInfo.st_mode & S_IFMT == S_IFDIR else { throw SessionMigrationError.invalidDirectory(requestedRoot) }
         let root = try canonicalDirectory(requestedRoot)
+        let exportGeneration = try SessionExporter.currentExportDirectory(in: root)
         var entries: [SessionTreeEntry] = []
         var stamps: [String: Stamp] = ["": Stamp(rootInfo)]
         var enumerationError: Error?
@@ -227,6 +228,12 @@ enum SessionTreeMigration {
                       count == UInt64(before.st_size) else { throw SessionMigrationError.sourceChanged(url) }
                 entries.append(.init(relativePath: relativePath, kind: .file, byteCount: count,
                                      sha256: hash.finalize().map { String(format: "%02x", $0) }.joined()))
+            } else if type == S_IFLNK,
+                      let target = try SessionExporter.managedExportLink(at: url, in: root, generation: exportGeneration) {
+                guard Stamp(try information(url)) == Stamp(before) else { throw SessionMigrationError.sourceChanged(url) }
+                let bytes = Data(target.utf8)
+                entries.append(.init(relativePath: relativePath, kind: .symbolicLink, byteCount: UInt64(bytes.count),
+                                     sha256: SessionArchiveCoding.digest(bytes)))
             } else { throw SessionMigrationError.unsupportedEntry(url) }
             stamps[relativePath] = Stamp(before)
         }

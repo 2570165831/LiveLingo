@@ -102,6 +102,7 @@ actor MLXRuntime {
     private struct Control {
         let workerID: UUID
         let expected: String
+        var writeFinished = false
         var result: Result<Void, Error>?
         var waiter: CheckedContinuation<Void, Error>?
     }
@@ -168,6 +169,8 @@ actor MLXRuntime {
         var interpreterArguments: [String] = []
         var onCancellationControlResolved: (@Sendable () async -> Void)?
         var onRetryWait: (@Sendable (RetryWaitPhaseForTesting) async -> Void)?
+        var onWorkerLaunched: (@Sendable (Process, FileHandle) -> Void)?
+        var onExitWait: (@Sendable () -> Void)?
     }
     private var testConfiguration: TestConfiguration?
     init(testConfiguration: TestConfiguration? = nil) {
@@ -284,9 +287,16 @@ actor MLXRuntime {
         environment["PYTHONDONTWRITEBYTECODE"] = "1"; environment["TOKENIZERS_PARALLELISM"] = "false"
         process.environment = environment
         process.standardInput = input; process.standardOutput = output; process.standardError = errors
+        guard fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            let errorCode = errno
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errorCode))
+        }
         let worker = Worker(process: process, input: input.fileHandleForWriting)
         try process.run()
         workers[model] = worker
+        #if DEBUG
+        testConfiguration?.onWorkerLaunched?(process, input.fileHandleForWriting)
+        #endif
         let identifier = worker.id
         Task {
             do {
@@ -400,8 +410,10 @@ actor MLXRuntime {
     private func waitForExit(_ worker: Worker, model: String) async {
         let deadline = (ExitDeadline.current ?? ExitDeadline(seconds: controlTimeout + 2)).limited(to: controlTimeout)
         while worker.process.isRunning && !deadline.isExpired {
-            do { try await Task.sleep(for: .milliseconds(50)) }
-            catch { break }
+            #if DEBUG
+            testConfiguration?.onExitWait?()
+            #endif
+            await Self.sleepForRetirement(0.05)
         }
         if worker.process.isRunning {
             // Process is a child owned by this Worker instance. Never enumerate
@@ -410,11 +422,23 @@ actor MLXRuntime {
         }
         let killDeadline = (ExitDeadline.current ?? ExitDeadline(seconds: 2)).limited(to: 2)
         while worker.process.isRunning && !killDeadline.isExpired {
-            do { try await Task.sleep(for: .milliseconds(20)) }
-            catch { break }
+            #if DEBUG
+            testConfiguration?.onExitWait?()
+            #endif
+            await Self.sleepForRetirement(0.02)
         }
         if !worker.process.isRunning, retiringWorkers[model]?.id == worker.id {
             retiringWorkers[model] = nil
+        }
+    }
+
+    private static func sleepForRetirement(_ seconds: TimeInterval) async {
+        // Retirement belongs to this exact worker even if its caller was
+        // cancelled. A cancelled Task.sleep must not turn polling into a spin.
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+                continuation.resume()
+            }
         }
     }
 
@@ -502,17 +526,27 @@ actor MLXRuntime {
         var command: [String: Any] = ["op": operation, "controlID": token]
         if let id { command["id"] = id }
         // Unstructured timeout and checked continuation deliberately outlive
-        // caller cancellation: a pause still owns its worker until confirmed.
+        // caller cancellation. Include writer queueing and pipe backpressure.
         let timeout = Task {
             do { try await Task.sleep(for: .seconds(deadline.remaining)) }
             catch { return }
-            resolveControl(token, with: .failure(QwenRuntimeError.generationInterrupted("模型暂停或退出未及时确认；保留上次有效进度。")))
+            guard let control = controls[token], control.result == nil else { return }
+            let failure = QwenRuntimeError.generationInterrupted("模型暂停或退出未及时确认；保留上次有效进度。")
+            resolveControl(token, with: .failure(failure))
+            if !control.writeFinished,
+               let model = workers.first(where: { $0.value.id == worker.id })?.key {
+                // Signal only the retained child, independently of its blocked
+                // writer. Observed exit then releases the pipe and retirement.
+                ended(model, workerID: worker.id, error: failure)
+            }
         }
         defer { timeout.cancel() }
-        // Queueing and a full stdin pipe consume the very same control budget.
-        try await send(command, to: worker, deadline: deadline, ignoringTaskCancellation: true)
         var failure: Error?
         do {
+            // Send once; queueing, pipe backpressure and acknowledgement all
+            // consume the same deadline, even for a cancelled owner.
+            try await send(command, to: worker, deadline: deadline, ignoringTaskCancellation: true)
+            controls[token]?.writeFinished = true
             try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
                 // send() yields the actor, so a reply or exit may already be stored.
                 guard var control = controls[token] else {
@@ -523,7 +557,10 @@ actor MLXRuntime {
                 control.waiter = waiter
                 controls[token] = control
             }
-        } catch { failure = error }
+        } catch {
+            if case .failure(let recorded)? = controls[token]?.result { failure = recorded }
+            else { failure = error }
+        }
         #if DEBUG
         // Hold the real resolved-entry/pre-retirement window only when a
         // scripted-worker test explicitly supplies a hook. Normal calls add
@@ -620,6 +657,7 @@ actor MLXRuntime {
                         // Domain validation still decides whether to commit notes.
                         try await control("ack", id: id, worker: worker)
                         forget(id, worker: worker)
+                        try Task.checkCancellation()
                         return text
                     }
                 }

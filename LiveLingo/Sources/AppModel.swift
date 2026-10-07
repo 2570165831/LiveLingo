@@ -252,6 +252,19 @@ final class FinalCaptionState: ObservableObject {
 
 @MainActor
 enum ReviewExportSource {
+    static func markdownAsync(for directory: URL?, queue: LearningReviewQueue,
+                              sessionID: UUID? = nil, inputRevision: Int? = nil) async throws -> String? {
+        guard let directory else { return nil }
+        let accessed = directory.startAccessingSecurityScopedResource()
+        defer { if accessed { directory.stopAccessingSecurityScopedResource() } }
+        do {
+            return try await queue.collectedReviewReportMarkdownAsync(for: directory, sessionID: sessionID,
+                                                                       inputRevision: inputRevision)
+        } catch let error as SessionStoreError {
+            throw ReviewIdentityError.unreadable(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))
+        }
+    }
+
     static func markdown(for directory: URL?, queue: LearningReviewQueue,
                          sessionID: UUID? = nil, inputRevision: Int? = nil) throws -> String? {
         guard let directory else { return nil }
@@ -915,6 +928,8 @@ final class AppModel: ObservableObject {
     private var manualTranslationTask: Task<Void, Never>?
     private var manualRequestInFlight = false
     @Published var outputDirectory: URL?
+    @Published private(set) var recoverableRecordings: [SessionWorkspace.RecordingRecovery] = []
+    private var recordingRecoveryDirectory: URL?
     @Published var selectedMode: ModelMode {
         didSet {
             guard selectedMode != oldValue else { return }
@@ -1045,7 +1060,9 @@ final class AppModel: ObservableObject {
     private var sessionSaver: SessionSaveCoordinator?
     private var finalizationOwner: UUID?
     private var finalizationInProgress = false
-    private var preparingApplicationExit = false
+    private var sessionFinalizationTask: Task<Void, Never>?
+    @Published private var preparingApplicationExit = false
+    var isTerminating: Bool { preparingApplicationExit }
     private var applicationExitDeadline: ExitDeadline?
     private let exitStorageProgress = ExitDeadline.StorageProgress()
     private var temporaryCleanupRequested = false
@@ -1116,6 +1133,7 @@ final class AppModel: ObservableObject {
 
     /// 最近一次手动复查的结果提示（nil = 没有新提示）；只用于界面展示，不改笔记正文。
     @Published private(set) var reviewQueueNotice: String?
+    private var reviewReadGeneration = 0
 
     /// 可复查批次：与 `LearningReviewQueue.enqueue(scope:)` 同一编号规则
     /// （只含有要点的批次，从 1 编号），所以第 N 项就对应 `scope.batch(N)`。
@@ -1210,7 +1228,8 @@ final class AppModel: ObservableObject {
          backgroundServices: Bool = true,
          scheduledNotes: Bool? = nil,
          defaults: UserDefaults = AppRuntimeEnvironment.preferences,
-         chineseScriptConverter: ChineseScriptConverter = .shared) {
+         chineseScriptConverter: ChineseScriptConverter = .shared,
+         recoveryDirectory: URL? = nil) {
         precondition(!AppRuntimeEnvironment.isUnitTesting || reviewQueue != nil,
                      "Tests must inject an isolated review queue")
         self.pipeline = pipeline
@@ -1223,6 +1242,11 @@ final class AppModel: ObservableObject {
         self.preferences = defaults
         self.chineseScriptConverter = chineseScriptConverter
         noteReviewQueue = reviewQueue ?? LearningReviewQueue()
+        recordingRecoveryDirectory = recoveryDirectory ?? (backgroundServicesEnabled ? SessionWorkspace.recoverableRecordingRoot : nil)
+        if let root = recordingRecoveryDirectory {
+            do { recoverableRecordings = try SessionWorkspace.recordingRecoveries(in: root) }
+            catch { archiveNotice = "录音恢复索引读取失败，原件已保留：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
+        }
         let savedMode = preferences.string(forKey: Self.modelModeDefaultsKey)
             .flatMap(ModelMode.init(rawValue:)) ?? .automatic
         let savedStorageMode = preferences.string(forKey: Self.storageModeDefaultsKey)
@@ -1243,11 +1267,23 @@ final class AppModel: ObservableObject {
         effectiveProfile = savedMode.resolvedProfile(isOnBattery: onBattery)
         noteReviewQueue.onUpdate = { [weak self] directory, _, status in
             guard let self, case .saved(let current) = self.phase, current == directory else { return }
-            do {
-                self.reviewAdvice = try ReviewExportSource.markdown(for: current, queue: self.noteReviewQueue,
-                    sessionID: self.sessionSnapshot?.sessionID, inputRevision: self.sessionSnapshot?.inputRevision) ?? ""
-                self.reviewQueueNotice = status
-            } catch { self.reviewQueueNotice = error.localizedDescription }
+            self.reviewReadGeneration += 1
+            let read = self.reviewReadGeneration, identity = self.sessionID, epoch = self.generation
+            let revision = self.sessionSnapshot?.inputRevision
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let advice = try await ReviewExportSource.markdownAsync(for: current, queue: self.noteReviewQueue,
+                        sessionID: identity, inputRevision: revision)
+                    guard self.reviewReadGeneration == read, self.sessionID == identity, self.generation == epoch,
+                          self.sessionSnapshot?.inputRevision == revision, self.phase == .saved(current) else { return }
+                    self.reviewAdvice = advice ?? ""
+                    self.reviewQueueNotice = status
+                } catch {
+                    guard self.reviewReadGeneration == read, self.sessionID == identity, self.generation == epoch else { return }
+                    self.reviewQueueNotice = LearningFailureCode.label(for: LearningFailureCode.code(for: error))
+                }
+            }
         }
         pipeline.update(profile: effectiveProfile)
         #if LIVELINGO_PREVIEW
@@ -1268,7 +1304,16 @@ final class AppModel: ObservableObject {
     var isPaused: Bool { phase == .paused }
     var hasActiveSession: Bool { isRecording || isPaused }
     var isLiveOnly: Bool {
-        (activeStorageMode ?? selectedStorageMode) == .liveOnly
+        if savedSessionDirectory != nil { return false }
+        return (activeStorageMode ?? selectedStorageMode) == .liveOnly
+    }
+
+    var currentCourseDirectory: URL? { sessionSaver?.directory ?? sessionDirectory }
+    var courseSaveDirectoryLabel: String { (currentCourseDirectory ?? outputDirectory)?.lastPathComponent ?? "尚未选择" }
+    var savedSessionDirectory: URL? {
+        if case .saved(let directory) = phase { return directory }
+        if case .failed = phase, activeStorageMode != .liveOnly { return currentCourseDirectory }
+        return nil
     }
     var currentInputMode: AudioInputMode {
         activeInputMode ?? selectedInputMode
@@ -1368,15 +1413,57 @@ final class AppModel: ObservableObject {
         guard let directory = await chooseOutputDirectory(),
               sessionID == identity, generation == epoch,
               hasActiveSession, activeStorageMode == .liveOnly else { return }
-        do { try pipeline.updatePersistence(persistsSession: true) }
-        catch {
-            archiveError = "未能保留当前录音：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
-            return
+        await convertCurrentSessionToRecording(in: directory)
+    }
+
+    func convertCurrentSessionToRecording(in directory: URL) async {
+        guard hasActiveSession, activeStorageMode == .liveOnly else { return }
+        let identity = sessionID, epoch = generation
+        do {
+            guard let source = sessionDirectory else { throw AppError.outputDirectoryMissing }
+            try pipeline.updatePersistence(persistsSession: true)
+            activeStorageMode = .saveSession
+            selectedStorageMode = .saveSession
+            outputDirectory = directory
+            if sessionSaver == nil { bindSessionArchive(to: source) }
+            try await flushSessionArchive()
+            guard sessionID == identity, generation == epoch else { return }
+            let recovery = SessionWorkspace.RecordingRecovery(id: identity, directory: source, outputRoot: directory)
+            try storeRecordingRecovery(recovery)
+        } catch {
+            archiveError = "录音继续保留；转换后的保存或恢复索引尚未确认：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
         }
-        activeStorageMode = .saveSession
-        selectedStorageMode = .saveSession
-        outputDirectory = directory
-        if let sessionDirectory { bindSessionArchive(to: sessionDirectory) }
+    }
+
+    private func storeRecordingRecovery(_ recovery: SessionWorkspace.RecordingRecovery) throws {
+        let root = recordingRecoveryDirectory ?? recovery.directory.deletingLastPathComponent()
+        let updated = recoverableRecordings.filter { $0.id != recovery.id } + [recovery]
+        try SessionWorkspace.saveRecordingRecoveries(updated, in: root)
+        recordingRecoveryDirectory = root
+        recoverableRecordings = updated
+        preferences.set(try SessionArchiveCoding.encode(updated), forKey: "LiveLingo.pendingRecordingRecovery")
+    }
+
+    private func retireRecordingRecovery(session: UUID) throws {
+        guard recoverableRecordings.contains(where: { $0.id == session }), let root = recordingRecoveryDirectory else { return }
+        let remaining = recoverableRecordings.filter { $0.id != session }
+        try SessionWorkspace.saveRecordingRecoveries(remaining, in: root)
+        recoverableRecordings = remaining
+        if remaining.isEmpty { preferences.removeObject(forKey: "LiveLingo.pendingRecordingRecovery") }
+        else { preferences.set(try SessionArchiveCoding.encode(remaining), forKey: "LiveLingo.pendingRecordingRecovery") }
+    }
+
+    func recoverRecording(_ recovery: SessionWorkspace.RecordingRecovery) async {
+        guard !phase.isBusy, !archiveLoading else { return }
+        do {
+            guard try await SessionStore(directory: recovery.directory).loadAsync()?.sessionID == recovery.id else {
+                throw SessionStoreError.identityConflict("恢复位置属于另一课程，原件已保留")
+            }
+            try await openSavedSession(recovery.directory, allowAutomaticProcessing: false)
+            outputDirectory = recovery.outputRoot
+            temporarySessionDirectory = recovery.needsPromotion ? recovery.directory : nil
+            archiveNotice = "已恢复未完成录音；处理保持暂停，可重试保存到所选目录。"
+        } catch { archiveError = "录音恢复失败，原件已保留：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
     }
 
     func start() {
@@ -1594,6 +1681,35 @@ final class AppModel: ObservableObject {
     /// Snapshots the current notes and review advice. Export never calls a model
     /// and never touches the recording or the saved session files.
     func notesExportSnapshot() -> NotesExportSnapshot? {
+        do {
+            return makeNotesExportSnapshot(review: exportIncludesReviewAdvice
+                ? try ReviewExportSource.markdown(for: exportDirectory, queue: noteReviewQueue) : nil)
+        } catch {
+            exportStatus = "读取复查报告失败，未导出：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+            return nil
+        }
+    }
+
+    func notesExportSnapshotAsync() async -> NotesExportSnapshot? {
+        let identity = sessionID, epoch = generation, directory = exportDirectory
+        let revision = sessionSnapshot?.inputRevision, includeReview = exportIncludesReviewAdvice
+        do {
+            let report = includeReview ? try await ReviewExportSource.markdownAsync(for: directory,
+                queue: noteReviewQueue, sessionID: identity, inputRevision: revision) : nil
+            guard sessionID == identity, generation == epoch, exportDirectory == directory,
+                  sessionSnapshot?.inputRevision == revision, exportIncludesReviewAdvice == includeReview else {
+                exportStatus = "课程或导出选项已变化，请重新导出。"
+                return nil
+            }
+            return makeNotesExportSnapshot(review: report)
+        } catch {
+            guard sessionID == identity, generation == epoch else { return nil }
+            exportStatus = "读取复查报告失败，未导出：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+            return nil
+        }
+    }
+
+    private func makeNotesExportSnapshot(review report: String?) -> NotesExportSnapshot? {
         let notes = exportScope == .wholeLesson ? lectureSummary : latestSummaryUpdate
         let trimmed = notes.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -1604,14 +1720,6 @@ final class AppModel: ObservableObject {
         let transcript = exportIncludesTranscript
             ? (exportScope == .wholeLesson ? segments : segments.filter { latestLearningIDs.contains($0.id) })
             : []
-        let report: String?
-        do {
-            report = exportIncludesReviewAdvice
-                ? try ReviewExportSource.markdown(for: directory, queue: noteReviewQueue) : nil
-        } catch {
-            exportStatus = "读取复查报告失败，未导出：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
-            return nil
-        }
         if exportIncludesReviewAdvice, report == nil {
             exportStatus = "该录音暂无已保存复查意见"
         }
@@ -1638,8 +1746,18 @@ final class AppModel: ObservableObject {
     /// translation queue keep running while the panel is up.
     func beginNotesExport() {
         guard !isExporting else { return }
-        guard let snapshot = notesExportSnapshot() else { return }
         let format = exportFormat
+        isExporting = true
+        Task { [weak self] in
+            guard let self else { return }
+            let snapshot = await self.notesExportSnapshotAsync()
+            self.isExporting = false
+            guard let snapshot, !self.isTerminating else { return }
+            self.presentNotesExport(snapshot, format: format)
+        }
+    }
+
+    private func presentNotesExport(_ snapshot: NotesExportSnapshot, format: NotesExportFormat) {
         let panel = NSSavePanel()
         panel.title = "导出课堂笔记"
         panel.prompt = "导出"
@@ -1727,9 +1845,11 @@ final class AppModel: ObservableObject {
             let importing = importTask, starting = sessionStartTask
             let translation = translationWorker, summary = summaryTask
             let processing = processingTask
+            let finalization = sessionFinalizationTask
             for task in [translation, summary, processing, importing, starting, manual, refresh, readiness, power] {
                 deadline.track(task)
             }
+            deadline.track(finalization)
             readiness?.cancel(); power?.cancel(); refresh?.cancel(); manual?.cancel()
             importing?.cancel(); starting?.cancel(); translation?.cancel(); processing?.cancel()
             cancelSummaryTask()
@@ -1740,6 +1860,7 @@ final class AppModel: ObservableObject {
                 || (temporarySessionDirectory != nil && sessionSaver == nil)
             do {
                 try await waitForLifecycle { [self] in
+                    await finalization?.value
                     while finalizationInProgress {
                         try deadline.check()
                         try await Task.sleep(for: .milliseconds(20))
@@ -1801,7 +1922,7 @@ final class AppModel: ObservableObject {
     }
 
     private func admitLifecycleRetry() -> Bool {
-        guard !preparingApplicationExit, !finalizationInProgress,
+        guard !preparingApplicationExit, !finalizationInProgress, sessionFinalizationTask == nil,
               applicationExitDeadline?.hasPendingOperations != true else {
             archiveError = "上次停止仍有任务未结束，内容与文件已保留，请稍后重试。"
             return false
@@ -1839,17 +1960,32 @@ final class AppModel: ObservableObject {
             #if DEBUG
             if let pause = privacyExitConfiguration?.pauseReview { await pause(); return }
             #endif
-            await noteReviewQueue.pauseAndWait()
+            try await noteReviewQueue.pauseForApplicationTermination()
         }
     }
 
     private func retryPendingTemporarySessions() throws {
+        let usesInjectedRetry: Bool
         #if DEBUG
-        if let retry = privacyExitConfiguration?.retryTemporarySessions { try retry() }
-        else { try SessionWorkspace.retryPendingTemporarySessions() }
+        if let retry = privacyExitConfiguration?.retryTemporarySessions {
+            try retry()
+            usesInjectedRetry = true
+        } else {
+            try SessionWorkspace.retryPendingTemporarySessions()
+            usesInjectedRetry = false
+        }
         #else
         try SessionWorkspace.retryPendingTemporarySessions()
+        usesInjectedRetry = false
         #endif
+        // The default journal retry covers the system temporary root. A live
+        // recording may now use the stable recovery root; retry only this
+        // owned, already-requested cleanup before releasing its locator.
+        if temporaryCleanupRequested, !usesInjectedRetry, let root = temporarySessionDirectory,
+           SessionDirectoryLocation.canonical(root.deletingLastPathComponent())
+                != SessionDirectoryLocation.canonical(try SessionWorkspace.temporaryRoot()) {
+            try discardTemporarySession(root)
+        }
         // A successful retry has disposed every requested registration, including
         // our failed root. Do not attempt a second discard after its record left.
         if temporaryCleanupRequested {
@@ -1924,7 +2060,7 @@ final class AppModel: ObservableObject {
     }
 
     func revealSavedSession() {
-        guard case .saved(let url) = phase else { return }
+        guard let url = savedSessionDirectory else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
@@ -2010,6 +2146,7 @@ final class AppModel: ObservableObject {
         learningNotebook.writeState(to: &snapshot)
         snapshot.latestEvidenceIDs = latestLearningIDs
         snapshot.generation = generation
+        let priorCheckpoints = snapshot.generationCheckpoints
         snapshot.generationCheckpoints = learningDraft.map {
             [$0.checkpoint(sessionID: sessionID, inputRevision: snapshot.inputRevision, generation: generation)]
         } ?? []
@@ -2035,7 +2172,8 @@ final class AppModel: ObservableObject {
             }
         }
         sessionSnapshot = snapshot
-        saver.submit(snapshot)
+        let retiring = priorCheckpoints.filter { prior in !snapshot.generationCheckpoints.contains(where: { $0.id == prior.id }) }
+        saver.submit(snapshot, retiringCheckpoints: retiring)
     }
 
     private func flushSessionArchive() async throws {
@@ -2062,6 +2200,10 @@ final class AppModel: ObservableObject {
             sessionSnapshot?.lastJournalDigest = saved.lastJournalDigest
             sessionSnapshot?.updatedAt = saved.updatedAt
         }
+    }
+
+    func prepareForApplicationTermination() async -> Bool {
+        await prepareForApplicationExit()
     }
 
     /// Suspend processing of the displayed saved course before switching UI.
@@ -2137,7 +2279,7 @@ final class AppModel: ObservableObject {
     }
 
     func chooseSavedSession() {
-        guard !phase.isBusy, !archiveLoading else { return }
+        guard !isTerminating, !phase.isBusy, !archiveLoading else { return }
         let panel = NSOpenPanel()
         panel.title = "打开已保存课程"
         panel.prompt = "打开课程"
@@ -2257,8 +2399,15 @@ final class AppModel: ObservableObject {
                 archiveError = "课程正文已打开；补转队列恢复失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
         }
-        do { reviewAdvice = try ReviewExportSource.markdown(for: directory, queue: noteReviewQueue) ?? "" }
-        catch { archiveError = "课程已打开；复查报告读取失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
+        do {
+            let advice = try await ReviewExportSource.markdownAsync(for: directory, queue: noteReviewQueue,
+                sessionID: identity, inputRevision: sessionSnapshot?.inputRevision)
+            guard sessionID == identity, generation == epoch else { return }
+            reviewAdvice = advice ?? ""
+        } catch {
+            guard sessionID == identity, generation == epoch else { return }
+            archiveError = "课程已打开；复查报告读取失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+        }
         if allowAutomaticProcessing, !priorPaused, !legacyProvenanceUnavailable, archiveError == nil {
             resumeSavedProcessing()
         } else {
@@ -2333,7 +2482,7 @@ final class AppModel: ObservableObject {
     /// 开始任意一次"课堂会话"前的状态重置：实时录音与文件导入共用。
     @discardableResult
     private func resetSessionStateForNewRun() -> Bool {
-        guard !preparingApplicationExit, !finalizationInProgress,
+        guard !preparingApplicationExit, !finalizationInProgress, sessionFinalizationTask == nil,
               applicationExitDeadline?.hasPendingOperations != true else {
             archiveError = "前一次停止仍有任务未结束，内容与文件已保留，新课堂未开始。"
             return false
@@ -2464,7 +2613,7 @@ final class AppModel: ObservableObject {
             let sessionName = Self.sessionFolderName()
             let recordingURL: URL
             if storageMode.usesTemporaryRecording {
-                let temporaryDirectory = try SessionWorkspace.makeTemporarySessionDirectory()
+                let temporaryDirectory = try SessionWorkspace.makeRecoverableTemporarySessionDirectory()
                 temporarySessionDirectory = temporaryDirectory
                 sessionDirectory = temporaryDirectory
                 recordingURL = temporaryDirectory.appendingPathComponent(
@@ -2551,13 +2700,19 @@ final class AppModel: ObservableObject {
     }
 
     private func stopSession(failure: String? = nil) async {
+        if let task = sessionFinalizationTask { await task.value; return }
         if !preparingApplicationExit, applicationExitDeadline?.isExpired == true {
             guard applicationExitDeadline?.hasPendingOperations != true else { return }
             applicationExitDeadline = nil
         }
         // Ordinary stop/save has no application-exit budget. During an actual
         // quit, storage progress renews the inherited inactivity lease.
-        await finishSessionStop(failure: failure)
+        let task = Task { [self] in
+            defer { sessionFinalizationTask = nil }
+            await finishSessionStop(failure: failure)
+        }
+        sessionFinalizationTask = task
+        await task.value
     }
 
     private func finishSessionStop(failure: String?) async {
@@ -2646,6 +2801,8 @@ final class AppModel: ObservableObject {
             activeStorageMode = nil
             activeInputMode = nil
             phase = .saved(directory)
+            do { try retireRecordingRecovery(session: identity) }
+            catch { archiveNotice = "课程已保存；恢复索引尚未清理：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
             if let failure {
                 sessionNotice = Self.recordingStoppedNotice(message: failure, segmentCount: segments.count)
             }
@@ -2725,7 +2882,17 @@ final class AppModel: ObservableObject {
         // Receipt after the source producer and all translation/repair writers close.
         noteInputProducerDrained = true
         cancelScheduledSummaryRefresh()
-        await generateLectureSummary(force: true)
+        summaryTaskGeneration += 1
+        let noteOwner = summaryTaskGeneration
+        let noteTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.generateLectureSummary(force: true)
+        }
+        summaryTask = noteTask
+        await withTaskCancellationHandler {
+            await noteTask.value
+        } onCancel: { noteTask.cancel() }
+        if summaryTaskGeneration == noteOwner { summaryTask = nil }
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
         do {
             try await flushSessionArchive()
@@ -2944,12 +3111,14 @@ final class AppModel: ObservableObject {
     }
 
     func retrySavedSessionWrite() {
-        guard case .saved(let directory) = phase, !archiveLoading else { return }
+        guard savedSessionDirectory != nil, !archiveLoading else { return }
         let identity = sessionID, epoch = generation
         archiveLoading = true
         Task {
             defer { archiveLoading = false }
             do {
+                let directory = try await finalizeSessionDirectoryIfNeeded()
+                if sessionSaver == nil { bindSessionArchive(to: directory) }
                 try await flushSessionArchive()
                 guard sessionID == identity, generation == epoch else { return }
                 if let saved = sessionSaver?.lastSavedSnapshot {
@@ -2971,7 +3140,10 @@ final class AppModel: ObservableObject {
                 let pending = Set(pipeline.transcriptionWork().filter { $0.candidateText != nil }.map(\.id))
                 transcriptionCandidates.removeAll { !pending.contains($0.id) }
                 archiveError = sessionSnapshot?.processing.lastError
+                phase = .saved(directory)
                 archiveNotice = "课程进度已保存；处理保持原暂停状态。"
+                do { try retireRecordingRecovery(session: identity) }
+                catch { archiveNotice = "课程已保存；恢复索引尚未清理：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
             } catch {
                 guard sessionID == identity, generation == epoch else { return }
                 archiveError = "课程进度仍未保存，原文件与待保存内容保留：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
@@ -3200,6 +3372,21 @@ final class AppModel: ObservableObject {
     func cancelTypedTranslation() { manualTranslationTask?.cancel() }
 
     #if DEBUG
+    func beginLiveCourseForTesting(directory: URL, outputRoot: URL) async throws {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        resetSessionStateForNewRun()
+        sessionDirectory = directory
+        temporarySessionDirectory = directory
+        outputDirectory = outputRoot
+        activeStorageMode = .liveOnly
+        selectedStorageMode = .liveOnly
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        _ = try await pipeline.startSyntheticCapture(format: format,
+            recordingURL: directory.appendingPathComponent(SessionWorkspace.recordingFileName),
+            sessionID: sessionID, persistsSession: false, eventHandler: { _ in })
+        phase = .recording
+    }
+
     func setTypedTranslationRequestForTesting(_ request: @escaping QwenTranslationClient.TypedRequest) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         typedTranslationRequest = request
@@ -4691,6 +4878,12 @@ final class AppModel: ObservableObject {
                     }
                     try validateLifecycleCompletion(revision)
                     guard let snapshot else { throw SessionStoreError.missingSnapshot }
+                    if var recovery = recoverableRecordings.first(where: { $0.id == identity }) {
+                        recovery.directory = copied.destinationDirectory
+                        recovery.needsPromotion = false
+                        try storeRecordingRecovery(recovery)
+                        try validateLifecycleCompletion(revision)
+                    }
                     try noteReviewQueue.relocatePausedCourse(sessionID: identity,
                         from: temporarySessionDirectory, to: copied.destinationDirectory)
                     let retired: SessionMigrationReceipt
@@ -5505,7 +5698,7 @@ extension AppModel {
                         try await Task.sleep(for: .milliseconds(250))
                     }
                     if let failure = noteReviewQueue.currentFailure { throw QwenRuntimeError.requestFailed(failure) }
-                    guard let reportText = try ReviewExportSource.markdown(for: directory, queue: noteReviewQueue),
+                    guard let reportText = try await ReviewExportSource.markdownAsync(for: directory, queue: noteReviewQueue),
                           !reportText.isEmpty else {
                         throw QwenRuntimeError.requestFailed("CLI review ended without a readable report")
                     }
@@ -5520,7 +5713,7 @@ extension AppModel {
                 exportScope = .wholeLesson
                 exportIncludesTranscript = true
                 exportIncludesReviewAdvice = true
-                guard let snapshot = notesExportSnapshot() else {
+                guard let snapshot = await notesExportSnapshotAsync() else {
                     throw QwenRuntimeError.requestFailed(exportStatus ?? "笔记快照无法导出")
                 }
                 for format in NotesExportFormat.allCases {
@@ -5694,7 +5887,7 @@ extension AppModel {
                             try await Task.sleep(for: .milliseconds(250))
                         }
                         if let failure = noteReviewQueue.currentFailure { throw QwenRuntimeError.requestFailed(failure) }
-                        guard let reportText = try ReviewExportSource.markdown(for: directory, queue: noteReviewQueue),
+                        guard let reportText = try await ReviewExportSource.markdownAsync(for: directory, queue: noteReviewQueue),
                               !reportText.isEmpty else {
                             throw QwenRuntimeError.requestFailed("CLI review ended without a readable report")
                         }
@@ -5707,7 +5900,7 @@ extension AppModel {
                     exportScope = .wholeLesson
                     exportIncludesTranscript = true
                     exportIncludesReviewAdvice = true
-                    guard let snapshot = notesExportSnapshot() else {
+                    guard let snapshot = await notesExportSnapshotAsync() else {
                         throw QwenRuntimeError.requestFailed(exportStatus ?? "笔记快照无法导出")
                     }
                     for format in NotesExportFormat.allCases {

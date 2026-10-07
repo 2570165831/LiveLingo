@@ -18,9 +18,10 @@ actor SessionArchiveWriter {
     }
 
     @discardableResult
-    func commit(_ value: SessionSnapshot) throws -> SessionSnapshot {
-        let desired = try SessionArchiveCoding.decode(SessionSnapshot.self,
+    func commit(_ value: SessionSnapshot, retiringCheckpoints: [SessionGenerationCheckpoint] = []) throws -> SessionSnapshot {
+        var desired = try SessionArchiveCoding.decode(SessionSnapshot.self,
             from: SessionArchiveCoding.encode(value))
+        let retainedByCaller = Set(desired.generationCheckpoints.map(\.id))
         try desired.validate()
         // An append/rename can reach disk before its final sync reports an
         // error. Re-read on each explicit attempt so an acknowledged prefix is
@@ -40,6 +41,12 @@ actor SessionArchiveWriter {
         guard previous.sessionID == desired.sessionID else {
             throw SessionStoreError.identityConflict("存档写入属于另一课程")
         }
+        for checkpoint in previous.generationCheckpoints where !desired.generationCheckpoints.contains(where: { $0.id == checkpoint.id }) {
+            var retained = retiringCheckpoints.first(where: { $0.id == checkpoint.id }) ?? checkpoint
+            if !desired.canResume(retained) { retained.invalidated = true }
+            desired.generationCheckpoints.append(retained)
+        }
+        try desired.validate()
         // Legacy imports do not have a journal until their first explicit save.
         if previous.storageRevision == 0 {
             let saved = try store.save(desired)
@@ -79,6 +86,11 @@ actor SessionArchiveWriter {
                 try append(.generationCheckpoint(checkpoint))
             }
         }
+        for requested in retiringCheckpoints where !retainedByCaller.contains(requested.id) {
+            guard let checkpoint = committed?.generationCheckpoints.first(where: { $0.id == requested.id }) else { continue }
+            try append(.retireGenerationCheckpoint(checkpoint))
+            desired.generationCheckpoints.removeAll { $0.id == requested.id }
+        }
         if committed?.processing != desired.processing { try append(.processing(desired.processing)) }
         guard let current = committed else { throw SessionStoreError.missingSnapshot }
         var next = desired
@@ -108,6 +120,7 @@ final class SessionSaveCoordinator {
     private let writer: SessionArchiveWriter
     private let interval: Duration
     private var pending: SessionSnapshot?
+    private var retirementRequests: [UUID: SessionGenerationCheckpoint] = [:]
     private var pump: Task<Void, Never>?
     private var urgent = false
     private(set) var lastError: Error?
@@ -130,12 +143,13 @@ final class SessionSaveCoordinator {
             }), restored: restored)
     }
 
-    func submit(_ snapshot: SessionSnapshot) {
+    func submit(_ snapshot: SessionSnapshot, retiringCheckpoints: [SessionGenerationCheckpoint] = []) {
         guard snapshot.sessionID == sessionID else {
             let error = SessionStoreError.identityConflict("过期任务尝试保存另一课程")
             lastError = error; onFailure?(error)
             return
         }
+        for checkpoint in retiringCheckpoints { retirementRequests[checkpoint.id] = checkpoint }
         pending = snapshot
         // A failed writer retains the latest pending state. Subsequent state
         // changes or explicit flush may retry; an unchanged error never spins.
@@ -149,9 +163,11 @@ final class SessionSaveCoordinator {
             while pending != nil {
                 if !urgent { try? await Task.sleep(for: interval) }
                 guard let snapshot = pending else { return }
+                let retirements = retirementRequests.values.sorted { $0.id.uuidString < $1.id.uuidString }
                 pending = nil
                 do {
-                    let saved = try await writer.commit(snapshot)
+                    let saved = try await writer.commit(snapshot, retiringCheckpoints: retirements)
+                    for value in retirements where retirementRequests[value.id] == value { retirementRequests[value.id] = nil }
                     lastSavedSnapshot = saved
                     onSaved?(saved)
                 }

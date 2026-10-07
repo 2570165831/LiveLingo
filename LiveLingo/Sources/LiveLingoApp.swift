@@ -1,6 +1,32 @@
 import AppKit
 import OSLog
 import SwiftUI
+#if DEBUG
+import ObjectiveC
+
+/// Darwin Foundation can choose its own per-user temporary directory despite
+/// TMPDIR. The isolated test host redirects the getter before any fixtures run.
+private enum UnitTestTemporaryDirectory {
+    static let directory: URL? = {
+        guard let path = ProcessInfo.processInfo.environment["LIVELINGO_TEST_TMPDIR"],
+              path.hasPrefix("/"), path.hasSuffix("/dd-safety/tmp") else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+    }()
+    private static let install: Void = {
+        guard AppRuntimeEnvironment.isUnitTesting, directory != nil,
+              let original = class_getInstanceMethod(FileManager.self, NSSelectorFromString("temporaryDirectory")),
+              let replacement = class_getInstanceMethod(FileManager.self, #selector(getter: FileManager.isolatedTestTemporaryDirectory)) else { return }
+        method_exchangeImplementations(original, replacement)
+    }()
+    static func configure() { _ = install }
+}
+
+private extension FileManager {
+    @objc dynamic var isolatedTestTemporaryDirectory: URL {
+        UnitTestTemporaryDirectory.directory!
+    }
+}
+#endif
 
 /// Close owned file choosers and SwiftUI sheets before asking AppKit to quit.
 /// Otherwise AppKit can reject termination before the delegate sees it.
@@ -126,6 +152,15 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     var replyForTesting: (@MainActor @Sendable (Bool) -> Void)?
     var terminationTimeoutForTesting: TimeInterval?
     var confirmExitWithoutSavingForTesting: (@MainActor @Sendable () -> Bool)?
+    // Both regression suites inject the same bounded termination path.
+    var prepareToTerminate: (@MainActor @Sendable () async -> Bool)? {
+        get { cleanupForTesting }
+        set { cleanupForTesting = newValue }
+    }
+    var terminationReply: (@MainActor @Sendable (Bool) -> Void)? {
+        get { replyForTesting }
+        set { replyForTesting = newValue }
+    }
     #endif
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -222,6 +257,9 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
 private final class AppModelHolder: ObservableObject {
     let model: AppModel?
     init() {
+        #if DEBUG
+        UnitTestTemporaryDirectory.configure()
+        #endif
         model = AppRuntimeEnvironment.isUnitTesting ? nil : AppModel()
         if let model { FullScreenClassModeController.shared.connect(model: model) }
         AppLifecycleDelegate.model = model

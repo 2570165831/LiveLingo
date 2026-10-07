@@ -32,11 +32,7 @@ import Darwin
         return directory
     }
     static func fileBytes(_ directory: URL) throws -> [String: Data] {
-        var result: [String: Data] = [:]
-        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
-            result[file.lastPathComponent] = try Data(contentsOf: file)
-        }
-        return result
+        try LiveLingoCLI.fixtureFiles(in: directory)
     }
 
     @MainActor static func testProductionReleaseCLIOpenSavedPreservesTraditionalTarget(

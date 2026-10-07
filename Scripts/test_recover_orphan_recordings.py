@@ -282,15 +282,18 @@ class RecoverOrphanRecordingsTests(unittest.TestCase):
         target = self.directory / "replaced-target.wav"
         displaced = self.directory / "owned-output.wav"
         foreign_content = b"another writer's output"
-        original_header = recover.header_bytes
+        original_sync = recover.os.fsync
 
-        def replace_target_and_change_source(*args):
-            target.rename(displaced)
-            target.write_bytes(foreign_content)
-            source.write_bytes(source.read_bytes() + b"\x00\x00")
-            return original_header(*args)
+        def replace_target_and_change_source(fd):
+            # The final name now first exists at publication. Inject the same
+            # foreign replacement before its directory commit is acknowledged.
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                target.rename(displaced)
+                target.write_bytes(foreign_content)
+                source.write_bytes(source.read_bytes() + b"\x00\x00")
+            return original_sync(fd)
 
-        with patch.object(recover, "header_bytes", side_effect=replace_target_and_change_source):
+        with patch.object(recover.os, "fsync", side_effect=replace_target_and_change_source):
             with self.assertRaises(recover.SourceChanged):
                 recover.export_recording(source, layout, target)
         self.assertEqual(target.read_bytes(), foreign_content)
@@ -319,14 +322,15 @@ class RecoverOrphanRecordingsTests(unittest.TestCase):
         target = self.directory / "replaced-target-only.wav"
         displaced = self.directory / "owned-output.wav"
         foreign_content = b"another writer's output"
-        original_header = recover.header_bytes
+        original_sync = recover.os.fsync
 
-        def replace_target(*args):
-            target.rename(displaced)
-            target.write_bytes(foreign_content)
-            return original_header(*args)
+        def replace_target(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                target.rename(displaced)
+                target.write_bytes(foreign_content)
+            return original_sync(fd)
 
-        with patch.object(recover, "header_bytes", side_effect=replace_target):
+        with patch.object(recover.os, "fsync", side_effect=replace_target):
             with self.assertRaisesRegex(OSError, "输出路径"):
                 recover.export_recording(source, layout, target)
         self.assertEqual(target.read_bytes(), foreign_content)
