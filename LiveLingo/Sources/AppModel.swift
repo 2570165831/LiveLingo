@@ -540,6 +540,7 @@ final class AppModel: ObservableObject {
     private func captureNewCourseOutputLanguage(_ explicit: OutputLanguage? = nil) {
         outputLanguage = explicit ?? preferences.string(forKey: "LiveLingo.outputLanguage")
             .flatMap(releasedOutputLanguage) ?? .simplifiedChinese
+        learningNotebook = LearningNotebook(target: captionTarget)
     }
 
     var previewTranslationSource: String {
@@ -668,19 +669,22 @@ final class AppModel: ObservableObject {
     }
     @Published private(set) var lectureSummary = ""
     @Published private(set) var latestSummaryUpdate = ""
-    var latestSummaryScope: String {
+    var latestSummaryScope: String { latestSummaryScope(targetCode: "zh-Hans") }
+    private func latestSummaryScope(targetCode: String) -> String {
         let evidence = segments.filter { latestLearningIDs.contains($0.id) }
         guard let start = evidence.map(\.startTime).min(), let end = evidence.map(\.endTime).max() else {
-            return "尚无已完成批次"
+            return ClassroomFixedText.noCompletedBatch.text(targetCode: targetCode)
         }
         func stamp(_ value: TimeInterval) -> String {
             let seconds = max(0, Int(value))
             return String(format: "%02d:%02d", seconds / 60, seconds % 60)
         }
-        return "最近完成：\(stamp(start))–\(stamp(end))"
+        return ClassroomFixedText.latestCompletedRange.format(args: [stamp(start), stamp(end)], targetCode: targetCode)
     }
-    var summaryCoverageStatus: String {
-        "已整理 \(lastSummarizedSegmentCount) / \(completedTranslationCount) 段已翻译内容"
+    var summaryCoverageStatus: String { summaryCoverageStatus(targetCode: "zh-Hans") }
+    private func summaryCoverageStatus(targetCode: String) -> String {
+        ClassroomFixedText.captionCoverage.format(args: [String(lastSummarizedSegmentCount), String(completedTranslationCount)],
+            targetCode: targetCode)
     }
     @Published private(set) var reviewAdvice = ""
     private var summaryCycleIDs: Set<UUID>?
@@ -958,7 +962,7 @@ final class AppModel: ObservableObject {
         reviewAdvice = ""
         // 新会话不显示上一场留下的手动复查提示。
         reviewQueueNotice = nil
-        learningNotebook = LearningNotebook()
+        learningNotebook = LearningNotebook(target: captionTarget)
         reviewConcurrency.reset()
         learningDraft = nil
         latestLearningIDs = []
@@ -1338,11 +1342,12 @@ final class AppModel: ObservableObject {
             exportStatus = "该录音暂无已保存复查意见"
         }
         return NotesExportSnapshot(
-            className: "实时课堂",
+            className: ClassroomFixedText.liveClass.text(targetCode: outputLanguage.rawValue),
             sessionName: directory?.lastPathComponent,
             scope: exportScope,
-            scopeDetail: exportScope == .wholeLesson ? summaryCoverageStatus : latestSummaryScope,
-            coverageLine: summaryCoverageStatus,
+            scopeDetail: exportScope == .wholeLesson ? summaryCoverageStatus(targetCode: outputLanguage.rawValue)
+                : latestSummaryScope(targetCode: outputLanguage.rawValue),
+            coverageLine: summaryCoverageStatus(targetCode: outputLanguage.rawValue),
             notesMarkdown: trimmed,
             reviewMarkdown: report,
             transcript: transcript,
@@ -1742,7 +1747,7 @@ final class AppModel: ObservableObject {
         snapshot.legacyMarkdown = snapshot.legacyMarkdown ?? lectureSummary
         snapshot.segments = segments
         snapshot.processing.paused = true
-        learningNotebook = LearningNotebook()
+        learningNotebook = LearningNotebook(target: captionTarget)
         latestLearningIDs = []
         summarizedSegmentIDs = []
         lastSummarizedSegmentCount = 0
@@ -3415,8 +3420,9 @@ final class AppModel: ObservableObject {
                 let ids = Set(draft.evidence.map(\.id))
                 guard ids.isDisjoint(with: summarizedSegmentIDs),
                       draft.matches(evidence: segments.filter { ids.contains($0.id) }, model: modelName,
-                                    systemPrompt: captionTarget.learningNotePrompt),
-                      sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName) }) ?? true else { return nil }
+                                    systemPrompt: LearningPrompts.generationPrompt(target: captionTarget,
+                                        recoveringAfterOutputLimit: captionTarget == .english && summaryRecoveryCharacters != nil)),
+                      sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName, systemPrompt: draft.systemPrompt) }) ?? true else { return nil }
                 return draft
             }
             if let draft = reusableDraft, !Set(draft.dependencyIDs).isSubset(of: admission.eligible) {
@@ -3455,7 +3461,8 @@ final class AppModel: ObservableObject {
                         input: try LearningPrompts.input(evidence: inputSnapshot, topics: learningNotebook.topics,
                             pending: pending, target: captionTarget),
                         target: captionTarget,
-                        systemPrompt: captionTarget.learningNotePrompt,
+                        systemPrompt: LearningPrompts.generationPrompt(target: captionTarget,
+                                        recoveringAfterOutputLimit: captionTarget == .english && summaryRecoveryCharacters != nil),
                         pendingTargets: pending.map(\.id), contextRevision: learningNotebook.revision,
                         dependencyIDs: dependencies
                     )
@@ -3483,7 +3490,7 @@ final class AppModel: ObservableObject {
                               self.summaryTaskGeneration == summaryOwner,
                               self.learningDraft?.id == draft.id,
                               inputSnapshot == self.segments.filter({ batchIDs.contains($0.id) }),
-                              self.sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName) }) ?? true else { return }
+                              self.sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName, systemPrompt: draft.systemPrompt) }) ?? true else { return }
                         self.learningDraft?.text = text
                     })
                     guard !Task.isCancelled, !processingPaused, currentGeneration == generation,
@@ -3499,12 +3506,12 @@ final class AppModel: ObservableObject {
                       sessionID == summarySession, summaryTaskGeneration == summaryOwner else { return }
                 guard learningDraft?.id == draft.id else { return }
                 guard inputSnapshot == segments.filter({ batchIDs.contains($0.id) }),
-                      sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName) }) ?? true else {
+                      sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName, systemPrompt: draft.systemPrompt) }) ?? true else {
                     learningDraft = nil
                     summaryCycleIDs = nil
                     return
                 }
-                note = LearningPrompts.resolvingFollowUps(note, targets: draft.pendingTargets)
+                note = LearningPrompts.resolvingFollowUps(note, targets: draft.pendingTargets, target: draft.target)
                 note.topic = captionTarget.normalize(note.topic)
                 note.sourceVersion = 2
                 for index in note.points.indices {

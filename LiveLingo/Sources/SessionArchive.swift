@@ -322,8 +322,12 @@ struct SessionGenerationCheckpoint: Codable, Equatable, Sendable {
     /// Use this overload after reopening or revising a different source segment.
     func matches(snapshot: SessionSnapshot, modelName: String, protocolVersion: Int,
                  input: String, prompt: String) -> Bool {
-        SessionSnapshot.normalizedTargetLocale(targetLocale) == SessionSnapshot.normalizedTargetLocale(snapshot.targetLocale)
-            && snapshot.canResume(self) && matches(sessionID: snapshot.sessionID, inputRevision: self.inputRevision,
+        // Traditional profiles share the historical Simplified Chinese generator.
+        // Bind to its generation locale while keeping English checkpoints separate.
+        guard let saved = try? OutputLanguage.storedLanguage(targetLocale),
+              let current = try? OutputLanguage.storedLanguage(snapshot.targetLocale),
+              saved.profile.generationLocale == current.profile.generationLocale else { return false }
+        return snapshot.canResume(self) && matches(sessionID: snapshot.sessionID, inputRevision: self.inputRevision,
                                             modelName: modelName, protocolVersion: protocolVersion,
                                             input: input, prompt: prompt)
     }

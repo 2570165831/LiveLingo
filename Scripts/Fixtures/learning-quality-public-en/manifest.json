@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "id": "cs50-c-basics",
+      "file": "cs50-c-basics.json",
+      "sha256": "85ada57fb306b1d56c696837a9838b45ca70fcf1a885d2aafcb071bc24caca44"
+    },
+    {
+      "id": "cs50-algorithms",
+      "file": "cs50-algorithms.json",
+      "sha256": "5eafa1e19664d9289354ce706c0d6bce49947ad12e9e4d38ab3521edbae1c678"
+    },
+    {
+      "id": "cs50-memory",
+      "file": "cs50-memory.json",
+      "sha256": "ca5849221783803f2b9e8d99f15283f788a08c94bf750b5f193fbb714f2bcbe5"
+    },
+    {
+      "file": "gold.json",
+      "sha256": "bbf65365070c4acf1b1b61a3a334158cd68bd684edbfe9fa8b2b1aec56ca12a0"
+    }
+  ]
+}

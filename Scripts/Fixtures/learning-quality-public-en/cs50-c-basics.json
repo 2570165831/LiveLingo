@@ -1,0 +1,25 @@
+{
+  "id": "cs50-c-basics",
+  "stages": [
+    [
+      {
+        "english": "In C, a single equals sign assigns a value to a variable. A double equals sign compares values for equality, so distinguish an equality test from an accidental assignment in a condition.",
+        "chinese": "In C, a single equals sign assigns a value to a variable. A double equals sign compares values for equality, so distinguish an equality test from an accidental assignment in a condition."
+      },
+      {
+        "english": "When both operands have integer type, division discards the fractional part by truncating toward zero. Convert an operand to a floating-point type before division if you want a floating-point result; converting only the result cannot bring back the discarded fraction.",
+        "chinese": "When both operands have integer type, division discards the fractional part by truncating toward zero. Convert an operand to a floating-point type before division if you want a floating-point result; converting only the result cannot bring back the discarded fraction."
+      }
+    ],
+    [
+      {
+        "english": "A C string is a sequence of characters ending with the null character, written '\\0'. The terminator marks the end, and strlen reports the byte length before it without counting that terminator.",
+        "chinese": "A C string is a sequence of characters ending with the null character, written '\\0'. The terminator marks the end, and strlen reports the byte length before it without counting that terminator."
+      },
+      {
+        "english": "A return statement hands a result back to the caller of a function. Printing a result displays it for the user; printing it is a different operation from returning that result to the caller.",
+        "chinese": "A return statement hands a result back to the caller of a function. Printing a result displays it for the user; printing it is a different operation from returning that result to the caller."
+      }
+    ]
+  ]
+}

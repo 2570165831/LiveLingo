@@ -278,7 +278,10 @@ struct TargetAcceptanceCLI {
                 "caption-base-4b": QwenTranslationClient.englishSourceFaithfulCaptionPrompt,
                 "wrapper-4b": QwenTranslationClient.englishWrapper4B,
                 "wrapper-9b": QwenTranslationClient.englishWrapper9B,
-                "recovery": QwenTranslationClient.englishRecoverySuffix]
+                "recovery": QwenTranslationClient.englishRecoverySuffix,
+                "note-generate": LearningPrompts.generateEnglish,
+                "note-review": LearningPrompts.reviewEnglish,
+                "note-recovery": LearningPrompts.recoveryEnglish]
         }
         for (key, model) in models {
             prompts["caption-\(key)"] = try await captionPrompt(model: model, target: target)

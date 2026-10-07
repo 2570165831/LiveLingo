@@ -1,0 +1,25 @@
+{
+  "id": "cs50-memory",
+  "stages": [
+    [
+      {
+        "english": "A pointer stores an address. For an object x, &x yields its address, and *p accesses the pointed-to object when p points to a live object of the appropriate type.",
+        "chinese": "A pointer stores an address. For an object x, &x yields its address, and *p accesses the pointed-to object when p points to a live object of the appropriate type."
+      },
+      {
+        "english": "Assigning one pointer to another copies the address, not the pointed-to data. Both pointers can then refer to the same live memory, so changing that memory through one pointer can be observed through the other.",
+        "chinese": "Assigning one pointer to another copies the address, not the pointed-to data. Both pointers can then refer to the same live memory, so changing that memory through one pointer can be observed through the other."
+      }
+    ],
+    [
+      {
+        "english": "malloc requests a dynamically allocated block of memory and returns a pointer when the allocation succeeds. If it fails, the result is NULL; check that result before using it as a pointer to allocated storage.",
+        "chinese": "malloc requests a dynamically allocated block of memory and returns a pointer when the allocation succeeds. If it fails, the result is NULL; check that result before using it as a pointer to allocated storage."
+      },
+      {
+        "english": "Free a dynamically allocated block once when it is no longer needed. After free, the storage must not be accessed through the old pointer or any aliases, and that allocation must not be freed a second time.",
+        "chinese": "Free a dynamically allocated block once when it is no longer needed. After free, the storage must not be accessed through the old pointer or any aliases, and that allocation must not be freed a second time."
+      }
+    ]
+  ]
+}

@@ -18,6 +18,8 @@ struct LearningQualityCLI {
         let displayContract: String
         let generationOrigin: String
         let buildManifestSHA256: String?
+        /// Nil is omitted for the frozen default producer encoding.
+        let targetLocale: String?
     }
     struct DisplayPoint: Codable {
         let reference: String
@@ -65,7 +67,117 @@ struct LearningQualityCLI {
         let successfulRequests: Int
         let error: String?
     }
-    enum Failure: Error { case arguments, invalidFixture, exists, noProgress, renderMismatch }
+    enum Failure: Error {
+        case arguments, invalidFixture, exists, noProgress, renderMismatch
+        case unsupportedTarget
+    }
+    struct Options {
+        let input: URL
+        let output: URL
+        let target: CaptionTranslationTarget
+        let dryRun: Bool
+    }
+    static func options(_ arguments: [String],
+                        defaultTarget: CaptionTranslationTarget = .simplifiedChinese) throws -> Options {
+        var values: [String: String] = [:]
+        var dryRun = false
+        var index = 0
+        while index < arguments.count {
+            let flag = arguments[index]
+            if flag == "--dry-run" {
+                guard !dryRun else { throw Failure.arguments }
+                dryRun = true
+                index += 1
+                continue
+            }
+            guard ["--input", "--output", "--target"].contains(flag), values[flag] == nil,
+                  index + 1 < arguments.count, !arguments[index + 1].isEmpty,
+                  !arguments[index + 1].hasPrefix("--") else { throw Failure.arguments }
+            values[flag] = arguments[index + 1]
+            index += 2
+        }
+        guard let input = values["--input"], let output = values["--output"] else { throw Failure.arguments }
+        let code = values["--target"] ?? defaultTarget.rawValue
+        guard ["zh-Hans", "en"].contains(code),
+              let target = CaptionTranslationTarget(rawValue: code) else { throw Failure.unsupportedTarget }
+        return Options(input: URL(fileURLWithPath: input),
+            output: URL(fileURLWithPath: output, isDirectory: true), target: target, dryRun: dryRun)
+    }
+
+    struct DryRunRequest: Encodable {
+        let number: Int
+        let stage: Int
+        let sourceUnits: [LearningSourceUnit]
+        let inputFile: String
+        let inputSHA256: String
+        let reviewInputFile: String
+        let reviewInputSHA256: String
+    }
+    struct DryRunPlan: Encodable {
+        let preparationVersion = 1
+        let generationOrigin = "offline-preparation"
+        let modelInvoked = false
+        let reviewUsesEmptySeedNote = true
+        let targetLocale: String
+        let fixtureID: String
+        let fixtureSHA256: String
+        let generationPromptFile: String
+        let generationPromptSHA256: String
+        let reviewPromptFile: String
+        let reviewPromptSHA256: String
+        let requests: [DryRunRequest]
+    }
+
+    /// Exercise actual production preparation, never the model runtime.
+    /// An empty seed is used for review-input shape, not as a generated note.
+    static func prepare(fixture: Fixture, bytes: Data, output: URL,
+                        target: CaptionTranslationTarget = .simplifiedChinese) throws {
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        try bytes.write(to: output.appendingPathComponent("fixture.json"), options: .atomic)
+        let prompt = Data(target.learningNotePrompt.utf8)
+        let reviewPrompt = Data(target.learningReviewPrompt.utf8)
+        try prompt.write(to: output.appendingPathComponent("generation-prompt.txt"), options: .atomic)
+        try reviewPrompt.write(to: output.appendingPathComponent("review-prompt.txt"), options: .atomic)
+        var evidence: [TranscriptSegment] = []
+        var preparedIDs = Set<UUID>()
+        var requests: [DryRunRequest] = []
+        for (stageIndex, rows) in fixture.stages.enumerated() {
+            for (index, row) in rows.enumerated() {
+                evidence.append(try segment(row, fixtureID: fixture.id, stage: stageIndex,
+                    index: index, ordinal: evidence.count))
+            }
+            let boundary = Set(evidence.map(\.id))
+            while !boundary.isSubset(of: preparedIDs) {
+                let selected = LectureSummaryInput.incremental(from: evidence, coveredIDs: preparedIDs,
+                    previousSummary: "", maximumCharacters: SummaryRefreshPolicy.automaticBatchCharacters,
+                    target: target).segmentIDs
+                guard !selected.isEmpty else { throw Failure.noProgress }
+                let current = evidence.filter { selected.contains($0.id) }
+                let input = try LearningPrompts.input(evidence: current, topics: [], target: target)
+                let seed = LearningNote(topic: "无新增学习知识", points: [], sourceVersion: 2, noNewKnowledge: true)
+                let batch = LearningNoteBatch(id: current[0].id, evidence: current, note: seed)
+                let review = try LearningPrompts.reviewInput(batch, target: target)
+                let number = requests.count + 1
+                let inputFile = "input-\(number).json"
+                let reviewInputFile = "review-input-\(number).json"
+                try Data(input.utf8).write(to: output.appendingPathComponent(inputFile), options: .atomic)
+                try Data(review.json.utf8).write(to: output.appendingPathComponent(reviewInputFile), options: .atomic)
+                requests.append(DryRunRequest(number: number, stage: stageIndex + 1,
+                    sourceUnits: LearningSourceUnit.make(current, target: target),
+                    inputFile: inputFile, inputSHA256: sha(Data(input.utf8)),
+                    reviewInputFile: reviewInputFile, reviewInputSHA256: sha(Data(review.json.utf8))))
+                preparedIDs.formUnion(selected)
+            }
+        }
+        let plan = DryRunPlan(targetLocale: target.rawValue, fixtureID: fixture.id, fixtureSHA256: sha(bytes),
+            generationPromptFile: "generation-prompt.txt", generationPromptSHA256: sha(prompt),
+            reviewPromptFile: "review-prompt.txt", reviewPromptSHA256: sha(reviewPrompt), requests: requests)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(plan).write(to: output.appendingPathComponent("dry-run.json"), options: .atomic)
+        let event: [String: Any] = ["event": "offline_prepared", "target": target.rawValue,
+            "preparedRequests": requests.count, "modelInvoked": false]
+        print(String(decoding: try JSONSerialization.data(withJSONObject: event, options: .sortedKeys), as: UTF8.self))
+    }
 
     static func sha(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -88,7 +200,9 @@ struct LearningQualityCLI {
     /// Resolving a follow-up alias only identifies its target; it does not settle
     /// the factual question. Linked groups retain the renderer's question state.
     static func displayPoints(notebook: LearningNotebook, markdown: String,
-                              latestMarkdown: String) throws -> [DisplayPoint] {
+                              latestMarkdown: String,
+                              target: CaptionTranslationTarget = .simplifiedChinese) throws -> [DisplayPoint] {
+        guard notebook.target == target else { throw Failure.renderMismatch }
         let all = notebook.batches.flatMap { batch in
             batch.note.points.enumerated().map {
                 (reference: LearningNotebook.reference(batch, $0.offset), point: $0.element, batch: batch.id)
@@ -124,7 +238,8 @@ struct LearningQualityCLI {
                     root = parent
                 }
                 let placement = try containsQuestion(root) ? "replay" : "body"
-                guard renderedContains(item.point.markdown, in: placement, markdown: rendered) else {
+                guard renderedContains(item.point.markdown(target: target), in: placement,
+                                   markdown: rendered, target: target) else {
                     throw Failure.renderMismatch
                 }
                 result[item.reference] = placement
@@ -136,18 +251,24 @@ struct LearningQualityCLI {
         return all.map { item in
             DisplayPoint(reference: item.reference, hasOpenQuestion: item.point.hasOpenQuestion,
                 fullDisposition: full[item.reference] ?? "hidden", latestDisposition: latest[item.reference] ?? "hidden",
-                renderedLine: item.point.markdown, resolvedClarifies: item.point.clarifies)
+                renderedLine: item.point.markdown(target: target), resolvedClarifies: item.point.clarifies)
         }
     }
 
-    static func renderedContains(_ pointLine: String, in placement: String, markdown: String) -> Bool {
+    static func renderedContains(_ pointLine: String, in placement: String, markdown: String,
+                                 target: CaptionTranslationTarget = .simplifiedChinese) -> Bool {
+        // Kind/state labels use the selected target. Classroom wrappers
+        // follow ClassroomFixedText's single switch (Chinese by default).
+        let replayHeading = ClassroomFixedText.replayHeading.text(targetCode: target.rawValue)
+        let sourceCheckHeading = ClassroomFixedText.sourceCheckHeading.text(targetCode: target.rawValue)
+        let logisticsHeading = ClassroomFixedText.logisticsHeading.text(targetCode: target.rawValue)
         var current = "body"
         var lines: [String] = []
         for line in markdown.components(separatedBy: "\n") {
             if line.hasPrefix("## ") {
                 let title = String(line.dropFirst(3))
-                current = title == LearningNotebook.replayHeading ? "replay"
-                    : (title == LearningNotebook.sourceCheckHeading || title == "课程安排与待办" ? "advisory" : "body")
+                current = title == replayHeading ? "replay"
+                    : (title == sourceCheckHeading || title == logisticsHeading ? "advisory" : "body")
                 lines.append("")
             } else {
                 lines.append(current == placement ? line.trimmingCharacters(in: .whitespaces) : "")
@@ -159,13 +280,14 @@ struct LearningQualityCLI {
     }
 
     @MainActor static func main() async {
+        let dryRun = CommandLine.arguments.dropFirst().contains("--dry-run")
         do { try await run() }
         catch {
-            await shutdown()
+            if !dryRun { await shutdown() }
             fputs("Quality probe failed; inspect the isolated result and response files.\n", stderr)
             exit(1)
         }
-        await shutdown()
+        if !dryRun { await shutdown() }
     }
 
     @MainActor static func shutdown() async {
@@ -175,13 +297,13 @@ struct LearningQualityCLI {
 
     @MainActor static func run(
         arguments: [String] = Array(CommandLine.arguments.dropFirst()),
-        target: CaptionTranslationTarget = .simplifiedChinese,
+        target defaultTarget: CaptionTranslationTarget = .simplifiedChinese,
         generate: (@MainActor (String, String) async throws -> String)? = nil
     ) async throws {
-        let args = arguments
-        guard args.count == 4, args[0] == "--input", args[2] == "--output" else { throw Failure.arguments }
-        let input = URL(fileURLWithPath: args[1])
-        let output = URL(fileURLWithPath: args[3], isDirectory: true)
+        let parsed = try options(arguments, defaultTarget: defaultTarget)
+        let input = parsed.input
+        let output = parsed.output
+        let target = parsed.target
         guard !FileManager.default.fileExists(atPath: output.path) else { throw Failure.exists }
         let bytes = try Data(contentsOf: input)
         let fixture = try JSONDecoder().decode(Fixture.self, from: bytes)
@@ -190,6 +312,10 @@ struct LearningQualityCLI {
                   !$0.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     && !$0.chinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
               } }) else { throw Failure.invalidFixture }
+        if parsed.dryRun {
+            try prepare(fixture: fixture, bytes: bytes, output: output, target: target)
+            return
+        }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let sample = try segment(fixture.stages[0][0], fixtureID: fixture.id, stage: 0, index: 0, ordinal: 0)
         let sourceObject = try JSONSerialization.jsonObject(with: encoder.encode(sample)) as? [String: Any]
@@ -211,14 +337,15 @@ struct LearningQualityCLI {
             batchCharacters: SummaryRefreshPolicy.automaticBatchCharacters,
             displayContract: "production-point-and-rendered-membership-v1",
             generationOrigin: generate == nil ? "production-model" : "synthetic-regression",
-            buildManifestSHA256: buildManifest.map(sha))
+            buildManifestSHA256: buildManifest.map(sha),
+            targetLocale: target == .simplifiedChinese ? nil : target.rawValue)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         try bytes.write(to: output.appendingPathComponent("fixture.json"), options: .atomic)
         if let buildManifest {
             try buildManifest.write(to: output.appendingPathComponent("quality-build-manifest.json"), options: .atomic)
         }
         let model = QwenModelProfile.energySaver.translationModel
-        var notebook = LearningNotebook()
+        var notebook = LearningNotebook(target: target)
         var evidence: [TranscriptSegment] = []
         var covered = Set<UUID>()
         var stages: [Stage] = []
@@ -241,7 +368,8 @@ struct LearningQualityCLI {
                 let boundary = Set(evidence.map(\.id))
                 while !boundary.isSubset(of: covered) {
                     let selected = LectureSummaryInput.incremental(from: evidence, coveredIDs: covered,
-                        previousSummary: "", maximumCharacters: SummaryRefreshPolicy.automaticBatchCharacters).segmentIDs
+                        previousSummary: "", maximumCharacters: SummaryRefreshPolicy.automaticBatchCharacters,
+                        target: target).segmentIDs
                     guard !selected.isEmpty else { throw Failure.noProgress }
                     let current = evidence.filter { selected.contains($0.id) }
                     let pending = notebook.selectPendingPoints(for: current)
@@ -251,7 +379,7 @@ struct LearningQualityCLI {
                     let inputFile = "input-\(number).json"
                     try Data(prepared.utf8).write(to: output.appendingPathComponent(inputFile), options: .atomic)
                     requests.append(Request(number: number, stage: stageIndex + 1, evidence: current,
-                        sourceUnits: LearningSourceUnit.make(current), pendingTargets: Array(pending.prefix(4).map(\.id)),
+                        sourceUnits: LearningSourceUnit.make(current, target: target), pendingTargets: Array(pending.prefix(4).map(\.id)),
                         inputFile: inputFile, inputSHA256: sha(Data(prepared.utf8))))
                     try save()
                     let requestStarted = ProcessInfo.processInfo.systemUptime
@@ -271,7 +399,7 @@ struct LearningQualityCLI {
                         requests[number - 1].outcome = "received"
                         try save()
                         var note = try LearningNote.decode(response)
-                        note = LearningPrompts.resolvingFollowUps(note, targets: pending.map(\.id))
+                        note = LearningPrompts.resolvingFollowUps(note, targets: pending.map(\.id), target: target)
                         note.topic = target.normalize(note.topic)
                         note.sourceVersion = 2
                         for index in note.points.indices {
@@ -301,7 +429,8 @@ struct LearningQualityCLI {
                     elapsedSeconds: ProcessInfo.processInfo.systemUptime - started, batches: notebook.batches,
                     markdown: markdown, latestMarkdown: latest,
                     coveredSourceIDs: covered.sorted { $0.uuidString < $1.uuidString },
-                    displayPoints: try displayPoints(notebook: notebook, markdown: markdown, latestMarkdown: latest),
+                    displayPoints: try displayPoints(notebook: notebook, markdown: markdown,
+                        latestMarkdown: latest, target: target),
                     requestedRequests: requests.count, successfulRequests: successes)
                 stages.append(stage)
                 try markdown.write(to: output.appendingPathComponent("notes-stage-\(stage.number).md"),

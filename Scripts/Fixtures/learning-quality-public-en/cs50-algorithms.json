@@ -1,0 +1,25 @@
+{
+  "id": "cs50-algorithms",
+  "stages": [
+    [
+      {
+        "english": "For linear search, inspect array elements one at a time until you find the target or run out of elements. The array need not be sorted, and in the worst case the work grows linearly with its length, O(n).",
+        "chinese": "For linear search, inspect array elements one at a time until you find the target or run out of elements. The array need not be sorted, and in the worst case the work grows linearly with its length, O(n)."
+      },
+      {
+        "english": "For binary search on a sorted array, compare the target with the middle element and continue only in the half that can still contain it. With constant-time access to array elements, the worst-case number of comparisons grows logarithmically, O(log n); without sorted order, discarding a half is unjustified.",
+        "chinese": "For binary search on a sorted array, compare the target with the middle element and continue only in the half that can still contain it. With constant-time access to array elements, the worst-case number of comparisons grows logarithmically, O(log n); without sorted order, discarding a half is unjustified."
+      }
+    ],
+    [
+      {
+        "english": "Selection sort repeatedly finds the smallest value in the remaining unsorted region and moves it to the next output position. Its repeated scans give quadratic running time, O(n^2), even if the input array already happens to be sorted.",
+        "chinese": "Selection sort repeatedly finds the smallest value in the remaining unsorted region and moves it to the next output position. Its repeated scans give quadratic running time, O(n^2), even if the input array already happens to be sorted."
+      },
+      {
+        "english": "Merge sort divides an array into smaller parts, recursively sorts them, and merges the sorted parts by comparing their next available elements. For the usual comparison-based array algorithm, the worst-case running time is O(n log n).",
+        "chinese": "Merge sort divides an array into smaller parts, recursively sorts them, and merges the sorted parts by comparing their next available elements. For the usual comparison-based array algorithm, the worst-case running time is O(n log n)."
+      }
+    ]
+  ]
+}

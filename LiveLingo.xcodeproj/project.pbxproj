@@ -7,6 +7,7 @@
 
 /* Begin PBXBuildFile section */
 		B71800000000000000000001 /* EnglishTargetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71800000000000000000002 /* EnglishTargetTests.swift */; };
+		B72200000000000000000001 /* EnglishLearningNotesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72200000000000000000002 /* EnglishLearningNotesTests.swift */; };
 		B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */; };
 		B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71400000000000000000002 /* TargetPipelineRefactorTests.swift */; };
 		930000000000000000000001 /* FloatingSubtitleWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000002 /* FloatingSubtitleWindow.swift */; };
@@ -115,6 +116,7 @@
 
 /* Begin PBXFileReference section */
 		B71800000000000000000002 /* EnglishTargetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnglishTargetTests.swift; sourceTree = "<group>"; };
+		B72200000000000000000002 /* EnglishLearningNotesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnglishLearningNotesTests.swift; sourceTree = "<group>"; };
 		B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetSourcePolicyRefactorTests.swift; sourceTree = "<group>"; };
 		B71400000000000000000002 /* TargetPipelineRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetPipelineRefactorTests.swift; sourceTree = "<group>"; };
 		930000000000000000000002 /* FloatingSubtitleWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingSubtitleWindow.swift; sourceTree = "<group>"; };
@@ -292,6 +294,7 @@
 				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
 				B71600000000000000000002 /* TargetSourcePolicyRefactorTests.swift */,
 				B71800000000000000000002 /* EnglishTargetTests.swift */,
+				B72200000000000000000002 /* EnglishLearningNotesTests.swift */,
 				B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */,
 				B75500000000000000000002 /* TargetDefaultingTests.swift */,
 				B75700000000000000000002 /* TargetExportTests.swift */,
@@ -455,6 +458,7 @@
 				B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */,
 				B71600000000000000000001 /* TargetSourcePolicyRefactorTests.swift in Sources */,
 				B71800000000000000000001 /* EnglishTargetTests.swift in Sources */,
+				B72200000000000000000001 /* EnglishLearningNotesTests.swift in Sources */,
 				B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */,
 				B75500000000000000000001 /* TargetDefaultingTests.swift in Sources */,
 				B75700000000000000000001 /* TargetExportTests.swift in Sources */,

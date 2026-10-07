@@ -46,7 +46,8 @@ final class EnglishTargetTests: XCTestCase {
         }
     }
 
-    private func englishModel(_ dependencies: CaptionTranslationDependencies = .unavailable) async throws -> (AppModel, URL) {
+    private func englishModel(_ dependencies: CaptionTranslationDependencies = .unavailable,
+                              notes: LearningGenerationDependencies = .unavailable) async throws -> (AppModel, URL) {
         let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
             .appendingPathComponent("EnglishTarget-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -55,7 +56,7 @@ final class EnglishTargetTests: XCTestCase {
         let defaults = try XCTUnwrap(EnglishDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _ in throw CancellationError() }
-        let model = AppModel(reviewQueue: queue, translation: dependencies, notes: .unavailable,
+        let model = AppModel(reviewQueue: queue, translation: dependencies, notes: notes,
             backgroundServices: false, scheduledNotes: false, defaults: defaults)
         model.setReleasedOutputLanguagesForTesting([.simplifiedChinese, .english])
         try await model.beginSavedCourseForTesting(directory: root.appendingPathComponent("course"))
@@ -255,6 +256,48 @@ final class EnglishTargetTests: XCTestCase {
         let captured = await requests.prompts
         XCTAssertEqual(captured.count, 2)
         XCTAssertTrue(captured.allSatisfy { $0.contains(QwenTranslationClient.englishSourceFaithfulCaptionPrompt) })
+    }
+    func testEnglishNoteGenerationCallSiteBindsEnglishEvidenceAndKeepsInternalKinds() async throws {
+        var calls = 0
+        var notes = LearningGenerationDependencies.unavailable
+        notes.generateWithPrompt = { input, _, prefix, prompt, _ in
+            calls += 1
+            XCTAssertEqual(prompt, LearningPrompts.generateEnglish)
+            XCTAssertEqual(prefix, "")
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+            let evidence = try XCTUnwrap(json["evidence"] as? [[String: Any]])
+            XCTAssertEqual(evidence.map { $0["language"] as? String }, Array(repeating: "en", count: evidence.count))
+            let points = evidence.map { unit in ["kind": "例子", "text": unit["text"] as! String,
+                "sourceIDs": [unit["id"] as! String]] as [String: Any] }
+            return String(decoding: try JSONSerialization.data(withJSONObject:
+                ["sourceVersion": 2, "topic": "Variables", "points": points, "noNewKnowledge": false],
+                options: [.sortedKeys]), as: UTF8.self)
+        }
+        let (model, _) = try await englishModel(notes: notes)
+        model.receiveIdentifiedCaptionForTesting(.init(startTime: 0, endTime: 1,
+            english: "A variable stores a value.", sourceLanguage: "en"))
+        model.receiveIdentifiedCaptionForTesting(.init(startTime: 1, endTime: 2,
+            english: "Each variable has a name.", sourceLanguage: "en"))
+        await model.generateSummaryForTesting()
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(model.learningNotebookForTesting.target, .english)
+        let point = try XCTUnwrap(model.learningNotebookForTesting.batches.first?.note.points.first)
+        XCTAssertEqual(point.kind, "例子")
+        XCTAssertEqual(point.referenceState, .linked)
+        XCTAssertEqual(point.sourceIDs, ["en0s0"])
+        XCTAssertEqual(point.sources?.map(\.quote), ["A variable stores a value."])
+        XCTAssertTrue(model.lectureSummary.contains("**Example**: A variable stores a value."))
+        XCTAssertFalse(model.lectureSummary.contains("**例子**"))
+        model.exportIncludesReviewAdvice = false
+        model.exportScope = .latest
+        let exported = try XCTUnwrap(model.notesExportSnapshot())
+        XCTAssertEqual(exported.target, .english)
+        XCTAssertEqual(exported.className, "实时课堂")
+        XCTAssertEqual(exported.coverageLine, "已整理 2 / 2 段已翻译内容")
+        XCTAssertEqual(exported.scopeDetail, model.latestSummaryScope)
+        XCTAssertTrue(NotesExportDocument.markdown(exported).contains("**Example**: A variable stores a value."))
+        model.exportScope = .wholeLesson
+        XCTAssertEqual(try XCTUnwrap(model.notesExportSnapshot()).scopeDetail, model.summaryCoverageStatus)
     }
 
 }

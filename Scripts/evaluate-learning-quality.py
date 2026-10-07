@@ -27,6 +27,19 @@ PENDING_EVIDENCE_RULE = ("quoteIDs 和 candidateQuoteIDs 引用 priorEvidence �
 # Mirror the default CaptionTranslationTarget.simplifiedChinese and SpokenLanguage.all. Source-unit
 # labels stay en/zh even when the spoken source uses a different language.
 CAPTION_TRANSLATION_TARGET = "zh-Hans"
+CAPTION_TRANSLATION_TARGETS = frozenset({"zh-Hans", "en"})
+KIND_DISPLAY_LABELS_EN = {
+    "核心结论": "Key finding", "概念关系": "Concept relationship", "例子": "Example",
+    "易错点": "Common pitfall", "补充理解": "Background", "待确认": "Needs clarification",
+}
+FOLLOWUP_DISPLAY_LABELS_EN = {
+    "缺信息": "Missing information", "后文补充": "Later clarification",
+    "前后冲突": "Conflicting accounts", "关系不明": "Relationship unclear",
+}
+PENDING_EVIDENCE_RULE_EN = (
+    "quoteIDs and candidateQuoteIDs refer to priorEvidence or current evidence. "
+    "Historical h IDs are context only: never use them in current point sourceIDs "
+    "or repeat old quotations as new knowledge.")
 CAPTION_PASS_THROUGH_LANGUAGE_CODES = frozenset({"zh"})
 CAPTION_PASS_THROUGH_TRANSFORM = "Traditional-Simplified"
 SPOKEN_LANGUAGE_CODES = frozenset({
@@ -385,8 +398,22 @@ def open_question(point: dict) -> bool:
     return point.get("kind") == "待确认" or bool(question and question.strip() and question.strip() != NUMERIC_CONTEXT)
 
 
-def point_line(point: dict) -> str:
+def followup_state_label(state: str, *, target: str = CAPTION_TRANSLATION_TARGET) -> str:
+    """Display only; wire follow-up states remain their fixed Chinese codes."""
+    require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
+    return FOLLOWUP_DISPLAY_LABELS_EN.get(state, state) if target == "en" else state
+
+
+def point_line(point: dict, *, target: str = CAPTION_TRANSLATION_TARGET) -> str:
+    require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
     kind = point["kind"]
+    if target == "en":
+        kind_label = KIND_DISPLAY_LABELS_EN.get(kind, kind)
+        if open_question(point):
+            pending = KIND_DISPLAY_LABELS_EN["待确认"]
+            label = pending if kind in ("", "核心结论", "待确认") else f"{kind_label} ({pending})"
+            return f"- **{label}**: {point['text']}"
+        return "- " + ("" if kind == "核心结论" else f"**{kind_label}**: ") + point["text"]
     if open_question(point):
         label = "待确认" if kind in ("核心结论", "待确认") else kind + "（待确认）"
         return f"- **{label}**：{point['text']}"
@@ -430,16 +457,19 @@ def source_language(source: dict) -> str | None:
     return None
 
 
-def render_pass_through(text: str) -> str:
+def render_pass_through(text: str, *, target: str = CAPTION_TRANSLATION_TARGET) -> str:
     """Use the system transform behind Swift's SimplifiedChineseNormalizer.
 
     No optional Python package or subprocess receives caption text. If the
     system API is unavailable, withhold integrity credit rather than guess.
     """
+    require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
+    if target == "en":
+        return text
     import ctypes
     import ctypes.util
 
-    require(CAPTION_TRANSLATION_TARGET == "zh-Hans", "unsupported-caption-target")
+    require(target == "zh-Hans", "unsupported-caption-target")
     library = ctypes.util.find_library("CoreFoundation") if sys.platform == "darwin" else None
     require(bool(library), "pass-through-normalizer-unavailable")
 
@@ -486,22 +516,35 @@ def render_pass_through(text: str) -> str:
                 core.CFRelease(value)
 
 
-def verify_units(units: list[dict], evidence: list[dict]) -> dict[str, dict]:
+def source_text_groups(source: dict, *, target: str = CAPTION_TRANSLATION_TARGET) -> list[tuple[str, str]]:
+    """Mirror LearningSourceUnit.textGroups without renaming legacy storage fields."""
+    require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
+    language_code = source_language(source)
+    if target == "en":
+        # English pass-through always uses the source, even when a usable old
+        # Chinese counterpart remains. Other sources use saved target evidence.
+        text = (render_pass_through(source["english"], target=target) if language_code is None
+                else source.get("chinese", ""))
+        return [("en", text)]
+    groups = (("en", "english"), ("zh", "chinese")) if language_code is None else (("zh", "chinese"),)
+    return [(language, (source["chinese"] if has_usable_translation(source)
+                       else render_pass_through(source["english"], target=target))
+             if language_code in CAPTION_PASS_THROUGH_LANGUAGE_CODES else source[key])
+            for language, key in groups]
+
+
+def verify_units(units: list[dict], evidence: list[dict], *,
+                 target: str = CAPTION_TRANSLATION_TARGET) -> dict[str, dict]:
+    require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
     units = object_list(units, "sourceUnits")
     unique([x.get("id") for x in units], "sourceUnits")
     require(all(integer(x.get("index")) and x["index"] < len(evidence) and x.get("language") in ("en", "zh")
                 for x in units), "source-unit-owner")
     expected_order = []
     for index, source in enumerate(evidence):
-        language_code = source_language(source)
-        groups = (("en", "english"), ("zh", "chinese")) if language_code is None else (("zh", "chinese"),)
-        for language, key in groups:
+        for language, original in source_text_groups(source, target=target):
             fragments = [x for x in units if x["index"] == index and x["language"] == language]
             require(bool(fragments), "missing-source-language")
-            if language_code in CAPTION_PASS_THROUGH_LANGUAGE_CODES:
-                original = source["chinese"] if has_usable_translation(source) else render_pass_through(source["english"])
-            else:
-                original = source[key]
             cursor = 0
             for number, fragment in enumerate(fragments):
                 expected_id = f"{language}{index}s{number}"
@@ -527,7 +570,11 @@ def artifact(directory: Path, name, expected_digest) -> bytes:
     return data
 
 
-def rendered_contains(line: str, placement: str, markdown: str) -> bool:
+def rendered_contains(line: str, placement: str, markdown: str, *,
+                      target: str = CAPTION_TRANSLATION_TARGET) -> bool:
+    require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
+    # Kind/state display follows the target; classroom headings/wrappers retain
+    # ClassroomFixedText's single switch, whose current default is Chinese.
     current, lines = "body", []
     for part in markdown.split("\n"):
         if part.startswith("## "):
@@ -586,14 +633,16 @@ def placements(batches: list[dict], latest=False) -> dict[str, str]:
 
 
 def verify_pending_points(prepared: dict, targets: list[str], references: dict[str, dict],
-                          reference_batches: dict[str, dict], units: dict[str, dict]) -> None:
+                          reference_batches: dict[str, dict], units: dict[str, dict], *,
+                          target: str = CAPTION_TRANSLATION_TARGET) -> None:
     followups = object_list(prepared.get("pendingPoints"), "pendingPoints")
     require([p.get("id") for p in followups] == [f"q{i}" for i in range(len(targets))], "pending-alias-order")
     indexed = ("priorEvidence" in prepared or "pendingEvidenceRule" in prepared
                or any("quoteIDs" in p or "candidateQuoteIDs" in p for p in followups))
     catalog = None
     if indexed:
-        require(prepared.get("pendingEvidenceRule") == PENDING_EVIDENCE_RULE, "pending-evidence-rule")
+        accepted_rules = (PENDING_EVIDENCE_RULE, PENDING_EVIDENCE_RULE_EN) if target == "en" else (PENDING_EVIDENCE_RULE,)
+        require(prepared.get("pendingEvidenceRule") in accepted_rules, "pending-evidence-rule")
         prior = object_list(prepared.get("priorEvidence"), "priorEvidence")
         require(all(isinstance(p.get("id"), str) and re.fullmatch(r"h(?:0|[1-9][0-9]*)", p["id"])
                     and p.get("scope") == "prior" and isinstance(p.get("text"), str) and p["text"].strip()
@@ -614,17 +663,19 @@ def verify_pending_points(prepared: dict, targets: list[str], references: dict[s
         # Bound the number of distinct quoted texts, not the expanded ID list.
         return list(dict.fromkeys(catalog[x] for x in ids))
 
-    for followup, target in zip(followups, targets):
-        old = references[target]
+    for followup, reference in zip(followups, targets):
+        old = references[reference]
         eligible = old.get("referenceState") in ("pending", "awaitingContext", "numericDifference") or bool(old.get("needsContext")) or (old.get("sourceHasPronoun") is True and old.get("referenceState") == "linked")
         require(eligible, "pending-target-not-eligible")
         quotes = texts(followup, "quotes", "quoteIDs")
         original_quotes = [s["quote"] for s in old.get("sources", [])]
         if not original_quotes:
             original_quotes = []
-            for source in reference_batches[target]["evidence"]:
+            for source in reference_batches[reference]["evidence"]:
                 language = source_language(source) if indexed else None
-                if language in CAPTION_PASS_THROUGH_LANGUAGE_CODES:
+                if target == "en":
+                    text = source_text_groups(source, target=target)[0][1]
+                elif language in CAPTION_PASS_THROUGH_LANGUAGE_CODES:
                     text = source["chinese"] if has_usable_translation(source) else render_pass_through(source["english"])
                 elif language is not None:
                     text = source["chinese"]
@@ -635,7 +686,7 @@ def verify_pending_points(prepared: dict, targets: list[str], references: dict[s
                 and all(isinstance(q, str) and q and any(s.startswith(q) for s in original_quotes) for q in quotes),
                 "pending-quotes-not-bound-to-target")
         candidates = texts(followup, "candidateQuotes", "candidateQuoteIDs")
-        candidate_sources = [s["quote"] for p in references.values() if p.get("clarifies") == target
+        candidate_sources = [s["quote"] for p in references.values() if p.get("clarifies") == reference
                              for s in p.get("sources", [])]
         require(isinstance(candidates, list) and len(candidates) <= 2
                 and all(isinstance(q, str) and q and any(s.startswith(q) for s in candidate_sources) for q in candidates),
@@ -703,7 +754,8 @@ def verify_followups(raw: dict, normalized: dict, batch: dict, targets: list[str
 
 
 def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
-                  *, allow_synthetic: bool = False) -> list[dict]:
+                  *, allow_synthetic: bool = False,
+                  target: str = CAPTION_TRANSLATION_TARGET) -> list[dict]:
     require(type(result.get("probeVersion")) is int and result["probeVersion"] == 2, "probe-v2-required; old output retained as legacy evidence")
     require(result.get("fixtureID") == case["id"] and result.get("fixtureSHA256") == fixture_sha, "fixture-binding-mismatch")
     require(artifact(directory, "fixture.json", fixture_sha) is not None, "fixture-artifact")
@@ -711,6 +763,9 @@ def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
     require(isinstance(result.get("model"), str) and bool(result["model"]), "model-identity-required")
     producer = result.get("producer")
     require(isinstance(producer, dict), "producer-required")
+    require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
+    require(producer.get("targetLocale", CAPTION_TRANSLATION_TARGET) == target,
+            "producer-target-mismatch")
     for key in ("executableSHA256", "promptSHA256"):
         require(isinstance(producer.get(key), str) and re.fullmatch(r"[a-f0-9]{64}", producer[key]), f"producer:{key}")
     origin = producer.get("generationOrigin")
@@ -770,7 +825,7 @@ def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
             request = requests[request_index]; request_index += 1
             require(integer(request.get("stage"), 1) and request["stage"] == number, "request-stage-mismatch")
             require(request.get("batchID") == batch["id"] and request.get("evidence") == batch["evidence"], "request-batch-binding")
-            units = verify_units(request.get("sourceUnits"), batch["evidence"])
+            units = verify_units(request.get("sourceUnits"), batch["evidence"], target=target)
             require(request.get("inputFile") == f"input-{request_index}.json"
                     and request.get("responseFile") == f"response-{request_index}.txt", "request-artifact-number")
             prepared = decode(artifact(directory, request.get("inputFile"), request.get("inputSHA256")))
@@ -780,7 +835,7 @@ def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
             unique(targets, "pending-target")
             require(not set(targets) & retired_questions(batches[:batches.index(batch)]),
                     "pending-target-already-retired")
-            verify_pending_points(prepared, targets, references, reference_batches, units)
+            verify_pending_points(prepared, targets, references, reference_batches, units, target=target)
             raw = decode(artifact(directory, request.get("responseFile"), request.get("responseSHA256")))
             normal = request.get("normalizedNote")
             validate_note(raw); validate_note(normal); validate_note(batch.get("note"))
@@ -846,12 +901,12 @@ def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
             reference = display["reference"]; point = references[reference]
             require(type(display.get("hasOpenQuestion")) is bool and display["hasOpenQuestion"] == open_question(point), "production-question-mismatch")
             require(display.get("resolvedClarifies") == point.get("clarifies"), "display-followup-mismatch")
-            line = point_line(point)
+            line = point_line(point, target=target)
             require(display.get("renderedLine") == line, "rendered-point-line-mismatch")
             for key, places, markdown in (("fullDisposition", full_places, full), ("latestDisposition", latest_places, latest)):
                 placement = places[reference]
                 require(display.get(key) == placement, "production-placement-mismatch")
-                require(placement == "hidden" or rendered_contains(line, placement, markdown), "point-missing-from-rendered-section")
+                require(placement == "hidden" or rendered_contains(line, placement, markdown, target=target), "point-missing-from-rendered-section")
             flags = []
             if UNASSERTED.search(point["text"]): flags.append("unasserted-or-warning-preface")
             if DENIAL.search(point["text"]): flags.append("explicit-denial-requires-semantic-readback")
@@ -864,7 +919,8 @@ def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
 
 
 def evaluate_case(case_gold: dict, case: dict, result: dict, *, directory: Path | None = None,
-                  fixture_sha: str | None = None, allow_synthetic: bool = False) -> dict:
+                  fixture_sha: str | None = None, allow_synthetic: bool = False,
+                  target: str = CAPTION_TRANSLATION_TARGET) -> dict:
     facts = [{"id": f["id"], "meaning": f["meaning"], "stage": f["stage"], "coverageSignal": False,
               "lexicalSignal": False, "matchedPointReferences": [], "semanticStatus": PENDING} for f in case_gold["facts"]]
     report = {"id": case["id"], "split": case_gold["split"], "categories": case_gold["categories"],
@@ -872,7 +928,8 @@ def evaluate_case(case_gold: dict, case: dict, result: dict, *, directory: Path 
               "semanticRequirements": [], "pointReadback": {}}
     try:
         require(directory is not None and fixture_sha is not None, "frozen-source-and-artifact-directory-required")
-        stages = verify_result(case, result, directory, fixture_sha, allow_synthetic=allow_synthetic)
+        stages = verify_result(case, result, directory, fixture_sha,
+                               allow_synthetic=allow_synthetic, target=target)
         if minimum := case_gold.get("minimumRequests"):
             require(result["successfulRequests"] >= minimum, "overflow-request-minimum")
         report["integrityStatus"] = "pass"
@@ -909,7 +966,9 @@ def evaluate_case(case_gold: dict, case: dict, result: dict, *, directory: Path 
     return report
 
 
-def score(corpus: Path, results: Path, *, allow_synthetic: bool = False) -> dict:
+def score(corpus: Path, results: Path, *, allow_synthetic: bool = False,
+          target: str = CAPTION_TRANSLATION_TARGET) -> dict:
+    require(target in CAPTION_TRANSLATION_TARGETS, "unsupported-caption-target")
     manifest = load(corpus / "manifest.json")
     entries = object_list(manifest.get("files"), "manifest-files")
     names = [entry.get("file") for entry in entries]
@@ -920,6 +979,7 @@ def score(corpus: Path, results: Path, *, allow_synthetic: bool = False) -> dict
     for name, entry in entries.items():
         require(digest(corpus / name) == entry.get("sha256"), f"frozen-corpus-changed:{name}")
     gold = load(corpus / "gold.json")
+    require(gold.get("targetLocale", target) == target, "gold-target-mismatch")
     cases = object_list(gold.get("cases"), "gold-cases")
     require(bool(cases), "empty-gold")
     require(all(isinstance(c.get("id"), str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", c["id"])
@@ -946,15 +1006,16 @@ def score(corpus: Path, results: Path, *, allow_synthetic: bool = False) -> dict
         try:
             result = load(directory / "result.json")
             report = evaluate_case(expected, case, result, directory=directory, fixture_sha=entries[name]["sha256"],
-                                   allow_synthetic=allow_synthetic)
+                                   allow_synthetic=allow_synthetic, target=target)
         except (IntegrityError, ValueError, TypeError, KeyError, OSError) as error:
-            report = evaluate_case(expected, case, {})
+            report = evaluate_case(expected, case, {}, target=target)
             report["error"] = "result_missing" if isinstance(error, FileNotFoundError) else str(error)
             report["checks"][0]["reason"] = report["error"]
             if isinstance(error, FileNotFoundError): report["integrityStatus"] = "incomplete"
         reports.append(report)
     identities = {(r["producer"]["executableSHA256"], r["producer"]["promptSHA256"],
-                   r["producer"].get("buildManifestSHA256"), r["producer"]["generationOrigin"])
+                   r["producer"].get("buildManifestSHA256"), r["producer"]["generationOrigin"],
+                   r["producer"].get("targetLocale", CAPTION_TRANSLATION_TARGET))
                   for r in reports if r["integrityStatus"] == "pass"}
     identity_consistent = len(identities) <= 1
     if not identity_consistent:
@@ -972,7 +1033,7 @@ def score(corpus: Path, results: Path, *, allow_synthetic: bool = False) -> dict
                 "bodyCoverageSignals": sum(f["coverageSignal"] for f in facts),
                 "lexicalSignals": sum(f["lexicalSignal"] for f in facts),
                 "semanticallyAcceptedFacts": 0, "semanticReadbackPendingFacts": len(facts)}
-    return {"version": 2, "goldSHA256": entries["gold.json"]["sha256"], "resultsDirectory": str(results.resolve()),
+    value = {"version": 2, "goldSHA256": entries["gold.json"]["sha256"], "resultsDirectory": str(results.resolve()),
             "integrityStatus": "pass" if reports and all(r["integrityStatus"] == "pass" for r in reports) else "failed",
             "cases": reports, "totals": totals(reports),
             "bySplit": {split: totals([r for r in reports if r["split"] == split]) for split in sorted({r["split"] for r in reports})},
@@ -981,6 +1042,9 @@ def score(corpus: Path, results: Path, *, allow_synthetic: bool = False) -> dict
             "splitInterpretation": "declared-labels-only; prior exposure requires an external evaluation log",
             "overallAcceptance": "pending-semantic-readback-and-baseline-comparison",
             "exitCodeMeaning": "0=complete-structural-evidence;2=incomplete-or-invalid-evidence;1=execution-failure;no-code-certifies-semantics"}
+    if target != CAPTION_TRANSLATION_TARGET:
+        value["targetLocale"] = target
+    return value
 
 
 def main(argv=None) -> int:
@@ -988,12 +1052,16 @@ def main(argv=None) -> int:
     parser.add_argument("--corpus", required=True, type=Path)
     parser.add_argument("--results", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--target", choices=sorted(CAPTION_TRANSLATION_TARGETS),
+                        default=CAPTION_TRANSLATION_TARGET,
+                        help="Target evidence language; default preserves the zh-Hans protocol")
     parser.add_argument("--allow-synthetic-regression", action="store_true",
                         help="Validate explicitly marked injected test results; never count as model evidence")
     args = parser.parse_args(argv)
     if args.output.exists(): parser.error("Output already exists; retain previous evaluations")
     try:
-        value = score(args.corpus, args.results, allow_synthetic=args.allow_synthetic_regression)
+        value = score(args.corpus, args.results, allow_synthetic=args.allow_synthetic_regression,
+                      target=args.target)
     except (IntegrityError, ValueError, TypeError, KeyError, OSError) as error:
         value = {"version": 2, "integrityStatus": "failed", "error": str(error),
                  "overallAcceptance": "pending-semantic-readback-and-baseline-comparison"}

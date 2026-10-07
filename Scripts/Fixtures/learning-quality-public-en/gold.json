@@ -1,0 +1,281 @@
+{
+  "version": 1,
+  "authorship": "Self-authored synthetic captions and expectations prepared by a Codex native subagent from stable public CS50 topic knowledge before observing any evaluated model output. No real classroom recording, original subtitle excerpt, private reference, or local reference read.",
+  "limits": "Synthetic candidate only; no original-lecture or local-reference sentence-by-sentence comparison has been performed. Captions and expectations share an author; independent factual review is pending. The field named chinese contains English target evidence, not a Chinese translation. English and Chinese regex alternatives remain coverage hints only; run this corpus with --target en. No evaluated model output or baseline comparison has been inspected.",
+  "gates": {
+    "knownFactualErrorsAllowed": 0,
+    "independentCoverageRegressionAllowed": 0,
+    "requiresSemanticReadback": true
+  },
+  "referenceVerification": {
+    "environmentVariable": "LIVELINGO_CS50_REFERENCE_DIR",
+    "set": false,
+    "localReferenceRead": false,
+    "originalSubtitleRead": false,
+    "networkUsed": false,
+    "status": "synthetic-candidate-awaiting-independent-reference-review"
+  },
+  "cases": [
+    {
+      "id": "cs50-c-basics",
+      "split": "development",
+      "categories": [
+        "english-lecture",
+        "cs50-inspired",
+        "comparison",
+        "condition",
+        "negation",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "assignment-and-equality",
+          "meaning": "In C, '=' assigns a value; '==' compares values for equality.",
+          "patterns": [
+            "(?:single\\s+equals?\\s+sign|(?<![=])=(?![=])).{0,90}assign.{0,160}(?:double\\s+equals?\\s+sign|==).{0,90}(?:compar|equal)",
+            "(?:单(?:个)?等号|(?<![=])=(?![=])).{0,45}赋值.{0,100}(?:两(?:个)?等号|==).{0,45}(?:相等|比较)"
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 1
+            }
+          ]
+        },
+        {
+          "id": "integer-division-and-conversion",
+          "meaning": "Integer division truncates toward zero; convert an operand to floating point before dividing to retain a fractional result.",
+          "patterns": [
+            "\\binteger\\b.{0,80}\\bdivision\\b.{0,95}(?:truncat.{0,22}zero|discard.{0,30}fraction).{0,200}(?:convert|cast).{0,95}\\bbefore\\b.{0,18}\\bdivision\\b",
+            "整数.{0,45}除法.{0,25}(?:向零截断|丢弃.{0,10}小数).{0,120}(?:先.{0,45}(?:浮点|float|double).{0,20}再.{0,20}除|除法(?:之)?前.{0,35}(?:转换|转成))"
+          ],
+          "semanticChecks": [
+            "Both integer operands and truncation toward zero must remain explicit.",
+            "Conversion must occur before division, not only after the fraction has been discarded."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 2
+            }
+          ]
+        },
+        {
+          "id": "null-terminated-string",
+          "meaning": "A C string ends with the null character '\\0'; strlen counts preceding bytes and excludes that terminator.",
+          "patterns": [
+            "\\bstring\\b.{0,100}(?:null\\s+character|\\\\0).{0,160}\\bstrlen\\b.{0,110}(?:without\\s+count|exclud|not\\s+count)",
+            "字符串.{0,50}(?:空字符|\\\\0|结束符).{0,100}strlen.{0,60}(?:不计|不含|不包括|排除).{0,20}(?:结束符|空字符|\\\\0)"
+          ],
+          "semanticChecks": [
+            "The string terminator is a null character, not a null pointer.",
+            "strlen returns byte length before the terminator; do not claim a general Unicode character count."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 1
+            }
+          ]
+        },
+        {
+          "id": "return-versus-print",
+          "meaning": "Returning a result passes it to the caller; printing displays it and is a distinct operation.",
+          "patterns": [
+            "\\breturn\\b.{0,90}\\bcaller\\b.{0,110}\\bprint(?:ing)?\\b.{0,95}(?:display|output)",
+            "(?:return|返回).{0,45}调用者.{0,100}打印.{0,40}(?:显示|输出).{0,70}(?:不同|区别)"
+          ],
+          "semanticChecks": [
+            "Distinguish displaying a value from returning that value.",
+            "Do not infer that printf itself has no return value."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 2
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cs50-algorithms",
+      "split": "development",
+      "categories": [
+        "english-lecture",
+        "cs50-inspired",
+        "comparison",
+        "condition",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "linear-search",
+          "meaning": "Linear search can inspect an unsorted array one element at a time; its worst-case running time is O(n).",
+          "patterns": [
+            "\\blinear\\s+search\\b.{0,220}(?:need\\s+not\\s+be\\s+sorted|unsorted).{0,180}O\\s*\\(\\s*n\\s*\\)",
+            "线性查找.{0,100}(?:不需要有序|无需排序|未排序|无序).{0,100}O\\s*\\(\\s*n\\s*\\)"
+          ],
+          "semanticChecks": [
+            "O(n) describes worst-case work here, not a claim that every search visits every element.",
+            "Sorted input is not required."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 1
+            }
+          ]
+        },
+        {
+          "id": "binary-search",
+          "meaning": "Binary search halves the candidate region of a sorted array and takes O(log n) comparisons in the worst case.",
+          "patterns": [
+            "\\bbinary\\s+search\\b.{0,65}\\bsorted\\b.{0,240}\\bhalf\\b.{0,280}O\\s*\\(\\s*log\\s*n\\s*\\)",
+            "(?:有序数组.{0,35}二分查找|二分查找.{0,40}有序).{0,130}(?:一半|减半).{0,170}O\\s*\\(\\s*log\\s*n\\s*\\)"
+          ],
+          "semanticChecks": [
+            "The sorted-order precondition and repeated halving must both remain.",
+            "Time complexity assumes constant-time access to array elements; do not generalize to arbitrary linked-list access."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 2
+            }
+          ]
+        },
+        {
+          "id": "selection-sort",
+          "meaning": "Selection sort repeatedly selects the remaining minimum; its running time is O(n^2), including already sorted input.",
+          "patterns": [
+            "\\bselection\\s+sort\\b.{0,80}(?:smallest|minimum).{0,220}O\\s*\\(\\s*n\\s*(?:\\^\\s*2|²)\\s*\\).{0,100}(?:already|even).{0,70}\\bsorted\\b",
+            "选择排序.{0,85}最小.{0,120}O\\s*\\(\\s*n\\s*(?:\\^\\s*2|²)\\s*\\).{0,65}(?:已经有序|已排序|有序)"
+          ],
+          "semanticChecks": [
+            "Retain the repeated minimum selection and quadratic work.",
+            "Do not give selection sort a linear best case merely because the input is already sorted."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 1
+            }
+          ]
+        },
+        {
+          "id": "merge-sort",
+          "meaning": "Merge sort recursively sorts smaller parts and merges their sorted results; its usual array implementation has worst-case O(n log n) running time.",
+          "patterns": [
+            "\\bmerge\\s+sort\\b.{0,110}recurs.{0,100}merg.{0,230}O\\s*\\(\\s*n\\s*(?:log|lg)\\s*n\\s*\\)",
+            "归并排序.{0,80}递归.{0,85}(?:合并|归并).{0,160}O\\s*\\(\\s*n\\s*(?:log|lg)\\s*n\\s*\\)"
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 2
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cs50-memory",
+      "split": "development",
+      "categories": [
+        "english-lecture",
+        "cs50-inspired",
+        "subject",
+        "condition",
+        "negation",
+        "incremental"
+      ],
+      "facts": [
+        {
+          "id": "address-and-dereference",
+          "meaning": "A pointer stores an address; '&' obtains an object's address and '*' dereferences a valid pointer to access the object.",
+          "patterns": [
+            "\\bpointer\\b.{0,55}\\baddress\\b.{0,130}&\\s*x.{0,65}\\baddress\\b.{0,70}\\*\\s*p.{0,65}\\baccess",
+            "指针.{0,30}地址.{0,85}&\\s*x.{0,45}地址.{0,100}\\*\\s*p.{0,40}(?:解引用|访问)"
+          ],
+          "semanticChecks": [
+            "Keep address storage distinct from the pointed-to value.",
+            "Dereferencing requires a valid pointer to an appropriate live object."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 1
+            }
+          ]
+        },
+        {
+          "id": "pointer-aliasing",
+          "meaning": "Pointer assignment copies an address, not the pointed-to data; aliases may observe changes to the same underlying memory.",
+          "patterns": [
+            "assign.{0,70}\\bpointer\\b.{0,80}cop(?:y|ies).{0,35}\\baddress\\b.{0,55}\\bnot\\b.{0,55}\\bdata\\b.{0,110}\\bsame\\b.{0,50}\\bmemory\\b",
+            "指针.{0,65}复制.{0,25}地址.{0,30}不是.{0,25}数据.{0,90}同一.{0,30}内存"
+          ],
+          "semanticChecks": [
+            "Do not imply that assigning a pointer creates an independent copy of its data."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 1,
+              "row": 2
+            }
+          ]
+        },
+        {
+          "id": "allocation-failure",
+          "meaning": "malloc may return NULL on failure; check the returned pointer before accessing allocated storage.",
+          "patterns": [
+            "\\bmalloc\\b.{0,170}\\bfail.{0,65}\\bNULL\\b.{0,70}\\bcheck\\b.{0,90}\\bbefore\\b",
+            "malloc.{0,100}失败.{0,45}NULL.{0,90}(?:之前.{0,35}检查|先.{0,25}检查)"
+          ],
+          "semanticChecks": [
+            "Do not assume malloc always succeeds.",
+            "NULL is a pointer failure result here, distinct from a string's null terminator."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 1
+            }
+          ]
+        },
+        {
+          "id": "allocation-lifetime",
+          "meaning": "Free an allocation once after its last use; do not access it through old pointers or aliases or free it again.",
+          "patterns": [
+            "\\bfree\\b.{0,120}\\bonce\\b.{0,180}\\bmust\\s+not\\b.{0,35}\\baccess.{0,180}(?:not.{0,35}freed.{0,45}second|double.?free)",
+            "free.{0,40}释放一次.{0,120}(?:不能|禁止).{0,70}访问.{0,80}(?:不能.{0,35}重复释放|禁止.{0,35}重复释放)"
+          ],
+          "semanticChecks": [
+            "The allocation's lifetime ends for aliases too.",
+            "Do not infer that free sets all aliases to NULL or prevents later invalid accesses automatically."
+          ],
+          "stage": 2,
+          "sourceRows": [
+            {
+              "stage": 2,
+              "row": 2
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "targetLocale": "en"
+}

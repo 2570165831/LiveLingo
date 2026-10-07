@@ -93,14 +93,14 @@ enum CaptionTranslationTarget: String, Sendable {
     var learningNotePrompt: String {
         switch self {
         case .simplifiedChinese: return LearningPrompts.generate
-        case .english: return LearningPrompts.generate
+        case .english: return LearningPrompts.generateEnglish
         }
     }
 
     var learningReviewPrompt: String {
         switch self {
         case .simplifiedChinese: return LearningPrompts.review
-        case .english: return LearningPrompts.review
+        case .english: return LearningPrompts.reviewEnglish
         }
     }
 

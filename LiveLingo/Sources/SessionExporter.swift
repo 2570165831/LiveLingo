@@ -435,6 +435,19 @@ enum NotesExportError: LocalizedError {
 }
 
 enum NotesExportDocument {
+    static func fixed(_ key: ClassroomFixedText, target: OutputLanguage) -> String {
+        key.text(targetCode: target.rawValue)
+    }
+    static func fixed(_ key: ClassroomFixedText, _ args: [String], target: OutputLanguage) -> String {
+        key.format(args: args, targetCode: target.rawValue)
+    }
+    static func notesHeading(for target: OutputLanguage) -> String { fixed(.notesHeading, target: target) }
+    static func reviewHeading(for target: OutputLanguage) -> String { fixed(.exportReviewHeading, target: target) }
+    static func disclaimer(for target: OutputLanguage) -> String { fixed(.exportDisclaimer, target: target) }
+    static func scopeLabel(_ snapshot: NotesExportSnapshot) -> String {
+        fixed(snapshot.scope == .latest ? .latestScope : .wholeScope, target: snapshot.target)
+    }
+
     static let notesHeading = "学习笔记"
     static let reviewHeading = "9B 复查意见（仅供核对，未合并进笔记正文）"
     static let transcriptHeading = "双语字幕（含时间戳）"
@@ -452,7 +465,7 @@ enum NotesExportDocument {
     }
 
     static func defaultFileName(_ snapshot: NotesExportSnapshot, format: NotesExportFormat) -> String {
-        "\(snapshot.className) \(classDate(of: snapshot)) \(snapshot.scope.fileLabel).\(format.fileExtension)"
+        "\(snapshot.className) \(classDate(of: snapshot)) \(scopeLabel(snapshot)).\(format.fileExtension)"
     }
 
     static func timestamp(_ interval: TimeInterval) -> String {
@@ -467,20 +480,20 @@ enum NotesExportDocument {
 
     static func header(_ snapshot: NotesExportSnapshot, markdown: Bool) -> [String] {
         var lines: [String] = []
-        let title = "\(snapshot.className) · \(snapshot.scope.fileLabel) · \(classDate(of: snapshot))"
+        let title = "\(snapshot.className) · \(scopeLabel(snapshot)) · \(classDate(of: snapshot))"
         lines.append(markdown ? "# \(title)" : title)
         lines.append("")
-        lines.append("- 内容范围：\(snapshot.scope.title)（\(snapshot.scopeDetail)）")
-        lines.append("- 整理进度：\(snapshot.coverageLine)")
+        lines.append("- " + fixed(.exportScopeLine, [scopeLabel(snapshot), snapshot.scopeDetail], target: snapshot.target))
+        lines.append("- " + fixed(.exportCoverageLine, [snapshot.coverageLine], target: snapshot.target))
         // 「最近更新」只限制笔记正文的范围；复查意见是**整场录音**的。
         if snapshot.includesReviewAdvice, snapshot.reviewMarkdown != nil, snapshot.scope == .latest {
-            lines.append("- 复查范围：本录音所有已完成的复查批次（不受“最近更新”笔记范围限制）")
+            lines.append("- " + fixed(.exportReviewScope, target: snapshot.target))
         }
         if let session = snapshot.sessionName {
-            lines.append("- 来源录音：\(session)")
+            lines.append("- " + fixed(.exportSessionLine, [session], target: snapshot.target))
         }
-        lines.append("- 导出时间：\(timestampFormatter.string(from: snapshot.generatedAt))")
-        lines.append("- 说明：\(disclaimer)")
+        lines.append("- " + fixed(.exportTimeLine, [timestampFormatter.string(from: snapshot.generatedAt)], target: snapshot.target))
+        lines.append("- " + fixed(.exportExplanationLine, [disclaimer(for: snapshot.target)], target: snapshot.target))
         lines.append("")
         return lines
     }
@@ -491,7 +504,7 @@ enum NotesExportDocument {
     /// - 批次标题（`## 第 N 批 …`）降为子级（`### …`）✓，保留原有的批号与主题 ✓；
     /// - 其余正文**原样保留** ✓（不认识的内容只搬不删 ✓）；
     /// - 不再另加"复查批次 1/2/3"编号 ✓（报告里已经有批号，重复编号会对不上 ✓）。
-    static func reviewSection(_ markdown: String) -> String {
+    static func reviewSection(_ markdown: String, target: OutputLanguage = .simplifiedChinese) -> String {
         var output: [String] = []
         var progressTaken = false
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -499,7 +512,7 @@ enum NotesExportDocument {
             let trimmed = text.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("# "), !progressTaken {
                 progressTaken = true
-                output.append("- 复查进度：" + trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces))
+                output.append("- " + fixed(.exportProgressLine, [trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)], target: target))
                 continue
             }
             if trimmed.hasPrefix("## ") {
@@ -515,20 +528,20 @@ enum NotesExportDocument {
     static func reviewBody(_ snapshot: NotesExportSnapshot) -> String? {
         guard snapshot.includesReviewAdvice, let review = snapshot.reviewMarkdown,
               !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        let body = reviewSection(review)
+        let body = reviewSection(review, target: snapshot.target)
         return body.isEmpty ? nil : body
     }
 
     /// 有复查意见时才存在的章节（Markdown / 纯文本两种渲染）。
     private static func reviewBlock(_ snapshot: NotesExportSnapshot, markdown: Bool) -> String? {
         guard let body = reviewBody(snapshot) else { return nil }
-        return markdown ? "## \(reviewHeading)\n\n" + body : reviewHeading + "\n\n" + strippingMarkdown(body)
+        return markdown ? "## \(reviewHeading(for: snapshot.target))\n\n" + body : reviewHeading(for: snapshot.target) + "\n\n" + strippingMarkdown(body)
     }
 
     static func markdown(_ snapshot: NotesExportSnapshot) -> String {
         var sections: [String] = [header(snapshot, markdown: true).joined(separator: "\n")]
         let notes = snapshot.notesMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-        sections.append("## \(notesHeading)\n\n" + (notes.isEmpty ? "（所选范围暂无笔记）" : notes))
+        sections.append("## \(notesHeading(for: snapshot.target))\n\n" + (notes.isEmpty ? fixed(.emptyNotes, target: snapshot.target) : notes))
         if let review = reviewBlock(snapshot, markdown: true) {
             sections.append(review)
         }
@@ -548,7 +561,7 @@ enum NotesExportDocument {
             .map { $0.hasPrefix("- ") ? "  " + String($0.dropFirst(2)) : $0 }
             .joined(separator: "\n"))
         let notes = strippingMarkdown(snapshot.notesMarkdown).trimmingCharacters(in: .whitespacesAndNewlines)
-        sections.append(notesHeading + "\n\n" + (notes.isEmpty ? "（所选范围暂无笔记）" : notes))
+        sections.append(notesHeading(for: snapshot.target) + "\n\n" + (notes.isEmpty ? fixed(.emptyNotes, target: snapshot.target) : notes))
         if let review = reviewBlock(snapshot, markdown: false) {
             sections.append(review)
         }
@@ -682,20 +695,20 @@ enum PDFNotesWriter {
             output.append(line(text, style: style))
         }
 
-        append("\(snapshot.className) · \(snapshot.scope.fileLabel) · \(snapshot.classDate)", style: .title)
-        append("内容范围：\(snapshot.scope.title)（\(snapshot.scopeDetail)）", style: .meta)
-        append("整理进度：\(snapshot.coverageLine)", style: .meta)
+        append("\(snapshot.className) · \(NotesExportDocument.scopeLabel(snapshot)) · \(snapshot.classDate)", style: .title)
+        append(NotesExportDocument.fixed(.exportScopeLine, [NotesExportDocument.scopeLabel(snapshot), snapshot.scopeDetail], target: snapshot.target), style: .meta)
+        append(NotesExportDocument.fixed(.exportCoverageLine, [snapshot.coverageLine], target: snapshot.target), style: .meta)
         if snapshot.includesReviewAdvice, snapshot.reviewMarkdown != nil, snapshot.scope == .latest {
-            append("复查范围：本录音所有已完成的复查批次（不受“最近更新”笔记范围限制）", style: .meta)
+            append(NotesExportDocument.fixed(.exportReviewScope, [], target: snapshot.target), style: .meta)
         }
-        if let session = snapshot.sessionName { append("来源录音：\(session)", style: .meta) }
-        append("导出时间：\(NotesExportDocument.timestampFormatter.string(from: snapshot.generatedAt))", style: .meta)
-        append(NotesExportDocument.disclaimer, style: .meta)
+        if let session = snapshot.sessionName { append(NotesExportDocument.fixed(.exportSessionLine, [session], target: snapshot.target), style: .meta) }
+        append(NotesExportDocument.fixed(.exportTimeLine, [NotesExportDocument.timestampFormatter.string(from: snapshot.generatedAt)], target: snapshot.target), style: .meta)
+        append(NotesExportDocument.disclaimer(for: snapshot.target), style: .meta)
 
-        append(NotesExportDocument.notesHeading, style: .heading)
+        append(NotesExportDocument.notesHeading(for: snapshot.target), style: .heading)
         let notes = snapshot.notesMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
         if notes.isEmpty {
-            append("（所选范围暂无笔记）", style: .body)
+            append(NotesExportDocument.fixed(.emptyNotes, target: snapshot.target), style: .body)
         } else {
             for line in notes.split(separator: "\n", omittingEmptySubsequences: false) {
                 append(String(line), style: Style.markdown(String(line)))
@@ -703,7 +716,7 @@ enum PDFNotesWriter {
         }
 
         if let review = NotesExportDocument.reviewBody(snapshot) {
-            append(NotesExportDocument.reviewHeading, style: .heading)
+            append(NotesExportDocument.reviewHeading(for: snapshot.target), style: .heading)
             for line in review.split(separator: "\n", omittingEmptySubsequences: false) {
                 append(String(line), style: Style.markdown(String(line)))
             }
