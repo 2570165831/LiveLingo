@@ -144,12 +144,18 @@ enum SessionExporter {
     static func savedSummaryURL(in directory: URL) -> URL {
         struct TargetMetadata: Decodable { let targetLocale: String }
         var names: [String] = []
+        let snapshotURL = directory.appendingPathComponent(SessionStore.snapshotFileName)
+        if FileManager.default.fileExists(atPath: snapshotURL.path),
+           let snapshot = try? SessionStore(directory: directory).load(),
+           let locale = snapshot.targetLocale, isValidTargetLocale(locale) {
+            names.append(targetSummaryFileName(for: locale))
+        }
         if let data = try? Data(contentsOf: directory.appendingPathComponent("manifest.json")),
            let metadata = try? JSONDecoder().decode(TargetMetadata.self, from: data),
            isValidTargetLocale(metadata.targetLocale) {
             names.append(targetSummaryFileName(for: metadata.targetLocale))
         }
-        for name in [targetSummaryFileName, "summary-zh-Hans.md"] where !names.contains(name) {
+        for name in ["summary-zh-Hans.md"] where !names.contains(name) {
             names.append(name)
         }
         return names.map { directory.appendingPathComponent($0) }
@@ -185,19 +191,54 @@ enum SessionExporter {
             + captionLines(segment, target: target).joined(separator: "\n")
     }
 
+    /// Saved text can be verified before its language is released for generation.
+    static func targetLine(_ segment: TranscriptSegment, outputLanguage: OutputLanguage) -> String {
+        if let generated = outputLanguage.generationTarget {
+            return targetLine(segment, target: generated)
+        }
+        if outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage) {
+            return segment.hasUsableTranslation ? segment.chinese : segment.english
+        }
+        if segment.sourceLanguage != nil, segment.translationState == .failed {
+            return "（本段翻译未完成，可对照原文）"
+        }
+        return humanReadableChinese(segment.chinese)
+    }
+
+    static func captionLines(_ segment: TranscriptSegment, outputLanguage: OutputLanguage) -> [String] {
+        let translated = targetLine(segment, outputLanguage: outputLanguage)
+        if outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage) {
+            // Earlier English-target exports could contain a separate English
+            // rendering. Retain both lines when those saved bodies differ.
+            if outputLanguage == .english, translated != sourceLine(segment) {
+                return [sourceLine(segment), translated]
+            }
+            return [translated]
+        }
+        return [sourceLine(segment), translated]
+    }
+
+    static func srtCue(_ segment: TranscriptSegment, index: Int, outputLanguage: OutputLanguage) -> String {
+        "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
+            + captionLines(segment, outputLanguage: outputLanguage).joined(separator: "\n")
+    }
+
     static func export(
         segments: [TranscriptSegment],
         sessionDirectory: URL,
         recordingFileName: String = "recording.wav",
         summary: String = "",
         createdAt: Date = Date(),
-        target: CaptionTranslationTarget = .simplifiedChinese
+        target: OutputLanguage = .simplifiedChinese
     ) throws {
+        guard target.rendererIsAvailable else {
+            throw SessionStoreError.invalidState("课程输出语言的渲染器尚不可用")
+        }
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
 
         let english = segments.map(sourceLine).joined(separator: "\n")
-        let chinese = segments.map { targetLine($0, target: target) }.joined(separator: "\n")
+        let chinese = try segments.map { try target.render(targetLine($0, outputLanguage: target)) }.joined(separator: "\n")
         try english.appending("\n").write(
             to: sessionDirectory.appendingPathComponent("transcript-en.txt"),
             atomically: true,
@@ -226,7 +267,7 @@ enum SessionExporter {
         )
 
         let srt = segments.enumerated().map { index, segment in
-            srtCue(segment, index: index, target: target)
+            srtCue(segment, index: index, outputLanguage: target)
         }.joined(separator: "\n\n") + "\n"
         try srt.write(
             to: sessionDirectory.appendingPathComponent("bilingual.srt"),
@@ -234,7 +275,7 @@ enum SessionExporter {
             encoding: .utf8
         )
 
-        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSummary = try target.render(summary).trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedSummary.isEmpty {
             try (trimmedSummary + "\n").write(
                 to: sessionDirectory.appendingPathComponent(targetSummaryFileName(for: target.rawValue)),
@@ -362,6 +403,7 @@ struct NotesExportSnapshot: Equatable, Sendable {
     let generatedAt: Date
     let includesReviewAdvice: Bool
     let includesTranscript: Bool
+    var target: OutputLanguage = .simplifiedChinese
 
     var classDate: String { NotesExportDocument.classDate(of: self) }
 }
@@ -369,12 +411,14 @@ struct NotesExportSnapshot: Equatable, Sendable {
 enum NotesExportError: LocalizedError {
     case emptyNotes
     case pdfContextUnavailable
+    case rendererUnavailable
     case writeFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .emptyNotes: return "所选范围还没有可导出的笔记内容。"
         case .pdfContextUnavailable: return "无法创建 PDF 输出上下文。"
+        case .rendererUnavailable: return "课程输出语言的渲染器尚不可用，暂时无法导出笔记。"
         case .writeFailed(let detail): return "写入文件失败：\(detail)"
         }
     }
@@ -478,7 +522,7 @@ enum NotesExportDocument {
         if snapshot.includesTranscript, !snapshot.transcript.isEmpty {
             let lines = snapshot.transcript.map { segment -> String in
                 let stamp = "\(timestamp(segment.startTime))–\(timestamp(segment.endTime))"
-                return "[\(stamp)] " + SessionExporter.captionLines(segment).joined(separator: "\n")
+                return "[\(stamp)] " + SessionExporter.captionLines(segment, outputLanguage: snapshot.target).joined(separator: "\n")
             }
             sections.append("## \(transcriptHeading)\n\n" + lines.joined(separator: "\n\n"))
         }
@@ -498,7 +542,7 @@ enum NotesExportDocument {
         if snapshot.includesTranscript, !snapshot.transcript.isEmpty {
             let lines = snapshot.transcript.map { segment -> String in
                 let stamp = "\(timestamp(segment.startTime))–\(timestamp(segment.endTime))"
-                return "[\(stamp)] " + SessionExporter.captionLines(segment).joined(separator: "\n")
+                return "[\(stamp)] " + SessionExporter.captionLines(segment, outputLanguage: snapshot.target).joined(separator: "\n")
             }
             sections.append(transcriptHeading + "\n\n" + lines.joined(separator: "\n\n"))
         }
@@ -506,6 +550,7 @@ enum NotesExportDocument {
     }
 
     static func data(_ snapshot: NotesExportSnapshot, format: NotesExportFormat) throws -> Data {
+        guard snapshot.target.rendererIsAvailable else { throw NotesExportError.rendererUnavailable }
         switch format {
         case .markdown: return Data(markdown(snapshot).utf8)
         case .plainText: return Data(plainText(snapshot).utf8)
@@ -655,7 +700,7 @@ enum PDFNotesWriter {
             append(NotesExportDocument.transcriptHeading, style: .heading)
             for segment in snapshot.transcript {
                 let stamp = "\(NotesExportDocument.timestamp(segment.startTime))–\(NotesExportDocument.timestamp(segment.endTime))"
-                let lines = SessionExporter.captionLines(segment)
+                let lines = SessionExporter.captionLines(segment, outputLanguage: snapshot.target)
                 append("[\(stamp)] \(lines[0])", style: .body)
                 for translation in lines.dropFirst() { append(translation, style: .translation) }
             }

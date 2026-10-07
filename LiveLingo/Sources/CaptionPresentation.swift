@@ -48,6 +48,13 @@ struct CaptionPresentation: Equatable {
         }
     }
 
+    init(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
+         locale: Locale = CaptionLanguageNames.interfaceLocale) {
+        languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
+        isSourceOnly = outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
+        primaryText = isSourceOnly ? SessionExporter.targetLine(segment, outputLanguage: outputLanguage) : segment.english
+    }
+
     static func translationStatus(isTranslating: Bool) -> String {
         isTranslating ? "翻译中…" : "等待翻译…"
     }

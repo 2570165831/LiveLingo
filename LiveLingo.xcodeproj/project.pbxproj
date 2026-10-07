@@ -94,6 +94,7 @@
 		B75500000000000000000001 /* TargetDefaultingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B75500000000000000000002 /* TargetDefaultingTests.swift */; };
 		B75600000000000000000001 /* TargetPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B75600000000000000000002 /* TargetPersistenceTests.swift */; };
 		B76600000000000000000001 /* CourseOutputLanguageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B76600000000000000000002 /* CourseOutputLanguageTests.swift */; };
+		B75700000000000000000001 /* TargetExportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B75700000000000000000002 /* TargetExportTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -199,6 +200,7 @@
 		B75500000000000000000002 /* TargetDefaultingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetDefaultingTests.swift; sourceTree = "<group>"; };
 		B75600000000000000000002 /* TargetPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetPersistenceTests.swift; sourceTree = "<group>"; };
 		B76600000000000000000002 /* CourseOutputLanguageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CourseOutputLanguageTests.swift; sourceTree = "<group>"; };
+		B75700000000000000000002 /* TargetExportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetExportTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -276,6 +278,7 @@
 			children = (
 				B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */,
 				B75500000000000000000002 /* TargetDefaultingTests.swift */,
+				B75700000000000000000002 /* TargetExportTests.swift */,
 				B76600000000000000000002 /* CourseOutputLanguageTests.swift */,
 				B75600000000000000000002 /* TargetPersistenceTests.swift */,
 				B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */,
@@ -432,6 +435,7 @@
 			files = (
 				B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */,
 				B75500000000000000000001 /* TargetDefaultingTests.swift in Sources */,
+				B75700000000000000000001 /* TargetExportTests.swift in Sources */,
 				B76600000000000000000001 /* CourseOutputLanguageTests.swift in Sources */,
 				B75600000000000000000001 /* TargetPersistenceTests.swift in Sources */,
 				B70000000000000000000007 /* AcceptanceVerdictSnapshotTests.swift in Sources */,

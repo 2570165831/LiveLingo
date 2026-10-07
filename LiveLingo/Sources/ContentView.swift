@@ -475,7 +475,7 @@ struct ContentView: View {
     }
 
     private func segmentRow(_ segment: TranscriptSegment) -> some View {
-        TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize, stream: model.finalCaptionStream)
+        TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize, stream: model.finalCaptionStream, target: model.outputLanguage)
             .equatable()
     }
 
@@ -1840,13 +1840,14 @@ private struct TranscriptCaptionRow: View, Equatable {
     let segment: TranscriptSegment
     let textSize: Double
     let stream: FinalCaptionState
+    var target: OutputLanguage = .simplifiedChinese
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.segment == rhs.segment && lhs.textSize == rhs.textSize && lhs.stream === rhs.stream
+        lhs.segment == rhs.segment && lhs.textSize == rhs.textSize && lhs.stream === rhs.stream && lhs.target == rhs.target
     }
 
     var body: some View {
-        let caption = CaptionPresentation(segment)
+        let caption = CaptionPresentation(segment, outputLanguage: target)
         HStack(alignment: .top, spacing: 14) {
             Text(Self.clock(segment.startTime))
                 .font(.system(size: 13).monospacedDigit())

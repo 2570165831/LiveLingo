@@ -49,7 +49,7 @@ struct LiveLingoCLI {
 
  // MARK: - Command line
 
- static let usage = "Usage: livelingo-cli (--replay AUDIO | --system-audio SECONDS) --output NEW_DIRECTORY [--high-quality] [--import] [--export-notes] [--run-review]\n       livelingo-cli --translate-text TEXT [--high-quality] [--output NEW_DIRECTORY]\n       livelingo-cli --verify-saved DIRECTORY\n       livelingo-cli --open-saved DIRECTORY\n       livelingo-cli --resume-saved DIRECTORY [--high-quality] [--export-notes] [--run-review]\nReplay injects PCM without playing sound. --import uses the app's file-import path. Audio requires ASRRuntime/ and Models/ beside this executable or inside its isolated bundle. External ASR endpoints are rejected. MLX paths use LIVELINGO_MLX_PYTHON/WORKER/MODELS. Each generating run creates independent preferences, data and checkpoints; failures retain state. Only --translate-text prints translated content. --verify-saved is a read-only export-integrity check (it does NOT prove a complete run, and it accepts valid audio with zero captions). --open-saved reopens a course this CLI itself isolated and bound; it never records, never resumes generation and reports identity, revision, batches, source and pause state. --resume-saved performs the same bound reopen and then explicitly continues the saved translation/notes work; it refuses courses whose bound session, revision, captions or batches do not match the recorded identity."
+ static let usage = "Usage: livelingo-cli (--replay AUDIO | --system-audio SECONDS) --output NEW_DIRECTORY [--target zh-Hans] [--high-quality] [--import] [--export-notes] [--run-review]\n       livelingo-cli --translate-text TEXT [--high-quality] [--output NEW_DIRECTORY]\n       livelingo-cli --verify-saved DIRECTORY\n       livelingo-cli --open-saved DIRECTORY\n       livelingo-cli --resume-saved DIRECTORY [--high-quality] [--export-notes] [--run-review]\nReplay injects PCM without playing sound. --import uses the app's file-import path. Audio requires ASRRuntime/ and Models/ beside this executable or inside its isolated bundle. External ASR endpoints are rejected. MLX paths use LIVELINGO_MLX_PYTHON/WORKER/MODELS. Each generating run creates independent preferences, data and checkpoints; failures retain state. Only --translate-text prints translated content. --verify-saved is a read-only export-integrity check (it does NOT prove a complete run, and it accepts valid audio with zero captions). --open-saved reopens a course this CLI itself isolated and bound; it never records, never resumes generation and reports identity, revision, batches, source and pause state. --resume-saved performs the same bound reopen and then explicitly continues the saved translation/notes work; it refuses courses whose bound session, revision, captions or batches do not match the recorded identity."
 
  struct GenerateCommand: Equatable, Sendable {
   enum Source: Equatable, Sendable { case replay(String), systemAudio(Double) }
@@ -59,6 +59,7 @@ struct LiveLingoCLI {
   var fileImport: Bool
   var exportNotes: Bool
   var runReview: Bool
+  var target: OutputLanguage = .simplifiedChinese
  }
 
  enum Command: Equatable, Sendable {
@@ -75,7 +76,7 @@ struct LiveLingoCLI {
  static func parse(_ arguments: [String]) throws -> Command {
   if arguments.isEmpty || arguments.contains("--help") { return .help }
   let valueOptions: Set<String> = ["--replay", "--system-audio", "--output", "--translate-text",
-                                   "--verify-saved", "--open-saved", "--resume-saved"]
+                                   "--verify-saved", "--open-saved", "--resume-saved", "--target"]
   let switches: Set<String> = ["--high-quality", "--import", "--export-notes", "--run-review"]
   var values: [String: String] = [:]
   var index = 0
@@ -108,12 +109,12 @@ struct LiveLingoCLI {
    return mode == "--verify-saved" ? .verifySaved(values[mode]!) : .openSaved(values[mode]!)
   }
   if mode == "--resume-saved" {
-   guard !flag("--output"), !flag("--import") else { throw CLIError.invalidArguments }
+   guard !flag("--output"), !flag("--import"), !flag("--target") else { throw CLIError.invalidArguments }
    return .resumeSaved(path: values[mode]!, highQuality: flag("--high-quality"),
                        exportNotes: flag("--export-notes"), runReview: flag("--run-review"))
   }
   if mode == "--translate-text" {
-   guard !flag("--import"), !flag("--export-notes"), !flag("--run-review") else { throw CLIError.invalidArguments }
+   guard !flag("--import"), !flag("--export-notes"), !flag("--run-review"), !flag("--target") else { throw CLIError.invalidArguments }
    return .translateText(text: values[mode]!, highQuality: flag("--high-quality"), output: values["--output"])
   }
   guard let output = values["--output"] else { throw CLIError.invalidArguments }
@@ -127,9 +128,10 @@ struct LiveLingoCLI {
    }
    source = .systemAudio(seconds)
   }
+  guard let target = OutputLanguage.releasedLanguage(values["--target"] ?? "zh-Hans") else { throw CLIError.invalidArguments }
   return .generate(GenerateCommand(source: source, output: output, highQuality: flag("--high-quality"),
                                    fileImport: flag("--import"), exportNotes: flag("--export-notes"),
-                                   runReview: flag("--run-review")))
+                                   runReview: flag("--run-review"), target: target))
  }
 
  @MainActor static func run() async throws {
@@ -201,7 +203,7 @@ struct LiveLingoCLI {
   do {
    try await model.cliRun(file: file, seconds: seconds, directory: directory,
                           highQuality: command.highQuality, paced: !command.fileImport,
-                          exportNotes: command.exportNotes, runReview: command.runReview) { event, fields in
+                          exportNotes: command.exportNotes, runReview: command.runReview, target: command.target) { event, fields in
     writeEvent(safeEvent(event, fields: fields, elapsed: ProcessInfo.processInfo.systemUptime - start))
    }
   } catch {
@@ -311,7 +313,10 @@ struct LiveLingoCLI {
   let decoder=JSONDecoder();decoder.dateDecodingStrategy = .iso8601
   let manifest=try decoder.decode(SessionExporter.Manifest.self,from:Data(contentsOf:directory.appendingPathComponent("manifest.json")))
   guard manifest.recordingFile == "recording.wav",
-        SessionExporter.isValidTargetLocale(manifest.targetLocale) else { throw CLIError.inconsistentExport }
+        let renderer = OutputLanguage.savedRenderer(for: manifest.targetLocale, sourceLanguages: manifest.sourceLanguages) else { throw CLIError.inconsistentExport }
+  if FileManager.default.fileExists(atPath: directory.appendingPathComponent(SessionStore.snapshotFileName).path),
+     let snapshot = try SessionStore(directory: directory).load(), let recorded = snapshot.targetLocale,
+     recorded != manifest.targetLocale { throw CLIError.inconsistentExport }
   let targetTranscriptName = SessionExporter.targetTranscriptFileName(for: manifest.targetLocale)
   let targetSummaryName = SessionExporter.targetSummaryFileName(for: manifest.targetLocale)
   let jsonl=try String(contentsOf:directory.appendingPathComponent("bilingual.jsonl"),encoding:.utf8)
@@ -328,14 +333,14 @@ struct LiveLingoCLI {
     try decoder.decode(LanguageMetadata.self, from: Data($0.utf8)).sourceLanguage == nil
    }) else { throw CLIError.inconsistentExport }
   }
-  let usesLegacyFormat = manifest.sourceLanguages == nil
+  let usesLegacyFormat = manifest.targetLocale == "zh-Hans" && manifest.sourceLanguages == nil
   let english=try String(contentsOf:directory.appendingPathComponent("transcript-en.txt"),encoding:.utf8)
   let chinese=try String(contentsOf:directory.appendingPathComponent(targetTranscriptName),encoding:.utf8)
-  let targetLines = usesLegacyFormat ? segments.map(legacyTargetLine) : segments.map { SessionExporter.targetLine($0) }
+  let targetLines = usesLegacyFormat ? segments.map(legacyTargetLine) : segments.map { renderer.targetLine($0) }
   guard english == segments.map(SessionExporter.sourceLine).joined(separator:"\n")+"\n",
         chinese == targetLines.joined(separator:"\n")+"\n" else { throw CLIError.inconsistentExport }
   let expectedSRT = segments.enumerated().map { index, segment in
-   usesLegacyFormat ? legacySRTCue(segment, index: index) : SessionExporter.srtCue(segment, index: index)
+   usesLegacyFormat ? legacySRTCue(segment, index: index) : renderer.srtCue(segment, index: index)
   }.joined(separator: "\n\n") + "\n"
   guard try String(contentsOf: directory.appendingPathComponent("bilingual.srt"), encoding: .utf8) == expectedSRT else { throw CLIError.inconsistentExport }
   let audio=try AVAudioFile(forReading:directory.appendingPathComponent(manifest.recordingFile))

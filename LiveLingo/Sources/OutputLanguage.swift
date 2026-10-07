@@ -80,4 +80,53 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         return .simplifiedChinese
     }
 
+    var rendererIsAvailable: Bool {
+        if case .identity = profile.renderer { return true }
+        return false
+    }
+
+    func keepsSourceAsCaption(language: String?) -> Bool {
+        profile.passThroughSources.contains(language ?? "en")
+    }
+
+    func render(_ text: String) throws -> String {
+        guard rendererIsAvailable else {
+            throw SessionStoreError.invalidState("课程输出语言的渲染器尚不可用")
+        }
+        return text
+    }
+
+    enum SavedRenderer {
+        case output(OutputLanguage)
+        // Earlier exporters used this non-regional code for already rendered
+        // Traditional Chinese. It is read-only compatibility, not a new target.
+        case legacyTraditionalChinese(usesLegacyFormat: Bool)
+
+        func targetLine(_ segment: TranscriptSegment) -> String {
+            switch self {
+            case .output(let language): return SessionExporter.targetLine(segment, outputLanguage: language)
+            case .legacyTraditionalChinese(let usesLegacyFormat):
+                return usesLegacyFormat ? SessionExporter.humanReadableChinese(segment.chinese)
+                    : SessionExporter.targetLine(segment, target: .simplifiedChinese)
+            }
+        }
+        func srtCue(_ segment: TranscriptSegment, index: Int) -> String {
+            switch self {
+            case .output(let language): return SessionExporter.srtCue(segment, index: index, outputLanguage: language)
+            case .legacyTraditionalChinese(let usesLegacyFormat):
+                if !usesLegacyFormat {
+                    return SessionExporter.srtCue(segment, index: index, target: .simplifiedChinese)
+                }
+                return "\(index + 1)\n\(SessionExporter.srtTimestamp(segment.startTime)) --> \(SessionExporter.srtTimestamp(segment.endTime))\n"
+                    + [segment.english, targetLine(segment)].joined(separator: "\n")
+            }
+        }
+    }
+
+    static func savedRenderer(for locale: String, sourceLanguages: [String]? = nil) -> SavedRenderer? {
+        if locale == "zh-Hant" { return .legacyTraditionalChinese(usesLegacyFormat: sourceLanguages == nil) }
+        guard let language = Self(rawValue: locale), language.rendererIsAvailable else { return nil }
+        return .output(language)
+    }
+
 }

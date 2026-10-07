@@ -1293,7 +1293,8 @@ final class AppModel: ObservableObject {
             transcript: transcript,
             generatedAt: Date(),
             includesReviewAdvice: exportIncludesReviewAdvice,
-            includesTranscript: exportIncludesTranscript && !transcript.isEmpty
+            includesTranscript: exportIncludesTranscript && !transcript.isEmpty,
+            target: outputLanguage
         )
     }
 
@@ -1969,9 +1970,9 @@ final class AppModel: ObservableObject {
             guard sessionID == identity, generation == epoch else { return }
             if sessionSaver == nil { bindSessionArchive(to: directory) }
             try await flushSessionArchive()
-            let captions = segments, notes = lectureSummary
+            let captions = segments, notes = lectureSummary, target = outputLanguage
             try await Task.detached {
-                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes)
+                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target)
             }.value
             guard sessionID == identity, generation == epoch else { return }
             volatileEnglish = ""
@@ -2037,9 +2038,9 @@ final class AppModel: ObservableObject {
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
         do {
             try await flushSessionArchive()
-            let captions = segments, notes = lectureSummary
+            let captions = segments, notes = lectureSummary, target = outputLanguage
             try await Task.detached {
-                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes)
+                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target)
             }.value
             guard !Task.isCancelled, sessionID == identity, generation == epoch else { return }
             if let recovered = sessionSnapshot?.processing.clearResolvedStorageFailure(), archiveError == recovered {
@@ -2241,9 +2242,9 @@ final class AppModel: ObservableObject {
                 // A prior failure may have happened while writing readable
                 // exports, after the snapshot succeeded. Retry both outputs
                 // before retiring the persisted storage failure.
-                let captions = segments, notes = lectureSummary
+                let captions = segments, notes = lectureSummary, target = outputLanguage
                 try await Task.detached {
-                    try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes)
+                    try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target)
                 }.value
                 guard sessionID == identity, generation == epoch else { return }
                 sessionSnapshot?.processing.clearResolvedStorageFailure()
@@ -4594,7 +4595,7 @@ extension AppModel {
                 else { try await Task.sleep(for: .milliseconds(250)) }
             }
             try await flushSessionArchive()
-            try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary)
+            try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage)
 
             if runReview {
                 try noteReviewQueue.enqueue(directory: directory, notebook: learningNotebook,
@@ -4782,7 +4783,7 @@ extension AppModel {
                     else { try await Task.sleep(for: .milliseconds(250)) }
                 }
                 try await flushSessionArchive()
-                try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary)
+                try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage)
                 if runReview {
                     try noteReviewQueue.enqueue(directory: directory, notebook: learningNotebook,
                         scope: .wholeLesson, sessionID: identity, inputRevision: sessionSnapshot?.inputRevision)

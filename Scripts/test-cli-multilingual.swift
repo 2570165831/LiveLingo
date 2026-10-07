@@ -401,6 +401,7 @@ import Foundation
             try Data("broken\n".utf8).write(to: mixed.appendingPathComponent("bilingual.srt"))
             try rejects("corrupt_srt_rejected") { try LiveLingoCLI.verifySaved(mixed, emit: false) }
             passed.append("corrupt_srt_rejected")
+            passed += try targetChecks(root)
             LiveLingoCLI.writeEvent(["event": "multilingual_cli_tests_passed", "tests": passed.count, "checks": passed])
         } catch {
             LiveLingoCLI.writeEvent(["event": "multilingual_cli_tests_failed",
@@ -409,4 +410,71 @@ import Foundation
             exit(1)
         }
     }
+    static func targetChecks(_ root: URL) throws -> [String] {
+        var passed: [String] = []
+        let base = ["--replay", "synthetic.wav", "--output", "synthetic-output"]
+        let implicit = try LiveLingoCLI.parse(base)
+        let explicit = try LiveLingoCLI.parse(base + ["--target", "zh-Hans"])
+        try expect(implicit == explicit, "target_default_matches_explicit_hans")
+        for arguments in [
+            base + ["--target", "en"], base + ["--target", "fr"],
+            base + ["--target", "zh-Hant-TW"], base + ["--target", "unknown"],
+            base + ["--target", "zh-Hans", "--target", "zh-Hans"],
+            ["--verify-saved", "synthetic", "--target", "zh-Hans"],
+            ["--open-saved", "synthetic", "--target", "zh-Hans"],
+            ["--resume-saved", "synthetic", "--target", "zh-Hans"],
+            ["--translate-text", "synthetic", "--target", "zh-Hans"]
+        ] {
+            do { _ = try LiveLingoCLI.parse(arguments) }
+            catch LiveLingoCLI.CLIError.invalidArguments { continue }
+            throw Failure(name: "target_option_must_be_validated_before_io")
+        }
+        passed.append("validated_generation_target_and_mode_boundaries")
+
+        let course = try fixtureDirectory(root, name: "single-line-english-target")
+        let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Air is clear.", chinese: "Air is clear.")
+        try SessionExporter.export(segments: [segment], sessionDirectory: course,
+            summary: "Clear air.", createdAt: Date(timeIntervalSince1970: 0), target: .english)
+        let before = try fileBytes(course)
+        try expect(before["transcript-target-en.txt"] == Data("Air is clear.\n".utf8), "english_target_has_distinct_filename")
+        try expect(before["bilingual.srt"] == Data("1\n00:00:00,000 --> 00:00:01,000\nAir is clear.\n".utf8), "english_target_single_line_srt")
+        try expect(try LiveLingoCLI.verifySaved(course, emit: false) == 1, "english_target_is_not_legacy_hans")
+        try expect(try fileBytes(course) == before, "english_target_verify_is_read_only")
+        passed.append("single_line_english_target_verify")
+
+        let traditional = try frozenFixture(root, name: "annotated-traditional-target", files: [
+            "manifest.json": #"{"createdAt":"1970-01-01T00:00:00Z","recordingFile":"recording.wav","segmentCount":1,"sourceLocale":"en-US","targetLocale":"zh-Hant","sourceLanguages":["zh"]}"#,
+            "bilingual.jsonl": #"{"id":"00000000-0000-0000-0000-000000000080","startTime":0,"endTime":1,"english":"這個實驗需要兩個容器。","chinese":"這個實驗需要兩個容器。","sourceLanguage":"zh"}"# + "\n",
+            "transcript-en.txt": "這個實驗需要兩個容器。\n",
+            "transcript-zh-Hant.txt": "這個實驗需要兩個容器。\n",
+            "bilingual.srt": "1\n00:00:00,000 --> 00:00:01,000\n這個實驗需要兩個容器。\n"
+        ])
+        let traditionalBefore = try fileBytes(traditional)
+        try expect(try LiveLingoCLI.verifySaved(traditional, emit: false) == 1, "annotated_traditional_keeps_single_line_srt")
+        try expect(try fileBytes(traditional) == traditionalBefore, "annotated_traditional_verify_is_read_only")
+        passed.append("annotated_traditional_target_keeps_original_rendering")
+
+        let manifest = course.appendingPathComponent("manifest.json")
+        for locale in ["xx", "zh-Hant-TW"] {
+            var object = try JSONSerialization.jsonObject(with: before["manifest.json"]!) as! [String: Any]
+            object["targetLocale"] = locale
+            try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: manifest)
+            try rejects("unknown_or_unavailable_saved_renderer_rejected") {
+                try LiveLingoCLI.verifySaved(course, emit: false)
+            }
+        }
+        try before["manifest.json"]!.write(to: manifest)
+        passed.append("unknown_saved_target_and_unavailable_converter_rejected")
+
+        let oldMarker = #"{"audioFrames":0,"audioSampleRate":0,"batchDigest":"synthetic","batchIDs":[],"boundAt":"synthetic","captionDigest":"synthetic","completedDigest":"synthetic","completedIDs":[],"inputRevision":0,"journalIncompleteTailBytes":0,"latestEvidenceIDs":[],"segmentIDs":[],"sessionID":"synthetic"}"#
+        var bound = try JSONDecoder().decode(LiveLingoCLI.CLIRunSession.self, from: Data(oldMarker.utf8))
+        try expect(bound.targetLocale == nil, "old_marker_defaults_to_hans")
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        try expect(try encoder.encode(bound) == Data(oldMarker.utf8), "nil_marker_target_preserves_bytes")
+        bound.targetLocale = "en"
+        try expect(try JSONDecoder().decode(LiveLingoCLI.CLIRunSession.self, from: encoder.encode(bound)).targetLocale == "en", "marker_target_round_trip")
+        passed.append("optional_cli_target_marker_compatibility")
+        return passed
+    }
+
 }

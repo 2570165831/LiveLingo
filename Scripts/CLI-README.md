@@ -136,7 +136,7 @@ it does not prove complete processing and accepts valid audio with zero captions
 
 Multilingual exports reuse the existing files. `transcript-en.txt` contains the
 original source text without language labels. The target transcript (currently
-`transcript-zh-Hans.txt`, selected by `CaptionTranslationTarget`) uses the saved
+`transcript-zh-Hans.txt`, selected by the course output language) uses the saved
 usable target text for Chinese speech, or normalizes its source text to the
 target writing system when that text is unavailable. Other languages, including
 Cantonese, use translated text. SRT cues contain the Chinese target line once;
@@ -148,15 +148,20 @@ infer zh only when their completed source and target text match and satisfy the
 Chinese-content gate; this does not recover a separate historical yue identity.
 Manifest `sourceLanguages` is an optional sorted list of unique non-English codes and is
 omitted for English-only courses; `sourceLocale` retains its legacy value.
-`--verify-saved` selects transcript and summary filenames using the saved
-manifest's `targetLocale`, even when it differs from the current target. With
-`sourceLanguages` present it requires the exact language list and current shared
-rendering. Without that field every row must lack an explicit source-language
-marker, and verification uses the old two-line SRT and
-`humanReadableChinese(chinese)` target text, including inferred zh rows. Absent
-or null JSONL markers remain compatible; any stored `sourceLanguage` string,
-including `en` or an unknown code, requires the manifest language field.
-Removing the manifest language list from an explicitly marked export is rejected.
+`--verify-saved` selects filenames and a supported renderer from the manifest's
+`targetLocale`; unknown targets and unavailable converters are rejected.
+The old unmarked two-line rules apply only to `zh-Hans` without
+`sourceLanguages`. English-target source-only captions use one-line cues;
+earlier exports with different source and saved English bodies retain both.
+Already rendered legacy `zh-Hant` exports remain readable through a separate
+compatibility renderer. Explicit JSONL source markers still require the exact
+manifest language list. Verification does not consult the current preference.
+
+Generation accepts `--target zh-Hans` (also the default). Other codes, duplicate
+flags, and `--target` in verification, reopen, resume, or typed-translation modes
+are rejected before files or runtimes are touched. Opening and resuming use the
+course's recorded target; a changed preference applies only to new courses.
+
 An `en` target uses `transcript-target-en.txt`, preserving the separate original
 source file `transcript-en.txt`.
 Non-English translation failures render as
