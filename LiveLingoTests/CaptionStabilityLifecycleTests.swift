@@ -187,12 +187,12 @@ final class CaptionStabilityLifecycleTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let probe = StabilityNoteProbe(captionCount: captionCount, failFirst: failFirst, gate: gate)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review-queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Saved note lifecycle tests must not start a review")
                 throw CancellationError()
             }
         let model = AppModel(reviewQueue: queue, translation: probe.translation,
-            notes: .init(generate: { input, _, _, _ in try await probe.generate(input) }),
+            notes: .init(generate: { input, _, _, _, _ in try await probe.generate(input) }),
             backgroundServices: false, scheduledNotes: true, defaults: defaults)
         model.resetTranslationSessionForTesting()
         model.loadPresentationForTesting(phase: .idle, evidence: [])

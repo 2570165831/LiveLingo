@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import XCTest
 @testable import LiveLingo
 
@@ -55,7 +57,7 @@ final class EnglishTargetTests: XCTestCase {
         let cleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(EnglishDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in throw CancellationError() }
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
         let model = AppModel(reviewQueue: queue, translation: dependencies, notes: notes,
             backgroundServices: false, scheduledNotes: false, defaults: defaults)
         model.setReleasedOutputLanguagesForTesting([.simplifiedChinese, .english])
@@ -105,6 +107,38 @@ final class EnglishTargetTests: XCTestCase {
             XCTAssertEqual([shown.source, shown.translation].compactMap { $0 }.count, 1)
             XCTAssertEqual((shown.source ?? shown.translation)?.text, "The variable stores a value.")
         }
+    }
+
+    func testEnglishCaptionsUseOwnedNonactivatingPanelWithOneVisibleRow() async throws {
+        let (model, _) = try await englishModel()
+        let suite = "EnglishTargetPanel-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { try cleanup.remove() }
+        let preferences = FloatingSubtitlePreferences(store: defaults)
+        model.receiveLivePreviewForTesting("A variable stores a value.")
+        let controller = FloatingSubtitleWindowController(defaults: defaults)
+        let panel = controller.prepareWindow(model: model)
+        defer { controller.close() }
+        let host = try XCTUnwrap(panel.contentView as? NSHostingView<AnyView>)
+        var heights: [FloatingSubtitleDisplayMode: CGFloat] = [:]
+        for mode in FloatingSubtitleDisplayMode.allCases {
+            preferences.displayMode = mode
+            try await Task.sleep(for: .milliseconds(150))
+            host.layoutSubtreeIfNeeded()
+            let caption = model.floatingSubtitlePresentation(mode: mode)
+            XCTAssertEqual([caption.source, caption.translation].compactMap { $0 }.count, 1)
+            XCTAssertEqual((caption.source ?? caption.translation)?.text, "A variable stores a value.")
+            XCTAssertEqual(host.bounds.size, host.fittingSize)
+            XCTAssertEqual(panel.contentMinSize, host.fittingSize)
+            XCTAssertEqual(panel.contentMaxSize, host.fittingSize)
+            XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+            XCTAssertFalse(panel.isVisible)
+            XCTAssertFalse(panel.isKeyWindow)
+            heights[mode] = host.bounds.height
+        }
+        XCTAssertEqual(heights[.bilingual], heights[.translationOnly])
+        XCTAssertLessThan(try XCTUnwrap(heights[.sourceOnly]), try XCTUnwrap(heights[.bilingual]))
     }
 
     private actor RequestCount {
@@ -260,7 +294,7 @@ final class EnglishTargetTests: XCTestCase {
     func testEnglishNoteGenerationCallSiteBindsEnglishEvidenceAndKeepsInternalKinds() async throws {
         var calls = 0
         var notes = LearningGenerationDependencies.unavailable
-        notes.generateWithPrompt = { input, _, prefix, prompt, _ in
+        notes.generate = { input, _, prefix, prompt, _ in
             calls += 1
             XCTAssertEqual(prompt, LearningPrompts.generateEnglish)
             XCTAssertEqual(prefix, "")
@@ -298,6 +332,186 @@ final class EnglishTargetTests: XCTestCase {
         XCTAssertTrue(NotesExportDocument.markdown(exported).contains("**Example**: A variable stores a value."))
         model.exportScope = .wholeLesson
         XCTAssertEqual(try XCTUnwrap(model.notesExportSnapshot()).scopeDetail, model.summaryCoverageStatus)
+    }
+
+    private actor HeldManualRequest {
+        var continuation: CheckedContinuation<String, Never>?
+        func reply() async -> String { await withCheckedContinuation { continuation = $0 } }
+        var entered: Bool { continuation != nil }
+        func finish() { continuation?.resume(returning: "The temperature increases."); continuation = nil }
+    }
+
+    private func observingNotes(_ observe: @escaping @MainActor @Sendable (String?) -> Void)
+        -> LearningGenerationDependencies {
+        .init(generate: { _, _, _, prompt, _ in
+            observe(prompt)
+            return #"{"sourceVersion":2,"topic":"Variables","points":[{"kind":"例子","text":"A variable stores a value.","sourceIDs":["en0s0"]}],"noNewKnowledge":false}"#
+        })
+    }
+
+    func testRequiredGenerationDependencyForwardsEnglishPromptThroughApp() async throws {
+        var prompts: [String?] = []
+        let (model, _) = try await englishModel(notes: observingNotes { prompts.append($0) })
+        model.receiveIdentifiedCaptionForTesting(.init(startTime: 0, endTime: 1, english: "A variable stores a value."))
+        model.receiveIdentifiedCaptionForTesting(.init(startTime: 1, endTime: 2, english: "Each variable has a name."))
+        await model.generateSummaryForTesting()
+        XCTAssertEqual(prompts.count, 1)
+        XCTAssertEqual(prompts.first ?? nil, LearningPrompts.generateEnglish)
+        XCTAssertEqual(model.learningNotebookForTesting.batches.first?.note.points.first?.referenceState, .linked)
+    }
+
+    func testSavedEnglishAdmissionBypassesQueueWhileManualTranslationIsInFlight() async throws {
+        let (model, root) = try await englishModel()
+        let held = HeldManualRequest()
+        model.setTypedTranslationRequestForTesting { _, _, _ in
+            await held.reply()
+        }
+        model.manualTranslationInput = "温度升高。"
+        model.translateTypedText()
+        for _ in 0..<100 {
+            if await held.entered { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let entered = await held.entered
+        XCTAssertTrue(entered)
+        let pending = [nil, "en"].enumerated().map { index, language in
+            TranscriptSegment(startTime: Double(index), endTime: Double(index + 1),
+                english: "The variable stores a value.", sourceLanguage: language)
+        }
+        model.loadPresentationForTesting(phase: .saved(root.appendingPathComponent("course")), evidence: pending)
+        // This is the exact admission method used by resumeSavedProcessing;
+        // keep the drain out of the pre-fix case so a busy loop cannot hang XCTest.
+        model.restorePendingCaptionWorkForTesting()
+        XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+        XCTAssertTrue(model.translationEnqueuedAtForTesting.isEmpty)
+        XCTAssertTrue(model.segments.allSatisfy { $0.hasUsableTranslation && $0.chinese == $0.english })
+        XCTAssertNil(model.translationTaskForTesting)
+        await held.finish()
+        for _ in 0..<100 where model.isManualTranslating { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(model.isManualTranslating)
+    }
+
+    func testSavedResumeStaysResponsiveDuringHeldManualRequestAndSkipsEnglishWorkers() async throws {
+        var translations = 0, repairs = 0, adjacent = 0, apple = 0
+        var dependencies = CaptionTranslationDependencies.unavailable
+        dependencies.translateTarget = { _, _, _, _, _, _, _ in translations += 1; return "unused" }
+        dependencies.adjacentTarget = { _, _, _, _, _, _, _, _, _, _ in
+            adjacent += 1; return .init(previous: nil, current: nil, previousRejection: nil, currentRejection: nil)
+        }
+        dependencies.repairTarget = { _, _ in repairs += 1; return .init(previous: nil, rejection: nil) }
+        let (model, root) = try await englishModel(dependencies)
+        let directory = root.appendingPathComponent("held-resume")
+        let pending = [nil, "en"].enumerated().map { index, language in
+            TranscriptSegment(startTime: Double(index), endTime: Double(index + 1),
+                english: "A variable stores a value.", sourceLanguage: language)
+        }
+        try SessionStore(directory: directory).save(SessionSnapshot(segments: pending, targetLocale: "en"))
+        model.loadPresentationForTesting(phase: .saved(root.appendingPathComponent("course")), evidence: [])
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        let held = HeldManualRequest()
+        model.setTypedTranslationRequestForTesting { _, _, _ in await held.reply() }
+        model.manualTranslationInput = "温度升高。"
+        model.translateTypedText()
+        for _ in 0..<100 {
+            if await held.entered { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let entered = await held.entered
+        XCTAssertTrue(entered)
+        model.resumeSavedProcessing()
+        for _ in 0..<100 where model.segments.contains(where: { !$0.hasUsableTranslation }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let prepared = try await model.preparePreviewTranslationIfEligible { apple += 1 }
+        XCTAssertFalse(prepared)
+        XCTAssertTrue(model.isManualTranslating)
+        XCTAssertTrue(model.translationQueueForTesting.isEmpty)
+        XCTAssertTrue(model.translationEnqueuedAtForTesting.isEmpty)
+        XCTAssertTrue(model.segments.allSatisfy { $0.hasUsableTranslation && $0.chinese == $0.english })
+        XCTAssertEqual([translations, repairs, adjacent, apple], [0, 0, 0, 0])
+        await held.finish()
+        for _ in 0..<100 where model.isManualTranslating { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(model.isManualTranslating)
+        await model.savedProcessingTaskForTesting?.value
+    }
+
+    func testLegacyEnglishImportBindsNotebookAndDraftToManifestTarget() async throws {
+        let (model, root) = try await englishModel()
+        let directory = root.appendingPathComponent("legacy")
+        let evidence = [TranscriptSegment(startTime: 0, endTime: 1,
+            english: "The variable stores a value.", chinese: "The variable stores a value.")]
+        try SessionExporter.export(segments: evidence, sessionDirectory: directory,
+            summary: "## Variables\nA variable stores a value.", target: .english)
+        let loaded = try SessionStore(directory: directory).loadDetailed()
+        XCTAssertEqual(loaded.origin, .legacy)
+        let snapshot = try XCTUnwrap(loaded.snapshot)
+        XCTAssertEqual(snapshot.targetLocale, "en")
+        let notebook = try LearningNotebook(snapshot: snapshot)
+        XCTAssertEqual(notebook.target, .english)
+        let draft = LearningDraft(evidence: snapshot.segments, model: "synthetic",
+            input: try LearningPrompts.input(evidence: snapshot.segments, topics: [], target: .english),
+            target: .english, systemPrompt: LearningPrompts.generateEnglish)
+        XCTAssertTrue(draft.matches(snapshot: snapshot, model: "synthetic", systemPrompt: draft.systemPrompt))
+        model.loadPresentationForTesting(phase: .saved(root.appendingPathComponent("course")), evidence: [])
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        guard case .saved(let opened) = model.phase else { return XCTFail("Legacy course was not opened") }
+        XCTAssertEqual(opened, directory)
+        XCTAssertEqual(model.outputLanguage, .english)
+        XCTAssertEqual(model.learningNotebookForTesting.target, .english)
+    }
+
+    func testLegacyEnglishRebuildPersistsTargetAndCommitsGeneratedNotesAfterReopen() async throws {
+        var calls = 0
+        var notes = LearningGenerationDependencies.unavailable
+        notes.generate = { _, _, _, prompt, _ in
+            calls += 1
+            XCTAssertEqual(prompt, LearningPrompts.generateEnglish)
+            return #"{"sourceVersion":2,"topic":"Variables","points":[{"kind":"例子","text":"A variable stores a value.","sourceIDs":["en0s0"]}],"noNewKnowledge":false}"#
+        }
+        let (model, root) = try await englishModel(notes: notes)
+        let directory = root.appendingPathComponent("legacy-rebuild")
+        try SessionExporter.export(segments: [.init(startTime: 0, endTime: 1,
+            english: "A variable stores a value.", chinese: "A variable stores a value.")],
+            sessionDirectory: directory, summary: "## Variables\nPreserved old notes.", target: .english)
+        model.loadPresentationForTesting(phase: .saved(root.appendingPathComponent("course")), evidence: [])
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        model.rebuildSavedNotes()
+        for _ in 0..<200 where model.learningNotebookForTesting.batches.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        await model.savedProcessingTaskForTesting?.value
+        try await model.flushSavedCourseForTesting()
+        XCTAssertEqual(calls, 1, "status=\(model.summaryStatus); error=\(model.archiveError ?? "none"); legacy=\(model.legacyProvenanceUnavailable)")
+        XCTAssertEqual(model.learningNotebookForTesting.batches.count, 1)
+        let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+        XCTAssertEqual(saved.targetLocale, "en")
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        XCTAssertEqual(model.outputLanguage, .english)
+        XCTAssertEqual(model.learningNotebookForTesting.target, .english)
+        XCTAssertEqual(model.learningNotebookForTesting.batches.count, 1)
+        XCTAssertTrue(model.lectureSummary.contains("**Example**: A variable stores a value."))
+    }
+
+    func testExplicitEnglishFormulaAnnotationSurvivesRevisionAndSavedResume() async throws {
+        let (model, root) = try await englishModel()
+        let original = TranscriptSegment(startTime: 0, endTime: 1,
+            english: "The formula is [Formula transcription uncertain].")
+        model.receiveIdentifiedCaptionForTesting(original)
+        XCTAssertEqual(model.segments.first?.captionAnnotation, .formulaNeedsReview)
+        model.reviseCaptionForTesting(id: original.id,
+            english: "The new formula is [Formula transcription uncertain].")
+        XCTAssertEqual(model.segments.first?.captionAnnotation, .formulaNeedsReview)
+        let directory = root.appendingPathComponent("pending-formula")
+        try SessionStore(directory: directory).save(SessionSnapshot(segments: [original], targetLocale: "en"))
+        model.loadPresentationForTesting(phase: .saved(root.appendingPathComponent("course")), evidence: model.segments)
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        model.resumeSavedProcessing()
+        for _ in 0..<100 where model.segments.first?.hasUsableTranslation != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        await model.savedProcessingTaskForTesting?.value
+        XCTAssertEqual(model.segments.first?.captionAnnotation, .formulaNeedsReview)
+        XCTAssertEqual(model.segments.first?.chinese, original.english)
     }
 
 }

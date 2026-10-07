@@ -304,7 +304,7 @@ final class TargetSourcePolicyRefactorTests: XCTestCase {
         addTeardownBlock { try cleanup.remove() }
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("unused-queue.json"),
-                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
             XCTFail("Synthetic preview probes must not invoke a generator")
             throw CancellationError()
         }

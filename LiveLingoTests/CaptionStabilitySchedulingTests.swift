@@ -167,12 +167,12 @@ private final class CaptionSchedulingFixture {
         preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review-queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Scheduling fixtures must not invoke review models")
                 throw CancellationError()
             }
         model = AppModel(reviewQueue: queue, translation: translation ?? .unavailable,
-            notes: .init(generate: { input, _, prefix, _ in
+            notes: .init(generate: { input, _, prefix, _, _ in
                 try probe.generate(input, prefix: prefix)
             }), backgroundServices: false, scheduledNotes: true, defaults: defaults)
         model.resetTranslationSessionForTesting()

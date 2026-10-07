@@ -20,7 +20,7 @@ final class OutputLanguageBaselineTests: XCTestCase {
             .appendingPathComponent("OutputLanguageBaseline-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Presentation must not request a generation")
                 throw CancellationError()
             }

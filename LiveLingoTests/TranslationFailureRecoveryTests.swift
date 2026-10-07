@@ -39,7 +39,7 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         // Volatile overrides avoid changing a persistent preference domain.
         defaults.setVolatileDomain(["LiveLingo.modelMode": ModelMode.energySaver.rawValue], forName: UserDefaults.argumentDomain)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Failure recovery tests must not start a model or review")
                 throw CancellationError()
             }

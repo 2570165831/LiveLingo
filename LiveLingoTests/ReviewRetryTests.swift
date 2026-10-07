@@ -99,7 +99,7 @@ struct ReviewRetryTests {
         let directory = try makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
         var attempts = 0
-        let queue = makeQueue(journal: directory.appendingPathComponent("queue.json")) { _, _, record, update in
+        let queue = makeQueue(journal: directory.appendingPathComponent("queue.json")) { _, _, _, record, update in
             attempts += 1
             record("review-owned-\(attempts)")
             await update("unfinished generation")
@@ -173,7 +173,7 @@ struct ReviewRetryTests {
         }
         let journal = first.deletingLastPathComponent().appendingPathComponent("queue.json")
         var attempts = 0
-        let queue = makeQueue(journal: journal) { _, _, _, _ in
+        let queue = makeQueue(journal: journal) { _, _, _, _, _ in
             attempts += 1
             if attempts == 1 {
                 throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
@@ -224,7 +224,7 @@ struct ReviewRetryTests {
         defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
         let journal = directory.deletingLastPathComponent().appendingPathComponent("queue.json")
         var attempts = 0
-        let queue = makeQueue(journal: journal) { _, _, _, _ in
+        let queue = makeQueue(journal: journal) { _, _, _, _, _ in
             attempts += 1
             throw QwenRuntimeError.requestFailed("模拟本机模型协议错误")
         }
@@ -252,7 +252,7 @@ struct ReviewRetryTests {
         let journal = directory.deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("queue.json")
         var attempts = 0
-        let queue = makeQueue(journal: journal) { _, _, _, _ in
+        let queue = makeQueue(journal: journal) { _, _, _, _, _ in
             attempts += 1
             return Self.emptyV2Response
         }
@@ -274,7 +274,7 @@ struct ReviewRetryTests {
         let directory = try makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
         let journal = directory.deletingLastPathComponent().appendingPathComponent("queue.json")
-        let queue = makeQueue(journal: journal) { _, _, _, _ in
+        let queue = makeQueue(journal: journal) { _, _, _, _, _ in
             try await Task.sleep(for: .seconds(30))
             return Self.emptyV2Response
         }
@@ -302,7 +302,7 @@ struct ReviewRetryTests {
         defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
         let journal = directory.deletingLastPathComponent().appendingPathComponent("queue.json")
         var calls = 0
-        let queue = makeQueue(journal: journal) { _, _, _, _ in
+        let queue = makeQueue(journal: journal) { _, _, _, _, _ in
             calls += 1
             // 第一批立刻完成，第二批卡住，方便观察稳定的中间状态。
             if calls > 1 { try await Task.sleep(for: .seconds(30)) }
@@ -338,7 +338,7 @@ struct ReviewRetryTests {
         let session = try makeDirectory()
         let journal = session.deletingLastPathComponent().appendingPathComponent("queue.json")
         // 假 generator：绝不在测试里启动本机模型。
-        let queue = makeQueue(journal: journal) { _, _, _, _ in
+        let queue = makeQueue(journal: journal) { _, _, _, _, _ in
             try await Task.sleep(for: .seconds(30))
             return Self.emptyV2Response
         }
@@ -525,7 +525,7 @@ struct ReviewRetryTests {
         try writeJournal(prefix: "已经想了一半的前缀", digest: digest, version: LearningReviewQueue.journalVersion)
         #expect(try persistedJournal(journal).version == LearningReviewQueue.journalVersion)
         var deliveredPrefix: String?
-        let queue = makeQueue(journal: journal) { _, prefix, _, _ in
+        let queue = makeQueue(journal: journal) { _, prefix, _, _, _ in
             deliveredPrefix = prefix
             return Self.emptyV2Response
         }
@@ -543,7 +543,7 @@ struct ReviewRetryTests {
         #expect(try persistedJournal(journal).version == nil, "② 用的必须是旧日志（没有 version）")
         var restoredCalls = 0
         var restoredPrefix: String?
-        let restored = makeQueue(journal: journal) { _, prefix, _, _ in
+        let restored = makeQueue(journal: journal) { _, prefix, _, _, _ in
             restoredCalls += 1
             restoredPrefix = prefix
             return Self.emptyV2Response
@@ -576,7 +576,7 @@ struct ReviewRetryTests {
         try writeJournal(prefix: "错误的绑定", digest: otherDigest, next: 0)
         var mismatchedCalls = 0
         var mismatchedPrefix: String?
-        let mismatched = makeQueue(journal: journal) { _, prefix, _, _ in
+        let mismatched = makeQueue(journal: journal) { _, prefix, _, _, _ in
             mismatchedCalls += 1
             mismatchedPrefix = prefix
             return Self.emptyV2Response
@@ -624,7 +624,7 @@ struct ReviewRetryTests {
 
         var calls = 0
         var deliveredPrefix: String?
-        let queue = makeQueue(journal: journal) { _, prefix, _, _ in
+        let queue = makeQueue(journal: journal) { _, prefix, _, _, _ in
             calls += 1
             deliveredPrefix = prefix
             return Self.emptyV2Response
@@ -682,7 +682,7 @@ struct ReviewRetryTests {
         #expect(try persistedJournal(pausedJournal).version == nil, "构造的必须是旧日志（没有 version）")
 
         var pausedCalls = 0
-        let paused = makeQueue(journal: pausedJournal) { _, _, _, _ in
+        let paused = makeQueue(journal: pausedJournal) { _, _, _, _, _ in
             pausedCalls += 1
             return Self.emptyV2Response
         }
@@ -727,7 +727,7 @@ struct ReviewRetryTests {
 
         var calls = 0
         var deliveredPrefix: String?
-        let queue = makeQueue(journal: journal) { _, prefix, _, _ in
+        let queue = makeQueue(journal: journal) { _, prefix, _, _, _ in
             calls += 1
             deliveredPrefix = prefix
             return Self.emptyV2Response
@@ -774,7 +774,7 @@ struct ReviewRetryTests {
         try writeQueueJournal([legacyJob], userPaused: false, version: nil, to: journal)
 
         var calls: [String] = []
-        let queue = makeQueue(journal: journal) { input, _, _, _ in
+        let queue = makeQueue(journal: journal) { input, _, _, _, _ in
             calls.append(input)
             return Self.emptyV2Response
         }
@@ -829,7 +829,7 @@ struct ReviewRetryTests {
         let journal = root.appendingPathComponent("queue.json")
         let notebookA = makeNotebook(batches: 2, label: "甲")
         let notebookB = makeNotebook(label: "乙")
-        let queue = makeQueue(journal: journal) { input, _, _, _ in
+        let queue = makeQueue(journal: journal) { input, _, _, _, _ in
             // 第一个任务（甲，两批）立刻完成；第二个任务卡住，方便稳定观察"出队后"的状态。
             if input.contains("orbital 乙0") { try await Task.sleep(for: .seconds(30)) }
             return Self.emptyV2Response

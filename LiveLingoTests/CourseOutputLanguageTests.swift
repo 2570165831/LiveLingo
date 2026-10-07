@@ -22,7 +22,7 @@ final class CourseOutputLanguageTests: XCTestCase {
         let cleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(ObservedDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Opening a course must not call a model")
                 throw CancellationError()
             }

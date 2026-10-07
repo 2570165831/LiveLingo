@@ -161,7 +161,7 @@ final class CaptionStabilityPublicationTests: XCTestCase {
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Publication tests must never launch a review")
                 throw CancellationError()
             }
@@ -260,7 +260,7 @@ final class CaptionStabilityPublicationTests: XCTestCase {
                 previousChinese: chinese, current: current, context: context, modelName: name,
                 repairPrevious: shouldRepair, currentHints: hints, onCurrent: update,
                 request: { _, _, _ in try await requests.request() })
-        }), notes: .init(generate: { _, _, _, _ in
+        }), notes: .init(generate: { _, _, _, _, _ in
             summaryCalls += 1
             XCTFail("A publication-only fixture must not generate notes")
             throw CancellationError()
@@ -315,7 +315,7 @@ final class CaptionStabilityPublicationTests: XCTestCase {
             XCTAssertEqual(pending.previous.english, self.previousEnglish)
             XCTAssertEqual(pending.current.english, self.currentEnglish)
             return try await repair.wait()
-        }), notes: .init(generate: { [self] input, _, _, _ in
+        }), notes: .init(generate: { [self] input, _, _, _, _ in
             inputs.append(input)
             // Let an erroneous live request finish so the no-request assertions
             // catch it instead of leaving a failed fixture indefinitely parked.
@@ -405,7 +405,7 @@ final class CaptionStabilityPublicationTests: XCTestCase {
             }, repair: { _ in
                 repairCalls += 1
                 return try await repair.wait()
-            }), notes: .init(generate: { [self] input, _, _, _ in
+            }), notes: .init(generate: { [self] input, _, _, _, _ in
                 inputs.append(input)
                 // Expose an early generation rather than parking the fixture
                 // forever if production fails to honor the unresolved risk.

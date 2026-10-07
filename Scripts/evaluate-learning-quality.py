@@ -843,6 +843,13 @@ def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
             note = batch["note"]
             require(raw["noNewKnowledge"] == normal["noNewKnowledge"] == note["noNewKnowledge"]
                     and normal["topic"] == note["topic"] and len(raw["points"]) == len(normal["points"]) == len(note["points"]), "normalized-note-shape-mismatch")
+            # Default Chinese retains both storage columns. English uses the
+            # same selected target evidence as source units, including support
+            # from other fragments in the owning segment or the current batch.
+            segment_texts = [([source["english"], source["chinese"]] if target == "zh-Hans"
+                              else [text for _, text in source_text_groups(source, target=target)])
+                             for source in batch["evidence"]]
+            all_segments = [text for texts in segment_texts for text in texts]
             for index, (raw_point, normalized, point) in enumerate(zip(raw["points"], normal["points"], note["points"])):
                 require(raw_point["kind"] == normalized["kind"] == point["kind"] and normalized["text"] == point["text"], "normalized-point-mismatch")
                 ids = point.get("sourceIDs")
@@ -858,9 +865,7 @@ def verify_result(case: dict, result: dict, directory: Path, fixture_sha: str,
                 question = (normalized.get("needsContext") or "")[:240].strip()
                 owner_indices = sorted({s["index"] for s in linked})
                 own_segments = [text for owner in owner_indices
-                                for text in (batch["evidence"][owner]["english"], batch["evidence"][owner]["chinese"])]
-                all_segments = [text for source in batch["evidence"]
-                                for text in (source["english"], source["chinese"])]
+                                for text in segment_texts[owner]]
                 difference, gap = numeric_report(point["text"], [s["quote"] for s in linked],
                                                   own_segments, all_segments)
                 if not linked and point["kind"] == "补充理解":

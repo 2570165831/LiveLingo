@@ -28,7 +28,7 @@ struct SessionExporterTests {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
             defer { try? FileManager.default.removeItem(at: root) }
             let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
-                observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _ in throw CancellationError() })
+                observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
             let model = AppModel(reviewQueue: queue, backgroundServices: false, defaults: defaults)
             #expect(model.preventIdleSleepWhileRecording == (choice ?? true))
             var classroomChanges = 0
@@ -946,7 +946,7 @@ struct ASRRecoveryTests {
 
         // 假 generator + 独立目录：这条测试不会启动本机模型。
         let queue = LearningReviewQueue(journalURL: journalURL, observeSleep: false, diagnostics: .disabled,
-                                        generate: { _, _, _, _ in "{}" })
+                                        generate: { _, _, _, _, _ in "{}" })
         #expect(queue.hasWork == false)                       // 坏文件不应带来任何任务 ✓
         #expect(queue.status.contains("复查进度读取失败"))      // 失败要**说出来** ✓
         #expect(try Data(contentsOf: journalURL) == corrupt)  // **现场逐字节保留** ✓（核心断言 ✓）

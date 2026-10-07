@@ -540,12 +540,12 @@ final class MultilingualLearningNotesTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveLingo-V2bRecovery-\(UUID())", isDirectory: true)
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("review.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Reference recovery must not invoke review")
                 throw CancellationError()
             }
         var requests: [(input: String, prefix: String)] = []
-        let notes = LearningGenerationDependencies(generate: { input, _, prefix, update in
+        let notes = LearningGenerationDependencies(generate: { input, _, prefix, _, update in
             requests.append((input, prefix))
             let root = try self.inputPayload(input)
             let units = try XCTUnwrap(root["evidence"] as? [[String: Any]])

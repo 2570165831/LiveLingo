@@ -144,7 +144,7 @@ struct TargetPersistenceTests {
     }
     private func pausedQueue(_ url: URL) -> LearningReviewQueue {
         LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
-            generate: { _, _, _, _ in
+            generate: { _, _, _, _, _ in
                 Issue.record("Pure persistence tests must never invoke generation")
                 throw CancellationError()
             })

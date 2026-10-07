@@ -612,7 +612,7 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
     func testNoticeUsesExistingRecordingStatusAndDoesNotReplaceOtherNotices() async throws {
         let directory = try directory()
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("review.json"), observeSleep: false,
-            diagnostics: .disabled) { _, _, _, _ in throw CancellationError() }
+            diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
         let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
             backgroundServices: false, scheduledNotes: false)
         model.loadPresentationForTesting(phase: .recording, evidence: [], notice: "已有课堂提示")

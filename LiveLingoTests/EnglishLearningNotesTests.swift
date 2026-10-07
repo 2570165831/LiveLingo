@@ -5,6 +5,53 @@ import XCTest
 /// New step-22 tests. No old test is edited; all generation is substituted.
 @MainActor
 final class EnglishLearningNotesTests: XCTestCase {
+    private typealias ObserveReview = @MainActor @Sendable (String, String, String?) throws -> Void
+    private func observingGenerator(_ observe: @escaping ObserveReview) -> LearningReviewQueue.Generator {
+        { input, prefix, prompt, _, _ in
+            try observe(input, prefix, prompt)
+            return #"{"reviewVersion":2,"corrections":[],"additions":[]}"#
+        }
+    }
+
+    func testReviewQueueForwardsFrozenEnglishPromptInputAndPrefixToGenerator() async throws {
+        let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("EnglishReviewForwarding-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var book = LearningNotebook(target: .english)
+        try book.append(evidence: [foreign()], note: note())
+        var snapshot = SessionSnapshot(segments: book.batches.flatMap(\.evidence), targetLocale: "en")
+        book.writeState(to: &snapshot)
+        try SessionStore(directory: root).save(snapshot)
+        let journal = root.appendingPathComponent("queue.json")
+        var calls = 0
+        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+            generate: observingGenerator { input, prefix, prompt in
+                calls += 1
+                XCTAssertEqual(prompt, LearningPrompts.reviewEnglish)
+                let saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
+                let job = try XCTUnwrap(saved.jobs.first)
+                XCTAssertEqual(job.prompt, LearningPrompts.reviewEnglish)
+                XCTAssertEqual(job.prefix, prefix)
+                let inputDigest = LearningReviewQueue.prefixDigest(json: input,
+                    prompt: LearningPrompts.reviewEnglish, targetLocale: "en")
+                let identity = try XCTUnwrap(job.identity)
+                XCTAssertEqual(job.prefixInputDigest, ReviewInputBinding.digest(
+                    Data((identity.key + "\n" + (job.inputDigest ?? "") + "\n" + inputDigest).utf8)))
+                let prepared = try LearningReviewQueue.prepareInput(job, allowUnreleased: true)
+                XCTAssertEqual(input, prepared.input.json)
+                XCTAssertEqual(prepared.input.catalog.keys.sorted(), ["e0.en.0"])
+                XCTAssertFalse(input.contains("水会流动"))
+            })
+        addTeardownBlock { await queue.shutdownForTesting(); try FileManager.default.removeItem(at: root) }
+        queue.allowUnreleasedTargetsForTesting()
+        try queue.enqueue(directory: root, notebook: book, targetLocale: "en")
+        for _ in 0..<100 where queue.hasWork { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(calls, 1)
+        XCTAssertFalse(queue.hasWork)
+        XCTAssertFalse(OutputLanguage.english.isReleased)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("summary-review.md").path))
+    }
+
     private func foreign(_ caption: String = "Water flows.", at time: Double = 0) -> TranscriptSegment {
         TranscriptSegment(startTime: time, endTime: time + 1,
             english: "水会流动。", chinese: caption, sourceLanguage: "zh")
@@ -70,6 +117,31 @@ final class EnglishLearningNotesTests: XCTestCase {
         let prepared = try LearningPrompts.reviewInput(.init(id: UUID(), evidence: [source], note: note()), target: .english)
         XCTAssertEqual(prepared.catalog.keys.sorted(), ["e0.en.0"])
         XCTAssertEqual(prepared.catalog["e0.en.0"]?.text, "Water flows.")
+    }
+
+    func testEnglishFollowUpStateLabelsReachNotebookAndExportRendering() throws {
+        for state in [LearningFollowUp.State.supplemented, .conflict, .unclear] {
+            var book = LearningNotebook(target: .english)
+            try book.append(evidence: [foreign("A pressure reading was taken.")],
+                note: note("A pressure reading has no identified owner.", kind: "待确认", question: "Which tank?"))
+            let original = try encoded(book.batches[0])
+            let target = try XCTUnwrap(book.pendingPoints.first?.id)
+            var later = note("The earlier reading belongs to Aurora.")
+            later.followUps = [.init(target: target, state: state, sourceIDs: ["en0s0"],
+                pointIndex: state == .supplemented ? 0 : nil,
+                detail: "The later source identifies the tank.")]
+            try book.append(evidence: [foreign("The earlier reading belongs to Aurora.", at: 3)], note: later)
+            XCTAssertEqual(try encoded(book.batches[0]), original)
+            XCTAssertTrue(book.markdown().contains(state.label(target: .english)), state.rawValue)
+            let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+                .appendingPathComponent("EnglishFollowUpExport-\(UUID())")
+            try SessionExporter.export(segments: book.batches.flatMap(\.evidence),
+                sessionDirectory: root, summary: book.markdown(), target: .english)
+            addTeardownBlock { try FileManager.default.removeItem(at: root) }
+            let exported = try String(contentsOf: root.appendingPathComponent("summary-en.md"), encoding: .utf8)
+            XCTAssertTrue(exported.contains(state.label(target: .english)))
+            XCTAssertEqual(book.batches[1].followUps?.first?.state, state)
+        }
     }
 
     func testNotebookAppendCommitsEnglishFollowUpAndRetainsOldBytes() throws {
@@ -324,7 +396,7 @@ final class EnglishLearningNotesTests: XCTestCase {
             let url = root.appendingPathComponent(locale + ".json")
             try encoded(journal).write(to: url)
             let queue = LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
-                generate: { _, _, _, _ in XCTFail("Unrecognized/unreleased tasks cannot generate"); throw CancellationError() })
+                generate: { _, _, _, _, _ in XCTFail("Unrecognized/unreleased tasks cannot generate"); throw CancellationError() })
             await queue.shutdownForTesting()
             let kept = try XCTUnwrap(queue.journalForTesting.jobs.first)
             XCTAssertEqual(kept.prompt, job.prompt)

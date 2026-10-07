@@ -1000,7 +1000,7 @@ struct FloatingSubtitleWindowTestFixture {
         let cleanup = try TestPreferenceCleanup(suite: suite)
         let store = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
-                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
             XCTFail("Window tests must never invoke a generator")
             throw CancellationError()
         }

@@ -202,7 +202,7 @@ final class DefaultTargetGoldenTests: XCTestCase {
         try (notebook.markdown() + "\n").write(
             to: reportDirectory.appendingPathComponent("summary-zh-Hans.md"), atomically: true, encoding: .utf8)
         let queue = LearningReviewQueue(journalURL: reportDirectory.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { actualInput, prefix, _, _ in
+            observeSleep: false, diagnostics: .disabled) { actualInput, prefix, _, _, _ in
                 XCTAssertEqual(actualInput, input)
                 XCTAssertTrue(prefix.isEmpty)
                 return response
@@ -317,7 +317,7 @@ final class DefaultTargetGoldenTests: XCTestCase {
         let directory = try temporaryDirectory()
         try await installFakeWorker(in: directory)
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in throw CancellationError() }
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
         await queue.shutdownForTesting()
         let suite = "DefaultTargetGolden-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)

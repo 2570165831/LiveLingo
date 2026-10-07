@@ -435,5 +435,75 @@ class CalibrationReportTests(ScratchTests):
         self.assertFalse(output.exists())
 
 
+class ReferenceLetterAuditTests(unittest.TestCase):
+    def test_han_only_and_mixed_sources_use_all_production_letters(self):
+        pure = synthetic_unit("synthetic-han")
+        pure.texts.update(zh="汉字 123。", en="ABCDEF")
+        mixed = synthetic_unit("synthetic-mixed")
+        mixed.texts.update(zh="汉字 DNA e\u0301 123。", en="ABCDEF")
+        report = a.reference_letter_audit([pure, mixed], target="en")
+        first, second = report["rows"]
+        self.assertEqual((first["source_letters"], first["source_han_letters"],
+                          first["source_other_letters"], first["target_letters"]), (2, 2, 0, 6))
+        self.assertEqual((second["source_letters"], second["source_han_letters"],
+                          second["source_other_letters"], second["target_letters"]), (6, 2, 4, 6))
+        self.assertEqual((first["production_letter_ratio"], second["production_letter_ratio"]), (3, 1))
+        self.assertEqual((first["han_denominator_ratio"], second["han_denominator_ratio"]), (3, 3))
+        cohorts = report["by_source_composition"]
+        self.assertEqual(cohorts["han_only"]["sample_count"], 1)
+        self.assertEqual(cohorts["mixed_han_and_other_letters"]["sample_count"], 1)
+        self.assertEqual(cohorts["mixed_han_and_other_letters"]["source_other_letters"], 4)
+        self.assertEqual(report["production_letter_ratio"]["p50"], 2)
+        self.assertEqual(report["han_denominator_diagnostic"]["p50"], 3)
+        self.assertAlmostEqual(report["provisional_p99_5_ceiling"], 2.99)
+        self.assertTrue(report["provisional"])
+        self.assertFalse(report["independent_validation"])
+        self.assertTrue(report["requires_expanded_holdout"])
+
+    def test_nfc_scalar_categories_and_production_han_ranges_are_preserved(self):
+        unit = synthetic_unit()
+        unit.texts.update(zh="汉Ａe\u0301𠮷 \u1100\u1161 123., \u0301", en="E\u0301 ﬁ 123! \u0301")
+        row = a.reference_letter_audit([unit], target="en")["rows"][0]
+        self.assertEqual((row["source_letters"], row["source_han_letters"],
+                          row["source_other_letters"], row["target_letters"]), (5, 2, 3, 2))
+        self.assertEqual(row["production_letter_ratio"], .4)
+        unit.texts["zh"] = "汉々〇"
+        row = a.reference_letter_audit([unit], target="en")["rows"][0]
+        # 々 is a Unicode letter outside the production Han ranges; 〇 is
+        # category Nl, so it is not a LatinTargetLengthGuard letter at all.
+        self.assertEqual((row["source_letters"], row["source_han_letters"],
+                          row["source_other_letters"]), (2, 1, 1))
+
+    def test_zero_letter_sources_are_reported_without_inventing_a_ratio(self):
+        unit = synthetic_unit()
+        unit.texts.update(zh="123 !?", en="DNA")
+        report = a.reference_letter_audit([unit], target="en")
+        self.assertIsNone(report["rows"][0]["production_letter_ratio"])
+        self.assertIsNone(report["rows"][0]["han_denominator_ratio"])
+        self.assertIsNone(report["provisional_p99_5_ceiling"])
+        self.assertEqual(report["production_letter_ratio"]["undefined_count"], 1)
+        self.assertEqual(report["by_source_composition"]["no_han_letters"]["sample_count"], 1)
+
+
+class ReferenceLetterReportTests(ScratchTests):
+    def test_calibration_exports_same_unit_audit_without_changing_inputs(self):
+        path, units = self.un_fixture()
+        original = path.read_bytes()
+        executable = self.transport_cli(a.make_cases(units[:1], targets=("en",)))
+        report = a.calibrate(cli=executable, un_root=path.parent.parent,
+                             output=self.root / "letters.json", targets=("en",))
+        audit = report["reference_length_audits"]["en_from_zh"]
+        self.assertEqual(audit["sample_count"], 1)
+        self.assertEqual(audit["by_source_composition"]["han_only"]["sample_count"], 1)
+        good = next(row for row in report["verdicts"]
+                    if row["source_language"] == "zh" and row["case_kind"] == "good")
+        row = audit["rows"][0]
+        self.assertEqual((row["source_letters"], row["target_letters"], row["production_letter_ratio"]),
+                         (good["sourceLetters"], good["candidateLetters"], good["lengthRatio"]))
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(audit["independent_validation"])
+        self.assertIn("LatinTargetLengthGuard.letterCount", report["methods"]["letters"])
+
+
 if __name__ == "__main__":
     unittest.main()

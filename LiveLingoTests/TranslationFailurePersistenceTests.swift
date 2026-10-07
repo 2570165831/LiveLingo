@@ -323,7 +323,7 @@ final class TranslationFailurePersistenceTests: XCTestCase {
             }
             try encode(saved).write(to: url)
             let queue = LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
-                generate: { _, _, _, _ in
+                generate: { _, _, _, _, _ in
                     XCTFail("Persistence checks must not start model generation")
                     throw CancellationError()
                 })

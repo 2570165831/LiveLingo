@@ -1,3 +1,4 @@
+#if !LIVELINGO_CLI
 import AppKit
 import SwiftUI
 
@@ -263,3 +264,4 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         saveFrame()
     }
 }
+#endif

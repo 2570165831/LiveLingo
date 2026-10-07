@@ -119,7 +119,7 @@ final class RealtimePolicyTests: XCTestCase {
         XCTAssertTrue(book.topics.isEmpty)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"), observeSleep: false) { _, _, _, _ in throw CancellationError() }
+        let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"), observeSleep: false) { _, _, _, _, _ in throw CancellationError() }
         addTeardownBlock { await queue.shutdownForTesting() }
         try queue.enqueue(directory: directory, notebook: book)
         XCTAssertFalse(queue.hasWork)
@@ -502,7 +502,7 @@ final class RealtimePolicyTests: XCTestCase {
                         note: .init(topic: "离子", points: [.init(kind: "核心结论", text: "离子事实")]))
         try (book.markdown() + "\n").write(to: root.appendingPathComponent("summary-zh-Hans.md"), atomically: true, encoding: .utf8)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false,
-                                        diagnostics: .disabled) { _, _, _, _ in
+                                        diagnostics: .disabled) { _, _, _, _, _ in
             #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
         }
         addTeardownBlock { await queue.shutdownForTesting() }
@@ -541,7 +541,7 @@ final class RealtimePolicyTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false,
-                                        diagnostics: .disabled) { _, _, _, _ in throw CancellationError() }
+                                        diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
         addTeardownBlock { await queue.shutdownForTesting() }
         XCTAssertNil(try ReviewExportSource.markdown(for: root, queue: queue))
         let body = "# 9B 思考复查 · 第 2 批（局部） 1/1 批（约 5 分钟/批）\n\n本批没有提出复查建议。"
@@ -564,7 +564,7 @@ final class RealtimePolicyTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false,
-                                        diagnostics: .disabled) { _, _, _, _ in throw CancellationError() }
+                                        diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
         addTeardownBlock { await queue.shutdownForTesting() }
 
         // ① 非 UTF-8 的局部报告：文件在，读不出来 → 抛错并指名文件。
@@ -671,7 +671,7 @@ final class RealtimePolicyTests: XCTestCase {
         let file = root.appendingPathComponent("summary-zh-Hans.md")
         let original = book.markdown() + "\n"
         try original.write(to: file, atomically: true, encoding: .utf8)
-        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _ in
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _, _ in
             #"{"corrections":[],"additions":[{"evidenceIndex":0,"kind":"核心结论","text":"氧气是末端电子受体。","reason":"遗漏电子受体。","quoteID":"e0.en.0"}],"reviewVersion":2}"#
         }
         addTeardownBlock { await queue.shutdownForTesting() }
@@ -688,7 +688,7 @@ final class RealtimePolicyTests: XCTestCase {
     func testReviewAdviceIsConnectedOnStartupAndDoesNotReplaceNotes() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingoLearningTests-\(UUID())")
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _ in throw CancellationError() }
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _, _ in throw CancellationError() }
         let suite = "LiveLingo-Test-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -758,7 +758,7 @@ final class RealtimePolicyTests: XCTestCase {
             dirs.append(dir)
         }
         let journal = root.appendingPathComponent("queue.json")
-        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
             return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
         }
         addTeardownBlock { await queue.shutdownForTesting() }
@@ -768,7 +768,7 @@ final class RealtimePolicyTests: XCTestCase {
         saved.jobs[0].failure = "模拟失败"
         try JSONEncoder().encode(saved).write(to: journal)
         await queue.shutdownForTesting()
-        let restored = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, _, _, _ in #"{"corrections":[],"reviewVersion":2,"additions":[]}"# }
+        let restored = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in #"{"corrections":[],"reviewVersion":2,"additions":[]}"# }
         addTeardownBlock { await restored.shutdownForTesting() }
         restored.setContext(recording: false, concurrent: false, resourcesAvailable: true)
         try await Task.sleep(for: .milliseconds(150))
@@ -789,7 +789,7 @@ final class RealtimePolicyTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         var book = LearningNotebook()
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Atoms")], note: .init(topic: "原子", points: [.init(kind: "核心结论", text: "原笔记")]))
-        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"), observeSleep: false, diagnostics: .disabled) { _, _, _, update in
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"), observeSleep: false, diagnostics: .disabled) { _, _, _, _, update in
             await update("saved-prefix")
             try? await Task.sleep(for: .milliseconds(150))
             return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
@@ -823,7 +823,7 @@ final class RealtimePolicyTests: XCTestCase {
         var book = LearningNotebook()
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Atoms")], note: .init(topic: "原子", points: [.init(kind: "核心结论", text: "原笔记")]))
         try (book.markdown() + "\n").write(to: savedNotes, atomically: true, encoding: .utf8)
-        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, _, _, update in
+        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, _, _, _, update in
             await update("Checking atoms ")
             try await Task.sleep(for: .seconds(60))
             return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
@@ -845,7 +845,7 @@ final class RealtimePolicyTests: XCTestCase {
         XCTAssertTrue(queue.userPaused)
         XCTAssertFalse(queue.running)
         await queue.shutdownForTesting()
-        let restored = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, prefix, _, _ in
+        let restored = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, prefix, _, _, _ in
             guard prefix == "Checking atoms " else { throw QwenRuntimeError.invalidResponse }
             return #"{"corrections":[{"index":0,"original":"原笔记","kind":"核心结论","text":"修正后的笔记","reason":"纠正术语"}],"reviewVersion":2,"additions":[]}"#
         }
@@ -867,7 +867,7 @@ final class RealtimePolicyTests: XCTestCase {
         let journal = root.appendingPathComponent("journal.json")
         var book = LearningNotebook()
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Atoms")], note: .init(topic: "原子", points: [.init(kind: "核心结论", text: "原笔记")]))
-        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, _, _, update in
+        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, _, _, _, update in
             await update("Retained thinking ")
             throw QwenRuntimeError.generationInterrupted("worker exited")
         }
@@ -878,7 +878,7 @@ final class RealtimePolicyTests: XCTestCase {
         let saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
         XCTAssertEqual(saved.jobs.first?.prefix, "Retained thinking ")
         await queue.shutdownForTesting()
-        let restored = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, prefix, _, _ in
+        let restored = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, prefix, _, _, _ in
             XCTAssertEqual(prefix, "Retained thinking ")
             return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
         }
@@ -899,7 +899,7 @@ final class RealtimePolicyTests: XCTestCase {
         var book = LearningNotebook()
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Atoms")], note: .init(topic: "原子", points: [.init(kind: "核心结论", text: "原笔记")]))
         let journal = root.appendingPathComponent("journal.json")
-        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, _, _, _ in
+        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, _, _, _, _ in
             XCTFail("Missing recording must not invoke model")
             return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
         }
@@ -911,7 +911,7 @@ final class RealtimePolicyTests: XCTestCase {
         let oldJournal = LearningReviewQueue.Journal(jobs: [historical], userPaused: true)
         try JSONEncoder().encode(oldJournal).write(to: journal)
         let restored = LearningReviewQueue(journalURL: journal, observeSleep: false,
-            diagnostics: .disabled) { _, _, _, _ in throw CancellationError() }
+            diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
         addTeardownBlock { await restored.shutdownForTesting() }
         XCTAssertThrowsError(try queue.enqueue(directory: recording, notebook: book))
         XCTAssertFalse(restored.belongsTo(nil))
@@ -935,7 +935,7 @@ final class RealtimePolicyTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         var book = LearningNotebook()
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Atoms")], note: .init(topic: "原子", points: [.init(kind: "核心结论", text: "原笔记")]))
-        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _ in #"{"corrections":[],"reviewVersion":2,"additions":[]}"# }
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _, _ in #"{"corrections":[],"reviewVersion":2,"additions":[]}"# }
         addTeardownBlock { await queue.shutdownForTesting() }
         queue.togglePause()
         try queue.enqueue(directory: root, notebook: book)
@@ -1500,7 +1500,7 @@ final class RealtimePolicyTests: XCTestCase {
         try (book.markdown() + "\n").write(to: root.appendingPathComponent("summary-zh-Hans.md"), atomically: true, encoding: .utf8)
         let journal = root.appendingPathComponent("journal.json")
         let queue = LearningReviewQueue(journalURL: journal, observeSleep: false,
-                                        diagnostics: .init(maximumFiles: 4, maximumFileBytes: 32_768, maximumTotalBytes: 131_072)) { _, _, _, update in
+                                        diagnostics: .init(maximumFiles: 4, maximumFileBytes: 32_768, maximumTotalBytes: 131_072)) { _, _, _, _, update in
             await update("PRIVATE-THINKING-MARKER 我已检查全部要点。")
             return #"{"corrections":[{"index":0,"original":"与笔记不一致的原文","kind":"核心结论","text":"修改","reason":"理由"}],"reviewVersion":2,"additions":[]}"#
         }
@@ -1547,7 +1547,7 @@ final class RealtimePolicyTests: XCTestCase {
                         note: .init(topic: "原子", points: [.init(kind: "核心结论", text: "原笔记")]))
         try (book.markdown() + "\n").write(to: root.appendingPathComponent("summary-zh-Hans.md"), atomically: true, encoding: .utf8)
         let journal = root.appendingPathComponent("journal.json")
-        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, _, _, update in
+        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, _, _, _, update in
             await update("Retained thinking ")
             throw QwenRuntimeError.generationInterrupted("worker exited")
         }
@@ -1570,7 +1570,7 @@ final class RealtimePolicyTests: XCTestCase {
 
         // 手动重试：清掉等待中的退避窗口，从检查点继续。
         await queue.shutdownForTesting()
-        let restored = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, prefix, _, _ in
+        let restored = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, prefix, _, _, _ in
             guard prefix == "Retained thinking " else { throw QwenRuntimeError.invalidResponse }
             try await Task.sleep(for: .seconds(30))
             return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
@@ -1758,7 +1758,7 @@ final class CaptionLifecycleTests: XCTestCase {
                     addTeardownBlock { try preferenceCleanup.remove() }
                     let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
                     let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
-                                                    observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+                                                    observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                         XCTFail("caption tests must not start review")
                         throw CancellationError()
                     }
@@ -1818,7 +1818,7 @@ final class ReviewExportIntegrationTests: XCTestCase {
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Temperature increases.")],
                         note: .init(topic: "温度", points: [.init(kind: "核心结论", text: "原笔记")]))
         let journal = root.appendingPathComponent("queue.json")
-        let generate: LearningReviewQueue.Generator = { _, _, _, _ in
+        let generate: LearningReviewQueue.Generator = { _, _, _, _, _ in
             #"{"reviewVersion":2,"corrections":[{"index":0,"original":"原笔记","kind":"核心结论","text":"温度升高。","reason":"核对方向"}],"additions":[]}"#
         }
         let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled, generate: generate)

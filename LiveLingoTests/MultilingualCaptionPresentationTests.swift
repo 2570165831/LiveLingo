@@ -163,7 +163,7 @@ final class MultilingualPreviewPresentationTests: XCTestCase {
         defaults.setVolatileDomain(["transcriptTextSize": 18.0, "floatingTextSize": 24.0], forName: suite)
         presentationDefaults = defaults
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
-                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
             XCTFail("Presentation tests must not start a language model")
             throw CancellationError()
         }

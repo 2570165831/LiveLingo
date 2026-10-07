@@ -1444,15 +1444,26 @@ struct LearningNotebook: Sendable {
             guard let entry = followUpRecords[reference] else { return "" }
             let range = LearningTimeLabel.label(evidence: entry.batch.evidence)
             let head = range.map { "（[\($0)]）" } ?? ""
+            func stateLine(_ text: String) -> String {
+                "\n\(indentation)- **\(entry.record.state.label(target: self.target))\(head):** \(text)"
+            }
             switch entry.record.state {
             case .supplemented:
                 guard let index = entry.record.pointIndex, entry.batch.note.points.indices.contains(index) else { return "" }
                 let text = entry.batch.note.points[index].text
-                return "\n\(indentation)- " + ClassroomFixedText.followUpSupplementLine.noteFormat([head, text], target: self.target)
+                let line = self.target == .english ? stateLine(text)
+                    : "\n\(indentation)- " + ClassroomFixedText.followUpSupplementLine.noteFormat([head, text], target: self.target)
+                return line
                     + "\n\(indentation)  - " + ClassroomFixedText.retiredExplanation.noteText(target: self.target)
             case .conflict:
+                if self.target == .english {
+                    return stateLine(entry.record.detail ?? ClassroomFixedText.conflictFallback.noteText(target: self.target))
+                }
                 return "\n\(indentation)- " + ClassroomFixedText.followUpConflictLine.noteFormat([head, entry.record.detail ?? ClassroomFixedText.conflictFallback.noteText(target: self.target)], target: self.target)
             case .unclear:
+                if self.target == .english {
+                    return stateLine(entry.record.detail ?? ClassroomFixedText.unclearFallback.noteText(target: self.target))
+                }
                 return "\n\(indentation)- " + ClassroomFixedText.followUpUnclearLine.noteFormat([head, entry.record.detail ?? ClassroomFixedText.unclearFallback.noteText(target: self.target)], target: self.target)
             case .missing:
                 return ""
@@ -3415,8 +3426,7 @@ final class LearningReviewQueue: ObservableObject {
         var retiredJobs: [Job]? = nil
     }
     static let journalVersion = 3
-    typealias Generator = @MainActor @Sendable (String, String, @escaping @Sendable (String) -> Void, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String
-    private typealias PromptGenerator = @MainActor @Sendable (String, String, String, @escaping @Sendable (String) -> Void, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String
+    typealias Generator = @MainActor @Sendable (String, String, String, @escaping @Sendable (String) -> Void, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String
 
     @Published private(set) var status = ""
     @Published private(set) var hasWork = false
@@ -3435,7 +3445,15 @@ final class LearningReviewQueue: ObservableObject {
     private var resourceBlocked = false
     private var persistenceFailure: String?
     private let journalURL: URL
-    private let generate: PromptGenerator
+    private let generate: Generator
+    private var allowUnreleasedTargets = false
+
+    #if DEBUG
+    func allowUnreleasedTargetsForTesting() {
+        precondition(AppRuntimeEnvironment.isUnitTesting && jobs.isEmpty && task == nil)
+        allowUnreleasedTargets = true
+    }
+    #endif
     private let diagnostics: ReviewDiagnosticsStore?
     private var observers: [NSObjectProtocol] = []
     private var lastCheckpoint: TimeInterval = 0
@@ -3885,7 +3903,7 @@ final class LearningReviewQueue: ObservableObject {
                 .appendingPathComponent("ReviewDiagnostics"), policy: diagnostics)
             : nil
         self.generate = { input, prefix, prompt, recordIdentity, update in
-            if let generate { return try await generate(input, prefix, recordIdentity, update) }
+            if let generate { return try await generate(input, prefix, prompt, recordIdentity, update) }
             return try await QwenTranslationClient.reviewLearningNote(input, prefix: prefix, systemPrompt: prompt,
                                                                       onRequestIdentity: recordIdentity, onUpdate: update)
         }
@@ -4115,7 +4133,7 @@ final class LearningReviewQueue: ObservableObject {
         guard persistenceFailure == nil else { throw QwenRuntimeError.requestFailed(persistenceFailure!) }
         let snapshot = try ReviewInputBinding.snapshot(in: directory)
         let resolvedTarget = try Self.resolvedTargetLocale(targetLocale, snapshot: snapshot)
-        guard let prompt = Self.reviewPrompt(for: resolvedTarget) else {
+        guard let prompt = Self.reviewPrompt(for: resolvedTarget, allowUnreleased: allowUnreleasedTargets) else {
             throw QwenRuntimeError.requestFailed("输出语言 \(resolvedTarget ?? "zh-Hans") 尚无复查提示词，不能开始生成")
         }
         let requestedID = sessionID ?? snapshot?.sessionID
@@ -4433,7 +4451,7 @@ final class LearningReviewQueue: ObservableObject {
                 let priorIdentity = restored.identity
                 try upgradeIdentity(&restored, snapshot: snapshot)
                 var repaired = targetChanged || priorIdentity != restored.identity
-                if let prompt = Self.reviewPrompt(for: restored.targetLocale) {
+                if let prompt = Self.reviewPrompt(for: restored.targetLocale, allowUnreleased: allowUnreleasedTargets) {
                     if restored.prompt == nil {
                         restored.prompt = prompt
                         restored.prefix = ""
@@ -4453,7 +4471,7 @@ final class LearningReviewQueue: ObservableObject {
             }
             try validateLocation(job, at: accessURL, allowHistorical: false)
             if job.next < job.batches.count {
-                guard let prompt = Self.reviewPrompt(for: job.targetLocale), job.prompt == prompt,
+                guard let prompt = Self.reviewPrompt(for: job.targetLocale, allowUnreleased: allowUnreleasedTargets), job.prompt == prompt,
                       let target = (try? OutputLanguage.storedLanguage(job.targetLocale))?.generationTarget else {
                     throw ReviewFailure(stage: .input, code: "unsupported_target",
                         detail: "当前输出语言尚无可用的复查提示词；已保留原任务，未生成简体复查")
@@ -4464,7 +4482,7 @@ final class LearningReviewQueue: ObservableObject {
                 let prepareStarted = ProcessInfo.processInfo.systemUptime
                 // 本批输入与"同一次冻结的引用目录"一起产出：生成用 prepared.json，
                 // 解码用同一份 catalog（模型只回 quoteID）。
-                let prepared = try Self.prepareInput(job).input
+                let prepared = try Self.prepareInput(job, allowUnreleased: allowUnreleasedTargets).input
                 preparedInput = prepared.json
                 timings["prepare"] = Self.milliseconds(since: prepareStarted)
                 if jobs.first?.id == job.id {

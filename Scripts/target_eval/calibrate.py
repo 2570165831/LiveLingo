@@ -275,6 +275,73 @@ def letter_ratio_quantiles(values: Iterable[float | None]) -> dict:
     return result
 
 
+def reference_letter_audit(units: Iterable[c.ParallelUnit], *, target: str) -> dict:
+    """Measure zh references in the production letter unit, without judging.
+
+    LatinTargetLengthGuard.letterCount applies NFC and counts Lu/Ll/Lt/Lm/Lo
+    scalars, including non-Han letters in mixed sources. The separate Han-only
+    denominator below is a diagnostic, never the production ratio. The current
+    local corpus has 85 complete turns; its quantiles remain provisional,
+    in-sample values to recalibrate after expansion and an independent holdout.
+    """
+    if target not in TARGET_LOCALES:
+        raise ValueError("reference length target must be en/es/fr")
+
+    def han_letter(char: str) -> bool:
+        # Exactly TranslationAcceptance.isHan ranges, restricted to letters.
+        code = ord(char)
+        return unicodedata.category(char).startswith("L") and any(
+            low <= code <= high for low, high in (
+                (0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF),
+                (0x20000, 0x2FA1F), (0x30000, 0x323AF)))
+
+    rows = []
+    for unit in units:
+        source = unicodedata.normalize("NFC", unit.texts["zh"])
+        reference = unicodedata.normalize("NFC", unit.texts[target])
+        counts = m.length_ratio(source, reference, unit="letters")
+        han = sum(han_letter(char) for char in source)
+        other = counts["source_count"] - han
+        composition = ("mixed_han_and_other_letters" if han and other else
+                       "han_only" if han else "no_han_letters")
+        rows.append({"turn_id": unit.id, "source_letters": counts["source_count"],
+                     "source_han_letters": han, "source_other_letters": other,
+                     "target_letters": counts["target_count"],
+                     "source_composition": composition,
+                     "production_letter_ratio": counts["ratio"],
+                     "han_denominator_ratio": counts["target_count"] / han if han else None})
+
+    def summarize_lengths(group: Sequence[dict]) -> dict:
+        return {"sample_count": len(group),
+                "source_letters": sum(row["source_letters"] for row in group),
+                "source_han_letters": sum(row["source_han_letters"] for row in group),
+                "source_other_letters": sum(row["source_other_letters"] for row in group),
+                "target_letters": sum(row["target_letters"] for row in group),
+                "production_letter_ratio": letter_ratio_quantiles(
+                    row["production_letter_ratio"] for row in group)}
+
+    quantiles = letter_ratio_quantiles(row["production_letter_ratio"] for row in rows)
+    han_quantiles = letter_ratio_quantiles(row["han_denominator_ratio"] for row in rows)
+    han_quantiles["unit"] = "target-unicode-letters/source-Han-letter-scalars"
+    return {"source_locale": "zh", "target_locale": target, "sample_count": len(rows),
+            "counting_method": "LatinTargetLengthGuard.letterCount: NFC then Lu/Ll/Lt/Lm/Lo scalars",
+            "production_letter_ratio": quantiles,
+            "han_denominator_diagnostic": han_quantiles,
+            "by_source_composition": {
+                composition: summarize_lengths([row for row in rows
+                                               if row["source_composition"] == composition])
+                for composition in ("han_only", "mixed_han_and_other_letters", "no_han_letters")},
+            "provisional_p99_5_ceiling": (
+                math.ceil(quantiles["p99.5"] * 100) / 100 if quantiles["p99.5"] is not None else None),
+            "ratio_derivation": "ceil(in-sample production-letter p99.5 * 100) / 100; no added ratio margin",
+            "quantile_method": "sorted sample, linear interpolation at (n - 1) * 0.995",
+            "provisional": True, "independent_validation": False,
+            "requires_expanded_holdout": True,
+            "sample_relationship": "in-sample UN speech-turn references; recalibrate after expanding meetings/sources and validate on a separate holdout; not a 1% false-rejection proof",
+            "scope_limit": "reference length measurements only; no Python acceptance decisions or Swift policy tuning",
+            "rows": rows}
+
+
 def _rate(numerator: int, denominator: int) -> dict:
     return {"numerator": numerator, "denominator": denominator,
             "rate": numerator / denominator if denominator else None}
@@ -393,7 +460,7 @@ def calibrate(*, cli: str | Path, un_root: str | Path, output: str | Path,
                                       "limitations": "No independent sentence/caption holdout. Fixed length parameters originate from these same UN turns. Synthetic tests check software behavior, not generalization."},
                           "one_percent_gate": {"established": False,
                                                "reason": "In-sample turn/reference diagnostics with no independent holdout cannot establish a 1% population false-rejection limit; bootstrap degeneracy at zero failures does not prove it."},
-                          "letters": "NFC normalization, then Unicode letters (isalpha; Lu/Ll/Lt/Lm/Lo); no accent folding; marks/digits/punctuation excluded",
+                          "letters": "LatinTargetLengthGuard.letterCount unit: NFC normalization, then Unicode letter scalars (Lu/Ll/Lt/Lm/Lo), including non-Han letters in mixed sources; no accent folding; marks/digits/punctuation excluded",
                           "count_validation": "every CLI count and ratio checked against Python Unicode letters",
                           "length_quantiles": "all good references, including rejected ones; target/source letters; zero-letter sources undefined",
                           "quantile_method": "sorted sample, linear interpolation at (n - 1) * q",
@@ -401,10 +468,13 @@ def calibrate(*, cli: str | Path, un_root: str | Path, output: str | Path,
                           "guard_defaults": {
                               "policy": "Swift CLI fixed per-target/per-source parameters, unless explicitly overridden; output limit = max(sourceLetters, 24) * maximumRatio + 12. Their declared p99.5 provenance is compared with the observed sample per source; a mismatch is reported, never tuned away.",
                               "automatic_tuning": False,
-                              "sample_relationship": "defaults calibrated from the same UN turns used here; in-sample diagnostics, not independent validation",
+                              "sample_relationship": "production defaults originate from 85 complete local UN turns; reusing those turns gives provisional in-sample diagnostics, not independent validation; recalibrate after expanding meetings/sources and verify a separate holdout",
                               "observed_values": "per-source observed_letter_guard plus exact maximumOutputLetters in each verdict"},
                           "token_ratio": {"measured": False, "reason": "no tokenizer or model loaded"},
                           "scope_limit": "turn-level diagnostics; not sentence-level caption acceptance or translation-quality proof"},
+              "reference_length_audits": {
+                  f"{target}_from_zh": reference_letter_audit(corpus.units, target=target)
+                  for target in targets},
               "execution": {"case_count": len(cases), "batch_size": batch_size,
                             "judge_batch_count": (len(cases) + batch_size - 1) // batch_size,
                             "timeout_seconds_per_batch": timeout_seconds,

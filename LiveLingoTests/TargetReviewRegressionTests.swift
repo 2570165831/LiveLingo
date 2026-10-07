@@ -77,7 +77,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         let before = try files(directory)
         var reads = 0
         let queue = LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
-            generate: { _, _, _, _ in XCTFail("Startup must not generate"); throw CancellationError() },
+            generate: { _, _, _, _, _ in XCTFail("Startup must not generate"); throw CancellationError() },
             startupSnapshotReader: { directory in
                 reads += 1
                 if kind == "permission" { throw POSIXError(.EPERM) }
@@ -167,7 +167,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         try encode(journal).write(to: url)
         var calls = 0
         let queue = LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
-            generate: { _, _, _, _ in calls += 1; throw CancellationError() },
+            generate: { _, _, _, _, _ in calls += 1; throw CancellationError() },
             startupSnapshotReader: { _ in throw POSIXError(.EPERM) })
         queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
         queue.performPrimaryAction()
@@ -190,7 +190,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         let cleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(ObservedDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("These tests must not call a model"); throw CancellationError()
             }
         let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,

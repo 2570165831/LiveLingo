@@ -129,24 +129,18 @@ struct CaptionTranslationDependencies {
 
 @MainActor
 struct LearningGenerationDependencies {
-    var generate: (String, String, String, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String
-    var generateWithPrompt: ((String, String, String, String, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String)? = nil
-    static let live = Self(generate: { input, model, prefix, update in
-        try await QwenTranslationClient.learningNote(input: input, modelName: model, prefix: prefix, onUpdate: update)
-    }, generateWithPrompt: { input, model, prefix, prompt, update in
+    var generate: (String, String, String, String, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String
+    static let live = Self(generate: { input, model, prefix, prompt, update in
         try await QwenTranslationClient.learningNote(input: input, modelName: model, prefix: prefix,
                                                      systemPrompt: prompt, onUpdate: update)
     })
-    static let unavailable = Self(generate: { _, _, _, _ in
+    static let unavailable = Self(generate: { _, _, _, _, _ in
         throw QwenRuntimeError.requestFailed("测试必须注入笔记生成器")
     })
 
     func generateNote(_ input: String, model: String, prefix: String, systemPrompt: String,
                       onUpdate: @escaping @MainActor @Sendable (String) async -> Void) async throws -> String {
-        if let generateWithPrompt {
-            return try await generateWithPrompt(input, model, prefix, systemPrompt, onUpdate)
-        }
-        return try await generate(input, model, prefix, onUpdate)
+        try await generate(input, model, prefix, systemPrompt, onUpdate)
     }
 }
 
@@ -534,7 +528,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var outputLanguage: OutputLanguage = .simplifiedChinese
     var captionTarget: CaptionTranslationTarget {
         // Unsupported generation targets are rejected before restoring work.
-        outputLanguage.generationTarget ?? .simplifiedChinese
+        if let snapshot = sessionSnapshot {
+            return (try? OutputLanguage.storedLanguage(snapshot.targetLocale))?.generationTarget ?? .simplifiedChinese
+        }
+        return outputLanguage.generationTarget ?? .simplifiedChinese
     }
 
     private func captureNewCourseOutputLanguage(_ explicit: OutputLanguage? = nil) {
@@ -1768,7 +1765,10 @@ final class AppModel: ObservableObject {
         var next = replacement
         let target = captionTarget
         if target.keepsSourceAsCaption(language: next.sourceLanguage) {
-            next.completeTranslation(target.renderPassThrough(next.english))
+            next.completeTranslation(target.renderPassThrough(next.english), targetCode: target.rawValue)
+            next.updateCaptionAnnotation(targetCode: target.rawValue,
+                formulaUncertain: (next.sourceLanguage == nil || next.sourceLanguage == "en")
+                    && FormulaASRReview.uncertain(next.english))
             translationQueue.removeAll { $0 == next.id }
             translationEnqueuedAt.removeValue(forKey: next.id)
             translationHints.removeValue(forKey: next.id)
@@ -2092,6 +2092,11 @@ final class AppModel: ObservableObject {
             guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
             drainTranslationQueue()
             if let translationWorker { await translationWorker.value }
+            else if hasPendingTranslationWork {
+                // A manual request can block worker admission. Suspend until
+                // it releases the slot instead of spinning on the MainActor.
+                try? await Task.sleep(for: .milliseconds(100))
+            }
         }
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch,
               let directory = sessionDirectory else { return }
@@ -2135,6 +2140,12 @@ final class AppModel: ObservableObject {
                 if let processingPauseTask { try await processingPauseTask.value }
                 guard sessionID == identity, generation == epoch else { return }
                 if pipeline.transcriptionState()?.sessionID != identity {
+                    // Freeze an English legacy import's identity and target
+                    // before the transcription restorer rereads its course.
+                    // Legacy captions may not carry their own session ID.
+                    if captionTarget == .english, sessionSnapshot?.storageRevision == 0 {
+                        try await flushSessionArchive()
+                    }
                     if let snapshot = sessionSnapshot {
                         try reconcileSavedTranscriptionCandidates(snapshot, archivedIn: directory)
                     }
@@ -2154,16 +2165,33 @@ final class AppModel: ObservableObject {
                     resetCaptionRecoveryRound()
                 }
                 processingPaused = false
-                for segment in segments where !segment.hasUsableTranslation {
-                    if !translationQueue.contains(segment.id) { translationQueue.append(segment.id) }
-                    translationEnqueuedAt[segment.id] = ProcessInfo.processInfo.systemUptime
-                }
+                restorePendingCaptionWork()
                 drainTranslationQueue()
                 startSavedDrain()
                 persistCurrentSession()
             } catch {
                 guard sessionID == identity, generation == epoch else { return }
                 archiveError = "未能继续处理：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func restorePendingCaptionWork() {
+        let target = captionTarget
+        for index in segments.indices where !segments[index].hasUsableTranslation {
+            let id = segments[index].id
+            if target.keepsSourceAsCaption(language: segments[index].sourceLanguage) {
+                segments[index].completeTranslation(target.renderPassThrough(segments[index].english),
+                    targetCode: target.rawValue)
+                segments[index].updateCaptionAnnotation(targetCode: target.rawValue,
+                    formulaUncertain: (segments[index].sourceLanguage == nil || segments[index].sourceLanguage == "en")
+                        && FormulaASRReview.uncertain(segments[index].english))
+                translationQueue.removeAll { $0 == id }
+                translationEnqueuedAt.removeValue(forKey: id)
+                translationHints.removeValue(forKey: id)
+            } else {
+                if !translationQueue.contains(id) { translationQueue.append(id) }
+                translationEnqueuedAt[id] = ProcessInfo.processInfo.systemUptime
             }
         }
     }
@@ -2634,6 +2662,10 @@ final class AppModel: ObservableObject {
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
     var translationQueueForTesting: [UUID] { translationQueue }
     var translationEnqueuedAtForTesting: [UUID: TimeInterval] { translationEnqueuedAt }
+    func restorePendingCaptionWorkForTesting() {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        restorePendingCaptionWork()
+    }
     var hasCaptionBacklogForTesting: Bool { hasCaptionBacklog }
     var captionWorkPendingForTesting: Bool { captionWorkPending }
     func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {
@@ -2892,6 +2924,9 @@ final class AppModel: ObservableObject {
                 if target.keepsSourceAsCaption(language: input.sourceLanguage) {
                     let rendered = target.renderPassThrough(input.english)
                     self.segments[index].completeTranslation(rendered, targetCode: target.rawValue)
+                    self.segments[index].updateCaptionAnnotation(targetCode: target.rawValue,
+                        formulaUncertain: (input.sourceLanguage == nil || input.sourceLanguage == "en")
+                            && FormulaASRReview.uncertain(input.english))
                     self.translationHints.removeValue(forKey: id)
                     self.liveChinese = rendered
                     self.markCaptionActivity()

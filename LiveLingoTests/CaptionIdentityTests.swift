@@ -99,7 +99,7 @@ final class CaptionIdentityTests: XCTestCase {
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("字幕生命周期测试不能发起复查")
                 throw CancellationError()
             }
@@ -163,7 +163,7 @@ final class CaptionIdentityTests: XCTestCase {
             let audio = try AVAudioFile(forWriting: root.appendingPathComponent("recording.wav"), settings: format.settings)
             try audio.write(from: pcm)
             var calls = 0
-            let model = try makeModel(.unavailable, notes: .init(generate: { _, _, _, _ in
+            let model = try makeModel(.unavailable, notes: .init(generate: { _, _, _, _, _ in
                 calls += 1
                 if calls == 1 { throw QwenRuntimeError.invalidResponse }
                 return #"{"topic":"小车运动","points":[{"kind":"核心结论","text":"B 车全程保持每秒两米的速度。","sourceIDs":["en0s0","en1s0"]}]}"#
@@ -1148,7 +1148,7 @@ final class CaptionIdentityTests: XCTestCase {
             let gate = CaptionIdentityGate<String>()
             addTeardownBlock { await gate.finish(.failure(CancellationError())) }
             var calls = 0
-            let model = try makeModel(.unavailable, notes: .init(generate: { _, _, _, update in
+            let model = try makeModel(.unavailable, notes: .init(generate: { _, _, _, _, update in
                 calls += 1
                 await update("{\"topic\":")
                 return try await gate.wait()

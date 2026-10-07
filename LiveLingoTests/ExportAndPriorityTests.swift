@@ -517,7 +517,7 @@ final class ProcessingFocusTests: XCTestCase {
         let queue = await MainActor.run { () -> LearningReviewQueue in
             // 假 generator + 独立目录：这条测试不碰真实 9B。
             let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
-                                            generate: { _, _, _, _ in "{}" })
+                                            generate: { _, _, _, _, _ in "{}" })
             queue.togglePause()
             XCTAssertTrue(queue.userPaused)
             queue.setContext(recording: false, concurrent: decision.allowConcurrentReview,

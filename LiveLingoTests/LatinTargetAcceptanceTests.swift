@@ -371,7 +371,7 @@ final class LatinTargetAcceptanceTests: XCTestCase {
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Caption tests must not load models or create notes")
                 throw CancellationError()
             }
@@ -484,5 +484,113 @@ final class LatinTargetAcceptanceTests: XCTestCase {
         #else
         throw XCTSkip("Call instrumentation is present only in Debug builds.")
         #endif
+    }
+}
+
+extension LatinTargetAcceptanceTests {
+    private static let b1ForeignShortCaptions: [(source: String, language: String, translation: String)] = [
+        ("Hola.", "es", "Hello."),
+        ("Buenos días.", "es", "Good morning."),
+        ("No sé.", "es", "I do not know."),
+        ("La presión.", "es", "The pressure."),
+        ("Bonjour.", "fr", "Hello."),
+        ("Merci beaucoup.", "fr", "Thank you very much."),
+        ("C’est faux.", "fr", "That is false.")
+    ]
+
+    private actor B1RequestCapture {
+        private var prompts: [String] = []
+        func reply(prompt: String, text: String) -> String {
+            prompts.append(prompt)
+            return text
+        }
+        func snapshot() -> [String] { prompts }
+    }
+
+    func testB1ShortForeignEchoesAreRejectedByEnglishAcceptance() {
+        for sample in Self.b1ForeignShortCaptions {
+            XCTAssertNotNil(LatinTargetAcceptance.rejection(candidate: sample.source,
+                source: sample.source, target: .english, sourceLanguage: sample.language), sample.source)
+            XCTAssertNotNil(TranslationAcceptance.rejection(candidate: sample.source,
+                source: sample.source, sourceLanguage: sample.language, target: .english), sample.source)
+        }
+    }
+
+    func testB1ProductionClientRejectsShortForeignEchoAndAcceptsContentRetry() async throws {
+        for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+            for sample in Self.b1ForeignShortCaptions {
+                let requests = B1RequestCapture()
+                do {
+                    _ = try await QwenTranslationClient.translate(sample.source, modelName: model,
+                        sourceLanguage: sample.language, target: .english,
+                        request: { _, prompt, _ in
+                            await requests.reply(prompt: prompt, text: sample.source)
+                        })
+                    XCTFail("Foreign source copy reached an English caption: \(sample.source)")
+                } catch QwenRuntimeError.translationRejected { }
+
+                // Exercise the production client's content-retry attempt with
+                // a new request, after the first output has failed acceptance.
+                let translated = try await QwenTranslationClient.translate(sample.source, modelName: model,
+                    sourceLanguage: sample.language, target: .english, attempt: .repairContent,
+                    request: { _, prompt, _ in
+                        await requests.reply(prompt: prompt, text: sample.translation)
+                    })
+                XCTAssertEqual(translated, sample.translation, sample.source)
+                let prompts = await requests.snapshot()
+                XCTAssertEqual(prompts.count, 2, sample.source)
+                XCTAssertFalse(prompts.first?.contains(QwenTranslationClient.englishRecoverySuffix) == true)
+                XCTAssertTrue(prompts.last?.contains(QwenTranslationClient.englishRecoverySuffix) == true)
+            }
+        }
+    }
+
+    func testB1ProductionClientPreservesNamesIdentifiersAndSharedWords() async throws {
+        let portable: [(String, String)] = [
+            ("Dijkstra.", "es"), ("Isaac Newton", "fr"), ("Buenos Aires", "es"),
+            ("DNA ATP FTIR", "fr"), ("500 nm", "es"),
+            ("frame_index", "fr"), ("nodeID42", "es"),
+            ("Radio.", "es"), ("Hotel.", "es"), ("Internet.", "fr"),
+            ("Excellent.", "fr"), ("Question?", "fr")
+        ]
+        for (text, language) in portable {
+            let requests = B1RequestCapture()
+            let output = try await QwenTranslationClient.translate(text,
+                modelName: QwenModelProfile.energySaver.translationModel,
+                sourceLanguage: language, target: .english,
+                request: { _, prompt, _ in await requests.reply(prompt: prompt, text: text) })
+            XCTAssertEqual(output, text, text)
+            let prompts = await requests.snapshot()
+            XCTAssertEqual(prompts.count, 1, text)
+        }
+    }
+
+    func testEnglishHanLengthGuardUsesProductionNFCUnicodeLetterUnit() {
+        let mixed = String(repeating: "汉", count: 30) + " DNA e\u{301} 42。"
+        XCTAssertEqual(LatinTargetLengthGuard.letterCount(mixed), 34)
+        XCTAssertEqual(LatinTargetLengthGuard.letterCount("汉Ａe\u{301}𠮷 123。"), 4)
+        XCTAssertEqual(LatinTargetLengthGuard.maximumOutputLetters(source: mixed,
+            target: .english, sourceLanguage: "zh"), 34 * 4.57 + 12, accuracy: 1e-12)
+        XCTAssertGreaterThan(LatinTargetLengthGuard.maximumOutputLetters(source: mixed,
+            target: .english, sourceLanguage: "zh"),
+            LatinTargetLengthGuard.maximumOutputLetters(source: String(repeating: "汉", count: 30),
+                target: .english, sourceLanguage: "zh"))
+    }
+
+    func testEnglishHanProvisionalLengthBoundAcceptsEdgeAndRejectsNextLetter() {
+        // 4.57 is the 85-turn in-sample p99.5 ceiling, not a holdout
+        // guarantee. The existing floor and absolute allowance are retained.
+        XCTAssertEqual(LatinTargetLengthGuard.englishFromHanMaximumRatio, 4.57)
+        for source in ["汉", String(repeating: "汉", count: 24),
+                       String(repeating: "汉", count: 233),
+                       String(repeating: "汉", count: 30) + " DNA"] {
+            let limit = LatinTargetLengthGuard.maximumOutputLetters(source: source,
+                target: .english, sourceLanguage: "zh")
+            let edge = Int(limit.rounded(.down))
+            XCTAssertTrue(LatinTargetLengthGuard.isPlausible(candidate: String(repeating: "é", count: edge),
+                source: source, target: .english, sourceLanguage: "zh"))
+            XCTAssertFalse(LatinTargetLengthGuard.isPlausible(candidate: String(repeating: "é", count: edge + 1),
+                source: source, target: .english, sourceLanguage: "zh"))
+        }
     }
 }

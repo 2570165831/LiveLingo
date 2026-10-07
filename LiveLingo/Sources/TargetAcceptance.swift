@@ -1094,26 +1094,28 @@ enum LatinTargetAcceptance {
                 return .nonLatinScript
             }
             let unchanged = echoForm(candidate) == echoForm(source)
-            if sourceCode(sourceLanguage) != target.rawValue, unchanged,
-               sourceContentWords(source).count >= 3 { return .sourceEcho }
-            // Names and short homographs can legitimately remain unchanged.
-            // Recognition cannot resolve a language from those portable tokens.
-            if !unchanged || sourceContentWords(source).count >= 3 {
-                let language = identifyLanguage(candidate, target: target, sourceLanguage: sourceLanguage)
-                if isForcedClassification(language) {
-                    return .wrongLanguage
-                }
-                // Short subtitles are ambiguous to the OS recognizer. A missing
-                // function word, by itself, is never a reason to reject them.
-                if words(candidate).count > 5, language.detectedLanguage != target.rawValue,
-                   language.detectedConfidence >= 0.8 { return .wrongLanguage }
-                if target != .english, containsEnglishClause(candidate, target: target, sourceLanguage: sourceLanguage) {
-                    return .mixedEnglishProse
-                }
-                if hasCompetingEvidence(candidate, target: target) { return .wrongLanguage }
-                if sourceCode(sourceLanguage) != target.rawValue,
-                   containsCopiedProse(candidate: candidate, source: source) { return .sourceProse }
+            let foreignSource = sourceCode(sourceLanguage) != target.rawValue
+            if foreignSource, unchanged, sourceContentWords(source).count >= 3 { return .sourceEcho }
+            // Short copies still undergo recognition and competing-language
+            // checks. Only explicit portable forms can override an uncertain
+            // recognizer; foreign prose evidence defeats a title-case name.
+            let language = identifyLanguage(candidate, target: target, sourceLanguage: sourceLanguage)
+            let portableCopy = unchanged && isPortableSourceCopy(candidate, target: target, sourceLanguage: sourceLanguage)
+            if foreignSource, unchanged, !portableCopy,
+               hasShortSourceProseEvidence(candidate, target: target, sourceLanguage: sourceLanguage)
+                || (language.detectedLanguage != target.rawValue && language.detectedConfidence >= 0.8) {
+                return .sourceEcho
             }
+            if !portableCopy, isForcedClassification(language) { return .wrongLanguage }
+            // A missing function word alone is not evidence against a
+            // translated short caption; unchanged foreign prose is different.
+            if !portableCopy, words(candidate).count > 5, language.detectedLanguage != target.rawValue,
+               language.detectedConfidence >= 0.8 { return .wrongLanguage }
+            if target != .english, containsEnglishClause(candidate, target: target, sourceLanguage: sourceLanguage) {
+                return .mixedEnglishProse
+            }
+            if hasCompetingEvidence(candidate, target: target) { return .wrongLanguage }
+            if foreignSource, containsCopiedProse(candidate: candidate, source: source) { return .sourceProse }
 
         }
         guard LatinTargetLengthGuard.isPlausible(candidate: candidate, source: source, target: target,
@@ -1222,6 +1224,55 @@ enum LatinTargetAcceptance {
                 && Double(competing) / Double(max(1, tokens.count)) >= 0.2
         }
     }
+    // Distinctive greetings, replies and lecture words supplement ambiguous
+    // short OS classifications. Shared words (e.g. no/radio) are not evidence.
+    private static let shortSourceProseWords: [Target: Set<String>] = [
+        .spanish: Set("hola adiós gracias perdón disculpa disculpe sé sabemos presión temperatura agua cierto falso verdad sí".split(separator: " ").map(String.init)),
+        .french: Set("bonjour bonsoir salut merci beaucoup pardon désolé désolée sais savons pression température eau vrai faux oui c'est c’est".split(separator: " ").map(String.init))
+    ]
+    private static let sharedEnglishWordForms: [Target: Set<String>] = [
+        .spanish: Set("radio hotel internet animal hospital local final total original material central experimental".split(separator: " ").map(String.init)),
+        .french: Set("excellent question internet radio menu restaurant important original final total".split(separator: " ").map(String.init))
+    ]
+    private static func isSharedEnglishWord(_ tokens: [String], target: Target, source: Target) -> Bool {
+        guard tokens.count == 1 else { return false }
+        if target == .english { return sharedEnglishWordForms[source, default: []].contains(tokens[0]) }
+        return source == .english && sharedEnglishWordForms[target, default: []].contains(tokens[0])
+    }
+    private static func hasShortSourceProseEvidence(_ text: String, target: Target, sourceLanguage: String?) -> Bool {
+        guard let source = Target(rawValue: sourceCode(sourceLanguage)), source != target else { return false }
+        let tokens = words(text)
+        if isSharedEnglishWord(tokens, target: target, source: source) { return false }
+        if tokens.contains(where: { shortSourceProseWords[source, default: []].contains($0) }) { return true }
+        if tokens.contains(where: { evidence[source, default: []].contains($0) && !evidence[target, default: []].contains($0) }) {
+            return true
+        }
+        // Buenos Aires is a name; buenos días is a greeting. The adjective
+        // alone must not turn a clearly capitalized place into copied prose.
+        if source == .spanish {
+            return zip(tokens, tokens.dropFirst()).contains { first, second in
+                (first == "buenos" && second == "días")
+                    || (first == "buenas" && ["tardes", "noches"].contains(second))
+            }
+        }
+        return false
+    }
+    private static let portableIdentifier = try! NSRegularExpression(pattern:
+        #"^[A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+|[0-9][A-Za-z0-9_]*|[a-z][A-Z][A-Za-z0-9_]*)[.!?]?$"#)
+    private static func isPortableSourceCopy(_ text: String, target: Target, sourceLanguage: String?) -> Bool {
+        let canonical = text.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        if portableIdentifier.firstMatch(in: canonical, range: NSRange(canonical.startIndex..., in: canonical)) != nil { return true }
+        let tokens = words(canonical)
+        if let source = Target(rawValue: sourceCode(sourceLanguage)), isSharedEnglishWord(tokens, target: target, source: source) { return true }
+        guard !hasShortSourceProseEvidence(canonical, target: target, sourceLanguage: sourceLanguage) else { return false }
+        // Preserve capitalized name tokens, but never a known foreign clause
+        // merely because its first word (or every word) is capitalized.
+        let names = wordExpression.matches(in: canonical, range: NSRange(canonical.startIndex..., in: canonical))
+            .compactMap { Range($0.range, in: canonical).map { String(canonical[$0]) } }
+        return !names.isEmpty && names.allSatisfy {
+            $0.first?.isUppercase == true && $0.dropFirst().contains(where: \.isLowercase)
+        }
+    }
     private static func sourceContentWords(_ text: String) -> [String] {
         let tokens = wordExpression.matches(in: text, range: NSRange(text.startIndex..., in: text))
             .compactMap { Range($0.range, in: text).map { String(text[$0]) } }
@@ -1298,17 +1349,23 @@ enum LatinTargetAcceptance {
 enum LatinTargetLengthGuard {
     static let minimumSourceLetters = 24
     static let absoluteLetterAllowance = 12
-    /// Local UN S/PV.10142/10153/10168/10192, 85 complete aligned turns.
-    /// English letters / Han scalars: p99.5 4.56732296137339, ceiling to 0.01.
-    /// Scripts/target_eval/calibrate.py plus the local Han-count audit; in-sample only.
+    /// Provisional value from 85 complete turns in four local UN meetings.
+    /// Same NFC Unicode-letter scalar unit as letterCount, for both source
+    /// and English reference: p99.5 4.5673229613733906, ceiling to 0.01.
+    /// 55 Han-only sources; 30 mixed sources contain 60 non-Han letters.
+    /// Scripts/target_eval/calibrate.py reports these cohorts separately.
+    /// In-sample only, with no added ratio margin; not a 1% gate or caption
+    /// guarantee. Recalibrate after expanding meetings/sources and validate
+    /// on an independent holdout. Existing 24/+12 allowances are retained.
     static let englishFromHanMaximumRatio = 4.57
 
     /// Four local UN meetings, 85 fully extracted aligned turns. Values follow
     /// the reference letter-ratio p99.5 rounded UP to 0.01, except the retained
     /// historical fr/ru 1.20: its empirical ceiling is 1.19 and the extra 0.01
     /// has no recovered derivation (Scripts/target_eval/PROVENANCE.md). This
-    /// review changes no ratio. These are in-sample calibration parameters,
-    /// not independent accuracy validation or a subtitle guarantee.
+    /// review changes no ratio. These are provisional in-sample parameters;
+    /// expanded meetings/sources and an independent holdout must establish
+    /// their replacement, not this sample or a subtitle guarantee.
     static func maximumRatio(target: LatinTargetAcceptance.Target, sourceLanguage: String?) -> Double {
         LatinAcceptanceInstrumentation.record(.maximumRatio)
         let source = sourceLanguage?.lowercased().split(separator: "-").first.map(String.init) ?? "en"

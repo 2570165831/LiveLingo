@@ -815,7 +815,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FloatingSubtitleDisplay-\(UUID().uuidString)",
                                                                                      isDirectory: true)
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
-                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
             XCTFail("Display tests must never invoke a generator")
             throw CancellationError()
         }

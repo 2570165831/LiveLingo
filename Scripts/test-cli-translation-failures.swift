@@ -90,7 +90,7 @@ struct CLITranslationFailureTests {
         }
         defaults.setVolatileDomain(["LiveLingo.modelMode": ModelMode.energySaver.rawValue], forName: UserDefaults.argumentDomain)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent(name + "-queue.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 throw QwenRuntimeError.runtimeUnavailable
             }
         await queue.shutdownForTesting()

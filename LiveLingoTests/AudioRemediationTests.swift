@@ -1199,7 +1199,7 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
     @MainActor
     func testNonEnglishVerdictClearsOnlyThatRangesWarning() throws {
         let root = try directory()
-        let reviews = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _ in
+        let reviews = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _, _ in
             throw CancellationError()
         }
         let suite = "LiveLingo-Test-\(UUID())"

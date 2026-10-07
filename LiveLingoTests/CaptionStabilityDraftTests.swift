@@ -36,7 +36,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review.json"),
-            observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Draft acceptance must not invoke review")
                 throw CancellationError()
             }
@@ -73,7 +73,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
         var requests: [Request] = []
         let prefix = retainedPrefix
         let empty = #"{"sourceVersion":2,"topic":"无新增学习知识","points":[],"noNewKnowledge":true}"#
-        let model = try makeModel(time: time, notes: .init(generate: { input, _, continuation, update in
+        let model = try makeModel(time: time, notes: .init(generate: { input, _, continuation, _, update in
             requests.append(.init(input: input, prefix: continuation))
             let count = try self.requestSegmentCount(input)
             if count > 2 {
@@ -110,7 +110,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
     func testEnglishOutputLimitPreservesTheFrozenInputAndOrdinaryFailurePath() async throws {
         let time = Time()
         var requests: [Request] = []
-        let model = try makeModel(time: time, notes: .init(generate: { input, _, prefix, _ in
+        let model = try makeModel(time: time, notes: .init(generate: { input, _, prefix, _, _ in
             requests.append(.init(input: input, prefix: prefix))
             throw QwenRuntimeError.outputLimitReached("Synthetic English output limit")
         }))
@@ -130,7 +130,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
     func testUnsplittableMultilingualOutputLimitStopsWithoutUnboundedRetries() async throws {
         let time = Time()
         var counts: [Int] = []
-        let model = try makeModel(time: time, notes: .init(generate: { input, _, _, _ in
+        let model = try makeModel(time: time, notes: .init(generate: { input, _, _, _, _ in
             counts.append(try self.requestSegmentCount(input))
             throw QwenRuntimeError.outputLimitReached("Synthetic repeated output limit")
         }))
@@ -148,7 +148,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
     func testMultilingualTimeoutKeepsTheExistingBackoffWithoutSplitting() async throws {
         let time = Time()
         var count = 0
-        let model = try makeModel(time: time, notes: .init(generate: { _, _, _, _ in
+        let model = try makeModel(time: time, notes: .init(generate: { _, _, _, _, _ in
             count += 1
             throw QwenRuntimeError.requestTimedOut
         }))
@@ -168,7 +168,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
             let time = Time()
             var requests: [Request] = []
             let prefix = retainedPrefix, note = response
-            let model = try makeModel(time: time, notes: .init(generate: { input, _, continuation, update in
+            let model = try makeModel(time: time, notes: .init(generate: { input, _, continuation, _, update in
                 requests.append(Request(input: input, prefix: continuation))
                 if requests.count == 1 {
                     await update(prefix)
@@ -229,7 +229,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
         let time = Time()
         var requests: [Request] = []
         let note = response
-        let model = try makeModel(time: time, notes: .init(generate: { input, _, prefix, _ in
+        let model = try makeModel(time: time, notes: .init(generate: { input, _, prefix, _, _ in
             requests.append(.init(input: input, prefix: prefix))
             return note
         }))

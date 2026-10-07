@@ -580,7 +580,12 @@ final class SessionStore: @unchecked Sendable {
                       snapshot.lastJournalDigest == SessionArchiveCoding.genesisDigest else {
                     throw SessionStoreError.staleSnapshot
                 }
-                if let legacy = current.result.snapshot {
+                if var legacy = current.result.snapshot {
+                    // The first explicit default snapshot remains authoritative
+                    // over derived export metadata, as before. Imported targets
+                    // are preserved by callers carrying the loaded snapshot;
+                    // an existing snapshot's target is always immutable above.
+                    if snapshot.targetLocale == nil { legacy.targetLocale = nil }
                     try Self.validatePreservation(from: legacy, to: snapshot)
                 }
             }
@@ -810,9 +815,13 @@ final class SessionStore: @unchecked Sendable {
         guard ids.count <= 1 else { throw SessionStoreError.identityConflict("旧字幕包含多个会话标识") }
         let summary = hasMarkdown ? try String(contentsOf: markdown, encoding: .utf8) : nil
         let date = (try? directory.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
-        let snapshot = SessionSnapshot(sessionID: ids.first ?? legacySessionID,
+        var snapshot = SessionSnapshot(sessionID: ids.first ?? legacySessionID,
                                        inputRevision: segments.map(\.inputRevision).max() ?? 0,
                                        segments: segments, legacyMarkdown: summary, createdAt: date)
+        // Only legacy imports consult export metadata. A stored nil remains
+        // the frozen Simplified Chinese choice and is never stamped by writes.
+        snapshot.targetLocale = try OutputLanguage.savedLanguage(in: directory,
+            snapshot: snapshot, origin: .legacy).persistedLocale
         try snapshot.validate()
         return snapshot
     }

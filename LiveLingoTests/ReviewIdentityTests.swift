@@ -66,7 +66,7 @@ enum ReviewIdentityScenarios {
         @discardableResult
         func makeQueue(generate: LearningReviewQueue.Generator? = nil) -> LearningReviewQueue {
             let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
-                generate: generate ?? { _, _, _, _ in ReviewIdentityScenarios.emptyResponse })
+                generate: generate ?? { _, _, _, _, _ in ReviewIdentityScenarios.emptyResponse })
             queue.setContext(recording: true, concurrent: false, resourcesAvailable: false)
             queues.append(queue)
             return queue
@@ -372,7 +372,7 @@ enum ReviewIdentityScenarios {
         try await withFixture { f in
             await f.queue.shutdownForTesting()
             var calls = 0
-            let queue = f.makeQueue { _, _, _, update in
+            let queue = f.makeQueue { _, _, _, _, update in
                 calls += 1
                 if calls > 1 {
                     await update("unfinished prefix")
@@ -479,7 +479,7 @@ struct ReviewIdentityTests {
             var calls = 0
             var writerStopped = false
             let marker = f.directory.appendingPathComponent("writer-finished.txt")
-            let queue = f.makeQueue { _, _, _, _ in
+            let queue = f.makeQueue { _, _, _, _, _ in
                 calls += 1
                 if calls == 1 {
                     do { try await Task.sleep(for: .seconds(30)) }

@@ -28,7 +28,7 @@ final class MultilingualCaptionGateTests: XCTestCase {
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
-                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _ in
+                                       observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
             XCTFail("Caption display tests must not invoke a generator")
             throw CancellationError()
         }
