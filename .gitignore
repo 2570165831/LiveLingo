@@ -5,6 +5,8 @@ xcuserdata/
 
 # Build products and caches
 work/
+# Local target-language evaluation corpora and reports must never be committed.
+target-eval/
 outputs/
 DerivedData/
 **/DerivedData/
