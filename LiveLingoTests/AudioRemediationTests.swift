@@ -1538,7 +1538,14 @@ extension AudioRemediationTests {
         XCTAssertEqual(record.candidateOrigin, "context")
         XCTAssertNil(record.candidateLanguage)
         let diagnostics = try String(contentsOf: root.appendingPathComponent("transcription-issues.jsonl"), encoding: .utf8)
-        XCTAssertTrue(diagnostics.contains(record.candidateText!))
+        XCTAssertFalse(diagnostics.contains(record.candidateText!))
+        let rows = try diagnostics.split(separator: "\n").map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        XCTAssertTrue(rows.contains {
+            ($0["candidateBytes"] as? Int) == record.candidateText!.utf8.count
+                && ($0["candidateSHA256"] as? String)?.count == 64
+        })
         XCTAssertFalse(diagnostics.contains(rejected.text))
         XCTAssertEqual(Set(calls.value.map(\.requestID)).count, calls.value.count)
         XCTAssertTrue(calls.value.allSatisfy { $0.requestID.count <= 128 && $0.stage.count <= 21 })

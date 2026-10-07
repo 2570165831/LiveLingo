@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreMedia
+import CryptoKit
 import Foundation
 import OSLog
 import ScreenCaptureKit
@@ -520,10 +521,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 throw PipelineError.importFailed("保存位置已有录音，请使用新的课程目录。")
             }
             root = recordingURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try SensitiveFileIO.prepareDirectory(root)
         } else {
             root = try SessionWorkspace.temporaryRoot().appendingPathComponent("LiveLingo-ASR-" + id.uuidString)
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            try SensitiveFileIO.prepareDirectory(root)
         }
         stateLock.withLock {
             generation = token; sessionID = id; identifiedEvents = requestedID != nil
@@ -589,6 +590,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 commonFormat: format.commonFormat,
                 interleaved: format.isInterleaved
             )
+            try SensitiveFileIO.tightenFileIfPresent(recordingURL)
         } else {
             fullRecording = nil
         }
@@ -652,6 +654,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 commonFormat: format.commonFormat,
                 interleaved: format.isInterleaved
             )
+            try SensitiveFileIO.tightenFileIfPresent(recordingURL)
         } else {
             fullRecording = nil
         }
@@ -806,6 +809,9 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         guard stateLock.withLock({ generation == token }) else { return }
         await transcriptionQueue.cancel()
         await cleanLiveOnlyWorkIfNeeded(generation: token)
+        if stateLock.withLock({ generation == token && !persistsSession }) {
+            transcriptionQueue.discardVolatileContentAfterCancellation()
+        }
     }
 
     func drainTranscription(sessionID: UUID? = nil) async { await transcriptionQueue.finish(sessionID: sessionID) }
@@ -922,7 +928,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private func reportQueueFailure(_ error: Error) {
-        failCapture("转写状态无法保存：\(error.localizedDescription)", generation: stateLock.withLock { generation })
+        failCapture("转写状态无法保存：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))", generation: stateLock.withLock { generation })
     }
 
     private func failCapture(_ message: String, generation token: UUID) {
@@ -1012,7 +1018,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             stateLock.unlock()
         } catch {
             stateLock.unlock()
-            if reportFailure { failCapture("音频写入失败：\(error.localizedDescription)", generation: stateLock.withLock { generation }) }
+            if reportFailure { failCapture("音频写入失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))", generation: stateLock.withLock { generation }) }
             return error
         }
 
@@ -2039,7 +2045,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 try openNextChunkLocked()
             } catch {
                 let token = generation
-                let message = "无法建立下一段音频：\(error.localizedDescription)"
+                let message = "无法建立下一段音频：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
                 audioProcessingQueue.async { [weak self] in self?.failCapture(message, generation: token) }
             }
         }
@@ -2102,12 +2108,18 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             modelKey: profile.asrKey, fallbackModelKey: profile.fallbackASRKey), directory: chunkDirectory)
         nextChunkIndex += 1
         chunkURL = url
+        let parent = try SensitiveFileIO.Directory.open(at: chunkDirectory, create: false, tighten: true)
+        guard try !parent.requireRegularFileIfPresent(named: url.lastPathComponent) else {
+            throw PipelineError.temporaryDirectoryUnavailable
+        }
         chunkFile = try AVAudioFile(
             forWriting: url,
             settings: inputFormat.settings,
             commonFormat: inputFormat.commonFormat,
             interleaved: inputFormat.isInterleaved
         )
+        try parent.assertStillAtOriginalPath()
+        try SensitiveFileIO.tightenFileIfPresent(url)
     }
 
 }
@@ -2281,8 +2293,10 @@ extension SpeechPipeline {
         let format = MediaFileImport.storageFormat
         do {
             let output = try recordingURL.map {
-                try AVAudioFile(forWriting: $0, settings: format.settings,
+                let file = try AVAudioFile(forWriting: $0, settings: format.settings,
                                 commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+                try SensitiveFileIO.tightenFileIfPresent($0)
+                return file
             }
             try configureSession(format: format, recordingFile: output, chunkDirectory: temporaryDirectory)
         } catch {
@@ -2308,7 +2322,7 @@ extension SpeechPipeline {
                         continuation.resume(returning: self.write(transfer.buffer, reportFailure: false))
                     }
                 }
-                if let error { throw MediaFileImport.ImportError.unreadable("音频写入失败：\(error.localizedDescription)") }
+                if let error { throw MediaFileImport.ImportError.unreadable("音频写入失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))") }
                 // 有界背压：转写落后时就等一下，别把整场课的分块全堆到磁盘上。
                 while self.transcriptionQueue.inFlightCount >= Self.importBacklogLimit {
                     try Task.checkCancellation()
@@ -2331,8 +2345,12 @@ extension SpeechPipeline {
                                eventHandler: @escaping @Sendable (Event) -> Void) async throws -> OwnedAudioCaptureBuffer {
         let directory = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
             persistsSession: persistsSession, eventHandler: eventHandler)
-        let file = try recordingURL.map { try AVAudioFile(forWriting: $0, settings: format.settings,
-            commonFormat: format.commonFormat, interleaved: format.isInterleaved) }
+        let file = try recordingURL.map {
+            let file = try AVAudioFile(forWriting: $0, settings: format.settings,
+                commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+            try SensitiveFileIO.tightenFileIfPresent($0)
+            return file
+        }
         try configureSession(format: format, recordingFile: file, chunkDirectory: directory)
         let input = try makeIngress(format: format)
         stateLock.withLock { ingress = input; self.inputMode = inputMode }
@@ -2376,6 +2394,7 @@ extension SpeechPipeline {
                                                persistsSession: true, eventHandler: eventHandler)
         let audio = try AVAudioFile(forReading: file)
         let output = try AVAudioFile(forWriting: recordingURL, settings: audio.processingFormat.settings)
+        try SensitiveFileIO.tightenFileIfPresent(recordingURL)
         await startStreamingPreviewIfAvailable()
         try configureSession(format: audio.processingFormat, recordingFile: output, chunkDirectory: temporary)
         try transcriptionQueue.setCapturing(true)
@@ -2608,7 +2627,7 @@ enum WAVContextClip {
     private static func write(payload: Data, layout: Layout, to url: URL) throws {
         var output = header(layout: layout, payloadBytes: payload.count)
         output.append(payload)
-        try output.write(to: url, options: .atomic)
+        try SensitiveFileIO.atomicWrite(output, to: url)
     }
 
     private static func ascii(_ data: Data, _ offset: Int, _ length: Int) -> String {
@@ -2643,28 +2662,27 @@ enum RecordingDiagnostics {
                        end: TimeInterval? = nil, detail: String, candidate: String? = nil,
                        reason: TranscriptionWorkRecord.FailureReason? = nil) {
         let logger = Logger(subsystem: "com.jianhongli.LiveLingo", category: "RecordingDiagnostics")
-        // The event name already says whether a candidate exists; the reason is a fixed identifier.
-        logger.notice("event=\(event, privacy: .public) has_interval=\(start != nil && end != nil) reason=\(reason?.rawValue ?? "none", privacy: .public)")
+        let knownEvents = ["transcription_missing", "transcription_non_english", "transcription_retry"]
+        let category = knownEvents.contains(event) ? event : "transcription_issue"
+        logger.notice("event=\(category, privacy: .public) has_interval=\(start != nil && end != nil) reason=\(reason?.rawValue ?? "none", privacy: .public)")
         guard let recordingURL else { return }
         lock.withLock {
             do {
                 var row: [String: Any] = ["date": ISO8601DateFormatter().string(from: Date()),
-                    "event": event, "detail": detail]
-                if let start { row["start"] = start }
-                if let end { row["end"] = end }
-                if let candidate { row["candidate"] = candidate }
+                    "event": category, "detailBytes": detail.utf8.count]
+                if let start, start.isFinite { row["start"] = start }
+                if let end, end.isFinite { row["end"] = end }
+                if let candidate {
+                    row["candidateBytes"] = candidate.utf8.count
+                    row["candidateSHA256"] = SHA256.hash(data: Data(candidate.utf8)).map {
+                        String(format: "%02x", $0)
+                    }.joined()
+                }
                 if let reason { row["reason"] = reason.rawValue }
                 var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
                 data.append(0x0a)
                 let url = recordingURL.deletingLastPathComponent().appendingPathComponent("transcription-issues.jsonl")
-                if !FileManager.default.fileExists(atPath: url.path) {
-                    try data.write(to: url, options: .atomic)
-                } else {
-                    let handle = try FileHandle(forWritingTo: url)
-                    defer { try? handle.close() }
-                    try handle.seekToEnd()
-                    try handle.write(contentsOf: data)
-                }
+                try SensitiveFileIO.append(data, to: url)
             } catch {
                 let code = (error as NSError).code
                 logger.error("event=recording_diagnostic_write_failed code=\(code)")

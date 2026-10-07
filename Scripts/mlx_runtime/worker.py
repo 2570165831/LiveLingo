@@ -7,7 +7,6 @@ import contextlib
 import json
 from pathlib import Path
 import queue
-import re
 import select
 import sys
 sys.dont_write_bytecode = True
@@ -35,8 +34,9 @@ except ImportError:
         def measure(stage):
             return contextlib.nullcontext()
 
-from review_diagnostics import (bind_review_prompt, failure_line, generation_detail,
-                                parse_review_input, stage_error)
+from review_diagnostics import (bind_review_prompt, generation_detail,
+                                parse_review_input, safe_error_message, stage_error)
+from checkpoints import checkpoint_records, checkpoint_token, prepare_state_directory, remove_checkpoint
 
 protocol = sys.stdout
 sys.stdout = sys.stderr
@@ -61,7 +61,7 @@ def environment_number(name, cast, default):
     if raw is None or raw == '': return default
     try: return cast(raw)
     except (TypeError, ValueError):
-        print(f'Ignoring invalid {name}={raw!r}', file=sys.stderr)
+        print(f'Ignoring invalid {name}', file=sys.stderr)
         return default
 
 
@@ -140,7 +140,7 @@ class MlxMemory:
             return False
         try: previous = int(setter(self.cache_limit_bytes))
         except Exception as error:
-            self._write(f'[memory] cache-limit failed error={error}')
+            self._write(f'[memory] cache-limit failed code={generation_detail(error)}')
             return False
         self.log_event('cache-limit', force=True, previous=self._mib(previous))
         return True
@@ -154,7 +154,7 @@ class MlxMemory:
         if clear is not None and cache != 0:
             try: clear(); cleared = True
             except Exception as error:
-                self._write(f'[memory] cache-release failed reason={reason} error={error}')
+                self._write(f'[memory] cache-release failed reason={reason} code={generation_detail(error)}')
         self.log_event(reason, force=True, cleared='yes' if cleared else 'no')
         self._released = clear is None or cleared or cache == 0
         return cleared
@@ -192,7 +192,7 @@ def read_commands(input_fd, stop_fd, stopping, commands):
             if len(pending) > 2_097_152:
                 raise ValueError('Oversized protocol request')
     except Exception as error:
-        commands.put({'op': 'reader_error', 'message': str(error)})
+        commands.put({'op': 'reader_error', 'code': generation_detail(error)})
 
 
 def send(kind, request_id=None, **fields):
@@ -221,7 +221,11 @@ def main():
                         help='Quiet period before unloading idle weights; paused progress stays on disk.')
     args = parser.parse_args()
     state_directory = Path(args.state_directory)
-    state_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        prepare_state_directory(state_directory)
+    except (OSError, ValueError):
+        send('error', message='runtime failure code=state_directory_invalid', recoverable=False)
+        return 2
     commands = queue.Queue()
     from engine import Engine, Generation
     from schemas import note_schema, review_schema
@@ -233,9 +237,12 @@ def main():
     engine = None
     active = OrderedDict()
     paused = OrderedDict()
+    volatile_paused = OrderedDict()
     completed = {}
     identities = {}
     purposes = {}
+    retention = {}
+    owned_checkpoints = {}
     last_checkpoint = {}
     last_emit = {}
     checkpointed = set()
@@ -245,28 +252,42 @@ def main():
 
     def describe_request_error(request_id, error):
         """Tag a review request failure with stage/code so the app can explain it."""
-        message = str(error)
-        if purposes.get(request_id) == 'review' and 'review failure ' not in message:
-            return failure_line('generation', 'generation_failed', generation_detail(error),
-                                request=request_id or 'unknown', error_type=type(error).__name__)
-        return message
+        return safe_error_message(error, review=purposes.get(request_id) == 'review')
+
+    def release_owned_checkpoint(request_id):
+        identity = identities.get(request_id)
+        token = owned_checkpoints.get(request_id)
+        if identity is not None and token is not None:
+            remove_checkpoint(state_directory, identity, expected=token)
+
+    def command_failed(command, error):
+        request_id = command.get('id')
+        send('error', request_id,
+             message=safe_error_message(error, review=command.get('purpose') == 'review'
+                                       or purposes.get(request_id) == 'review'),
+             controlID=command.get('controlID'),
+             recoverable=not isinstance(error, (ValueError, KeyError, TypeError)))
 
     def persist(generation):
+        if getattr(generation, '_retain_checkpoint', True) is False:
+            return
         generation.save(state_directory/(generation.identity+'.safetensors'))
+        token = checkpoint_token(state_directory, generation.identity)
+        if token is not None:
+            owned_checkpoints[generation._request_id] = token
         # Tensor caches are replaceable accelerators; the app owns the durable
         # text journal. Bound cold caches so paused jobs cannot fill the disk.
         # A done event is not a delivery receipt. Protect completed records
         # until ACK/CANCEL, just like active and hot paused generations.
         protected={generation.identity, *[g.identity for g in active.values()],
                    *paused.keys(), *completed.values()}
-        files=[p for p in state_directory.iterdir() if not p.is_symlink() and p.is_file()
-               and re.fullmatch(r'[0-9a-f]{64}\.safetensors',p.name)]
-        total=sum(p.stat().st_size for p in files)
-        for path in sorted(files,key=lambda p:p.stat().st_mtime):
+        records = checkpoint_records(state_directory)
+        total = sum(info.st_size for _, info in records)
+        for path, info in sorted(records, key=lambda item: item[1].st_mtime):
             if total <= 4*1024**3: break
             if path.stem not in protected:
-                size=path.stat().st_size
-                path.unlink();total-=size
+                remove_checkpoint(state_directory, path.stem)
+                total -= info.st_size
 
     def checkpoint_path(generation):
         return state_directory/(generation.identity+'.safetensors')
@@ -277,54 +298,70 @@ def main():
         control = {'controlID': command.get('controlID')}
         if op in ('shutdown','reader_error'):
             failures = []
-            for identity, generation in active.items():
-                if identity not in checkpointed: continue
+            for running_id, generation in active.items():
+                if running_id not in checkpointed: continue
                 try: persist(generation)
                 except Exception as error:
-                    failures.append(identity)
-                    print('Checkpoint failure:', type(error).__name__, file=sys.stderr)
+                    failures.append(running_id)
+                    print('Checkpoint failure:', generation_detail(error), file=sys.stderr)
             send('shutdown', request_id, state='checkpoint_failed' if failures else 'ready_to_exit',
                  failedRequests=failures, **control)
             return False
-        if op in ('ack','cancel'):
+        if op in ('ack','cancel','discard'):
+            identity = identities.get(request_id)
+            release_owned_checkpoint(request_id)
+            was_retained = retention.get(request_id, True)
             generation = active.pop(request_id, None)
-            identity = identities.pop(request_id, None)
+            identities.pop(request_id, None)
             purposes.pop(request_id, None)
+            retention.pop(request_id, None)
+            owned_checkpoints.pop(request_id, None)
             if identity is not None:
-                paused.pop(identity, None)
+                if was_retained:
+                    paused.pop(identity, None)
+                else:
+                    volatile_paused.pop(request_id, None)
                 completed.pop(request_id, None)
-                (state_directory/(identity+'.safetensors')).unlink(missing_ok=True)
             checkpointed.discard(request_id)
             last_checkpoint.pop(request_id,None);last_emit.pop(request_id,None)
             generation = None
             if not active:
-                memory.release('cancel' if op=='cancel' else 'ack')
+                memory.release('cancel' if op in ('cancel', 'discard') else 'ack')
             send(op, request_id, state='released', **control)
             return True
         if op in ('pause','checkpoint'):
             generation = active.get(request_id)
             if generation is not None:
-                if op != 'cancel': persist(generation)
+                persist(generation)
                 if op != 'checkpoint':
                     active.pop(request_id, None)
                     checkpointed.discard(request_id)
                     last_checkpoint.pop(request_id,None);last_emit.pop(request_id,None)
                     if op == 'pause':
-                        paused[generation.identity] = generation
+                        if retention.get(request_id, True):
+                            paused[generation.identity] = generation
+                        else:
+                            volatile_paused[request_id] = generation
+                            while len(volatile_paused) > 1:
+                                volatile_paused.popitem(last=False)
                         # Keep only the most recent paused task hot. Older tasks
                         # remain recoverable from their atomic checkpoint.
                         while len(paused)>1: paused.popitem(last=False)
                         # A paused task keeps its own tensors; only unused
                         # buffers are returned here.
                         memory.log_event('pause')
-                send('paused' if op=='pause' else op, request_id, state='saved', **control)
+                send('paused' if op=='pause' else op, request_id,
+                     state='saved' if retention.get(request_id, True) else 'in_memory', **control)
             else:
                 # Generation may finish at the token boundary immediately before
                 # a pause reaches us. Acknowledge the stopped computation while
                 # preserving the completed checkpoint until delivery is acked.
                 identity = identities.get(request_id)
+                has_paused = (identity in paused if retention.get(request_id, True)
+                              else request_id in volatile_paused)
                 state = ('completed' if request_id in completed else
-                         'saved' if identity in paused else 'absent')
+                         ('saved' if retention.get(request_id, True) else 'in_memory')
+                         if has_paused else 'absent')
                 send('paused' if op=='pause' else op, request_id, state=state, **control)
             return True
         if op != 'generate': raise ValueError('Unknown operation')
@@ -337,9 +374,15 @@ def main():
         if not isinstance(prompt,str) or not isinstance(prefix,str) or len((prompt+prefix).encode())>1_048_576:
             raise ValueError('Invalid input')
         purpose = command.get('purpose','text')
+        retain_checkpoint = command.get('retainCheckpoint', True)
+        if not isinstance(retain_checkpoint, bool):
+            raise ValueError('retainCheckpoint must be a boolean')
+        if request_id in identities and retention.get(request_id, True) != retain_checkpoint:
+            raise ValueError('Request ID belongs to a different retention policy')
         use_prefix_cache = command.get('usePrefixCache', True)
         if not isinstance(use_prefix_cache, bool):
             raise ValueError('usePrefixCache must be a boolean')
+        use_prefix_cache = use_prefix_cache and retain_checkpoint
         schema = None
         # Check the request before any weight is loaded: a legacy or malformed
         # review input must fail with its structured compatibility error
@@ -375,29 +418,46 @@ def main():
             generation=Generation(engine,prompt,schema,thinking=bool(command.get('thinking',False)),prefix=prefix,
                                   thinking_budget=thinking_budget,final_budget=final_budget,
                                   _use_prefix_cache=use_prefix_cache)
-        if any(item.identity == generation.identity for item in active.values()):
+        if any(item.identity == generation.identity and retention.get(other_id, True) == retain_checkpoint
+               for other_id, item in active.items()):
             raise ValueError('Identical generation already active')
         for old_id, identity in list(identities.items()):
-            if identity == generation.identity and old_id not in active:
+            if (identity == generation.identity and old_id not in active
+                    and retention.get(old_id, True) == retain_checkpoint):
                 identities.pop(old_id, None)
                 completed.pop(old_id, None)
-        hot=paused.pop(generation.identity,None)
+                retention.pop(old_id, None)
+                purposes.pop(old_id, None)
+                if old_id != request_id:
+                    owned_checkpoints.pop(old_id, None)
+        identities[request_id] = generation.identity
+        retention[request_id] = retain_checkpoint
+        purposes[request_id] = purpose
+        generation._retain_checkpoint = retain_checkpoint
+        generation._request_id = request_id
+        hot = (paused.pop(generation.identity, None) if retain_checkpoint
+               else volatile_paused.pop(request_id, None))
+        if hot is not None and hot.identity != generation.identity:
+            hot = None
         recovered=hot if prefix else None
         path=checkpoint_path(generation)
-        if prefix and recovered is None and path.exists():
+        if retain_checkpoint and prefix and recovered is None and path.exists():
             try:
                 with measure(generation_stage(purpose)):
                     recovered=Generation.restore(engine,path,generation.identity)
-            except Exception as error: send('checkpoint_rejected',request_id,message=str(error))
+            except Exception as error:
+                send('checkpoint_rejected', request_id, message=safe_error_message(error))
         if recovered is not None:
             # A stale UI journal may lag the token checkpoint, or vice versa.
             # Only reuse a checkpoint belonging to the same unfinished prefix.
             if recovered.wire.startswith(prefix) or prefix.startswith(recovered.wire):
                 generation=recovered
         active[request_id]=generation
+        generation._retain_checkpoint = retain_checkpoint
+        generation._request_id = request_id
         identities[request_id]=generation.identity
         purposes[request_id]=purpose
-        if purpose in ('note','review'): checkpointed.add(request_id)
+        if purpose in ('note','review') and retain_checkpoint: checkpointed.add(request_id)
         last_checkpoint[request_id]=time.monotonic()
         last_emit[request_id]=0.0
         send('snapshot',request_id,wire=generation.wire,recovered=recovered is generation)
@@ -424,7 +484,7 @@ def main():
                 except queue.Empty: pass
             while command is not None:
                 try: keep_running=handle(command)
-                except Exception as error: send('error',command.get('id'),message=str(error),controlID=command.get('controlID'),recoverable=not isinstance(error,(ValueError,KeyError,TypeError)))
+                except Exception as error: command_failed(command, error)
                 if not keep_running: break
                 try: command=commands.get_nowait()
                 except queue.Empty: command=None
@@ -437,6 +497,7 @@ def main():
                     # Dropping these tensors releases weights without deleting
                     # any completed batch or resumable progress.
                     paused.clear()
+                    volatile_paused.clear()
                     engine = None
                     import gc
                     gc.collect()
@@ -495,7 +556,7 @@ def main():
                 try: command=commands.get_nowait()
                 except queue.Empty: break
                 try: keep_running=handle(command)
-                except Exception as error: send('error',command.get('id'),message=str(error),controlID=command.get('controlID'),recoverable=not isinstance(error,(ValueError,KeyError,TypeError)))
+                except Exception as error: command_failed(command, error)
                 if not keep_running: break
     except BrokenPipeError:
         pass
@@ -514,4 +575,9 @@ def main():
                 os.close(stop_write)
                 os.close(stop_read)
 
-if __name__=='__main__': main()
+if __name__=='__main__':
+    try:
+        sys.exit(main())
+    except Exception as error:
+        print(safe_error_message(error), file=sys.stderr)
+        sys.exit(1)

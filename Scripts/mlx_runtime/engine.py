@@ -16,6 +16,7 @@ from safetensors import safe_open
 from schemas import build_generation_regex
 from grammar_vocabulary import build_vocabulary
 from review_diagnostics import grammar_error
+from checkpoints import atomic_checkpoint, load_checkpoint
 from outlines_core.kernels.mlx import allocate_token_bitmask, fill_next_token_bitmask, apply_token_bitmask
 
 PREFILL_STEP = 256
@@ -137,7 +138,7 @@ class Engine:
             raise ValueError('Thinking delimiter must be one token for this adapter')
         identity = [('runtime', [(name, version(name)) for name in
                     ('mlx', 'mlx-lm', 'outlines', 'outlines_core', 'transformers')])]
-        for name in ('engine.py', 'schemas.py', 'checks.py', 'worker.py', 'grammar_vocabulary.py', 'review_diagnostics.py', 'latin_numbers.py'):
+        for name in ('engine.py', 'schemas.py', 'checks.py', 'worker.py', 'grammar_vocabulary.py', 'review_diagnostics.py', 'latin_numbers.py', 'checkpoints.py'):
             source = Path(__file__).with_name(name)
             if source.is_file():
                 identity.append((name, hashlib.sha256(source.read_bytes()).hexdigest()))
@@ -281,37 +282,34 @@ class Generation:
         return 'token'
 
     def save(self, path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
         metadata = dict(version=self.VERSION, identity=self.identity, spec=self.spec,
             prefix=self.initial_prefix, pending=self.pending, ids=self.ids, final_ids=self.final_ids,
             key=self.key.tolist(), phase=self.phase, thinking_count=self.thinking_count,
             final_count=self.final_count, done=self.done)
-        temporary = path.with_name(path.stem+'.pending.safetensors')
         serialized = json.dumps(metadata, ensure_ascii=False)
-        if self.done:
-            # A completed request only replays its result while awaiting ACK.
-            # Persist its exact tokens/RNG/spec atomically, without writing KV
-            # tensors that will never be used for another model step.
-            mx.save_safetensors(str(temporary), {}, {'livelingo.completed': serialized})
-        else:
-            save_prompt_cache(str(temporary), self.cache, {'generation': serialized})
-        os.replace(temporary, path)
+        def write(temporary):
+            if self.done:
+                # Completed requests replay their exact result without KV.
+                mx.save_safetensors(temporary, {}, {'livelingo.completed': serialized})
+            else:
+                save_prompt_cache(temporary, self.cache, {'generation': serialized})
+        atomic_checkpoint(path, write)
 
     @classmethod
     def restore(cls, engine, path, expected_identity):
         # Read only the header to distinguish result-only records from legacy
         # and unfinished tensor checkpoints. Do not load a large cache twice.
-        with safe_open(str(path), framework='numpy') as checkpoint:
-            completed = (checkpoint.metadata() or {}).get('livelingo.completed')
-        if completed is not None:
-            state = json.loads(completed)
-            if state.get('done') is not True:
-                raise ValueError('Result-only checkpoint is not complete')
-            cache = []
-        else:
-            cache, metadata = load_prompt_cache(str(path), return_metadata=True)
-            state = json.loads(metadata['generation'])
+        def read(filename):
+            with safe_open(filename, framework='numpy') as checkpoint:
+                completed = (checkpoint.metadata() or {}).get('livelingo.completed')
+            if completed is not None:
+                state = json.loads(completed)
+                if state.get('done') is not True:
+                    raise ValueError('Result-only checkpoint is not complete')
+                return [], state
+            cache, metadata = load_prompt_cache(filename, return_metadata=True)
+            return cache, json.loads(metadata['generation'])
+        cache, state = load_checkpoint(path, read)
         if state['version'] != cls.VERSION or state['identity'] != expected_identity:
             raise ValueError('Checkpoint identity mismatch')
         result = cls(engine, **state['spec'], prefix=state['prefix'], _use_prefix_cache=False)

@@ -510,6 +510,7 @@ class WorkerTests(TimingCase):
         bundle = self.directory / "bundle/mlx_runtime"
         bundle.mkdir(parents=True)
         for source in (SCRIPTS / "mlx_runtime/worker.py", SCRIPTS / "mlx_runtime/review_diagnostics.py",
+                       SCRIPTS / "mlx_runtime/checkpoints.py",
                        SCRIPTS / "scoreboard_timing.py"):
             shutil.copyfile(source, bundle / source.name)
         boot = "import sys; sys.path.insert(0,sys.argv[1]); stream=sys.stdout; import worker; sys.stdout=stream; print(worker.generation_stage('note'))"

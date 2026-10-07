@@ -46,7 +46,8 @@ os_major="$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f1)"
 
 current_user="$(/usr/bin/id -un)"
 current_uid="$(/usr/bin/id -u)"
-directory_home="$(/usr/bin/dscl . -read "/Users/${current_user}" NFSHomeDirectory 2>/dev/null \
+directory_records="/Users"
+directory_home="$(/usr/bin/dscl . -read "${directory_records}/${current_user}" NFSHomeDirectory 2>/dev/null \
   | /usr/bin/awk '{print $2}')"
 user_home="${LIVELINGO_USER_HOME:-${directory_home}}"
 applications_dir="${LIVELINGO_APPLICATIONS_DIR:-/Applications}"
@@ -144,6 +145,8 @@ temporary_plist="$(/usr/bin/mktemp -t livelingo-asr-plist)"
   "${temporary_plist}"
 /usr/bin/plutil -insert EnvironmentVariables -json "{}" "${temporary_plist}"
 /usr/bin/plutil -insert EnvironmentVariables.LIVELINGO_ASR_MODELS -string "${models_target}" "${temporary_plist}"
+asr_token="$("${service_target}/python/bin/python3" -B -c 'import secrets; print(secrets.token_hex(32))')"
+/usr/bin/plutil -insert EnvironmentVariables.LIVELINGO_ASR_TOKEN -string "${asr_token}" "${temporary_plist}"
 /usr/bin/plutil -insert RunAtLoad -bool true "${temporary_plist}"
 /usr/bin/plutil -insert KeepAlive -bool true "${temporary_plist}"
 /usr/bin/plutil -insert ThrottleInterval -integer 5 "${temporary_plist}"
@@ -151,7 +154,7 @@ temporary_plist="$(/usr/bin/mktemp -t livelingo-asr-plist)"
 /usr/bin/plutil -insert StandardOutPath -string "${logs_dir}/asr.log" "${temporary_plist}"
 /usr/bin/plutil -insert StandardErrorPath -string "${logs_dir}/asr-error.log" "${temporary_plist}"
 /usr/bin/plutil -lint "${temporary_plist}" >/dev/null
-/usr/bin/install -m 0644 "${temporary_plist}" "${launch_agent}"
+/usr/bin/install -m 0600 "${temporary_plist}" "${launch_agent}"
 /bin/mv "${temporary_plist}" "${backup_root}/generated-asr-plist.xml"
 
 if [[ "${LIVELINGO_SKIP_LAUNCHCTL:-0}" != "1" ]]; then
@@ -159,7 +162,8 @@ if [[ "${LIVELINGO_SKIP_LAUNCHCTL:-0}" != "1" ]]; then
   /bin/launchctl kickstart -k "${service_target_name}"
   ready=0
   for _ in {1..30}; do
-    if /usr/bin/curl -fsS --max-time 2 http://127.0.0.1:18765/health >/dev/null; then
+    if printf 'header = "X-LiveLingo-Token: %s"\n' "${asr_token}" \
+      | /usr/bin/curl --config - -fsS --max-time 2 http://127.0.0.1:18765/health >/dev/null; then
       ready=1
       break
     fi

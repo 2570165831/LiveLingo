@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import ctypes
+import errno
 import hmac
 import ipaddress
 import json
@@ -11,6 +13,8 @@ import time
 import uuid
 import gc
 import re
+import stat
+from contextlib import contextmanager
 from importlib.metadata import version
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -117,6 +121,143 @@ MODEL_ROOT = resolve_model_root()
 MODEL_PATHS = build_model_paths(MODEL_ROOT)
 AUTH_TOKEN = None
 SUPERVISED = False
+_TEMP_LOCK = threading.RLock()
+_TEMPORARY_FILES = {}
+_TEMP_STOPPING = False
+_ACL_API = None
+
+
+def private_audio_file(fd):
+    """Set 0600 and remove only macOS ALLOW entries through the owned fd."""
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        raise ValueError('Invalid temporary audio owner or type')
+    os.fchmod(fd, 0o600)
+    if sys.platform != 'darwin':
+        return
+    global _ACL_API
+    if _ACL_API is None:
+        api = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+        signatures = {
+            'acl_get_fd_np': ([ctypes.c_int, ctypes.c_int], ctypes.c_void_p),
+            'acl_get_entry': ([ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int),
+            'acl_get_tag_type': ([ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)], ctypes.c_int),
+            'acl_delete_entry': ([ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int),
+            'acl_set_fd_np': ([ctypes.c_int, ctypes.c_void_p, ctypes.c_int], ctypes.c_int),
+            'acl_free': ([ctypes.c_void_p], ctypes.c_int),
+        }
+        for name, (arguments, result) in signatures.items():
+            getattr(api, name).argtypes = arguments
+            getattr(api, name).restype = result
+        _ACL_API = api
+    api = _ACL_API
+    def read_acl():
+        ctypes.set_errno(0)
+        acl = api.acl_get_fd_np(fd, 0x100)  # ACL_TYPE_EXTENDED.
+        if acl or ctypes.get_errno() == errno.ENOENT:
+            return acl
+        raise OSError(ctypes.get_errno(), 'Private audio ACL read failed')
+
+    def first_allow(acl):
+        selector = 0
+        while True:
+            entry = ctypes.c_void_p()
+            ctypes.set_errno(0)
+            result = api.acl_get_entry(acl, selector, ctypes.byref(entry))
+            if not entry.value and (result >= 0 or
+                                    (result == -1 and ctypes.get_errno() == errno.EINVAL)):
+                return None
+            if result < 0 or not entry.value:
+                raise OSError(ctypes.get_errno(), 'Private audio ACL read failed')
+            tag = ctypes.c_int()
+            if api.acl_get_tag_type(entry, ctypes.byref(tag)) != 0:
+                raise OSError(ctypes.get_errno(), 'Private audio ACL read failed')
+            if tag.value == 1:  # ACL_EXTENDED_ALLOW; preserve DENY and other entries.
+                return entry
+            selector = -1  # ACL_NEXT_ENTRY in the macOS SDK.
+
+    acl = read_acl()
+    if not acl:
+        return
+    changed = False
+    try:
+        while (entry := first_allow(acl)) is not None:
+            if api.acl_delete_entry(acl, entry) != 0:
+                raise OSError(ctypes.get_errno(), 'Private audio ACL update failed')
+            changed = True
+        if changed and api.acl_set_fd_np(fd, acl, 0x100) != 0:
+            raise OSError(ctypes.get_errno(), 'Private audio ACL update failed')
+    finally:
+        api.acl_free(acl)
+    if changed:
+        verified = read_acl()
+        if verified:
+            try:
+                if first_allow(verified) is not None:
+                    raise OSError('Private audio ACL verification failed')
+            finally:
+                api.acl_free(verified)
+
+
+def safe_exception_code(error):
+    """Fixed categories only; dependency messages and class names are private."""
+    if isinstance(error, MemoryError): return 'resource_exhausted'
+    if isinstance(error, TimeoutError): return 'timeout'
+    if isinstance(error, OSError): return 'audio_io_failed'
+    if isinstance(error, (ValueError, TypeError, KeyError)): return 'invalid_audio'
+    return 'inference_failed'
+
+
+def release_temporary_audio(path):
+    """Unlink only an inode registered by this service, never an arbitrary path."""
+    with _TEMP_LOCK:
+        expected = _TEMPORARY_FILES.get(path)
+        if expected is None:
+            return
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            _TEMPORARY_FILES.pop(path, None)
+            return
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or (info.st_dev, info.st_ino) != expected):
+            raise ValueError('Invalid temporary audio owner or type')
+        os.unlink(path)
+        _TEMPORARY_FILES.pop(path, None)
+
+
+@contextmanager
+def temporary_audio(suffix):
+    """Register before writing and exclude shutdown until that write settles."""
+    with _TEMP_LOCK:
+        if _TEMP_STOPPING:
+            raise RuntimeError('ASR is shutting down')
+        output = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        info = os.fstat(output.fileno())
+        _TEMPORARY_FILES[output.name] = (info.st_dev, info.st_ino)
+        try:
+            private_audio_file(output.fileno())
+            yield output
+        except BaseException:
+            output.close()
+            release_temporary_audio(output.name)
+            raise
+        finally:
+            output.close()
+
+
+def cleanup_temporary_audio():
+    global _TEMP_STOPPING
+    with _TEMP_LOCK:
+        _TEMP_STOPPING = True
+        for path in list(_TEMPORARY_FILES):
+            try:
+                release_temporary_audio(path)
+            except (OSError, ValueError):
+                try:
+                    print('ASR cleanup failed code=temporary_audio_cleanup_failed', flush=True)
+                except OSError:
+                    pass
 
 
 def available_model_keys() -> list:
@@ -125,10 +266,10 @@ def available_model_keys() -> list:
 
 def model_for(key: str):
     if key not in MODEL_PATHS:
-        raise ValueError(f"Unsupported ASR model: {key}")
+        raise ValueError("Unsupported ASR model")
     path = MODEL_PATHS[key]
     if not path.is_dir():
-        raise FileNotFoundError(f"ASR model is missing: {path}")
+        raise FileNotFoundError("ASR model is missing")
     if key not in MODELS:
         from mlx_audio.stt.utils import load_model
 
@@ -201,9 +342,9 @@ def speech_band_enhance(source_path: str) -> tuple[str, dict]:
         limiter_scale = peak_ceiling / peak_before_limit
         enhanced *= limiter_scale
 
-    output = tempfile.NamedTemporaryFile(suffix="-speech.wav", delete=False)
-    output.close()
-    sf.write(output.name, enhanced, sample_rate, subtype="PCM_16")
+    with temporary_audio('-speech.wav') as output:
+        output.close()
+        sf.write(output.name, enhanced, sample_rate, subtype="PCM_16")
     effective_gain_db = requested_gain_db + dbfs(limiter_scale)
     return output.name, {
         "applied": True,
@@ -443,7 +584,7 @@ def start_idle_maintenance():
             # One maintenance future at a time, on the same thread as MLX.
             try: INFERENCE_WORKER.submit(unload_idle_models).result()
             except Exception as error:
-                print(f'ASR idle-unload failed type={type(error).__name__}', flush=True)
+                print(f'ASR idle-unload failed code={safe_exception_code(error)}', flush=True)
     threading.Thread(target=maintain, name='asr-idle-maintenance', daemon=True).start()
     return stopped
 
@@ -481,6 +622,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         query = parse_qs(parsed.query)
         model_key = query.get("model", ["0.6b"])[0]
+        if model_key not in MODEL_RELATIVE_PATHS:
+            self.send_json(400, {"error": "Unsupported ASR model"})
+            return
         should_enhance = query.get("enhance", ["off"])[0] == "speech"
         languages = parse_qs(parsed.query, keep_blank_values=True).get("language", ["English"])
         if len(languages) != 1 or languages[0] not in {"English", "auto"} or (
@@ -521,40 +665,40 @@ class Handler(BaseHTTPRequestHandler):
         try:
             audio = self.rfile.read(size)
             if len(audio) != size: raise ValueError('Incomplete audio request')
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temporary:
-                temporary.write(audio)
+            with temporary_audio('.wav') as temporary:
                 temporary_path = temporary.name
+                temporary.write(audio)
             model_input_path = temporary_path
             if should_enhance:
                 model_input_path, enhancement = speech_band_enhance(temporary_path)
             started = time.monotonic()
-            print(f"ASR request id={request_id} model={model_key} bytes={size}", flush=True)
+            log_id = uuid.uuid4().hex
+            print(f"ASR request id={log_id} model={model_key} bytes={size}", flush=True)
             text = INFERENCE_WORKER.submit(run_registered_transcription, request_id, model_input_path, model_key,
                                            language_mode, temporary_path).result()
-            print(f"ASR completed id={request_id} model={model_key} seconds={time.monotonic() - started:.3f}", flush=True)
+            print(f"ASR completed id={log_id} model={model_key} seconds={time.monotonic() - started:.3f}", flush=True)
             payload = {"text": text, "model": model_key, "request_id": request_id,
                        "audio_enhancement": enhancement}
             if language_mode == "auto":
                 payload.update(text)
-                print(f"ASR language id={request_id} label={text['detected_label']} "
+                label = text['detected_label'] if text['detected_label'] in LANGUAGE_CODES else 'unknown'
+                print(f"ASR language id={log_id} label={label} "
                       f"p={text['language_probability']} p_en={text['english_probability']} "
                       f"decode={text['decode']}", flush=True)
             self.send_json(200, payload)
         except Exception as error:
-            self.send_json(500, {"error": str(error), "request_id": request_id, "model": model_key})
+            self.send_json(500, {"error": safe_exception_code(error),
+                                 "request_id": request_id, "model": model_key})
         finally:
             finish_request(request_id, model_key)
             INFERENCE_SLOTS.release()
-            if model_input_path and model_input_path != temporary_path:
+            for path in (model_input_path, temporary_path):
+                if not path:
+                    continue
                 try:
-                    os.unlink(model_input_path)
-                except FileNotFoundError:
-                    pass
-            if temporary_path:
-                try:
-                    os.unlink(temporary_path)
-                except FileNotFoundError:
-                    pass
+                    release_temporary_audio(path)
+                except (OSError, ValueError):
+                    print('ASR cleanup failed code=temporary_audio_cleanup_failed', flush=True)
 
     def supplied_token(self) -> str:
         token = self.headers.get(TOKEN_HEADER, "") or ""
@@ -566,13 +710,39 @@ class Handler(BaseHTTPRequestHandler):
         return ""
 
     def require_authorized(self) -> bool:
-        """Reject foreign callers when the parent handed us a request token."""
-        if not AUTH_TOKEN:
-            return True
-        if hmac.compare_digest(self.supplied_token(), AUTH_TOKEN):
-            return True
-        self.send_json(401, {"error": "unauthorized"})
-        return False
+        """All routes require a token and the bound local HTTP origin."""
+        if not AUTH_TOKEN or not hmac.compare_digest(self.supplied_token().encode('utf-8'),
+                                                      AUTH_TOKEN.encode('utf-8')):
+            self.send_json(401, {"error": "unauthorized"})
+            return False
+        def values(name):
+            get_all = getattr(self.headers, 'get_all', None)
+            return get_all(name, []) if get_all else ([self.headers[name]] if name in self.headers else [])
+        hosts, origins = values('Host'), values('Origin')
+        if len(hosts) != 1 or len(origins) > 1:
+            self.send_json(403, {"error": "invalid local origin"})
+            return False
+        try:
+            raw_host = hosts[0]
+            if any(character.isspace() for character in raw_host):
+                raise ValueError('Invalid Host')
+            target = urlparse('http://' + raw_host)
+            if (target.path or target.query or target.fragment or target.username is not None
+                    or target.password is not None or target.port != self.server.server_address[1]):
+                raise ValueError('Invalid Host')
+            hostname = target.hostname
+            if hostname != 'localhost' and not ipaddress.ip_address(hostname).is_loopback:
+                raise ValueError('Invalid Host')
+            if origins:
+                origin = urlparse(origins[0])
+                if (origin.scheme != 'http' or origin.hostname != hostname or origin.port != target.port
+                        or origin.path or origin.query or origin.fragment
+                        or origin.username is not None or origin.password is not None):
+                    raise ValueError('Invalid Origin')
+        except (ValueError, TypeError):
+            self.send_json(403, {"error": "invalid local origin"})
+            return False
+        return True
 
     def send_json(self, status: int, payload: dict):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -588,7 +758,9 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def log_message(self, format_string, *args):
-        print(f"[{self.log_date_time_string()}] {format_string % args}", flush=True)
+        # BaseHTTPRequestHandler arguments contain the raw request target,
+        # including query strings and malformed request lines. Never format it.
+        return
 
 
 def parse_args(argv=None):
@@ -598,7 +770,7 @@ def parse_args(argv=None):
     parser.add_argument("--models-dir", default=None,
                         help="Model root; defaults to the bundled Resources/Models directory.")
     parser.add_argument("--token", default=None,
-                        help="Request token; every endpoint then requires it.")
+                        help="Required request token, or LIVELINGO_ASR_TOKEN; every endpoint requires it.")
     parser.add_argument("--supervised", action="store_true",
                         help="Exit when the parent process exits or closes our stdin.")
     return parser.parse_args(argv)
@@ -612,19 +784,21 @@ def validate_bind_host(host: str) -> str:
     try:
         address = ipaddress.ip_address(normalized)
     except ValueError as error:
-        raise ValueError(f"Invalid bind host: {host}") from error
+        raise ValueError("Invalid bind host") from None
     if not address.is_loopback:
-        raise ValueError(f"Refusing to bind a non-loopback address: {host}")
+        raise ValueError("Refusing to bind a non-loopback address")
     return str(address)
 
 
 def create_server(host: str, port: int) -> tuple:
     server = ThreadingHTTPServer((host, port), Handler)
+    server.handle_error = lambda *_: print('ASR http failure code=http_error', flush=True)
     return server, server.server_address[0], server.server_address[1]
 
 
 def ready_payload(server, host: str) -> dict:
-    return {
+    available = available_model_keys()
+    payload = {
         "event": "ready",
         "protocol": PROTOCOL_VERSION,
         "host": host,
@@ -632,9 +806,12 @@ def ready_payload(server, host: str) -> dict:
         "pid": os.getpid(),
         "auth": bool(AUTH_TOKEN),
         "supervised": bool(SUPERVISED),
-        "models_root": str(MODEL_ROOT),
-        "available_models": available_model_keys(),
+        "model_count": len(available),
     }
+    if SUPERVISED:
+        # Only the app's private pipe needs the absolute root for its handshake.
+        payload.update(models_root=str(MODEL_ROOT), available_models=available)
+    return payload
 
 
 def announce_ready(server, host: str) -> dict:
@@ -653,11 +830,13 @@ def request_shutdown(server, reason: str) -> None:
     try:
         # The parent may have closed stdout as well as stdin. Logging must not
         # prevent this watchdog from exiting the orphaned inference process.
-        print(f"ASR shutdown reason={reason}", flush=True)
+        code = 'parent_stdin_closed' if reason == 'parent stdin closed' else 'parent_exited'
+        print(f"ASR shutdown reason={code}", flush=True)
     except OSError:
         pass
     # No caller can use the service after its parent exits. A graceful server
     # close can wait for an in-flight inference, so it cannot be the exit gate.
+    cleanup_temporary_audio()
     os._exit(0)
 
 
@@ -700,6 +879,9 @@ def main(argv=None) -> int:
         return 2
     token = args.token if args.token is not None else os.environ.get("LIVELINGO_ASR_TOKEN")
     AUTH_TOKEN = (token or "").strip() or None
+    if AUTH_TOKEN is None:
+        print('错误：ASR request token is required', file=sys.stderr, flush=True)
+        return 2
     SUPERVISED = bool(args.supervised)
     MODEL_ROOT = resolve_model_root(args.models_dir)
     MODEL_PATHS = build_model_paths(MODEL_ROOT)
@@ -716,9 +898,15 @@ def main(argv=None) -> int:
         pass
     finally:
         maintenance.set()
+        cleanup_temporary_audio()
         server.server_close()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as error:
+        cleanup_temporary_audio()
+        print('ASR startup failed code=' + safe_exception_code(error), file=sys.stderr, flush=True)
+        sys.exit(1)

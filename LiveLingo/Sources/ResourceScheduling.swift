@@ -34,6 +34,66 @@ struct ASRHTTPResult: Sendable {
     let status: Int
 }
 
+/// Audio, prompts and request tokens must stay on a numeric loopback address.
+/// Each generation still owns its session; ASR alone shares a private session.
+enum LoopbackHTTPTransport {
+    final class RedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+            // Reject even same-host redirects: neither tokens nor bodies are replayed.
+            completionHandler(nil)
+        }
+    }
+
+    private static let redirectDelegate = RedirectDelegate()
+    private static let asrSession = makeSession()
+
+    static func loopbackURL(_ url: URL) throws -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              components.user == nil, components.password == nil, components.fragment == nil,
+              components.port.map({ (1...65_535).contains($0) }) ?? true,
+              let host = components.host?.lowercased(),
+              ["127.0.0.1", "::1", "[::1]", "localhost"].contains(host) else {
+            throw QwenRuntimeError.requestFailed("本机模型请求地址必须使用回环连接。")
+        }
+        // Do not resolve a hostname through DNS or a mutable hosts mapping.
+        if host == "localhost" { components.host = "127.0.0.1" }
+        guard let resolved = components.url else { throw QwenRuntimeError.invalidResponse }
+        return resolved
+    }
+
+    static func makeSession(configuration: URLSessionConfiguration = .ephemeral) -> URLSession {
+        let configuration = configuration.copy() as! URLSessionConfiguration
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.connectionProxyDictionary = [
+            "HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0,
+            "ProxyAutoConfigEnable": 0, "ProxyAutoDiscoveryEnable": 0,
+        ]
+        return URLSession(configuration: configuration, delegate: redirectDelegate, delegateQueue: nil)
+    }
+
+    static func validateResponse(_ response: URLResponse) throws {
+        guard let url = response.url else { throw QwenRuntimeError.invalidResponse }
+        _ = try loopbackURL(url)
+    }
+
+    static func data(for request: URLRequest, session: URLSession? = nil) async throws -> (Data, URLResponse) {
+        guard let url = request.url else { throw QwenRuntimeError.invalidResponse }
+        var request = request
+        request.url = try loopbackURL(url)
+        let result = try await (session ?? asrSession).data(for: request)
+        try validateResponse(result.1)
+        return result
+    }
+}
+
 enum ASRRequestContext {
     @TaskLocal static var requestID: String?
 
@@ -115,7 +175,7 @@ actor ASRRequestCoordinator {
 
     init(confirmationTimeout: TimeInterval = 5,
          transport: @escaping Transport = { request in
-             let (data, response) = try await URLSession.shared.data(for: request)
+             let (data, response) = try await LoopbackHTTPTransport.data(for: request)
              guard let http = response as? HTTPURLResponse else { throw QwenRuntimeError.invalidResponse }
              return ASRHTTPResult(data: data, status: http.statusCode)
          },
@@ -141,6 +201,7 @@ actor ASRRequestCoordinator {
                     enhanceSpeech: Bool = false, language: ASRLanguageMode,
                     requestID suppliedID: String? = nil) async throws -> ASRTranscription {
         try Task.checkCancellation()
+        let baseURL = try LoopbackHTTPTransport.loopbackURL(endpoint.baseURL)
         let requestID = suppliedID ?? UUID().uuidString
         guard Self.validRequestID(requestID) else { throw QwenRuntimeError.requestFailed("转写请求编号无效") }
         let key = Key(endpoint: endpoint, id: requestID)
@@ -157,7 +218,7 @@ actor ASRRequestCoordinator {
         guard leases.keys.filter({ $0.endpoint == endpoint }).count < 3 else {
             throw QwenRuntimeError.requestFailed("本机转写队列已满，片段等待重试。")
         }
-        var components = URLComponents(url: endpoint.baseURL.appending(path: "transcribe"), resolvingAgainstBaseURL: false)
+        var components = URLComponents(url: baseURL.appending(path: "transcribe"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "model", value: modelKey),
                                  URLQueryItem(name: "enhance", value: enhanceSpeech ? "speech" : "off")]
         if language == .auto { components?.queryItems?.append(URLQueryItem(name: "language", value: "auto")) }
@@ -252,10 +313,11 @@ actor ASRRequestCoordinator {
 
     func resourceState(endpoint: ASRRuntime.Endpoint) async -> ASRResourceSnapshot {
         let observedAt = ProcessInfo.processInfo.systemUptime
-        var request = URLRequest(url: endpoint.baseURL.appending(path: "health"))
-        request.timeoutInterval = 2
-        Self.authorize(&request, endpoint)
         do {
+            let baseURL = try LoopbackHTTPTransport.loopbackURL(endpoint.baseURL)
+            var request = URLRequest(url: baseURL.appending(path: "health"))
+            request.timeoutInterval = 2
+            Self.authorize(&request, endpoint)
             let response = try await transport(request)
             guard response.status == 200 else { throw QwenRuntimeError.serviceUnavailable }
             let health = try JSONDecoder().decode(Health.self, from: response.data)

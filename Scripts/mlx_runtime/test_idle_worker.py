@@ -199,6 +199,10 @@ class IdleWorkerTests(unittest.TestCase):
         worker.send(op='generate', id='resumed', prompt='slow', prefix=snapshot['wire'], purpose='note', input='{}')
         self.assertTrue(worker.until('snapshot', 'resumed')['recovered'])
         self.assertTrue(any(t['kind'] == 'restored' for t in worker.traces()))
+        # Restoring an older result does not prove that this new request owns
+        # its file. An explicit save creates this request's cancellable record.
+        worker.send(op='checkpoint', id='resumed')
+        self.assertEqual(worker.until('checkpoint', 'resumed')['state'], 'saved')
         worker.send(op='cancel', id='resumed')
         worker.until('cancel', 'resumed')
         self.assertEqual(list((self.path / 'state').glob('*.safetensors')), [])

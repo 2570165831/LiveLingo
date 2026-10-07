@@ -676,11 +676,16 @@ enum QwenASRClient {
         #if LIVELINGO_PREVIEW
         return nil
         #else
+        #if DEBUG || LIVELINGO_CLI
         guard let raw = ProcessInfo.processInfo.environment["LIVELINGO_ASR_ENDPOINT"] else { return nil }
-        guard let url = URL(string: raw), url.scheme == "http", url.host == "127.0.0.1", url.port != nil else {
+        guard let url = URL(string: raw), url.scheme == "http", url.host == "127.0.0.1", url.port != nil,
+              (try? LoopbackHTTPTransport.loopbackURL(url)) != nil else {
             preconditionFailure("Invalid isolated ASR endpoint")
         }
         return url
+        #else
+        return nil
+        #endif
         #endif
     }
 
@@ -688,11 +693,13 @@ enum QwenASRClient {
     /// Concurrent callers share one launch; cancelling a caller cancels only
     /// that caller's request.
     private static func resolveService() async throws -> ASRRuntime.Endpoint {
+        #if DEBUG || LIVELINGO_CLI
         if let override = endpointOverride {
             let raw = ProcessInfo.processInfo.environment["LIVELINGO_ASR_TOKEN"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return ASRRuntime.Endpoint(baseURL: override, token: raw ?? "")
         }
+        #endif
         let endpoint = try await ASRRuntime.shared.endpoint()
         return endpoint
     }
@@ -708,7 +715,7 @@ enum QwenASRClient {
         request.timeoutInterval = 3
         authorize(&request, token: service.token)
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await LoopbackHTTPTransport.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 throw QwenRuntimeError.serviceUnavailable
             }
@@ -2303,6 +2310,7 @@ enum QwenTranslationClient {
         thinking: Bool = false,
         continuationPrompt: String? = nil,
         endpoint: URL? = nil,
+        sessionConfiguration: URLSessionConfiguration? = nil,
         initialOutput: String = "",
         onRawUpdate: (@MainActor @Sendable (String) async -> Void)? = nil,
         onWireUpdate: (@MainActor @Sendable (String) async -> Void)? = nil,
@@ -2329,6 +2337,8 @@ enum QwenTranslationClient {
                 }
             return try await presentation.finish()
         }
+        guard let endpoint else { throw QwenRuntimeError.invalidResponse }
+        let endpointURL = try LoopbackHTTPTransport.loopbackURL(endpoint)
         var payload: [String: Any] = [
             "model": modelName,
             "prompt": try continuationPrompt ?? completionPrompt(input: input, systemPrompt: systemPrompt, thinking: thinking),
@@ -2345,17 +2355,16 @@ enum QwenTranslationClient {
             payload["presence_penalty"] = 1.5
             payload["repetition_penalty"] = 1.0
         }
-        guard let endpoint else { throw QwenRuntimeError.invalidResponse }
-        var request = URLRequest(url: endpoint)
+        var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
         request.timeoutInterval = inactivityTimeout ?? timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-        let configuration = URLSessionConfiguration.ephemeral
+        let configuration = (sessionConfiguration?.copy() as? URLSessionConfiguration) ?? .ephemeral
         configuration.timeoutIntervalForRequest = inactivityTimeout ?? timeout
         configuration.timeoutIntervalForResource = timeout
-        let session = URLSession(configuration: configuration)
+        let session = LoopbackHTTPTransport.makeSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
 
         return try await withTaskCancellationHandler {
@@ -2363,6 +2372,7 @@ enum QwenTranslationClient {
                 try Task.checkCancellation()
                 let (bytes, response) = try await session.bytes(for: request)
                 try Task.checkCancellation()
+                try LoopbackHTTPTransport.validateResponse(response)
                 guard let http = response as? HTTPURLResponse else {
                     throw QwenRuntimeError.invalidResponse
                 }
@@ -2423,7 +2433,8 @@ enum QwenTranslationClient {
     // turn. A length stop here is allowed only for reasoning, never for final text.
     static func boundedThinkingTranslation(
         _ input: String, modelName: String, systemPrompt: String,
-        endpoint: URL? = nil
+        endpoint: URL? = nil,
+        sessionConfiguration: URLSessionConfiguration? = nil
     ) async throws -> String {
         let prompt = try completionPrompt(
             input: input,
@@ -2438,6 +2449,8 @@ enum QwenTranslationClient {
                 }
             return try await presentation.finish()
         }
+        guard let endpoint else { throw QwenRuntimeError.invalidResponse }
+        let endpointURL = try LoopbackHTTPTransport.loopbackURL(endpoint)
         let payload: [String: Any] = [
             "model": modelName, "prompt": prompt, "max_tokens": 512,
             "temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
@@ -2445,22 +2458,22 @@ enum QwenTranslationClient {
             "stream": false, "echo": false,
             "stop": ["</think>", "<|im_end|>", "<|endoftext|>"]
         ]
-        guard let endpoint else { throw QwenRuntimeError.invalidResponse }
-        var request = URLRequest(url: endpoint)
+        var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-        let configuration = URLSessionConfiguration.ephemeral
+        let configuration = (sessionConfiguration?.copy() as? URLSessionConfiguration) ?? .ephemeral
         configuration.timeoutIntervalForRequest = 90
         configuration.timeoutIntervalForResource = 90
-        let session = URLSession(configuration: configuration)
+        let session = LoopbackHTTPTransport.makeSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         return try await withTaskCancellationHandler {
             do {
                 try Task.checkCancellation()
                 let (data, response) = try await session.data(for: request)
                 try Task.checkCancellation()
+                try LoopbackHTTPTransport.validateResponse(response)
                 guard let http = response as? HTTPURLResponse,
                       let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
                 else { throw QwenRuntimeError.invalidResponse }
@@ -2480,7 +2493,8 @@ enum QwenTranslationClient {
                 return try await streamingCompletion(
                     input, modelName: modelName, systemPrompt: systemPrompt, purpose: .text,
                     maximumOutputTokens: 2048, timeout: 90,
-                    continuationPrompt: continuation, endpoint: endpoint
+                    continuationPrompt: continuation, endpoint: endpoint,
+                    sessionConfiguration: sessionConfiguration
                 )
             } catch {
                 if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {

@@ -1470,7 +1470,7 @@ final class RealtimePolicyTests: XCTestCase {
         let directory = root.appendingPathComponent("ReviewDiagnostics")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let store = ReviewDiagnosticsStore(directory: directory,
-                                           policy: .init(maximumFiles: 3, maximumFileBytes: 1_500, maximumTotalBytes: 4_500))
+                                           policy: .init(maximumFiles: 3, maximumFileBytes: 1_500, maximumTotalBytes: 4_500, includesContent: true))
         let url = try XCTUnwrap(store.write(diagnosticSnapshot(index: 0,
                                                                input: String(repeating: "原", count: 4_000),
                                                                response: String(repeating: "答", count: 4_000))))
@@ -1500,7 +1500,7 @@ final class RealtimePolicyTests: XCTestCase {
         try (book.markdown() + "\n").write(to: root.appendingPathComponent("summary-zh-Hans.md"), atomically: true, encoding: .utf8)
         let journal = root.appendingPathComponent("journal.json")
         let queue = LearningReviewQueue(journalURL: journal, observeSleep: false,
-                                        diagnostics: .init(maximumFiles: 4, maximumFileBytes: 32_768, maximumTotalBytes: 131_072)) { _, _, _, _, update in
+                                        diagnostics: .init(maximumFiles: 4, maximumFileBytes: 32_768, maximumTotalBytes: 131_072, includesContent: true)) { _, _, _, _, update in
             await update("PRIVATE-THINKING-MARKER 我已检查全部要点。")
             return #"{"corrections":[{"index":0,"original":"与笔记不一致的原文","kind":"核心结论","text":"修改","reason":"理由"}],"reviewVersion":2,"additions":[]}"#
         }

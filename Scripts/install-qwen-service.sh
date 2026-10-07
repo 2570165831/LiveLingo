@@ -11,7 +11,8 @@ set -euo pipefail
 
 script_dir="${0:A:h}"
 current_user="$(/usr/bin/id -un)"
-user_root="${HOME:-$(/usr/bin/dscl . -read "/Users/${current_user}" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')}"
+directory_records="/Users"
+user_root="${HOME:-$(/usr/bin/dscl . -read "${directory_records}/${current_user}" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')}"
 label="com.jianhongli.LiveLingoASR"
 launch_agents_dir="${user_root}/Library/LaunchAgents"
 log_dir="${user_root}/Library/Logs/LiveLingo"
@@ -61,6 +62,9 @@ trap '/bin/rm -f -- "${temporary_plist}"' EXIT
 /usr/bin/plutil -create xml1 "${temporary_plist}"
 /usr/bin/plutil -insert Label -string "${label}" "${temporary_plist}"
 /usr/bin/plutil -insert ProgramArguments -json "[\"${runner_path}\",\"--host\",\"127.0.0.1\",\"--port\",\"18765\"]" "${temporary_plist}"
+asr_token="$("${source_python_env}/bin/python" -B -c 'import secrets; print(secrets.token_hex(32))')"
+/usr/bin/plutil -insert EnvironmentVariables -json "{}" "${temporary_plist}"
+/usr/bin/plutil -insert EnvironmentVariables.LIVELINGO_ASR_TOKEN -string "${asr_token}" "${temporary_plist}"
 /usr/bin/plutil -insert RunAtLoad -bool true "${temporary_plist}"
 /usr/bin/plutil -insert KeepAlive -bool true "${temporary_plist}"
 /usr/bin/plutil -insert ThrottleInterval -integer 5 "${temporary_plist}"
@@ -76,12 +80,13 @@ if [[ -f "${plist_path}" ]]; then
 fi
 
 /bin/launchctl bootout "${service_domain}" "${plist_path}" 2>/dev/null || true
-/usr/bin/install -m 0644 "${temporary_plist}" "${plist_path}"
+/usr/bin/install -m 0600 "${temporary_plist}" "${plist_path}"
 /bin/launchctl bootstrap "${service_domain}" "${plist_path}"
 /bin/launchctl kickstart -k "${service_target}"
 
 for _ in {1..30}; do
-  if /usr/bin/curl -fsS --max-time 2 http://127.0.0.1:18765/health >/dev/null; then
+  if printf 'header = "X-LiveLingo-Token: %s"\n' "${asr_token}" \
+    | /usr/bin/curl --config - -fsS --max-time 2 http://127.0.0.1:18765/health >/dev/null; then
     print "LiveLingo ASR service is ready: ${service_target}"
     exit 0
   fi

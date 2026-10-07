@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import OSLog
 
@@ -34,6 +35,74 @@ private struct ASRServiceAnnouncement: Sendable, Decodable {
 /// port 18765, and never signals a process it did not spawn itself.
 actor ASRRuntime {
     static let shared = ASRRuntime()
+
+    /// Created exclusively for one service, never reconstructed from a path.
+    /// Refuse cleanup if the root was replaced, moved or is still in use.
+    final class OwnedTemporaryDirectory: @unchecked Sendable {
+        let url: URL
+        private let device: dev_t
+        private let inode: ino_t
+        private let lock = NSLock()
+        private var removed = false
+
+        init(parent: URL = FileManager.default.temporaryDirectory) throws {
+            guard parent.isFileURL else {
+                throw QwenRuntimeError.requestFailed("内置 ASR 服务无法准备私有临时目录。")
+            }
+            let parent = parent.standardizedFileURL.resolvingSymlinksInPath()
+            let url = parent.appendingPathComponent("LiveLingo-ASR-" + UUID().uuidString, isDirectory: true)
+            guard mkdir(url.path, 0o700) == 0 else {
+                throw QwenRuntimeError.requestFailed("内置 ASR 服务无法准备私有临时目录。")
+            }
+            var status = stat()
+            guard lstat(url.path, &status) == 0,
+                  status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR), status.st_uid == getuid() else {
+                throw QwenRuntimeError.requestFailed("内置 ASR 服务无法确认私有临时目录归属。")
+            }
+            self.url = url
+            device = status.st_dev
+            inode = status.st_ino
+        }
+
+        @discardableResult
+        func removeAfterExit(_ processExited: Bool) -> Bool {
+            guard processExited else { return false }
+            return lock.withLock {
+                if removed { return true }
+                var status = stat()
+                if lstat(url.path, &status) != 0 {
+                    if errno == ENOENT { removed = true; return true }
+                    return false
+                }
+                guard status.st_dev == device, status.st_ino == inode,
+                      status.st_uid == getuid(),
+                      status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { return false }
+                do {
+                    try FileManager.default.removeItem(at: url)
+                    removed = true
+                    return true
+                } catch { return false }
+            }
+        }
+    }
+
+    enum StartupFailure: CaseIterable, Sendable {
+        case exitedBeforeReady, readinessTimeout, protocolMismatch, processMismatch
+        case authorizationMissing, modelDirectoryMismatch, nonLoopbackHost, invalidPort
+
+        fileprivate var message: String {
+            switch self {
+            case .exitedBeforeReady: return "内置 ASR 服务在报告就绪前退出。"
+            case .readinessTimeout: return "内置 ASR 服务在 \(Int(ASRRuntime.readinessTimeout)) 秒内未报告就绪。"
+            case .protocolMismatch: return "内置 ASR 服务协议版本不匹配。"
+            case .processMismatch: return "内置 ASR 服务的进程标识不匹配。"
+            case .authorizationMissing: return "内置 ASR 服务未启用请求令牌，拒绝连接。"
+            case .modelDirectoryMismatch: return "内置转写服务使用了不匹配的模型目录。"
+            case .nonLoopbackHost: return "内置 ASR 服务绑定了非回环地址。"
+            case .invalidPort: return "内置 ASR 服务报告了无效端口。"
+            }
+        }
+    }
 
     /// A live service the app may talk to.
     struct Endpoint: Sendable, Hashable {
@@ -204,7 +273,9 @@ actor ASRRuntime {
     }
 
     private func rememberExit(of service: Service) {
-        guard !service.isAlive, let endpoint = service.endpoint,
+        guard !service.isAlive else { return }
+        service.cleanupTemporaryDirectory()
+        guard let endpoint = service.endpoint,
               !exitedEndpoints.contains(endpoint) else { return }
         exitedEndpoints.append(endpoint)
         if exitedEndpoints.count > 256 { exitedEndpoints.removeFirst() }
@@ -244,6 +315,7 @@ actor ASRRuntime {
         let standardOutput = Pipe()
         let standardError = Pipe()
         let log = LogBuffer()
+        let temporaryDirectory = try OwnedTemporaryDirectory()
 
         process.executableURL = paths.interpreter
         // `--supervised` makes the child exit when this process dies or closes
@@ -255,21 +327,23 @@ actor ASRRuntime {
             "--port", "0",
             "--models-dir", paths.models.path,
         ]
-        process.environment = Self.serviceEnvironment(token: token, models: paths.models)
+        process.environment = Self.serviceEnvironment(token: token, models: paths.models,
+                                                      temporaryDirectory: temporaryDirectory.url)
         process.standardInput = standardInput
         process.standardOutput = standardOutput
         process.standardError = standardError
         process.terminationHandler = { finished in
             log.recordExit(status: finished.terminationStatus, reason: finished.terminationReason)
+            if !temporaryDirectory.removeAfterExit(true) {
+                Self.logger.error("ASR runtime event=temporary_cleanup_failed")
+            }
         }
 
         do {
             try process.run()
         } catch {
-            throw QwenRuntimeError.requestFailed(
-                "内置 ASR 服务无法启动：\(error.localizedDescription)\n"
-                    + "解释器：\(paths.interpreter.path)\n服务脚本：\(paths.service.path)"
-            )
+            _ = temporaryDirectory.removeAfterExit(!process.isRunning)
+            throw QwenRuntimeError.requestFailed("内置 ASR 服务无法启动。")
         }
 
         Self.startReading(standardOutput.fileHandleForReading, into: log, fromStandardError: false)
@@ -281,7 +355,8 @@ actor ASRRuntime {
             standardOutput: standardOutput,
             standardError: standardError,
             log: log,
-            token: token
+            token: token,
+            temporaryDirectory: temporaryDirectory
         )
 
         do {
@@ -313,13 +388,10 @@ actor ASRRuntime {
                 return announcement
             }
             if !service.isAlive {
-                throw failure("内置 ASR 服务在报告就绪前退出", service: service)
+                throw failure(.exitedBeforeReady, service: service)
             }
             if Date() >= deadline {
-                throw failure(
-                    "内置 ASR 服务在 \(Int(readinessTimeout)) 秒内未报告就绪",
-                    service: service
-                )
+                throw failure(.readinessTimeout, service: service)
             }
             try await Task.sleep(nanoseconds: 40_000_000)
         }
@@ -330,33 +402,27 @@ actor ASRRuntime {
         service: Service
     ) throws -> Endpoint {
         guard announcement.protocolVersion == protocolVersion else {
-            throw failure(
-                "内置 ASR 服务协议版本不匹配（服务 \(announcement.protocolVersion)，App 期望 \(protocolVersion)）",
-                service: service
-            )
+            throw failure(.protocolMismatch, service: service)
         }
         guard announcement.pid == service.processIdentifier else {
-            throw failure(
-                "内置 ASR 服务的进程标识不匹配（服务 \(announcement.pid)，子进程 \(service.processIdentifier)）",
-                service: service
-            )
+            throw failure(.processMismatch, service: service)
         }
         guard announcement.auth && announcement.supervised else {
-            throw failure("内置 ASR 服务未启用请求令牌，拒绝连接", service: service)
+            throw failure(.authorizationMissing, service: service)
         }
         let expectedModels = try resolvePaths().models
         guard modelDirectoryMatches(announcement.modelsRoot, expected: expectedModels) else {
-            throw failure("内置转写服务使用了不匹配的模型目录", service: service)
+            throw failure(.modelDirectoryMismatch, service: service)
         }
         let host = announcement.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard host == "127.0.0.1" || host == "::1" || host == "localhost" else {
-            throw failure("内置 ASR 服务绑定了非回环地址：\(announcement.host)", service: service)
+            throw failure(.nonLoopbackHost, service: service)
         }
         guard (1...65_535).contains(announcement.port) else {
-            throw failure("内置 ASR 服务报告了无效端口：\(announcement.port)", service: service)
+            throw failure(.invalidPort, service: service)
         }
         guard let baseURL = URL(string: "http://127.0.0.1:\(announcement.port)") else {
-            throw failure("内置 ASR 服务报告了无效端口：\(announcement.port)", service: service)
+            throw failure(.invalidPort, service: service)
         }
         logger.notice(
             "ASR service event=models_root_verified auth=\(announcement.auth)"
@@ -448,15 +514,15 @@ actor ASRRuntime {
 
         var missing: [String] = []
         if !FileManager.default.isExecutableFile(atPath: interpreter.path) {
-            missing.append(interpreter.path)
+            missing.append("解释器 python/bin/python3")
         }
         if !FileManager.default.isReadableFile(atPath: service.path) {
-            missing.append(service.path)
+            missing.append("服务脚本 qwen_asr_service.py")
         }
         var isDirectory: ObjCBool = false
         if !FileManager.default.fileExists(atPath: models.path, isDirectory: &isDirectory)
             || !isDirectory.boolValue {
-            missing.append(models.path)
+            missing.append("模型目录 Models")
         }
         guard missing.isEmpty else {
             throw QwenRuntimeError.requestFailed(
@@ -469,8 +535,10 @@ actor ASRRuntime {
     /// The child gets an explicit environment. The model root is passed on the
     /// command line and repeated here; the request token travels through the
     /// environment only, so it never appears in `ps` output.
-    private static func serviceEnvironment(token: String, models: URL) -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
+    static func serviceEnvironment(token: String, models: URL, temporaryDirectory: URL,
+                                   inherited: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var environment = inherited
+        environment["TMPDIR"] = temporaryDirectory.path
         environment["LIVELINGO_ASR_TOKEN"] = token
         environment["LIVELINGO_ASR_MODELS"] = models.path
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -492,20 +560,16 @@ actor ASRRuntime {
 
     // MARK: - Diagnostics
 
-    private static func failure(_ title: String, service: Service) -> QwenRuntimeError {
-        let captured = service.log.diagnostics()
-        var lines = [
-            "\(title)。",
-            "子进程：\(service.processIdentifier)",
-            "退出状态：\(service.exitDescription ?? "仍在运行")",
-        ]
-        if !captured.error.isEmpty { lines.append("stderr：\n\(captured.error)") }
-        if !captured.output.isEmpty { lines.append("stdout：\n\(captured.output)") }
-        let message = lines.joined(separator: "\n")
-        // Child output and error descriptions may contain course text, paths,
-        // or credentials. Keep those details out of ordinary diagnostics.
-        logger.error("ASR runtime event=failed pid=\(service.processIdentifier) running=\(service.isAlive) stdout_bytes=\(captured.output.utf8.count) stderr_bytes=\(captured.error.utf8.count)")
-        return QwenRuntimeError.requestFailed(message)
+    private static func failure(_ reason: StartupFailure, service: Service) -> QwenRuntimeError {
+        startupFailure(reason, diagnostics: service.log.diagnostics(),
+                       processIdentifier: service.processIdentifier, running: service.isAlive)
+    }
+
+    static func startupFailure(_ reason: StartupFailure, diagnostics: (output: String, error: String),
+                               processIdentifier: Int32, running: Bool) -> QwenRuntimeError {
+        // Captured output is used only for byte counts, never for a free-text error.
+        logger.error("ASR runtime event=failed pid=\(processIdentifier) running=\(running) stdout_bytes=\(diagnostics.output.utf8.count) stderr_bytes=\(diagnostics.error.utf8.count)")
+        return .requestFailed(reason.message)
     }
 
     private static func startReading(
@@ -534,6 +598,7 @@ actor ASRRuntime {
         let standardOutput: Pipe
         let standardError: Pipe
         let log: LogBuffer
+        let temporaryDirectory: OwnedTemporaryDirectory
 
         private let lock = NSLock()
         private var storedEndpoint: Endpoint?
@@ -545,7 +610,8 @@ actor ASRRuntime {
             standardOutput: Pipe,
             standardError: Pipe,
             log: LogBuffer,
-            token: String
+            token: String,
+            temporaryDirectory: OwnedTemporaryDirectory
         ) {
             self.process = process
             self.standardInput = standardInput
@@ -553,6 +619,7 @@ actor ASRRuntime {
             self.standardError = standardError
             self.log = log
             self.token = token
+            self.temporaryDirectory = temporaryDirectory
         }
 
         var isAlive: Bool { process.isRunning }
@@ -601,6 +668,14 @@ actor ASRRuntime {
             try? standardInput.fileHandleForWriting.close()
             try? standardOutput.fileHandleForReading.close()
             try? standardError.fileHandleForReading.close()
+            cleanupTemporaryDirectory()
+        }
+
+        func cleanupTemporaryDirectory() {
+            guard !isAlive else { return }
+            if !temporaryDirectory.removeAfterExit(true) {
+                ASRRuntime.logger.error("ASR runtime event=temporary_cleanup_failed")
+            }
         }
     }
 

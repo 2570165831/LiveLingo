@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 
 struct CaptureGap: Codable, Sendable, Equatable, Identifiable {
     var id = UUID()
@@ -242,27 +243,28 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var state: State
     private var index: [UUID: Int] = [:]
-    private let logURL: URL
-    private let snapshotURL: URL
+    private let sessionRoot: SensitiveFileIO.Directory
+    private let workRoot: SensitiveFileIO.Directory
     private(set) var recoveredTruncatedTail = false
 
     init(sessionDirectory: URL, sessionID: UUID) throws {
         self.sessionID = sessionID
         directory = sessionDirectory.appendingPathComponent(Self.directoryName, isDirectory: true)
-        logURL = directory.appendingPathComponent("work.jsonl")
-        snapshotURL = directory.appendingPathComponent("snapshot.json")
         state = State(sessionID: sessionID)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: snapshotURL.path) {
+        let root = try Self.privateIO {
+            try SensitiveFileIO.Directory.open(at: sessionDirectory, create: true, tighten: true)
+        }
+        sessionRoot = root
+        workRoot = try Self.privateIO { try root.subdirectory(named: Self.directoryName) }
+        if let data = try Self.privateIO({ try workRoot.readIfPresent(named: "snapshot.json") }) {
             do {
-                state = try JSONDecoder().decode(Envelope.self, from: Data(contentsOf: snapshotURL)).decode(State.self)
+                state = try JSONDecoder().decode(Envelope.self, from: data).decode(State.self)
             } catch { throw JournalError.corrupt("快照：\(error.localizedDescription)") }
             guard state.version == 1 else { throw JournalError.corrupt("不支持的快照版本") }
             guard state.sessionID == sessionID else { throw JournalError.sessionMismatch }
         }
         try rebuildIndex()
-        if FileManager.default.fileExists(atPath: logURL.path) {
-            let data = try Data(contentsOf: logURL)
+        if let data = try Self.privateIO({ try workRoot.readIfPresent(named: "work.jsonl") }) {
             let completeEnd = data.lastIndex(of: 0x0a).map { $0 + 1 } ?? 0
             var previousSequence = 0
             // Validate every complete row, including rows covered by snapshot.
@@ -280,12 +282,11 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             guard previousSequence >= state.sequence else { throw JournalError.corrupt("日志短于快照") }
             if completeEnd < data.count {
                 // Preserve the incomplete bytes before repairing only the tail.
-                let savedTail = directory.appendingPathComponent("truncated-tail-\(UUID().uuidString).bin")
-                try data.suffix(from: completeEnd).write(to: savedTail, options: .atomic)
-                let handle = try FileHandle(forWritingTo: logURL)
-                defer { try? handle.close() }
-                try handle.truncate(atOffset: UInt64(completeEnd))
-                try handle.synchronize()
+                let savedTail = "truncated-tail-\(UUID().uuidString).bin"
+                try Self.privateIO {
+                    try workRoot.atomicWrite(Data(data.suffix(from: completeEnd)), named: savedTail, requireAbsent: true)
+                    try workRoot.truncate(named: "work.jsonl", to: UInt64(completeEnd))
+                }
                 recoveredTruncatedTail = true
             }
         } else if state.sequence > 0 { throw JournalError.corrupt("缺少工作日志") }
@@ -302,6 +303,15 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             try put(record)
         }
         if state.sequence == 0 { try setPaused(false) }
+    }
+
+    private static func privateIO<T>(_ action: () throws -> T) throws -> T {
+        do { return try action() }
+        catch SensitiveFileIO.Failure.unsafePath { throw JournalError.unsafePath }
+        catch SensitiveFileIO.Failure.system(_, let code) {
+            if code == ELOOP || code == ENOTDIR { throw JournalError.unsafePath }
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
     }
 
     private func rebuildIndex() throws {
@@ -356,14 +366,12 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
                               record: record, gap: gap, paused: paused, capturing: capturing)
         try validate(change)
         var data = try JSONEncoder().encode(Envelope(change)); data.append(0x0a)
-        if !FileManager.default.fileExists(atPath: logURL.path) {
-            try data.write(to: logURL, options: .atomic)
-            let handle = try FileHandle(forWritingTo: logURL)
-            defer { try? handle.close() }; try handle.synchronize()
-        } else {
-            let handle = try FileHandle(forWritingTo: logURL)
-            defer { try? handle.close() }
-            try handle.seekToEnd(); try handle.write(contentsOf: data); try handle.synchronize()
+        try Self.privateIO {
+            if try workRoot.requireRegularFileIfPresent(named: "work.jsonl") {
+                try workRoot.append(data, named: "work.jsonl")
+            } else {
+                try workRoot.atomicWrite(data, named: "work.jsonl", requireAbsent: true)
+            }
         }
         apply(change)
         if state.sequence % 128 == 0 { try checkpoint() }
@@ -371,23 +379,35 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     func checkpoint() throws {
         try lock.withLock {
             let data = try JSONEncoder().encode(Envelope(state))
-            try data.write(to: snapshotURL, options: .atomic)
+            try Self.privateIO { try workRoot.atomicWrite(data, named: "snapshot.json") }
         }
     }
     static func stageCapture(_ descriptor: CaptureChunkDescriptor, directory: URL) throws {
-        let url = directory.appendingPathComponent("capture-" + descriptor.id.uuidString + ".json")
-        guard !FileManager.default.fileExists(atPath: url.path) else { throw JournalError.duplicateIdentity }
-        try JSONEncoder().encode(Envelope(descriptor)).write(to: url, options: .atomic)
+        let name = "capture-" + descriptor.id.uuidString + ".json"
+        let data = try JSONEncoder().encode(Envelope(descriptor))
+        do {
+            try Self.privateIO {
+                let root = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: true)
+                try root.atomicWrite(data, named: name, requireAbsent: true)
+            }
+        } catch let error as POSIXError where error.code == .EEXIST {
+            throw JournalError.duplicateIdentity
+        }
     }
     func clearCaptureMarker(id: UUID) throws {
-        let url = directory.appendingPathComponent("capture-" + id.uuidString + ".json")
-        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+        try lock.withLock {
+            try Self.privateIO { try workRoot.removeRegularFileIfPresent(named: "capture-" + id.uuidString + ".json") }
+        }
     }
     func unfinishedCaptures() throws -> [CaptureChunkDescriptor] {
-        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasPrefix("capture-") && $0.pathExtension == "json" }
-            .map { url in
-                let descriptor = try JSONDecoder().decode(Envelope.self, from: Data(contentsOf: url)).decode(CaptureChunkDescriptor.self)
+        try lock.withLock {
+            try Self.privateIO { try workRoot.names() }
+            .filter { $0.hasPrefix("capture-") && $0.hasSuffix(".json") }
+            .map { name in
+                guard let data = try Self.privateIO({ try workRoot.readIfPresent(named: name) }) else {
+                    throw JournalError.unsafePath
+                }
+                let descriptor = try JSONDecoder().decode(Envelope.self, from: data).decode(CaptureChunkDescriptor.self)
                 guard descriptor.sessionID == sessionID else { throw JournalError.sessionMismatch }
                 guard descriptor.startFrame >= 0, descriptor.sampleRate.isFinite, descriptor.sampleRate > 0,
                       descriptor.audioFile == URL(fileURLWithPath: descriptor.audioFile).lastPathComponent,
@@ -396,6 +416,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
                 }
                 return descriptor
             }.sorted { $0.ordinal < $1.ordinal }
+        }
     }
     var records: [TranscriptionWorkRecord] { lock.withLock { state.records } }
     var gaps: [CaptureGap] { lock.withLock { state.gaps } }
@@ -411,19 +432,22 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     func addGap(_ gap: CaptureGap) throws { try lock.withLock { try append(gap: gap) } }
     func audioURL(for record: TranscriptionWorkRecord) throws -> URL {
         try validateRecord(record)
-        let url = directory.appendingPathComponent(record.audioFile)
-        guard url.resolvingSymlinksInPath().deletingLastPathComponent() == directory.resolvingSymlinksInPath() else { throw JournalError.unsafePath }
-        return url
+        try Self.privateIO {
+            try sessionRoot.assertStillAtOriginalPath()
+            try workRoot.assertStillAtOriginalPath()
+            _ = try workRoot.requireRegularFileIfPresent(named: record.audioFile)
+        }
+        return directory.appendingPathComponent(record.audioFile)
     }
     func recordingURL(for record: TranscriptionWorkRecord) throws -> URL? {
         try validateRecord(record)
         guard let file = record.recordingFile else { return nil }
-        let parent = directory.deletingLastPathComponent()
-        let url = parent.appendingPathComponent(file)
-        guard url.resolvingSymlinksInPath().deletingLastPathComponent() == parent.resolvingSymlinksInPath() else {
-            throw JournalError.unsafePath
+        try Self.privateIO {
+            try sessionRoot.assertStillAtOriginalPath()
+            try workRoot.assertStillAtOriginalPath()
+            _ = try sessionRoot.requireRegularFileIfPresent(named: file)
         }
-        return url
+        return directory.deletingLastPathComponent().appendingPathComponent(file)
     }
     func claimNext() throws -> TranscriptionWorkRecord? {
         try lock.withLock {

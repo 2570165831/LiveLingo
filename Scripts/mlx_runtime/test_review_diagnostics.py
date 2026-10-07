@@ -207,6 +207,15 @@ class InputProblemTests(unittest.TestCase):
         self.assertIn('code=invalid_json', str(not_text.exception))
         self.assertEqual(parse_review_input(review_input())['note']['points'][0]['text'], '原笔记')
 
+    def test_unsupported_quote_language_keeps_multilingual_fixed_diagnostic(self):
+        private_language = 'synthetic-private-language'
+        data = payload(units=[evidence(0, quotes=[quote(0, language=private_language)])])
+        with self.assertRaises(ValueError) as failure:
+            parse_review_input(json.dumps(data))
+        message = str(failure.exception)
+        self.assertIn('detail=quote language must be en, zh, es or fr', message)
+        self.assertNotIn(private_language, message)
+
     def test_json_error_description_carries_position_not_content(self):
         try:
             json.loads('{"topic": "秘密内容", }')
@@ -238,7 +247,7 @@ class PromptBindingTests(unittest.TestCase):
 class GenerationDetailTests(unittest.TestCase):
     def test_generation_detail_is_bounded_and_content_free(self):
         detail = generation_detail(RuntimeError('out of memory ' + 'z' * 500))
-        self.assertTrue(detail.startswith('RuntimeError: out of memory'))
+        self.assertEqual(detail, 'runtime_error')
         self.assertLessEqual(len(detail), 140)
         payload_text = generation_detail(ValueError('{"text": "模型输出"}'))
         self.assertNotIn('模型输出', payload_text)

@@ -39,7 +39,8 @@ enum SessionWorkspace {
             temporaryPrefix + identifier.uuidString,
             isDirectory: true
         )
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: false)
+        let root = try SensitiveFileIO.Directory.open(at: fileManager.temporaryDirectory, create: false, tighten: false)
+        _ = try root.subdirectory(named: directory.lastPathComponent)
         return directory
     }
 
@@ -81,7 +82,7 @@ enum SessionWorkspace {
         if let preserved = receipt.preservedSourceDirectory {
             let recovery = ["source": preserved.path, "destination": destination.path]
             let bytes = try JSONSerialization.data(withJSONObject: recovery, options: [.sortedKeys])
-            try bytes.write(to: destination.appendingPathComponent("migration-recovery.json"), options: .atomic)
+            try SensitiveFileIO.atomicWrite(bytes, to: destination.appendingPathComponent("migration-recovery.json"))
         }
         return receipt.destinationDirectory
     }
@@ -298,18 +299,11 @@ enum SessionExporter {
             isLegacyRendered: summaryIsLegacyRendered,
             scheduleEvidence: summaryEvidence.isEmpty ? segments : summaryEvidence,
             converter: converter).trimmingCharacters(in: .whitespacesAndNewlines)
-        let fileManager = FileManager.default
-        try fileManager.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
-        try english.appending("\n").write(
-            to: sessionDirectory.appendingPathComponent("transcript-en.txt"),
-            atomically: true,
-            encoding: .utf8
-        )
-        try chinese.appending("\n").write(
-            to: sessionDirectory.appendingPathComponent(targetTranscriptFileName(for: target.rawValue)),
-            atomically: true,
-            encoding: .utf8
-        )
+        try SensitiveFileIO.prepareDirectory(sessionDirectory)
+        try SensitiveFileIO.atomicWrite(Data(english.appending("\n").utf8),
+            to: sessionDirectory.appendingPathComponent("transcript-en.txt"))
+        try SensitiveFileIO.atomicWrite(Data(chinese.appending("\n").utf8),
+            to: sessionDirectory.appendingPathComponent(targetTranscriptFileName(for: target.rawValue)))
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -321,24 +315,13 @@ enum SessionExporter {
             }
             return line
         }.joined(separator: "\n") + "\n"
-        try jsonl.write(
-            to: sessionDirectory.appendingPathComponent("bilingual.jsonl"),
-            atomically: true,
-            encoding: .utf8
-        )
+        try SensitiveFileIO.atomicWrite(Data(jsonl.utf8), to: sessionDirectory.appendingPathComponent("bilingual.jsonl"))
 
-        try srt.write(
-            to: sessionDirectory.appendingPathComponent("bilingual.srt"),
-            atomically: true,
-            encoding: .utf8
-        )
+        try SensitiveFileIO.atomicWrite(Data(srt.utf8), to: sessionDirectory.appendingPathComponent("bilingual.srt"))
 
         if !trimmedSummary.isEmpty {
-            try (trimmedSummary + "\n").write(
-                to: sessionDirectory.appendingPathComponent(targetSummaryFileName(for: target.rawValue)),
-                atomically: true,
-                encoding: .utf8
-            )
+            try SensitiveFileIO.atomicWrite(Data((trimmedSummary + "\n").utf8),
+                to: sessionDirectory.appendingPathComponent(targetSummaryFileName(for: target.rawValue)))
         }
 
         let manifest = Manifest(
@@ -351,10 +334,7 @@ enum SessionExporter {
             converterVersion: target.profile.renderer == .identity ? nil : ChineseScriptConverter.version
         )
         let manifestData = try encoder.encode(manifest)
-        try manifestData.write(
-            to: sessionDirectory.appendingPathComponent("manifest.json"),
-            options: .atomic
-        )
+        try SensitiveFileIO.atomicWrite(manifestData, to: sessionDirectory.appendingPathComponent("manifest.json"))
     }
 
     /// 2026-09-18：给人看的出口（字幕/转写/笔记导出）不该出现 `[翻译失败：…]` 这种英文错误串 ✗。
@@ -633,7 +613,7 @@ enum NotesExportDocument {
     ///
     /// - 顶层报告标题（`# …`）转成一行"复查进度"文字 ✓（不再和章节标题抢层级 ✓）；
     /// - 批次标题（`## 第 N 批 …`）降为子级（`### …`）✓，保留原有的批号与主题 ✓；
-    /// - 其余正文**原样保留** ✓（不认识的内容只搬不删 ✓）；
+    /// - 正常建议原样保留；旧机器失败行改为固定说明，不再次导出自由诊断；
     /// - 不再另加"复查批次 1/2/3"编号 ✓（报告里已经有批号，重复编号会对不上 ✓）。
     static func reviewSection(_ markdown: String, target: OutputLanguage = .simplifiedChinese,
                               rendered: RenderedFields? = nil) -> String {
@@ -642,6 +622,12 @@ enum NotesExportDocument {
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
             let text = String(line)
             let trimmed = text.trimmingCharacters(in: .whitespaces)
+            let failurePrefixes = ["本批复查失败，保留原笔记：", "读取路径失败", "复查进度读取失败",
+                                   "复查报告读取失败", "报告保存失败", "复查报告保存失败"]
+            if failurePrefixes.contains(where: trimmed.hasPrefix) {
+                output.append("本批复查未完成，原笔记已保留。")
+                continue
+            }
             if trimmed.hasPrefix("# "), !progressTaken {
                 progressTaken = true
                 output.append("- " + fixed(.exportProgressLine, [trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)], target: target, rendered: rendered))
@@ -742,7 +728,7 @@ enum NotesExportDocument {
                       converter: ChineseScriptConverter = .shared) throws {
         let payload = try data(snapshot, format: format, converter: converter)
         do {
-            try payload.write(to: url, options: .atomic)
+            try SensitiveFileIO.atomicWrite(payload, to: url)
         } catch {
             throw NotesExportError.writeFailed(error.localizedDescription)
         }

@@ -55,6 +55,7 @@ enum ReviewReportCollection {
     /// readable committed manifest and an older, verifiable convenience file.
     static func save(_ entry: ReviewReportEntry, in directory: URL) throws {
         try entry.validate()
+        try SensitiveFileIO.prepareDirectory(directory)
         var entry = entry
         var entries = try read(in: directory)
         if let index = entries.firstIndex(where: { $0.jobID == entry.jobID }) {
@@ -73,10 +74,10 @@ enum ReviewReportCollection {
         try checkConflicts(entries)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        try encoder.encode(Manifest(entries: entries)).write(
-            to: directory.appendingPathComponent(manifestFileName), options: .atomic)
-        try (entry.markdown + "\n").write(to: directory.appendingPathComponent(entry.fileName),
-                                           atomically: true, encoding: .utf8)
+        try SensitiveFileIO.atomicWrite(encoder.encode(Manifest(entries: entries)),
+            to: directory.appendingPathComponent(manifestFileName))
+        try SensitiveFileIO.atomicWrite(Data((entry.markdown + "\n").utf8),
+            to: directory.appendingPathComponent(entry.fileName))
     }
 
     static func markdown(in directory: URL, queueReports: [ReviewReportEntry],

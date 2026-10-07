@@ -893,7 +893,16 @@ final class SessionStore: @unchecked Sendable {
         #endif
         Self.processLock.lock()
         defer { Self.processLock.unlock() }
-        if writing { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+        try SessionArchiveCoding.privateIO(at: directory) {
+            if writing {
+                try SensitiveFileIO.prepareDirectory(directory)
+            } else if FileManager.default.fileExists(atPath: directory.path) {
+                _ = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: true)
+            }
+            for name in [Self.snapshotFileName, Self.journalFileName, ".session-store.lock"] {
+                try SensitiveFileIO.tightenFileIfPresent(directory.appendingPathComponent(name))
+            }
+        }
         let lockURL = directory.appendingPathComponent(".session-store.lock")
         try SessionArchiveCoding.requireRegularFileIfPresent(lockURL)
         let flags = (writing ? O_RDWR | O_CREAT : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW
@@ -966,28 +975,21 @@ enum SessionArchiveCoding {
         guard info.st_mode & S_IFMT == S_IFREG else { throw SessionStoreError.unsafePath(url.path) }
     }
     static func atomicWrite(_ data: Data, _ destination: URL) throws {
-        try requireRegularFileIfPresent(destination)
-        let temporary = destination.deletingLastPathComponent().appendingPathComponent(".session-write-\(UUID().uuidString).tmp")
-        let fd = Darwin.open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
-        guard fd >= 0 else { throw SessionStoreError.io(operation: "create snapshot", code: errno) }
-        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-        try handle.write(contentsOf: data)
-        try handle.synchronize()
-        try handle.close()
-        guard Darwin.rename(temporary.path, destination.path) == 0 else {
-            throw SessionStoreError.io(operation: "replace snapshot", code: errno)
+        try privateIO(at: destination) {
+            let parent = try SensitiveFileIO.Directory.open(at: destination.deletingLastPathComponent(),
+                                                          create: false, tighten: false)
+            try parent.atomicWrite(data, named: destination.lastPathComponent, temporaryPrefix: ".session-write-")
         }
-        try syncDirectory(destination.deletingLastPathComponent())
     }
     static func appendAndSync(_ data: Data, _ destination: URL) throws {
-        try requireRegularFileIfPresent(destination)
-        let fd = Darwin.open(destination.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0o600)
-        guard fd >= 0 else { throw SessionStoreError.io(operation: "open journal", code: errno) }
-        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-        try handle.write(contentsOf: data)
-        try handle.synchronize()
-        try handle.close()
-        try syncDirectory(destination.deletingLastPathComponent())
+        try privateIO(at: destination) { try SensitiveFileIO.append(data, to: destination) }
+    }
+    static func privateIO<T>(at url: URL, _ action: () throws -> T) throws -> T {
+        do { return try action() }
+        catch SensitiveFileIO.Failure.unsafePath { throw SessionStoreError.unsafePath(url.path) }
+        catch SensitiveFileIO.Failure.system(let operation, let code) {
+            throw SessionStoreError.io(operation: operation, code: code)
+        }
     }
     static func syncDirectory(_ directory: URL) throws {
         let directoryFD = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC | O_DIRECTORY)

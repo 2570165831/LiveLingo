@@ -2,6 +2,10 @@ import Foundation
 import Darwin
 import OSLog
 
+enum MLXRequestContext {
+    @TaskLocal static var retainsCheckpoint = true
+}
+
 // One owned process per model. No LM Studio server, global ports or foreign PIDs.
 actor MLXRuntime {
     static let shared = MLXRuntime()
@@ -299,7 +303,9 @@ actor MLXRuntime {
             guard let id = event.id, worker.requests.contains(id), let continuation = streams[id] else { continue }
             requestActivity[id] = worker.lastActivity
             if event.event == "error" {
-                let message = event.message ?? "本机模型生成失败"
+                let message = event.message.flatMap(ReviewFailure.parseWorkerMessage).map {
+                    "review failure " + $0.logLine
+                } ?? "本机模型生成失败；上游详情已省略。"
                 let failure: QwenRuntimeError
                 if event.code == "output_budget_exhausted" {
                     failure = .outputLimitReached(message)
@@ -326,9 +332,8 @@ actor MLXRuntime {
 
     private func ended(_ model: String, workerID: UUID, error: Error?) {
         guard let worker = workers[model], worker.id == workerID else { return }
-        let details = String(data: worker.diagnostics, encoding: .utf8) ?? ""
         for id in worker.requests {
-            let message = "本机模型通信已结束，正在确认进程退出。\(details.suffix(1000))"
+            let message = "本机模型通信已结束，正在确认进程退出。"
             streams[id]?.finish(throwing: error ?? (resumableRequests.contains(id)
                 ? QwenRuntimeError.generationInterrupted(message) : QwenRuntimeError.processExited))
             streams[id] = nil; requestModels[id] = nil
@@ -503,6 +508,10 @@ actor MLXRuntime {
         if !worker.process.isRunning, workers[model]?.id == worker.id { workers[model] = nil }
     }
 
+    func shutdown() async {
+        for model in Array(workers.keys) { await unload(model) }
+    }
+
     func generate(model: String, prompt: String, input: String, prefix: String,
                   thinking: Bool, purpose: String, finalBudget: Int, timeout: TimeInterval,
                   thinkingBudget: Int = 16384,
@@ -517,7 +526,7 @@ actor MLXRuntime {
             let worker = try worker(model)
             let pair = AsyncThrowingStream<Event, Error>.makeStream()
             streams[id] = pair.continuation; requestModels[id] = model; worker.requests.insert(id)
-            if purpose != "text" { resumableRequests.insert(id) }
+            if purpose != "text", MLXRequestContext.retainsCheckpoint { resumableRequests.insert(id) }
             let started = ProcessInfo.processInfo.systemUptime
             requestActivity[id] = started
             let inactivityLimit = inactivityTimeout ?? min(timeout, 180)
@@ -540,8 +549,8 @@ actor MLXRuntime {
             do {
                 var command: [String: Any] = ["op":"generate", "id":id, "prompt":prompt, "input":input, "prefix":prefix,
                                 "thinking":thinking, "purpose":purpose, "thinkingBudget":thinkingBudget,
-                                "finalBudget":finalBudget]
-                if !usePrefixCache { command["usePrefixCache"] = false }
+                                "finalBudget":finalBudget, "retainCheckpoint":MLXRequestContext.retainsCheckpoint]
+                if !usePrefixCache || !MLXRequestContext.retainsCheckpoint { command["usePrefixCache"] = false }
                 try await send(command, to: worker)
                 for try await event in pair.stream {
                     try Task.checkCancellation()

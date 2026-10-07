@@ -18,7 +18,40 @@ import re
 
 MAX_DETAIL = 200
 MAX_FIELD = 80
-_FIELD = re.compile(r'[^A-Za-z0-9_.\[\]/=:-]')
+_STAGES = frozenset({'input', 'schema', 'prompt_binding', 'generation', 'decode'})
+_CODES = frozenset({'invalid_input', 'invalid_json', 'invalid_item', 'missing_field',
+                    'legacy_input', 'unsupported_review_version', 'input_not_in_prompt',
+                    'schema_build_failed', 'generation_failed', 'vocabulary_encoding',
+                    'grammar_complexity', 'grammar_compile_failed', 'output_budget_exhausted'})
+_STRUCTURAL_FIELD = re.compile(
+    r'(?:input|reviewVersion|note(?:\.points(?:\[\d+\](?:\.(?:text|index))?)?)?'
+    r'|evidence(?:\[\d+\](?:\.(?:index|chineseWarning|quotes(?:\[\d+\]'
+    r'(?:\.(?:id|language|text))?)?))?)?)')
+_DETAIL_MESSAGES = frozenset({
+    'point text must be a string', 'point must be an object',
+    'point index must be an integer', 'review input must be a JSON object',
+    'review input must be a JSON string', 'review input has no note object',
+    'note.points must be an array', 'evidence must be an array',
+    'evidence item must be an object', 'evidence index must be an integer',
+    'evidence index must not be negative', 'evidence index must be unique',
+    'evidence quotes must be an array', 'chineseWarning must be a string',
+    'quote must be an object', 'unexpected field in a v2 quote',
+    'unexpected field in a v2 evidence item', 'quote id must be a non-empty string',
+    'quote id must be a short ASCII identifier', 'quote id must be unique across the review input',
+    'quote language must be en or zh', 'quote language must be en, zh, es or fr',
+    'quote id language does not match its language field',
+    'quote id does not belong to this evidence item', 'quote text must be a string',
+    'empty fragments are not allowed', 'quote id is required',
+    'quote language is required', 'quote text is required',
+    'evidence must use reviewVersion 2 quotes; legacy english/chinese fields are not accepted',
+    'evidence mixes reviewVersion 2 quotes with legacy quote fields',
+    'review input has no reviewVersion; only reviewVersion 2 is accepted',
+    'reviewVersion must be the integer 2', 'only reviewVersion 2 is accepted',
+    'review input not found in rendered prompt', 'review input not found',
+    'token_bytes_unmatched', 'grammar_state_limit', 'cache limit exceeded',
+    'invalid_request', 'invalid_json', 'io_error', 'resource_exhausted',
+    'timeout', 'runtime_error', 'output_budget_exhausted', 'internal_error',
+})
 
 REVIEW_VERSION = 2
 QUOTE_LANGUAGES = ('en', 'zh', 'es', 'fr')
@@ -35,44 +68,58 @@ LEGACY_EVIDENCE_FIELDS = ('english', 'chinese', 'quote')
 
 
 def clean_detail(value, limit=MAX_DETAIL):
-    """Collapse to one bounded line; replace payload-looking text."""
+    """Only fixed application explanations or numeric JSON positions survive."""
     raw = str(value)
     text = ' '.join(raw.split())
     if not text:
         return ''
-    if '{' in text or '}' in text or '<|' in text or '\\"' in text:
-        return f'<redacted {len(raw.encode("utf-8", "replace"))} bytes>'
-    return text[:limit]
+    if text in _DETAIL_MESSAGES or re.fullmatch(
+            r'JSON syntax error at line \d+ column \d+ \(offset \d+\)', text):
+        return text[:limit]
+    return f'<redacted {len(raw.encode("utf-8", "replace"))} bytes>'
 
 
 def field_value(value):
-    """Sanitize a key/value field so it cannot smuggle free text."""
-    return _FIELD.sub('_', ' '.join(str(value).split()))[:MAX_FIELD]
+    """Accept only known structural paths, never attacker-chosen key names."""
+    return value if (isinstance(value, str) and len(value) <= MAX_FIELD
+                     and _STRUCTURAL_FIELD.fullmatch(value)) else 'unknown'
 
 
 def failure_line(stage, code, detail='', **fields):
     """One structured, content-free failure record."""
-    parts = [f'review failure stage={field_value(stage)} code={field_value(code)}']
+    stage = stage if isinstance(stage, str) and stage in _STAGES else 'unknown'
+    code = code if isinstance(code, str) and code in _CODES else 'generation_failed'
+    parts = [f'review failure stage={stage} code={code}']
     for name in sorted(fields):
         value = fields[name]
         if value is None:
             continue
-        parts.append(f'{field_value(name)}={field_value(value)}')
+        if name == 'field':
+            parts.append(f'field={field_value(value)}')
+        elif name in ('input_bytes', 'prompt_bytes') and type(value) is int and value >= 0:
+            parts.append(f'{name}={value}')
     cleaned = clean_detail(detail)
     if cleaned:
         parts.append(f'detail={cleaned}')
     return ' '.join(parts)
 
 
+class ReviewFailure(ValueError):
+    """Application-authored structured record; arbitrary exception text is not one."""
+    def __init__(self, stage, code='generation_failed', detail='', **fields):
+        self.record = failure_line(stage, code, detail, **fields)
+        super().__init__(self.record)
+
+
 def stage_error(stage, code, detail='', **fields):
     """ValueError carrying a structured record (message reaches the app)."""
-    return ValueError(failure_line(stage, code, detail, **fields))
+    return ReviewFailure(stage, code, detail, **fields)
 
 
 def describe_json_error(error):
     if isinstance(error, json.JSONDecodeError):
         return f'JSON syntax error at line {error.lineno} column {error.colno} (offset {error.pos})'
-    return f'input is not valid JSON: {type(error).__name__}'
+    return 'invalid_json'
 
 
 def _quote_problem(evidence_position, unit_index, quote_index, quote, seen_ids):
@@ -171,7 +218,7 @@ def review_input_problem(data):
         return ('unsupported_review_version', 'reviewVersion', 'reviewVersion must be the integer 2')
     if version != REVIEW_VERSION:
         return ('unsupported_review_version', 'reviewVersion',
-                f'reviewVersion {version} is not accepted; only reviewVersion 2 is accepted')
+                'only reviewVersion 2 is accepted')
     note = data.get('note')
     if not isinstance(note, dict):
         return ('missing_field', 'note', 'review input has no note object')
@@ -202,10 +249,25 @@ def review_input_problem(data):
 
 
 def generation_detail(error):
-    """Bounded, allowlisted description of a failed generation."""
-    name = type(error).__name__
-    text = clean_detail(str(error), 120)
-    return f'{name}: {text}' if text else name
+    """Classify by exception type without ever reading its free-text message."""
+    if getattr(error, 'code', None) == 'output_budget_exhausted':
+        return 'output_budget_exhausted'
+    if isinstance(error, json.JSONDecodeError): return 'invalid_json'
+    if isinstance(error, MemoryError): return 'resource_exhausted'
+    if isinstance(error, TimeoutError): return 'timeout'
+    if isinstance(error, OSError): return 'io_error'
+    if isinstance(error, (ValueError, KeyError, TypeError)): return 'invalid_request'
+    if isinstance(error, RuntimeError): return 'runtime_error'
+    return 'internal_error'
+
+
+def safe_error_message(error, review=False):
+    if isinstance(error, ReviewFailure):
+        return error.record
+    code = generation_detail(error)
+    if review:
+        return failure_line('generation', 'generation_failed', code)
+    return 'runtime failure code=' + code
 
 
 def parse_review_input(raw_input):
@@ -246,4 +308,4 @@ def grammar_error(error):
         return stage_error('schema', 'vocabulary_encoding', 'token_bytes_unmatched')
     if 'DFA states' in message or 'Failed to build DFA' in message:
         return stage_error('schema', 'grammar_complexity', 'grammar_state_limit')
-    return stage_error('schema', 'grammar_compile_failed', type(error).__name__)
+    return stage_error('schema', 'grammar_compile_failed', generation_detail(error))

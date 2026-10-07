@@ -145,7 +145,7 @@ def note_command(request_id, prompt):
 class WorkerSession:
     """One worker subprocess with a timeout-bounded JSONL reader and teardown."""
 
-    def __init__(self, state_directory, checkpoint_bytes=CHECKPOINT_BYTES):
+    def __init__(self, state_directory, checkpoint_bytes=CHECKPOINT_BYTES, boot=BOOT):
         self.state = Path(state_directory)
         self.protocol_errors = []
         self.stderr_lines = []
@@ -153,7 +153,7 @@ class WorkerSession:
         self._events = queue.Queue()
         environment = dict(os.environ, FAKE_CHECKPOINT_BYTES=str(checkpoint_bytes))
         self.process = subprocess.Popen(
-            [sys.executable, '-B', '-c', BOOT, str(ROOT), str(self.state)],
+            [sys.executable, '-B', '-c', boot, str(ROOT), str(self.state)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=environment)
         self._threads = [threading.Thread(target=self._read_protocol, daemon=True),

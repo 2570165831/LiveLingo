@@ -320,7 +320,7 @@ class ServiceResponsivenessTests(unittest.TestCase):
         # Every service here owns synthetic state and a test-only executor.
         for name, value in {
             'MODELS': {}, 'MODEL_LAST_USED': {}, 'UNLOADING_MODELS': set(),
-            'REQUEST_STATES': {}, 'COMPLETED_REQUESTS': {}, 'AUTH_TOKEN': None,
+            'REQUEST_STATES': {}, 'COMPLETED_REQUESTS': {}, 'AUTH_TOKEN': 'synthetic-service-test-token',
             'INFERENCE_SLOTS': threading.BoundedSemaphore(service.MAX_INFERENCE_REQUESTS),
         }.items():
             self.enterContext(patch.object(service, name, value))
@@ -364,6 +364,7 @@ class ServiceResponsivenessTests(unittest.TestCase):
             handler.path = parsed.path + ('?' + parsed.query if parsed.query else '')
             handler.headers = Message()
             for key, value in request.header_items(): handler.headers[key] = value
+            handler.headers['Host'] = parsed.netloc
             body = request.data or b''
             handler.headers['Content-Length'] = str(len(body))
             handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
@@ -399,7 +400,7 @@ class ServiceResponsivenessTests(unittest.TestCase):
 
     def post(self, base, request_id, model='parakeet'):
         request = Request(base + f'/transcribe?model={model}', data=b'test',
-                          headers={'X-LiveLingo-Request-ID': request_id})
+                          headers={'X-LiveLingo-Request-ID': request_id, service.TOKEN_HEADER: service.AUTH_TOKEN})
         with urlopen(request, timeout=5) as response:
             return json.load(response)
 
@@ -460,7 +461,9 @@ class ServiceResponsivenessTests(unittest.TestCase):
     def synthetic_handler(self, query):
         handler = object.__new__(service.Handler)
         handler.path = '/transcribe?' + query
-        handler.headers = {'Content-Length': '1', 'X-LiveLingo-Request-ID': 'synthetic'}
+        handler.server = SimpleNamespace(server_address=('127.0.0.1', 12345))
+        handler.headers = {'Content-Length': '1', 'X-LiveLingo-Request-ID': 'synthetic',
+                           'Host': '127.0.0.1:12345', service.TOKEN_HEADER: service.AUTH_TOKEN}
         handler.rfile = io.BytesIO(b'x')
         handler.send_json = Mock()
         return handler
@@ -492,7 +495,8 @@ class ServiceResponsivenessTests(unittest.TestCase):
         base = f'http://127.0.0.1:{server.server_port}'
         def request(index):
             with urlopen(Request(base + '/transcribe?model=parakeet', data=b'test',
-                         headers={'X-LiveLingo-Request-ID': f'bounded-{index}'}), timeout=5) as response:
+                         headers={'X-LiveLingo-Request-ID': f'bounded-{index}',
+                                  service.TOKEN_HEADER: service.AUTH_TOKEN}), timeout=5) as response:
                 return json.load(response)
         try:
             with patch.object(service, 'model_for', return_value=SimpleNamespace(generate=generate)):
@@ -536,7 +540,8 @@ class ServiceResponsivenessTests(unittest.TestCase):
         base = f"http://127.0.0.1:{server.server_port}"
 
         def transcribe():
-            with urlopen(Request(base + "/transcribe?model=parakeet", data=b"test"), timeout=5) as response:
+            with urlopen(Request(base + "/transcribe?model=parakeet", data=b"test",
+                                 headers={service.TOKEN_HEADER: service.AUTH_TOKEN}), timeout=5) as response:
                 return json.load(response)
 
         try:
@@ -546,7 +551,7 @@ class ServiceResponsivenessTests(unittest.TestCase):
                     try:
                         self.assertTrue(entered.wait(2))
                         second = pool.submit(transcribe)
-                        with urlopen(base + "/health", timeout=1) as response:
+                        with urlopen(Request(base + "/health", headers={service.TOKEN_HEADER: service.AUTH_TOKEN}), timeout=1) as response:
                             self.assertTrue(json.load(response)["ok"])
                         self.assertEqual(len(calls), 1)
                     finally:
@@ -585,7 +590,7 @@ class ServiceResponsivenessTests(unittest.TestCase):
                     job = clients.submit(handler.do_POST)
                     try:
                         self.assertTrue(entered.wait(2))
-                        with urlopen(base + '/health', timeout=2) as response:
+                        with urlopen(Request(base + '/health', headers={service.TOKEN_HEADER: service.AUTH_TOKEN}), timeout=2) as response:
                             during = json.load(response)
                         self.assertEqual(during['requests']['disconnected']['state'], 'running')
                         self.assertNotIn('disconnected', during['completed_requests'])
@@ -600,11 +605,13 @@ class ServiceResponsivenessTests(unittest.TestCase):
                 return
             client = socket.create_connection(('127.0.0.1', server.server_port), timeout=3)
             try:
-                client.sendall(b'POST /transcribe?model=parakeet HTTP/1.0\r\n'
-                               b'Content-Length: 4\r\nX-LiveLingo-Request-ID: disconnected\r\n\r\ntest')
+                client.sendall(('POST /transcribe?model=parakeet HTTP/1.0\r\n'
+                                f'Host: 127.0.0.1:{server.server_port}\r\n'
+                                f'{service.TOKEN_HEADER}: {service.AUTH_TOKEN}\r\n'
+                                'Content-Length: 4\r\nX-LiveLingo-Request-ID: disconnected\r\n\r\ntest').encode())
                 self.assertTrue(entered.wait(2))
                 client.close()
-                with urlopen(base + '/health', timeout=2) as response:
+                with urlopen(Request(base + '/health', headers={service.TOKEN_HEADER: service.AUTH_TOKEN}), timeout=2) as response:
                     during = json.load(response)
                 self.assertEqual(during['requests']['disconnected']['state'], 'running')
                 self.assertNotIn('disconnected', during['completed_requests'])
@@ -845,7 +852,8 @@ sys.exit(service.main(sys.argv[1:]))
                         handler = object.__new__(service.Handler)
                         handler.path = service.urlparse(request.full_url).path
                         handler.server = SimpleNamespace(server_address=('127.0.0.1', ready['port']))
-                        handler.headers = {service.TOKEN_HEADER: request.get_header('X-livelingo-token', '')}
+                        handler.headers = {'Host': service.urlparse(request.full_url).netloc,
+                                           service.TOKEN_HEADER: request.get_header('X-livelingo-token', '')}
                         handler.send_json = Mock()
                         with patch.object(service, 'AUTH_TOKEN', token), \
                              patch.object(service, 'MODEL_ROOT', Path(models)), \

@@ -647,7 +647,14 @@ struct ASRRecoveryTests {
         await queue.finish()
         let journal = try String(contentsOf: dir.appendingPathComponent("transcription-issues.jsonl"), encoding: .utf8)
         #expect(journal.contains("transcription_retry"))
-        #expect(journal.contains("A recovered sentence"))
+        #expect(!journal.contains("A recovered sentence"))
+        let rows = try journal.split(separator: "\n").map {
+            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        #expect(rows.contains {
+            ($0?["candidateBytes"] as? Int) == "A recovered sentence with surrounding context.".utf8.count
+                && ($0?["candidateSHA256"] as? String)?.count == 64
+        })
         #expect(!collector.events.contains { if case .final = $0 { return true }; return false })
     }
 

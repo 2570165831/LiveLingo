@@ -1805,13 +1805,13 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
          itemIndex: Int? = nil, pointIndex: Int? = nil, field: String? = nil,
          requestID: String? = nil, inputBytes: Int? = nil, responseBytes: Int? = nil) {
         self.stage = stage
-        self.code = code
+        self.code = Self.safeCode(code)
         self.detail = detail
         self.batchIndex = batchIndex
         self.batchCount = batchCount
         self.itemIndex = itemIndex
         self.pointIndex = pointIndex
-        self.field = field
+        self.field = Self.safeField(field)
         self.requestID = requestID
         self.inputBytes = inputBytes
         self.responseBytes = responseBytes
@@ -1832,13 +1832,21 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
         if let field { context.append("字段 \(field)") }
         let head = "复查失败[\(stage.label)]" + (context.isEmpty ? "" : "（" + context.joined(separator: " · ") + "）")
         var text = "\(head)：\(localizedDetail)"
-        if !detail.isEmpty, detail != localizedDetail { text += "（\(detail)）" }
+        // Only exact numeric validator templates carry additional counts.
+        let templates = [
+            "too_many_additions": #"^补充建议 [0-9]{1,9} 条，上限 24 条$"#,
+            "quote_not_in_evidence": #"^引用未出现在证据 [0-9]{1,9} 的英文或中文原文中（引用 [0-9]{1,9} 字）$"#,
+        ]
+        if let pattern = templates[code],
+           detail.range(of: pattern, options: .regularExpression) != nil {
+            text += "（\(detail)）"
+        }
         if let responseBytes { text += " · 响应 \(responseBytes) 字节" }
         return text
     }
 
     /// Chinese explanation for known codes, so the failure is readable without
-    /// the runtime developer log. Unknown codes fall back to the raw detail.
+    /// the runtime developer log. Unknown details never enter reports.
     var localizedDetail: String {
         switch (stage, code) {
         case (.decode, "invalid_json"), (.input, "invalid_json"):
@@ -1885,10 +1893,14 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
         case (.schema, "schema_build_failed"): return "无法为复查输入构建本地约束模式"
         case (.promptBinding, "input_not_in_prompt"): return "复查输入未出现在渲染后的提示词中"
         case (.directory, "directory_unavailable"): return "录音目录找不到或无法写入"
+        case (.directory, "directory_in_trash"): return "录音目录位于废纸篓，已暂停复查"
+        case (_, "input_stale"): return "课程内容已有新修订，请重新开始复查"
+        case (_, "input_conflict"): return "笔记与复查原文不同，已保留现有数据"
+        case (_, "report_unreadable"): return "复查报告无法读取，已保留现有数据"
         case (.journal, _): return "复查进度保存失败"
         case (.output, _): return "复查报告写入失败"
         case (.cancelled, _): return "复查任务已取消，进度已保留"
-        default: return detail.isEmpty ? "复查未通过校验" : detail
+        default: return "复查未通过校验"
         }
     }
 
@@ -1916,15 +1928,47 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
         return copy
     }
 
-    /// Bound an upstream explanation for private UI and failure diagnostics.
-    /// Plain text may contain user data, so this result must not enter OSLog.
+    /// Free text is never diagnostic metadata, even without JSON/control marks.
     static func sanitized(_ raw: String, limit: Int = 200) -> String {
-        let collapsed = raw.split(whereSeparator: { $0.isNewline }).joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !collapsed.contains("{"), !collapsed.contains("}"), !collapsed.contains("<|") else {
-            return "上游返回了无法直接展示的内容（\(raw.utf8.count) 字节）"
-        }
-        return String(collapsed.prefix(limit))
+        "上游错误详情已省略（\(raw.utf8.count) 字节）"
+    }
+
+    static func safeCode(_ raw: String) -> String {
+        let known: Set<String> = [
+            "invalid_json", "missing_key", "type_mismatch", "null_value", "empty_response",
+            "missing_review_version", "unexpected_review_version", "unsupported_review_version",
+            "index_out_of_range", "duplicate_index", "original_mismatch", "empty_reason",
+            "reason_too_long", "invalid_point", "too_many_additions", "evidence_index_out_of_range",
+            "empty_quote", "quote_too_long", "quote_not_in_evidence", "unknown_quote_id",
+            "quote_id_mismatch", "missing_quote_id", "legacy_quote_field", "unexpected_quote_id",
+            "invalid_note", "input_encode_failed", "generation_interrupted", "request_failed",
+            "model_unavailable", "invalid_response", "generation_failed", "unexpected_error",
+            "missing_field", "invalid_item", "vocabulary_encoding", "grammar_complexity",
+            "grammar_compile_failed", "schema_build_failed", "input_not_in_prompt",
+            "directory_unavailable", "directory_in_trash", "cancelled", "input_stale",
+            "input_conflict", "report_unreadable", "service_unavailable", "process_exited",
+            "runtime_unavailable", "timeout", "output_limit", "rejected", "batch_not_found",
+            "unsupported_target", "no_pending_batch", "unrecognized_saved_prompt",
+            "session_unsupportedSchema", "session_corruptSnapshot", "session_corruptJournal",
+            "session_incompleteJournalTail", "session_unsafePath", "session_invalidState", "session_io",
+        ]
+        if known.contains(raw) { return raw }
+        if raw.range(of: #"^ns_(NSCocoaErrorDomain|NSPOSIXErrorDomain|NSURLErrorDomain|AVFoundationErrorDomain|unknown)_-?[0-9]{1,12}$"#,
+                     options: .regularExpression) != nil { return raw }
+        return "unexpected_error"
+    }
+
+    static func safeField(_ raw: String?) -> String? {
+        guard let raw, raw.count <= 128 else { return nil }
+        let names: Set<String> = ["reviewVersion", "sourceVersion", "corrections", "additions", "index",
+            "original", "text", "kind", "reason", "evidenceIndex", "quote", "quoteID", "note",
+            "points", "topic", "input", "evidence", "sourceIDs", "noNewKnowledge", "needsContext",
+            "clarifies", "followUps", "references", "id", "needs_context", "schema"]
+        let normalized = raw.replacingOccurrences(of: #"Index ([0-9]+)"#, with: "$1", options: .regularExpression)
+        let tokens = normalized.split(whereSeparator: { ".[]".contains($0) })
+        guard !tokens.isEmpty, tokens.allSatisfy({ names.contains(String($0)) ||
+            (!$0.isEmpty && $0.count <= 9 && $0.allSatisfy({ $0.isASCII && $0.isNumber })) }) else { return nil }
+        return raw
     }
 
     /// Parse the owned worker's structured `review failure stage=... code=...`
@@ -1943,7 +1987,7 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
             else if text.hasPrefix("field=") { field = identifier(String(text.dropFirst(6))) }
             else if text.hasPrefix("item=") { item = Int(text.dropFirst(5)) }
         }
-        let detail = segments.count > 1 ? sanitized(String(segments[1]), limit: 240) : ""
+        let detail = "上游返回了结构化失败类别"
         return ReviewFailure(stage: stage, code: code, detail: detail, itemIndex: item, field: field)
     }
 
@@ -1963,11 +2007,8 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
             && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(systemError.code)
             || systemError.domain == NSPOSIXErrorDomain && systemError.code == 2
         if missingFile {
-            let path = (systemError.userInfo[NSFilePathErrorKey] as? String)
-                ?? (systemError.userInfo[NSURLErrorKey] as? URL)?.path
             return ReviewFailure(stage: .directory, code: LearningFailureCode.code(for: error),
-                detail: "所需文件不存在" + (path.map { "：" + sanitized($0) } ?? "")
-                    + "；本任务已暂停，其他可用任务继续。")
+                detail: "所需文件不存在；本任务已暂停，其他可用任务继续。")
         }
         guard let qwen = error as? QwenRuntimeError else {
             // Known app errors carry their own reason; keep it instead of a bare
@@ -1987,8 +2028,8 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
         case .processExited, .runtimeUnavailable:
             return ReviewFailure(stage: .generation, code: LearningFailureCode.code(for: qwen),
                                  detail: qwen.errorDescription ?? "")
-        case .modelUnavailable(let name):
-            return ReviewFailure(stage: .generation, code: "model_unavailable", detail: "离线包缺少模型 \(name.prefix(64))")
+        case .modelUnavailable:
+            return ReviewFailure(stage: .generation, code: "model_unavailable", detail: "离线包缺少本次需要的模型")
         case .invalidResponse:
             return ReviewFailure(stage: .generation, code: "invalid_response", detail: "本机模型返回了无法识别的数据")
         case .requestFailed(let message), .generationInterrupted(let message),
@@ -2064,7 +2105,9 @@ enum LearningFailureCode {
         case is CancellationError: return "cancelled"
         default:
             let error = error as NSError
-            return "ns_" + error.domain.filter { $0.isLetter || $0.isNumber } + "_\(error.code)"
+            let domains = [NSCocoaErrorDomain, NSPOSIXErrorDomain, NSURLErrorDomain, "AVFoundationErrorDomain"]
+            let domain = domains.contains(error.domain) ? error.domain : "unknown"
+            return "ns_" + domain + "_\(error.code)"
         }
     }
 
@@ -2139,6 +2182,7 @@ struct ReviewDiagnosticsPolicy: Equatable, Sendable {
     var maximumFiles: Int
     var maximumFileBytes: Int
     var maximumTotalBytes: Int
+    var includesContent = false
 
     static let standard = ReviewDiagnosticsPolicy(maximumFiles: 8, maximumFileBytes: 262_144, maximumTotalBytes: 1_048_576)
     static let disabled = ReviewDiagnosticsPolicy(maximumFiles: 0, maximumFileBytes: 0, maximumTotalBytes: 0)
@@ -2146,9 +2190,8 @@ struct ReviewDiagnosticsPolicy: Equatable, Sendable {
     var isEnabled: Bool { maximumFiles > 0 && maximumFileBytes > 0 && maximumTotalBytes > 0 }
 }
 
-/// Private local snapshot written only when a review batch fails. It may hold
-/// the prepared input and the final answer, but never the reasoning prefix, the
-/// journal, credentials or raw recordings.
+/// Metadata is the default. Prepared input/final answer require an explicit
+/// debugging policy; reasoning, credentials and recordings are always excluded.
 struct ReviewDiagnosticSnapshot: Codable {
     var version = 1
     var createdAt: String
@@ -2166,6 +2209,8 @@ struct ReviewDiagnosticSnapshot: Codable {
     var inputBytes: Int
     var responseBytes: Int
     var prefixBytes: Int
+    var inputSHA256: String? = nil
+    var responseSHA256: String? = nil
     var timingsMS: [String: Int]?
     var timingsUnavailable: [String]?
     var input: String?
@@ -2197,8 +2242,7 @@ struct ReviewDiagnosticsStore: Sendable {
             #endif
             try prepareDirectory()
             guard let url = availableURL(for: snapshot) else { return nil }
-            guard FileManager.default.createFile(atPath: url.path, contents: data,
-                                                 attributes: [.posixPermissions: 0o600]) else { return nil }
+            try SensitiveFileIO.atomicWrite(data, to: url)
             rotate(keeping: url)
             return url
         } catch {
@@ -2214,6 +2258,19 @@ struct ReviewDiagnosticsStore: Sendable {
         encoder.outputFormatting = [.sortedKeys]
         let byteLimit = min(policy.maximumFileBytes, policy.maximumTotalBytes)
         var candidate = snapshot
+        candidate.code = ReviewFailure.safeCode(snapshot.code)
+        candidate.field = ReviewFailure.safeField(snapshot.field)
+        candidate.detail = ReviewFailure(stage: ReviewFailureStage(rawValue: snapshot.stage) ?? .unknown,
+            code: candidate.code, detail: "").localizedDetail
+        candidate.inputSHA256 = snapshot.input.map(Self.digest)
+        candidate.responseSHA256 = snapshot.finalResponse.map(Self.digest)
+        if !policy.includesContent {
+            candidate.input = nil
+            candidate.finalResponse = nil
+            candidate.inputOmitted = true
+            candidate.responseOmitted = true
+            candidate.boundary = "本地私有诊断：仅含类别、计数、哈希和耗时，不含课堂正文。"
+        }
         if let response = candidate.finalResponse,
            response.contains("<think>") || response.contains("</think>") || response.contains("<|im_start|>") {
             candidate.finalResponse = nil
@@ -2247,6 +2304,10 @@ struct ReviewDiagnosticsStore: Sendable {
         return metadataOnly
     }
 
+    private static func digest(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
     /// Byte-accurate prefix that never splits a grapheme cluster.
     static func truncated(_ text: String, toUTF8Bytes limit: Int) -> String {
         guard limit > 0 else { return "" }
@@ -2278,15 +2339,7 @@ struct ReviewDiagnosticsStore: Sendable {
     }
 
     private func prepareDirectory() throws {
-        let manager = FileManager.default
-        let attributes = try? manager.attributesOfItem(atPath: directory.path)
-        if let type = attributes?[.type] as? FileAttributeType {
-            guard type == .typeDirectory else { throw CocoaError(.fileWriteInvalidFileName) }
-        } else {
-            try manager.createDirectory(at: directory, withIntermediateDirectories: true,
-                                        attributes: [.posixPermissions: 0o700])
-        }
-        try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        try SensitiveFileIO.prepareDirectory(directory)
     }
 
     private func availableURL(for snapshot: ReviewDiagnosticSnapshot) -> URL? {
@@ -3544,7 +3597,7 @@ final class LearningReviewQueue: ObservableObject {
             } catch {
                 self.jobs = before
                 self.retiredJobs = retiredBefore
-                self.managementError = "队列未更改：\(error.localizedDescription)"
+                self.managementError = "队列未更改：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
             self.managementPending -= 1
             self.reconcile()
@@ -3898,7 +3951,7 @@ final class LearningReviewQueue: ObservableObject {
         do { try save(); persistenceFailure = nil }
         catch {
             jobs.insert(removed, at: 0)
-            persistenceFailure = "复查队列保存失败，未移除任务：\(error.localizedDescription)"
+            persistenceFailure = "复查队列保存失败，未移除任务：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
         }
         reconcile()
     }
@@ -4083,7 +4136,7 @@ final class LearningReviewQueue: ObservableObject {
                 userPaused = journal.userPaused
                 if repaired {
                     do { try save() }
-                    catch { persistenceFailure = "复查进度保存失败，已暂停：\(error.localizedDescription)" }
+                    catch { persistenceFailure = "复查进度保存失败，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
                 }
                 for index in jobs.indices
                 where !deferredTargets.contains(jobs[index].id)
@@ -4094,7 +4147,7 @@ final class LearningReviewQueue: ObservableObject {
                                                  detail: "prefix_bytes=\(jobs[index].prefix.utf8.count)"), at: index)
                 }
             } catch {
-                persistenceFailure = "复查进度读取失败，已保留现场：\(error.localizedDescription)"
+                persistenceFailure = "复查进度读取失败，已保留现场：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
                 ReviewLog.failure("review event=restore_failed error_code=\((error as NSError).code)")
             }
         }
@@ -4300,13 +4353,13 @@ final class LearningReviewQueue: ObservableObject {
         catch {
             jobs = before
             retiredJobs = retiredBefore
-            persistenceFailure = "复查进度保存失败，已暂停：\(error.localizedDescription)"
+            persistenceFailure = "复查进度保存失败，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             refreshStatus()
             throw error
         }
         do { try writeOutputs(jobs[jobs.count - 1]) }
         catch {
-            jobs[jobs.count - 1].failure = "复查文件不可写，已暂停：\(error.localizedDescription)"
+            jobs[jobs.count - 1].failure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "failed",
                                          stage: ReviewFailureStage.output.rawValue, batch: 0,
                                          batchCount: batches.count,
@@ -4420,7 +4473,7 @@ final class LearningReviewQueue: ObservableObject {
             let before = jobs
             jobs.insert(jobs.remove(at: index), at: 0)
             do { try save() }
-            catch { jobs = before; persistenceFailure = "复查队列保存失败：\(error.localizedDescription)" }
+            catch { jobs = before; persistenceFailure = "复查队列保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
         }
         // 2026-09-20（父任务验收第 4 点）：升级后"等待手动开始"的旧任务不能挡住**后来明确提交**的任务 ✓。
         // 把它往后挪一格，让已明确排队的那项先跑 ✓；它自己仍留在队列里等用户点"开始复查" ✓，
@@ -4431,7 +4484,7 @@ final class LearningReviewQueue: ObservableObject {
             let before = jobs
             jobs.insert(jobs.remove(at: index), at: 0)
             do { try save() }
-            catch { jobs = before; persistenceFailure = "复查队列保存失败：\(error.localizedDescription)" }
+            catch { jobs = before; persistenceFailure = "复查队列保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
         }
         refreshStatus()
         let reason = blockReason
@@ -4651,12 +4704,9 @@ final class LearningReviewQueue: ObservableObject {
             // invalid) answer is discarded, while an interrupted generation may
             // resume from its checkpoint.
             let preservesProgress = (error as? QwenRuntimeError)?.preservesGenerationProgress == true
-            var failure = ReviewFailure.classify(error, defaultStage: phase)
+            let failure = ReviewFailure.classify(error, defaultStage: phase)
                 .decorated(batch: batchIndex, count: batchCount, requestID: identity.latest,
                            inputBytes: preparedInput?.utf8.count, responseBytes: finalResponse?.utf8.count)
-            if failure.stage == .directory {
-                failure.detail += "（任务录音目录：\(ReviewFailure.sanitized(accessURL.path))）"
-            }
             if jobs.first?.id == job.id {
                 if receivedCompleteResponse || (generationAttempted && !preservesProgress) {
                     jobs[0].prefix = ""
@@ -4740,7 +4790,7 @@ final class LearningReviewQueue: ObservableObject {
         recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "retry_started",
                                      batch: jobs[0].next, batchCount: jobs[0].batches.count,
                                      detail: "attempt=\(retry.attempts) code=\(retry.code)"), at: 0)
-        do { try save() } catch { persistenceFailure = "复查进度保存失败，已暂停：\(error.localizedDescription)" }
+        do { try save() } catch { persistenceFailure = "复查进度保存失败，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
         reconcile()
     }
 
@@ -4788,7 +4838,7 @@ final class LearningReviewQueue: ObservableObject {
             field: failure.field,
             itemIndex: failure.itemIndex,
             pointIndex: failure.pointIndex,
-            detail: failure.detail,
+            detail: failure.localizedDetail,
             inputBytes: input?.utf8.count ?? 0,
             responseBytes: response?.utf8.count ?? 0,
             prefixBytes: job.prefix.utf8.count,
@@ -4815,7 +4865,7 @@ final class LearningReviewQueue: ObservableObject {
         if job.resolvedScope.isWholeLesson {
             let originalURL = job.directory.appendingPathComponent("summary-before-review.md")
             if !FileManager.default.fileExists(atPath: originalURL.path) {
-                try (job.original + "\n").write(to: originalURL, atomically: true, encoding: .utf8)
+                try SensitiveFileIO.atomicWrite(Data((job.original + "\n").utf8), to: originalURL)
             }
         }
         let report = try ReviewReportCollection.markdown(in: job.directory, queueReports: [],
@@ -4827,7 +4877,8 @@ final class LearningReviewQueue: ObservableObject {
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireContained(journalURL, in: PreviewDataIsolation.dataDirectory)
         #endif
-        try FileManager.default.createDirectory(at: journalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try SensitiveFileIO.prepareDirectory(journalURL.deletingLastPathComponent())
+        try SensitiveFileIO.tightenFileIfPresent(journalURL)
         // 2026-09-18：写前脏检查。
         // 背景：电源监视器等每 5 秒会走一遍 reconcile() → persistOrPause() → save()，
         // 此前**无条件整份重写**这个日志（实测 808 KB × ≈13 次/分钟 ≈ 14.7 GB/天，
@@ -4840,7 +4891,7 @@ final class LearningReviewQueue: ObservableObject {
            FileManager.default.fileExists(atPath: journalURL.path) {
             return
         }
-        try data.write(to: journalURL, options: .atomic)
+        try SensitiveFileIO.atomicWrite(data, to: journalURL)
         lastPersistedJournalBytes = data
     }
 
@@ -4850,7 +4901,7 @@ final class LearningReviewQueue: ObservableObject {
     private func persistOrPause() {
         guard persistenceFailure == nil else { return }
         do { try save() }
-        catch { persistenceFailure = "复查进度保存失败，已暂停：\(error.localizedDescription)"; task?.cancel() }
+        catch { persistenceFailure = "复查进度保存失败，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"; task?.cancel() }
     }
 
     private func refreshStatus() {

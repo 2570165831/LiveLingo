@@ -119,6 +119,13 @@ enum FilePanelPresentation {
 
 @MainActor
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
+    static weak var model: AppModel?
+    private var terminationTask: Task<Void, Never>?
+    #if DEBUG
+    var cleanupForTesting: (@MainActor @Sendable () async -> Bool)?
+    var replyForTesting: (@MainActor @Sendable (Bool) -> Void)?
+    #endif
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard !AppRuntimeEnvironment.isUnitTesting else { return }
         FullScreenClassModeController.shared.start()
@@ -131,7 +138,29 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         FilePanelPresentation.cancelAll()
-        return .terminateNow
+        #if DEBUG
+        if AppRuntimeEnvironment.isUnitTesting, cleanupForTesting == nil { return .terminateNow }
+        #endif
+        guard terminationTask == nil else { return .terminateLater }
+        terminationTask = Task { [self] in
+            let shouldExit: Bool
+            #if DEBUG
+            if let cleanupForTesting { shouldExit = await cleanupForTesting() }
+            else { shouldExit = await Self.model?.prepareForApplicationExit() ?? true }
+            #else
+            shouldExit = await Self.model?.prepareForApplicationExit() ?? true
+            #endif
+            if shouldExit, !AppRuntimeEnvironment.isUnitTesting {
+                await ASRRuntime.shared.stop()
+                await MLXRuntime.shared.shutdown()
+            }
+            terminationTask = nil
+            #if DEBUG
+            if let replyForTesting { replyForTesting(shouldExit); return }
+            #endif
+            sender.reply(toApplicationShouldTerminate: shouldExit)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -148,6 +177,7 @@ private final class AppModelHolder: ObservableObject {
     init() {
         model = AppRuntimeEnvironment.isUnitTesting ? nil : AppModel()
         if let model { FullScreenClassModeController.shared.connect(model: model) }
+        AppLifecycleDelegate.model = model
     }
 }
 

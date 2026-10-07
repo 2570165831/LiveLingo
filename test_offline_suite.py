@@ -9,6 +9,10 @@ import unittest
 
 
 def load_tests(loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: str | None):
+    # Synthetic tensor regressions never need a GPU or model weights. Set the
+    # device before importing suites that materialize their fixtures.
+    import mlx.core as mx
+    mx.set_default_device(mx.cpu)
     root = Path(__file__).resolve().parent
     # Existing script tests import sibling helpers by their historical names.
     # Match their standalone invocation search path without changing old tests.

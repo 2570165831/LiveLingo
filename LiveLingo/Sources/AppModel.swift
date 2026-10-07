@@ -276,7 +276,7 @@ enum ReviewExportSource {
         do {
             files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         } catch {
-            throw QwenRuntimeError.requestFailed("读取复查报告目录失败，未导出：\(error.localizedDescription)")
+            throw QwenRuntimeError.requestFailed("读取复查报告目录失败，未导出：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))")
         }
         var found: [(number: Int, text: String)] = []
         for file in files {
@@ -286,7 +286,7 @@ enum ReviewExportSource {
                 text = try String(contentsOf: file, encoding: .utf8)
             } catch {
                 throw QwenRuntimeError.requestFailed(
-                    "局部复查报告读取失败，未导出：\(file.lastPathComponent)（\(error.localizedDescription)）")
+                    "局部复查报告读取失败，未导出：\(file.lastPathComponent)（\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))）")
             }
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw QwenRuntimeError.requestFailed("局部复查报告为空，未导出：\(file.lastPathComponent)")
@@ -850,7 +850,8 @@ final class AppModel: ObservableObject {
             guard previewRunToken == runToken else { return }
             if !Task.isCancelled {
                 previewTranslationStatus = captionTarget.isSpanishOrFrench
-                    ? "初译语言包未就绪，只等正式译文" : "初译未就绪：\(error.localizedDescription)"
+                    ? "初译语言包未就绪，只等正式译文"
+                    : "初译未就绪：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
         }
     }
@@ -1043,6 +1044,8 @@ final class AppModel: ObservableObject {
     private var sessionSnapshot: SessionSnapshot?
     private var sessionSaver: SessionSaveCoordinator?
     private var finalizationOwner: UUID?
+    private var finalizationInProgress = false
+    private var preparingApplicationExit = false
     private var processingTask: Task<Void, Never>?
     private var processingTaskID: UUID?
     private var processingPauseTask: Task<Void, Error>?
@@ -1133,7 +1136,7 @@ final class AppModel: ObservableObject {
                 reviewQueueNotice = "已加入复查队列：\(scope.label) · 只给出核对意见，不会自动修改笔记正文"
             } catch {
                 guard sessionID == identity, generation == epoch else { return }
-                reviewQueueNotice = "复查未排队：\(error.localizedDescription)"
+                reviewQueueNotice = "复查未排队：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
         }
     }
@@ -1348,7 +1351,7 @@ final class AppModel: ObservableObject {
               hasActiveSession, activeStorageMode == .liveOnly else { return }
         do { try pipeline.updatePersistence(persistsSession: true) }
         catch {
-            archiveError = "未能保留当前录音：\(error.localizedDescription)"
+            archiveError = "未能保留当前录音：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             return
         }
         activeStorageMode = .saveSession
@@ -1366,8 +1369,8 @@ final class AppModel: ObservableObject {
                 await startSession()
             } catch {
                 if let directory = sessionDirectory { phase = .saved(directory) }
-                else { phase = .failed("切换前保存失败：\(error.localizedDescription)") }
-                archiveError = "当前课程进度尚未保存，保留现场：\(error.localizedDescription)"
+                else { phase = .failed("切换前保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))") }
+                archiveError = "当前课程进度尚未保存，保留现场：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
         }
     }
@@ -1439,7 +1442,7 @@ final class AppModel: ObservableObject {
         } catch {
             phase = previousPhase
             if !(error is CancellationError) {
-                archiveError = "当前课程尚未保存，导入未开始：\(error.localizedDescription)"
+                archiveError = "当前课程尚未保存，导入未开始：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
             return
         }
@@ -1468,7 +1471,7 @@ final class AppModel: ObservableObject {
                 in: outputDirectory,
                 preferredName: Self.sessionFolderName()
             )
-            try FileManager.default.createDirectory(at: finalDirectory, withIntermediateDirectories: false)
+            try SensitiveFileIO.prepareDirectory(finalDirectory)
             sessionDirectory = finalDirectory
             bindSessionArchive(to: finalDirectory)
             let recordingURL = finalDirectory.appendingPathComponent(SessionWorkspace.recordingFileName)
@@ -1495,7 +1498,7 @@ final class AppModel: ObservableObject {
         } catch is CancellationError {
             await finishMediaImport(message: importFailureMessage ?? "已停止导入")
         } catch {
-            await finishMediaImport(message: "导入中断：\(error.localizedDescription)")
+            await finishMediaImport(message: "导入中断：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))")
         }
     }
 
@@ -1570,7 +1573,7 @@ final class AppModel: ObservableObject {
             report = exportIncludesReviewAdvice
                 ? try ReviewExportSource.markdown(for: directory, queue: noteReviewQueue) : nil
         } catch {
-            exportStatus = "读取复查报告失败，未导出：\(error.localizedDescription)"
+            exportStatus = "读取复查报告失败，未导出：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             return nil
         }
         if exportIncludesReviewAdvice, report == nil {
@@ -1639,7 +1642,7 @@ final class AppModel: ObservableObject {
                     ? "；该录音暂无已保存复查意见" : ""
                 message = "已导出 \(url.lastPathComponent)（\(max(1, size / 1_024)) KB）" + reviewNotice
             } catch {
-                message = "导出失败：\(error.localizedDescription)"
+                message = "导出失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
             await MainActor.run {
                 self.isExporting = false
@@ -1659,6 +1662,75 @@ final class AppModel: ObservableObject {
         Task { await stopSession() }
     }
 
+    /// Closing capture, parking owned writers and clearing volatile content must
+    /// finish before AppKit is allowed to terminate. A failed cleanup keeps its
+    /// exact temporary root for retry, never scans or removes saved courses.
+    func prepareForApplicationExit() async -> Bool {
+        preparingApplicationExit = true
+        defer { preparingApplicationExit = false }
+        cancelScheduledSummaryRefresh()
+        readinessMonitorTask?.cancel()
+        powerMonitorTask?.cancel()
+        let refresh = resourceRefreshTask
+        refresh?.cancel()
+        let manual = manualTranslationTask
+        manual?.cancel()
+        let importing = importTask
+        importing?.cancel()
+        stopCandidatePlayback()
+        while finalizationInProgress { try? await Task.sleep(for: .milliseconds(20)) }
+        let discardsContent = activeStorageMode == .liveOnly
+            || (temporarySessionDirectory != nil && sessionSaver == nil)
+        if activeStorageMode == .liveOnly { await stopSession() }
+        else {
+            await pipeline.stopCapture(continueTranscribing: false)
+            let translation = translationWorker, summary = summaryTask
+            translation?.cancel()
+            cancelSummaryTask()
+            await translation?.value
+            await summary?.value
+            do {
+                try await parkSavedProcessing()
+                if sessionSaver != nil {
+                    let directory = try await finalizeSessionDirectoryIfNeeded(resumeAfterMigration: false)
+                    try await flushSessionArchive()
+                    try SessionExporter.export(segments: segments, sessionDirectory: directory,
+                        summary: lectureSummary, target: outputLanguage)
+                    phase = .saved(directory)
+                }
+            } catch {
+                archiveError = "退出前保存失败，现有课程与进度已保留，请重试。"
+                return false
+            }
+            await pipeline.cancel()
+        }
+        await importing?.value
+        await manual?.value
+        await refresh?.value
+        await noteReviewQueue.pauseAndWait()
+        if discardsContent, let root = temporarySessionDirectory {
+            do { try SessionWorkspace.discardTemporarySession(root) }
+            catch {
+                phase = .failed("临时文件未能删除，已取消退出，请重试。")
+                return false
+            }
+            temporarySessionDirectory = nil
+            sessionDirectory = nil
+        }
+        if discardsContent {
+            volatileEnglish = ""
+            liveChinese = ""
+            segments = []
+            lectureSummary = ""
+            latestSummaryUpdate = ""
+            transcriptionCandidates = []
+            clearTranslationPreview()
+            resetLearningNotes()
+        }
+        generation += 1
+        return true
+    }
+
     func pause() {
         guard isRecording else { return }
         pipeline.pause()
@@ -1673,7 +1745,7 @@ final class AppModel: ObservableObject {
             resumeElapsedClock()
             phase = .recording
         } catch {
-            Task { await failActiveSession("恢复录音失败：\(error.localizedDescription)") }
+            Task { await failActiveSession("恢复录音失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))") }
         }
     }
 
@@ -1717,7 +1789,7 @@ final class AppModel: ObservableObject {
         let boundID = sessionID
         saver.onFailure = { [weak self, weak saver] error in
             guard let self, self.sessionID == boundID, self.sessionSaver === saver else { return }
-            let message = "课程进度保存失败：\(error.localizedDescription)"
+            let message = "课程进度保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             self.archiveWriteError = message
             self.archiveError = message
         }
@@ -1738,7 +1810,7 @@ final class AppModel: ObservableObject {
                     self.transcriptionCandidates.removeAll { !pending.contains($0.id) }
                 }
             } catch {
-                self.archiveError = "正文已保存，候选确认尚未同步；请重试保存：\(error.localizedDescription)"
+                self.archiveError = "正文已保存，候选确认尚未同步；请重试保存：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
             let handled = self.lastReviewInvalidation?.sessionID == boundID
                 ? self.lastReviewInvalidation!.revision : 0
@@ -1748,7 +1820,7 @@ final class AppModel: ObservableObject {
                     try self.noteReviewQueue.invalidateInputs(sessionID: boundID, inputRevision: saved.inputRevision,
                         affectedBatchIDs: revisions.isEmpty ? nil : Set(revisions.flatMap(\.retainedBatches).map(\.id)))
                     self.lastReviewInvalidation = (boundID, saved.inputRevision)
-                } catch { self.reviewQueueNotice = "原复查进度已保留；输入修订同步失败：\(error.localizedDescription)" }
+                } catch { self.reviewQueueNotice = "原复查进度已保留；输入修订同步失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
             }
         }
         sessionSaver = saver
@@ -1881,7 +1953,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 guard response == .OK, let directory = panel.url, let self else { return }
                 do { try await self.openSavedSession(directory) }
-                catch { self.archiveError = "课程未打开：\(error.localizedDescription)" }
+                catch { self.archiveError = "课程未打开：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
             }
         }
     }
@@ -1982,11 +2054,11 @@ final class AppModel: ObservableObject {
                     }
                 transcriptionProcessing = pipeline.transcriptionState()
             } catch {
-                archiveError = "课程正文已打开；补转队列恢复失败：\(error.localizedDescription)"
+                archiveError = "课程正文已打开；补转队列恢复失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
         }
         do { reviewAdvice = try ReviewExportSource.markdown(for: directory, queue: noteReviewQueue) ?? "" }
-        catch { archiveError = "课程已打开；复查报告读取失败：\(error.localizedDescription)" }
+        catch { archiveError = "课程已打开；复查报告读取失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
         if allowAutomaticProcessing, !priorPaused, !legacyProvenanceUnavailable, archiveError == nil {
             resumeSavedProcessing()
         } else {
@@ -2176,10 +2248,7 @@ final class AppModel: ObservableObject {
                     in: selectedOutputDirectory,
                     preferredName: sessionName
                 )
-                try FileManager.default.createDirectory(
-                    at: finalDirectory,
-                    withIntermediateDirectories: false
-                )
+                try SensitiveFileIO.prepareDirectory(finalDirectory)
                 sessionDirectory = finalDirectory
                 recordingURL = finalDirectory.appendingPathComponent(
                     SessionWorkspace.recordingFileName
@@ -2224,9 +2293,14 @@ final class AppModel: ObservableObject {
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
             stopElapsedClock()
             if let temporarySessionDirectory {
-                try? SessionWorkspace.discardTemporarySession(temporarySessionDirectory)
-                self.temporarySessionDirectory = nil
-                sessionDirectory = nil
+                do {
+                    try SessionWorkspace.discardTemporarySession(temporarySessionDirectory)
+                    self.temporarySessionDirectory = nil
+                    sessionDirectory = nil
+                } catch {
+                    phase = .failed("临时文件未能删除，请重试退出。")
+                    return
+                }
             }
             recoverRuntimeIfNeeded(from: error)
             activeStorageMode = nil
@@ -2243,6 +2317,8 @@ final class AppModel: ObservableObject {
         let epoch = generation
         guard finalizationOwner != identity else { return }
         finalizationOwner = identity
+        finalizationInProgress = true
+        defer { finalizationInProgress = false }
         let mode = activeStorageMode
         phase = .stopping
         stopElapsedClock()
@@ -2285,11 +2361,13 @@ final class AppModel: ObservableObject {
             translationHints = [:]
             transcriptionCandidates = []
             transcriptionProcessing = nil
-            sessionDirectory = nil
-            temporarySessionDirectory = nil
+            if cleanupError == nil {
+                sessionDirectory = nil
+                temporarySessionDirectory = nil
+            }
             activeStorageMode = nil
             activeInputMode = nil
-            if let cleanupError { phase = .failed("实时录音已结束；临时文件删除失败：\(cleanupError.localizedDescription)") }
+            if cleanupError != nil { phase = .failed("实时录音已结束；临时文件未能删除，请重试停止或退出。") }
             else if let failure { phase = .failed(failure) }
             else { phase = .liveEnded }
             return
@@ -2330,14 +2408,14 @@ final class AppModel: ObservableObject {
             processingPaused = true
             activeStorageMode = nil
             activeInputMode = nil
-            archiveError = "录音采集已停止；课程保存失败，保留现有文件与内存进度：\(error.localizedDescription)"
+            archiveError = "录音采集已停止；课程保存失败，保留现有文件与内存进度：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             sessionSnapshot?.processing.recordFailure(archiveError!, source: .storage)
             phase = .failed(archiveError!)
         }
     }
 
     private func startSavedDrain() {
-        guard processingTask == nil, !processingPaused else { return }
+        guard !preparingApplicationExit, processingTask == nil, !processingPaused else { return }
         let identity = sessionID, epoch = generation
         let taskID = UUID()
         processingTaskID = taskID
@@ -2396,7 +2474,7 @@ final class AppModel: ObservableObject {
             archiveNotice = "录音和当前处理结果已保存。"
         } catch {
             guard sessionID == identity, generation == epoch else { return }
-            archiveError = "录音保留；整理结果保存失败：\(error.localizedDescription)"
+            archiveError = "录音保留；整理结果保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             sessionSnapshot?.processing.recordFailure(archiveError!, source: .storage)
         }
     }
@@ -2405,7 +2483,7 @@ final class AppModel: ObservableObject {
         guard case .saved = phase else { return }
         Task {
             do { try await parkSavedProcessing() }
-            catch { archiveError = "处理暂停时保存失败：\(error.localizedDescription)" }
+            catch { archiveError = "处理暂停时保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
         }
     }
 
@@ -2448,7 +2526,7 @@ final class AppModel: ObservableObject {
                 persistCurrentSession()
             } catch {
                 guard sessionID == identity, generation == epoch else { return }
-                archiveError = "未能继续处理：\(error.localizedDescription)"
+                archiveError = "未能继续处理：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
         }
     }
@@ -2548,7 +2626,7 @@ final class AppModel: ObservableObject {
                 if !previouslyPaused { resumeSavedProcessing() }
             } catch {
                 guard sessionID == identity, generation == epoch else { return }
-                archiveError = "确认结果尚未完成保存；处理已暂停，原文修订和候选均保留。请重试保存：\(error.localizedDescription)"
+                archiveError = "确认结果尚未完成保存；处理已暂停，原文修订和候选均保留。请重试保存：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
         }
     }
@@ -2627,7 +2705,7 @@ final class AppModel: ObservableObject {
                 archiveNotice = "课程进度已保存；处理保持原暂停状态。"
             } catch {
                 guard sessionID == identity, generation == epoch else { return }
-                archiveError = "课程进度仍未保存，原文件与待保存内容保留：\(error.localizedDescription)"
+                archiveError = "课程进度仍未保存，原文件与待保存内容保留：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
                 sessionSnapshot?.processing.recordFailure(archiveError!, source: .storage)
             }
         }
@@ -2642,7 +2720,7 @@ final class AppModel: ObservableObject {
                 expectedOriginal: candidate.originalText, expectedCandidate: expectedCandidate ?? candidate.text)
             transcriptionCandidates.removeAll { $0.id == id }
             if playingCandidateID == id { stopCandidatePlayback() }
-        } catch { archiveError = "候选尚未关闭：\(error.localizedDescription)" }
+        } catch { archiveError = "候选尚未关闭：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
     }
 
     /// Playback is only started by an explicit button action. Tests never
@@ -2666,7 +2744,7 @@ final class AppModel: ObservableObject {
                 guard let self, self.sessionID == identity, self.playingCandidateID == id else { return }
                 self.stopCandidatePlayback()
             }
-        } catch { archiveError = "本段录音无法播放：\(error.localizedDescription)" }
+        } catch { archiveError = "本段录音无法播放：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
     }
 
     func stopCandidatePlayback() {
@@ -2702,7 +2780,7 @@ final class AppModel: ObservableObject {
                             originalText: existing.english, originalLanguage: existing.sourceLanguage,
                             candidateText: result.text, candidateLanguage: result.language)
                         archiveNotice = "同一录音段出现不同转写，原文已保留，等待确认。"
-                    } catch { archiveError = "原文已保留；候选记录失败：\(error.localizedDescription)" }
+                    } catch { archiveError = "原文已保留；候选记录失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
                 }
                 return
             }
@@ -2845,7 +2923,7 @@ final class AppModel: ObservableObject {
             } catch is CancellationError {
                 self.manualTranslationStatus = "已取消"
             } catch {
-                self.manualTranslationStatus = "翻译失败：\(error.localizedDescription)"
+                self.manualTranslationStatus = "翻译失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
         }
     }
@@ -2881,6 +2959,16 @@ final class AppModel: ObservableObject {
         phase = .recording
         bindSessionArchive(to: directory)
         try await flushSessionArchive()
+    }
+
+    func beginLiveOnlyCourseForTesting(directory: URL) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        precondition(sessionSaver == nil && !noteReviewQueue.hasWork)
+        resetSessionStateForNewRun()
+        activeStorageMode = .liveOnly
+        sessionDirectory = directory
+        temporarySessionDirectory = directory
+        phase = .recording
     }
 
     func stopSavedCourseForTesting() async {
@@ -3607,6 +3695,7 @@ final class AppModel: ObservableObject {
     }
 
     private func scheduleSummaryRefresh(force: Bool = false) {
+        guard !preparingApplicationExit else { return }
         // Observe availability even while resources are occupied; queue activity must not slide deadlines.
         let stability = noteAdmissionDecision()
         let savedCanContinue: Bool
@@ -3804,7 +3893,9 @@ final class AppModel: ObservableObject {
                 } else {
                     learningDraft?.attempts += 1
                     summaryStatus = draft.text.isEmpty ? "正在整理本轮新学…" : "正在接续未完成的笔记…"
-                    let response = try await learningGeneration.generateNote(
+                    let response = try await MLXRequestContext.$retainsCheckpoint.withValue(
+                        (activeStorageMode ?? selectedStorageMode) != .liveOnly) {
+                        try await learningGeneration.generateNote(
                         draft.input, model: modelName, prefix: draft.text, systemPrompt: draft.systemPrompt,
                         onUpdate: { [weak self] text in
                         guard let self, !Task.isCancelled, !self.processingPaused,
@@ -3814,7 +3905,8 @@ final class AppModel: ObservableObject {
                               inputSnapshot == self.segments.filter({ batchIDs.contains($0.id) }),
                               self.sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName, systemPrompt: draft.systemPrompt) }) ?? true else { return }
                         self.learningDraft?.text = text
-                    })
+                        })
+                    }
                     guard !Task.isCancelled, !processingPaused, currentGeneration == generation,
                           sessionID == summarySession, summaryTaskGeneration == summaryOwner else { return }
                     do { note = try LearningNote.decode(response) }
@@ -3880,7 +3972,7 @@ final class AppModel: ObservableObject {
                 let reason = LearningFailureCode.code(for: error)
                 Self.latencyLog.notice("summary event=failed model=\(modelName, privacy: .public) reason=\(reason, privacy: .public) retry_seconds=\(retry) failures=\(self.consecutiveSummaryFailures)")
                 summaryStatus = lectureSummary.isEmpty
-                    ? "摘要暂不可用：\(error.localizedDescription)"
+                    ? "摘要暂不可用：\(LearningFailureCode.label(for: reason))"
                     : "保留上次摘要 · 本轮更新失败（\(LearningFailureCode.label(for: reason))）"
                 return
             }
@@ -4264,7 +4356,7 @@ final class AppModel: ObservableObject {
         await stopSession(failure: message)
     }
 
-    private func finalizeSessionDirectoryIfNeeded() async throws -> URL {
+    private func finalizeSessionDirectoryIfNeeded(resumeAfterMigration: Bool = true) async throws -> URL {
         if let temporarySessionDirectory {
             guard let outputDirectory else { throw AppError.outputDirectoryMissing }
             try await pipeline.pauseTranscription()
@@ -4297,7 +4389,7 @@ final class AppModel: ObservableObject {
                 do {
                     let data = try JSONSerialization.data(withJSONObject: ["source": preserved.path,
                         "destination": finalDirectory.path], options: [.sortedKeys])
-                    try data.write(to: finalDirectory.appendingPathComponent("migration-recovery.json"), options: .atomic)
+                    try SensitiveFileIO.atomicWrite(data, to: finalDirectory.appendingPathComponent("migration-recovery.json"))
                 } catch { archiveNotice = "课程已迁移；原件保留于 \(preserved.path)，恢复位置记录未能保存。" }
             }
             guard let saved = try await Task.detached(operation: {
@@ -4316,7 +4408,7 @@ final class AppModel: ObservableObject {
                     self.consume(event)
                 }
             }
-            try pipeline.resumeTranscription()
+            if resumeAfterMigration { try pipeline.resumeTranscription() }
             return finalDirectory
         }
         guard let sessionDirectory else { throw AppError.sessionDirectoryMissing }

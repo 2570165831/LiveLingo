@@ -203,7 +203,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 try context.journal.setPaused(true)
                 try context.journal.requeueActive()
             } catch {
-                storageFailure = error.localizedDescription
+                storageFailure = "转写工作记录无法保存（\(LearningFailureCode.code(for: error))）"
                 throw error
             }
         }
@@ -254,6 +254,18 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     func cancel() async {
         do { try await pause() }
         catch { failStorage(error) }
+    }
+
+    /// The caller has joined cancellation. Saved journals retain their state;
+    /// volatile sessions release their in-memory transcript and candidate copy.
+    func discardVolatileContentAfterCancellation() {
+        lock.withLock {
+            guard context?.persistent == false, worker == nil, active == nil else { return }
+            context = nil
+            activeRecord = nil
+            recentFormulaContext = ""
+            storageFailure = nil
+        }
     }
     /// Updates comparison text after an explicit user revision. Subsequent
     /// same-range recognition becomes a candidate and cannot overwrite it.
@@ -523,7 +535,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         }
                         if record.candidateText != nil { emitCandidate(record) }
                     case .failure(let error):
-                        markFailure(&record, message: "本机转写失败：\(error.localizedDescription)；音频已保留。", reason: .error)
+                        markFailure(&record, message: "本机转写失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))；音频已保留。", reason: .error)
                         try owner.journal.put(record)
                     }
                     if let failure = record.failure {
@@ -585,9 +597,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         lock.withLock {
             if let generation, context?.generation != generation { return }
             guard storageFailure == nil else { return }
-            storageFailure = error.localizedDescription
+            storageFailure = "转写工作记录无法保存（\(LearningFailureCode.code(for: error))）"
             active?.cancel()
-            (context?.handler ?? fallbackHandler)?(.failure("转写工作记录无法保存：\(error.localizedDescription)"))
+            (context?.handler ?? fallbackHandler)?(.failure("转写工作记录无法保存：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"))
         }
     }
     static func recognize(_ record: TranscriptionWorkRecord, audioURL: URL, recordingURL: URL?,

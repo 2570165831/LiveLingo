@@ -149,14 +149,14 @@ struct ReviewRetryTests {
         #expect(ReviewRetryPolicy.maximumAttempts == 2)
     }
 
-    @Test func missingFilesKeepTheirLocationAndNeverRetryAsModelErrors() {
+    @Test func missingFilesKeepTheirCategoryWithoutLocationAndNeverRetryAsModelErrors() {
         for code in [NSFileNoSuchFileError, NSFileReadNoSuchFileError] {
             let error = NSError(domain: NSCocoaErrorDomain, code: code,
                 userInfo: [NSFilePathErrorKey: "/synthetic/course/session-snapshot.json"])
             let failure = ReviewFailure.classify(error, defaultStage: .generation)
             #expect(failure.stage == .directory)
             #expect(failure.code == "ns_NSCocoaErrorDomain_\(code)")
-            #expect(failure.description.contains("session-snapshot.json"))
+            #expect(!failure.description.contains("session-snapshot.json"))
             #expect(!ReviewRetryPolicy.isRetryable(failure))
             #expect(!failure.logLine.contains("/synthetic"))
         }
@@ -186,7 +186,8 @@ struct ReviewRetryTests {
         queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
         #expect(await waitFor { attempts == 2 && !queue.running && queue.items.count == 1 })
         #expect(queue.items.first?.directory.standardizedFileURL.path == first.standardizedFileURL.path)
-        #expect(queue.items.first?.failure?.contains("missing.json") == true)
+        #expect(queue.items.first?.failure?.contains("missing.json") == false)
+        #expect(queue.items.first?.failure?.contains("访问录音目录") == true)
         #expect(queue.items.first?.stats?.retries == 0)
         #expect(FileManager.default.fileExists(atPath: second.appendingPathComponent("summary-review.md").path))
         await queue.shutdownForTesting()
