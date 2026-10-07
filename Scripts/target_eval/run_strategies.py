@@ -4,11 +4,12 @@ Run from the checkout with ``python -m Scripts.target_eval.run_strategies``.
 Only --dry-run uses a fake worker; a normal invocation loads local MLX weights.
 Reports are local corpus evidence, including source/reference/generated text.
 The scoreboard's persistent session lock and LiveLingo process guard are reused.
-No downloads, worker changes, automatic route selection or helper builds occur.
+No downloads, automatic route selection or helper builds occur.
 """
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import dataclass
 import hashlib
 import importlib.util
@@ -37,7 +38,11 @@ SOURCE_NAMES = {"ar": "Arabic", "zh": "Chinese", "en": "English", "fr": "French"
                 "ru": "Russian", "es": "Spanish", "yue": "Cantonese", "ja": "Japanese",
                 "ko": "Korean", "de": "German", "hi": "Hindi", "th": "Thai"}
 CONTROL_MARKERS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>")
-UNKNOWN_STATS = ("input_tokens", "reused_prefix_tokens", "exact_first_token_seconds")
+UNKNOWN_STATS = ("exact_first_token_seconds",)
+# Verified against OutputLanguage.profiles by a source-parsing regression test.
+PASS_THROUGH_SOURCES = {"zh-Hans": frozenset({"zh"}), "zh-Hant-TW": frozenset({"zh"}),
+                        "zh-Hant-HK": frozenset({"zh"}), "en": frozenset({"en"}),
+                        "es": frozenset(), "fr": frozenset()}
 
 
 def _load_scoreboard():
@@ -186,7 +191,7 @@ def cases_for(units, targets, routes, sources=None):
             raise ValueError("hans-convert requires zh-Hant-TW/HK (PLAN I.7 / II.zh-Hant)")
     if sources is None:
         common = set.intersection(*(set(u.texts) for u in units))
-        sources = sorted(common.intersection(SOURCE_NAMES) - set(targets) - {"zh" if "zh-Hans" in targets else ""})
+        sources = sorted(common.intersection(SOURCE_NAMES) - set(targets))
         if "via-en" in routes:
             sources = [s for s in sources if s != "en"]
     distinct(sources, SOURCE_NAMES, "sources")
@@ -202,8 +207,9 @@ def cases_for(units, targets, routes, sources=None):
             for source in sources:
                 if source not in unit.texts:
                     raise ValueError(f"missing source locale {source}")
-                if source == route.target and source != "en" or source == "zh" and route.target == "zh-Hans":
-                    raise ValueError("select different source/target locales; only en/en passthrough is defined here")
+                passthrough = source in PASS_THROUGH_SOURCES[route.target]
+                if source == route.target and not passthrough:
+                    raise ValueError("select different source/target locales outside the App passthrough table")
                 # Fail before launching a worker on invalid terms or control markers.
                 if any(marker in unit.texts[source] for marker in CONTROL_MARKERS):
                     raise ValueError("source contains a model control marker")
@@ -215,7 +221,8 @@ def cases_for(units, targets, routes, sources=None):
                 rows.append({"id": json.dumps([unit.id, source, route.target], ensure_ascii=False),
                              "unit_id": unit.id, "corpus": unit.corpus, "source": unit.texts[source],
                              "source_locale": source, "reference": unit.texts[ref_locale],
-                             "reference_locale": ref_locale, "target_locale": route.target, "terms": terms})
+                             "reference_locale": ref_locale, "target_locale": route.target, "terms": terms,
+                             "passthrough": passthrough, "comparison_eligible": not passthrough})
         cases[route] = rows
     return cases
 
@@ -254,6 +261,13 @@ def stats(start, end, first=None, final=None, thinking=None):
 
 class WorkerFailure(RuntimeError):
     """Codes only: raw worker diagnostics can contain local paths or text."""
+
+    def __init__(self, code, *, stream_fault=None, measurement=None):
+        super().__init__(code)
+        self.code = code
+        self.stream_fault = (code not in ("output_budget_exhausted", "worker_generation_failed")
+                             if stream_fault is None else stream_fault)
+        self.measurement = measurement
 
 
 class MLXWorker:
@@ -339,41 +353,46 @@ class MLXWorker:
     def generate(self, system, text, source, target):
         identity = f"route-{time.monotonic_ns()}"
         prompt = chat_prompt(system, text, source, target, self.profile)
-        start, first = time.monotonic(), None
-        self._send({"op": "generate", "id": identity, "prompt": prompt, "prefix": "", "purpose": "text",
-                    "thinking": False, "thinkingBudget": 16384, "finalBudget": self.final_budget, "usePrefixCache": True})
-        deadline = start + self.timeout
-        while True:
-            event, received = self._event(deadline)
-            kind = event["event"]
-            if kind in ("memory", "model_state"):
-                continue
-            if event.get("id") != identity:
-                raise WorkerFailure("unexpected_worker_request_id")
-            if kind == "loading":
-                continue
-            if kind == "snapshot":
-                if not isinstance(event.get("wire"), str):
-                    raise WorkerFailure("invalid_worker_snapshot")
-                if event["wire"] and first is None:
+        start, first, result = time.monotonic(), None, None
+        try:
+            self._send({"op": "generate", "id": identity, "prompt": prompt, "prefix": "", "purpose": "text",
+                        "thinking": False, "thinkingBudget": 16384, "finalBudget": self.final_budget, "usePrefixCache": True})
+            deadline = start + self.timeout
+            while True:
+                event, received = self._event(deadline)
+                kind = event["event"]
+                if kind in ("memory", "model_state"):
+                    continue
+                if event.get("id") != identity:
+                    raise WorkerFailure("unexpected_worker_request_id")
+                if kind == "loading":
+                    continue
+                if kind == "snapshot":
+                    if not isinstance(event.get("wire"), str):
+                        raise WorkerFailure("invalid_worker_snapshot")
+                    if event["wire"] and first is None:
+                        first = received
+                    continue
+                if kind == "error":
+                    self._control("cancel", identity)
+                    raise WorkerFailure("output_budget_exhausted" if event.get("code") == "output_budget_exhausted" else "worker_generation_failed")
+                if kind != "done" or not isinstance(event.get("text"), str):
+                    raise WorkerFailure("invalid_worker_completion")
+                counts = []
+                for key in ("finalTokens", "thinkingTokens", "inputTokens", "reusedPrefixTokens"):
+                    value = event.get(key)
+                    if value is not None and (type(value) is not int or value < 0):
+                        raise WorkerFailure("invalid_worker_token_count")
+                    counts.append(value)
+                if first is None and event["text"]:
                     first = received
-                continue
-            if kind == "error":
-                self._control("cancel", identity)
-                raise WorkerFailure("output_budget_exhausted" if event.get("code") == "output_budget_exhausted" else "worker_generation_failed")
-            if kind != "done" or not isinstance(event.get("text"), str):
-                raise WorkerFailure("invalid_worker_completion")
-            counts = []
-            for key in ("finalTokens", "thinkingTokens"):
-                value = event.get(key)
-                if value is not None and (type(value) is not int or value < 0):
-                    raise WorkerFailure("invalid_worker_token_count")
-                counts.append(value)
-            if first is None and event["text"]:
-                first = received
-            result = {"output": event["text"], **stats(start, received, first, *counts)}
-            self._control("ack", identity)
-            return result
+                result = {"output": event["text"], **stats(start, received, first, *counts[:2]),
+                          "input_tokens": counts[2], "reused_prefix_tokens": counts[3]}
+                self._control("ack", identity)
+                return result
+        except WorkerFailure as error:
+            error.measurement = result or stats(start, time.monotonic(), first)
+            raise
 
     def close(self):
         if self.process is None:
@@ -437,36 +456,94 @@ def convert(text, target, executable, timeout, dry_run):
     if dry_run:
         return f"DRY-RUN converted {target}: {text}"
     env = dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", PYTHONDONTWRITEBYTECODE="1")
-    result = subprocess.run([str(executable)], input=json.dumps({"targetLocale": target, "text": text}),
-                            capture_output=True, text=True, encoding="utf-8", timeout=timeout, env=env)
+    try:
+        result = subprocess.run([str(executable)], input=json.dumps({"targetLocale": target, "text": text}),
+                                capture_output=True, text=True, encoding="utf-8", timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        raise WorkerFailure("converter_timeout", stream_fault=False) from None
+    except (OSError, UnicodeError):
+        raise WorkerFailure("converter_execution_failed", stream_fault=False) from None
     if result.returncode:
-        raise WorkerFailure("converter_nonzero_exit")
-    value = json.loads(result.stdout)
+        raise WorkerFailure("converter_nonzero_exit", stream_fault=False)
+    try:
+        value = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        raise WorkerFailure("invalid_converter_response", stream_fault=False) from None
     if not isinstance(value, dict) or not isinstance(value.get("text"), str) or not value["text"].strip():
-        raise WorkerFailure("invalid_converter_response")
+        raise WorkerFailure("invalid_converter_response", stream_fault=False)
     return value["text"]
+
+
+class WorkerSession:
+    """Own one child at a time; only a broken stream discards that child."""
+
+    def __init__(self, factory):
+        self.factory, self.worker = factory, None
+        self.generation_count = 0
+        self.worker_number = 0
+        self.lifecycle_failures = []
+
+    def start(self):
+        if self.worker is None:
+            self.worker = self.factory().__enter__()
+            self.worker_number += 1
+            self.generation_count = 0
+
+    def stop(self, error=None):
+        worker, self.worker = self.worker, None
+        if worker is not None:
+            try:
+                worker.__exit__(type(error) if error else None, error, None)
+            except WorkerFailure as failure:
+                self.lifecycle_failures.append({"worker_number": self.worker_number, "code": failure.code})
+
+    def generate(self, *args):
+        first = self.generation_count == 0
+        self.generation_count += 1
+        try:
+            result = self.worker.generate(*args)
+        except WorkerFailure as error:
+            if error.measurement is not None:
+                error.measurement.update(worker_first_generation=first, worker_number=self.worker_number)
+            raise
+        return {**result, "worker_first_generation": first, "worker_number": self.worker_number}
 
 
 def complete_sum(values):
     return sum(values) if all(value is not None for value in values) else None
 
 
+def successful_translation(row):
+    return row["status"] == "succeeded" and row["comparison_eligible"]
+
+
+def evaluate_or_empty(rows):
+    return m.evaluate(rows) if rows else {"sample_count": 0, "examples": [], "chrfpp": None}
+
+
 def summarize(rows, quality):
     calls = [call for row in rows for call in row["calls"]]
-    terms = [row["quality"]["terminology"] for row in rows]
+    successful = [row for row in rows if successful_translation(row)]
+    failed = [row for row in rows if row["status"] == "failed"]
+    terms = [row["quality"]["terminology"] for row in successful]
     term_count, hit_count = sum(t["term_count"] for t in terms), sum(t["hit_count"] for t in terms)
-    purity = [row["quality"]["purity"] for row in rows]
+    purity = [row["quality"]["purity"] for row in successful]
     letters, forbidden = sum(p["letter_count"] for p in purity), sum(p["forbidden_letter_count"] for p in purity)
-    durations = sorted(row["total_seconds"] for row in rows)
-    first = sorted(row["first_token_seconds"] for row in rows if row["first_token_seconds"] is not None)
-    return {"sample_count": len(rows), "call_count": len(calls), "chrfpp": quality["chrfpp"],
+    durations = sorted(row["total_seconds"] for row in successful)
+    first = sorted(row["first_token_seconds"] for row in successful if row["first_token_seconds"] is not None)
+    return {"sample_count": len(rows), "success_count": len(rows) - len(failed), "failure_count": len(failed),
+            "failure_codes": dict(Counter(row["failure"]["code"] for row in failed)),
+            "passthrough_count": sum(row["passthrough"] for row in rows),
+            "translation_success_count": len(successful), "call_count": len(calls), "chrfpp": quality["chrfpp"],
             "terminology": {"hit_count": hit_count, "term_count": term_count, "rate": hit_count / term_count if term_count else None},
             "script_purity": 1 - forbidden / letters if letters else None,
             "input_tokens": complete_sum([call["input_tokens"] for call in calls]),
             "output_tokens": complete_sum([call["output_tokens"] for call in calls]),
             "reused_prefix_tokens": complete_sum([call["reused_prefix_tokens"] for call in calls]),
-            "total_seconds": sum(durations), "mean_seconds": sum(durations) / len(rows),
-            "p95_seconds": durations[math.ceil(.95 * len(durations)) - 1],
+            "total_seconds": sum(row["total_seconds"] for row in rows),
+            "successful_translation_seconds": sum(durations),
+            "mean_seconds": sum(durations) / len(durations) if durations else None,
+            "p95_seconds": durations[math.ceil(.95 * len(durations)) - 1] if durations else None,
             "first_token_seconds": {"sample_count": len(first), "mean": sum(first) / len(first) if first else None,
                                     "p95": first[math.ceil(.95 * len(first)) - 1] if first else None},
             "gross_j": complete_sum([row["energy"]["gross_j"] for row in rows]),
@@ -480,16 +557,20 @@ def disabled_energy(reason):
 
 def markdown(report):
     lines = ["# Target route comparison", "", f"Mode: {'DRY RUN — synthetic outputs; no quality/performance evidence' if report['dry_run'] else 'local MLX worker'}.", "",
-             "| Target | Route | Units | Calls | chrF++ | Output tokens | Total s | Gross J |",
-             "|---|---|---:|---:|---:|---:|---:|---:|"]
+             "| Target | Route | Units | Failed | Passthrough | Calls | chrF++ | Output tokens | Total s | Gross J |",
+             "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for route in report["routes"]:
         s = route["summary"]
         def display(value):
             return "unknown" if value is None else (f"{value:.3f}" if isinstance(value, float) else str(value))
         lines.append(f"| {route['target_locale']} | {route['route']} | " + " | ".join(display(s[k]) for k in
-                     ("sample_count", "call_count", "chrfpp", "output_tokens", "total_seconds", "gross_j")) + " |")
-    lines += ["", "Input tokens, reused prefix tokens and exact first-token time are unavailable in protocol v2.",
-              "First-token seconds use the first visible snapshot/done receipt (a throttled proxy).",
+                     ("sample_count", "failure_count", "passthrough_count", "call_count", "chrfpp", "output_tokens", "total_seconds", "gross_j")) + " |")
+    lines += ["", "Targets run in separate blocks; each prompt is warmed outside measured row/call windows.",
+              "Route order rotates by unit/source pair; restarts repeat the block warm-up outside measurements.",
+              "Input/reused-prefix tokens use optional worker done fields; older workers report null.",
+              "First-token seconds use the first visible snapshot/done receipt (a throttled proxy); exact TTFT is unknown.",
+              "Totals include failed attempts; quality/mean/p95 exclude failures and passthrough. Paired summaries use common successes.",
+              "Comparisons exclude passthrough and use only rows successful in every route for that target.",
               "Energy is whole-machine gross CPU/GPU/ANE energy; AC, thermal and interference are unverified.",
               "No App acceptance/retries, human review, classroom weighting or route-switch gate is established.",
               "UN units are curated turns, SRT units are overlap groups; no sentence/audio times are inferred."]
@@ -511,16 +592,18 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
     units, diagnostics = load_corpus(args)
     cases = cases_for(units, args.targets, args.routes, args.sources)
     for route, rows in cases.items():
-        if not (route.target == "en" and all(row["source_locale"] == "en" for row in rows)):
+        if any(not row["passthrough"] for row in rows):
             for target in route.hops:
                 bundle.caption(target, args.profile)
     converter = Path(args.converter).resolve() if args.converter else None
-    if "hans-convert" in args.routes and not args.dry_run and (converter is None or not converter.is_file() or not os.access(converter, os.X_OK)):
-        raise ValueError("hans-convert needs --converter: an audited local executable; no conversion table is invented")
+    needs_converter = "hans-convert" in args.routes or any(
+        row["passthrough"] and row["source_locale"] == "zh" for rows in cases.values() for row in rows)
+    if needs_converter and not args.dry_run and (converter is None or not converter.is_file() or not os.access(converter, os.X_OK)):
+        raise ValueError("hans-convert/Chinese passthrough needs --converter: an audited normalizer/renderer; no conversion table is invented")
     worker_path = Path(args.worker or os.environ.get("LIVELINGO_MLX_WORKER", Path(__file__).resolve().parents[1] / "mlx_runtime/worker.py")).resolve()
     runtime = {"worker_sha256": digest(worker_path.read_bytes()), "profile": args.profile}
     converter_sha = digest(converter.read_bytes()) if converter is not None else None
-    has_calls = any(route.target != "en" or any(row["source_locale"] != "en" for row in rows) for route, rows in cases.items())
+    has_calls = any(not row["passthrough"] for rows in cases.values() for row in rows)
     if not args.dry_run and has_calls:
         python = args.python or os.environ.get("LIVELINGO_MLX_PYTHON")
         models = args.models_root or os.environ.get("LIVELINGO_MLX_MODELS")
@@ -537,8 +620,8 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
         if args.energy_helper and (not Path(args.energy_helper).is_file() or not os.access(args.energy_helper, os.X_OK)):
             raise ValueError("energy helper must be an existing executable")
     provider = process_provider or scoreboard.read_processes
-    # The default path is exactly the scoreboard's lock, never the output leaf.
-    with scoreboard.session_lock(scoreboard.DEFAULT):
+    # Resolve the common Git metadata lock, independent of checkout/output.
+    with scoreboard.session_lock():
         scoreboard.preflight_processes(provider)
         if not args.dry_run:
             guard_other_workers(worker_path)
@@ -552,58 +635,134 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
             helper_path=args.energy_helper, interval=args.sample_interval)
         route_results = [{"target_locale": route.target, "route": route.name,
                           "hops": list(route.hops), "results": []} for route in cases]
-        call_count = 0
+        session, warmups = WorkerSession(factory), []
+
+        def guard():
+            owned_pid = getattr(getattr(session.worker, "process", None), "pid", None)
+            scoreboard.preflight_processes(provider, owned_pids=() if owned_pid is None else (owned_pid,))
+            if not args.dry_run:
+                guard_other_workers(worker_path, owned_pid)
+
+        def warm_block(target, group):
+            start = time.monotonic()
+            try:
+                session.start()
+            except WorkerFailure as error:
+                warmups.append({**stats(start, time.monotonic()), "target_block": target,
+                                "target_locale": None, "measured": False, "status": "failed",
+                                "failure": {"code": error.code, "stream_fault": True}})
+                return False
+            # At most two distinct generation prompts: target+en or target+Hans.
+            prompts = dict.fromkeys(hop for route, _ in group
+                                    if any(not row["passthrough"] for row in cases[route]) for hop in route.hops)
+            for hop in prompts:
+                guard()
+                start = time.monotonic()
+                item = {"target_block": target, "target_locale": hop, "measured": False,
+                        "worker_number": session.worker_number,
+                        "prompt_sha256": digest(bundle.caption(hop, args.profile).encode("utf-8"))}
+                try:
+                    # Short content warms system-prefix prefill without using a reference.
+                    result = session.generate(bundle.caption(hop, args.profile), "1", "en", hop)
+                    item.update(result, status="succeeded", failure=None)
+                    guard()
+                except WorkerFailure as error:
+                    item.update(error.measurement or stats(start, time.monotonic()), status="failed",
+                                failure={"code": error.code, "stream_fault": error.stream_fault})
+                    if error.stream_fault:
+                        session.stop(error)
+                warmups.append(item)
+                if session.worker is None:
+                    return False
+            return True
+
         try:
             if sampler:
                 sampler.start()
-            with factory() as worker:
-                # Alternate routes on the exact same unit/source pair rather
-                # than running an entire baseline before the candidate.
-                for index in range(len(next(iter(cases.values())))):
-                    for route, route_result in zip(cases, route_results, strict=True):
+            for target in args.targets:
+                group = [(route, result) for route, result in zip(cases, route_results, strict=True) if route.target == target]
+                block_has_calls = any(not row["passthrough"] for route, _ in group for row in cases[route])
+                if block_has_calls:
+                    warm_block(target, group)
+                for index in range(len(cases[group[0][0]])):
+                    shift = index % len(group)
+                    order = group[shift:] + group[:shift]
+                    for position, (route, route_result) in enumerate(order):
                         example = cases[route][index]
-                        row = {**example, "calls": [], "hypothesis": example["source"], "passthrough": False}
+                        row = {**example, "calls": [], "hypothesis": example["source"],
+                               "status": "succeeded", "failure": None, "route_position": position}
+                        # Recreate/re-warm only a broken worker, before this row's clock.
+                        if not row["passthrough"] and session.worker is None:
+                            try:
+                                warm_block(target, group)
+                            except WorkerFailure as error:
+                                row.update(status="failed", failure={"code": error.code, "stream_fault": True})
                         start = time.monotonic()
                         source = example["source_locale"]
-                        if route.target == "en" and source == "en":
-                            row["passthrough"] = True
-                        else:
-                            for target in route.hops:
-                                scoreboard.preflight_processes(provider)
-                                if not args.dry_run:
-                                    guard_other_workers(worker_path, getattr(getattr(worker, "process", None), "pid", None))
-                                system = bundle.caption(target, args.profile)
-                                text = row["hypothesis"]
-                                result = worker.generate(system, text, source, target)
-                                row["calls"].append({**result, "input": text, "source_locale": source,
-                                                     "target_locale": target, "worker_first_generation": call_count == 0,
-                                                     "prompt_sha256": digest(system.encode("utf-8"))})
-                                call_count += 1
-                                row["hypothesis"], source = result["output"], "en" if target == "en" else target
-                            if route.name == "hans-convert":
-                                row["hypothesis"] = convert(row["hypothesis"], route.target, converter, args.timeout_seconds, args.dry_run)
+                        try:
+                            if row["status"] == "failed":
+                                pass
+                            elif row["passthrough"]:
+                                if source == "zh":
+                                    row["hypothesis"] = convert(row["hypothesis"], route.target, converter, args.timeout_seconds, args.dry_run)
+                            elif session.worker is None:
+                                raise WorkerFailure("worker_warmup_failed")
+                            else:
+                                for hop in route.hops:
+                                    guard()
+                                    system, text = bundle.caption(hop, args.profile), row["hypothesis"]
+                                    if any(marker in text for marker in CONTROL_MARKERS):
+                                        raise WorkerFailure("intermediate_control_marker", stream_fault=False)
+                                    call_start = time.monotonic()
+                                    identity = {"input": text, "source_locale": source, "target_locale": hop,
+                                                "prompt_sha256": digest(system.encode("utf-8"))}
+                                    try:
+                                        result = session.generate(system, text, source, hop)
+                                    except WorkerFailure as error:
+                                        row["calls"].append({**(error.measurement or stats(call_start, time.monotonic())),
+                                                             **identity, "status": "failed", "failure_code": error.code})
+                                        raise
+                                    row["calls"].append({**result, **identity, "status": "succeeded", "failure_code": None})
+                                    row["hypothesis"], source = result["output"], "en" if hop == "en" else hop
+                                    guard()
+                                if route.name == "hans-convert":
+                                    row["hypothesis"] = convert(row["hypothesis"], route.target, converter, args.timeout_seconds, args.dry_run)
+                        except WorkerFailure as error:
+                            row.update(status="failed", failure={"code": error.code, "stream_fault": error.stream_fault})
+                            if error.stream_fault:
+                                session.stop(error)
                         row.update(start_mono=start, end_mono=time.monotonic())
                         row["total_seconds"] = row["end_mono"] - start
                         for field in ("input_tokens", "output_tokens", "reused_prefix_tokens"):
                             row[field] = complete_sum([call[field] for call in row["calls"]])
                         last = row["calls"][-1] if row["calls"] else None
+                        converted = route.name == "hans-convert" or row["passthrough"] and source == "zh"
                         row["first_token_seconds"] = (last["start_mono"] - start + last["first_token_seconds"]
-                            if last is not None and last["first_token_seconds"] is not None and route.name != "hans-convert" else None)
+                            if last is not None and last["first_token_seconds"] is not None and not converted else None)
                         row["first_token_method"] = "final_generation_first_visible_output; unavailable_after_nonstreaming_conversion"
                         row["exact_first_token_seconds"] = None
                         route_result["results"].append(row)
         finally:
+            session.stop()
             if sampler:
                 sampler.stop()  # final partial interval flushed before window integration
         samples = sampler.snapshot() if sampler else []
+
+        def attach_energy(item):
+            item["energy"] = energy.window_energy(samples, item["start_mono"], item["end_mono"]) if sampler else disabled_energy("dry_run" if args.dry_run else "disabled")
+
+        for item in warmups:
+            attach_energy(item)
         for route in route_results:
-            route["quality"] = m.evaluate(route["results"])
-            for row, q in zip(route["results"], route["quality"]["examples"], strict=True):
-                row["quality"] = q
+            successful = [row for row in route["results"] if row["status"] == "succeeded"]
+            quality = evaluate_or_empty(successful)
+            qualities = {q["id"]: q for q in quality["examples"]}
+            route["quality"] = evaluate_or_empty([row for row in successful if row["comparison_eligible"]])
             for row in route["results"]:
-                row["energy"] = energy.window_energy(samples, row["start_mono"], row["end_mono"]) if sampler else disabled_energy("dry_run" if args.dry_run else "disabled")
+                row["quality"] = qualities.get(row["id"])
+                attach_energy(row)
                 for call in row["calls"]:
-                    call["energy"] = energy.window_energy(samples, call["start_mono"], call["end_mono"]) if sampler else disabled_energy("dry_run" if args.dry_run else "disabled")
+                    attach_energy(call)
             route["summary"] = summarize(route["results"], route["quality"])
         bundle.verify_unchanged()
         if digest(worker_path.read_bytes()) != runtime["worker_sha256"] or converter is not None and digest(converter.read_bytes()) != converter_sha:
@@ -611,11 +770,23 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
         comparisons = []
         for target in args.targets:
             group = [r for r in route_results if r["target_locale"] == target]
+            common = set.intersection(*({row["id"] for row in route["results"] if successful_translation(row)} for route in group))
             for candidate in group[1:]:
-                comparisons.append({"target_locale": target, "baseline_route": group[0]["route"],
-                                    "candidate_route": candidate["route"], **m.compare(group[0]["results"], candidate["results"],
-                                        iterations=args.bootstrap_iterations, seed=0)})
-        report = {"schema_version": 1, "dry_run": args.dry_run, "status": "completed", "runtime": runtime,
+                baseline_rows = [row for row in group[0]["results"] if row["id"] in common]
+                candidate_rows = [row for row in candidate["results"] if row["id"] in common]
+                comparison = {"target_locale": target, "baseline_route": group[0]["route"],
+                              "candidate_route": candidate["route"], "excluded_count": len(group[0]["results"]) - len(common),
+                              "pairing": "successful non-passthrough rows common to every route for this target",
+                              "status": "compared" if common else "no_common_successes"}
+                if common:
+                    comparison.update(m.compare(baseline_rows, candidate_rows, iterations=args.bootstrap_iterations, seed=0))
+                    comparison["paired_summaries"] = {group[0]["route"]: summarize(baseline_rows, evaluate_or_empty(baseline_rows)),
+                                                       candidate["route"]: summarize(candidate_rows, evaluate_or_empty(candidate_rows))}
+                else:
+                    comparison.update(sample_count=0, example_ids=[], delta=None, ci_low=None, ci_high=None)
+                comparisons.append(comparison)
+        report = {"schema_version": 1, "dry_run": args.dry_run,
+                  "status": "completed_with_failures" if any(r["summary"]["failure_count"] for r in route_results) or any(w["status"] == "failed" for w in warmups) or session.lifecycle_failures else "completed", "runtime": runtime,
                   "prompts": {"manifest_sha256": bundle.manifest_sha256, "entries": bundle.entries},
                   "converter": {"sha256": converter_sha, "protocol": "stdin JSON {targetLocale,text}; stdout JSON {text}"} if converter else None,
                   "corpus": {"unit_count": len(units), "diagnostics": diagnostics},
@@ -623,8 +794,12 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
                                "sample_interval": args.sample_interval, "routes": args.routes, "targets": args.targets},
                   "methods": {"unknown_worker_fields": list(UNKNOWN_STATS), "output_tokens": "finalTokens + thinkingTokens; excludes EOS",
                               "first_token_time": "first nonempty snapshot/done receipt; snapshots throttled to 100ms; not exact TTFT",
-                              "route_order": "per unit, routes in requested order; one persistent worker, sequential calls, warm shared prefix cache",
-                              "timing_scope": "call starts immediately before generate and ends at done; row also includes process guards, ACK and conversion; first generation includes model load; p95 is nearest rank",
+                              "route_order": "target blocks in requested order; per unit/source pair rotate requested routes left by index modulo route count; sequential worker",
+                              "warmup": "one unmeasured short generation per distinct prompt before each target block and after stream restart; cache hits are measured, not assumed",
+                              "optional_worker_fields": ["input_tokens", "reused_prefix_tokens"],
+                              "passthrough": "OutputLanguage.passThroughSources; zh uses audited normalization/rendering adapter, en uses identity; zero calls and excluded from comparisons",
+                              "failures": "per-row codes and attempted-call timings; continue after generation/converter/input failures; restart and re-warm only stream faults",
+                              "timing_scope": "successful call ends at done; failed call ends at failure receipt/control completion; row includes guards, ACK and conversion; warmup/reload excluded; totals include failures, mean/p95 use successful translations; p95 nearest rank",
                               "input_transport": "App nonthinking ChatML; 9B JSON / 4B quoted content; no auxiliary hints, acceptance or retries",
                               "unit": "one supplied aligned unit/source pair; UN turns and SRT overlap groups are not sentence-aligned",
                               "confidence_interval": "metrics.compare paired corpus chrF++ bootstrap, 95%; supplied units, no classroom weighting",
@@ -632,6 +807,7 @@ def run(args, *, process_provider=None, worker_factory=None, sampler_factory=Non
                   "route_switch_gate": {"established": False, "reason": "No acceptance/human-error/weighted-energy or end-to-end G4 evidence; no production route changes"},
                   "energy": {"enabled": sampler is not None, "sampler_metadata": sampler.metadata if sampler else {},
                              "sampler_errors": sampler.errors if sampler else [], "samples": samples},
+                  "warmups": warmups, "worker_sessions": {"count": session.worker_number, "lifecycle_failures": session.lifecycle_failures},
                   "routes": route_results, "comparisons": comparisons}
         c.write_json(report, out / "report.json")
         c._write_text(out / "summary.md", markdown(report))

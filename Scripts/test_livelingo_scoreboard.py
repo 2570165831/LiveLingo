@@ -8,12 +8,14 @@ import io
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("livelingo_scoreboard", Path(__file__).with_name("livelingo-scoreboard.py"))
@@ -64,9 +66,15 @@ sys.exit(1)
 class ScoreboardOrchestrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        parent = m.WORK / "orchestration-tests"
-        parent.mkdir(parents=True, exist_ok=True)
-        cls.root = Path(tempfile.mkdtemp(prefix="run-", dir=parent))
+        cls.root = Path(tempfile.mkdtemp(prefix="scoreboard-orchestration-"))
+        cls.lock_directory = cls.root / "common.git" / "work" / "scoreboard"
+        for attribute, value in (("WORK", cls.root), ("DEFAULT", cls.root / "scoreboard")):
+            override = patch.object(m, attribute, value)
+            override.start()
+            cls.addClassCleanup(override.stop)
+        override = patch.object(m, "default_machine_lock_directory", return_value=cls.lock_directory)
+        override.start()
+        cls.addClassCleanup(override.stop)
         cls.build = cls.root / "fake-build"
         cls.build.mkdir()
         cls.cli = cls.build / "livelingo-cli"
@@ -163,6 +171,196 @@ class ScoreboardOrchestrationTests(unittest.TestCase):
         with m.session_lock(path):
             pass
         self.assertTrue((path / ".lock").is_file())
+
+    def checkout_modules(self, suffix):
+        # Minimal Git metadata fixtures, not registered worktrees or commits.
+        root = self.path(suffix)
+        common = root / "common.git"
+        (common / "objects").mkdir(parents=True)
+        (common / "refs" / "heads").mkdir(parents=True)
+        (common / "HEAD").write_text("ref: refs/heads/synthetic\n")
+        modules = []
+        for name in ("checkout-a", "checkout-b"):
+            checkout = root / name
+            checkout.mkdir()
+            metadata = common / "worktrees" / name
+            metadata.mkdir(parents=True)
+            (metadata / "HEAD").write_text("ref: refs/heads/synthetic\n")
+            (metadata / "commondir").write_text("../../\n")
+            (metadata / "gitdir").write_text(str(checkout / ".git") + "\n")
+            (checkout / ".git").write_text("gitdir: " + str(metadata) + "\n")
+            spec = importlib.util.spec_from_file_location(name, Path(m.__file__))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.ROOT = checkout
+            module.WORK = checkout / "work"
+            module.DEFAULT = module.WORK / ("output-" + name)
+            modules.append(module)
+        return common, modules
+
+    def test_default_lock_is_shared_across_checkouts_and_outputs(self):
+        common, (first, second) = self.checkout_modules("shared-lock")
+        expected = common / "work" / "scoreboard"
+        self.assertNotEqual(first.DEFAULT, second.DEFAULT)
+        self.assertEqual(first.default_machine_lock_directory(), expected)
+        self.assertEqual(second.default_machine_lock_directory(), expected)
+        for owner, contender in ((first, second), (second, first)):
+            with owner.session_lock():
+                # There is no CLI/worker, so the process guard alone passes.
+                contender.preflight_processes(lambda: {})
+                with self.assertRaises(contender.Rejected) as rejected:
+                    with contender.session_lock():
+                        self.fail("different checkout/output bypassed the shared lock")
+                self.assertEqual(rejected.exception.reason, "scoreboard_busy")
+        inode = (expected / ".lock").stat().st_ino
+        with second.session_lock():
+            self.assertEqual((expected / ".lock").stat().st_ino, inode)
+        self.assertFalse(first.DEFAULT.exists())
+        self.assertFalse(second.DEFAULT.exists())
+
+    def test_default_lock_ignores_cwd_and_git_environment_overrides(self):
+        common, (first, second) = self.checkout_modules("git-routing")
+        overrides = {"GIT_DIR": str(self.root / "unrelated.git"),
+                     "GIT_WORK_TREE": str(second.ROOT), "GIT_COMMON_DIR": str(self.root / "wrong-common"),
+                     "LIVELINGO_SCOREBOARD_OUT": str(second.DEFAULT)}
+        with contextlib.chdir(second.ROOT), patch.dict(os.environ, overrides):
+            self.assertEqual(first.default_machine_lock_directory(), common / "work" / "scoreboard")
+        self.assertFalse((common / "work").exists())
+
+    def test_default_lock_rejects_symlink_parents_and_file(self):
+        for component in ("work", "scoreboard", ".lock"):
+            with self.subTest(component=component):
+                common, (first, _) = self.checkout_modules("symlink-lock-" + component)
+                directory = common / "work" / "scoreboard"
+                target = self.path("lock-target-" + component)
+                if component == ".lock":
+                    directory.mkdir(parents=True)
+                    target.write_text("keep")
+                    (directory / component).symlink_to(target)
+                else:
+                    target.mkdir()
+                    link = common / component if component == "work" else directory
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    link.symlink_to(target, target_is_directory=True)
+                with self.assertRaises(first.Rejected) as rejected:
+                    with first.session_lock():
+                        self.fail("shared lock followed a symlink")
+                self.assertEqual(rejected.exception.reason, "symlink_output")
+                if component == ".lock":
+                    self.assertEqual(target.read_text(), "keep")
+                else:
+                    self.assertEqual(list(target.iterdir()), [])
+
+    def test_idle_baseline_lock_blocks_other_checkout_without_cli_or_worker(self):
+        _, (first, second) = self.checkout_modules("idle-baseline")
+        args = self.args(first.DEFAULT / "run")
+        args.no_energy = False
+        args.idle_seconds = 120
+        sampler = Mock()
+
+        class IdleProbeComplete(Exception):
+            pass
+
+        def idle_probe(seconds):
+            self.assertEqual(seconds, 120)
+            self.assertEqual(second.busy_processes({}), [])
+            second.preflight_processes(lambda: {})
+            with self.assertRaises(second.Rejected) as rejected:
+                with second.session_lock():
+                    self.fail("runner entered during scoreboard idle baseline")
+            self.assertEqual(rejected.exception.reason, "scoreboard_busy")
+            self.assertFalse(second.DEFAULT.exists())
+            raise IdleProbeComplete()
+
+        with patch.object(first.energy, "PowerSampler", return_value=sampler), \
+                patch.object(first, "pause_window", side_effect=idle_probe) as pause, \
+                patch.object(first, "execute_cli") as execute, self.assertRaises(IdleProbeComplete):
+            first.run(args, provider=lambda: {})
+        pause.assert_called_once_with(120)
+        execute.assert_not_called()
+        sampler.start.assert_called_once_with()
+        sampler.stop.assert_called_once_with()
+        with second.session_lock():
+            pass
+
+    def test_read_processes_adds_command_without_changing_identity(self):
+        row = dict(pid=42, uid=os.getuid(), state="S", started="current", executable="/synthetic/python3")
+        identity = m.classroom.identity(row)
+        command_line = "/synthetic/python3 Scripts/mlx_runtime/worker.py --model synthetic --state-directory state"
+        with patch.object(m.classroom, "read_processes", return_value={42: row}), \
+                patch.object(m.subprocess, "check_output", return_value="42 " + command_line + "\n"):
+            rows = m.read_processes()
+        self.assertEqual(m.classroom.identity(rows[42]), identity)
+        self.assertEqual(rows[42]["command"], command_line)
+        self.assertEqual(m.busy_processes(rows), [42])
+
+    def test_standalone_workers_and_owned_pid_exclusion(self):
+        for executable, command_line in (
+                ("/synthetic/python3.13", "/synthetic/python3.13 Scripts/mlx_runtime/worker.py --model model --state-directory state"),
+                ("/synthetic/LanguageRuntime/python/bin/Python", "/synthetic/LanguageRuntime/python/bin/Python /synthetic/LanguageRuntime/worker.py --model=model --state-directory=state"),
+                ("/synthetic/python3 -u Scripts/mlx_runtime/worker.py --model model --state-directory state", None),
+                ("/synthetic path/python3", '"/synthetic path/python3" "/synthetic path/mlx_runtime/worker.py" --model model --state-directory state')):
+            with self.subTest(executable=executable):
+                row = dict(pid=42, executable=executable, state="S")
+                if command_line is not None:
+                    row["command"] = command_line
+                provider = lambda: {42: row}
+                self.assertEqual(m.busy_processes(provider()), [42])
+                with self.assertRaises(m.Rejected) as rejected:
+                    m.preflight_processes(provider)
+                self.assertEqual(rejected.exception.reason, "another_livelingo_run_active")
+                self.assertEqual(m.busy_processes(provider(), owned_pids=(42,)), [])
+                m.preflight_processes(provider, owned_pids=(42,))
+                other = dict(row, pid=43)
+                self.assertEqual(m.busy_processes({42: row, 43: other}, owned_pids=(42,)), [43])
+                with self.assertRaises(m.Rejected):
+                    m.preflight_processes(lambda: {42: row, 43: other}, owned_pids=(42,))
+
+    def test_unrelated_python_and_zombies_are_not_busy(self):
+        commands = ("python3 Scripts/mlx_runtime/worker.py --state-directory state",
+                    "python3 Scripts/mlx_runtime/worker.py --model model",
+                    "python3 Scripts/worker.py --model model --state-directory state",
+                    "python3 Scripts/mlx_runtime/worker.py.bak --model model --state-directory state",
+                    "sh Scripts/mlx_runtime/worker.py --model model --state-directory state")
+        for command_line in commands:
+            with self.subTest(command=command_line):
+                row = dict(pid=42, executable=command_line.split()[0], command=command_line, state="S")
+                self.assertEqual(m.busy_processes({42: row}), [])
+        worker = dict(pid=42, executable="python3", state="Z",
+                      command="python3 Scripts/mlx_runtime/worker.py --model model --state-directory state")
+        rows = {42: worker, 43: dict(pid=43, executable="/synthetic/livelingo-cli", state="S"),
+                44: dict(pid=44, executable="/synthetic/LiveLingo.app/Contents/MacOS/LiveLingo", state="S")}
+        self.assertEqual(m.busy_processes(rows), [43, 44])
+        self.assertEqual(m.busy_processes(rows, owned_pids=(43,)), [44])
+
+    def test_independent_worker_process_is_detected_without_loading_a_model(self):
+        worker = self.path("independent-worker") / "mlx_runtime" / "worker.py"
+        worker.parent.mkdir(parents=True)
+        worker.write_text("import sys\nprint('ready', flush=True)\nsys.stdin.read()\n")
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        process = subprocess.Popen([sys.executable, str(worker), "--model", "synthetic",
+                                    "--state-directory", str(worker.parent / "state")],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   cwd=worker.parent, env=env)
+        try:
+            ready, _, _ = select.select([process.stdout], [], [], 5)
+            self.assertTrue(ready, "inert worker did not signal readiness")
+            self.assertEqual(process.stdout.readline(), b"ready\n")
+            rows = m.read_processes()
+            self.assertIn(process.pid, rows)
+            self.assertEqual(m.busy_processes({process.pid: rows[process.pid]}), [process.pid])
+            with self.assertRaises(m.Rejected):
+                m.preflight_processes(lambda: {process.pid: rows[process.pid]})
+            m.preflight_processes(lambda: {process.pid: rows[process.pid]}, owned_pids=(process.pid,))
+        finally:
+            process.stdin.close()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.wait(timeout=5)
+            process.stdout.close()
+            process.stderr.close()
 
     def test_json_and_md_creation_are_exclusive(self):
         out = m.new_directory(self.path("exclusive"))

@@ -456,7 +456,9 @@ def main():
                     if request_id in checkpointed: persist(generation)
                     completed[request_id]=generation.identity
                     send('done',request_id,wire=generation.wire,text=generation.text,
-                         thinkingTokens=generation.thinking_count,finalTokens=generation.final_count)
+                         thinkingTokens=generation.thinking_count,finalTokens=generation.final_count,
+                         inputTokens=getattr(generation,'input_tokens',None),
+                         reusedPrefixTokens=getattr(generation,'reused_prefix_tokens',None))
                     finished='done'
                 else:
                     if now-last_emit.get(request_id,0)>=0.1:

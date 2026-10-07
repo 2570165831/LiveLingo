@@ -2,8 +2,10 @@
 """Frozen, offline CLI measurements. Reports never contain subtitle text.
 
 Raw CLI sessions are private local evidence, kept separately from the numeric
-reports. Only this checkout's ignored work/ is writable. No sudo, installation,
-network fetch, shared ASR endpoint, branch change or cleanup is performed.
+reports. Reports stay in this checkout's ignored work/; the persistent session
+lock lives in the Git common directory, shared by all worktrees. No sudo,
+installation, network fetch, shared ASR endpoint, branch change or cleanup is
+performed.
 """
 import argparse
 import contextlib
@@ -143,9 +145,36 @@ def write_jsonl(path, rows):
             stream.write(json.dumps(row, ensure_ascii=True, sort_keys=True, allow_nan=False) + "\n")
 
 
+def default_machine_lock_directory():
+    """Return the shared lock directory without creating it.
+
+    Anchor Git discovery to this script's checkout, never the caller's cwd or
+    output directory. Ignore inherited Git routing overrides so every worktree
+    of this repository selects the same untracked Git metadata directory.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    common = Path(command(["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute",
+                           "--git-common-dir"], cwd=ROOT, env=env).decode().strip())
+    if not common.is_absolute() or not common.is_dir():
+        raise Rejected("invalid_lock")
+    return common.resolve() / "work" / "scoreboard"
+
+
 @contextlib.contextmanager
-def session_lock(directory=DEFAULT):
-    path = writable(Path(directory) / ".lock")
+def session_lock(directory=None):
+    """Hold the cross-worktree lock for the whole session, including idle time.
+
+    Production callers use session_lock() with no output-path argument.
+    Explicit directories retain the checkout work/ boundary for local tests.
+    """
+    if directory is None:
+        directory = default_machine_lock_directory()
+        path = directory / ".lock"
+        for component in (path, directory, directory.parent):
+            if component.is_symlink():
+                raise Rejected("symlink_output")
+    else:
+        path = writable(Path(directory) / ".lock")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
@@ -508,16 +537,45 @@ _classroom_spec.loader.exec_module(classroom)
 
 
 def read_processes():
-    return classroom.read_processes()
+    # Keep executable/start-time identities unchanged for owned-process checks.
+    # comm= alone cannot distinguish an independent Python translation worker.
+    rows = classroom.read_processes()
+    commands = subprocess.check_output(["/bin/ps", "-ww", "-axo", "pid=,args="], text=True)
+    for line in commands.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) != 2:
+            raise Rejected("invalid_process_table")
+        pid = int(fields[0])
+        if pid in rows:
+            rows[pid]["command"] = fields[1]
+    return rows
 
 
-def busy_processes(rows):
-    return [row["pid"] for row in rows.values() if not row["state"].startswith("Z") and
-            (Path(row["executable"]).name == "livelingo-cli" or "LiveLingo.app/Contents/MacOS/" in row["executable"])]
+def standalone_worker(row):
+    command_line = row.get("command", row["executable"])
+    try:
+        executable = shlex.split(row["executable"])[0]
+    except (ValueError, IndexError):
+        executable = ""
+    python = any(re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", name, re.IGNORECASE)
+                 for name in (Path(row["executable"]).name, Path(executable).name))
+    return bool(python and
+                re.search(r"(?:^|[/\s\"'])(?:mlx_runtime|LanguageRuntime)/worker\.py(?=$|[\s\"'])", command_line) and
+                re.search(r"(?:^|\s)--model(?:=|\s)", command_line) and
+                re.search(r"(?:^|\s)--state-directory(?:=|\s)", command_line))
 
 
-def preflight_processes(provider=read_processes):
-    if busy_processes(provider()):
+def busy_processes(rows, *, owned_pids=()):
+    """Return busy PIDs, excluding only the caller's explicitly owned children."""
+    owned = set(owned_pids)
+    return [row["pid"] for row in rows.values() if row["pid"] not in owned and
+            not row["state"].startswith("Z") and
+            (Path(row["executable"]).name == "livelingo-cli" or
+             "LiveLingo.app/Contents/MacOS/" in row["executable"] or standalone_worker(row))]
+
+
+def preflight_processes(provider=read_processes, *, owned_pids=()):
+    if busy_processes(provider(), owned_pids=owned_pids):
         raise Rejected("another_livelingo_run_active")
 
 

@@ -47,21 +47,26 @@ changes are cleaned up by unittest. No UserDefaults suites are used.
 directory, validates its manifest/SHA-256/byte counts, and preserves the exact
 UTF-8 system prompt, including whitespace. It selects `caption-9b` or
 `caption-4b`; no prompt is derived by replacing a different target's words.
-The current exporter only supplies **zh-Hans**. En/es/fr and direct Traditional
-Chinese runs fail before worker/output creation until their App prompt exports
-exist. Synthetic test manifests exercise those future routes without claiming
+The current exporter only supplies **zh-Hans**. Translation calls for en/es/fr
+and direct Traditional Chinese fail before worker/output creation until their
+App prompt exports exist; zero-call passthrough does not need a model prompt. Synthetic test manifests exercise those future routes without claiming
 that the App already exports them.
 
 | Route | Definition | PLAN |
 |---|---|---|
-| `direct` | One generation in the target language. `en` source to `en` target passes through with zero calls. | I.7; II.en and II.es/fr; Traditional direct generation is an evaluation control only. |
+| `direct` | One generation in the target language, except App passthrough sources (zero model calls; excluded from comparisons). | I.7; II.en and II.es/fr; Traditional direct generation is an evaluation control only. |
 | `via-en` | Non-English source → generated English → es/fr, using the exported English and target prompts. Two sequential calls, with no reference text fed to either call. | I.7; II.es/fr; step 25. |
 | `hans-convert` | One zh-Hans generation → caller-supplied reviewed TW/HK converter. | I.7; II.zh-Hant-TW/HK. |
 
 `--targets` and `--routes` form a Cartesian list; unsupported combinations fail.
 For a direct/pivot pair, `--sources` must exclude English. Without `--sources`,
 the common corpus source locales are selected, excluding target locales and,
-for pivots, English. Non-English source=target policies are outside this runner.
+for pivots, English. The passthrough table matches `OutputLanguage.passThroughSources`:
+`zh` to any Chinese output and `en` to English make zero model calls. Chinese
+passthrough uses the explicit normalizer/renderer adapter, including zh-Hans
+normalization before TW/HK rendering. Passthrough rows are labelled and excluded
+from translation quality, latency summaries and paired route comparisons.
+A source equal to a target outside that table is rejected.
 Traditional references must explicitly use `zh-Hant-TW` or `zh-Hant-HK`; generic
 `zh-Hant` gold is not silently assigned a regional label.
 
@@ -73,13 +78,25 @@ and SRT overlap groups remain intact, rather than inventing aligned sentences.
 Optional JSONL `metadata.terms` maps each target to the required term list used
 by `metrics.terminology_hit_rate`; absent terms have an unknown hit rate.
 
-All calls run sequentially in one persistent worker, alternating requested
-routes for each input unit/source. The lock is **exactly this checkout's
-scoreboard `work/scoreboard/.lock`**, with the original path checks and persistent
-inode. The original App/CLI census is checked before startup and every call;
-standalone MLX workers are also refused (the runner's owned child is excluded).
-Other checkouts' standalone workers are caught by the census; no process is
-stopped to make room. The lock does not control unrelated GPU applications.
+Targets run in separate blocks in requested order. Within a block, routes
+rotate left by the unit/source-pair index modulo route count, so two routes
+alternate which runs first. Only the target plus English (or target plus Hans)
+prompts can be active in a block, matching the worker's two-entry prefix cache.
+Each distinct prompt gets a short unmeasured generation before the block. Its
+model load, prefill, time and energy are recorded in `warmups`, outside measured
+row/call windows and route totals. A stream restart repeats that warm-up before
+timing resumes. Cache reuse is read from the worker, never assumed from warm-up.
+
+Both tools hold `<git-common-dir>/work/scoreboard/.lock` for their full sessions,
+including the scoreboard's idle baseline and runner warm-ups. Git discovery is
+anchored to each script's checkout, ignores inherited Git routing overrides and
+uses the common metadata directory shared by all repository worktrees. This is
+writable repository metadata, outside tracked content, independent of the output
+leaf or current directory; its persistent inode is never unlinked. Existing
+path checks remain for explicit fixture lock directories. The App/CLI/standalone
+worker census is checked before startup and before/after each generation; only
+the runner's owned child is excluded. No other process is stopped to make room.
+Separate repository clones and unrelated GPU applications are outside this lock.
 
 Set `LIVELINGO_MLX_PYTHON` and `LIVELINGO_MLX_MODELS` to the existing App-compatible
 Python and model-root directory. `LIVELINGO_MLX_WORKER` optionally selects the
@@ -96,30 +113,47 @@ the sampler. Missing rails/coverage or busy-time fallback remain unknown joules.
 Gross energy includes other processes and has **no idle subtraction**. Thermal,
 AC and interference are unverified, so energy comparability stays false.
 
-Protocol v2 exposes `finalTokens` and `thinkingTokens`; their sum is output
-tokens excluding EOS. Input tokens and `reused_prefix_tokens` are not emitted,
-despite the latter existing inside `Generation`; both stay `null`. Exact TTFT
-also stays `null`. `first_token_seconds` is labelled as the first nonempty
-snapshot/done receipt, with snapshots throttled to 100 ms; it is a visible-output
-proxy. Per-call time includes lazy model load on the first generation and ends
-at `done`; per-unit time includes guards, ACK waits and conversion. Per-unit
-first-output time for a pivot includes the first hop. Nonstreaming conversion's
-first-output time is unknown. p95 uses nearest rank.
+Protocol v2 keeps its existing completion fields and adds optional read-only
+`inputTokens` and `reusedPrefixTokens`. The input count is captured at generation
+construction before consuming the pending tokens; reuse comes from the existing
+cache statistic. `finalTokens + thinkingTokens` is output tokens excluding EOS.
+Older workers lacking the optional counters report `null`; no token estimate is
+substituted. Swift decodes its existing `Event` type with `JSONDecoder`, ignoring extra keys.
+Exact TTFT stays `null`. `first_token_seconds` is the first nonempty snapshot/done
+receipt, with snapshots throttled to 100 ms, a visible-output proxy. Successful
+call time ends at `done`; failed call time ends at failure receipt/control
+completion. Row time includes guards, ACK waits and conversion. Initial model
+load and restart warm-ups occur outside these windows. For a pivot, first-output
+time includes the first hop; after nonstreaming conversion it is unknown.
+p95 uses nearest rank. Mean/p95 and quality use successful translation rows;
+route totals and gross energy include failed attempts. `paired_summaries` use
+only the identical common successful rows used by the quality comparison.
 
 `hans-convert` needs an explicit local `--converter` executable, once the reviewed
 converter exists. This worktree has no converter or reviewed tables. The adapter
 contract is one stdin JSON object `{"targetLocale":"zh-Hant-TW","text":"..."}`
-and one stdout JSON object `{"text":"..."}` per invocation. Its binary SHA-256
-is recorded. The runner implements no conversion rules; dry runs use a labelled
-fake conversion and never execute that adapter.
+and one stdout JSON object `{"text":"..."}` per invocation. For Chinese
+passthrough, `targetLocale` can also be `zh-Hans`; the adapter must normalize the
+source to Hans and then render the requested region, without a model call.
+Its binary SHA-256 is recorded. The runner implements no conversion rules;
+dry runs use a labelled fake conversion and never execute that adapter.
 
 `--output-dir` must name a **new** descendant of the existing directory in
 `LIVELINGO_TARGET_EVAL_OUTPUT_ROOT`. Existing files/directories, symlinks and
-repository outputs are refused; the leaf is reserved atomically. A successful
+repository outputs are refused; the leaf is reserved atomically. A finished
 run writes `report.json` (all input/reference/output text, per-call/unit stats,
-route summaries, samples and paired chrF++ 95% bootstrap) and `summary.md`.
-Failed attempts keep their reserved directory and are not published as completed
-reports; retry with a new output path. These files are local public-corpus
+unmeasured warm-ups, route summaries, samples and paired chrF++ 95% bootstrap)
+and `summary.md`. Single-row generation, budget, timeout/EOF, converter and
+intermediate-control-marker failures are recorded with sanitized codes and
+elapsed time, and the next row continues. Only stream faults restart the owned
+worker; budget errors cancel/confirm release and keep that worker. Failed rows
+have no quality score. Each target's comparisons use rows successful in every
+requested route, excluding passthrough; an empty intersection reports
+`no_common_successes` with null deltas instead of bootstrapping empty input.
+Each route reports its failure count and codes; such runs have
+`completed_with_failures` status. Fatal configuration, process-interference or
+artifact-integrity errors still retain the output directory without publishing
+a completed report; retry with a new output path. These files are local public-corpus
 evidence, not the numeric-only scoreboard reports. Worker stderr is drained and
 hashed in memory, never copied into the report. Dry-run scores/times are synthetic.
 There is no App acceptance/retry loop or audited simplified-only inventory, so
@@ -151,8 +185,8 @@ PYTHONDONTWRITEBYTECODE=1 python3.13 -m Scripts.target_eval.run_strategies \
 ```
 
 `--final-budget` defaults to the App's 160-token caption budget (max 4096).
-Long UN turns can exceed even 4096; budget exhaustion is a failure, never a
-completed translation. This command is an invocation example, not a measured
+Long UN turns can exceed even 4096; budget exhaustion is a recorded failed row,
+never a completed translation. Subsequent rows continue without an App retry loop. This command is an invocation example, not a measured
 claim about those turns or future targets. For current zh-Hans exports use
 `--targets zh-Hans --routes direct --sources en` instead.
 

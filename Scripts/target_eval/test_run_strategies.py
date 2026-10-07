@@ -1,9 +1,13 @@
 """Synthetic routes and protocol-v2 subprocesses only; never import MLX/weights."""
 from contextlib import redirect_stdout
+import ast
+from collections import OrderedDict
+import copy
 import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,6 +25,7 @@ p.add_argument('--model'); p.add_argument('--state-directory')
 args = p.parse_args()
 state = pathlib.Path(args.state_directory); state.mkdir(exist_ok=True)
 mode = os.environ.get('STRATEGY_SYNTHETIC_MODE', '')
+generations = 0
 def send(event, **fields):
     print(json.dumps(dict(event=event, **fields)), flush=True)
 send('ready', version=1 if mode == 'bad-ready' else 2)
@@ -31,8 +36,13 @@ for line in sys.stdin:
         f.write(json.dumps(row)+'\n')
     op, identity = row['op'], row['id']
     if op == 'generate':
+        generations += 1
         if mode == 'timeout': continue
-        if mode == 'budget':
+        if mode in ('crash-once', 'timeout-once') and generations == 4 and not (state/'fault-used').exists():
+            (state/'fault-used').write_text('synthetic fault')
+            if mode == 'crash-once': os._exit(2)
+            continue
+        if mode == 'budget' or mode == 'budget-once' and generations == 15:
             send('error', id=identity, code='output_budget_exhausted', message='PRIVATE diagnostic')
             continue
         send('loading', id=identity)
@@ -40,6 +50,8 @@ for line in sys.stdin:
         send('snapshot', id=identity, wire='synthetic')
         fields = dict(id='wrong' if mode == 'wrong-id' else identity, text='synthetic translation', wire='synthetic translation')
         if mode != 'missing-stats': fields.update(finalTokens=7, thinkingTokens=0)
+        if mode == 'prefix-stats': fields.update(inputTokens=1000, reusedPrefixTokens=768)
+        if mode == 'bad-prefix-stats': fields.update(inputTokens=1000, reusedPrefixTokens=True)
         if mode == 'bad-stats': fields['finalTokens'] = True
         send('done', **fields)
         print('PRIVATE worker diagnostic', file=sys.stderr, flush=True)
@@ -59,6 +71,29 @@ class RecordingWorker(a.FakeWorker):
         self.calls.append((system, text, source, target))
         result = super().generate(system, text, source, target)
         result.update(output_tokens=7, final_tokens=7, thinking_tokens=0)
+        return result
+
+
+class PrefixCacheWorker(RecordingWorker):
+    """Replay real PromptPrefixCache LRU policy without importing MLX."""
+
+    def __init__(self):
+        super().__init__()
+        source = Path(a.__file__).resolve().parents[1] / "mlx_runtime/engine.py"
+        tree = ast.parse(source.read_text())
+        node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PromptPrefixCache")
+        namespace = {"OrderedDict": OrderedDict, "copy": copy, "PREFILL_STEP": 256}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
+        self.cache = namespace["PromptPrefixCache"](max_tokens=768, max_entries=2)
+
+    def generate(self, system, text, source, target):
+        tokens = list(a.chat_prompt(system, text, source, target, "9b").encode())
+        _, reused = self.cache.fetch(tokens)
+        count = min(768, (len(tokens) - 1) // 256 * 256)
+        snapshot = type("Snapshot", (), {"nbytes": 1})()
+        self.cache.remember(tokens[:count], [snapshot])
+        result = super().generate(system, text, source, target)
+        result.update(input_tokens=len(tokens), reused_prefix_tokens=reused)
         return result
 
 
@@ -90,6 +125,7 @@ class RunnerTests(unittest.TestCase):
         # synthetic root, without contending with another task's real lock.
         self.enterContext(patch.object(a.scoreboard, "WORK", self.root))
         self.enterContext(patch.object(a.scoreboard, "DEFAULT", self.root / "shared-scoreboard-lock"))
+        self.enterContext(patch.object(a.scoreboard, "default_machine_lock_directory", return_value=a.scoreboard.DEFAULT))
         self.prompts = self.root / "prompts"
         self.export_prompts()
         self.corpus = self.root / "corpus.jsonl"
@@ -134,7 +170,7 @@ class RunnerTests(unittest.TestCase):
         script = self.root / "fake-worker.py"
         script.write_text(FAKE_PROTOCOL)
         model = self.root / "models" / a.MODELS["9b"]
-        model.mkdir(parents=True)
+        model.mkdir(parents=True, exist_ok=True)
         for name in ("config.json", "tokenizer.json"):
             (model / name).write_text("{}")
         args = self.args("--python", sys.executable, "--worker", str(script), "--models-root", str(self.root / "models"), *extra)
@@ -148,9 +184,11 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual([direct["summary"]["call_count"], pivot["summary"]["call_count"]], [2, 4])
         self.assertEqual([len(r["calls"]) for r in direct["results"]], [1, 1])
         self.assertEqual([len(r["calls"]) for r in pivot["results"]], [2, 2])
-        # All three calls for a unit precede the next unit; pivot consumes the
+        # Two unmeasured warm-ups precede the rotated unit order. Pivot consumes
         # generated English, never the parallel English human reference.
-        self.assertEqual([call[3] for call in self.recording.calls], ["es", "en", "es", "es", "en", "es"])
+        self.assertEqual([call[3] for call in self.recording.calls], ["es", "en", "es", "en", "es", "en", "es", "es"])
+        self.assertEqual([r["route_position"] for r in direct["results"]], [0, 1])
+        self.assertEqual([r["route_position"] for r in pivot["results"]], [1, 0])
         first, second = pivot["results"][0]["calls"]
         self.assertEqual(second["input"], first["output"])
         self.assertNotEqual(second["input"], self.units[0].texts["en"])
@@ -266,7 +304,9 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.recording.calls, [])
         route = report["routes"][0]
         self.assertEqual(route["summary"]["call_count"], 0)
-        self.assertEqual(route["summary"]["chrfpp"], 100)
+        self.assertIsNone(route["summary"]["chrfpp"])
+        self.assertEqual(route["summary"]["passthrough_count"], 2)
+        self.assertEqual([r["quality"]["chrfpp"] for r in route["results"]], [100, 100])
         self.assertTrue(all(r["passthrough"] and r["hypothesis"] == r["source"] for r in route["results"]))
 
     def test_traditional_direct_and_hans_conversion_use_distinct_prompts(self):
@@ -371,7 +411,8 @@ class RunnerTests(unittest.TestCase):
         self.assertIsNone(report["routes"][0]["summary"]["input_tokens"])
         self.assertFalse(report["energy"]["enabled"])
         calls = [call for route in report["routes"] for row in route["results"] for call in row["calls"]]
-        self.assertEqual(sum(call["worker_first_generation"] for call in calls), 1)
+        self.assertEqual(sum(call["worker_first_generation"] for call in calls), 0)
+        self.assertEqual(sum(call["worker_first_generation"] for call in report["warmups"]), 1)
         for route in report["routes"]:
             self.assertEqual(route["summary"]["first_token_seconds"]["sample_count"], 2)
             for row in route["results"]:
@@ -457,6 +498,234 @@ class RunnerTests(unittest.TestCase):
             files[locale] = file
         args.corpus, args.input, args.locale_file = "flores-plus", None, [f"{k}={v}" for k, v in files.items()]
         self.assertEqual(a.load_corpus(args)[0], c.read_flores_plus(files))
+
+    def expand_units(self, count):
+        self.units = [c.ParallelUnit(f"synthetic:{i}", "synthetic", self.units[0].texts,
+                                     self.units[0].metadata) for i in range(count)]
+        self.corpus = self.root / f"corpus-{count}.jsonl"
+        c.write_jsonl(self.units, self.corpus)
+
+    def long_prefix_prompts(self):
+        manifest_path = self.prompts / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        for entry in manifest["prompts"]:
+            data = (entry["targetLocale"] + " System " + "x" * 1100).encode()
+            (self.prompts / entry["file"]).write_bytes(data)
+            entry.update(byteCount=len(data), sha256=a.digest(data))
+        manifest_path.write_text(json.dumps(manifest))
+
+    def test_target_blocks_keep_real_two_entry_lru_warm_for_every_measured_direct(self):
+        self.expand_units(6)
+        self.long_prefix_prompts()
+        scenarios = ((["es", "fr"], ["direct", "via-en"], "zh"),
+                     (["zh-Hant-TW", "zh-Hant-HK"], ["direct", "hans-convert"], "en"),
+                     (["en", "es", "fr"], ["direct"], "zh"))
+        for index, (targets, routes, source) in enumerate(scenarios):
+            with self.subTest(targets=targets):
+                self.recording = PrefixCacheWorker()
+                args = self.args("--targets", *targets, "--routes", *routes, "--sources", source,
+                                 "--output-dir", str(self.root / f"lru-{index}"))
+                report = self.run_fake(args)
+                calls = [call for route in report["routes"] for row in route["results"] for call in row["calls"]]
+                self.assertTrue(calls)
+                self.assertEqual({call["reused_prefix_tokens"] for call in calls}, {768})
+                self.assertTrue(all(not call["worker_first_generation"] for call in calls))
+                expected_warmups = sum(len(set(hop for name in routes for hop in a.Route(t, name).hops)) for t in targets)
+                self.assertEqual(len(report["warmups"]), expected_warmups)
+                self.assertTrue(all(not warm["measured"] for warm in report["warmups"]))
+                self.assertTrue(all(route["summary"]["reused_prefix_tokens"] > 0 for route in report["routes"]))
+        # Reproduce the reviewed old order: each direct is evicted by en+other target.
+        cold = PrefixCacheWorker()
+        reused = []
+        for _ in range(6):
+            for target in ("es", "fr"):
+                system = a.PromptBundle(self.prompts).caption(target, "9b")
+                reused.append(cold.generate(system, "text", "zh", target)["reused_prefix_tokens"])
+                cold.generate(a.PromptBundle(self.prompts).caption("en", "9b"), "text", "zh", "en")
+                cold.generate(system, "text", "en", target)
+        self.assertEqual(reused, [0] * 12)
+
+    def test_first_load_and_energy_are_only_in_unmeasured_warmups_in_both_route_orders(self):
+        self.expand_units(5)
+        for index, routes in enumerate((["direct", "via-en"], ["via-en", "direct"])):
+            with self.subTest(routes=routes):
+                clock = [100.0]
+                class ColdWorker(RecordingWorker):
+                    def generate(worker, system, text, source, target):
+                        start = clock[0]
+                        clock[0] += 1.0 if not worker.calls else .01
+                        worker.calls.append((system, text, source, target))
+                        return {"output": "synthetic translation", **a.stats(start, clock[0], clock[0], 7, 0)}
+                self.recording = ColdWorker()
+                helper = self.root / "synthetic-helper"
+                helper.touch(); helper.chmod(0o700)
+                args = self.real_args_with_fake_protocol("--routes", *routes, "--energy-helper", str(helper),
+                                                        "--output-dir", str(self.root / f"cold-{index}"))
+                with patch.object(a.time, "monotonic", side_effect=lambda: clock[0]):
+                    report = self.run_fake(args, sampler_factory=SyntheticSampler)
+                by_name = {route["route"]: route for route in report["routes"]}
+                self.assertAlmostEqual(by_name["direct"]["summary"]["mean_seconds"], .01)
+                self.assertAlmostEqual(by_name["via-en"]["summary"]["mean_seconds"], .02)
+                self.assertAlmostEqual(by_name["direct"]["summary"]["p95_seconds"], .01)
+                self.assertAlmostEqual(by_name["direct"]["summary"]["gross_j"], .15)
+                self.assertAlmostEqual(by_name["via-en"]["summary"]["gross_j"], .30)
+                self.assertAlmostEqual(report["warmups"][0]["total_seconds"], 1.0)
+                self.assertAlmostEqual(report["warmups"][0]["energy"]["gross_j"], 3.0)
+                self.assertEqual([r["route_position"] for r in by_name[routes[0]]["results"]], [0, 1, 0, 1, 0])
+
+    def test_pass_through_table_matches_swift_output_language_profiles(self):
+        sources = Path(a.__file__).resolve().parents[2] / "LiveLingo/Sources"
+        swift = (sources / "OutputLanguage.swift").read_text()
+        enum_cases = dict(re.findall(r'case (\w+) = "([^"]+)"', swift))
+        table = swift.split("private static let profiles:", 1)[1].split("\n    ]", 1)[0]
+        matches = re.findall(r'\.(\w+): \.init\(.*?passThroughSources: \[([^\]]*)\]', table, re.DOTALL)
+        actual = {enum_cases[name]: frozenset(re.findall(r'"([^"]+)"', codes)) for name, codes in matches}
+        self.assertEqual(len(matches), len(enum_cases))
+        self.assertEqual(actual, a.PASS_THROUGH_SOURCES)
+
+    def test_chinese_to_hans_or_hant_passthrough_has_zero_calls_and_no_comparison(self):
+        self.export_prompts(targets=())
+        for index, target in enumerate(("zh-Hans", "zh-Hant-TW", "zh-Hant-HK")):
+            routes = ["direct"] if target == "zh-Hans" else ["direct", "hans-convert"]
+            with self.subTest(target=target):
+                self.recording.calls.clear()
+                report = self.run_fake(self.args("--targets", target, "--routes", *routes, "--sources", "zh",
+                                                 "--output-dir", str(self.root / f"pass-{index}")))
+                self.assertEqual(self.recording.calls, [])
+                self.assertEqual(report["warmups"], [])
+                for route in report["routes"]:
+                    self.assertEqual(route["summary"]["call_count"], 0)
+                    self.assertEqual(route["summary"]["passthrough_count"], 2)
+                    self.assertEqual(route["summary"]["translation_success_count"], 0)
+                    self.assertTrue(all(row["passthrough"] and not row["comparison_eligible"] for row in route["results"]))
+                for comparison in report["comparisons"]:
+                    self.assertEqual(comparison["status"], "no_common_successes")
+                    self.assertEqual(comparison["sample_count"], 0)
+
+    def test_default_chinese_hant_source_is_passthrough_and_excluded_from_pairing(self):
+        args = self.args("--targets", "zh-Hant-TW", "--routes", "direct", "hans-convert")
+        args.sources = None
+        report = self.run_fake(args)
+        for route in report["routes"]:
+            zh = [row for row in route["results"] if row["source_locale"] == "zh"]
+            self.assertEqual(len(zh), 2)
+            self.assertTrue(all(not row["calls"] and row["passthrough"] for row in zh))
+        paired_ids = report["comparisons"][0]["example_ids"]
+        self.assertEqual(len(paired_ids), 6)
+        self.assertTrue(all(json.loads(identity)[1] != "zh" for identity in paired_ids))
+
+    def test_real_chinese_passthrough_requires_normalizer_before_worker_and_uses_zero_calls(self):
+        args = self.args("--targets", "zh-Hans", "--routes", "direct", "--sources", "zh")
+        args.dry_run = False
+        with self.assertRaisesRegex(ValueError, "--converter"):
+            self.run_fake(args)
+        executable = self.root / "synthetic-normalizer"
+        executable.touch(); executable.chmod(0o700)
+        args.converter = executable
+        with patch.object(a, "convert", return_value="温度升高。") as normalizer, patch.object(a, "guard_other_workers"):
+            report = self.run_fake(args)
+        self.assertEqual(normalizer.call_count, 2)
+        self.assertTrue(all(call.args[1] == "zh-Hans" for call in normalizer.call_args_list))
+        self.assertEqual(self.recording.calls, [])
+        self.assertEqual(report["routes"][0]["summary"]["call_count"], 0)
+
+    def test_fake_protocol_optional_prefix_stats_and_invalid_counts(self):
+        with self.transport(mode="prefix-stats") as worker:
+            result = worker.generate("Prompt", "Example", "en", "es")
+        self.assertEqual(result["input_tokens"], 1000)
+        self.assertEqual(result["reused_prefix_tokens"], 768)
+        worker = self.transport(mode="bad-prefix-stats")
+        with self.assertRaisesRegex(a.WorkerFailure, "invalid_worker_token_count"):
+            with worker:
+                worker.generate("Prompt", "Example", "en", "es")
+
+    def test_budget_failure_on_call_fifteen_keeps_rows_and_same_worker(self):
+        self.expand_units(10)
+        self.enterContext(patch.dict(os.environ, {"STRATEGY_SYNTHETIC_MODE": "budget-once"}))
+        report = a.run(self.real_args_with_fake_protocol("--no-energy"), process_provider=lambda: {})
+        direct, pivot = report["routes"]
+        self.assertEqual(report["status"], "completed_with_failures")
+        self.assertEqual(report["worker_sessions"]["count"], 1)
+        self.assertEqual([r["summary"]["failure_count"] for r in report["routes"]], [1, 0])
+        failed = next(row for row in direct["results"] if row["status"] == "failed")
+        self.assertEqual(failed["failure"], {"code": "output_budget_exhausted", "stream_fault": False})
+        self.assertEqual(failed["calls"][0]["status"], "failed")
+        self.assertGreater(failed["calls"][0]["total_seconds"], 0)
+        self.assertIsNone(failed["quality"])
+        self.assertEqual(len(direct["results"]), 10)
+        self.assertEqual(len(pivot["results"]), 10)
+        self.assertEqual(report["comparisons"][0]["sample_count"], 9)
+        self.assertNotIn(failed["id"], report["comparisons"][0]["example_ids"])
+        self.assertEqual(direct["results"][-1]["status"], "succeeded")
+        self.assertNotIn("PRIVATE", json.dumps(report))
+        self.assertEqual(json.loads((self.root / "result/report.json").read_text()), report)
+        self.assertIn("Failed", (self.root / "result/summary.md").read_text())
+
+    def test_stream_crash_or_timeout_restarts_then_rewarms_and_continues(self):
+        for mode in ("crash-once", "timeout-once"):
+            with self.subTest(mode=mode), patch.dict(os.environ, {"STRATEGY_SYNTHETIC_MODE": mode}):
+                args = self.real_args_with_fake_protocol("--no-energy", "--timeout-seconds", ".25",
+                                                        "--output-dir", str(self.root / mode))
+                report = a.run(args, process_provider=lambda: {})
+                self.assertEqual(report["worker_sessions"]["count"], 2)
+                self.assertEqual(len(report["warmups"]), 4)
+                self.assertEqual(sum(r["summary"]["failure_count"] for r in report["routes"]), 1)
+                self.assertEqual(report["comparisons"][0]["sample_count"], 1)
+                measured = [call for route in report["routes"] for row in route["results"] for call in row["calls"] if call["status"] == "succeeded"]
+                self.assertTrue(all(not call["worker_first_generation"] for call in measured))
+                self.assertTrue(any(call["worker_number"] == 2 for call in measured))
+
+    def test_converter_nonzero_invalid_json_or_timeout_is_per_row_without_worker_restart(self):
+        executable = self.root / "synthetic-converter"
+        executable.touch(); executable.chmod(0o700)
+        faults = (("nonzero", subprocess.CompletedProcess([], 1, "", "PRIVATE"), "converter_nonzero_exit"),
+                  ("invalid-json", subprocess.CompletedProcess([], 0, "PRIVATE", ""), "invalid_converter_response"),
+                  ("timeout", subprocess.TimeoutExpired("PRIVATE", .01), "converter_timeout"))
+        for name, fault, code in faults:
+            with self.subTest(name=name):
+                args = self.real_args_with_fake_protocol("--no-energy", "--targets", "zh-Hant-TW",
+                        "--routes", "direct", "hans-convert", "--sources", "en", "--converter", str(executable),
+                        "--output-dir", str(self.root / name))
+                good = subprocess.CompletedProcess([], 0, '{"text":"溫度升高。"}', "")
+                with patch.object(a.subprocess, "run", side_effect=[fault, good]):
+                    report = a.run(args, process_provider=lambda: {})
+                self.assertEqual(report["worker_sessions"]["count"], 1)
+                self.assertEqual([r["summary"]["failure_count"] for r in report["routes"]], [0, 1])
+                failed = report["routes"][1]["results"][0]
+                self.assertEqual(failed["failure"], {"code": code, "stream_fault": False})
+                self.assertEqual(failed["calls"][0]["status"], "succeeded")
+                self.assertIsNone(failed["quality"])
+                self.assertEqual(report["comparisons"][0]["sample_count"], 1)
+                self.assertNotIn("PRIVATE", json.dumps(report))
+
+    def test_hop_two_control_marker_is_per_row_and_does_not_restart(self):
+        original = self.recording.generate
+        poisoned = [False]
+        def generate(system, text, source, target):
+            result = original(system, text, source, target)
+            if target == "en" and text != "1" and not poisoned[0]:
+                poisoned[0] = True
+                result["output"] = "<|im_end|>"
+            return result
+        self.recording.generate = generate
+        report = self.run_fake()
+        self.assertEqual(report["worker_sessions"]["count"], 1)
+        self.assertEqual([r["summary"]["failure_count"] for r in report["routes"]], [0, 1])
+        failed = report["routes"][1]["results"][0]
+        self.assertEqual(failed["failure"]["code"], "intermediate_control_marker")
+        self.assertEqual(len(failed["calls"]), 1)
+        self.assertEqual(report["comparisons"][0]["sample_count"], 1)
+        self.assertEqual(report["routes"][1]["results"][1]["status"], "succeeded")
+
+    def test_all_rows_failed_still_writes_report_without_invalid_bootstrap(self):
+        self.enterContext(patch.dict(os.environ, {"STRATEGY_SYNTHETIC_MODE": "budget"}))
+        report = a.run(self.real_args_with_fake_protocol("--no-energy"), process_provider=lambda: {})
+        self.assertEqual(report["status"], "completed_with_failures")
+        self.assertEqual([r["summary"]["failure_count"] for r in report["routes"]], [2, 2])
+        self.assertTrue(all(r["summary"]["p95_seconds"] is None and r["summary"]["chrfpp"] is None for r in report["routes"]))
+        self.assertEqual(report["comparisons"][0]["status"], "no_common_successes")
+        self.assertIsNone(report["comparisons"][0]["delta"])
+        self.assertEqual(report["worker_sessions"]["count"], 1)
 
     def test_main_dry_run_writes_both_reports_and_prints_relative_receipt(self):
         args = self.args()

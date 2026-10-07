@@ -174,6 +174,7 @@ class Generation:
         self.spec['seed'] = seed
         self.initial_prefix = prefix
         self.pending = engine.tokenizer.encode(prompt + prefix, add_special_tokens=False)
+        self.input_tokens = len(self.pending)
         self.reused_prefix_tokens = 0
         self.prefill_tokens = 0
         # Reuse only exact input state, never output or a grammar's progress.
