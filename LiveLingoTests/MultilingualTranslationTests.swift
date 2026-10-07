@@ -159,7 +159,7 @@ final class MultilingualTranslationTests: XCTestCase, @unchecked Sendable {
                     XCTAssertEqual(payload["source_text_to_translate"], "El calor fluye lentamente.")
                     XCTAssertTrue(payload["translation_instruction"]?.hasPrefix("Source language: Spanish (es).") == true)
                 } else { XCTAssertTrue(call.input.hasPrefix("Source language: Spanish (es).")) }
-                XCTAssertTrue(call.input.contains(CaptionTranslationTarget.current.promptName))
+                XCTAssertTrue(call.input.contains(CaptionTranslationTarget.simplifiedChinese.promptName))
                 XCTAssertTrue(call.input.contains("El calor fluye lentamente."))
                 XCTAssertFalse(call.input.contains("auxiliary_token_hints"))
                 XCTAssertFalse(call.input.contains("2 s"))
@@ -195,7 +195,7 @@ final class MultilingualTranslationTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(call.input.contains("Cantonese (yue)"))
         XCTAssertTrue(call.input.contains("standard written Mandarin"))
         XCTAssertTrue(call.input.contains("呢個箱入面有兩本書。"))
-        XCTAssertEqual(CaptionTranslationTarget.current.rawValue, "zh-Hans")
+        XCTAssertEqual(CaptionTranslationTarget.simplifiedChinese.rawValue, "zh-Hans")
     }
 
     func testUnknownSourceFailsBeforeAnyRequest() async {
@@ -315,7 +315,7 @@ final class MultilingualTranslationTests: XCTestCase, @unchecked Sendable {
 
 final class MultilingualReviewTranslationTests: XCTestCase, @unchecked Sendable {
     func testDefaultTargetPinsPassThroughAndSimplifiedRendering() throws {
-        let target = CaptionTranslationTarget.current
+        let target = CaptionTranslationTarget.simplifiedChinese
         XCTAssertEqual(target.rawValue, "zh-Hans")
         XCTAssertEqual(target.promptName, "Simplified Chinese")
         XCTAssertTrue(target.keepsSourceAsCaption(language: "zh"))

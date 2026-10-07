@@ -24,7 +24,7 @@ DISPLAY_CONTRACT = "production-point-and-rendered-membership-v1"
 PENDING = "pending-independent-readback"
 PENDING_EVIDENCE_RULE = ("quoteIDs 和 candidateQuoteIDs 引用 priorEvidence 的旧原文或 evidence 的当前原文。"
                          "h 编号只作历史上下文，不能用于当前正文 sourceIDs；旧引文不作为本批新知识重复整理。")
-# Mirror CaptionTranslationTarget.current and SpokenLanguage.all. Source-unit
+# Mirror the default CaptionTranslationTarget.simplifiedChinese and SpokenLanguage.all. Source-unit
 # labels stay en/zh even when the spoken source uses a different language.
 CAPTION_TRANSLATION_TARGET = "zh-Hans"
 CAPTION_PASS_THROUGH_LANGUAGE_CODES = frozenset({"zh"})

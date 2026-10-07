@@ -125,8 +125,8 @@ enum SessionExporter {
         var sourceLanguages: [String]? = nil
     }
 
-    static var targetTranscriptFileName: String { targetTranscriptFileName(for: CaptionTranslationTarget.current.rawValue) }
-    static var targetSummaryFileName: String { targetSummaryFileName(for: CaptionTranslationTarget.current.rawValue) }
+    static var targetTranscriptFileName: String { targetTranscriptFileName(for: CaptionTranslationTarget.simplifiedChinese.rawValue) }
+    static var targetSummaryFileName: String { targetSummaryFileName(for: CaptionTranslationTarget.simplifiedChinese.rawValue) }
 
     static func targetTranscriptFileName(for locale: String) -> String {
         // The legacy source transcript must remain distinct from English output.
@@ -160,8 +160,7 @@ enum SessionExporter {
     /// Language labels are UI metadata, never part of copied/exported text.
     static func sourceLine(_ segment: TranscriptSegment) -> String { segment.english }
 
-    static func targetLine(_ segment: TranscriptSegment) -> String {
-        let target = CaptionTranslationTarget.current
+    static func targetLine(_ segment: TranscriptSegment, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
         if target.keepsSourceAsCaption(language: segment.sourceLanguage) {
             return segment.hasUsableTranslation ? segment.chinese : target.renderPassThrough(segment.english)
         }
@@ -171,9 +170,9 @@ enum SessionExporter {
         return humanReadableChinese(segment.chinese)
     }
 
-    static func captionLines(_ segment: TranscriptSegment) -> [String] {
-        CaptionTranslationTarget.current.keepsSourceAsCaption(language: segment.sourceLanguage)
-            ? [targetLine(segment)] : [sourceLine(segment), targetLine(segment)]
+    static func captionLines(_ segment: TranscriptSegment, target: CaptionTranslationTarget = .simplifiedChinese) -> [String] {
+        target.keepsSourceAsCaption(language: segment.sourceLanguage)
+            ? [targetLine(segment, target: target)] : [sourceLine(segment), targetLine(segment, target: target)]
     }
 
     static func sourceLanguages(in segments: [TranscriptSegment]) -> [String]? {
@@ -181,9 +180,9 @@ enum SessionExporter {
         return codes.isEmpty ? nil : codes
     }
 
-    static func srtCue(_ segment: TranscriptSegment, index: Int) -> String {
+    static func srtCue(_ segment: TranscriptSegment, index: Int, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
         return "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
-            + captionLines(segment).joined(separator: "\n")
+            + captionLines(segment, target: target).joined(separator: "\n")
     }
 
     static func export(
@@ -191,20 +190,21 @@ enum SessionExporter {
         sessionDirectory: URL,
         recordingFileName: String = "recording.wav",
         summary: String = "",
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        target: CaptionTranslationTarget = .simplifiedChinese
     ) throws {
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
 
         let english = segments.map(sourceLine).joined(separator: "\n")
-        let chinese = segments.map(targetLine).joined(separator: "\n")
+        let chinese = segments.map { targetLine($0, target: target) }.joined(separator: "\n")
         try english.appending("\n").write(
             to: sessionDirectory.appendingPathComponent("transcript-en.txt"),
             atomically: true,
             encoding: .utf8
         )
         try chinese.appending("\n").write(
-            to: sessionDirectory.appendingPathComponent(targetTranscriptFileName),
+            to: sessionDirectory.appendingPathComponent(targetTranscriptFileName(for: target.rawValue)),
             atomically: true,
             encoding: .utf8
         )
@@ -226,7 +226,7 @@ enum SessionExporter {
         )
 
         let srt = segments.enumerated().map { index, segment in
-            srtCue(segment, index: index)
+            srtCue(segment, index: index, target: target)
         }.joined(separator: "\n\n") + "\n"
         try srt.write(
             to: sessionDirectory.appendingPathComponent("bilingual.srt"),
@@ -237,7 +237,7 @@ enum SessionExporter {
         let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedSummary.isEmpty {
             try (trimmedSummary + "\n").write(
-                to: sessionDirectory.appendingPathComponent(targetSummaryFileName),
+                to: sessionDirectory.appendingPathComponent(targetSummaryFileName(for: target.rawValue)),
                 atomically: true,
                 encoding: .utf8
             )
@@ -246,7 +246,7 @@ enum SessionExporter {
         let manifest = Manifest(
             createdAt: createdAt,
             sourceLocale: "en-US",
-            targetLocale: CaptionTranslationTarget.current.rawValue,
+            targetLocale: target.rawValue,
             recordingFile: recordingFileName,
             segmentCount: segments.count,
             sourceLanguages: sourceLanguages(in: segments)

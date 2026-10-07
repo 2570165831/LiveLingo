@@ -110,7 +110,7 @@ extension AppModel {
         var hasTranslation = true
         if mode == .translationOnly {
             if let caption = confirmedNonEnglishCaption {
-                hasTranslation = CaptionTranslationTarget.current.keepsSourceAsCaption(language: caption.sourceLanguage)
+                hasTranslation = captionTarget.keepsSourceAsCaption(language: caption.sourceLanguage)
                     || caption.hasUsableTranslation
             } else if previewTranslationEnabled && supportsPreviewTranslation
                         && !previewChinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -133,7 +133,7 @@ extension AppModel {
     }
 
     var nonEnglishPreviewPresentation: CaptionPresentation? {
-        confirmedNonEnglishCaption.map { CaptionPresentation($0) }
+        confirmedNonEnglishCaption.map { CaptionPresentation($0, target: captionTarget) }
     }
 
     var previewEnglishDisplay: String {
@@ -143,7 +143,7 @@ extension AppModel {
 
     var previewChineseDisplay: String {
         if let caption = confirmedNonEnglishCaption {
-            let target = CaptionTranslationTarget.current
+            let target = captionTarget
             if target.keepsSourceAsCaption(language: caption.sourceLanguage) { return target.renderPassThrough(caption.english) }
             if caption.hasUsableTranslation { return caption.chinese }
             return caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…"

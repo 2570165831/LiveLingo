@@ -76,7 +76,7 @@ final class MultilingualCaptionPresentationTests: XCTestCase {
     }
 
     func testEveryLanguageUsesTheSameSourceOnlyPolicyAsThePipeline() {
-        let target = CaptionTranslationTarget.current
+        let target = CaptionTranslationTarget.simplifiedChinese
         for language in SpokenLanguage.all {
             let presentation = CaptionPresentation(caption(language.code))
             XCTAssertEqual(presentation.isSourceOnly, target.keepsSourceAsCaption(language: language.code), language.code)

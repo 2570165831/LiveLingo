@@ -90,6 +90,8 @@
 		892593BBED8FB1FC9C4B9892 /* ResourceSchedulingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 337292BF21D61DC3DF379BC0 /* ResourceSchedulingTests.swift */; };
 		0D3DFC0CF75D7D67AC572AD4 /* SessionPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B302D42994401027F0893B5 /* SessionPersistenceTests.swift */; };
 		F74C17E4B9DBAB4B17E9A433 /* ReviewIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B3A361BF6A43DB2222C7A97 /* ReviewIdentityTests.swift */; };
+		B70500000000000000000001 /* OutputLanguage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70500000000000000000002 /* OutputLanguage.swift */; };
+		B75500000000000000000001 /* TargetDefaultingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B75500000000000000000002 /* TargetDefaultingTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -191,6 +193,8 @@
 		337292BF21D61DC3DF379BC0 /* ResourceSchedulingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceSchedulingTests.swift; sourceTree = "<group>"; };
 		7B302D42994401027F0893B5 /* SessionPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionPersistenceTests.swift; sourceTree = "<group>"; };
 		3B3A361BF6A43DB2222C7A97 /* ReviewIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewIdentityTests.swift; sourceTree = "<group>"; };
+		B70500000000000000000002 /* OutputLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputLanguage.swift; sourceTree = "<group>"; };
+		B75500000000000000000002 /* TargetDefaultingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetDefaultingTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -223,6 +227,7 @@
 				910000000000000000000002 /* FloatingSubtitlePreferences.swift */,
 				CA0000000000000000000102 /* CaptureHealth.swift */,
 				B71900000000000000000002 /* TargetAcceptance.swift */,
+				B70500000000000000000002 /* OutputLanguage.swift */,
 				900000000000000000000002 /* CaptionPresentation.swift */,
 				EA33EF11F70BAA832EBE7D3D /* ReviewReportCollection.swift */,
 				DC2A12CCCC919BB523AFFB33 /* ReviewIdentity.swift */,
@@ -266,6 +271,7 @@
 			isa = PBXGroup;
 			children = (
 				B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */,
+				B75500000000000000000002 /* TargetDefaultingTests.swift */,
 				B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */,
 				B70000000000000000000008 /* AcceptanceVerdictSnapshotTests.swift */,
 				B70000000000000000000006 /* default-target-golden.json */,
@@ -379,6 +385,7 @@
 				910000000000000000000001 /* FloatingSubtitlePreferences.swift in Sources */,
 				CA0000000000000000000101 /* CaptureHealth.swift in Sources */,
 				B71900000000000000000001 /* TargetAcceptance.swift in Sources */,
+				B70500000000000000000001 /* OutputLanguage.swift in Sources */,
 				900000000000000000000001 /* CaptionPresentation.swift in Sources */,
 				04F78613ACCF181FC7155CCF /* ReviewReportCollection.swift in Sources */,
 				BFEA359EEB395F257C15B7E0 /* ReviewIdentity.swift in Sources */,
@@ -418,6 +425,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */,
+				B75500000000000000000001 /* TargetDefaultingTests.swift in Sources */,
 				B70000000000000000000007 /* AcceptanceVerdictSnapshotTests.swift in Sources */,
 				B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,

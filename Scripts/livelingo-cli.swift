@@ -331,7 +331,7 @@ struct LiveLingoCLI {
   let usesLegacyFormat = manifest.sourceLanguages == nil
   let english=try String(contentsOf:directory.appendingPathComponent("transcript-en.txt"),encoding:.utf8)
   let chinese=try String(contentsOf:directory.appendingPathComponent(targetTranscriptName),encoding:.utf8)
-  let targetLines = usesLegacyFormat ? segments.map(legacyTargetLine) : segments.map(SessionExporter.targetLine)
+  let targetLines = usesLegacyFormat ? segments.map(legacyTargetLine) : segments.map { SessionExporter.targetLine($0) }
   guard english == segments.map(SessionExporter.sourceLine).joined(separator:"\n")+"\n",
         chinese == targetLines.joined(separator:"\n")+"\n" else { throw CLIError.inconsistentExport }
   let expectedSRT = segments.enumerated().map { index, segment in

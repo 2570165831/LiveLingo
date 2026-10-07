@@ -11,7 +11,10 @@ struct SpokenLanguage: Equatable, Sendable {
     let qwenLabel: String
     let writingSystem: WritingSystem
     /// Compatibility for existing callers; the target owns the decision.
-    var avoidsTranslation: Bool { CaptionTranslationTarget.current.keepsSourceAsCaption(language: code) }
+    var avoidsTranslation: Bool { avoidsTranslation(target: .simplifiedChinese) }
+    func avoidsTranslation(target: CaptionTranslationTarget = .simplifiedChinese) -> Bool {
+        target.keepsSourceAsCaption(language: code)
+    }
     var chineseName: String {
         CaptionLanguageNames.name(for: code) ?? qwenLabel
     }

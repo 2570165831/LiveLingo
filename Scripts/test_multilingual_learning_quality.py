@@ -188,8 +188,9 @@ class SwiftSourcePolicyParityTests(unittest.TestCase):
 
     def test_caption_target_and_pass_through_match_swift(self):
         target = self.runtime.split("enum CaptionTranslationTarget:", 1)[1].split("struct ", 1)[0]
-        current = re.search(r"static let current = Self\.(\w+)", target).group(1)
-        locale = re.search(r'case ' + re.escape(current) + r' = "([^"]+)"', target).group(1)
+        default = "simplifiedChinese"
+        self.assertNotIn("static let current", target)
+        locale = re.search(r'case ' + re.escape(default) + r' = "([^"]+)"', target).group(1)
         policy = target.split("func keepsSourceAsCaption", 1)[1].split("func renderPassThrough", 1)[0]
         self.assertEqual(scorer.CAPTION_TRANSLATION_TARGET, locale)
         self.assertEqual(scorer.CAPTION_PASS_THROUGH_LANGUAGE_CODES,

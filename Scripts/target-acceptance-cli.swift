@@ -181,7 +181,7 @@ struct TargetAcceptanceCLI {
                 sourceCount = source.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count
                 candidateCount = body.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count
                 if let language = SpokenLanguage.find(sourceLanguage) {
-                    let limit = CaptionTranslationTarget.current.maximumOutputCharacters(source: source, language: language)
+                    let limit = CaptionTranslationTarget.simplifiedChinese.maximumOutputCharacters(source: source, language: language)
                     maximum = limit
                     // Only legacy reporting metadata mirrors these constants;
                     // neither acceptance nor the actual maximum uses this table.

@@ -36,8 +36,8 @@ struct CaptionPresentation: Equatable {
     let isSourceOnly: Bool
     let primaryText: String
 
-    init(_ segment: TranscriptSegment, locale: Locale = CaptionLanguageNames.interfaceLocale) {
-        let target = CaptionTranslationTarget.current
+    init(_ segment: TranscriptSegment, locale: Locale = CaptionLanguageNames.interfaceLocale,
+         target: CaptionTranslationTarget = .simplifiedChinese) {
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
         isSourceOnly = target.keepsSourceAsCaption(language: segment.sourceLanguage)
         if isSourceOnly {

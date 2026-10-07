@@ -922,20 +922,19 @@ struct LearningSourceUnit: Encodable, Equatable, Sendable {
 
     /// The en/zh review protocol stays fixed. Non-English evidence contributes
     /// only the target group; pass-through speech uses target-normalized text.
-    static func textGroups(for segment: TranscriptSegment) -> [(language: String, text: String)] {
+    static func textGroups(for segment: TranscriptSegment, target: CaptionTranslationTarget = .simplifiedChinese) -> [(language: String, text: String)] {
         guard segment.sourceLanguage != nil else {
             return [("en", segment.english), ("zh", segment.chinese)]
         }
-        let target = CaptionTranslationTarget.current
         let text = target.keepsSourceAsCaption(language: segment.sourceLanguage)
             ? (segment.hasUsableTranslation ? segment.chinese : target.renderPassThrough(segment.english))
             : segment.chinese
         return [("zh", text)]
     }
 
-    static func make(_ evidence: [TranscriptSegment]) -> [Self] {
+    static func make(_ evidence: [TranscriptSegment], target: CaptionTranslationTarget = .simplifiedChinese) -> [Self] {
         evidence.enumerated().flatMap { index, segment in
-            textGroups(for: segment).flatMap { language, text -> [Self] in
+            textGroups(for: segment, target: target).flatMap { language, text -> [Self] in
                 var sentences: [String] = []
                 text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .bySentences) { sentence, _, _, _ in
                     if let sentence, !sentence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

@@ -67,8 +67,6 @@ enum PowerSourceMonitor {
 enum CaptionTranslationTarget: String, Sendable {
     case simplifiedChinese = "zh-Hans"
 
-    static let current = Self.simplifiedChinese
-
     var promptName: String {
         switch self {
         case .simplifiedChinese: return "Simplified Chinese"
@@ -766,7 +764,7 @@ enum TranslationAcceptance {
             return String(decoding: data, as: UTF8.self)
         }
 
-        func applying(_ response: String) throws -> String {
+        func applying(_ response: String, target: CaptionTranslationTarget = .simplifiedChinese) throws -> String {
             func fail() -> QwenRuntimeError {
                 .translationRejected("译文未通过验收：引语补译格式无效，或仍有未译内容。")
             }
@@ -781,7 +779,7 @@ enum TranslationAcceptance {
                 guard containsHan(text), !containsKanaOrHangul(text), text.count <= 160,
                       text.rangeOfCharacter(from: CharacterSet(charactersIn: "\"'“”‘’`\r\n")) == nil
                 else { throw fail() }
-                _ = try validated(text, source: value.source)
+                _ = try validated(text, source: value.source, target: target)
                 // A surface safeguard, not proof of semantic negation scope.
                 if value.source.range(of: #"(?i)\b(?:not|no|never|neither|nor|none|nothing|without|cannot|[a-z]+n['’]t)\b"#,
                                       options: .regularExpression) != nil,
@@ -792,13 +790,13 @@ enum TranslationAcceptance {
                 let selected = Dictionary(uniqueKeysWithValues: statusValues.map { ($0.id, object[$0.id]!) })
                 let data = try JSONSerialization.data(withJSONObject: selected, options: [.sortedKeys])
                 let statuses = JSONStatusRepairPlan(source: source, candidate: candidate, values: statusValues)
-                replacements += try statuses.replacements(String(decoding: data, as: UTF8.self))
+                replacements += try statuses.replacements(String(decoding: data, as: UTF8.self), target: target)
             }
             let result = NSMutableString(string: candidate)
             for (range, text) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
                 result.replaceCharacters(in: range, with: text)
             }
-            return try validated(result as String, source: source)
+            return try validated(result as String, source: source, target: target)
         }
     }
 
@@ -933,7 +931,7 @@ enum TranslationAcceptance {
             return String(decoding: data, as: UTF8.self)
         }
 
-        func replacements(_ response: String) throws -> [(NSRange, String)] {
+        func replacements(_ response: String, target: CaptionTranslationTarget = .simplifiedChinese) throws -> [(NSRange, String)] {
             func fail() -> QwenRuntimeError {
                 .translationRejected("译文未通过验收：状态补译格式无效，或无法核实中文和否定。")
             }
@@ -954,7 +952,7 @@ enum TranslationAcceptance {
                       !translation.unicodeScalars.contains(where: CharacterSet.decimalDigits.contains),
                       !value.source.hasPrefix("not ") || translation.contains(where: { "不没未无非".contains($0) })
                 else { throw fail() }
-                _ = try validated(translation, source: value.source)
+                _ = try validated(translation, source: value.source, target: target)
                 let data = try JSONSerialization.data(withJSONObject: [translation], options: [.withoutEscapingSlashes])
                 let quoted = String(decoding: data, as: UTF8.self).dropFirst().dropLast()
                 replacements.append((value.range, String(quoted)))
@@ -962,8 +960,8 @@ enum TranslationAcceptance {
             return replacements
         }
 
-        func applying(_ response: String) throws -> String {
-            let replacements = try replacements(response)
+        func applying(_ response: String, target: CaptionTranslationTarget = .simplifiedChinese) throws -> String {
+            let replacements = try replacements(response, target: target)
             let result = NSMutableString(string: candidate)
             for (range, text) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
                 result.replaceCharacters(in: range, with: text)
@@ -1116,14 +1114,17 @@ enum TranslationAcceptance {
         return nil
     }
 
-    static func rejection(candidate: String, source: String, sourceLanguage: String? = nil) -> Rejection? {
-        if case .failure(let rejection) = checked(candidate: candidate, source: source, sourceLanguage: sourceLanguage) {
+    static func rejection(candidate: String, source: String, sourceLanguage: String? = nil,
+                          target: CaptionTranslationTarget = .simplifiedChinese) -> Rejection? {
+        if case .failure(let rejection) = checked(candidate: candidate, source: source,
+                                                 sourceLanguage: sourceLanguage, target: target) {
             return rejection
         }
         return nil
     }
 
-    private static func nonEnglishRejection(candidate: String, source: String, code: String) -> Rejection? {
+    private static func nonEnglishRejection(candidate: String, source: String, code: String,
+                                            target: CaptionTranslationTarget = .simplifiedChinese) -> Rejection? {
         guard let language = SpokenLanguage.find(code) else { return .nonChineseText }
         let body = bodyWithoutApplicationNotice(candidate)
         let folded = body.folding(options: [.widthInsensitive, .diacriticInsensitive], locale: nil)
@@ -1132,7 +1133,6 @@ enum TranslationAcceptance {
             containsSelfReply: { text, source in unsupportedModelSelfDescription(in: text, source: source) }) {
             return structural
         }
-        let target = CaptionTranslationTarget.current
         if target.containsInstructionLeak(body) { return .promptLeak }
         guard target.containsOutputScript(body) else { return .nonChineseText }
         let isCopy = echoForm(target.normalize(body)) == echoForm(target.normalize(source))
@@ -1176,9 +1176,11 @@ enum TranslationAcceptance {
             .map { String($0).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
     }
 
-    private static func checked(candidate: String, source: String, sourceLanguage: String? = nil) -> Result<String, Rejection> {
+    private static func checked(candidate: String, source: String, sourceLanguage: String? = nil,
+                                target: CaptionTranslationTarget = .simplifiedChinese) -> Result<String, Rejection> {
         if let sourceLanguage, sourceLanguage != "en" {
-            if let rejection = nonEnglishRejection(candidate: candidate, source: source, code: sourceLanguage) {
+            if let rejection = nonEnglishRejection(candidate: candidate, source: source, code: sourceLanguage,
+                                                    target: target) {
                 return .failure(rejection)
             }
         } else if let rejection = contentRejection(candidate: candidate, source: source) { return .failure(rejection) }
@@ -1252,8 +1254,9 @@ enum TranslationAcceptance {
         return nil
     }
 
-    static func validated(_ candidate: String, source: String, sourceLanguage: String? = nil) throws -> String {
-        switch checked(candidate: candidate, source: source, sourceLanguage: sourceLanguage) {
+    static func validated(_ candidate: String, source: String, sourceLanguage: String? = nil,
+                          target: CaptionTranslationTarget = .simplifiedChinese) throws -> String {
+        switch checked(candidate: candidate, source: source, sourceLanguage: sourceLanguage, target: target) {
         case .failure(let rejection):
             throw QwenRuntimeError.translationRejected("译文未通过验收：\(rejection.reason)。")
         case .success(let restored):
@@ -1261,8 +1264,9 @@ enum TranslationAcceptance {
         }
     }
 
-    static func validatedCaption(_ candidate: String, source: String, sourceLanguage: String? = nil) throws -> String {
-        let accepted = try validated(candidate, source: source, sourceLanguage: sourceLanguage)
+    static func validatedCaption(_ candidate: String, source: String, sourceLanguage: String? = nil,
+                                 target: CaptionTranslationTarget = .simplifiedChinese) throws -> String {
+        let accepted = try validated(candidate, source: source, sourceLanguage: sourceLanguage, target: target)
         if let sourceLanguage, sourceLanguage != "en" { return accepted }
         guard TranslationLengthGuard.isPlausible(chinese: accepted, english: source) else {
             throw QwenRuntimeError.translationRejected("译文长度与原文不成比例，已保留英文。")
@@ -2306,17 +2310,19 @@ enum QwenTranslationClient {
         _ text: String,
         modelName: String,
         sourceLanguage: String? = nil,
+        target: CaptionTranslationTarget = .simplifiedChinese,
         hints: [AuxiliaryTranslationHint] = [],
         attempt: CaptionTranslationAttempt = .standard,
         onUpdate: (@MainActor @Sendable (String) async -> Void)? = nil,
         request: AdjacentRequest? = nil
     ) async throws -> String {
         let output = try await requestTranslation(text, modelName: modelName, hints: hints,
-                                                  sourceLanguage: sourceLanguage,
+                                                  sourceLanguage: sourceLanguage, target: target,
                                                   attempt: attempt, request: request, onUpdate: onUpdate)
         let nonEnglish = sourceLanguage != nil && sourceLanguage != "en"
-        let candidate = nonEnglish ? CaptionTranslationTarget.current.normalize(output) : output
-        let accepted = try TranslationAcceptance.validated(candidate, source: text, sourceLanguage: sourceLanguage)
+        let candidate = nonEnglish ? target.normalize(output) : output
+        let accepted = try TranslationAcceptance.validated(candidate, source: text, sourceLanguage: sourceLanguage,
+                                                           target: target)
         return !nonEnglish && FormulaASRReview.uncertain(text) ? TranslationAcceptance.formulaNotice + accepted : accepted
     }
 
@@ -2338,6 +2344,7 @@ enum QwenTranslationClient {
     private static func requestTranslation(
         _ text: String, modelName: String, hints: [AuxiliaryTranslationHint],
         sourceLanguage: String? = nil,
+        target: CaptionTranslationTarget = .simplifiedChinese,
         attempt: CaptionTranslationAttempt = .standard,
         request: AdjacentRequest? = nil,
         onUpdate: (@MainActor @Sendable (String) async -> Void)? = nil
@@ -2359,7 +2366,7 @@ enum QwenTranslationClient {
         if usesWrapper {
             var payload: [String: Any] = [field: text]
             if let language {
-                payload["translation_instruction"] = CaptionTranslationTarget.current.sourceInstruction(language)
+                payload["translation_instruction"] = target.sourceInstruction(language)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             if modelName == QwenModelProfile.highQuality.translationModel, !hints.isEmpty {
@@ -2384,7 +2391,7 @@ enum QwenTranslationClient {
         // Keep the two existing system-prefix cache variants unchanged. Source
         // and target instructions belong only to the user message.
         let requestInput = usesWrapper ? input
-            : (language.map { CaptionTranslationTarget.current.quotedSourceInput(input, language: $0) } ?? input)
+            : (language.map { target.quotedSourceInput(input, language: $0) } ?? input)
         let budget = attempt.outputTokenBudget(for: text)
         let output: String
         if let request { output = try await request(requestInput, prompt, budget) }
@@ -2403,11 +2410,14 @@ enum QwenTranslationClient {
         // Combine eligible JSON statuses with quoted operands before their
         // ranges change. The same bounded repair also applies after a content
         // retry; unrelated failures still need the complete caption rejected.
-        let quotes = try await repairingQuotedTranslation(output, source: text, modelName: modelName, request: request)
-        return try await repairingJSONStatuses(quotes, source: text, modelName: modelName, request: request)
+        let quotes = try await repairingQuotedTranslation(output, source: text, modelName: modelName,
+                                                           target: target, request: request)
+        return try await repairingJSONStatuses(quotes, source: text, modelName: modelName,
+                                                target: target, request: request)
     }
 
     private static func repairingQuotedTranslation(_ output: String, source: String, modelName: String,
+                                                   target: CaptionTranslationTarget = .simplifiedChinese,
                                                    request: AdjacentRequest? = nil) async throws -> String {
         guard let plan = TranslationAcceptance.quotedTranslationRepairPlan(candidate: output, source: source) else { return output }
         try Task.checkCancellation()
@@ -2425,10 +2435,11 @@ enum QwenTranslationClient {
             }
         }
         try Task.checkCancellation()
-        return try plan.applying(response)
+        return try plan.applying(response, target: target)
     }
 
     private static func repairingJSONStatuses(_ output: String, source: String, modelName: String,
+                                             target: CaptionTranslationTarget = .simplifiedChinese,
                                              request: AdjacentRequest? = nil) async throws -> String {
         guard let plan = TranslationAcceptance.jsonStatusRepairPlan(candidate: output, source: source) else { return output }
         if let rejection = TranslationAcceptance.foreignProseRejection(candidate: output, source: source) {
@@ -2445,7 +2456,7 @@ enum QwenTranslationClient {
         for value in plan.values.sorted(by: { $0.range.location > $1.range.location }) {
             trial.replaceCharacters(in: value.range, with: "\"译文\"")
         }
-        if let rejection = TranslationAcceptance.rejection(candidate: trial as String, source: source) {
+        if let rejection = TranslationAcceptance.rejection(candidate: trial as String, source: source, target: target) {
             throw QwenRuntimeError.translationRejected("译文未通过验收：\(rejection.reason)。")
         }
         let input = try plan.input()
@@ -2462,7 +2473,7 @@ enum QwenTranslationClient {
             }
         }
         try Task.checkCancellation()
-        return try plan.applying(response)
+        return try plan.applying(response, target: target)
     }
 
     /// Independent outcomes for the two halves of a boundary translation. A
@@ -2485,6 +2496,7 @@ enum QwenTranslationClient {
 
     static func translateAdjacent(previous: String, previousChinese: String, current: String,
                                   context: String, modelName: String, repairPrevious: Bool = true,
+                                  target: CaptionTranslationTarget = .simplifiedChinese,
                                   currentHints: [AuxiliaryTranslationHint] = [],
                                   onCurrent: (@MainActor @Sendable (String) async -> Void)? = nil,
                                   deferRepair: (@MainActor @Sendable () -> Bool)? = nil,
@@ -2500,7 +2512,7 @@ enum QwenTranslationClient {
         let requestRejection: String?
         do {
             currentOutput = try await requestTranslation(protectedCurrent.text, modelName: modelName,
-                hints: protectedCurrent.translationHints(from: currentHints), request: request)
+                hints: protectedCurrent.translationHints(from: currentHints), target: target, request: request)
             requestRejection = nil
         } catch QwenRuntimeError.translationRejected(let reason) {
             // A rejected wrapper is a content failure, not a failed generation.
@@ -2522,7 +2534,7 @@ enum QwenTranslationClient {
                                                                  english: boundaryInput)
         let currentLengthRejection: String? = currentPlausible ? nil : "译文长度与原文不成比例（疑似混入上下文）"
         let currentRejection = requestRejection ?? protectedCurrent.restorationFailure(in: currentOutput)
-            ?? TranslationAcceptance.rejection(candidate: currentTranslation, source: boundaryInput)?.reason
+            ?? TranslationAcceptance.rejection(candidate: currentTranslation, source: boundaryInput, target: target)?.reason
         let acceptedCurrent = (currentRejection == nil && currentLengthRejection == nil) ? currentTranslation : nil
         if let acceptedCurrent {
             // Show a validated current line before waiting for optional repair.
@@ -2542,7 +2554,7 @@ enum QwenTranslationClient {
                 previousRepairDeferred: true)
         }
         let repaired = try await repairPreviousCaption(previous: previous, previousChinese: previousChinese,
-            current: current, context: context, modelName: modelName, request: request)
+            current: current, context: context, modelName: modelName, target: target, request: request)
         return AdjacentTranslation(previous: repaired.previous, current: acceptedCurrent,
             previousRejection: repaired.rejection, currentRejection: currentRejection ?? currentLengthRejection)
     }
@@ -2554,12 +2566,13 @@ enum QwenTranslationClient {
 
     static func repairPreviousCaption(previous: String, previousChinese: String, current: String,
                                       context: String, modelName: String,
+                                      target: CaptionTranslationTarget = .simplifiedChinese,
                                       request: AdjacentRequest? = nil) async throws -> PreviousRepair {
         try Task.checkCancellation()
         // Use the standard translation task for each target. A multi-output JSON task
         // made this local model conflate meanings across the two chunks.
-        func contextual(_ target: String, before: String, after: String) async throws -> (text: String, rejection: String?) {
-            let protected = ChemistryTranslationProtector.prepare(target)
+        func contextual(_ sourceText: String, before: String, after: String) async throws -> (text: String, rejection: String?) {
+            let protected = ChemistryTranslationProtector.prepare(sourceText)
             let input = try protected.contextualJSON(before: before, after: after, protectTarget: false)
             let basePrompt = modelName == QwenModelProfile.energySaver.translationModel
                 ? sourceFaithfulCaptionPrompt : systemPrompt
@@ -2618,7 +2631,7 @@ enum QwenTranslationClient {
         // 中文里就会多出前面几句 ✗，而拿"整段前英文"比是**比错了对象** ✗（比例仍在阈值内 ✗），拦不住 ✓。
         let repairSource = canRepairTail ? tail : previous
         let previousRejection = previousOutput.rejection
-            ?? TranslationAcceptance.rejection(candidate: previousTranslation, source: repairSource)?.reason
+            ?? TranslationAcceptance.rejection(candidate: previousTranslation, source: repairSource, target: target)?.reason
         let normalizedPrevious = SimplifiedChineseNormalizer.normalize(previousTranslation)
         let revisedPrevious: String?
         if previousRejection != nil {
@@ -2707,6 +2720,7 @@ enum QwenTranslationClient {
     typealias TypedRequest = @Sendable (_ input: String, _ systemPrompt: String, _ thinking: Bool) async throws -> String
 
     static func translateTypedText(_ text: String, modelName: String, thinking: Bool = false,
+                                   target: CaptionTranslationTarget = .simplifiedChinese,
                                    request: TypedRequest? = nil) async throws -> String {
         try Task.checkCancellation()
         // Typed input must not pass through academic ASR correction. Express
@@ -2755,8 +2769,8 @@ enum QwenTranslationClient {
         if let request { valueRequest = { input, prompt, _ in try await request(input, prompt, false) } }
         else { valueRequest = nil }
         let repaired = try await repairingJSONStatuses(output, source: protected.text, modelName: modelName,
-                                                       request: valueRequest)
-        let accepted = try TranslationAcceptance.validated(repaired, source: protected.text)
+                                                       target: target, request: valueRequest)
+        let accepted = try TranslationAcceptance.validated(repaired, source: protected.text, target: target)
         return try protected.validatedRestore(in: accepted)
     }
 
@@ -3285,22 +3299,24 @@ enum LectureSummaryInput {
         var uncertainNotes: [String] = []
     }
 
-    static func entryCharacters(for segment: TranscriptSegment) -> Int {
-        CaptionTranslationTarget.current.keepsSourceAsCaption(language: segment.sourceLanguage)
-            ? SessionExporter.targetLine(segment).count + 32
+    static func entryCharacters(for segment: TranscriptSegment,
+                                target: CaptionTranslationTarget = .simplifiedChinese) -> Int {
+        target.keepsSourceAsCaption(language: segment.sourceLanguage)
+            ? SessionExporter.targetLine(segment, target: target).count + 32
             : segment.english.count + segment.chinese.count + 32
     }
 
     static func incremental(
         from segments: [TranscriptSegment], coveredIDs: Set<UUID>, previousSummary: String,
-        maximumCharacters: Int = 4_000
+        maximumCharacters: Int = 4_000,
+        target: CaptionTranslationTarget = .simplifiedChinese
     ) -> Batch {
         var selected: [TranscriptSegment] = []
         var size = 0
         for segment in segments where !coveredIDs.contains(segment.id) {
             guard !segment.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   segment.hasUsableTranslation else { continue }
-            let entrySize = entryCharacters(for: segment)
+            let entrySize = entryCharacters(for: segment, target: target)
             if !selected.isEmpty, size + entrySize > maximumCharacters { break }
             selected.append(segment)
             size += entrySize
@@ -3310,7 +3326,7 @@ enum LectureSummaryInput {
         let notes = uncertain.map { "- [" + clock($0.startTime) + "] 公式转写待核对：" + $0.chinese }
         let verified = selected.filter { !FormulaASRReview.uncertain($0.english) }
         guard !verified.isEmpty else { return Batch(text: "", segmentIDs: Set(selected.map(\.id)), uncertainNotes: notes) }
-        let transcript = make(from: verified, maximumCharacters: Int.max)
+        let transcript = make(from: verified, maximumCharacters: Int.max, target: target)
         let input = """
         Update the previous summary using only the new bilingual captions below.
         Preserve earlier valid facts; merge duplicates and correct earlier claims only when the new captions support it.
@@ -3327,7 +3343,8 @@ enum LectureSummaryInput {
     }
     static func make(
         from segments: [TranscriptSegment],
-        maximumCharacters: Int = 12_000
+        maximumCharacters: Int = 12_000,
+        target: CaptionTranslationTarget = .simplifiedChinese
     ) -> String {
         let completed = segments.filter {
             !$0.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -3339,10 +3356,9 @@ enum LectureSummaryInput {
         var characterCount = 0
         for segment in completed.reversed() {
             let entry: String
-            let target = CaptionTranslationTarget.current
             let sourceLabel = (segment.sourceLanguage ?? "en").uppercased()
             if target.keepsSourceAsCaption(language: segment.sourceLanguage) {
-                entry = "[\(clock(segment.startTime))]\n\(sourceLabel): \(SessionExporter.targetLine(segment))"
+                entry = "[\(clock(segment.startTime))]\n\(sourceLabel): \(SessionExporter.targetLine(segment, target: target))"
             } else {
                 let targetLabel = target.rawValue.components(separatedBy: "-")[0].uppercased()
                 entry = """
