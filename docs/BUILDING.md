@@ -20,6 +20,39 @@ xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo \
 
 未签名 Release 可使用 `./Scripts/build-release.sh`。需要完整功能时，继续准备并组装运行库和模型。
 
+### 与正式版分开的界面预览包
+
+```sh
+./Scripts/build-preview-app.sh
+# 可选：只引用本机正式包的模型，不复制模型或运行库
+./Scripts/build-preview-app.sh --reference-installed-models
+```
+
+脚本离线构建，默认输出到源码目录旁的 `../work/preview/package-<提交>-<随机串>/LiveLingo 预览版.app`，DerivedData 复用该根目录下的 `dd-build-x86_64`。可用 `--output-root /绝对路径` 指定专属目录。不会安装、启动或覆盖已有预览包。Xcode 会自动向 Launch Services 登记构建产物的位置，这是构建副作用，不等于安装；预览包始终使用独立 bundle ID，脚本不改系统偏好或文件关联设置。`receipt.json` 记录实际路径、大小（不跟随模型引用）、架构、Info.plist、完整源提交与是否有未提交改动；构建号含提交短哈希，脏工作区另带 `.dirty`。
+
+bundle ID 固定为 `com.jianhongli.LiveLingo.preview`，显示名和窗口标题均为“LiveLingo 预览版”。只在这条构建命令中启用 `LIVELINGO_PREVIEW`；正式版的工程设置、bundle ID、模型定位、偏好和数据路径保持原有规则。
+
+**沙盒与数据**：正式版的 `LiveLingo.entitlements` 启用 App Sandbox、用户选择文件读写及 App scope 书签，不含共享 App Group。签名包的生效 entitlements 才构成系统沙盒；`ENABLE_APP_SANDBOX=YES` 或包内声明本身不能使未签名包进入沙盒。正式版容器是否存在也不能证明另一个未签名进程会受沙盒约束。
+
+| 数据 | 未签名预览版 | 将来授权签名且沙盒生效后 |
+| --- | --- | --- |
+| 偏好、窗口状态 | 独立 preview 偏好域，通常为 `~/Library/Preferences/com.jianhongli.LiveLingo.preview.plist` | preview 容器内的同名偏好域 |
+| App Support | `~/Library/Application Support/LiveLingoPreview/` | `~/Library/Containers/com.jianhongli.LiveLingo.preview/Data/Library/Application Support/LiveLingoPreview/` |
+| MLX 检查点 | 上述根目录的 `LanguageRuntime/Checkpoints/{4b,9b}` | 同样位于 preview 容器的数据根目录内 |
+| 复查队列、诊断、目录书签 | 根目录的 `learning-review-queue.json`、`ReviewDiagnostics/`；书签保存在队列任务中 | 同上，不读取正式版队列或其书签 |
+| 课程、导出、导入媒体 | 根目录的 `Courses/`；拒绝打开、写入或迁移范围外的课程 | 同一限制，且系统额外实施沙盒权限 |
+| 临时录音、ASR 分块、重试音频 | 根目录的 `Temporary/`，会话使用独立 UUID | 同上 |
+
+预览版忽略 `LIVELINGO_PREFERENCES_SUITE`、`LIVELINGO_DATA_DIRECTORY` 与 `LIVELINGO_MLX_*` 的外部覆盖；不会继承正式版保存位置。当前保存目录只保存在 AppModel 内存中，没有单独的偏好书签；复查书签与检查点分别按上表隔离。保存位置按钮在预览版中固定指向自己的 `Courses/`，媒体导入也只接受其中的文件。不要把正式版课程放进去；若需查看合成课程，先放入独立测试副本。路径检查也遍历课程内部的链接，拒绝指向根目录外的内容；拒绝操作不会回退到正式版目录。上述未签名隔离来自应用代码，并非系统级沙盒保证。未签名进程还可能无法创建 App scope 安全书签（系统报 `Failed to retrieve app-scope key`），因此课程迁移、复查定位等依赖此类书签的操作不保证可用。
+
+**体积与功能**：默认不带 `Models`、`LanguageRuntime` 或 `ASRRuntime`，也不预热 ASR。可验收窗口、布局、设置、浮动字幕和文件面板；录音转写、MLX 翻译、模型摘要、笔记生成与复查不能用。`--reference-installed-models` 检查 `/Applications/LiveLingo.app` 的正式 bundle ID，只在预览资源中建立 `Models` 软链接；正式包只被读取，不修改权限、模型或设置。它不会补齐 Python 运行库，因此引用后仍是界面试用包。软链接**不是只读挂载**：这里只保证本脚本与所打包代码不向模型目录写入，不声称对其他程序施加只读权限。授权沙盒签名与外部模型引用的组合直接报错；沙盒不会因为软链接就自动获准读取正式包资源，脚本不加临时例外、不借用正式版书签。
+
+**用户手动打开**：在 Finder 中打开回执里的 `.app`，无需放入 `/Applications`。默认是完全未签名的 Intel 包：Intel Mac 可直接使用，Apple Silicon 需要已经安装的 Rosetta；缺少时由用户决定是否接受系统安装提示，脚本不安装它。若系统拦截来源不明的应用，先确认构建来源，再用 Finder 右键“打开”；部分系统版本需在“系统设置 → 隐私与安全性”中选择“仍要打开”。提示与入口会随系统版本、隔离属性和组织策略变化，未在本任务中实测；不要全局关闭 Gatekeeper。若系统提示损坏/策略禁止，或仍拒绝打开，停止并取得单独签名授权，不承诺右键可以解决所有拦截。
+
+**签名是可选且需另外授权的步骤**：脚本既关闭 Xcode CodeSign，也以 `-Wl,-no_adhoc_codesign` 关闭链接器默认 ad-hoc 签名，并逐个检查 Mach-O 的 `LC_CODE_SIGNATURE`。严格未签名的原生 arm64 包不能在 Apple Silicon 上执行；`--arch arm64` 可生成构建证据，实际打开前需要另行授权签名。获准后才可传 `--sign 'Developer ID Application: …' --certificate /绝对路径/证书.cer --keychain /绝对路径/login.keychain-db`；脚本核对证书有效期及匹配的私钥身份，使用原有沙盒 entitlements 做离线签名，不公证、不发布，不接受 ad-hoc 身份，不导入或解锁钥匙串。签名后的实际启动、容器与权限仍需用户真机复核。
+
+完整回归也禁止签名时，在已安装 Rosetta 的 Apple Silicon 主机上指定 `-destination 'platform=macOS,arch=x86_64' ARCHS=x86_64`，加 `CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO AD_HOC_CODE_SIGNING_ALLOWED=NO 'OTHER_LDFLAGS=$(inherited) -Wl,-no_adhoc_codesign'`，DerivedData 和日志放入专属输出根目录；完整套件不启用预览编译条件。未签名 App 测试宿主的安全书签用例可能失败，不能为通过测试自动签名。可将测试 bundle 链接到未签名的 App debug dylib，再用 Xcode 已有签名的 `xctest` 工具作独立宿主；这不对本任务产物新增签名。直接调用 `xctest` 的结果须与 `xcodebuild test` 分开记录，不能补写成功标记让日志检查通过。另用预览编译条件运行 `PreviewIsolationTests`，检查课程边界。测试环境为 `LIVELINGO_UNIT_TESTING=1`，不创建正式 AppModel、不预热模型；这不等于用户打开 App 的界面验收。对实际完整测试日志执行 `check_build_warnings.py` 和 `check_test_preferences.py`，如实记录失败与未满足项。
+
 `Scripts/recover-orphan-recordings.py` 检查异常退出后尚未收尾的 WAV。只在头部完整、编码支持且音频边界可确认时恢复；正常音频后的元数据、非零数据长度及结构不明确的文件不会被任意扩展。
 **默认只报告，加 `--export` 才写出新文件，源文件始终只读，也不覆盖已有同名输出**。恢复期间源文件变化时，该次输出不计为成功；参数见其 `--help`。
 

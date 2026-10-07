@@ -888,6 +888,9 @@ final class SessionStore: @unchecked Sendable {
     }
 
     private func locked<T>(writing: Bool, _ action: () throws -> T) throws -> T {
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireSessionDirectory(directory)
+        #endif
         Self.processLock.lock()
         defer { Self.processLock.unlock() }
         if writing { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
@@ -1106,6 +1109,9 @@ struct SessionDirectoryIdentity: Equatable, Sendable {
             }
             location = bookmarked
         }
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireSessionDirectory(location)
+        #endif
         guard try location.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
             throw SessionStoreError.unsafePath(location.path)
         }

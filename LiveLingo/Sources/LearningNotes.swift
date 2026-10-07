@@ -2192,6 +2192,9 @@ struct ReviewDiagnosticsStore: Sendable {
     func write(_ snapshot: ReviewDiagnosticSnapshot) -> URL? {
         guard policy.isEnabled, let data = bounded(snapshot) else { return nil }
         do {
+            #if LIVELINGO_PREVIEW
+            try PreviewDataIsolation.requireTreeContained(directory, in: PreviewDataIsolation.dataDirectory)
+            #endif
             try prepareDirectory()
             guard let url = availableURL(for: snapshot) else { return nil }
             guard FileManager.default.createFile(atPath: url.path, contents: data,
@@ -3571,6 +3574,9 @@ final class LearningReviewQueue: ObservableObject {
 
     func relocateJob(_ id: UUID, to directory: URL) {
         editQueue { [self] in
+            #if LIVELINGO_PREVIEW
+            try PreviewDataIsolation.requireCourseDirectory(directory)
+            #endif
             guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
             let selected = jobs[index]
             let scoped = directory.startAccessingSecurityScopedResource()
@@ -3783,6 +3789,9 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     private func validateLocation(_ job: Job, at directory: URL, allowHistorical: Bool) throws {
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireCourseDirectory(directory)
+        #endif
         let snapshot = try ReviewInputBinding.snapshot(in: directory)
         try Self.validateTargetLocale(job.targetLocale, snapshot: snapshot)
         try ReviewInputBinding.validate(identity: job.identity, scope: job.resolvedScope,
@@ -3930,6 +3939,12 @@ final class LearningReviewQueue: ObservableObject {
          retryDelays: [TimeInterval] = ReviewRetryPolicy.delays,
          startupSnapshotReader: (URL) throws -> SessionSnapshot? = ReviewInputBinding.snapshot(in:)) {
         self.retryDelays = retryDelays.isEmpty ? ReviewRetryPolicy.delays : retryDelays
+        #if LIVELINGO_PREVIEW
+        let resolvedJournal: URL
+        do {
+            resolvedJournal = try PreviewDataIsolation.dataURL("learning-review-queue.json")
+        } catch { preconditionFailure("Preview review queue must stay in its own data directory") }
+        #else
         let environmentRoot = ProcessInfo.processInfo.environment["LIVELINGO_DATA_DIRECTORY"]
         if let environmentRoot {
             precondition(environmentRoot.hasPrefix("/") && environmentRoot != "/",
@@ -3938,6 +3953,7 @@ final class LearningReviewQueue: ObservableObject {
         let configuredRoot = environmentRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/LiveLingo")
         let resolvedJournal = journalURL ?? configuredRoot.appendingPathComponent("learning-review-queue.json")
+        #endif
         self.journalURL = resolvedJournal
         self.diagnostics = diagnostics.isEnabled
             ? ReviewDiagnosticsStore(directory: resolvedJournal.deletingLastPathComponent()
@@ -3953,6 +3969,11 @@ final class LearningReviewQueue: ObservableObject {
                 let journal = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: self.journalURL))
                 jobs = journal.jobs
                 retiredJobs = journal.retiredJobs ?? []
+                #if LIVELINGO_PREVIEW
+                for job in jobs + retiredJobs {
+                    try PreviewDataIsolation.requireCourseDirectory(job.directory)
+                }
+                #endif
                 guard Set((jobs + retiredJobs).map(\.id)).count == jobs.count + retiredJobs.count else {
                     throw ReviewIdentityError.conflict("复查日志含有重复任务 ID")
                 }
@@ -4169,6 +4190,9 @@ final class LearningReviewQueue: ObservableObject {
     /// 同一目录的同一范围不重复入队 ✓，不同范围可以并存 ✓（整课报告与局部报告各有各的文件 ✓）。
     func enqueue(directory: URL, notebook: LearningNotebook, scope: LearningReviewScope = .wholeLesson,
                  sessionID: UUID? = nil, inputRevision: Int? = nil, targetLocale: String? = nil) throws {
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireCourseDirectory(directory)
+        #endif
         guard managementPending == 0 else { throw ReviewIdentityError.conflict("课程目录切换尚未完成，请稍后发起复查") }
         let reviewable = notebook.batches.filter { !$0.note.points.isEmpty }
         guard persistenceFailure == nil else { throw QwenRuntimeError.requestFailed(persistenceFailure!) }
@@ -4469,6 +4493,9 @@ final class LearningReviewQueue: ObservableObject {
             if let bookmark = job.directoryBookmark {
                 var stale = false
                 accessURL = try URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale)
+                #if LIVELINGO_PREVIEW
+                try PreviewDataIsolation.requireCourseDirectory(accessURL)
+                #endif
                 scoped = accessURL.startAccessingSecurityScopedResource()
                 jobs[0].directory = accessURL
                 if stale {
@@ -4797,6 +4824,9 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     private func save() throws {
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireContained(journalURL, in: PreviewDataIsolation.dataDirectory)
+        #endif
         try FileManager.default.createDirectory(at: journalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         // 2026-09-18：写前脏检查。
         // 背景：电源监视器等每 5 秒会走一遍 reconcile() → persistOrPause() → save()，

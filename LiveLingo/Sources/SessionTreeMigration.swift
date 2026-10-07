@@ -247,6 +247,12 @@ enum SessionTreeMigration {
     }
 
     private static func validate(source: URL, destination: URL) throws -> (source: URL, destination: URL) {
+        #if LIVELINGO_PREVIEW
+        // Temporary recordings are owned UUID directories; all final courses
+        // and all user-requested course moves must stay in the preview root.
+        try PreviewDataIsolation.requireSessionDirectory(source)
+        try PreviewDataIsolation.requireCourseDirectory(destination)
+        #endif
         // Ancestor aliases (including macOS /var) are ordinary locators. Reject
         // the session root itself when it is a symlink; do not follow leaf links.
         guard source.isFileURL, destination.isFileURL else {

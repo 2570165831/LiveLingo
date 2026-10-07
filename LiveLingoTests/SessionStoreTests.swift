@@ -2,6 +2,110 @@ import Foundation
 import Testing
 @testable import LiveLingo
 
+struct PreviewIsolationTests {
+    private struct Fixture {
+        let base: URL
+        let root: URL
+        let production: URL
+        init() throws {
+            base = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                .appendingPathComponent("LiveLingoPreviewIsolation-\(UUID().uuidString)", isDirectory: true)
+            root = base.appendingPathComponent("Preview", isDirectory: true)
+            production = base.appendingPathComponent("Production", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: production, withIntermediateDirectories: false)
+        }
+        func clean() { try? FileManager.default.removeItem(at: base) }
+    }
+
+    @Test func permitsNewFilesWithinPreviewRoot() throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        try PreviewDataIsolation.requireContained(fixture.root, in: fixture.root)
+        try PreviewDataIsolation.requireContained(fixture.root.appendingPathComponent("Courses/New/snapshot.json"), in: fixture.root)
+    }
+
+    @Test func refusesProductionAndPrefixLookalikes() throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        #expect(throws: SessionStoreError.self) {
+            try PreviewDataIsolation.requireContained(fixture.production, in: fixture.root)
+        }
+        #expect(throws: SessionStoreError.self) {
+            try PreviewDataIsolation.requireContained(fixture.base.appendingPathComponent("Preview-other/course"), in: fixture.root)
+        }
+    }
+
+    @Test func refusesParentTraversalAndNonFileURLs() throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        #expect(throws: SessionStoreError.self) {
+            try PreviewDataIsolation.requireContained(fixture.root.appendingPathComponent("../Production/course"), in: fixture.root)
+        }
+        #expect(throws: SessionStoreError.self) {
+            try PreviewDataIsolation.requireContained(URL(string: "https://example.invalid/course")!, in: fixture.root)
+        }
+    }
+
+    @Test func refusesDirectoryAndFileSymlinksToProduction() throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        let original = fixture.production.appendingPathComponent("snapshot.json")
+        let bytes = Data("production canary".utf8)
+        try bytes.write(to: original)
+        let alias = fixture.root.appendingPathComponent("Course")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture.production)
+        #expect(throws: SessionStoreError.self) {
+            try PreviewDataIsolation.requireContained(alias.appendingPathComponent("snapshot.json"), in: fixture.root)
+        }
+        let fileAlias = fixture.root.appendingPathComponent("queue.json")
+        try FileManager.default.createSymbolicLink(at: fileAlias, withDestinationURL: original)
+        #expect(throws: SessionStoreError.self) {
+            try PreviewDataIsolation.requireContained(fileAlias, in: fixture.root)
+        }
+        let course = fixture.root.appendingPathComponent("NestedCourse", isDirectory: true)
+        try FileManager.default.createDirectory(at: course, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: course.appendingPathComponent("snapshot.json"), withDestinationURL: original)
+        #expect(throws: SessionStoreError.self) {
+            try PreviewDataIsolation.requireTreeContained(course, in: fixture.root)
+        }
+        #expect(try Data(contentsOf: original) == bytes)
+    }
+
+    @Test func refusesRedirectedPreviewRoot() throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        let alias = fixture.base.appendingPathComponent("RedirectedPreview")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture.production)
+        #expect(throws: SessionStoreError.self) {
+            try PreviewDataIsolation.requireContained(alias.appendingPathComponent("queue.json"), in: alias)
+        }
+    }
+
+    #if LIVELINGO_PREVIEW
+    @Test func previewSessionStoreRefusesOutsideReadsAndWrites() throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        let canary = fixture.production.appendingPathComponent("bilingual.jsonl")
+        let bytes = Data("production course must remain untouched".utf8)
+        try bytes.write(to: canary)
+        let store = SessionStore(directory: fixture.production)
+        #expect(throws: SessionStoreError.self) { try store.load() }
+        #expect(throws: SessionStoreError.self) { try store.save(SessionSnapshot()) }
+        #expect(throws: SessionStoreError.self) { try SessionDirectoryIdentity.resolve(directory: fixture.production) }
+        #expect(try Data(contentsOf: canary) == bytes)
+        #expect(!FileManager.default.fileExists(atPath: fixture.production.appendingPathComponent(".session-store.lock").path))
+    }
+
+    @Test func previewMigrationRefusesOutsideSourceAndDestination() throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        let canary = fixture.production.appendingPathComponent("recording.wav")
+        let bytes = Data("synthetic production audio".utf8)
+        try bytes.write(to: canary)
+        let destination = fixture.root.appendingPathComponent("Moved")
+        #expect(throws: SessionStoreError.self) {
+            try SessionTreeMigration.copyVerified(from: fixture.production, to: destination)
+        }
+        #expect(try Data(contentsOf: canary) == bytes)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+    }
+    #endif
+}
+
 struct SessionStoreTests {
     private struct Fixture {
         let root: URL

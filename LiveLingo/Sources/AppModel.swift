@@ -5,6 +5,81 @@ import Foundation
 import OSLog
 @preconcurrency import Translation
 
+/// Preview-only callers use this policy even when the executable has no sandbox.
+/// Kept independent of process environment so inherited CLI overrides cannot
+/// redirect a Finder-launched preview into production preferences or courses.
+enum PreviewDataIsolation {
+    static let bundleIdentifier = "com.jianhongli.LiveLingo.preview"
+
+    static var dataDirectory: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let root = support.appendingPathComponent("LiveLingoPreview", isDirectory: true)
+        precondition(root == root.resolvingSymlinksInPath(), "Preview data root must not be a symbolic link")
+        return root
+    }
+
+    static var coursesDirectory: URL { dataDirectory.appendingPathComponent("Courses", isDirectory: true) }
+    static var temporaryDirectory: URL { dataDirectory.appendingPathComponent("Temporary", isDirectory: true) }
+
+    static func requireContained(_ url: URL, in root: URL) throws {
+        let requestedRoot = root.standardizedFileURL
+        let resolvedRoot = requestedRoot.resolvingSymlinksInPath()
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard url.isFileURL, root.isFileURL,
+              requestedRoot == resolvedRoot,
+              resolved.pathComponents.starts(with: resolvedRoot.pathComponents) else {
+            throw SessionStoreError.invalidState("预览版只允许访问自己的数据目录；请使用预览版内创建的课程。")
+        }
+    }
+
+    static func requireCourseDirectory(_ url: URL) throws {
+        try requireTreeContained(url, in: coursesDirectory)
+    }
+
+    /// Check payload links before a store reads files beneath an allowed root.
+    /// Enumeration does not follow directory links or read course contents.
+    static func requireTreeContained(_ url: URL, in root: URL) throws {
+        try requireContained(url, in: root)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return }
+        var enumerationError: Error?
+        guard let entries = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil,
+            errorHandler: { _, error in enumerationError = error; return false }) else {
+            throw SessionStoreError.invalidState("无法检查预览版课程目录，已停止访问。")
+        }
+        for case let entry as URL in entries {
+            try requireContained(entry, in: root)
+        }
+        if let enumerationError { throw enumerationError }
+    }
+
+    static func requireSessionDirectory(_ url: URL) throws {
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+        if resolved.deletingLastPathComponent() == temporaryDirectory,
+           resolved.lastPathComponent.hasPrefix(SessionWorkspace.temporaryPrefix),
+           UUID(uuidString: String(resolved.lastPathComponent.dropFirst(SessionWorkspace.temporaryPrefix.count))) != nil {
+            try requireTreeContained(url, in: temporaryDirectory)
+        } else {
+            try requireCourseDirectory(url)
+        }
+    }
+
+    static func makeCoursesDirectory() throws -> URL {
+        let directory = coursesDirectory
+        try requireCourseDirectory(directory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    static func dataURL(_ relativePath: String) throws -> URL {
+        let url = dataDirectory.appendingPathComponent(relativePath)
+        try requireContained(url, in: dataDirectory)
+        return url
+    }
+}
+
 enum AppRuntimeEnvironment {
     static var isUnitTesting: Bool {
         let env = ProcessInfo.processInfo.environment
@@ -12,6 +87,11 @@ enum AppRuntimeEnvironment {
     }
 
     @MainActor static var preferences: UserDefaults {
+        #if LIVELINGO_PREVIEW
+        precondition(Bundle.main.bundleIdentifier == PreviewDataIsolation.bundleIdentifier,
+                     "Preview builds require their own bundle identifier")
+        return .standard
+        #else
         guard let suite = ProcessInfo.processInfo.environment["LIVELINGO_PREFERENCES_SUITE"] else { return .standard }
         precondition(!suite.isEmpty && suite.utf8.count <= 180 && suite.allSatisfy {
             $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_"
@@ -20,6 +100,7 @@ enum AppRuntimeEnvironment {
             preconditionFailure("The configured preference domain is unavailable")
         }
         return defaults
+        #endif
     }
 }
 
@@ -1147,6 +1228,10 @@ final class AppModel: ObservableObject {
             } catch { self.reviewQueueNotice = error.localizedDescription }
         }
         pipeline.update(profile: effectiveProfile)
+        #if LIVELINGO_PREVIEW
+        do { outputDirectory = try PreviewDataIsolation.makeCoursesDirectory() }
+        catch { archiveError = error.localizedDescription }
+        #endif
         guard backgroundServicesEnabled else { return }
         refreshPermissionLabels()
         refreshSummaryConcurrency()
@@ -1223,6 +1308,14 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func chooseOutputDirectory() async -> URL? {
+        #if LIVELINGO_PREVIEW
+        do {
+            let directory = try PreviewDataIsolation.makeCoursesDirectory()
+            outputDirectory = directory
+            sessionNotice = "预览版课程只保存在自己的 Courses 目录中。"
+            return directory
+        } catch { archiveError = error.localizedDescription; return nil }
+        #else
         let panel = NSOpenPanel()
         panel.title = "选择会话保存目录"
         panel.prompt = "选择"
@@ -1243,6 +1336,7 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+        #endif
     }
 
     func convertCurrentSessionToRecording() async {
@@ -1323,6 +1417,10 @@ final class AppModel: ObservableObject {
 
     private func importMediaFile(_ fileURL: URL) async {
         guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
+        #if LIVELINGO_PREVIEW
+        do { try PreviewDataIsolation.requireCourseDirectory(fileURL) }
+        catch { archiveError = error.localizedDescription; return }
+        #endif
         if outputDirectory == nil { await chooseOutputDirectory() }
         guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
         guard let outputDirectory else { return }
@@ -1513,6 +1611,10 @@ final class AppModel: ObservableObject {
         panel.allowedContentTypes = [format.contentType]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
+        #if LIVELINGO_PREVIEW
+        panel.directoryURL = PreviewDataIsolation.coursesDirectory
+        panel.message += " · 预览版只允许导出到自己的 Courses 目录"
+        #endif
         FilePanelPresentation.begin(panel) { [weak self] response in
             Task { @MainActor in
                 guard response == .OK, let url = panel.url, let self else { return }
@@ -1528,6 +1630,9 @@ final class AppModel: ObservableObject {
         Task.detached(priority: .userInitiated) {
             let message: String
             do {
+                #if LIVELINGO_PREVIEW
+                try PreviewDataIsolation.requireCourseDirectory(url)
+                #endif
                 try NotesExportDocument.write(snapshot, format: format, to: url, converter: converter)
                 let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
                 let reviewNotice = snapshot.includesReviewAdvice && snapshot.reviewMarkdown == nil
@@ -1768,6 +1873,10 @@ final class AppModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
+        #if LIVELINGO_PREVIEW
+        panel.directoryURL = PreviewDataIsolation.coursesDirectory
+        panel.message = "只打开预览版 Courses 目录里的课程；不会读取正式版课程。"
+        #endif
         FilePanelPresentation.begin(panel) { [weak self] response in
             Task { @MainActor in
                 guard response == .OK, let directory = panel.url, let self else { return }
@@ -1786,6 +1895,9 @@ final class AppModel: ObservableObject {
     /// Only the explicit CLI reopen path calls this overload with the opt-in.
     private func openSavedSession(_ directory: URL, allowAutomaticProcessing: Bool,
                                   allowUnreleasedChineseOutput: Bool) async throws {
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireCourseDirectory(directory)
+        #endif
         guard !phase.isBusy, !archiveLoading else { return }
         archiveLoading = true
         defer { archiveLoading = false }

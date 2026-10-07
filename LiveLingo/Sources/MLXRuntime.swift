@@ -139,8 +139,15 @@ actor MLXRuntime {
 
     private static func paths(_ model: String) throws -> (URL, URL, URL, URL) {
         guard let relative = relativeModels[model] else { throw QwenRuntimeError.modelUnavailable(model) }
-        let env = ProcessInfo.processInfo.environment
         let resources = Bundle.main.resourceURL ?? Bundle.main.bundleURL
+        #if LIVELINGO_PREVIEW
+        // Never inherit production CLI paths, including its checkpoint root.
+        let python = resources.appendingPathComponent("LanguageRuntime/python/bin/python3")
+        let script = resources.appendingPathComponent("LanguageRuntime/worker.py")
+        let models = resources.appendingPathComponent("Models")
+        let state = try PreviewDataIsolation.dataURL("LanguageRuntime/Checkpoints")
+        #else
+        let env = ProcessInfo.processInfo.environment
         let python = env["LIVELINGO_MLX_PYTHON"].map { URL(fileURLWithPath: $0) }
             ?? resources.appendingPathComponent("LanguageRuntime/python/bin/python3")
         let script = env["LIVELINGO_MLX_WORKER"].map { URL(fileURLWithPath: $0) }
@@ -151,6 +158,7 @@ actor MLXRuntime {
                                                   appropriateFor: nil, create: true)
         let state = env["LIVELINGO_MLX_STATE"].map { URL(fileURLWithPath: $0) }
             ?? support.appendingPathComponent("LiveLingo/LanguageRuntime/Checkpoints")
+        #endif
         return (python, script, models.appendingPathComponent(relative),
                 state.appendingPathComponent(model == "qwen3.5-4b-mlx" ? "4b" : "9b"))
     }

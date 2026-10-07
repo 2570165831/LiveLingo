@@ -162,7 +162,9 @@ struct LiveLingoApp: App {
                 ContentView()
                     .environmentObject(model)
                     .background(FullScreenMainWindowRegistration())
+                    #if !LIVELINGO_PREVIEW
                     .task { await ASRRuntime.shared.warmUp() }
+                    #endif
             } else {
                 EmptyView()
             }

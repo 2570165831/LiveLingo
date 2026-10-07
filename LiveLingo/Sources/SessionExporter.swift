@@ -21,11 +21,21 @@ enum SessionWorkspace {
     static let temporaryPrefix = "LiveLingo-Live-"
     static let recordingFileName = "recording.wav"
 
+    static func temporaryRoot(fileManager: FileManager = .default) throws -> URL {
+        #if LIVELINGO_PREVIEW
+        let root = try PreviewDataIsolation.dataURL("Temporary")
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+        #else
+        return fileManager.temporaryDirectory
+        #endif
+    }
+
     static func makeTemporarySessionDirectory(
         fileManager: FileManager = .default,
         identifier: UUID = UUID()
     ) throws -> URL {
-        let directory = fileManager.temporaryDirectory.appendingPathComponent(
+        let directory = try temporaryRoot(fileManager: fileManager).appendingPathComponent(
             temporaryPrefix + identifier.uuidString,
             isDirectory: true
         )
@@ -101,7 +111,7 @@ enum SessionWorkspace {
         fileManager: FileManager
     ) throws {
         let resolvedDirectory = directory.standardizedFileURL.resolvingSymlinksInPath()
-        let resolvedRoot = fileManager.temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedRoot = try temporaryRoot(fileManager: fileManager).standardizedFileURL.resolvingSymlinksInPath()
         guard resolvedDirectory.deletingLastPathComponent() == resolvedRoot,
               resolvedDirectory.lastPathComponent.hasPrefix(temporaryPrefix)
         else {

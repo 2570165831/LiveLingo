@@ -208,8 +208,13 @@ struct ContentView: View {
 
     /// The window title names the current lesson; the app name stays in the menu bar.
     private var windowTitle: String {
+        #if LIVELINGO_PREVIEW
+        if case .saved(let directory) = model.phase { return "LiveLingo 预览版 · " + directory.lastPathComponent }
+        return "LiveLingo 预览版 · 实时课堂"
+        #else
         if case .saved(let directory) = model.phase { return directory.lastPathComponent }
         return "实时课堂"
+        #endif
     }
 
     /// Recording, pause, adjacent floating-caption controls, and 更多.

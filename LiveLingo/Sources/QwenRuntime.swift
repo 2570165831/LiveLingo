@@ -673,11 +673,15 @@ enum QwenASRClient {
     /// own loopback service. There is no fixed-port fallback: without this
     /// override, or a runtime the app started itself, requests fail.
     private static var endpointOverride: URL? {
+        #if LIVELINGO_PREVIEW
+        return nil
+        #else
         guard let raw = ProcessInfo.processInfo.environment["LIVELINGO_ASR_ENDPOINT"] else { return nil }
         guard let url = URL(string: raw), url.scheme == "http", url.host == "127.0.0.1", url.port != nil else {
             preconditionFailure("Invalid isolated ASR endpoint")
         }
         return url
+        #endif
     }
 
     /// Resolves the endpoint to use and starts the bundled service when needed.

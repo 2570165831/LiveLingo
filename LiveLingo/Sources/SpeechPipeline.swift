@@ -522,7 +522,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             root = recordingURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         } else {
-            root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-ASR-" + id.uuidString)
+            root = try SessionWorkspace.temporaryRoot().appendingPathComponent("LiveLingo-ASR-" + id.uuidString)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         }
         stateLock.withLock {
@@ -2560,7 +2560,7 @@ enum WAVContextClip {
         let completeFrames = data.count / layout.blockAlign
         guard completeFrames > 0 else { throw ClipError.rangeNotWrittenYet }
         let payload = data.prefix(completeFrames * layout.blockAlign)
-        let url = FileManager.default.temporaryDirectory
+        let url = try SessionWorkspace.temporaryRoot()
             .appendingPathComponent("LiveLingo-retry-\(UUID().uuidString).wav")
         try write(payload: payload, layout: layout, to: url)
         return url
