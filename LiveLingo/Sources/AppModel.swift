@@ -2431,7 +2431,9 @@ final class AppModel: ObservableObject {
             let target = captionTarget
             let policy = target.sourcePolicy(for: segment.sourceLanguage)
             let sourceOnly = policy.keepsSourceAsCaption
-            if sourceOnly { segment.completeTranslation(target.renderPassThrough(segment.english)) }
+            if sourceOnly { segment.completeTranslation(target.renderPassThrough(segment.english), targetCode: target.rawValue) }
+            segment.updateCaptionAnnotation(targetCode: target.rawValue,
+                formulaUncertain: policy.usesEnglishTranslationPipeline && FormulaASRReview.uncertain(segment.english))
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
             volatileEnglish = ""
             markCaptionActivity()
@@ -2975,7 +2977,9 @@ final class AppModel: ObservableObject {
                           !self.processingPaused else { return }
                     guard let currentIndex = self.translationInputIndex(input, session: currentSession,
                         epoch: currentGeneration, worker: workerID) else { continue }
-                    self.segments[currentIndex].completeTranslation(chinese)
+                    self.segments[currentIndex].completeTranslation(chinese, targetCode: target.rawValue)
+                    self.segments[currentIndex].updateCaptionAnnotation(targetCode: target.rawValue,
+                        formulaUncertain: (sourceLanguage == nil || sourceLanguage == "en") && FormulaASRReview.uncertain(normalizedInput))
                     self.noteSuccessfulCaptionTranslation(id)
                     self.liveChinese = chinese
                     Self.traceTranslation(previousIndex == nil ? "complete" : "complete_adjacent", id: id,
@@ -3044,7 +3048,9 @@ final class AppModel: ObservableObject {
                         Self.traceTranslation("complete_after_retry", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started,
                                               detail: reason.rawValue)
-                        self.segments[currentIndex].completeTranslation(accepted)
+                        self.segments[currentIndex].completeTranslation(accepted, targetCode: target.rawValue)
+                        self.segments[currentIndex].updateCaptionAnnotation(targetCode: target.rawValue,
+                            formulaUncertain: (sourceLanguage == nil || sourceLanguage == "en") && FormulaASRReview.uncertain(normalizedInput))
                         self.noteSuccessfulCaptionTranslation(id)
                         self.liveChinese = accepted
                     } else {
@@ -3052,6 +3058,7 @@ final class AppModel: ObservableObject {
                                               elapsed: ProcessInfo.processInfo.systemUptime - started,
                                               detail: reason.rawValue)
                         self.segments[currentIndex].finishFailedTranslation()
+                        self.segments[currentIndex].updateCaptionAnnotation(targetCode: target.rawValue)
                         if transportFailuresOnly, !self.rescuedTransportCaptionIDs.contains(id) {
                             self.failedTransportCaptions[id] = (input, self.captionTranslationSuccessCount)
                         }

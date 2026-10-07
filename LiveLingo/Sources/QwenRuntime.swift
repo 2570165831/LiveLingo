@@ -1505,7 +1505,7 @@ enum QwenTranslationClient {
         let candidate = nonEnglish ? target.normalize(output) : output
         let accepted = try TranslationAcceptance.validated(candidate, source: text, sourceLanguage: sourceLanguage,
                                                            target: target)
-        return !nonEnglish && FormulaASRReview.uncertain(text) ? TranslationAcceptance.formulaNotice + accepted : accepted
+        return target == .simplifiedChinese && !nonEnglish && FormulaASRReview.uncertain(text) ? TranslationAcceptance.formulaNotice + accepted : accepted
     }
 
     typealias AdjacentRequest = @Sendable (_ input: String, _ systemPrompt: String, _ maximumOutputTokens: Int) async throws -> String
@@ -1703,7 +1703,7 @@ enum QwenTranslationClient {
             currentOutput = ""
             requestRejection = reason
         }
-        let currentTranslation = (FormulaASRReview.uncertain(boundaryInput) ? TranslationAcceptance.formulaNotice : "")
+        let currentTranslation = (target == .simplifiedChinese && FormulaASRReview.uncertain(boundaryInput) ? TranslationAcceptance.formulaNotice : "")
             + protectedCurrent.restore(in: currentOutput)
         try Task.checkCancellation()
         // 2026-09-19（**根因修复 ①** ✓）：这次调用把 `context` 与 `previous` 一起当 `before` 交给模型 ✗，

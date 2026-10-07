@@ -1897,12 +1897,16 @@ private struct TranscriptCaptionRow: View, Equatable {
                     sourceText(caption.primaryText)
                 }
 
+                if let notice = segment.annotationText(targetCode: target.rawValue),
+                   segment.captionAnnotation == .formulaNeedsReview {
+                    Text(notice).font(.caption).foregroundStyle(.secondary)
+                }
                 if caption.isSourceOnly {
                     EmptyView()
                 } else if segment.translationState == .pending || segment.translationState == .translating {
                     PendingCaptionTranslation(stream: stream, segmentID: segment.id, textSize: textSize)
                 } else {
-                    Text(markdown: segment.displayChinese)
+                    Text(markdown: target.profile.script == .han ? segment.displayChinese : SessionExporter.targetLine(segment, outputLanguage: target))
                         .font(.system(size: textSize))
                         .lineSpacing(7)
                         .foregroundStyle(.primary)

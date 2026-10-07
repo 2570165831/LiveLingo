@@ -5,6 +5,11 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         case pending, translating, completed, failed
     }
 
+    /// Application notices stay outside generated prose for non-Chinese targets.
+    enum CaptionAnnotation: String, Codable, Sendable {
+        case formulaNeedsReview, translationPending, translationIncomplete
+    }
+
     /// Metadata only. Never derive a category from an error's free-form text.
     enum TranslationFailureReason: String, Codable, CaseIterable, Sendable {
         case processExited, requestTimedOut, outputLimitReached, translationRejected
@@ -77,6 +82,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     /// Absent on the normal path and ignored by 0.2.0. Successful retries keep
     /// the trail, so intermittent failures remain diagnosable after saving.
     private(set) var translationFailures: [TranslationFailure] = []
+    private(set) var captionAnnotation: CaptionAnnotation?
 
     init(
         id: UUID = UUID(),
@@ -141,6 +147,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             && left.translationState == right.translationState && left.translationError == right.translationError
             && left.translationFailures == right.translationFailures
             && left.sourceLanguage == right.sourceLanguage
+            && left.captionAnnotation == right.captionAnnotation
     }
 
     /// One rendering rule for saved transcripts, the classroom and all exports.
@@ -158,8 +165,30 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         translationError = nil
     }
 
-    mutating func completeTranslation(_ text: String) {
-        chinese = text
+    mutating func completeTranslation(_ text: String, targetCode: String = "zh-Hans") {
+        let usesAnnotations = !targetCode.hasPrefix("zh")
+        let formulaNotice = text.hasPrefix(TranslationAcceptance.formulaNotice)
+        chinese = usesAnnotations ? TranslationAcceptance.bodyWithoutApplicationNotice(text) : text
+        updateCaptionAnnotation(targetCode: targetCode, formulaUncertain: formulaNotice)
+    }
+
+    mutating func updateCaptionAnnotation(targetCode: String, formulaUncertain: Bool = false) {
+        guard !targetCode.hasPrefix("zh") else { return }
+        switch translationState {
+        case .pending, .translating: captionAnnotation = .translationPending
+        case .failed: captionAnnotation = .translationIncomplete
+        case .completed:
+            captionAnnotation = formulaUncertain ? .formulaNeedsReview : nil
+        }
+    }
+
+    func annotationText(targetCode: String) -> String? {
+        switch captionAnnotation {
+        case .formulaNeedsReview: return ClassroomFixedText.formulaNeedsReview.text(targetCode: targetCode)
+        case .translationPending: return ClassroomFixedText.pendingTranslation.text(targetCode: targetCode)
+        case .translationIncomplete: return ClassroomFixedText.failedAgainstSource.text(targetCode: targetCode)
+        case nil: return nil
+        }
     }
 
     mutating func failTranslation(_ error: String) {
@@ -209,7 +238,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, sessionID, inputRevision, startTime, endTime, english, chinese, translationState, translationError, sourceLanguage
-        case translationFailures
+        case translationFailures, captionAnnotation
     }
 
     func encode(to encoder: Encoder) throws {
@@ -224,6 +253,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         try values.encode(translationState, forKey: .translationState)
         try values.encodeIfPresent(translationError, forKey: .translationError)
         if !translationFailures.isEmpty { try values.encode(translationFailures, forKey: .translationFailures) }
+        try values.encodeIfPresent(captionAnnotation, forKey: .captionAnnotation)
         // Preserve marker absence across the journal's encode/decode boundary;
         // otherwise an inferred zh becomes explicit and rejects an old yue revision.
         if !sourceLanguageWasInferred { try values.encodeIfPresent(sourceLanguage, forKey: .sourceLanguage) }
@@ -255,6 +285,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             translationState = storedState
             translationError = try values.decodeIfPresent(String.self, forKey: .translationError)
         }
+        captionAnnotation = try values.decodeIfPresent(CaptionAnnotation.self, forKey: .captionAnnotation)
         // This optional trail cannot make otherwise valid course content
         // unreadable. Consume entries independently so a bad one does not
         // discard its valid neighbours; core segment fields remain strict.

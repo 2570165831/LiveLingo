@@ -23,7 +23,7 @@ import Foundation
         guard manager.fileExists(atPath: sourceRoot.appendingPathComponent("Scripts/test-cli-multilingual.swift").path),
               manager.fileExists(atPath: sourceRoot.appendingPathComponent("LiveLingo/Sources/SessionExporter.swift").path)
         else { throw Failure(name: "run_from_source_root") }
-        let work = sourceRoot.appendingPathComponent("work", isDirectory: true).standardizedFileURL
+        let work = (ProcessInfo.processInfo.environment["LIVELINGO_CLI_TEST_OUTPUT_ROOT"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? sourceRoot.appendingPathComponent("work", isDirectory: true)).standardizedFileURL
         let directory = supplied.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
             ?? work.appendingPathComponent("cli-multilingual-" + UUID().uuidString, isDirectory: true)
         guard work.resolvingSymlinksInPath().path == work.path,

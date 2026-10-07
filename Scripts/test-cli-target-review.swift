@@ -93,8 +93,8 @@ struct CLITargetReviewTests {
         do {
             try expect(CommandLine.arguments.count == 2, "supply_new_evidence_directory")
             let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true).standardizedFileURL
-            let work = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("work", isDirectory: true).standardizedFileURL
+            let work = (ProcessInfo.processInfo.environment["LIVELINGO_CLI_TEST_OUTPUT_ROOT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("work", isDirectory: true)).standardizedFileURL
             try expect(root.path.hasPrefix(work.path + "/") && root.resolvingSymlinksInPath() == root,
                 "evidence_under_source_work")
             try expect(mkdir(root.path, 0o700) == 0, "new_evidence_directory_only")

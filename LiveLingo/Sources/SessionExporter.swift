@@ -207,10 +207,13 @@ enum SessionExporter {
         if outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage) {
             return segment.hasUsableTranslation ? segment.chinese : segment.english
         }
-        if segment.sourceLanguage != nil, segment.translationState == .failed {
-            return "（本段翻译未完成，可对照原文）"
+        if segment.translationState == .failed {
+            return ClassroomFixedText.failedAgainstSource.text(targetCode: outputLanguage.rawValue)
         }
-        return humanReadableChinese(segment.chinese)
+        if !segment.hasUsableTranslation {
+            return ClassroomFixedText.pendingTranslation.text(targetCode: outputLanguage.rawValue)
+        }
+        return segment.chinese
     }
 
     static func captionLines(_ segment: TranscriptSegment, outputLanguage: OutputLanguage) -> [String] {
