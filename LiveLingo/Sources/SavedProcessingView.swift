@@ -18,6 +18,21 @@ struct SavedProcessingView: View {
                     Text(model.savedProcessingStatus ?? "录音已保存，采集已停止。")
                         .font(.headline)
                         .accessibilityIdentifier("saved-processing-status")
+                    if let label = model.savedOutputLanguageLabel {
+                        Text(label).font(.callout).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("saved-course-output-language")
+                    }
+                    if model.showsChineseReadingSelector {
+                        Picker("阅读文字", selection: Binding(get: { model.chineseReadingLanguage },
+                                                            set: { model.setChineseDisplayLanguage($0) })) {
+                            ForEach(model.chineseReadingChoices) { language in
+                                Text(language.profile.autonym).tag(language)
+                            }
+                        }
+                        .accessibilityIdentifier("saved-course-reading-language")
+                        Text("切换阅读文字无需重新翻译；保存和导出仍使用课程原来的语言。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if let state = model.transcriptionProcessing {
                         Text(SavedProcessingPresentation.workSummary(state, segments: model.segments))
                             .font(.callout).foregroundStyle(.secondary)

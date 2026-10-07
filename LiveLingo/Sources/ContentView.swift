@@ -862,6 +862,18 @@ struct ClassroomSettingsView: View {
                 }
             }
             Section("字幕与处理") {
+                if model.showsOutputLanguageSelector {
+                    Picker("输出语言", selection: Binding(get: { model.newCourseOutputLanguagePreference },
+                                                        set: { model.newCourseOutputLanguagePreference = $0 })) {
+                        ForEach(model.outputLanguageChoices) { language in
+                            Text(language.profile.autonym).tag(language)
+                        }
+                    }
+                    .disabled(model.outputLanguageSelectionDisabled)
+                    .accessibilityIdentifier("new-course-output-language")
+                    Text("只对新录音和导入生效")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 Picker("质量模式", selection: $model.selectedMode) {
                     ForEach(ModelMode.allCases) { mode in
                         Text(mode.title).tag(mode)

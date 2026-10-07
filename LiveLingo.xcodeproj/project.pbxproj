@@ -118,6 +118,7 @@
 		C70900000000000000000003 /* TraditionalMarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */; };
 		C71000000000000000000001 /* TraditionalSessionExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C71000000000000000000002 /* TraditionalSessionExporterTests.swift */; };
 		C71100000000000000000001 /* TraditionalCLIRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C71100000000000000000002 /* TraditionalCLIRoutingTests.swift */; };
+		C71200000000000000000001 /* OutputLanguageSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C71200000000000000000002 /* OutputLanguageSelectionTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -247,6 +248,7 @@
 		C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraditionalMarkdownRenderingTests.swift; sourceTree = "<group>"; };
 		C71000000000000000000002 /* TraditionalSessionExporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraditionalSessionExporterTests.swift; sourceTree = "<group>"; };
 		C71100000000000000000002 /* TraditionalCLIRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraditionalCLIRoutingTests.swift; sourceTree = "<group>"; };
+		C71200000000000000000002 /* OutputLanguageSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputLanguageSelectionTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -334,6 +336,7 @@
 				C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */,
 				C71000000000000000000002 /* TraditionalSessionExporterTests.swift */,
 				C71100000000000000000002 /* TraditionalCLIRoutingTests.swift */,
+				C71200000000000000000002 /* OutputLanguageSelectionTests.swift */,
 				C70400000000000000000008 /* ZhVariantFixtures */,
 				C70400000000000000000004 /* ChineseScriptConverterTests.swift */,
 				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
@@ -527,6 +530,7 @@
 				C70900000000000000000003 /* TraditionalMarkdownRenderingTests.swift in Sources */,
 				C71000000000000000000001 /* TraditionalSessionExporterTests.swift in Sources */,
 				C71100000000000000000001 /* TraditionalCLIRoutingTests.swift in Sources */,
+				C71200000000000000000001 /* OutputLanguageSelectionTests.swift in Sources */,
 				C70400000000000000000003 /* ChineseScriptConverterTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,
 				910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */,

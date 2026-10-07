@@ -448,11 +448,11 @@ import Darwin
                 TranscriptSegment(startTime: Double(index), endTime: Double(index) + 1,
                                   english: "Synthetic restart caption \(index + 1)", sessionID: restartSession)
             }
-            try makeCourse("restart-course", captions: restartCaptions, bind: true,
+            _ = try makeCourse("restart-course", captions: restartCaptions, bind: true,
                            sessionID: restartSession, paused: true)
-            try makeCourse("unbound-course", captions: restartCaptions, bind: false,
+            _ = try makeCourse("unbound-course", captions: restartCaptions, bind: false,
                            sessionID: restartSession, paused: true)
-            try makeCourse("legacy-course", captions: restartCaptions, bind: false,
+            _ = try makeCourse("legacy-course", captions: restartCaptions, bind: false,
                            sessionID: restartSession, paused: true, legacyMarker: true)
             try expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("restart-course/.cli-runtime/run.json").path), "restart_fixture_present")
             passed.append("restart_fixtures")

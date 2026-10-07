@@ -61,7 +61,7 @@ neither direction is called correct merely because it differs.
   and 500-line synthetic conversion timings are recorded by XCTest measure,
   without a performance acceptance threshold. Native terminology review is
   still pending.
-- G8: the unsigned test App contains LICENSE/NOTICE; all eleven upstream
+- G8: the test App built with code signing disabled contains LICENSE/NOTICE; all eleven upstream
   file hashes and the project NOTICE hash match SOURCE.json. No DMG was made.
 - Initial full run failed two new fixture-path tests because Xcode copied the
   folder using its actual basename, `zh-variants-v1`. The lookup was corrected;
@@ -143,3 +143,52 @@ neither direction is called correct merely because it differs.
   Warning checker: zero. Preference cleanup: 298 created and cleaned, all
   registered plists absent. Log: `step11-xcode.log`. Python: 674 tests, six
   skipped, zero failures. G0 frozen-source diff remains empty.
+
+### Step 12
+
+- Added an autonym selector for released creation targets, hidden while only
+  one language is released and disabled during busy/import/archive work. Its
+  preference applies only to the next course. Saved labels read the course stamp.
+- Chinese reading overrides leave course snapshots, generation and export
+  targets unchanged. They respect release flags, reset between courses and
+  refuse a second conversion of legacy rendered notes. Evidence remains
+  available for a stamped regional export even while reading Simplified Chinese.
+- All eight new selector tests passed. The first focused run contained an
+  incorrect new assertion after creating the next course: normal finalization
+  changes the previous snapshot's state. The exact preference-change byte
+  assertion remains; after finalization the prior target is checked separately.
+  Log: `step12-fixed-focused-xcode.log`.
+- Final Python gate: 674 tests, six skipped, zero failures. Final CLI checks:
+  multilingual 36 groups; target review six; lifecycle 23; translation failure
+  seven; process exit/restart 20. The quality CLI passed 44 assertions over ten
+  synthetic fixtures with no real models; target acceptance accepted one
+  authored Spanish row. Process tests use synthetic files and fake workers/ASR.
+- Removed three lifecycle-test unused-return warnings with explicit discards;
+  the original assertions are unchanged. Final CLI build warning checkers: zero.
+- G1 final probe: all three upstream answer files are byte-identical in Swift
+  and Python; ten synthetic rows agree between the two implementations. Native
+  expected-answer review remains pending.
+- G8 final test App: all 16 bundled files match the source; the eleven upstream
+  file hashes and the project NOTICE match SOURCE.json. CODE_SIGNING_ALLOWED=NO
+  was used; the linker adds an ad-hoc Mach-O signature. No Developer ID signing,
+  sealed distribution bundle or DMG was produced.
+- Full final Xcode run: XCTest 1200, one skipped, zero failures; Swift Testing
+  166. Warning checker: zero. Preference cleanup: 306 created and cleaned, all
+  registered plists absent. Log: `step12-xcode.log`. The frozen-source comparison
+  against `9014439` remains empty, including the unchanged runtime directory.
+
+## Artifact closeout
+
+Six superseded CLI build folders were moved to
+`../work/dd-trad/quarantine/obsolete-cli-steps8-11` after complete inventory,
+path/volume checks, no-open-file checks and before/after content fingerprints.
+They total 121,085,106 logical bytes and 121,421,824 allocated bytes. The move
+is recoverable and on the same volume; it does not reclaim that space.
+The final CLI, prior accepted CLI and source archive hashes remain unchanged.
+
+The current test App, compatible build/module caches, final CLI entry points,
+G1 probe and offline acceptance/quality CLIs are retained for the receiving
+agent's acceptance. The step 11 final CLI is the immediate rollback; the step 4
+CLI retains the original dictionary-integration evidence. Regenerable builds
+can be retired after handoff acceptance. Per-step logs/xcresults and the exact
+upstream archive remain provenance and acceptance evidence; they were not moved.

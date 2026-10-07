@@ -527,27 +527,75 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var outputLanguage: OutputLanguage = .simplifiedChinese {
         didSet {
-            if oldValue != outputLanguage { prepareChineseDisplay() }
+            if oldValue != outputLanguage {
+                if chineseDisplayOverride != nil { chineseDisplayOverride = nil }
+                prepareChineseDisplay()
+            }
         }
     }
     @Published private(set) var chineseDisplayNotice: String?
     @Published private(set) var chineseDisplayReady = false
     private var chineseDisplayPreparationTask: Task<Void, Never>?
+    @Published private(set) var chineseDisplayOverride: OutputLanguage?
+
+    var chineseReadingLanguage: OutputLanguage { chineseDisplayOverride ?? outputLanguage }
+
+    /// This changes only reading. The stored course target, generation requests
+    /// and readable exports retain their original stamped language.
+    @discardableResult
+    func setChineseDisplayLanguage(_ language: OutputLanguage) -> Bool {
+        guard ChineseOutputDefaults.canSwitchDisplay(from: outputLanguage, to: language),
+              releasedOutputLanguage(language.rawValue) != nil,
+              !summaryIsLegacyRendered || language == outputLanguage else { return false }
+        let override = language == outputLanguage ? nil : language
+        if chineseDisplayOverride != override {
+            chineseDisplayOverride = override
+            prepareChineseDisplay()
+        }
+        return true
+    }
+
+    var showsChineseReadingSelector: Bool {
+        ChineseOutputDefaults.allowsChineseDisplaySwitch && outputLanguage.profile.script == .han
+            && outputLanguageChoices.contains(outputLanguage) && chineseReadingChoices.count > 1
+            && !summaryIsLegacyRendered
+    }
+    var chineseReadingChoices: [OutputLanguage] { outputLanguageChoices.filter { $0.profile.script == .han } }
+
+    @Published private(set) var outputLanguageChoices = OutputLanguage.released
+    var showsOutputLanguageSelector: Bool { outputLanguageChoices.count > 1 }
+    var outputLanguageSelectionDisabled: Bool { phase.isBusy || archiveLoading || isImportingFile }
+
+    /// Read only when the settings selector is visible, never while restoring
+    /// a saved course and never during model initialization.
+    var newCourseOutputLanguagePreference: OutputLanguage {
+        get { preferences.string(forKey: "LiveLingo.outputLanguage").flatMap(releasedOutputLanguage) ?? .simplifiedChinese }
+        set {
+            guard !outputLanguageSelectionDisabled, releasedOutputLanguage(newValue.rawValue) != nil else { return }
+            guard preferences.string(forKey: "LiveLingo.outputLanguage") != newValue.rawValue else { return }
+            objectWillChange.send()
+            preferences.set(newValue.rawValue, forKey: "LiveLingo.outputLanguage")
+        }
+    }
+
+    var savedOutputLanguageLabel: String? {
+        outputLanguage == .simplifiedChinese ? nil : "输出语言：" + outputLanguage.profile.autonym
+    }
 
     /// Do not let a first UI read synchronously load dictionaries. Completion
     /// publishes only for Traditional Chinese; the default redraw path is inert.
     var captionDisplayLanguage: OutputLanguage {
-        switch outputLanguage {
+        switch chineseReadingLanguage {
         case .traditionalChineseTaiwan, .traditionalChineseHongKong:
-            return chineseDisplayReady ? outputLanguage : .simplifiedChinese
-        case .simplifiedChinese, .english, .spanish, .french: return outputLanguage
+            return chineseDisplayReady ? chineseReadingLanguage : .simplifiedChinese
+        case .simplifiedChinese, .english, .spanish, .french: return chineseReadingLanguage
         }
     }
 
     private func prepareChineseDisplay() {
         chineseDisplayPreparationTask?.cancel()
         chineseDisplayPreparationTask = nil
-        let language = outputLanguage
+        let language = chineseReadingLanguage
         guard language == .traditionalChineseTaiwan || language == .traditionalChineseHongKong else {
             if chineseDisplayReady { chineseDisplayReady = false }
             if chineseDisplayNotice != nil { chineseDisplayNotice = nil }
@@ -563,7 +611,7 @@ final class AppModel: ObservableObject {
                 do { try converter.prepare(); return nil }
                 catch { return error.localizedDescription }
             }.value
-            guard !Task.isCancelled, let self, self.outputLanguage == language else { return }
+            guard !Task.isCancelled, let self, self.chineseReadingLanguage == language else { return }
             self.chineseDisplayPreparationTask = nil
             if let failure {
                 if self.chineseDisplayNotice != failure { self.chineseDisplayNotice = failure }
@@ -1395,7 +1443,7 @@ final class AppModel: ObservableObject {
     /// Frozen note evidence disambiguates schedule fields even after a later
     /// transcript repair, and when transcript export is switched off.
     var notesScheduleEvidence: [TranscriptSegment] {
-        guard outputLanguage.profile.renderer != .identity else { return [] }
+        guard outputLanguage.profile.renderer != .identity || chineseReadingLanguage.profile.renderer != .identity else { return [] }
         return learningNotebook.batches.flatMap(\.evidence) + segments
     }
 
@@ -1886,6 +1934,10 @@ final class AppModel: ObservableObject {
 
     /// 开始任意一次"课堂会话"前的状态重置：实时录音与文件导入共用。
     private func resetSessionStateForNewRun() {
+        if chineseDisplayOverride != nil {
+            chineseDisplayOverride = nil
+            prepareChineseDisplay()
+        }
         stopCandidatePlayback()
         sessionSaver = nil
         sessionSnapshot = nil
@@ -2680,9 +2732,10 @@ final class AppModel: ObservableObject {
         typedTranslationRequest = request
     }
 
-    /// Changes only the creation-time release lookup in an isolated test host.
+    /// Changes only the release lookup and selector choices in an isolated test host.
     func setReleasedOutputLanguagesForTesting(_ languages: Set<OutputLanguage>) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        outputLanguageChoices = OutputLanguage.allCases.filter(languages.contains)
         releasedOutputLanguage = { locale in
             guard let language = OutputLanguage(rawValue: locale), languages.contains(language) else { return nil }
             return language
