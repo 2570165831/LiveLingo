@@ -38,16 +38,28 @@ struct CaptionTranslationDependencies {
     var translateSource: (String, String, String, CaptionTranslationAttempt, Update?) async throws -> String = { _, _, _, _, _ in
         throw QwenRuntimeError.requestFailed("测试必须注入原语言翻译器")
     }
+    var retrySleep: @MainActor (TimeInterval) async throws -> Void = CaptionTranslationDependencies.sleepBeforeRetry
+    var prepareRetry: @MainActor (String) async throws -> Void = { _ in }
 
-    static let live = Self(
-        translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, attempt: $3, onUpdate: $4) },
-        adjacent: { try await QwenTranslationClient.translateAdjacent(previous: $0, previousChinese: $1,
-            current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6, onCurrent: $7, deferRepair: $8) },
-        repair: { try await QwenTranslationClient.repairPreviousCaption(previous: $0.previous.english,
-            previousChinese: $0.previous.chinese, current: $0.normalizedCurrent,
-            context: DeferredCaptionRepair.englishContext($0.context), modelName: $0.modelName) },
-        translateSource: sourceTranslator()
-    )
+    nonisolated private static func sleepBeforeRetry(_ seconds: TimeInterval) async throws {
+        try await Task.sleep(for: .seconds(seconds))
+    }
+
+    static let live: Self = makeLive()
+
+    private static func makeLive() -> Self {
+        let source = sourceTranslator()
+        var dependencies = Self(
+            translate: { try await QwenTranslationClient.translate($0, modelName: $1, hints: $2, attempt: $3, onUpdate: $4) },
+            adjacent: { try await QwenTranslationClient.translateAdjacent(previous: $0, previousChinese: $1,
+                current: $2, context: $3, modelName: $4, repairPrevious: $5, currentHints: $6, onCurrent: $7, deferRepair: $8) },
+            repair: { try await QwenTranslationClient.repairPreviousCaption(previous: $0.previous.english,
+                previousChinese: $0.previous.chinese, current: $0.normalizedCurrent,
+                context: DeferredCaptionRepair.englishContext($0.context), modelName: $0.modelName) },
+            translateSource: source)
+        dependencies.prepareRetry = { try await MLXRuntime.shared.finishRetirementBeforeRetry($0) }
+        return dependencies
+    }
     static let unavailable = Self(
         translate: { _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") },
         adjacent: { _, _, _, _, _, _, _, _, _ in throw QwenRuntimeError.requestFailed("测试必须注入翻译器") }
@@ -704,6 +716,9 @@ final class AppModel: ObservableObject {
     /// 苹果初译（预览）的时序日志：只记毫秒/计数，绝不记正文。
     private static let previewLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "PreviewLatency")
     private var translationWorker: Task<Void, Never>?
+    #if LIVELINGO_CLI
+    private var translationFailureReporter: (([String: Any]) -> Void)?
+    #endif
     private var summaryTask: Task<Void, Never>?
     private var stopOverlapStarted = false
     private var summaryScheduleTask: Task<Void, Never>?
@@ -1558,6 +1573,7 @@ final class AppModel: ObservableObject {
         pendingCaptionRepairs = snapshot.processing.pendingCaptionRepairs ?? []
         segments = snapshot.segments
         for index in segments.indices where segments[index].translationState == .translating {
+            segments[index].recordTranslationFailure(.interrupted)
             segments[index].deferTranslation()
         }
         learningNotebook = notebook
@@ -2631,6 +2647,20 @@ final class AppModel: ObservableObject {
                 }
                 let input = self.segments[index]
                 defer {
+                    // Returning an owned, interrupted caption is independent of
+                    // Task.isCancelled; translationInputIndex deliberately rejects
+                    // cancelled publishers. Never touch a replaced input/session.
+                    if Task.isCancelled, currentGeneration == self.generation,
+                       currentSession == self.sessionID, self.translationWorkerID == workerID,
+                       let currentIndex = self.segments.firstIndex(where: {
+                           $0.id == input.id && $0.inputRevision == input.inputRevision
+                               && $0.english == input.english && $0.sourceLanguage == input.sourceLanguage
+                       }), self.segments[currentIndex].translationState == .translating {
+                        self.recordCaptionTranslationFailure(.cancelled, at: currentIndex)
+                        self.segments[currentIndex].deferTranslation()
+                        if !self.translationQueue.contains(id) { self.translationQueue.append(id) }
+                        self.persistCurrentSession()
+                    }
                     if currentGeneration == self.generation, currentSession == self.sessionID,
                        self.translationWorkerID == workerID,
                        !self.translationQueue.contains(id) {
@@ -2796,16 +2826,15 @@ final class AppModel: ObservableObject {
                     self.liveChinese = chinese
                     Self.traceTranslation(previousIndex == nil ? "complete" : "complete_adjacent", id: id,
                                           elapsed: ProcessInfo.processInfo.systemUptime - started)
-                } catch is CancellationError {
-                    break
                 } catch {
                     guard !Task.isCancelled, currentGeneration == self.generation,
                           currentSession == self.sessionID, self.translationWorkerID == workerID,
                           !self.processingPaused else { break }
-                    guard self.translationInputIndex(input, session: currentSession,
-                        epoch: currentGeneration, worker: workerID) != nil else { continue }
+                    guard let failureIndex = self.translationInputIndex(input, session: currentSession,
+                        epoch: currentGeneration, worker: workerID) else { continue }
                     self.reviewConcurrency.observe(elapsed: 0, successful: false)
-                    var reason = error.localizedDescription
+                    var reason = TranscriptSegment.TranslationFailureReason.category(for: error)
+                    self.recordCaptionTranslationFailure(reason, at: failureIndex)
                     var recovered: String?
                     // One bounded recovery, owned by the same caption revision.
                     // Content failures change instructions; output-limit failures
@@ -2815,9 +2844,26 @@ final class AppModel: ObservableObject {
                         Self.traceTranslation("retry_\(attempt.rawValue)", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started)
                         do {
+                            let delay = CaptionTranslationAttempt.retryDelay(for: error)
+                            if delay > 0 {
+                                try await self.captionTranslation.retrySleep(delay)
+                                try Task.checkCancellation()
+                                guard self.translationInputIndex(input, session: currentSession,
+                                    epoch: currentGeneration, worker: workerID) != nil else { continue }
+                                try await self.captionTranslation.prepareRetry(translationModel)
+                            }
+                            try Task.checkCancellation()
+                            guard self.translationInputIndex(input, session: currentSession,
+                                epoch: currentGeneration, worker: workerID) != nil else { continue }
                             recovered = try await self.captionTranslation.translateCaption(
                                 protectedInput.text, translationModel, hints, attempt, nil, sourceLanguage: sourceLanguage)
-                        } catch { reason = error.localizedDescription }
+                            try Task.checkCancellation()
+                        } catch {
+                            guard !Task.isCancelled, let currentIndex = self.translationInputIndex(input,
+                                session: currentSession, epoch: currentGeneration, worker: workerID) else { continue }
+                            reason = TranscriptSegment.TranslationFailureReason.category(for: error)
+                            self.recordCaptionTranslationFailure(reason, at: currentIndex)
+                        }
                     }
                     guard !Task.isCancelled, currentGeneration == self.generation,
                           currentSession == self.sessionID, self.translationWorkerID == workerID,
@@ -2832,21 +2878,25 @@ final class AppModel: ObservableObject {
                                 : CaptionTranslationTarget.current.normalize(restored)
                             accepted = try TranslationAcceptance.validatedCaption(
                                 normalized, source: normalizedInput, sourceLanguage: sourceLanguage)
-                        } catch { reason = error.localizedDescription }
+                        } catch {
+                            reason = TranscriptSegment.TranslationFailureReason.category(for: error)
+                            self.recordCaptionTranslationFailure(reason, at: currentIndex)
+                        }
                     }
                     if let accepted {
                         Self.traceTranslation("complete_after_retry", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started,
-                                              detail: reason)
+                                              detail: reason.rawValue)
                         self.segments[currentIndex].completeTranslation(accepted)
                         self.liveChinese = accepted
                     } else {
                         Self.traceTranslation("failed", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started,
-                                              detail: reason)
-                        self.segments[currentIndex].failTranslation(reason)
+                                              detail: reason.rawValue)
+                        self.segments[currentIndex].finishFailedTranslation()
                         self.liveChinese = self.segments[currentIndex].displayChinese
                     }
+                    self.persistCurrentSession()
                 }
                 guard !Task.isCancelled, currentGeneration == self.generation else { return }
                 self.translatingSegmentID = nil
@@ -2874,6 +2924,16 @@ final class AppModel: ObservableObject {
     private static func traceStop(_ stage: String, since start: TimeInterval) {
         let milliseconds = Int(max(0, ProcessInfo.processInfo.systemUptime - start) * 1_000)
         latencyLog.notice("stop stage=\(stage, privacy: .public) elapsed_ms=\(milliseconds)")
+    }
+
+    private func recordCaptionTranslationFailure(_ reason: TranscriptSegment.TranslationFailureReason, at index: Int) {
+        segments[index].recordTranslationFailure(reason)
+        let count = segments[index].translationFailures.last!.count
+        Self.latencyLog.notice("caption_failure reason=\(reason.rawValue, privacy: .public) count=\(count)")
+        #if LIVELINGO_CLI
+        translationFailureReporter?(["translationFailureReason": reason.rawValue, "translationFailureCount": count])
+        #endif
+        persistCurrentSession()
     }
 
     private func startStopOverlapIfUseful() {
@@ -4316,6 +4376,8 @@ extension AppModel {
                 paced: Bool = true, exportNotes: Bool = false, runReview: Bool = false,
                 report: @escaping @MainActor (String, [String: Any]) -> Void) async throws {
         resetSessionStateForNewRun()
+        translationFailureReporter = { report("translation_failure", $0) }
+        defer { translationFailureReporter = nil }
         effectiveProfile = highQuality ? .highQuality : .energySaver
         pipeline.update(profile: effectiveProfile)
         activeStorageMode = .saveSession
@@ -4481,6 +4543,8 @@ extension AppModel {
     /// Returns observed facts so the CLI, not the model, decides PASS.
     func cliOpenSaved(directory: URL, resume: Bool, highQuality: Bool, exportNotes: Bool, runReview: Bool,
                       report: @escaping @MainActor (String, [String: Any]) -> Void) async throws -> LiveLingoCLI.CLIObservedSession {
+        translationFailureReporter = { report("translation_failure", $0) }
+        defer { translationFailureReporter = nil }
         effectiveProfile = highQuality ? .highQuality : .energySaver
         pipeline.update(profile: effectiveProfile)
         activeStorageMode = .saveSession

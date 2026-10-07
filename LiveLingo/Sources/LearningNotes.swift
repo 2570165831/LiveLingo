@@ -1841,6 +1841,9 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
             return ReviewFailure(stage: .generation, code: "request_failed", detail: sanitized(qwen.errorDescription ?? ""))
         case .lmStudioUnavailable:
             return ReviewFailure(stage: .generation, code: "generation_failed", detail: sanitized(qwen.errorDescription ?? ""))
+        case .processExited, .runtimeUnavailable:
+            return ReviewFailure(stage: .generation, code: LearningFailureCode.code(for: qwen),
+                                 detail: qwen.errorDescription ?? "")
         case .modelUnavailable(let name):
             return ReviewFailure(stage: .generation, code: "model_unavailable", detail: "离线包缺少模型 \(name.prefix(64))")
         case .invalidResponse:
@@ -1889,7 +1892,8 @@ enum LearningFailureCode {
         switch error {
         case let error as QwenRuntimeError:
             switch error {
-            case .serviceUnavailable, .lmStudioUnavailable: return "runtime_unavailable"
+            case .serviceUnavailable, .lmStudioUnavailable, .runtimeUnavailable: return "runtime_unavailable"
+            case .processExited: return "process_exited"
             case .transcriptionTimedOut, .requestTimedOut: return "timeout"
             case .modelUnavailable: return "model_unavailable"
             case .invalidResponse: return "invalid_response"

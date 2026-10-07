@@ -1351,6 +1351,8 @@ enum QwenRuntimeError: LocalizedError {
     case translationRejected(String)
     case outputLimitReached(String)
     case requestTimedOut
+    case processExited
+    case runtimeUnavailable
 
     var preservesGenerationProgress: Bool {
         if case .generationInterrupted = self { return true }
@@ -1371,6 +1373,10 @@ enum QwenRuntimeError: LocalizedError {
             return "本机模型返回了无法识别的数据。"
         case .requestTimedOut:
             return "本机模型请求超时。"
+        case .processExited:
+            return "本机语言模型进程已退出，可重新发起请求。"
+        case .runtimeUnavailable:
+            return "内置语言模型运行库不可用，请检查完整离线包。"
         case .requestFailed(let message), .generationInterrupted(let message),
              .translationRejected(let message), .outputLimitReached(let message):
             return message
@@ -1417,13 +1423,20 @@ enum CaptionTranslationAttempt: String, Sendable {
         case .translationRejected: return .repairContent
         case .outputLimitReached: return .expandedBudget
         case .serviceUnavailable, .transcriptionTimedOut, .lmStudioUnavailable,
-             .invalidResponse, .generationInterrupted, .requestTimedOut:
+             .invalidResponse, .generationInterrupted, .requestTimedOut, .processExited:
             return .standard
-        case .modelUnavailable: return nil
+        case .modelUnavailable, .runtimeUnavailable: return nil
         // Legacy worker failures include temporary queue admission failures.
         // Preserve their bounded retry until they have a specific error code.
         case .requestFailed: return .standard
         }
+    }
+
+    /// Keep content/budget repair unchanged; transport failures get one
+    /// delayed retry rather than racing a worker still being retired.
+    static func retryDelay(for error: Error) -> TimeInterval {
+        guard recovery(for: error) == .standard else { return 0 }
+        return 1
     }
 }
 

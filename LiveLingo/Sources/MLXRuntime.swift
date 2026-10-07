@@ -154,7 +154,7 @@ actor MLXRuntime {
         let (python, script, directory, _) = try paths(model)
         guard FileManager.default.isExecutableFile(atPath: python.path),
               FileManager.default.fileExists(atPath: script.path) else {
-            throw QwenRuntimeError.requestFailed("缺少内置语言模型运行库，请重新安装完整离线包。")
+            throw QwenRuntimeError.runtimeUnavailable
         }
         guard FileManager.default.fileExists(atPath: directory.appendingPathComponent("config.json").path),
               FileManager.default.fileExists(atPath: directory.appendingPathComponent("tokenizer.json").path) else {
@@ -265,7 +265,7 @@ actor MLXRuntime {
             worker.lastActivity = ProcessInfo.processInfo.systemUptime
             if event.event == "ready" {
                 guard event.version == 2 else {
-                    throw QwenRuntimeError.requestFailed("内置语言运行库协议版本不匹配。")
+                    throw QwenRuntimeError.runtimeUnavailable
                 }
                 worker.ready = true
                 continue
@@ -317,7 +317,7 @@ actor MLXRuntime {
         for id in worker.requests {
             let message = "本机模型通信已结束，正在确认进程退出。\(details.suffix(1000))"
             streams[id]?.finish(throwing: error ?? (resumableRequests.contains(id)
-                ? QwenRuntimeError.generationInterrupted(message) : QwenRuntimeError.requestFailed(message)))
+                ? QwenRuntimeError.generationInterrupted(message) : QwenRuntimeError.processExited))
             streams[id] = nil; requestModels[id] = nil
             resumableRequests.remove(id)
             requestActivity[id] = nil
@@ -349,6 +349,41 @@ actor MLXRuntime {
         }
         if !worker.process.isRunning, retiringWorkers[model]?.id == worker.id {
             retiringWorkers[model] = nil
+        }
+    }
+
+    /// A timeout can reach its caller before the cancel acknowledgement (and
+    /// possible retirement) finishes. Settle that existing ownership first;
+    /// never unload a healthy model or touch foreign PIDs for a caption retry.
+    func finishRetirementBeforeRetry(_ model: String) async throws {
+        guard let worker = workers[model] ?? retiringWorkers[model] else { return }
+        let deadline = ProcessInfo.processInfo.systemUptime + controlTimeout + 2
+        func cancellationPending() -> Bool {
+            controls.values.contains {
+                $0.workerID == worker.id && $0.result == nil && ["cancel", "paused"].contains($0.expected)
+            }
+        }
+        while cancellationPending(), ProcessInfo.processInfo.systemUptime < deadline {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try Task.checkCancellation()
+        guard !cancellationPending() else {
+            throw QwenRuntimeError.generationInterrupted("上一个请求的取消尚未确认，暂缓翻译补试。")
+        }
+        if retiringWorkers[model]?.id == worker.id, worker.process.isRunning {
+            // The existing retirement task owns termination. The retry caller
+            // only waits, and can cancel without spinning a cancelled sleep or
+            // issuing a second termination against the same worker.
+            let exitDeadline = ProcessInfo.processInfo.systemUptime + controlTimeout + 2
+            while worker.process.isRunning, ProcessInfo.processInfo.systemUptime < exitDeadline {
+                try Task.checkCancellation()
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try Task.checkCancellation()
+            guard !worker.process.isRunning else {
+                throw QwenRuntimeError.generationInterrupted("上一个模型进程尚未退出，暂缓翻译补试。")
+            }
         }
     }
 

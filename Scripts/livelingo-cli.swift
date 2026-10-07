@@ -779,8 +779,19 @@ struct LiveLingoCLI {
  // leaking classroom text. Identifiers are parsed, never copied arbitrarily.
  static func safeEvent(_ event: String, fields: [String: Any], elapsed: TimeInterval) -> [String: Any] {
   let events: Set<String> = ["prepare", "state", "capture", "capture_ready", "review_start", "review_done",
-                             "review_skipped", "exported", "finished", "save_failed", "opened", "resumed"]
+                             "review_skipped", "exported", "finished", "save_failed", "opened", "resumed", "translation_failure"]
   var result: [String: Any] = ["event": events.contains(event) ? (event == "finished" ? "processing_finished" : event) : "progress"]
+  if event == "translation_failure" {
+   // Reject bridged booleans/numbers, arbitrary text and unrelated fields.
+   if let raw = fields["translationFailureReason"] as? String,
+      let reason = TranscriptSegment.TranslationFailureReason(rawValue: raw),
+      let rawCount = fields["translationFailureCount"], type(of: rawCount) == Int.self,
+      let count = rawCount as? Int, count > 0 {
+    result["translationFailureReason"] = reason.rawValue
+    result["translationFailureCount"] = count
+   }
+   return result
+  }
   if elapsed.isFinite && elapsed >= 0 { result["elapsedSeconds"] = elapsed }
   for key in ["segments", "translated", "summarized", "pendingTranscription", "unresolvedTranscription",
               "otherLanguageTranscription", "jobs", "bytes", "revision", "batches"] {

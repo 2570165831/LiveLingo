@@ -5,6 +5,57 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         case pending, translating, completed, failed
     }
 
+    /// Metadata only. Never derive a category from an error's free-form text.
+    enum TranslationFailureReason: String, Codable, CaseIterable, Sendable {
+        case processExited, requestTimedOut, outputLimitReached, translationRejected
+        case cancelled, interrupted, runtimeUnavailable, invalidResponse
+        case generationInterrupted, requestFailed, unknown
+
+        static func category(for error: Error) -> Self {
+            if error is CancellationError { return .cancelled }
+            if error is DecodingError { return .invalidResponse }
+            if let error = error as? URLError {
+                if error.code == .timedOut { return .requestTimedOut }
+                if error.code == .cancelled { return .cancelled }
+            }
+            if let error = error as? POSIXError, error.code == .EPIPE { return .processExited }
+            guard let error = error as? QwenRuntimeError else { return .unknown }
+            switch error {
+            case .processExited: return .processExited
+            case .transcriptionTimedOut, .requestTimedOut: return .requestTimedOut
+            case .outputLimitReached: return .outputLimitReached
+            case .translationRejected: return .translationRejected
+            case .serviceUnavailable, .lmStudioUnavailable, .modelUnavailable, .runtimeUnavailable:
+                return .runtimeUnavailable
+            case .invalidResponse: return .invalidResponse
+            case .generationInterrupted: return .generationInterrupted
+            case .requestFailed: return .requestFailed
+            }
+        }
+    }
+
+    struct TranslationFailure: Codable, Equatable, Sendable {
+        let reason: TranslationFailureReason
+        var count: Int
+
+        private enum CodingKeys: String, CodingKey { case reason, count }
+
+        init(reason: TranslationFailureReason, count: Int) {
+            self.reason = reason
+            self.count = count
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            reason = TranslationFailureReason(rawValue: try values.decode(String.self, forKey: .reason)) ?? .unknown
+            count = try values.decode(Int.self, forKey: .count)
+            guard count > 0 else {
+                throw DecodingError.dataCorruptedError(forKey: .count, in: values,
+                    debugDescription: "Invalid translation failure count")
+            }
+        }
+    }
+
     let id: UUID
     let sessionID: UUID?
     var inputRevision: Int
@@ -22,6 +73,9 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     }
     private(set) var translationState: TranslationState
     private(set) var translationError: String?
+    /// Absent on the normal path and ignored by 0.2.0. Successful retries keep
+    /// the trail, so intermittent failures remain diagnosable after saving.
+    private(set) var translationFailures: [TranslationFailure] = []
 
     init(
         id: UUID = UUID(),
@@ -63,6 +117,11 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             left.sourceLanguage = nil
             right.sourceLanguage = nil
         }
+        // A 0.2.0 revision cannot carry the optional diagnostic trail.
+        if left.translationFailures.isEmpty || right.translationFailures.isEmpty {
+            left.translationFailures = []
+            right.translationFailures = []
+        }
         return left == right
     }
 
@@ -71,6 +130,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             && left.startTime == right.startTime && left.endTime == right.endTime
             && left.english == right.english && left.chinese == right.chinese
             && left.translationState == right.translationState && left.translationError == right.translationError
+            && left.translationFailures == right.translationFailures
             && left.sourceLanguage == right.sourceLanguage
     }
 
@@ -99,6 +159,27 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         translationError = error
     }
 
+    mutating func recordTranslationFailure(_ reason: TranslationFailureReason) {
+        addTranslationFailure(reason, count: 1)
+        translationError = nil
+    }
+
+    /// Called only after recording all failed attempts. New failures never
+    /// persist an arbitrary runtime message in translationError or Chinese.
+    mutating func finishFailedTranslation() {
+        precondition(!translationFailures.isEmpty)
+        chinese = ""
+        translationState = .failed
+        translationError = nil
+    }
+
+    private mutating func addTranslationFailure(_ reason: TranslationFailureReason, count: Int) {
+        let index = translationFailures.firstIndex { $0.reason == reason }
+        let previous = index.map { translationFailures.remove(at: $0).count } ?? 0
+        let (sum, overflow) = previous.addingReportingOverflow(count)
+        translationFailures.append(.init(reason: reason, count: overflow ? Int.max : sum))
+    }
+
     mutating func deferTranslation() {
         guard translationState == .translating else { return }
         translationState = .pending
@@ -119,6 +200,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, sessionID, inputRevision, startTime, endTime, english, chinese, translationState, translationError, sourceLanguage
+        case translationFailures
     }
 
     func encode(to encoder: Encoder) throws {
@@ -132,6 +214,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         try values.encode(chinese, forKey: .chinese)
         try values.encode(translationState, forKey: .translationState)
         try values.encodeIfPresent(translationError, forKey: .translationError)
+        if !translationFailures.isEmpty { try values.encode(translationFailures, forKey: .translationFailures) }
         // Preserve marker absence across the journal's encode/decode boundary;
         // otherwise an inferred zh becomes explicit and rejects an old yue revision.
         if !sourceLanguageWasInferred { try values.encodeIfPresent(sourceLanguage, forKey: .sourceLanguage) }
@@ -162,6 +245,9 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             }
             translationState = storedState
             translationError = try values.decodeIfPresent(String.self, forKey: .translationError)
+        }
+        for failure in try values.decodeIfPresent([TranslationFailure].self, forKey: .translationFailures) ?? [] {
+            addTranslationFailure(failure.reason, count: failure.count)
         }
         if storedLanguage == nil, translationState == .completed, english == chinese,
            EnglishTranscriptGate.verdict(english) == .hanDominant {
