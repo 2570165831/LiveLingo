@@ -624,6 +624,7 @@ final class AppModel: ObservableObject {
     }
     private static let rejectedTranscriptNotice = "上一语段未获得可用转写，已跳过；正在继续识别。"
     @Published private(set) var sessionNotice: String?
+    @Published private(set) var captureHealthNotice: String?
     @Published var manualTranslationInput = ""
     @Published private(set) var manualTranslationOutput = ""
     @Published private(set) var manualTranslationStatus = "输入英文，翻译为简体中文"
@@ -980,7 +981,7 @@ final class AppModel: ObservableObject {
 
     var errorMessage: String? {
         if case .failed(let message) = phase { return message }
-        return sessionNotice ?? archiveError ?? setupError
+        return (isRecording ? captureHealthNotice : nil) ?? sessionNotice ?? archiveError ?? setupError
     }
 
     func dismissSessionNotice() {
@@ -1724,6 +1725,7 @@ final class AppModel: ObservableObject {
         summaryStatus = "等待课堂内容"
         waveformSamples = Array(repeating: .zero, count: waveformSamples.count)
         sessionNotice = nil
+        captureHealthNotice = nil
         summarizedSegmentIDs = []
         resetLearningNotes()
         lastSummarizedSegmentCount = 0
@@ -2333,6 +2335,9 @@ final class AppModel: ObservableObject {
             if let index = transcriptionCandidates.firstIndex(where: { $0.id == candidate.id }) {
                 transcriptionCandidates[index] = candidate
             } else { transcriptionCandidates.append(candidate) }
+        case .captureHealth(let notice):
+            guard notice.sessionID == sessionID else { return }
+            captureHealthNotice = notice.message
         case .captureGap(let gap):
             guard gap.sessionID == sessionID else { return }
             if sessionSnapshot?.audioRanges.contains(where: { $0.id == gap.id }) == false {
@@ -2479,6 +2484,7 @@ final class AppModel: ObservableObject {
                           observedAt: ProcessInfo.processInfo.systemUptime))
         if let chinese { previewChinese = chinese }
     }
+    var captureHealthSessionIDForTesting: UUID { sessionID }
     func receiveTranscriptionNoticeForTesting(_ event: SpeechPipeline.Event) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         consume(event)

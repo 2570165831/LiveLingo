@@ -143,6 +143,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         case processing(TranscriptionProcessingState)
         case transcriptionCandidate(TranscriptionCandidate)
         case captureGap(CaptureGap)
+        case captureHealth(CaptureHealthNotice)
         case failure(String)
         case rejectedTranscript
         case transcriptionIssue(start: TimeInterval, end: TimeInterval, message: String)
@@ -223,11 +224,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private let stateLock = NSLock()
     private let transcriptionQueue: TranscriptionQueue
-    private let systemAudioQueue = DispatchQueue(label: "LiveLingo.SystemAudioCapture")
     private let microphoneRecoveryQueue = DispatchQueue(label: "LiveLingo.MicrophoneRecovery")
     private let previewLocale = Locale(identifier: "en-US")
     private var audioEngine: (any MicrophoneCaptureEngine)?
-    private var systemAudioStream: SCStream?
+    private var systemAudioStream: (any SystemAudioCaptureSource)?
     var hasRecordedAudio: Bool { stateLock.withLock { writtenFrames > 0 && sessionRecordingURL != nil } }
     private var recordingFile: AVAudioFile?
     private var chunkFile: AVAudioFile?
@@ -237,9 +237,19 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private let audioProcessingQueue = DispatchQueue(label: "LiveLingo.AudioProcessing", qos: .userInitiated)
     private var boundarySignal: DispatchSourceUserDataAdd!
     private var ingress: OwnedAudioCaptureBuffer?
-    private var systemAudioSink: SystemAudioCaptureSink?
     private var systemRecoveryTask: Task<Void, Never>?
     private var systemRecoveryAttempts = 0
+    private var systemAudioNeedsRecovery = false
+    private var systemAudioPendingHealthIssue: CaptureHealthIssue?
+    private var systemAudioRouteRevision = 0
+    private var recordedBufferGaps: Set<UUID> = []
+    private var captureHealth: CaptureHealthState?
+    private var captureHealthWatchdogTask: Task<Void, Never>?
+    private let captureHealthEvents = DispatchQueue(label: "LiveLingo.CaptureHealthEvents")
+    static let maximumSystemAudioRecoveryAttempts = 3
+    static func systemAudioRecoveryBackoff(attempt: Int) -> TimeInterval {
+        0.25 * pow(2, Double(max(0, attempt - 1)))
+    }
     private var generation = UUID()
     private var sessionID = UUID()
     private var identifiedEvents = false
@@ -331,6 +341,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private let microphoneNotifications: NotificationCenter
     private let microphoneRecoveryScheduler: (@Sendable (@escaping @Sendable () -> Void) -> Void)?
     private let enableMicrophoneWatchdog: Bool
+    private let enableCaptureHealthWatchdog: Bool
+    private let captureUptime: @Sendable () -> TimeInterval
+    private let systemAudioSourceFactory: @Sendable () -> any SystemAudioCaptureSource
+    private let systemAudioRouteMonitor: any SystemAudioRouteMonitoring
+    private let systemAudioRecoveryDelay: @Sendable (TimeInterval) async throws -> Void
 
     init(transcriber: TranscriptionQueue.Transcriber? = nil,
          beforeAudioWrite: (@Sendable () throws -> Void)? = nil,
@@ -339,7 +354,19 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
          microphoneEngineFactory: @escaping @Sendable () -> any MicrophoneCaptureEngine = { SystemMicrophoneCaptureEngine() },
          microphoneNotifications: NotificationCenter = .default,
          microphoneRecoveryScheduler: (@Sendable (@escaping @Sendable () -> Void) -> Void)? = nil,
-         enableMicrophoneWatchdog: Bool = true) {
+         enableMicrophoneWatchdog: Bool = true,
+         enableCaptureHealthWatchdog: Bool = true,
+         captureUptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         systemAudioSourceFactory: @escaping @Sendable () -> any SystemAudioCaptureSource = { ScreenSystemAudioCaptureSource() },
+         systemAudioRouteMonitor: any SystemAudioRouteMonitoring = SystemAudioRouteMonitor(),
+         systemAudioRecoveryDelay: @escaping @Sendable (TimeInterval) async throws -> Void = {
+             try await Task.sleep(for: .seconds($0))
+         }) {
+        self.enableCaptureHealthWatchdog = enableCaptureHealthWatchdog
+        self.captureUptime = captureUptime
+        self.systemAudioSourceFactory = systemAudioSourceFactory
+        self.systemAudioRouteMonitor = systemAudioRouteMonitor
+        self.systemAudioRecoveryDelay = systemAudioRecoveryDelay
         self.microphoneEngineFactory = microphoneEngineFactory
         self.microphoneNotifications = microphoneNotifications
         self.microphoneRecoveryScheduler = microphoneRecoveryScheduler
@@ -361,15 +388,27 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
          microphoneEngineFactory: @escaping @Sendable () -> any MicrophoneCaptureEngine = { SystemMicrophoneCaptureEngine() },
          microphoneNotifications: NotificationCenter = .default,
          microphoneRecoveryScheduler: (@Sendable (@escaping @Sendable () -> Void) -> Void)? = nil,
-         enableMicrophoneWatchdog: Bool = true) {
+         enableMicrophoneWatchdog: Bool = true,
+         enableCaptureHealthWatchdog: Bool = true,
+         captureUptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         systemAudioSourceFactory: @escaping @Sendable () -> any SystemAudioCaptureSource = { ScreenSystemAudioCaptureSource() },
+         systemAudioRouteMonitor: any SystemAudioRouteMonitoring = SystemAudioRouteMonitor(),
+         systemAudioRecoveryDelay: @escaping @Sendable (TimeInterval) async throws -> Void = {
+             try await Task.sleep(for: .seconds($0))
+         }) {
         self.init(transcriber: TranscriptionQueue.englishOnly(transcriber), beforeAudioWrite: beforeAudioWrite,
                   enableAudioAnalysis: enableAudioAnalysis, captureSleepNotificationCenter: captureSleepNotificationCenter,
                   microphoneEngineFactory: microphoneEngineFactory, microphoneNotifications: microphoneNotifications,
-                  microphoneRecoveryScheduler: microphoneRecoveryScheduler, enableMicrophoneWatchdog: enableMicrophoneWatchdog)
+                  microphoneRecoveryScheduler: microphoneRecoveryScheduler, enableMicrophoneWatchdog: enableMicrophoneWatchdog,
+                  enableCaptureHealthWatchdog: enableCaptureHealthWatchdog, captureUptime: captureUptime,
+                  systemAudioSourceFactory: systemAudioSourceFactory, systemAudioRouteMonitor: systemAudioRouteMonitor,
+                  systemAudioRecoveryDelay: systemAudioRecoveryDelay)
     }
 
     deinit {
         if let captureSleepObserver { captureSleepNotificationCenter.removeObserver(captureSleepObserver) }
+        captureHealthWatchdogTask?.cancel()
+        systemAudioRouteMonitor.stop()
         boundarySignal?.cancel()
     }
 
@@ -463,7 +502,9 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             generation = token; sessionID = id; identifiedEvents = requestedID != nil
             self.eventHandler = eventHandler; capturePaused = false; isStopping = false
             terminalFailureSent = false; terminalFailureDetails = []; finalizerTask = nil; writtenFrames = 0
-            systemRecoveryAttempts = 0
+            systemRecoveryAttempts = 0; systemAudioNeedsRecovery = false; captureHealth = nil
+            systemAudioPendingHealthIssue = nil
+            systemAudioRouteRevision = 0; recordedBufferGaps = []
             sessionRecordingURL = recordingURL
             self.persistsSession = persistsSession ?? (recordingURL != nil)
             temporarySessionDirectory = recordingURL == nil ? root : nil
@@ -481,7 +522,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                eventHandler: @escaping @Sendable (Event) -> Void) async throws {
         let directory = try await beginSession(recordingURL: recordingURL, sessionID: sessionID,
             persistsSession: persistsSession, eventHandler: eventHandler)
-        stateLock.withLock { self.inputMode = inputMode }
+        stateLock.withLock {
+            self.inputMode = inputMode
+            captureHealth = CaptureHealthState(mode: inputMode, startedAt: captureUptime())
+        }
         do {
             await startStreamingPreviewIfAvailable()
             switch inputMode {
@@ -496,6 +540,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             throw error
         }
         if inputMode == .microphone { startMicrophoneHealthMonitoring() }
+        else { startSystemAudioHealthMonitoring() }
         startCaptureSleepMonitoring()
     }
 
@@ -594,34 +639,36 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private func openSystemAudioStream(generation token: UUID) async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         try Task.checkCancellation()
-        guard let display = content.displays.first else { throw PipelineError.noDisplayAvailable }
         guard stateLock.withLock({ generation == token && !isStopping }) else { throw CancellationError() }
         let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
         let input = try makeIngress(format: format)
-        let sink = SystemAudioCaptureSink(ingress: input) { [weak self] stream, error in
-            self?.scheduleSystemAudioRecovery(stream: stream, error: error, generation: token)
-        }
-        let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []),
-                              configuration: Self.systemAudioConfiguration(), delegate: sink)
-        try stream.addStreamOutput(sink, type: .audio, sampleHandlerQueue: systemAudioQueue)
+        let source = systemAudioSourceFactory()
         let accepted = stateLock.withLock { () -> Bool in
             guard generation == token && !isStopping else { return false }
-            ingress = input; systemAudioSink = sink; systemAudioStream = stream
+            ingress = input; systemAudioStream = source
             input.setPaused(capturePaused)
             return true
         }
         guard accepted else { input.seal(); throw CancellationError() }
-        do { try await stream.startCapture() }
-        catch {
+        do {
+            try await source.start(input: input) { [weak self, weak source] in
+                guard let source else { return }
+                self?.scheduleSystemAudioRecovery(source: source, generation: token)
+            }
+        } catch {
             input.seal()
-            stateLock.withLock { if systemAudioStream === stream { systemAudioStream = nil; systemAudioSink = nil } }
+            await source.stop()
+            await input.drain()
+            stateLock.withLock { if systemAudioStream === source { systemAudioStream = nil } }
             throw error
         }
-        if !stateLock.withLock({ generation == token && !isStopping && systemAudioStream === stream }) {
-            input.seal(); try? await stream.stopCapture(); throw CancellationError()
+        let running = stateLock.withLock {
+            guard generation == token, !isStopping, systemAudioStream === source else { return false }
+            captureHealth?.restart(at: captureUptime())
+            return true
         }
+        if !running { input.seal(); await source.stop(); throw CancellationError() }
     }
 
     static func systemAudioConfiguration() -> SCStreamConfiguration {
@@ -646,6 +693,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             // device change so resume can bind a fresh tap before accepting PCM.
             microphoneRecoveryRequest = nil
             microphoneHealthyWindow = nil
+            clearCaptureHealthNoticeLocked()
             return inputMode == .microphone ? audioEngine : nil
         }
         if let engine, engine.isRunning { engine.pause() }
@@ -656,7 +704,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             guard captureConfigured, !isStopping, let mode = inputMode else { return nil }
             capturePaused = false
             ingress?.setPaused(false)
-            let now = ProcessInfo.processInfo.systemUptime
+            captureHealth?.restart(at: captureUptime())
+            let now = captureUptime()
             lastAudioCallbackUptime = now
             microphoneHealthGraceStartedAt = now
             microphoneRecoveryAttempts = 0
@@ -675,7 +724,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             engine.prepare()
             try engine.start()
         case .systemAudio:
-            guard stateLock.withLock({ systemAudioStream != nil }) else { throw PipelineError.noActiveSession }
+            guard let source = stateLock.withLock({ systemAudioStream }) else { throw PipelineError.noActiveSession }
+            if stateLock.withLock({ systemAudioNeedsRecovery }) {
+                scheduleSystemAudioRecovery(source: source, generation: token)
+            }
         }
     }
 
@@ -777,7 +829,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private func finalizeCapture(generation token: UUID) async {
         stopCaptureSleepMonitoring()
         stopMicrophoneHealthMonitoring()
-        let source = stateLock.withLock { () -> (OwnedAudioCaptureBuffer?, SCStream?, Task<Void, Never>?) in
+        stopSystemAudioHealthMonitoring()
+        let source = stateLock.withLock { () -> (OwnedAudioCaptureBuffer?, (any SystemAudioCaptureSource)?, Task<Void, Never>?) in
             let state = (ingress, systemAudioStream, systemRecoveryTask)
             systemRecoveryTask = nil; systemAudioStream = nil
             return state
@@ -795,10 +848,12 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 continuation.resume()
             }
         }
-        if let stream = source.1 { try? await stream.stopCapture() }
+        if let stream = source.1 { await stream.stop() }
         await source.0?.drain()
         await source.2?.value
-        if let failure = source.0?.failureSnapshot { recordBufferGap(failure, generation: token) }
+        if let input = source.0, let failure = input.failureSnapshot {
+            recordBufferGap(failure, input: input, generation: token)
+        }
         await withCheckedContinuation { continuation in
             audioProcessingQueue.async { [self] in
                 guard stateLock.withLock({ generation == token }) else { continuation.resume(); return }
@@ -807,13 +862,16 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 flushChunkOnConsumer(openNext: false, finishBoundary: true)
                 stateLock.withLock {
                     recordingFile = nil; chunkFile = nil; chunkURL = nil
-                    ingress = nil; systemAudioSink = nil; audioEngine = nil
+                    ingress = nil; audioEngine = nil; captureHealth = nil
                     inputMode = nil; captureConfigured = false
                 }
                 do { try transcriptionQueue.setCapturing(false) }
                 catch { reportQueueFailure(error) }
                 continuation.resume()
             }
+        }
+        await withCheckedContinuation { continuation in
+            captureHealthEvents.async { continuation.resume() }
         }
         await cancelStreamingPreview()
     }
@@ -855,12 +913,25 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private func captureBufferFailed(_ failure: OwnedAudioCaptureBuffer.Failure, generation token: UUID) {
+        if failure.formatChanged {
+            let source = stateLock.withLock { () -> (any SystemAudioCaptureSource)? in
+                guard generation == token, !isStopping else { return nil }
+                setCaptureHealthIssueLocked(.formatChanged)
+                if inputMode == .systemAudio { systemAudioPendingHealthIssue = .formatChanged }
+                return systemAudioStream
+            }
+            if let source {
+                scheduleSystemAudioRecovery(source: source, generation: token)
+                return
+            }
+        }
         failCapture(failure.reason + " 已保存写入成功的录音，缺失区间将在收尾时记录。", generation: token)
     }
 
-    private func recordBufferGap(_ failure: OwnedAudioCaptureBuffer.Failure, generation token: UUID) {
+    private func recordBufferGap(_ failure: OwnedAudioCaptureBuffer.Failure, input: OwnedAudioCaptureBuffer, generation token: UUID) {
         guard let gap = stateLock.withLock({ () -> CaptureGap? in
-            guard generation == token, let inputFormat else { return nil }
+            guard generation == token, let inputFormat,
+                  recordedBufferGaps.insert(input.identity).inserted else { return nil }
             return CaptureGap(sessionID: sessionID, lastWrittenFrame: writtenFrames,
                 sampleRate: inputFormat.sampleRate, observedStart: failure.observedStart,
                 observedEnd: max(failure.observedEnd, ProcessInfo.processInfo.systemUptime),
@@ -917,6 +988,9 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             detector?.analyze(owned)
             if #available(macOS 27, *) { writeModernPreview(owned, at: audioTime) }
             else { legacy?.append(owned) }
+        }
+        if let capturedSpan {
+            observeCaptureHealthData(peak: statistics.peak, buffer: buffer, span: capturedSpan)
         }
         rotateReadyChunk()
         return nil
@@ -1321,6 +1395,114 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         failCapture("电脑进入休眠，音频采集已结束。", generation: token)
     }
 
+    private func enqueueCaptureHealthLocked(category: String, notice: String? = nil, publishesNotice: Bool = false) {
+        guard let health = captureHealth else { return }
+        let input = ingress?.healthSnapshot ?? .init()
+        let diagnostic = CaptureHealthDiagnostic(category: (health.mode == .systemAudio ? "system_" : "microphone_") + category,
+            time: captureUptime(), callbacks: input.callbacks, frames: input.frames,
+            recoveryAttempts: health.mode == .systemAudio ? systemRecoveryAttempts : microphoneRecoveryAttempts)
+        let token = generation, recording = sessionRecordingURL, handler = eventHandler
+        let update = CaptureHealthNotice(sessionID: sessionID, message: notice)
+        captureHealthEvents.async { [weak self] in
+            guard let self, self.stateLock.withLock({ self.generation == token }) else { return }
+            CaptureHealthDiagnostics.append(diagnostic, beside: recording)
+            if publishesNotice { handler?(.captureHealth(update)) }
+        }
+    }
+
+    private func setCaptureHealthIssueLocked(_ issue: CaptureHealthIssue?) {
+        guard let health = captureHealth, health.issue != issue else { return }
+        captureHealth?.issue = issue
+        enqueueCaptureHealthLocked(category: issue?.rawValue ?? "delivery_resumed",
+            notice: issue?.message(for: health.mode), publishesNotice: true)
+    }
+
+    /// Pause/stop are user actions, not evidence that audio delivery recovered.
+    private func clearCaptureHealthNoticeLocked() {
+        guard captureHealth?.issue != nil else { return }
+        captureHealth?.issue = nil
+        let handler = eventHandler, token = generation
+        let update = CaptureHealthNotice(sessionID: sessionID, message: nil)
+        captureHealthEvents.async { [weak self] in
+            guard let self, self.stateLock.withLock({ self.generation == token }) else { return }
+            handler?(.captureHealth(update))
+        }
+    }
+
+    private func observeCaptureHealthData(peak: Double, buffer: AVAudioPCMBuffer, span: OwnedAudioCaptureBuffer.Span) {
+        stateLock.withLock {
+            guard var health = captureHealth, !isStopping, !capturePaused,
+                  systemRecoveryTask == nil, !microphoneNeedsRecovery else { return }
+            let duration = Double(span.frames) / (ingress?.format.sampleRate ?? buffer.format.sampleRate)
+            let issue = health.observe(peak: peak, duration: duration, start: span.observedStart,
+                                       end: span.observedStart + duration)
+            captureHealth = health
+            setCaptureHealthIssueLocked(issue)
+        }
+    }
+
+    private func checkCaptureDeliveryHealth(now: TimeInterval, generation token: UUID) {
+        let source = stateLock.withLock { () -> (any SystemAudioCaptureSource)? in
+            guard generation == token, var health = captureHealth, !isStopping, !capturePaused,
+                  systemRecoveryTask == nil, microphoneRecoveryRequest == nil,
+                  let input = ingress else { return nil }
+            let issue = health.deliveryIssue(input.healthSnapshot, now: now)
+            captureHealth = health
+            guard let issue else { return nil }
+            setCaptureHealthIssueLocked(issue)
+            return issue == .callbackInterrupted ? systemAudioStream : nil
+        }
+        if let source { scheduleSystemAudioRecovery(source: source, generation: token) }
+    }
+
+    private func startSystemAudioHealthMonitoring() {
+        let token = stateLock.withLock { generation }
+        systemAudioRouteMonitor.start { [weak self] issue in
+            guard let self else { return }
+            let source = self.stateLock.withLock { () -> (any SystemAudioCaptureSource)? in
+                guard self.generation == token, !self.isStopping else { return nil }
+                self.systemAudioNeedsRecovery = true
+                self.systemAudioPendingHealthIssue = issue
+                self.systemAudioRouteRevision += 1
+                if !self.capturePaused { self.setCaptureHealthIssueLocked(issue) }
+                return self.systemAudioStream
+            }
+            if let source { self.scheduleSystemAudioRecovery(source: source, generation: token) }
+        }
+        guard enableCaptureHealthWatchdog else { return }
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) }
+                catch { break }
+                guard let self else { break }
+                self.checkCaptureDeliveryHealth(now: self.captureUptime(), generation: token)
+            }
+        }
+        let watching = stateLock.withLock {
+            guard generation == token, !isStopping else { return false }
+            captureHealthWatchdogTask = task
+            return true
+        }
+        if !watching { task.cancel() }
+    }
+
+    private func stopSystemAudioHealthMonitoring() {
+        let task = stateLock.withLock { let old = captureHealthWatchdogTask; captureHealthWatchdogTask = nil; return old }
+        task?.cancel()
+        systemAudioRouteMonitor.stop()
+    }
+
+    private func microphoneConfigurationChanged(generation token: UUID) {
+        stateLock.withLock {
+            guard generation == token, !isStopping, let engine = audioEngine else { return }
+            if !capturePaused {
+                let changed = ingress.map { !Self.formatsMatch($0.format, engine.outputFormat) } ?? false
+                setCaptureHealthIssueLocked(changed ? .formatChanged : .deviceChanged)
+            }
+        }
+        scheduleMicrophoneRecovery(generation: token)
+    }
+
     /// Called under stateLock only after both audio writes succeeded. Engine
     /// starts, brief PCM blips and buffered bursts cannot renew the retry budget.
     private func noteHealthyMicrophoneInputLocked(start: TimeInterval, end: TimeInterval,
@@ -1352,9 +1534,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private func startMicrophoneHealthMonitoring() {
         let context = stateLock.withLock { () -> (UUID, any MicrophoneCaptureEngine)? in
             guard !isStopping, let audioEngine else { return nil }
-            let now = ProcessInfo.processInfo.systemUptime
+            let now = captureUptime()
             lastAudioCallbackUptime = now
             microphoneHealthGraceStartedAt = now
+            captureHealth?.restart(at: now)
             microphoneRecoveryAttempts = 0
             microphoneHealthyWindow = nil
             microphoneRecoveryRequest = nil
@@ -1367,7 +1550,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             object: engine.notificationObject,
             queue: nil
         ) { [weak self] _ in
-            self?.scheduleMicrophoneRecovery(generation: token)
+            self?.microphoneConfigurationChanged(generation: token)
         }
         let bound = stateLock.withLock { () -> Bool in
             guard generation == token, !isStopping, audioEngine === engine else { return false }
@@ -1375,13 +1558,13 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             return true
         }
         guard bound else { microphoneNotifications.removeObserver(observer); return }
-        guard enableMicrophoneWatchdog else { return }
+        guard enableMicrophoneWatchdog, enableCaptureHealthWatchdog else { return }
         let watchdog = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(1)) }
                 catch { break }
                 guard let self else { break }
-                self.checkMicrophoneCaptureHealth(generation: token)
+                self.checkMicrophoneCaptureHealth(now: self.captureUptime(), generation: token)
             }
         }
         let watching = stateLock.withLock { () -> Bool in
@@ -1412,8 +1595,13 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private func checkMicrophoneCaptureHealth(now: TimeInterval = ProcessInfo.processInfo.systemUptime,
                                               generation expected: UUID? = nil) {
+        let token = stateLock.withLock { generation }
+        if expected == nil || expected == token { checkCaptureDeliveryHealth(now: now, generation: token) }
         let stalledGeneration = stateLock.withLock { () -> UUID? in
             guard inputMode == .microphone, expected == nil || generation == expected else { return nil }
+            if let health = captureHealth, ingress?.healthSnapshot.callbacks == 0,
+               now - health.startedAt < CaptureHealthState.startupTimeout,
+               health.issue != .callbackInterrupted { return nil }
             let accepted = ingress?.lastAcceptedUptime ?? lastAudioCallbackUptime
             // An old pre-pause callback cannot cancel the new start's grace.
             let newest = max(accepted ?? -.infinity, microphoneHealthGraceStartedAt ?? -.infinity)
@@ -1443,7 +1631,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             self?.performMicrophoneRecovery(generation: token, request: request)
         }
         if let microphoneRecoveryScheduler { microphoneRecoveryScheduler(operation) }
-        else { microphoneRecoveryQueue.asyncAfter(deadline: .now() + 0.25, execute: operation) }
+        else {
+            let attempt = stateLock.withLock { microphoneRecoveryAttempts + 1 }
+            microphoneRecoveryQueue.asyncAfter(deadline: .now() + Self.systemAudioRecoveryBackoff(attempt: attempt), execute: operation)
+        }
     }
 
     private func performMicrophoneRecovery(generation token: UUID, request: UUID) {
@@ -1458,7 +1649,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             guard generation == token, microphoneRecoveryRequest == request, inputMode == .microphone,
                   !capturePaused, !isStopping, let audioEngine else { return nil }
             let allowed = microphoneRecoveryAttempts < Self.maximumMicrophoneRecoveryAttempts
-            if allowed { microphoneRecoveryAttempts += 1 }
+            if allowed {
+                microphoneRecoveryAttempts += 1
+                enqueueCaptureHealthLocked(category: "recovery_attempt")
+            } else { enqueueCaptureHealthLocked(category: "recovery_exhausted") }
             return (audioEngine, inputFormat, ingress, allowed)
         }
         guard let (engine, storage, previous, allowed) = context else { return }
@@ -1489,9 +1683,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 guard generation == token, microphoneRecoveryRequest == request, !isStopping, !capturePaused else { return false }
                 microphoneRecoveryRequest = nil
                 microphoneNeedsRecovery = false
-                let now = ProcessInfo.processInfo.systemUptime
+                let now = captureUptime()
                 lastAudioCallbackUptime = now
                 microphoneHealthGraceStartedAt = now
+                captureHealth?.restart(at: captureUptime())
                 return true
             }
             if !running { engine.stop(); return }
@@ -1514,34 +1709,52 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         }
     }
 
-    private func scheduleSystemAudioRecovery(stream: SCStream, error: Error, generation token: UUID) {
+    private func scheduleSystemAudioRecovery(source: any SystemAudioCaptureSource, generation token: UUID) {
         stateLock.withLock {
-            guard generation == token, systemAudioStream === stream, !isStopping,
-                  systemRecoveryTask == nil else { return }
+            guard generation == token, systemAudioStream === source, !isStopping else { return }
+            systemAudioNeedsRecovery = true
+            guard !capturePaused, systemRecoveryTask == nil else { return }
+            if captureHealth?.issue == nil {
+                setCaptureHealthIssueLocked(systemAudioPendingHealthIssue ?? .callbackInterrupted)
+            }
             let previous = ingress
             previous?.seal()
-            systemAudioStream = nil
-            let start = previous?.lastAcceptedUptime ?? ProcessInfo.processInfo.systemUptime
-            let detached = DetachedSystemAudioStream(stream: stream)
+            let start = previous?.lastAcceptedUptime ?? captureUptime()
             systemRecoveryTask = Task { [weak self] in
                 guard let self else { return }
-                try? await detached.stream.stopCapture()
+                await source.stop()
                 await previous?.drain()
+                if let previous, let failure = previous.failureSnapshot {
+                    self.recordBufferGap(failure, input: previous, generation: token)
+                }
                 await self.flushCurrentChunk(openNext: true)
                 while !Task.isCancelled {
                     let attempt = self.stateLock.withLock { () -> Int? in
-                        guard self.generation == token, !self.isStopping else { return nil }
+                        guard self.generation == token, !self.isStopping, !self.capturePaused,
+                              self.systemRecoveryAttempts < Self.maximumSystemAudioRecoveryAttempts else { return nil }
                         self.systemRecoveryAttempts += 1
+                        self.enqueueCaptureHealthLocked(category: "recovery_attempt")
                         return self.systemRecoveryAttempts
                     }
-                    guard let attempt, attempt <= Self.maximumMicrophoneRecoveryAttempts else { break }
+                    guard let attempt else { break }
                     do {
-                        try await Task.sleep(for: .milliseconds(250))
+                        try await self.systemAudioRecoveryDelay(Self.systemAudioRecoveryBackoff(attempt: attempt))
+                        try Task.checkCancellation()
+                        let revision = self.stateLock.withLock { () -> Int? in
+                            guard self.generation == token, !self.isStopping, !self.capturePaused else { return nil }
+                            return self.systemAudioRouteRevision
+                        }
+                        guard let revision else { break }
                         try await self.openSystemAudioStream(generation: token)
                         self.recordInterruption(since: start, reason: "系统内录恢复", generation: token)
-                        self.stateLock.withLock {
-                            if self.generation == token { self.systemRecoveryTask = nil }
+                        let changedSource = self.stateLock.withLock { () -> (any SystemAudioCaptureSource)? in
+                            guard self.generation == token else { return nil }
+                            self.systemRecoveryTask = nil
+                            self.systemAudioNeedsRecovery = revision != self.systemAudioRouteRevision
+                            if !self.systemAudioNeedsRecovery { self.systemAudioPendingHealthIssue = nil }
+                            return self.systemAudioNeedsRecovery ? self.systemAudioStream : nil
                         }
+                        if let changedSource { self.scheduleSystemAudioRecovery(source: changedSource, generation: token) }
                         return
                     } catch is CancellationError { break }
                     catch { continue }
@@ -1549,7 +1762,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 let report = self.stateLock.withLock { () -> Bool in
                     guard self.generation == token else { return false }
                     self.systemRecoveryTask = nil
-                    return !self.isStopping && !Task.isCancelled
+                    if self.capturePaused, self.systemAudioStream == nil { self.systemAudioStream = source }
+                    guard !self.isStopping, !self.capturePaused, !Task.isCancelled else { return false }
+                    self.enqueueCaptureHealthLocked(category: "recovery_exhausted")
+                    return true
                 }
                 if report {
                     self.recordInterruption(since: start, reason: "系统内录恢复失败", generation: token)
@@ -1560,7 +1776,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private func recordInterruption(since start: TimeInterval, reason: String, generation token: UUID) {
-        let end = ProcessInfo.processInfo.systemUptime
+        let end = captureUptime()
         guard end >= start else { return }
         guard let gap = stateLock.withLock({ () -> CaptureGap? in
             guard generation == token, let inputFormat else { return nil }
@@ -1997,6 +2213,21 @@ extension SpeechPipeline {
         startCaptureSleepMonitoring()
         return input
     }
+    func checkSyntheticCaptureHealth(now: TimeInterval) {
+        let (token, mode) = stateLock.withLock { (generation, inputMode) }
+        if mode == .microphone { checkMicrophoneCaptureHealth(now: now, generation: token) }
+        else { checkCaptureDeliveryHealth(now: now, generation: token) }
+    }
+    func waitForSyntheticSystemRecovery() async {
+        while let task = stateLock.withLock({ systemRecoveryTask }) { await task.value }
+        await drainSyntheticCaptureHealthEvents()
+    }
+    func drainSyntheticCaptureHealthEvents() async {
+        await withCheckedContinuation { continuation in
+            captureHealthEvents.async { continuation.resume() }
+        }
+    }
+    var syntheticSystemRecoveryAttempts: Int { stateLock.withLock { systemRecoveryAttempts } }
     var syntheticWorkDirectory: URL? { transcriptionQueue.journalDirectory }
     func checkSyntheticMicrophoneHealth(now: TimeInterval) { checkMicrophoneCaptureHealth(now: now) }
     var syntheticMicrophoneRecoveryState: (pending: Bool, attempts: Int) {

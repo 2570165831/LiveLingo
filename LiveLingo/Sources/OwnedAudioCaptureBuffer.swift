@@ -19,8 +19,16 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
         let observedEnd: TimeInterval
         let rejectedFrames: Int64
         let processedFrames: Int64
+        var formatChanged = false
+    }
+    struct HealthSnapshot: Sendable {
+        var callbacks: Int64 = 0
+        var frames: Int64 = 0
+        var lastCallback: TimeInterval?
+        var lastData: TimeInterval?
     }
     enum Submission: Equatable { case accepted, paused, closed, overflow }
+    let identity = UUID()
     let format: AVAudioFormat
     let capacityFrames: Int
     let capacityBytes: Int
@@ -48,6 +56,7 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
     private var failureDelivered = false
     private var finishDelivered = false
     private var lastAcceptedEnd: TimeInterval?
+    private var health = HealthSnapshot()
 
     init(format: AVAudioFormat, queue: DispatchQueue,
          consume: @escaping @Sendable (AVAudioPCMBuffer, Span) throws -> Void,
@@ -91,12 +100,24 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
     var pendingFrames: Int { lock.withLock { occupiedFrames } }
     var lastAcceptedUptime: TimeInterval? { lock.withLock { lastAcceptedEnd } }
     var failureSnapshot: Failure? { lock.withLock { failure } }
+    var healthSnapshot: HealthSnapshot { lock.withLock { health } }
     func setPaused(_ value: Bool) { lock.withLock { paused = value } }
     func seal() { lock.withLock { accepting = false }; source.add(data: 1) }
 
     @discardableResult
     func submit(_ buffer: AVAudioPCMBuffer, observedEnd: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Submission {
-        copy(buffer.audioBufferList, frames: Int(buffer.frameLength), observedEnd: observedEnd)
+        guard SpeechPipeline.formatsMatch(buffer.format, format) else {
+            return lock.withLock {
+                if paused { return .paused }
+                guard accepting else { return .closed }
+                noteCallback(end: observedEnd)
+                recordFailure("采集音频格式变化，当前缓冲未写入。", frames: Int(buffer.frameLength),
+                              end: observedEnd, formatChanged: true)
+                source.add(data: 1)
+                return .overflow
+            }
+        }
+        return copy(buffer.audioBufferList, frames: Int(buffer.frameLength), observedEnd: observedEnd)
     }
     /// The pointer is borrowed only for this synchronous copy, including on 27.
     @discardableResult
@@ -106,12 +127,13 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
         defer { lock.unlock(); source.add(data: 1) }
         if paused { return .paused }
         guard accepting else { noteRejected(frames: frames, end: observedEnd); return .closed }
+        noteCallback(end: observedEnd)
         guard frames > 0 else { return .accepted }
         let inputList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         let destination = UnsafeMutableAudioBufferListPointer(backing.mutableAudioBufferList)
         guard inputList.count == destination.count,
               inputList.allSatisfy({ $0.mData != nil && Int($0.mDataByteSize) >= frames * bytesPerFrame }) else {
-            recordFailure("采集音频格式变化，当前缓冲未写入。", frames: frames, end: observedEnd)
+            recordFailure("采集音频格式变化，当前缓冲未写入。", frames: frames, end: observedEnd, formatChanged: true)
             return .overflow
         }
         guard frames <= capacityFrames - occupiedFrames, spanCount < spans.count else {
@@ -132,12 +154,13 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
     /// retains a PCM buffer for a ScreenCaptureKit callback.
     @discardableResult
     func submit(_ sampleBuffer: CMSampleBuffer, observedEnd: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Submission {
-        guard CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer) else { return .closed }
         let frames = CMSampleBufferGetNumSamples(sampleBuffer)
         lock.lock()
         defer { lock.unlock(); source.add(data: 1) }
         if paused { return .paused }
         guard accepting else { noteRejected(frames: frames, end: observedEnd); return .closed }
+        noteCallback(end: observedEnd)
+        guard CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer) else { return .closed }
         guard frames > 0 else { return .accepted }
         guard let description = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description),
@@ -145,7 +168,7 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
               asbd.pointee.mChannelsPerFrame == format.channelCount,
               asbd.pointee.mBytesPerFrame == format.streamDescription.pointee.mBytesPerFrame,
               asbd.pointee.mFormatFlags == format.streamDescription.pointee.mFormatFlags else {
-            recordFailure("系统音频格式发生变化。", frames: frames, end: observedEnd); return .overflow
+            recordFailure("系统音频格式发生变化。", frames: frames, end: observedEnd, formatChanged: true); return .overflow
         }
         guard frames <= capacityFrames - occupiedFrames, spanCount < spans.count else {
             recordFailure("磁盘处理跟不上采集，两秒音频缓冲已耗尽。", frames: frames, end: observedEnd); return .overflow
@@ -167,22 +190,27 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
     }
     private func accepted(frames: Int, observedEnd: TimeInterval) {
         lastAcceptedEnd = observedEnd
+        health.frames += Int64(frames); health.lastData = observedEnd
         spans[spanTail] = Span(frames: frames, observedStart: observedEnd - Double(frames) / format.sampleRate)
         spanTail = (spanTail + 1) % spans.count; spanCount += 1
         writeFrame = (writeFrame + frames) % capacityFrames
         occupiedFrames += frames
     }
-    private func recordFailure(_ reason: String, frames: Int, end: TimeInterval) {
+    private func noteCallback(end: TimeInterval) {
+        health.callbacks += 1; health.lastCallback = end
+    }
+    private func recordFailure(_ reason: String, frames: Int, end: TimeInterval, formatChanged: Bool = false) {
         accepting = false
         guard failure == nil else { return }
         failure = Failure(reason: reason, observedStart: end - Double(frames) / format.sampleRate,
-                          observedEnd: end, rejectedFrames: Int64(frames), processedFrames: processedFrames)
+                          observedEnd: end, rejectedFrames: Int64(frames), processedFrames: processedFrames,
+                          formatChanged: formatChanged)
     }
     private func noteRejected(frames: Int, end: TimeInterval) {
         guard let old = failure, frames > 0 else { return }
         failure = Failure(reason: old.reason, observedStart: old.observedStart,
             observedEnd: max(old.observedEnd, end), rejectedFrames: old.rejectedFrames + Int64(frames),
-            processedFrames: processedFrames)
+            processedFrames: processedFrames, formatChanged: old.formatChanged)
     }
     private func setList(_ list: UnsafeMutableAudioBufferListPointer, offset: Int, frames: Int) {
         let original = UnsafeMutableAudioBufferListPointer(backing.mutableAudioBufferList)
@@ -233,7 +261,8 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
         // A sealed stream must flush its format converter before the caller
         // closes the WAV or replaces this tap. The serial consumer owns both.
         let shouldFinish = lock.withLock { () -> Bool in
-            guard !accepting, failure == nil, occupiedFrames == 0, !finishDelivered else { return false }
+            guard !accepting, failure == nil || failure?.formatChanged == true,
+                  occupiedFrames == 0, !finishDelivered else { return false }
             finishDelivered = true
             return true
         }
@@ -252,7 +281,7 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
             failureDelivered = true
             return Failure(reason: failure.reason, observedStart: failure.observedStart,
                            observedEnd: failure.observedEnd, rejectedFrames: failure.rejectedFrames,
-                           processedFrames: processedFrames)
+                           processedFrames: processedFrames, formatChanged: failure.formatChanged)
         }
         if let notification { failed(notification) }
     }
@@ -269,12 +298,6 @@ final class OwnedAudioCaptureBuffer: @unchecked Sendable {
 /// transfer makes this framework buffer safe to carry across that one hop.
 struct DecodedAudioTransfer: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
-}
-
-/// Detached from the pipeline before one recovery task stops the old stream.
-/// Delegate callbacks only test identity; they do not operate this stream again.
-struct DetachedSystemAudioStream: @unchecked Sendable {
-    let stream: SCStream
 }
 
 /// Each stream owns its callback sink. An obsolete stream can only write into
