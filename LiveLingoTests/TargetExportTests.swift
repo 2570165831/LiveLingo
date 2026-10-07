@@ -10,7 +10,8 @@ final class TargetExportTests: XCTestCase {
                 transcript: [], generatedAt: Date(timeIntervalSince1970: 0), includesReviewAdvice: false,
                 includesTranscript: false, target: target)
             for format in NotesExportFormat.allCases {
-                XCTAssertThrowsError(try NotesExportDocument.data(snapshot, format: format)) { error in
+                XCTAssertThrowsError(try NotesExportDocument.data(snapshot, format: format,
+                    converter: ChineseScriptConverter(resourceDirectory: nil))) { error in
                     guard case NotesExportError.rendererUnavailable = error else {
                         return XCTFail("Unexpected error: \(error)")
                     }

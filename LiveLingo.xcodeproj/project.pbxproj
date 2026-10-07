@@ -116,6 +116,7 @@
 		C70800000000000000000001 /* TraditionalCaptionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */; };
 		C70900000000000000000001 /* ClassroomMarkdownRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70900000000000000000002 /* ClassroomMarkdownRendering.swift */; };
 		C70900000000000000000003 /* TraditionalMarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */; };
+		C71000000000000000000001 /* TraditionalSessionExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C71000000000000000000002 /* TraditionalSessionExporterTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -243,6 +244,7 @@
 		C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraditionalCaptionPresentationTests.swift; sourceTree = "<group>"; };
 		C70900000000000000000002 /* ClassroomMarkdownRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassroomMarkdownRendering.swift; sourceTree = "<group>"; };
 		C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraditionalMarkdownRenderingTests.swift; sourceTree = "<group>"; };
+		C71000000000000000000002 /* TraditionalSessionExporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TraditionalSessionExporterTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -328,6 +330,7 @@
 			children = (
 				C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */,
 				C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */,
+				C71000000000000000000002 /* TraditionalSessionExporterTests.swift */,
 				C70400000000000000000008 /* ZhVariantFixtures */,
 				C70400000000000000000004 /* ChineseScriptConverterTests.swift */,
 				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
@@ -519,6 +522,7 @@
 				B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */,
 				C70800000000000000000001 /* TraditionalCaptionPresentationTests.swift in Sources */,
 				C70900000000000000000003 /* TraditionalMarkdownRenderingTests.swift in Sources */,
+				C71000000000000000000001 /* TraditionalSessionExporterTests.swift in Sources */,
 				C70400000000000000000003 /* ChineseScriptConverterTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,
 				910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */,

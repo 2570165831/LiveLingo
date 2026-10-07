@@ -89,7 +89,7 @@ final class TraditionalCaptionPresentationTests: XCTestCase {
         XCTAssertEqual(converter.debugCacheEntryCount, 0)
     }
 
-    func testTraditionalDisplayWorksWhileExportGateStaysClosed() throws {
+    func testTraditionalDisplayWorksWhileSavedVerifierGateStaysClosed() throws {
         let converter = ChineseScriptConverter(resourceDirectory: try dictionaries())
         for (language, expected) in traditionalLanguages {
             XCTAssertFalse(language.rendererIsAvailable)

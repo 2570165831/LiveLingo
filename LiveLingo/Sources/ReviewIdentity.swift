@@ -173,7 +173,23 @@ enum ReviewInputBinding {
         }
         let summary = SessionExporter.savedSummaryURL(in: directory, targetLocale: nil)
         if FileManager.default.fileExists(atPath: summary.path) {
-            guard try String(contentsOf: summary, encoding: .utf8) == original + "\n" else {
+            let saved = try Data(contentsOf: summary)
+            // Old queue input may itself be an already rendered summary. A
+            // byte-identical match needs no dictionary and must not convert twice.
+            if saved == Data((original + "\n").utf8) { return }
+            struct Metadata: Decodable { let targetLocale: String? }
+            let manifest = directory.appendingPathComponent("manifest.json")
+            let locale: String?
+            if FileManager.default.fileExists(atPath: manifest.path) {
+                locale = try JSONDecoder().decode(Metadata.self, from: Data(contentsOf: manifest)).targetLocale
+            } else {
+                locale = nil
+            }
+            // The non-regional code belongs to historical verifier fixtures.
+            let language = try OutputLanguage.storedLanguage(locale == "zh-Hant" ? nil : locale)
+            let rendered = try ClassroomMarkdownRendering.render(original, language: language,
+                scheduleEvidence: batches.flatMap(\.evidence))
+            guard saved == Data((rendered + "\n").utf8) else {
                 throw ReviewIdentityError.conflict("所选目录的笔记与复查原文不同")
             }
         }

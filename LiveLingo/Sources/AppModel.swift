@@ -1443,7 +1443,9 @@ final class AppModel: ObservableObject {
             generatedAt: Date(),
             includesReviewAdvice: exportIncludesReviewAdvice,
             includesTranscript: exportIncludesTranscript && !transcript.isEmpty,
-            target: outputLanguage
+            target: outputLanguage,
+            notesAreLegacyRendered: exportScope == .wholeLesson && summaryIsLegacyRendered,
+            scheduleEvidence: notesScheduleEvidence
         )
     }
 
@@ -1474,10 +1476,11 @@ final class AppModel: ObservableObject {
     private func performNotesExport(_ snapshot: NotesExportSnapshot, format: NotesExportFormat, to url: URL) {
         isExporting = true
         exportStatus = "正在导出 \(format.title)…"
+        let converter = chineseScriptConverter
         Task.detached(priority: .userInitiated) {
             let message: String
             do {
-                try NotesExportDocument.write(snapshot, format: format, to: url)
+                try NotesExportDocument.write(snapshot, format: format, to: url, converter: converter)
                 let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
                 let reviewNotice = snapshot.includesReviewAdvice && snapshot.reviewMarkdown == nil
                     ? "；该录音暂无已保存复查意见" : ""
@@ -2127,8 +2130,10 @@ final class AppModel: ObservableObject {
             if sessionSaver == nil { bindSessionArchive(to: directory) }
             try await flushSessionArchive()
             let captions = segments, notes = lectureSummary, target = outputLanguage
+            let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
             try await Task.detached {
-                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target)
+                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target,
+                    summaryIsLegacyRendered: legacy, summaryEvidence: evidence, converter: converter)
             }.value
             guard sessionID == identity, generation == epoch else { return }
             volatileEnglish = ""
@@ -2200,8 +2205,10 @@ final class AppModel: ObservableObject {
         do {
             try await flushSessionArchive()
             let captions = segments, notes = lectureSummary, target = outputLanguage
+            let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
             try await Task.detached {
-                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target)
+                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target,
+                    summaryIsLegacyRendered: legacy, summaryEvidence: evidence, converter: converter)
             }.value
             guard !Task.isCancelled, sessionID == identity, generation == epoch else { return }
             if let recovered = sessionSnapshot?.processing.clearResolvedStorageFailure(), archiveError == recovered {
@@ -2427,8 +2434,10 @@ final class AppModel: ObservableObject {
                 // exports, after the snapshot succeeded. Retry both outputs
                 // before retiring the persisted storage failure.
                 let captions = segments, notes = lectureSummary, target = outputLanguage
+                let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
                 try await Task.detached {
-                    try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target)
+                    try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target,
+                    summaryIsLegacyRendered: legacy, summaryEvidence: evidence, converter: converter)
                 }.value
                 guard sessionID == identity, generation == epoch else { return }
                 sessionSnapshot?.processing.clearResolvedStorageFailure()
@@ -4861,7 +4870,9 @@ extension AppModel {
                 else { try await Task.sleep(for: .milliseconds(250)) }
             }
             try await flushSessionArchive()
-            try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage)
+            try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage,
+                summaryIsLegacyRendered: summaryIsLegacyRendered, summaryEvidence: notesScheduleEvidence,
+                converter: chineseScriptConverter)
 
             if runReview {
                 try noteReviewQueue.enqueue(directory: directory, notebook: learningNotebook,
@@ -4903,7 +4914,7 @@ extension AppModel {
                 }
                 for format in NotesExportFormat.allCases {
                     let url = directory.appendingPathComponent(NotesExportDocument.defaultFileName(snapshot, format: format))
-                    try NotesExportDocument.write(snapshot, format: format, to: url)
+                    try NotesExportDocument.write(snapshot, format: format, to: url, converter: chineseScriptConverter)
                     let bytes = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber
                     guard let bytes, bytes.intValue > 0 else { throw QwenRuntimeError.invalidResponse }
                     report("exported", ["format": format.rawValue, "name": url.lastPathComponent, "bytes": bytes.intValue])
@@ -5049,7 +5060,9 @@ extension AppModel {
                     else { try await Task.sleep(for: .milliseconds(250)) }
                 }
                 try await flushSessionArchive()
-                try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage)
+                try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage,
+                summaryIsLegacyRendered: summaryIsLegacyRendered, summaryEvidence: notesScheduleEvidence,
+                converter: chineseScriptConverter)
                 if runReview {
                     try noteReviewQueue.enqueue(directory: directory, notebook: learningNotebook,
                         scope: .wholeLesson, sessionID: identity, inputRevision: sessionSnapshot?.inputRevision)
@@ -5088,7 +5101,7 @@ extension AppModel {
                     }
                     for format in NotesExportFormat.allCases {
                         let url = directory.appendingPathComponent(NotesExportDocument.defaultFileName(snapshot, format: format))
-                        try NotesExportDocument.write(snapshot, format: format, to: url)
+                        try NotesExportDocument.write(snapshot, format: format, to: url, converter: chineseScriptConverter)
                         let bytes = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber
                         guard let bytes, bytes.intValue > 0 else { throw QwenRuntimeError.invalidResponse }
                         exported.append(url)

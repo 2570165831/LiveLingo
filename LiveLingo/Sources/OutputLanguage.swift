@@ -10,6 +10,13 @@ enum ChineseOutputDefaults {
     static func canSwitchDisplay(from current: OutputLanguage, to next: OutputLanguage) -> Bool {
         allowsChineseDisplaySwitch && current.profile.script == .han && next.profile.script == .han
     }
+
+    /// The archival representation is chosen here, separately from display.
+    /// Changing this policy also needs a versioned reader and verifier change;
+    /// generation snapshots must continue to retain their original draft.
+    static func encodeBilingualDraft(_ segment: TranscriptSegment, using encoder: JSONEncoder) throws -> Data {
+        try encoder.encode(segment)
+    }
 }
 
 /// Pending user choices live here. Changing a route requires the G3 comparison.
@@ -117,6 +124,8 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         return .simplifiedChinese
     }
 
+    /// Saved-verifier support is enabled alongside the regional CLI renderer
+    /// in step 11. Display/export use their actual resource preflight instead.
     var rendererIsAvailable: Bool {
         if case .identity = profile.renderer { return true }
         return false
@@ -126,8 +135,8 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         profile.passThroughSources.contains(language ?? "en")
     }
 
-    /// Display conversion is available independently of the export gate, which
-    /// stays closed for Traditional Chinese until step 10 is integrated.
+    /// Generation text stays Simplified Chinese. Regional display and export
+    /// apply this renderer exactly once; release gating is independent.
     func render(_ text: String, converter: ChineseScriptConverter = .shared) throws -> String {
         switch self {
         case .traditionalChineseTaiwan: return try converter.convert(text, to: .taiwan)
@@ -142,9 +151,12 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         (try? render(text, converter: converter)) ?? text
     }
 
+    func renderFixedText(_ text: String, converter: ChineseScriptConverter = .shared) throws -> String {
+        ChineseOutputDefaults.fixedTextFollowsDisplayLanguage ? try render(text, converter: converter) : text
+    }
+
     func renderFixedTextForDisplay(_ text: String, converter: ChineseScriptConverter = .shared) -> String {
-        ChineseOutputDefaults.fixedTextFollowsDisplayLanguage
-            ? renderForDisplay(text, converter: converter) : text
+        (try? renderFixedText(text, converter: converter)) ?? text
     }
 
     enum SavedRenderer {

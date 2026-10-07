@@ -91,3 +91,22 @@ neither direction is called correct merely because it differs.
   Log: `step9-final-xcode.log`. Eight new Markdown tests passed.
 - Python: 674 tests, six skipped, zero failures. Existing multilingual CLI:
   20 groups; target review: six groups. G0 frozen-source diff remains empty.
+
+### Step 10
+
+- Added regional transcript/SRT/summary exports, optional manifest converter
+  version, and shared rendered fields for Markdown, text, Word and PDF notes.
+  Original transcripts and JSONL generation drafts retain their original bytes.
+  Source evidence and recording names are preserved; regional legacy summaries
+  bypass a second conversion. Missing resources fail before export writes.
+- Legacy review-report matching can compare a Simplified draft with the saved
+  regional rendering. Bound snapshot validation remains unchanged.
+- Full Xcode run: XCTest 1190, one skipped, zero failures; Swift Testing 166.
+  Warning checker: zero. Preference cleanup: 296 created and cleaned, all
+  registered plists absent. Log: `step10-xcode.log`.
+- Fourteen new exporter tests passed, including extracted Word/PDF text and
+  unchanged default manifests. The first focused run exposed an incorrect new
+  expected spelling: upstream STPhrases maps `复查` to `複查`. The authored
+  expectation was corrected; the final focused run passed all 36 tests.
+- Python: 674 tests, six skipped, zero failures. Existing multilingual CLI:
+  20 groups; target review: six groups. G0 frozen-source diff remains empty.

@@ -123,6 +123,7 @@ enum SessionExporter {
         let recordingFile: String
         let segmentCount: Int
         var sourceLanguages: [String]? = nil
+        var converterVersion: String? = nil
     }
 
     static var targetTranscriptFileName: String { targetTranscriptFileName(for: CaptionTranslationTarget.simplifiedChinese.rawValue) }
@@ -233,22 +234,62 @@ enum SessionExporter {
             + captionLines(segment, outputLanguage: outputLanguage).joined(separator: "\n")
     }
 
+    /// The existing targetLine/captionLines/srtCue APIs remain generation text
+    /// for UI callers. Export and saved-output verification render exactly once.
+    static func renderedTargetLine(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
+                                   converter: ChineseScriptConverter = .shared) throws -> String {
+        var draft = targetLine(segment, outputLanguage: outputLanguage)
+        let sourceOnly = outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
+        if outputLanguage.profile.renderer != .identity, !sourceOnly, segment.translationState == .failed {
+            draft = (segment.sourceLanguage == nil ? ClassroomFixedText.failedAgainstEnglish : .failedAgainstSource)
+                .text(targetCode: "zh-Hans")
+        }
+        return !sourceOnly && !segment.hasUsableTranslation
+            ? try outputLanguage.renderFixedText(draft, converter: converter)
+            : try outputLanguage.render(draft, converter: converter)
+    }
+
+    static func renderedCaptionLines(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
+                                    converter: ChineseScriptConverter = .shared) throws -> [String] {
+        let translated = try renderedTargetLine(segment, outputLanguage: outputLanguage, converter: converter)
+        return outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
+            ? [translated] : [sourceLine(segment), translated]
+    }
+
+    static func renderedSRTCue(_ segment: TranscriptSegment, index: Int, outputLanguage: OutputLanguage,
+                               converter: ChineseScriptConverter = .shared) throws -> String {
+        "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
+            + (try renderedCaptionLines(segment, outputLanguage: outputLanguage, converter: converter))
+                .joined(separator: "\n")
+    }
+
     static func export(
         segments: [TranscriptSegment],
         sessionDirectory: URL,
         recordingFileName: String = "recording.wav",
         summary: String = "",
         createdAt: Date = Date(),
-        target: OutputLanguage = .simplifiedChinese
+        target: OutputLanguage = .simplifiedChinese,
+        summaryIsLegacyRendered: Bool = false,
+        summaryEvidence: [TranscriptSegment] = [],
+        converter: ChineseScriptConverter = .shared
     ) throws {
-        guard target.rendererIsAvailable else {
-            throw SessionStoreError.invalidState("课程输出语言的渲染器尚不可用")
+        // Check the actual dictionary, including empty/legacy-only exports.
+        // Release metadata does not determine whether saved text can render.
+        if target.profile.renderer != .identity {
+            try converter.prepare()
         }
+        let english = segments.map(sourceLine).joined(separator: "\n")
+        let chinese = try segments.map { try renderedTargetLine($0, outputLanguage: target, converter: converter) }.joined(separator: "\n")
+        let srt = try segments.enumerated().map { index, segment in
+            try renderedSRTCue(segment, index: index, outputLanguage: target, converter: converter)
+        }.joined(separator: "\n\n") + "\n"
+        let trimmedSummary = try ClassroomMarkdownRendering.render(summary, language: target,
+            isLegacyRendered: summaryIsLegacyRendered,
+            scheduleEvidence: summaryEvidence.isEmpty ? segments : summaryEvidence,
+            converter: converter).trimmingCharacters(in: .whitespacesAndNewlines)
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
-
-        let english = segments.map(sourceLine).joined(separator: "\n")
-        let chinese = try segments.map { try target.render(targetLine($0, outputLanguage: target)) }.joined(separator: "\n")
         try english.appending("\n").write(
             to: sessionDirectory.appendingPathComponent("transcript-en.txt"),
             atomically: true,
@@ -264,7 +305,7 @@ enum SessionExporter {
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         encoder.dateEncodingStrategy = .iso8601
         let jsonl = try segments.map { segment -> String in
-            let data = try encoder.encode(segment)
+            let data = try ChineseOutputDefaults.encodeBilingualDraft(segment, using: encoder)
             guard let line = String(data: data, encoding: .utf8) else {
                 throw CocoaError(.fileWriteInapplicableStringEncoding)
             }
@@ -276,16 +317,12 @@ enum SessionExporter {
             encoding: .utf8
         )
 
-        let srt = segments.enumerated().map { index, segment in
-            srtCue(segment, index: index, outputLanguage: target)
-        }.joined(separator: "\n\n") + "\n"
         try srt.write(
             to: sessionDirectory.appendingPathComponent("bilingual.srt"),
             atomically: true,
             encoding: .utf8
         )
 
-        let trimmedSummary = try target.render(summary).trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedSummary.isEmpty {
             try (trimmedSummary + "\n").write(
                 to: sessionDirectory.appendingPathComponent(targetSummaryFileName(for: target.rawValue)),
@@ -300,7 +337,8 @@ enum SessionExporter {
             targetLocale: target.rawValue,
             recordingFile: recordingFileName,
             segmentCount: segments.count,
-            sourceLanguages: sourceLanguages(in: segments)
+            sourceLanguages: sourceLanguages(in: segments),
+            converterVersion: target.profile.renderer == .identity ? nil : ChineseScriptConverter.version
         )
         let manifestData = try encoder.encode(manifest)
         try manifestData.write(
@@ -414,6 +452,11 @@ struct NotesExportSnapshot: Equatable, Sendable {
     let includesReviewAdvice: Bool
     let includesTranscript: Bool
     var target: OutputLanguage = .simplifiedChinese
+    /// Legacy summaries are already rendered; review advice still uses its
+    /// independently stored generation text.
+    var notesAreLegacyRendered: Bool = false
+    /// Evidence remains available even when the user omits the transcript.
+    var scheduleEvidence: [TranscriptSegment] = []
 
     var classDate: String { NotesExportDocument.classDate(of: self) }
 }
@@ -435,17 +478,95 @@ enum NotesExportError: LocalizedError {
 }
 
 enum NotesExportDocument {
-    static func fixed(_ key: ClassroomFixedText, target: OutputLanguage) -> String {
-        key.text(targetCode: target.rawValue)
+    /// Prepared fields are shared by all four formats. Source quotations,
+    /// recording names and source caption lines are never a conversion input.
+    struct RenderedFields {
+        let className: String
+        let scopeDetail: String
+        let coverageLine: String
+        let notesMarkdown: String
+        var reviewBody: String?
+        let labels: [ClassroomFixedText: String]
+        let transcriptHeading: String
+        let captionLines: [[String]]
     }
-    static func fixed(_ key: ClassroomFixedText, _ args: [String], target: OutputLanguage) -> String {
-        key.format(args: args, targetCode: target.rawValue)
+
+    static func prepare(_ snapshot: NotesExportSnapshot,
+                        converter: ChineseScriptConverter = .shared) throws -> RenderedFields? {
+        let target = snapshot.target
+        guard target.profile.renderer != .identity else { return nil }
+        do {
+            // A supplied missing dictionary must fail even when no Han text is
+            // present or the legacy notes themselves need no conversion.
+            try converter.prepare()
+            let keys: [ClassroomFixedText] = [.notesHeading, .exportReviewHeading, .exportDisclaimer,
+                .latestScope, .wholeScope, .exportScopeLine, .exportCoverageLine, .exportReviewScope,
+                .exportSessionLine, .exportTimeLine, .exportExplanationLine, .exportProgressLine, .emptyNotes]
+            let labels = try Dictionary(uniqueKeysWithValues: keys.map {
+                ($0, try target.renderFixedText($0.text(targetCode: target.rawValue), converter: converter))
+            })
+            var fields = RenderedFields(
+                className: try target.render(snapshot.className, converter: converter),
+                scopeDetail: try target.render(snapshot.scopeDetail, converter: converter),
+                coverageLine: try target.render(snapshot.coverageLine, converter: converter),
+                notesMarkdown: try ClassroomMarkdownRendering.render(snapshot.notesMarkdown, language: target,
+                    isLegacyRendered: snapshot.notesAreLegacyRendered,
+                    scheduleEvidence: snapshot.scheduleEvidence.isEmpty ? snapshot.transcript : snapshot.scheduleEvidence,
+                    converter: converter),
+                reviewBody: nil,
+                labels: labels,
+                transcriptHeading: try target.renderFixedText(transcriptHeading(for: target), converter: converter),
+                captionLines: snapshot.includesTranscript ? try snapshot.transcript.map {
+                    try SessionExporter.renderedCaptionLines($0, outputLanguage: target, converter: converter)
+                } : []
+            )
+            if snapshot.includesReviewAdvice, let review = snapshot.reviewMarkdown,
+               !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let renderedReview = try ClassroomMarkdownRendering.render(review, language: target,
+                    scheduleEvidence: snapshot.scheduleEvidence, converter: converter)
+                let body = reviewSection(renderedReview, target: target, rendered: fields)
+                fields.reviewBody = body.isEmpty ? nil : body
+            }
+            return fields
+        } catch {
+            throw NotesExportError.rendererUnavailable
+        }
     }
-    static func notesHeading(for target: OutputLanguage) -> String { fixed(.notesHeading, target: target) }
-    static func reviewHeading(for target: OutputLanguage) -> String { fixed(.exportReviewHeading, target: target) }
-    static func disclaimer(for target: OutputLanguage) -> String { fixed(.exportDisclaimer, target: target) }
-    static func scopeLabel(_ snapshot: NotesExportSnapshot) -> String {
-        fixed(snapshot.scope == .latest ? .latestScope : .wholeScope, target: snapshot.target)
+
+    static func fixed(_ key: ClassroomFixedText, target: OutputLanguage,
+                      rendered: RenderedFields? = nil) -> String {
+        rendered?.labels[key] ?? key.text(targetCode: target.rawValue)
+    }
+    static func fixed(_ key: ClassroomFixedText, _ args: [String], target: OutputLanguage,
+                      rendered: RenderedFields? = nil) -> String {
+        guard let rendered else { return key.format(args: args, targetCode: target.rawValue) }
+        // Convert the template before inserting arguments. Searching/replacing
+        // an assembled line could rewrite a quote or a recording folder name.
+        let template = fixed(key, target: target, rendered: rendered)
+        let regex = try! NSRegularExpression(pattern: #"\{([0-9]+)\}"#)
+        var result = ""
+        var cursor = template.startIndex
+        for match in regex.matches(in: template, range: NSRange(template.startIndex..., in: template)) {
+            guard let range = Range(match.range, in: template),
+                  let digits = Range(match.range(at: 1), in: template),
+                  let index = Int(template[digits]), args.indices.contains(index) else { continue }
+            result += template[cursor..<range.lowerBound]
+            result += args[index]
+            cursor = range.upperBound
+        }
+        return result + template[cursor...]
+    }
+    static func notesHeading(for target: OutputLanguage, rendered: RenderedFields? = nil) -> String {
+        fixed(.notesHeading, target: target, rendered: rendered)
+    }
+    static func reviewHeading(for target: OutputLanguage, rendered: RenderedFields? = nil) -> String {
+        fixed(.exportReviewHeading, target: target, rendered: rendered)
+    }
+    static func disclaimer(for target: OutputLanguage, rendered: RenderedFields? = nil) -> String {
+        fixed(.exportDisclaimer, target: target, rendered: rendered)
+    }
+    static func scopeLabel(_ snapshot: NotesExportSnapshot, rendered: RenderedFields? = nil) -> String {
+        fixed(snapshot.scope == .latest ? .latestScope : .wholeScope, target: snapshot.target, rendered: rendered)
     }
 
     static let notesHeading = "学习笔记"
@@ -478,22 +599,22 @@ enum NotesExportDocument {
             : String(format: "%02d:%02d", minutes, seconds)
     }
 
-    static func header(_ snapshot: NotesExportSnapshot, markdown: Bool) -> [String] {
+    static func header(_ snapshot: NotesExportSnapshot, markdown: Bool, rendered: RenderedFields? = nil) -> [String] {
         var lines: [String] = []
-        let title = "\(snapshot.className) · \(scopeLabel(snapshot)) · \(classDate(of: snapshot))"
+        let title = "\(rendered?.className ?? snapshot.className) · \(scopeLabel(snapshot, rendered: rendered)) · \(classDate(of: snapshot))"
         lines.append(markdown ? "# \(title)" : title)
         lines.append("")
-        lines.append("- " + fixed(.exportScopeLine, [scopeLabel(snapshot), snapshot.scopeDetail], target: snapshot.target))
-        lines.append("- " + fixed(.exportCoverageLine, [snapshot.coverageLine], target: snapshot.target))
+        lines.append("- " + fixed(.exportScopeLine, [scopeLabel(snapshot, rendered: rendered), rendered?.scopeDetail ?? snapshot.scopeDetail], target: snapshot.target, rendered: rendered))
+        lines.append("- " + fixed(.exportCoverageLine, [rendered?.coverageLine ?? snapshot.coverageLine], target: snapshot.target, rendered: rendered))
         // 「最近更新」只限制笔记正文的范围；复查意见是**整场录音**的。
         if snapshot.includesReviewAdvice, snapshot.reviewMarkdown != nil, snapshot.scope == .latest {
-            lines.append("- " + fixed(.exportReviewScope, target: snapshot.target))
+            lines.append("- " + fixed(.exportReviewScope, target: snapshot.target, rendered: rendered))
         }
         if let session = snapshot.sessionName {
-            lines.append("- " + fixed(.exportSessionLine, [session], target: snapshot.target))
+            lines.append("- " + fixed(.exportSessionLine, [session], target: snapshot.target, rendered: rendered))
         }
-        lines.append("- " + fixed(.exportTimeLine, [timestampFormatter.string(from: snapshot.generatedAt)], target: snapshot.target))
-        lines.append("- " + fixed(.exportExplanationLine, [disclaimer(for: snapshot.target)], target: snapshot.target))
+        lines.append("- " + fixed(.exportTimeLine, [timestampFormatter.string(from: snapshot.generatedAt)], target: snapshot.target, rendered: rendered))
+        lines.append("- " + fixed(.exportExplanationLine, [disclaimer(for: snapshot.target, rendered: rendered)], target: snapshot.target, rendered: rendered))
         lines.append("")
         return lines
     }
@@ -504,7 +625,8 @@ enum NotesExportDocument {
     /// - 批次标题（`## 第 N 批 …`）降为子级（`### …`）✓，保留原有的批号与主题 ✓；
     /// - 其余正文**原样保留** ✓（不认识的内容只搬不删 ✓）；
     /// - 不再另加"复查批次 1/2/3"编号 ✓（报告里已经有批号，重复编号会对不上 ✓）。
-    static func reviewSection(_ markdown: String, target: OutputLanguage = .simplifiedChinese) -> String {
+    static func reviewSection(_ markdown: String, target: OutputLanguage = .simplifiedChinese,
+                              rendered: RenderedFields? = nil) -> String {
         var output: [String] = []
         var progressTaken = false
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -512,7 +634,7 @@ enum NotesExportDocument {
             let trimmed = text.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("# "), !progressTaken {
                 progressTaken = true
-                output.append("- " + fixed(.exportProgressLine, [trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)], target: target))
+                output.append("- " + fixed(.exportProgressLine, [trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)], target: target, rendered: rendered))
                 continue
             }
             if trimmed.hasPrefix("## ") {
@@ -525,7 +647,8 @@ enum NotesExportDocument {
     }
 
     /// 有复查意见时才存在的章节正文（层级已转换）；没有就是 nil。
-    static func reviewBody(_ snapshot: NotesExportSnapshot) -> String? {
+    static func reviewBody(_ snapshot: NotesExportSnapshot, rendered: RenderedFields? = nil) -> String? {
+        if let rendered { return rendered.reviewBody }
         guard snapshot.includesReviewAdvice, let review = snapshot.reviewMarkdown,
               !review.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let body = reviewSection(review, target: snapshot.target)
@@ -533,63 +656,68 @@ enum NotesExportDocument {
     }
 
     /// 有复查意见时才存在的章节（Markdown / 纯文本两种渲染）。
-    private static func reviewBlock(_ snapshot: NotesExportSnapshot, markdown: Bool) -> String? {
-        guard let body = reviewBody(snapshot) else { return nil }
-        return markdown ? "## \(reviewHeading(for: snapshot.target))\n\n" + body : reviewHeading(for: snapshot.target) + "\n\n" + strippingMarkdown(body)
+    private static func reviewBlock(_ snapshot: NotesExportSnapshot, markdown: Bool,
+                                    rendered: RenderedFields? = nil) -> String? {
+        guard let body = reviewBody(snapshot, rendered: rendered) else { return nil }
+        let heading = reviewHeading(for: snapshot.target, rendered: rendered)
+        return markdown ? "## \(heading)\n\n" + body : heading + "\n\n" + strippingMarkdown(body)
     }
 
-    static func markdown(_ snapshot: NotesExportSnapshot) -> String {
-        var sections: [String] = [header(snapshot, markdown: true).joined(separator: "\n")]
-        let notes = snapshot.notesMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-        sections.append("## \(notesHeading(for: snapshot.target))\n\n" + (notes.isEmpty ? fixed(.emptyNotes, target: snapshot.target) : notes))
-        if let review = reviewBlock(snapshot, markdown: true) {
+    static func markdown(_ snapshot: NotesExportSnapshot, rendered: RenderedFields? = nil) -> String {
+        var sections: [String] = [header(snapshot, markdown: true, rendered: rendered).joined(separator: "\n")]
+        let notes = (rendered?.notesMarkdown ?? snapshot.notesMarkdown).trimmingCharacters(in: .whitespacesAndNewlines)
+        sections.append("## \(notesHeading(for: snapshot.target, rendered: rendered))\n\n" + (notes.isEmpty ? fixed(.emptyNotes, target: snapshot.target, rendered: rendered) : notes))
+        if let review = reviewBlock(snapshot, markdown: true, rendered: rendered) {
             sections.append(review)
         }
         if snapshot.includesTranscript, !snapshot.transcript.isEmpty {
-            let lines = snapshot.transcript.map { segment -> String in
+            let lines = snapshot.transcript.enumerated().map { index, segment -> String in
                 let stamp = "\(timestamp(segment.startTime))–\(timestamp(segment.endTime))"
-                return "[\(stamp)] " + SessionExporter.captionLines(segment, outputLanguage: snapshot.target).joined(separator: "\n")
+                let captions = rendered?.captionLines[index] ?? SessionExporter.captionLines(segment, outputLanguage: snapshot.target)
+                return "[\(stamp)] " + captions.joined(separator: "\n")
             }
-            sections.append("## \(transcriptHeading(for: snapshot.target))\n\n" + lines.joined(separator: "\n\n"))
+            sections.append("## \(rendered?.transcriptHeading ?? transcriptHeading(for: snapshot.target))\n\n" + lines.joined(separator: "\n\n"))
         }
         return sections.joined(separator: "\n\n") + "\n"
     }
 
-    static func plainText(_ snapshot: NotesExportSnapshot) -> String {
+    static func plainText(_ snapshot: NotesExportSnapshot, rendered: RenderedFields? = nil) -> String {
         var sections: [String] = []
-        sections.append(header(snapshot, markdown: true)
+        sections.append(header(snapshot, markdown: true, rendered: rendered)
             .map { $0.hasPrefix("- ") ? "  " + String($0.dropFirst(2)) : $0 }
             .joined(separator: "\n"))
-        let notes = strippingMarkdown(snapshot.notesMarkdown).trimmingCharacters(in: .whitespacesAndNewlines)
-        sections.append(notesHeading(for: snapshot.target) + "\n\n" + (notes.isEmpty ? fixed(.emptyNotes, target: snapshot.target) : notes))
-        if let review = reviewBlock(snapshot, markdown: false) {
+        let notes = strippingMarkdown(rendered?.notesMarkdown ?? snapshot.notesMarkdown).trimmingCharacters(in: .whitespacesAndNewlines)
+        sections.append(notesHeading(for: snapshot.target, rendered: rendered) + "\n\n" + (notes.isEmpty ? fixed(.emptyNotes, target: snapshot.target, rendered: rendered) : notes))
+        if let review = reviewBlock(snapshot, markdown: false, rendered: rendered) {
             sections.append(review)
         }
         if snapshot.includesTranscript, !snapshot.transcript.isEmpty {
-            let lines = snapshot.transcript.map { segment -> String in
+            let lines = snapshot.transcript.enumerated().map { index, segment -> String in
                 let stamp = "\(timestamp(segment.startTime))–\(timestamp(segment.endTime))"
-                return "[\(stamp)] " + SessionExporter.captionLines(segment, outputLanguage: snapshot.target).joined(separator: "\n")
+                let captions = rendered?.captionLines[index] ?? SessionExporter.captionLines(segment, outputLanguage: snapshot.target)
+                return "[\(stamp)] " + captions.joined(separator: "\n")
             }
-            sections.append(transcriptHeading(for: snapshot.target) + "\n\n" + lines.joined(separator: "\n\n"))
+            sections.append((rendered?.transcriptHeading ?? transcriptHeading(for: snapshot.target)) + "\n\n" + lines.joined(separator: "\n\n"))
         }
         return sections.joined(separator: "\n\n\n") + "\n"
     }
 
-    static func data(_ snapshot: NotesExportSnapshot, format: NotesExportFormat) throws -> Data {
-        guard snapshot.target.rendererIsAvailable else { throw NotesExportError.rendererUnavailable }
+    static func data(_ snapshot: NotesExportSnapshot, format: NotesExportFormat,
+                     converter: ChineseScriptConverter = .shared) throws -> Data {
+        let rendered = try prepare(snapshot, converter: converter)
         switch format {
-        case .markdown: return Data(markdown(snapshot).utf8)
-        case .plainText: return Data(plainText(snapshot).utf8)
-        case .word: return try wordData(snapshot)
-        case .pdf: return try PDFNotesWriter.data(snapshot)
+        case .markdown: return Data(markdown(snapshot, rendered: rendered).utf8)
+        case .plainText: return Data(plainText(snapshot, rendered: rendered).utf8)
+        case .word: return try wordData(snapshot, rendered: rendered)
+        case .pdf: return try PDFNotesWriter.data(snapshot, rendered: rendered)
         }
     }
 
     /// `.docx` through the same attributed content the PDF uses: AppKit writes a
     /// real OOXML package, so Word opens it as an editable document with the
     /// headings, bold labels and sub/superscript formulas intact.
-    static func wordData(_ snapshot: NotesExportSnapshot) throws -> Data {
-        let attributed = PDFNotesWriter.attributedDocument(snapshot)
+    static func wordData(_ snapshot: NotesExportSnapshot, rendered: RenderedFields? = nil) throws -> Data {
+        let attributed = PDFNotesWriter.attributedDocument(snapshot, rendered: rendered)
         do {
             return try attributed.data(
                 from: NSRange(location: 0, length: attributed.length),
@@ -600,8 +728,9 @@ enum NotesExportDocument {
         }
     }
 
-    static func write(_ snapshot: NotesExportSnapshot, format: NotesExportFormat, to url: URL) throws {
-        let payload = try data(snapshot, format: format)
+    static func write(_ snapshot: NotesExportSnapshot, format: NotesExportFormat, to url: URL,
+                      converter: ChineseScriptConverter = .shared) throws {
+        let payload = try data(snapshot, format: format, converter: converter)
         do {
             try payload.write(to: url, options: .atomic)
         } catch {
@@ -646,8 +775,8 @@ enum PDFNotesWriter {
     static let margin: CGFloat = 48
     static let bodySize: CGFloat = 11
 
-    static func data(_ snapshot: NotesExportSnapshot) throws -> Data {
-        let attributed = attributedDocument(snapshot)
+    static func data(_ snapshot: NotesExportSnapshot, rendered: NotesExportDocument.RenderedFields? = nil) throws -> Data {
+        let attributed = attributedDocument(snapshot, rendered: rendered)
         let output = NSMutableData()
         guard let consumer = CGDataConsumer(data: output as CFMutableData) else {
             throw NotesExportError.pdfContextUnavailable
@@ -689,44 +818,45 @@ enum PDFNotesWriter {
         return output as Data
     }
 
-    static func attributedDocument(_ snapshot: NotesExportSnapshot) -> NSAttributedString {
+    static func attributedDocument(_ snapshot: NotesExportSnapshot,
+                                   rendered: NotesExportDocument.RenderedFields? = nil) -> NSAttributedString {
         let output = NSMutableAttributedString()
         func append(_ text: String, style: Style) {
             output.append(line(text, style: style))
         }
 
-        append("\(snapshot.className) · \(NotesExportDocument.scopeLabel(snapshot)) · \(snapshot.classDate)", style: .title)
-        append(NotesExportDocument.fixed(.exportScopeLine, [NotesExportDocument.scopeLabel(snapshot), snapshot.scopeDetail], target: snapshot.target), style: .meta)
-        append(NotesExportDocument.fixed(.exportCoverageLine, [snapshot.coverageLine], target: snapshot.target), style: .meta)
+        append("\(rendered?.className ?? snapshot.className) · \(NotesExportDocument.scopeLabel(snapshot, rendered: rendered)) · \(snapshot.classDate)", style: .title)
+        append(NotesExportDocument.fixed(.exportScopeLine, [NotesExportDocument.scopeLabel(snapshot, rendered: rendered), rendered?.scopeDetail ?? snapshot.scopeDetail], target: snapshot.target, rendered: rendered), style: .meta)
+        append(NotesExportDocument.fixed(.exportCoverageLine, [rendered?.coverageLine ?? snapshot.coverageLine], target: snapshot.target, rendered: rendered), style: .meta)
         if snapshot.includesReviewAdvice, snapshot.reviewMarkdown != nil, snapshot.scope == .latest {
-            append(NotesExportDocument.fixed(.exportReviewScope, [], target: snapshot.target), style: .meta)
+            append(NotesExportDocument.fixed(.exportReviewScope, [], target: snapshot.target, rendered: rendered), style: .meta)
         }
-        if let session = snapshot.sessionName { append(NotesExportDocument.fixed(.exportSessionLine, [session], target: snapshot.target), style: .meta) }
-        append(NotesExportDocument.fixed(.exportTimeLine, [NotesExportDocument.timestampFormatter.string(from: snapshot.generatedAt)], target: snapshot.target), style: .meta)
-        append(NotesExportDocument.disclaimer(for: snapshot.target), style: .meta)
+        if let session = snapshot.sessionName { append(NotesExportDocument.fixed(.exportSessionLine, [session], target: snapshot.target, rendered: rendered), style: .meta) }
+        append(NotesExportDocument.fixed(.exportTimeLine, [NotesExportDocument.timestampFormatter.string(from: snapshot.generatedAt)], target: snapshot.target, rendered: rendered), style: .meta)
+        append(NotesExportDocument.disclaimer(for: snapshot.target, rendered: rendered), style: .meta)
 
-        append(NotesExportDocument.notesHeading(for: snapshot.target), style: .heading)
-        let notes = snapshot.notesMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        append(NotesExportDocument.notesHeading(for: snapshot.target, rendered: rendered), style: .heading)
+        let notes = (rendered?.notesMarkdown ?? snapshot.notesMarkdown).trimmingCharacters(in: .whitespacesAndNewlines)
         if notes.isEmpty {
-            append(NotesExportDocument.fixed(.emptyNotes, target: snapshot.target), style: .body)
+            append(NotesExportDocument.fixed(.emptyNotes, target: snapshot.target, rendered: rendered), style: .body)
         } else {
             for line in notes.split(separator: "\n", omittingEmptySubsequences: false) {
                 append(String(line), style: Style.markdown(String(line)))
             }
         }
 
-        if let review = NotesExportDocument.reviewBody(snapshot) {
-            append(NotesExportDocument.reviewHeading(for: snapshot.target), style: .heading)
+        if let review = NotesExportDocument.reviewBody(snapshot, rendered: rendered) {
+            append(NotesExportDocument.reviewHeading(for: snapshot.target, rendered: rendered), style: .heading)
             for line in review.split(separator: "\n", omittingEmptySubsequences: false) {
                 append(String(line), style: Style.markdown(String(line)))
             }
         }
 
         if snapshot.includesTranscript, !snapshot.transcript.isEmpty {
-            append(NotesExportDocument.transcriptHeading(for: snapshot.target), style: .heading)
-            for segment in snapshot.transcript {
+            append(rendered?.transcriptHeading ?? NotesExportDocument.transcriptHeading(for: snapshot.target), style: .heading)
+            for (index, segment) in snapshot.transcript.enumerated() {
                 let stamp = "\(NotesExportDocument.timestamp(segment.startTime))–\(NotesExportDocument.timestamp(segment.endTime))"
-                let lines = SessionExporter.captionLines(segment, outputLanguage: snapshot.target)
+                let lines = rendered?.captionLines[index] ?? SessionExporter.captionLines(segment, outputLanguage: snapshot.target)
                 append("[\(stamp)] \(lines[0])", style: .body)
                 for translation in lines.dropFirst() { append(translation, style: .translation) }
             }
