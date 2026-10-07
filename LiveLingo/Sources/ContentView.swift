@@ -138,7 +138,6 @@ enum SummaryRenderingDiagnostics {
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var floatingWindow = FloatingSubtitleWindowController.shared
-    @Environment(\.openWindow) private var openWindow
     @AppStorage("transcriptTextSize") private var transcriptTextSize = 18.0
     @State private var wholeLessonNotes = false
     @State private var showExportOptions = false
@@ -220,7 +219,7 @@ struct ContentView: View {
         ToolbarItem(placement: .primaryAction) {
             HStack(spacing: 8) {
                 Button {
-                    openWindow(id: "subtitles")
+                    floatingWindow.show(model: model)
                 } label: {
                     Label("浮动字幕", systemImage: "pip")
                 }
@@ -900,8 +899,11 @@ struct ClassroomSettingsView: View {
                 subtitleSlider("背景不透明度", value: subtitles.backgroundOpacityBinding,
                                range: FloatingSubtitlePreferences.opacityRange, step: 0.05,
                                label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
-                Toggle("在全屏应用和所有桌面显示", isOn: subtitles.showsAcrossSpacesBinding)
+                Toggle("在所有桌面显示", isOn: subtitles.showsAcrossSpacesBinding)
                     .accessibilityIdentifier("floating-all-spaces")
+                Text("在所有桌面（含切换桌面时）保持显示。其他 App 进入全屏时，macOS 不允许普通 App 的窗口盖在上面；可让网课窗口用非全屏的最大化或分屏。")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -981,7 +983,6 @@ struct RecordingMenuItems: View {
 
     private struct Content: View {
         @ObservedObject var model: AppModel
-        @Environment(\.openWindow) private var openWindow
         @ObservedObject private var floatingWindow = FloatingSubtitleWindowController.shared
 
         var body: some View {
@@ -1001,13 +1002,13 @@ struct RecordingMenuItems: View {
                     .disabled(!model.canImportMedia)
             }
             Divider()
-            Button("浮动字幕") { openWindow(id: "subtitles") }
+            Button("浮动字幕") { floatingWindow.show(model: model) }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
             Button(floatingWindow.lockActionTitle) { floatingWindow.toggleLock() }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
             Button("浮动字幕移到屏幕底部") {
                 floatingWindow.moveToScreenBottom()
-                openWindow(id: "subtitles")
+                floatingWindow.show(model: model)
             }
         }
     }

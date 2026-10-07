@@ -538,24 +538,43 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
     }
 
     func testHostedBackgroundOpacityLeavesTextOpaqueAndWindowTransparent() async throws {
-        let (model, store) = try fixture()
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let model = fixture.model
+        let store = fixture.defaults
         let preferences = FloatingSubtitlePreferences(store: store)
         model.loadPresentationForTesting(phase: .recording, evidence: [], preview: "The water is cold.")
-        let (window, controller) = host(floating(model, store: store))
-        defer { window.close() }
-        try await resizeAndSettle(window, view: controller.view)
+        let windowController = FloatingSubtitleWindowController(defaults: store)
+        let window = windowController.prepareWindow(model: model)
+        defer { windowController.close() }
+        let view = try XCTUnwrap(window.contentView as? NSHostingView<AnyView>)
+        try await settle(view)
+        // The production controller owns a plain NSPanel. Count shadow refreshes
+        // on the concrete production configuration with a separate hidden probe.
+        let shadowWindow = ShadowTrackingWindow(contentRect: window.contentRect(forFrameRect: window.frame),
+                                               styleMask: [.titled], backing: .buffered, defer: false)
+        shadowWindow.isReleasedWhenClosed = false
+        defer { shadowWindow.close() }
+        let shadowConfiguration = FloatingSubtitleWindowConfiguration(window: shadowWindow)
+        shadowConfiguration.apply(.init())
         let originalIsOpaque = window.isOpaque
         let originalBackground = window.backgroundColor
-        let initial = try bitmap(controller.view)
+        let originalHasShadow = window.hasShadow
+        let initial = try bitmap(view)
         XCTAssertEqual(try XCTUnwrap(initial.colorAt(x: 2, y: 2)).alphaComponent, 1, accuracy: 0.02)
-        let shadowInvalidations = (window as? ShadowTrackingWindow)?.shadowInvalidations ?? 0
+        let shadowInvalidations = shadowWindow.shadowInvalidations
         preferences.backgroundOpacity = 0.7
-        try await settle(controller.view)
+        shadowConfiguration.apply(.init(backgroundOpacity: preferences.backgroundOpacity))
+        try await settle(view)
         XCTAssertFalse(window.isOpaque)
         XCTAssertEqual(window.backgroundColor, .clear)
-        let translucent = try bitmap(controller.view)
+        XCTAssertEqual(window.hasShadow, originalHasShadow)
+        XCTAssertFalse(window.isVisible)
+        XCTAssertFalse(shadowWindow.isVisible)
+        XCTAssertTrue(windowController.panel === window)
+        XCTAssertTrue(window.contentView === view)
+        let translucent = try bitmap(view)
         XCTAssertEqual(try XCTUnwrap(translucent.colorAt(x: 2, y: 2)).alphaComponent, 0.7, accuracy: 0.02)
-        XCTAssertGreaterThan((window as? ShadowTrackingWindow)?.shadowInvalidations ?? 0, shadowInvalidations)
+        XCTAssertGreaterThan(shadowWindow.shadowInvalidations, shadowInvalidations)
         var opaqueWhitePixels = 0
         for y in stride(from: 30, to: translucent.pixelsHigh - 30, by: 2) {
             for x in stride(from: 30, to: translucent.pixelsWide - 30, by: 2) {
@@ -565,14 +584,28 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(opaqueWhitePixels, 0, "Only the background may fade; caption glyphs must remain opaque")
-        try capture(controller.view, name: "floating-opacity-70")
-        let translucentShadowInvalidations = (window as? ShadowTrackingWindow)?.shadowInvalidations ?? 0
+        try captureOpacity(view, directory: fixture.ddOverlay)
+        let translucentShadowInvalidations = shadowWindow.shadowInvalidations
         preferences.backgroundOpacity = 1
-        try await settle(controller.view)
+        shadowConfiguration.apply(.init(backgroundOpacity: preferences.backgroundOpacity))
+        try await settle(view)
         XCTAssertEqual(window.isOpaque, originalIsOpaque)
         XCTAssertEqual(window.backgroundColor, originalBackground)
-        XCTAssertGreaterThan((window as? ShadowTrackingWindow)?.shadowInvalidations ?? 0, translucentShadowInvalidations)
-        XCTAssertTrue(try pixels(bitmap(controller.view)) == pixels(initial), "Restoring 100% must restore the original pixels")
+        XCTAssertEqual(window.hasShadow, originalHasShadow)
+        XCTAssertGreaterThan(shadowWindow.shadowInvalidations, translucentShadowInvalidations)
+        XCTAssertTrue(try pixels(bitmap(view)) == pixels(initial), "Restoring 100% must restore the original pixels")
+    }
+
+    private func captureOpacity(_ view: NSView, directory: URL) throws {
+        let png = try XCTUnwrap(bitmap(view).representation(using: .png, properties: [:]))
+        XCTAssertGreaterThan(png.count, 5_000, "A flat/unrendered image is not review evidence")
+        let screenshots = directory.appendingPathComponent("display-options/screenshots", isDirectory: true)
+        try FileManager.default.createDirectory(at: screenshots, withIntermediateDirectories: true)
+        try png.write(to: screenshots.appendingPathComponent("floating-opacity-70.png"))
+        let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+        attachment.name = "floating-opacity-70"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     func testHostedIndependentSizesUpdateTheActualSubtitlePixels() async throws {

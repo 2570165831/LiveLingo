@@ -9,11 +9,12 @@ struct FloatingSubtitleWindowSettings: Equatable {
     func collectionBehavior(restoring original: NSWindow.CollectionBehavior) -> NSWindow.CollectionBehavior {
         guard showsAcrossSpaces else { return original }
         var behavior = original
-        // All Spaces keeps captions with desktop switches; fullScreenAuxiliary
-        // lets them accompany a full-screen window. On macOS 14+, joining all
-        // applications also permits OTHER apps' full-screen/Stage Manager sets.
+        // Join every desktop, including during Space switches. Auxiliary roles
+        // make the panel eligible for compatible window sets; they do not let a
+        // regular foreground app cover another app's full-screen Space. We keep
+        // the app's regular activation policy, Dock icon and menu bar.
         // Remove mutually exclusive roles; moveToActiveSpace is unnecessary
-        // when the same overlay already joins every Space. No main window uses this policy.
+        // when the same panel already joins every desktop.
         behavior.subtract([.moveToActiveSpace, .fullScreenPrimary, .fullScreenNone, .primary, .auxiliary])
         behavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary, .canJoinAllApplications])
         return behavior
@@ -71,18 +72,133 @@ enum FloatingSubtitleWindowPlacement {
     }
 }
 
-/// A single SwiftUI subtitle Window shares this controller with the toolbar
-/// and Commands. Locking is deliberately memory-only: every launch is unlocked.
+/// Screen queries are separate so non-main displays and missing-window-screen
+/// fallbacks can be exercised without changing the user's display arrangement.
 @MainActor
-final class FloatingSubtitleWindowController: ObservableObject {
+struct FloatingSubtitleWindowScreens {
+    var windowVisibleFrame: (NSWindow) -> NSRect?
+    var mainVisibleFrame: () -> NSRect?
+    var firstVisibleFrame: () -> NSRect?
+
+    static let live = Self(windowVisibleFrame: { $0.screen?.visibleFrame },
+                           mainVisibleFrame: { NSScreen.main?.visibleFrame },
+                           firstVisibleFrame: { NSScreen.screens.first?.visibleFrame })
+
+    func visibleFrame(for window: NSWindow) -> NSRect? {
+        windowVisibleFrame(window) ?? mainVisibleFrame() ?? firstVisibleFrame()
+    }
+}
+
+/// Owns one nonactivating panel, rather than borrowing a SwiftUI scene window.
+/// SwiftUI hosts only its content and cannot rewrite scene-level window policy.
+/// Locking and visibility are memory-only; every launch starts closed/unlocked.
+@MainActor
+final class FloatingSubtitleWindowController: NSWindowController, ObservableObject, NSWindowDelegate {
     static let shared = FloatingSubtitleWindowController()
+    static let frameAutosaveName = "subtitles"
+    static let frameDefaultsKey = "NSWindow Frame subtitles"
 
     @Published private(set) var isLocked = false
+    private let defaults: UserDefaults
+    private let screens: FloatingSubtitleWindowScreens
+    private let notificationCenter: NotificationCenter
     private var configuration: FloatingSubtitleWindowConfiguration?
     private var settings = FloatingSubtitleWindowSettings()
     private var pendingBottomPlacement = false
 
+    var panel: NSPanel? { window as? NSPanel }
     var lockActionTitle: String { isLocked ? "解锁浮动字幕" : "锁定浮动字幕" }
+
+    init(defaults: UserDefaults = .standard, screens: FloatingSubtitleWindowScreens = .live,
+         notificationCenter: NotificationCenter = .default) {
+        self.defaults = defaults
+        self.screens = screens
+        self.notificationCenter = notificationCenter
+        super.init(window: nil)
+        for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+            notificationCenter.addObserver(self, selector: #selector(applicationVisibilityChanged(_:)),
+                                           name: name, object: NSApp)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("Subtitle panels are created programmatically") }
+
+    deinit { notificationCenter.removeObserver(self) }
+
+    /// Also used for offscreen verification; creating the content never orders
+    /// the panel onscreen, activates the app or starts any model service.
+    @discardableResult
+    func prepareWindow(model: AppModel) -> NSPanel {
+        let preferences = FloatingSubtitlePreferences(store: defaults)
+        updateSettings(showsAcrossSpaces: preferences.showsAcrossSpaces,
+                       backgroundOpacity: preferences.backgroundOpacity)
+        if let panel { return panel }
+
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 350),
+                            styleMask: [.titled, .closable, .miniaturizable, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+        panel.title = "浮动字幕"
+        panel.identifier = NSUserInterfaceItemIdentifier(Self.frameAutosaveName)
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.isReleasedWhenClosed = false
+        // Keep frame persistence, but deliberately drop the old SwiftUI scene's
+        // cross-launch reopening. Subtitles open only through explicit commands.
+        panel.isRestorable = false
+        panel.appearance = NSAppearance(named: .darkAqua)
+
+        let host = NSHostingView(rootView: AnyView(FloatingSubtitleView(windowController: self)
+            .environmentObject(model).defaultAppStorage(defaults)))
+        panel.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let size = host.fittingSize
+        panel.setContentSize(size)
+        panel.contentMinSize = size
+        panel.contentMaxSize = size
+
+        if let visible = screens.mainVisibleFrame() ?? screens.firstVisibleFrame() {
+            panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2,
+                                         y: visible.maxY - panel.frame.height - 20))
+        }
+        // Native AppKit uses this exact key for the former Window(id: "subtitles").
+        // Injected preference suites use the same frame format/key without ever
+        // registering native autosave against the production defaults domain.
+        let savedFrame = defaults.string(forKey: Self.frameDefaultsKey)
+        if defaults === UserDefaults.standard {
+            windowFrameAutosaveName = Self.frameAutosaveName
+            panel.setFrameAutosaveName(Self.frameAutosaveName)
+        }
+        if let savedFrame { panel.setFrame(from: savedFrame) }
+        // Restore the old top-left position, keeping the content's fixed size.
+        panel.setContentSize(size)
+        window = panel
+        configuration = FloatingSubtitleWindowConfiguration(window: panel)
+        configuration?.apply(settings)
+        panel.delegate = self
+        if pendingBottomPlacement {
+            pendingBottomPlacement = false
+            moveToScreenBottom()
+        }
+        return panel
+    }
+
+    func show(model: AppModel) {
+        let panel = prepareWindow(model: model)
+        if panel.isMiniaturized { panel.deminiaturize(nil) }
+        panel.orderFront(nil)
+        configuration?.apply(settings)
+    }
+
+    func hide() {
+        panel?.orderOut(nil)
+        configuration?.apply(settings)
+    }
+
+    override func close() {
+        saveFrame()
+        super.close()
+    }
 
     func toggleLock() {
         isLocked.toggle()
@@ -90,93 +206,48 @@ final class FloatingSubtitleWindowController: ObservableObject {
         configuration?.apply(settings)
     }
 
-    func attach(to window: NSWindow, showsAcrossSpaces: Bool, backgroundOpacity: Double) {
-        if configuration?.window !== window {
-            configuration?.restore()
-            configuration = FloatingSubtitleWindowConfiguration(window: window)
-        }
+    /// Content reports preferences, never its enclosing window. Hosting this
+    /// view elsewhere must not let it configure the classroom/main window.
+    func updateSettings(showsAcrossSpaces: Bool, backgroundOpacity: Double) {
         settings = FloatingSubtitleWindowSettings(showsAcrossSpaces: showsAcrossSpaces,
                                                   isLocked: isLocked, backgroundOpacity: backgroundOpacity)
         configuration?.apply(settings)
-        if pendingBottomPlacement {
-            pendingBottomPlacement = false
-            // An unopened SwiftUI Window attaches before its final content size
-            // is laid out. Wait until this pass ends before using its frame.
-            DispatchQueue.main.async { [weak self, weak window] in
-                guard let self, let window, self.configuration?.window === window else { return }
-                self.moveToScreenBottom()
-            }
-        }
     }
 
-    func detach(from window: NSWindow) {
-        guard configuration?.window === window else { return }
-        configuration?.restore()
+    @objc private func applicationVisibilityChanged(_ notification: Notification) {
+        // Never order a closed panel front on unhide. AppKit handles visibility;
+        // our owned policy stays identical before and after either notification.
+        configuration?.apply(settings)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        saveFrame()
+        // Unregister the native name before a replacement panel is created,
+        // even if AppKit still retains the just-closed panel for this runloop.
+        if defaults === UserDefaults.standard { panel?.setFrameAutosaveName("") }
+        // The hosted view observes this controller. Release that content when
+        // closing to break the controller -> panel -> view -> controller cycle.
+        // Reopening creates a panel at the saved frame with the same runtime lock.
+        panel?.contentView = nil
         configuration = nil
+        window = nil
+    }
+    func windowDidMove(_ notification: Notification) { saveFrame() }
+    func windowDidResize(_ notification: Notification) { saveFrame() }
+
+    private func saveFrame() {
+        guard let panel else { return }
+        defaults.set(panel.frameDescriptor, forKey: Self.frameDefaultsKey)
     }
 
     func moveToScreenBottom() {
-        guard let window = configuration?.window,
-              let screen = window.screen ?? NSScreen.main ?? NSScreen.screens.first else {
+        guard let panel else {
             pendingBottomPlacement = true
             return
         }
-        window.setFrame(FloatingSubtitleWindowPlacement.bottomFrame(windowSize: window.frame.size,
-                                                                    visibleFrame: screen.visibleFrame),
-                        display: false)
-    }
-}
-
-struct FloatingSubtitleWindowBridge: NSViewRepresentable {
-    let controller: FloatingSubtitleWindowController
-    let showsAcrossSpaces: Bool
-    let backgroundOpacity: Double
-
-    final class View: NSView {
-        var controller: FloatingSubtitleWindowController?
-        var showsAcrossSpaces = true
-        var backgroundOpacity = 1.0
-        private weak var configuredWindow: NSWindow?
-
-        override func viewWillMove(toWindow newWindow: NSWindow?) {
-            if configuredWindow !== newWindow { detach() }
-            super.viewWillMove(toWindow: newWindow)
-        }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            configureWindow()
-        }
-
-        func configureWindow() {
-            guard let window else { return }
-            configuredWindow = window
-            controller?.attach(to: window, showsAcrossSpaces: showsAcrossSpaces, backgroundOpacity: backgroundOpacity)
-        }
-
-        func detach() {
-            if let configuredWindow { controller?.detach(from: configuredWindow) }
-            configuredWindow = nil
-        }
-    }
-
-    func makeNSView(context: Context) -> View {
-        let view = View()
-        view.controller = controller
-        view.showsAcrossSpaces = showsAcrossSpaces
-        view.backgroundOpacity = backgroundOpacity
-        return view
-    }
-
-    func updateNSView(_ nsView: View, context: Context) {
-        if nsView.controller !== controller { nsView.detach() }
-        nsView.controller = controller
-        nsView.showsAcrossSpaces = showsAcrossSpaces
-        nsView.backgroundOpacity = backgroundOpacity
-        nsView.configureWindow()
-    }
-
-    static func dismantleNSView(_ nsView: View, coordinator: ()) {
-        nsView.detach()
+        guard let visibleFrame = screens.visibleFrame(for: panel) else { return }
+        panel.setFrame(FloatingSubtitleWindowPlacement.bottomFrame(windowSize: panel.frame.size,
+                                                                   visibleFrame: visibleFrame), display: false)
+        saveFrame()
     }
 }

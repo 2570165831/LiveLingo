@@ -68,9 +68,12 @@ private struct FloatingSubtitleContent: View {
                     .accessibilityLabel("字幕窗已锁定，点击穿透；可在主窗口或菜单解锁")
             }
         }
-        .background(FloatingSubtitleWindowBridge(controller: windowController,
-                                                 showsAcrossSpaces: preferences.showsAcrossSpaces,
-                                                 backgroundOpacity: preferences.backgroundOpacity))
+        .onChange(of: FloatingSubtitleWindowSettings(showsAcrossSpaces: preferences.showsAcrossSpaces,
+                                                     backgroundOpacity: preferences.backgroundOpacity),
+                  initial: true) { _, settings in
+            windowController.updateSettings(showsAcrossSpaces: settings.showsAcrossSpaces,
+                                            backgroundOpacity: settings.backgroundOpacity)
+        }
     }
 
     private func subtitle(_ text: String, size: Double, weight: Font.Weight, color: Color, height: CGFloat,

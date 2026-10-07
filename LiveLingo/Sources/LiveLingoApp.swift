@@ -171,15 +171,5 @@ struct LiveLingoApp: App {
                 EmptyView()
             }
         }
-
-        Window("浮动字幕", id: "subtitles") {
-            if let model = holder.model {
-                FloatingSubtitleView().environmentObject(model)
-            } else {
-                EmptyView()
-            }
-        }
-        .windowResizability(.contentSize)
-        .defaultPosition(.top)
     }
 }
