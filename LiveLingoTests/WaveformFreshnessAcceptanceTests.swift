@@ -418,13 +418,13 @@ final class WaveformFreshnessAcceptanceTests: XCTestCase {
     func testSuspendedTaskDoesNotRetainOwnerOrDisturbNewOwner() async throws {
         let clock = WaveformVirtualClock()
         var owner: WaveformFreshnessState? = clock.makeState()
-        weak var departedOwner = owner
+        let departedOwner = { [weak owner] in owner }
         var newOwner: WaveformFreshnessState?
         var retiredTask: Task<Void, Never>?
         var replacementTask: Task<Void, Never>?
         defer {
             // Also releases continuations if the weak-owner assertion fails.
-            departedOwner?.unmount()
+            departedOwner()?.unmount()
             owner?.unmount()
             newOwner?.unmount()
             retiredTask?.cancel()
@@ -438,7 +438,7 @@ final class WaveformFreshnessAcceptanceTests: XCTestCase {
         try await clock.awaitSleepCount(1)
         owner = nil // Do not explicitly unmount: deinit is the behavior under test.
         try await waveformEventually("A suspended freshness task retained its owner") {
-            departedOwner == nil
+            departedOwner() == nil
         }
         XCTAssertTrue(retired.isCancelled, "Releasing the owner cancels its task")
 
@@ -453,7 +453,7 @@ final class WaveformFreshnessAcceptanceTests: XCTestCase {
         clock.advance(to: 0.3)
         try clock.release(1)
         try await waveformFinished(retired)
-        XCTAssertNil(departedOwner)
+        XCTAssertNil(departedOwner())
         XCTAssertTrue(current.isReceiving)
         XCTAssertNotNil(current.taskForTesting)
         XCTAssertFalse(replacement.isCancelled)

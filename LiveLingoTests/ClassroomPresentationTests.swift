@@ -750,8 +750,9 @@ final class ClassroomPresentationTests: XCTestCase {
         func accessibilityIdentifier() -> String? { value("accessibilityIdentifier") as? String }
         func accessibilityFrame() -> NSRect { (value("accessibilityFrame") as? NSValue)?.rectValue ?? .zero }
         func accessibilityPerformPress() -> Bool {
-            guard object.responds(to: NSSelectorFromString("accessibilityPerformPress")) else { return false }
-            object.accessibilityPerformAction(.press)
+            guard let accessibility = object as? NSAccessibilityProtocol,
+                  object.responds(to: NSSelectorFromString("accessibilityPerformPress")) else { return false }
+            _ = accessibility.accessibilityPerformPress()
             return true
         }
     }

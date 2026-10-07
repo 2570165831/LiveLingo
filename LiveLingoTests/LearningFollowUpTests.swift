@@ -656,7 +656,7 @@ final class LearningFollowUpTests: XCTestCase {
         completed.completedNote = LearningNote(topic: "旧主题", points: [
             LearningPoint(kind: "核心结论", text: "已完成要点", sourceIDs: ["en0s0"])
         ], sourceVersion: 2, noNewKnowledge: false)
-        try? snapshot.generationCheckpoints.append(checkpoint)
+        snapshot.generationCheckpoints.append(checkpoint)
         XCTAssertEqual(snapshot.batches.count, 0, "已完成批次不被断点改动")
     }
 }

@@ -601,7 +601,7 @@ struct ASRRecoveryTests {
         }
         let collector = ASREventCollector()
         for (index, url) in [bad, good].enumerated() {
-            await queue.submit(.init(audioURL: url, modelKey: "primary", fallbackModelKey: "fallback",
+            queue.submit(.init(audioURL: url, modelKey: "primary", fallbackModelKey: "fallback",
                 start: Double(index), end: Double(index + 1), appleEvidence: "", recordingURL: recording), handler: collector.append)
         }
         await queue.finish()
@@ -622,7 +622,7 @@ struct ASRRecoveryTests {
             model == "primary" ? "这是中文" : "This is an English caption."
         }
         let collector = ASREventCollector()
-        await queue.submit(.init(audioURL: url, modelKey: "primary", fallbackModelKey: "fallback",
+        queue.submit(.init(audioURL: url, modelKey: "primary", fallbackModelKey: "fallback",
             start: 0, end: 1, appleEvidence: "", recordingURL: nil), handler: collector.append)
         await queue.finish()
         #expect(collector.events.contains { if case .final(text: "This is an English caption.", start: _, end: _, hints: _, language: _) = $0 { return true }; return false })
@@ -638,7 +638,7 @@ struct ASRRecoveryTests {
             url.lastPathComponent.hasPrefix("LiveLingo-retry-") ? "A recovered sentence with surrounding context." : ""
         }
         let collector = ASREventCollector()
-        await queue.submit(.init(audioURL: chunk, modelKey: "primary", fallbackModelKey: "fallback",
+        queue.submit(.init(audioURL: chunk, modelKey: "primary", fallbackModelKey: "fallback",
             start: 1, end: 2, appleEvidence: "", recordingURL: recording), handler: collector.append)
         for _ in 0..<60 {
             if collector.events.contains(where: { if case let .transcriptionIssue(_, _, message) = $0 { return message.contains("待核对") }; return false }) { break }
@@ -670,13 +670,13 @@ struct ASRRecoveryTests {
             }
             return url.lastPathComponent == "good.wav" ? "The next caption wins." : ""
         }
-        await queue.submit(.init(audioURL: bad, modelKey: "primary", fallbackModelKey: "fallback",
+        queue.submit(.init(audioURL: bad, modelKey: "primary", fallbackModelKey: "fallback",
             start: 0, end: 1, appleEvidence: "", recordingURL: recording), handler: collector.append)
         for _ in 0..<60 {
             if collector.events.contains(where: { if case .transcriptionIssue(start: -1, end: -1, message: "retryStarted") = $0 { return true }; return false }) { break }
             try await Task.sleep(for: .milliseconds(100))
         }
-        await queue.submit(.init(audioURL: good, modelKey: "primary", fallbackModelKey: "fallback",
+        queue.submit(.init(audioURL: good, modelKey: "primary", fallbackModelKey: "fallback",
             start: 1, end: 2, appleEvidence: "", recordingURL: recording), handler: collector.append)
         await queue.finish()
         #expect(collector.events.contains { if case .transcriptionIssue(start: -1, end: -1, message: "retryCancelled") = $0 { return true }; return false })
@@ -1007,7 +1007,7 @@ struct ASRRecoveryTests {
         // 契约：会话目录可用性判定（2026-09-18 今天这节的复查正是卡在 `.Trash` 上 ✗）。
         // 这条规则此前只写在批处理内部 ✗、没有测试 ✗；抽成纯函数后逐状态验 ✓。
         let manager = FileManager.default
-        #expect(LearningReviewQueue.directoryIssue(for: URL(fileURLWithPath: "/Users/example/.Trash/x")) == "directory_in_trash")
+        #expect(LearningReviewQueue.directoryIssue(for: URL(fileURLWithPath: "/synthetic/.Trash/x")) == "directory_in_trash")
         #expect(LearningReviewQueue.directoryIssue(for: URL(fileURLWithPath: "/Volumes/Backup/.Trashes/501/x")) == "directory_in_trash")
 
         // 不存在的目录 → 不可写 → directory_unavailable ✓

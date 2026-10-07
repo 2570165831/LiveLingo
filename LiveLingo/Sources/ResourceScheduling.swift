@@ -119,7 +119,7 @@ actor ASRRequestCoordinator {
              guard let http = response as? HTTPURLResponse else { throw QwenRuntimeError.invalidResponse }
              return ASRHTTPResult(data: data, status: http.statusCode)
          },
-         observeExit: @escaping ExitObservation = { await ASRRuntime.shared.hasExited($0) }) {
+         observeExit: @escaping ExitObservation = { ASRRuntime.shared.hasExited($0) }) {
         self.transport = transport
         self.observeExit = observeExit
         self.confirmationTimeout = confirmationTimeout
