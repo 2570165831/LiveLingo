@@ -18,8 +18,12 @@ struct SessionExporterTests {
     @Test @MainActor func recordingDefaultsRespectExplicitSleepChoiceAndIsolateMeterUpdates() throws {
         for choice: Bool? in [nil, false, true] {
             let suite = "LiveLingoMeterTest-\(UUID().uuidString)"
+            let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
             let defaults = try #require(UserDefaults(suiteName: suite))
-            defer { defaults.removePersistentDomain(forName: suite) }
+            defer {
+                do { try preferenceCleanup.remove(defaults) }
+                catch { Issue.record(error) }
+            }
             if let choice { defaults.set(choice, forKey: "LiveLingo.preventIdleSleepWhileRecording") }
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
             defer { try? FileManager.default.removeItem(at: root) }

@@ -11,6 +11,7 @@
 		B70000000000000000000005 /* default-target-golden.json in Resources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000006 /* default-target-golden.json */; };
 		B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000004 /* OutputLanguageBaselineTests.swift */; };
 		B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000002 /* DefaultTargetGoldenTests.swift */; };
+		920000000000000000000001 /* TestPreferenceCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000002 /* TestPreferenceCleanup.swift */; };
 		910000000000000000000001 /* FloatingSubtitlePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 910000000000000000000002 /* FloatingSubtitlePreferences.swift */; };
 		910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 910000000000000000000004 /* FloatingSubtitleDisplayTests.swift */; };
 		7F0000000000000000000005 /* TranslationRetirementRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F0000000000000000000006 /* TranslationRetirementRegressionTests.swift */; };
@@ -101,6 +102,7 @@
 		B70000000000000000000006 /* default-target-golden.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/default-target-golden.json"; sourceTree = "<group>"; };
 		B70000000000000000000004 /* OutputLanguageBaselineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputLanguageBaselineTests.swift; sourceTree = "<group>"; };
 		B70000000000000000000002 /* DefaultTargetGoldenTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DefaultTargetGoldenTests.swift; sourceTree = "<group>"; };
+		920000000000000000000002 /* TestPreferenceCleanup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestPreferenceCleanup.swift; sourceTree = "<group>"; };
 		910000000000000000000002 /* FloatingSubtitlePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingSubtitlePreferences.swift; sourceTree = "<group>"; };
 		910000000000000000000004 /* FloatingSubtitleDisplayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingSubtitleDisplayTests.swift; sourceTree = "<group>"; };
 		7F0000000000000000000006 /* TranslationRetirementRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationRetirementRegressionTests.swift; sourceTree = "<group>"; };
@@ -255,6 +257,7 @@
 				B70000000000000000000004 /* OutputLanguageBaselineTests.swift */,
 				B70000000000000000000002 /* DefaultTargetGoldenTests.swift */,
 				910000000000000000000004 /* FloatingSubtitleDisplayTests.swift */,
+				920000000000000000000002 /* TestPreferenceCleanup.swift */,
 				900000000000000000000004 /* MultilingualCaptionPresentationTests.swift */,
 				789000000000000000000004 /* MultilingualSessionExporterTests.swift */,
 				789000000000000000000002 /* MultilingualLearningNotesTests.swift */,
@@ -398,6 +401,7 @@
 				B70000000000000000000003 /* OutputLanguageBaselineTests.swift in Sources */,
 				B70000000000000000000001 /* DefaultTargetGoldenTests.swift in Sources */,
 				910000000000000000000003 /* FloatingSubtitleDisplayTests.swift in Sources */,
+				920000000000000000000001 /* TestPreferenceCleanup.swift in Sources */,
 				900000000000000000000003 /* MultilingualCaptionPresentationTests.swift in Sources */,
 				789000000000000000000003 /* MultilingualSessionExporterTests.swift in Sources */,
 				789000000000000000000001 /* MultilingualLearningNotesTests.swift in Sources */,

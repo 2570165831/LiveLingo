@@ -579,6 +579,7 @@ final class ClassroomPresentationTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ClassroomPresentation-\(UUID().uuidString)")
         let suite = "ClassroomPresentation-\(UUID().uuidString)"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         presentationDefaults = defaults
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
@@ -588,7 +589,7 @@ final class ClassroomPresentationTests: XCTestCase {
         }
         addTeardownBlock {
             await queue.shutdownForTesting()
-            UserDefaults().removePersistentDomain(forName: suite)
+            try preferenceCleanup.remove()
         }
         let model = AppModel(reviewQueue: queue, translation: translation, backgroundServices: false, defaults: defaults)
         let evidence = (0..<8).map { index in

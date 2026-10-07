@@ -796,23 +796,24 @@ struct ClassroomSettingsView: View {
                 .font(.callout)
             }
             Section("悬浮字幕") {
-                Picker("显示模式", selection: Binding(get: { subtitles.displayMode },
-                                                    set: { subtitles.displayMode = $0 })) {
+                Picker("显示模式", selection: subtitles.displayModeBinding) {
                     ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
-                subtitleSlider("原文字号", value: Binding(get: { subtitles.sourceTextSize },
-                                                     set: { subtitles.sourceTextSize = $0 }),
+                .accessibilityIdentifier("floating-display-mode")
+                if !model.previewTranslationEnabled || !model.supportsPreviewTranslation {
+                    Text("“仅中文译文”在译文可用前显示原文。")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                subtitleSlider("原文字号", value: subtitles.sourceTextSizeBinding,
                                range: FloatingSubtitlePreferences.fontSizeRange, step: 1,
                                label: "\(Int(subtitles.sourceTextSize)) pt")
-                subtitleSlider("译文字号", value: Binding(get: { subtitles.translationTextSize },
-                                                     set: { subtitles.translationTextSize = $0 }),
+                subtitleSlider("译文字号", value: subtitles.translationTextSizeBinding,
                                range: FloatingSubtitlePreferences.fontSizeRange, step: 1,
                                label: "\(Int(subtitles.translationTextSize)) pt")
-                subtitleSlider("背景不透明度", value: Binding(get: { subtitles.backgroundOpacity },
-                                                         set: { subtitles.backgroundOpacity = $0 }),
+                subtitleSlider("背景不透明度", value: subtitles.backgroundOpacityBinding,
                                range: FloatingSubtitlePreferences.opacityRange, step: 0.05,
                                label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
                 Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
@@ -842,7 +843,10 @@ struct ClassroomSettingsView: View {
             HStack {
                 Slider(value: value, in: range, step: step)
                     .accessibilityLabel(title)
+                    .accessibilityValue(label)
+                    .accessibilityIdentifier("floating-\(title)")
                 Text(label).monospacedDigit().foregroundStyle(.secondary).frame(width: 48, alignment: .trailing)
+                    .accessibilityHidden(true)
             }
         }
     }
