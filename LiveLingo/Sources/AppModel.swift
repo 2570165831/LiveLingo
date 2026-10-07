@@ -101,12 +101,24 @@ struct CaptionTranslationDependencies {
 @MainActor
 struct LearningGenerationDependencies {
     var generate: (String, String, String, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String
+    var generateWithPrompt: ((String, String, String, String, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String)? = nil
     static let live = Self(generate: { input, model, prefix, update in
         try await QwenTranslationClient.learningNote(input: input, modelName: model, prefix: prefix, onUpdate: update)
+    }, generateWithPrompt: { input, model, prefix, prompt, update in
+        try await QwenTranslationClient.learningNote(input: input, modelName: model, prefix: prefix,
+                                                     systemPrompt: prompt, onUpdate: update)
     })
     static let unavailable = Self(generate: { _, _, _, _ in
         throw QwenRuntimeError.requestFailed("测试必须注入笔记生成器")
     })
+
+    func generateNote(_ input: String, model: String, prefix: String, systemPrompt: String,
+                      onUpdate: @escaping @MainActor @Sendable (String) async -> Void) async throws -> String {
+        if let generateWithPrompt {
+            return try await generateWithPrompt(input, model, prefix, systemPrompt, onUpdate)
+        }
+        return try await generate(input, model, prefix, onUpdate)
+    }
 }
 
 /// Meter updates belong to their small views, rather than invalidating notes
@@ -3332,7 +3344,8 @@ final class AppModel: ObservableObject {
             let reusableDraft = learningDraft.flatMap { draft -> LearningDraft? in
                 let ids = Set(draft.evidence.map(\.id))
                 guard ids.isDisjoint(with: summarizedSegmentIDs),
-                      draft.matches(evidence: segments.filter { ids.contains($0.id) }, model: modelName),
+                      draft.matches(evidence: segments.filter { ids.contains($0.id) }, model: modelName,
+                                    systemPrompt: captionTarget.learningNotePrompt),
                       sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName) }) ?? true else { return nil }
                 return draft
             }
@@ -3370,6 +3383,7 @@ final class AppModel: ObservableObject {
                     learningDraft = LearningDraft(
                         evidence: inputSnapshot, model: modelName,
                         input: try LearningPrompts.input(evidence: inputSnapshot, topics: learningNotebook.topics, pending: pending),
+                        systemPrompt: captionTarget.learningNotePrompt,
                         pendingTargets: pending.map(\.id), contextRevision: learningNotebook.revision,
                         dependencyIDs: dependencies
                     )
@@ -3389,9 +3403,9 @@ final class AppModel: ObservableObject {
                 } else {
                     learningDraft?.attempts += 1
                     summaryStatus = draft.text.isEmpty ? "正在整理本轮新学…" : "正在接续未完成的笔记…"
-                    let response = try await learningGeneration.generate(
-                        draft.input, modelName, draft.text,
-                        { [weak self] text in
+                    let response = try await learningGeneration.generateNote(
+                        draft.input, model: modelName, prefix: draft.text, systemPrompt: draft.systemPrompt,
+                        onUpdate: { [weak self] text in
                         guard let self, !Task.isCancelled, !self.processingPaused,
                               self.generation == currentGeneration, self.sessionID == summarySession,
                               self.summaryTaskGeneration == summaryOwner,

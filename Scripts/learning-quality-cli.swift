@@ -175,6 +175,7 @@ struct LearningQualityCLI {
 
     @MainActor static func run(
         arguments: [String] = Array(CommandLine.arguments.dropFirst()),
+        target: CaptionTranslationTarget = .simplifiedChinese,
         generate: (@MainActor (String, String) async throws -> String)? = nil
     ) async throws {
         let args = arguments
@@ -204,7 +205,7 @@ struct LearningQualityCLI {
             buildManifest = data
         }
         let producer = Producer(executableSHA256: executableSHA,
-            promptSHA256: sha(Data(LearningPrompts.generate.utf8)),
+            promptSHA256: sha(Data(target.learningNotePrompt.utf8)),
             sourceRepresentation: sourceObject?["inputRevision"] == nil ? "legacy" : "revisioned",
             sourcePolicy: "fixture-uuid-v1/12s-start/10s-duration/revision-0/session-none",
             batchCharacters: SummaryRefreshPolicy.automaticBatchCharacters,
@@ -259,7 +260,7 @@ struct LearningQualityCLI {
                             response = try await generate(prepared, model)
                         } else {
                             response = try await QwenTranslationClient.learningNote(input: prepared,
-                                modelName: model, prefix: "", onUpdate: { _ in })
+                                modelName: model, prefix: "", systemPrompt: target.learningNotePrompt, onUpdate: { _ in })
                         }
                         let responseFile = "response-\(number).txt"
                         // Persist the final response before attempting production decoding.

@@ -2532,6 +2532,8 @@ struct LearningDraft: Sendable {
     let evidence: [TranscriptSegment]
     let model: String
     let input: String
+    let systemPrompt: String
+    let promptDigest: String
     var text = ""
     var attempts = 0
     var completedNote: LearningNote?
@@ -2541,10 +2543,13 @@ struct LearningDraft: Sendable {
     private var frozenBinding: SessionGenerationCheckpoint?
 
     init(id: UUID = UUID(), evidence: [TranscriptSegment], model: String, input: String,
+         systemPrompt: String = CaptionTranslationTarget.simplifiedChinese.learningNotePrompt,
          text: String = "", attempts: Int = 0, completedNote: LearningNote? = nil,
          pendingTargets: [String] = [], contextRevision: Int = 0,
          dependencyIDs: [UUID]? = nil, frozenBinding: SessionGenerationCheckpoint? = nil) {
         self.id = id; self.evidence = evidence.map(\.withoutTranslationFailures); self.model = model; self.input = input
+        self.systemPrompt = systemPrompt
+        self.promptDigest = SessionArchiveCoding.digest(Data(systemPrompt.utf8))
         self.text = text; self.attempts = attempts; self.completedNote = completedNote
         self.pendingTargets = pendingTargets; self.contextRevision = contextRevision
         self.dependencyIDs = dependencyIDs ?? evidence.map(\.id)
@@ -2561,7 +2566,7 @@ struct LearningDraft: Sendable {
         return SessionGenerationCheckpoint(id: id, sessionID: sessionID, inputRevision: inputRevision,
             generation: generation, modelName: model, protocolVersion: 2,
             inputDigest: SessionArchiveCoding.digest(Data(input.utf8)),
-            promptDigest: SessionArchiveCoding.digest(Data(LearningPrompts.generate.utf8)),
+            promptDigest: promptDigest,
             input: input, prefix: text, evidenceIDs: dependencyIDs, batchEvidenceIDs: evidence.map(\.id),
             pendingTargetIDs: pendingTargets, contextRevision: contextRevision,
             attempts: attempts, completedNote: completedNote)
@@ -2572,33 +2577,42 @@ struct LearningDraft: Sendable {
         frozenBinding = checkpoint(sessionID: sessionID, inputRevision: inputRevision, generation: generation)
     }
 
-    init?(checkpoint: SessionGenerationCheckpoint, snapshot: SessionSnapshot, model: String) {
+    init?(checkpoint: SessionGenerationCheckpoint, snapshot: SessionSnapshot, model: String,
+          systemPrompt: String? = nil) {
+        guard let target = (try? OutputLanguage.storedLanguage(snapshot.targetLocale))?.generationTarget else { return nil }
+        let prompt = systemPrompt ?? target.learningNotePrompt
         guard checkpoint.kind == "summary",
               checkpoint.matches(snapshot: snapshot, modelName: model, protocolVersion: 2,
-                  input: checkpoint.input, prompt: LearningPrompts.generate) else { return nil }
+                  input: checkpoint.input, prompt: prompt) else { return nil }
         let byID = Dictionary(uniqueKeysWithValues: snapshot.segments.map { ($0.id, $0) })
         let batchIDs = checkpoint.batchEvidenceIDs ?? checkpoint.evidenceIDs
         let evidence = batchIDs.compactMap { byID[$0] }
         guard evidence.count == batchIDs.count,
               checkpoint.evidenceIDs.allSatisfy({ byID[$0] != nil }) else { return nil }
         self.init(id: checkpoint.id, evidence: evidence, model: model, input: checkpoint.input,
+                  systemPrompt: prompt,
                   text: checkpoint.prefix, attempts: checkpoint.attempts, completedNote: checkpoint.completedNote,
                   pendingTargets: checkpoint.pendingTargetIDs, contextRevision: checkpoint.contextRevision,
                   dependencyIDs: checkpoint.evidenceIDs, frozenBinding: checkpoint)
     }
 
-    func matches(evidence: [TranscriptSegment], model: String) -> Bool {
+    func matches(evidence: [TranscriptSegment], model: String,
+                 systemPrompt: String = CaptionTranslationTarget.simplifiedChinese.learningNotePrompt) -> Bool {
         // The exact model input is frozen. A revision of unrelated notebook
         // content does not invalidate this draft's source dependencies.
         self.evidence == evidence.map(\.withoutTranslationFailures) && self.model == model
+            && promptDigest == SessionArchiveCoding.digest(Data(systemPrompt.utf8))
     }
 
-    func matches(snapshot: SessionSnapshot, model: String) -> Bool {
+    func matches(snapshot: SessionSnapshot, model: String, systemPrompt: String? = nil) -> Bool {
+        guard let target = (try? OutputLanguage.storedLanguage(snapshot.targetLocale))?.generationTarget else { return false }
+        let prompt = systemPrompt ?? target.learningNotePrompt
         let ids = Set(evidence.map(\.id))
-        guard matches(evidence: snapshot.segments.filter { ids.contains($0.id) }, model: model) else { return false }
+        guard matches(evidence: snapshot.segments.filter { ids.contains($0.id) }, model: model,
+                      systemPrompt: prompt) else { return false }
         return checkpoint(sessionID: snapshot.sessionID, inputRevision: snapshot.inputRevision,
                           generation: snapshot.generation).matches(snapshot: snapshot, modelName: model,
-            protocolVersion: 2, input: input, prompt: LearningPrompts.generate)
+            protocolVersion: 2, input: input, prompt: prompt)
     }
 }
 
@@ -3089,7 +3103,7 @@ final class LearningReviewQueue: ObservableObject {
     static func reviewPrompt(for targetLocale: String?) -> String? {
         guard let language = OutputLanguage(rawValue: targetLocale ?? "zh-Hans"),
               language.profile.generationLocale == "zh-Hans" else { return nil }
-        return LearningPrompts.review
+        return language.generationTarget?.learningReviewPrompt
     }
 
     static func resolvedTargetLocale(_ requested: String?, snapshot: SessionSnapshot?) throws -> String? {
@@ -3197,6 +3211,7 @@ final class LearningReviewQueue: ObservableObject {
     }
     static let journalVersion = 3
     typealias Generator = @MainActor @Sendable (String, String, @escaping @Sendable (String) -> Void, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String
+    private typealias PromptGenerator = @MainActor @Sendable (String, String, String, @escaping @Sendable (String) -> Void, @escaping @MainActor @Sendable (String) async -> Void) async throws -> String
 
     @Published private(set) var status = ""
     @Published private(set) var hasWork = false
@@ -3215,7 +3230,7 @@ final class LearningReviewQueue: ObservableObject {
     private var resourceBlocked = false
     private var persistenceFailure: String?
     private let journalURL: URL
-    private let generate: Generator
+    private let generate: PromptGenerator
     private let diagnostics: ReviewDiagnosticsStore?
     private var observers: [NSObjectProtocol] = []
     private var lastCheckpoint: TimeInterval = 0
@@ -3662,9 +3677,10 @@ final class LearningReviewQueue: ObservableObject {
             ? ReviewDiagnosticsStore(directory: resolvedJournal.deletingLastPathComponent()
                 .appendingPathComponent("ReviewDiagnostics"), policy: diagnostics)
             : nil
-        self.generate = generate ?? { input, prefix, recordIdentity, update in
-            try await QwenTranslationClient.reviewLearningNote(input, prefix: prefix,
-                                                               onRequestIdentity: recordIdentity, onUpdate: update)
+        self.generate = { input, prefix, prompt, recordIdentity, update in
+            if let generate { return try await generate(input, prefix, recordIdentity, update) }
+            return try await QwenTranslationClient.reviewLearningNote(input, prefix: prefix, systemPrompt: prompt,
+                                                                      onRequestIdentity: recordIdentity, onUpdate: update)
         }
         if FileManager.default.fileExists(atPath: self.journalURL.path) {
             do {
@@ -4240,7 +4256,7 @@ final class LearningReviewQueue: ObservableObject {
                 }
                 phase = .generation
                 let generationStarted = ProcessInfo.processInfo.systemUptime
-                let response = try await generate(prepared.json, job.prefix, { identity.record($0) }) { [weak self] text in
+                let response = try await generate(prepared.json, job.prefix, prompt, { identity.record($0) }) { [weak self] text in
                     guard let self, self.jobs.first?.id == job.id, self.jobs[0].next == job.next else { return }
                     guard text.utf8.count <= 524_288 else { self.task?.cancel(); self.jobs[0].failure = "本批思考内容过长，已暂停复查"; return }
                     self.jobs[0].prefix = text

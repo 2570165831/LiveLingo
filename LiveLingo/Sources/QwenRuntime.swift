@@ -67,6 +67,18 @@ enum PowerSourceMonitor {
 enum CaptionTranslationTarget: String, Sendable {
     case simplifiedChinese = "zh-Hans"
 
+    var learningNotePrompt: String {
+        switch self {
+        case .simplifiedChinese: return LearningPrompts.generate
+        }
+    }
+
+    var learningReviewPrompt: String {
+        switch self {
+        case .simplifiedChinese: return LearningPrompts.review
+        }
+    }
+
     var promptName: String {
         switch self {
         case .simplifiedChinese: return "Simplified Chinese"
@@ -2429,7 +2441,7 @@ enum QwenTranslationClient {
         } else {
             response = try await TranslationModelLifetime.shared.withModel(modelName) {
                 try await streamingCompletion(input, modelName: modelName,
-                    systemPrompt: TranslationAcceptance.QuotedTranslationRepairPlan.prompt,
+                    systemPrompt: TranslationAcceptance.QuotedTranslationRepairPlan.prompt, purpose: .text,
                     maximumOutputTokens: TranslationAcceptance.QuotedTranslationRepairPlan.outputBudget,
                     timeout: 15, usePrefixCache: false)
             }
@@ -2467,7 +2479,7 @@ enum QwenTranslationClient {
         } else {
             response = try await TranslationModelLifetime.shared.withModel(modelName) {
                 try await streamingCompletion(input, modelName: modelName,
-                    systemPrompt: TranslationAcceptance.JSONStatusRepairPlan.prompt,
+                    systemPrompt: TranslationAcceptance.JSONStatusRepairPlan.prompt, purpose: .text,
                     maximumOutputTokens: TranslationAcceptance.JSONStatusRepairPlan.outputBudget,
                     timeout: 30, usePrefixCache: false)
             }
@@ -2790,15 +2802,16 @@ enum QwenTranslationClient {
 
     static func learningNote(
         input: String, modelName: String, prefix: String,
+        systemPrompt: String = CaptionTranslationTarget.simplifiedChinese.learningNotePrompt,
         onUpdate: @escaping @MainActor @Sendable (String) async -> Void
     ) async throws -> String {
         guard prefix.utf8.count <= 65_536,
               !["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<think>", "</think>"].contains(where: prefix.contains)
         else { throw QwenRuntimeError.invalidResponse }
         return try await TranslationModelLifetime.shared.withModel(modelName) {
-            let prompt = try nonThinkingPrompt(input: input, systemPrompt: LearningPrompts.generate)
+            let prompt = try nonThinkingPrompt(input: input, systemPrompt: systemPrompt)
             return try await streamingCompletion(
-                input, modelName: modelName, systemPrompt: LearningPrompts.generate,
+                input, modelName: modelName, systemPrompt: systemPrompt, purpose: .note,
                 maximumOutputTokens: 3_072, timeout: 90,
                 continuationPrompt: prompt + prefix, initialOutput: prefix, onRawUpdate: onUpdate
             )
@@ -2808,6 +2821,7 @@ enum QwenTranslationClient {
 
     static func reviewLearningNote(
         _ input: String, prefix: String = "",
+        systemPrompt: String = CaptionTranslationTarget.simplifiedChinese.learningReviewPrompt,
         onRequestIdentity: (@Sendable (String) -> Void)? = nil,
         onUpdate: (@MainActor @Sendable (String) async -> Void)? = nil
     ) async throws -> String {
@@ -2816,10 +2830,10 @@ enum QwenTranslationClient {
               !["<|im_start|>", "<|im_end|>", "<|endoftext|>"].contains(where: prefix.contains)
         else { throw QwenRuntimeError.invalidResponse }
         return try await TranslationModelLifetime.shared.withModel(model) {
-            let prompt = try completionPrompt(input: input, systemPrompt: LearningPrompts.review, thinking: true)
+            let prompt = try completionPrompt(input: input, systemPrompt: systemPrompt, thinking: true)
             do {
                 return try await streamingCompletion(
-                    input, modelName: model, systemPrompt: LearningPrompts.review,
+                    input, modelName: model, systemPrompt: systemPrompt, purpose: .review,
                     maximumOutputTokens: prefix.contains("</think>") ? 4_096 : 16_384,
                     timeout: 1_200, thinking: true,
                     continuationPrompt: prompt + prefix, initialOutput: prefix, onWireUpdate: onUpdate,
@@ -2834,7 +2848,7 @@ enum QwenTranslationClient {
                 await onUpdate?(closed)
                 try Task.checkCancellation()
                 return try await streamingCompletion(
-                    input, modelName: model, systemPrompt: LearningPrompts.review,
+                    input, modelName: model, systemPrompt: systemPrompt, purpose: .review,
                     maximumOutputTokens: 4_096, timeout: 1_200, thinking: true,
                     continuationPrompt: prompt + closed, initialOutput: closed, onWireUpdate: onUpdate,
                     inactivityTimeout: 180,
@@ -2862,7 +2876,7 @@ enum QwenTranslationClient {
             || modelName == QwenModelProfile.energySaver.translationModel {
             if streaming {
                 let output = try await streamingCompletion(
-                    transport.input, modelName: modelName, systemPrompt: transport.systemPrompt,
+                    transport.input, modelName: modelName, systemPrompt: transport.systemPrompt, purpose: .text,
                     maximumOutputTokens: maximumOutputTokens, timeout: timeout,
                     onUpdate: update
                 )
@@ -2912,6 +2926,7 @@ enum QwenTranslationClient {
     // must also close the body stream, so a preempted summary releases inference.
     static func streamingCompletion(
         _ input: String, modelName: String, systemPrompt: String,
+        purpose: CompletionPurpose? = nil,
         maximumOutputTokens: Int, timeout: TimeInterval,
         thinking: Bool = false,
         continuationPrompt: String? = nil,
@@ -2930,9 +2945,9 @@ enum QwenTranslationClient {
             guard initialOutput.isEmpty || fullPrompt.hasSuffix(initialOutput) else { throw QwenRuntimeError.invalidResponse }
             let prompt = initialOutput.isEmpty ? fullPrompt : String(fullPrompt.dropLast(initialOutput.count))
             let presentation = await MLXCompletionPresentation(thinking: thinking)
-            let purpose = systemPrompt == LearningPrompts.generate ? "note" : (systemPrompt == LearningPrompts.review ? "review" : "text")
+            let resolvedPurpose = completionPurpose(systemPrompt: systemPrompt, explicit: purpose)
             _ = try await MLXRuntime.shared.generate(model: modelName, prompt: prompt, input: input, prefix: initialOutput,
-                thinking: thinking, purpose: purpose, finalBudget: min(maximumOutputTokens, 4096), timeout: timeout,
+                thinking: thinking, purpose: resolvedPurpose.rawValue, finalBudget: min(maximumOutputTokens, 4096), timeout: timeout,
                 inactivityTimeout: inactivityTimeout, usePrefixCache: usePrefixCache,
                 onRequestIdentity: onRequestIdentity) { wire in
                     let partial = try presentation.update(wire)
@@ -3091,7 +3106,7 @@ enum QwenTranslationClient {
                     + "\n\nI will now give the complete translation based on this check.\n</think>\n\n"
                 try Task.checkCancellation()
                 return try await streamingCompletion(
-                    input, modelName: modelName, systemPrompt: systemPrompt,
+                    input, modelName: modelName, systemPrompt: systemPrompt, purpose: .text,
                     maximumOutputTokens: 2048, timeout: 90,
                     continuationPrompt: continuation, endpoint: endpoint
                 )
@@ -3108,8 +3123,18 @@ enum QwenTranslationClient {
         _ input: String, modelName: String, systemPrompt: String,
         maximumOutputTokens: Int, timeout: TimeInterval
     ) async throws -> String {
-        try await streamingCompletion(input, modelName: modelName, systemPrompt: systemPrompt,
+        try await streamingCompletion(input, modelName: modelName, systemPrompt: systemPrompt, purpose: .text,
                                       maximumOutputTokens: maximumOutputTokens, timeout: timeout)
+    }
+
+    enum CompletionPurpose: String, Sendable { case text, note, review }
+
+    /// Old callers may omit the purpose; new prompts must bind it explicitly.
+    static func completionPurpose(systemPrompt: String, explicit: CompletionPurpose? = nil) -> CompletionPurpose {
+        if let explicit { return explicit }
+        if systemPrompt == LearningPrompts.generate { return .note }
+        if systemPrompt == LearningPrompts.review { return .review }
+        return .text
     }
 }
 

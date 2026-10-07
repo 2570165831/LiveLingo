@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71400000000000000000002 /* TargetPipelineRefactorTests.swift */; };
 		B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */; };
 		B71900000000000000000001 /* TargetAcceptance.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71900000000000000000002 /* TargetAcceptance.swift */; };
 		B70000000000000000000009 /* acceptance-verdicts-zh-Hans.json in Resources */ = {isa = PBXBuildFile; fileRef = B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */; };
@@ -109,6 +110,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B71400000000000000000002 /* TargetPipelineRefactorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetPipelineRefactorTests.swift; sourceTree = "<group>"; };
 		B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatinTargetAcceptanceTests.swift; sourceTree = "<group>"; };
 		B71900000000000000000002 /* TargetAcceptance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetAcceptance.swift; sourceTree = "<group>"; };
 		B7000000000000000000000A /* acceptance-verdicts-zh-Hans.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/acceptance-verdicts-zh-Hans.json"; sourceTree = "<group>"; };
@@ -278,6 +280,7 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				B71400000000000000000002 /* TargetPipelineRefactorTests.swift */,
 				B71900000000000000000004 /* LatinTargetAcceptanceTests.swift */,
 				B75500000000000000000002 /* TargetDefaultingTests.swift */,
 				B75700000000000000000002 /* TargetExportTests.swift */,
@@ -436,6 +439,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B71400000000000000000001 /* TargetPipelineRefactorTests.swift in Sources */,
 				B71900000000000000000003 /* LatinTargetAcceptanceTests.swift in Sources */,
 				B75500000000000000000001 /* TargetDefaultingTests.swift in Sources */,
 				B75700000000000000000001 /* TargetExportTests.swift in Sources */,
