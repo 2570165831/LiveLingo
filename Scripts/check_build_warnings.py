@@ -14,14 +14,17 @@ APP_INTENTS = re.compile(
     r"^(?:\S*/)?appintentsmetadataprocessor(?:\[\d+(?::\d+)?\])?:?\s+warning:",
     re.IGNORECASE,
 )
+# xcodebuild's own note when `-destination 'platform=macOS'` matches several
+# run destinations; it is not a compiler diagnostic.
+DESTINATION = re.compile(r"^--- xcodebuild: WARNING: Using the first of multiple matching destinations")
 
 
 def check(lines):
-    """Return numbered warning lines, excluding App Intents tool notices."""
+    """Return numbered warning lines, excluding App Intents and destination notices."""
     return [
         (number, line.rstrip())
         for number, line in enumerate(lines, 1)
-        if WARNING.search(line) and not APP_INTENTS.search(line)
+        if WARNING.search(line) and not APP_INTENTS.search(line) and not DESTINATION.search(line)
     ]
 
 
