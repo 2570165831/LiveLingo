@@ -186,6 +186,7 @@ class RealAdHocSigningTests(unittest.TestCase):
             signer.sign(app, rights)
             receipt = metadata.inspect(app, adhoc=True)
             self.assertEqual(len(receipt['signing']), 3)
+            self.assertTrue(all('adhoc' in item['flags'] for item in receipt['signing'].values()))
             self.assertTrue(receipt['sandbox']['signed_app_sandbox'])
             self.assertFalse(receipt['sandbox']['runtime_verified'])
             self.assertIn('Containers/com.jianhongli.LiveLingo.preview/',

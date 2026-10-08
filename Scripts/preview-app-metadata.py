@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import struct
 import subprocess
 
@@ -55,7 +56,10 @@ def signature_commands(path):
 def signing_info(path):
     result = subprocess.run(['/usr/bin/codesign', '-dv', '--verbose=4', str(path)],
                             text=True, capture_output=True, check=True)
-    fields = dict(line.split('=', 1) for line in (result.stdout + result.stderr).splitlines() if '=' in line)
+    display = result.stdout + result.stderr
+    fields = dict(line.split('=', 1) for line in display.splitlines() if '=' in line)
+    flags = re.search(r'\bflags=(\S+)', display)
+    fields['flags'] = flags.group(1) if flags else None
     return {key: fields.get(key) for key in ('Identifier', 'Signature', 'TeamIdentifier', 'flags')}
 
 
