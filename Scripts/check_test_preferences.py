@@ -18,8 +18,12 @@ SUITE = re.compile(
 )
 
 
-def check(lines, preferences):
-    """Return event counts and errors without modifying any preference file."""
+def check(lines, preferences, allow_no_events=False):
+    """Return event counts and errors without modifying any preference file.
+
+    allow_no_events is only for focused runs whose tests create no suite; the
+    successful completion marker and every per-suite rule still apply.
+    """
     created, cleaned = Counter(), Counter()
     errors = []
     succeeded = False
@@ -39,7 +43,7 @@ def check(lines, preferences):
 
     if not succeeded:
         errors.append("log has no successful xcodebuild test completion")
-    if not created:
+    if not created and not allow_no_events:
         errors.append("log has no TEST_PREFERENCE_CREATED events")
     for suite in sorted(created.keys() | cleaned.keys()):
         if created[suite] != 1 or cleaned[suite] != 1:
@@ -60,13 +64,15 @@ def check(lines, preferences):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", type=Path, help="complete xcodebuild test log")
+    parser.add_argument("--allow-no-events", action="store_true",
+                        help="focused runs only: pass when the tests created no preference suite")
     args = parser.parse_args()
     # Match TestPreferenceCleanup's account home; HOME/CFFIXED_USER_HOME may
     # point somewhere else while cfprefsd still uses the real user's home.
     preferences = Path(pwd.getpwuid(os.getuid()).pw_dir) / "Library" / "Preferences"
     try:
         with args.log.open(encoding="utf-8", errors="replace") as lines:
-            created, cleaned, errors = check(lines, preferences)
+            created, cleaned, errors = check(lines, preferences, args.allow_no_events)
     except OSError as error:
         parser.error(str(error))
     if errors:

@@ -66,6 +66,15 @@ class TestPreferenceLogGuardTests(unittest.TestCase):
         self.assertTrue(self.check([("CREATED", SUITE), ("CLEANED", SUITE)],
                                    succeeded=False)[2])
 
+    def test_focused_run_without_suites_passes_only_when_allowed_and_successful(self):
+        lines = ["** TEST SUCCEEDED **\n"]
+        self.assertTrue(guard.check(lines, self.preferences)[2])
+        self.assertEqual(guard.check(lines, self.preferences, allow_no_events=True), (0, 0, []))
+        self.assertTrue(guard.check([], self.preferences, allow_no_events=True)[2])
+        # Allowing zero events never excuses a suite that was created but not cleaned.
+        self.assertTrue(guard.check([f"TEST_PREFERENCE_CREATED suite={SUITE}\n"] + lines,
+                                    self.preferences, allow_no_events=True)[2])
+
 
 if __name__ == "__main__":
     unittest.main()
