@@ -205,6 +205,12 @@ private final class PendingTestPreferences: NSObject, XCTestObservation, @unchec
 enum TestTaskLifetime {
     enum Failure: Error { case timedOut }
 
+    /// Generous on a loaded machine (parallel hosts, background disk work) yet
+    /// well inside XCTest's 120 s per-test allowance, so a join that never
+    /// finishes still fails here and preserves its fixture instead of being
+    /// killed by the allowance. Timeouts still throw; nothing is skipped.
+    nonisolated static let defaultTimeout: Duration = .seconds(30)
+
     /// Capture handles before reset clears AppModel's slots. A failed join
     /// throws before callers remove preferences or an owned fixture directory.
     static func stop(_ model: AppModel, queue: LearningReviewQueue) async throws {
@@ -225,7 +231,7 @@ enum TestTaskLifetime {
     }
 
     static func value<Value: Sendable, TaskFailure: Error>(
-        _ task: Task<Value, TaskFailure>, timeout: Duration = .seconds(5)
+        _ task: Task<Value, TaskFailure>, timeout: Duration = TestTaskLifetime.defaultTimeout
     ) async throws -> Value {
         var result: Result<Value, TaskFailure>?
         let observer = Task { @MainActor in result = await task.result }
@@ -310,7 +316,7 @@ final class TestInfrastructureTests: XCTestCase {
             await gate.release(second)
         }
         defer { waiter.cancel() }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let deadline = ContinuousClock.now.advanced(by: TestTaskLifetime.defaultTimeout)
         while await gate.waitingCountForTesting == 0 {
             guard ContinuousClock.now < deadline else { throw TestTaskLifetime.Failure.timedOut }
             try await Task.sleep(for: .milliseconds(2))
@@ -327,7 +333,7 @@ final class TestInfrastructureTests: XCTestCase {
         try await gate.acquire(first)
         let waiter = Task { try await gate.acquire(cancelled) }
         defer { waiter.cancel() }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let deadline = ContinuousClock.now.advanced(by: TestTaskLifetime.defaultTimeout)
         while await gate.waitingCountForTesting == 0 {
             guard ContinuousClock.now < deadline else { throw TestTaskLifetime.Failure.timedOut }
             try await Task.sleep(for: .milliseconds(2))

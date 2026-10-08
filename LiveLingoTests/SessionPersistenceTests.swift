@@ -52,7 +52,7 @@ struct SessionPersistenceTests {
 
     @MainActor
     private func waitForEvent(_ stream: AsyncStream<Void>, fixture: Fixture,
-                              timeout: Duration = .seconds(5)) async throws {
+                              timeout: Duration = TestTaskLifetime.defaultTimeout) async throws {
         let read = Task { @MainActor in
             var iterator = stream.makeAsyncIterator()
             return await iterator.next()
