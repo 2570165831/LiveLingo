@@ -1749,8 +1749,11 @@ enum PDFNotesWriter {
 /// `**bold**` pairing shared by the plain-text and PDF/Word exports. A `**`
 /// run opens only before non-whitespace and closes only after non-whitespace,
 /// pairs stay on one line, and runs inside code spans or formulas never count,
-/// so `x ** 2`, a lone `**` and `` `a**b` `` stay literal. `__` is never bold
-/// here: in these notes it is far more often `__init__` than emphasis.
+/// so `x ** 2`, a lone `**` and `` `a**b` `` stay literal. A run with an ASCII
+/// letter or digit on both sides (`x**2`, `(a+b)**2`) is an operator, never a
+/// delimiter. In `***x***` the inner two stars are bold and the outer `*`
+/// stays. `__` is never bold here: in these notes it is far more often
+/// `__init__` than emphasis.
 enum MarkdownBold {
     /// The line split into plain and bold pieces, with paired delimiters removed.
     static func segments(_ line: String) -> [(text: String, bold: Bool)] {
@@ -1777,23 +1780,33 @@ enum MarkdownBold {
         var openers: [Int] = [], pairs: [(offset: Int, opens: Bool)] = []
         var index = 0
         while index < bytes.count {
-            guard bytes[index] == 42, !protected[index] else { index += 1; continue }
+            // The LaTeX scan reads `\Omega**` as the starred command `\Omega*`;
+            // a protected `*` that ends such a command and is followed by a
+            // free `*` is really the start of a closing `**`.
+            let starredSuffix = index > 0 && protected[index - 1] && index + 1 < bytes.count
+                && bytes[index + 1] == 42 && !protected[index + 1]
+            guard bytes[index] == 42, !protected[index] || starredSuffix else { index += 1; continue }
             var end = index + 1
             while end < bytes.count, bytes[end] == 42, !protected[end] { end += 1 }
             var backslashes = 0
             while index - backslashes > 0, bytes[index - backslashes - 1] == 92 { backslashes += 1 }
-            if end - index == 2, backslashes % 2 == 0 {
+            let operand = index > 0 && end < bytes.count && alphanumeric(bytes[index - 1]) && alphanumeric(bytes[end])
+            if (2...3).contains(end - index), backslashes % 2 == 0, !operand {
                 let closes = index > 0 && !whitespace(bytes, endingAt: index)
                 let opens = end < bytes.count && !whitespace(bytes, startingAt: end)
                 if closes, let opener = openers.popLast() {
                     pairs += [(opener, true), (index, false)]
                 } else if opens {
-                    openers.append(index)
+                    openers.append(end - 2)
                 }
             }
             index = end
         }
         return pairs.sorted { $0.offset < $1.offset }
+    }
+
+    private static func alphanumeric(_ byte: UInt8) -> Bool {
+        (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
     }
 
     private static func whitespace(_ bytes: [UInt8], startingAt index: Int) -> Bool {

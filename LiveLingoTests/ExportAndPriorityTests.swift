@@ -253,6 +253,62 @@ final class NotesExportTests: XCTestCase {
         XCTAssertEqual(rendered("**see `a**b`**").bold.joined(), "see `a**b`")
     }
 
+    private func boldPieces(_ line: String) -> [String] {
+        MarkdownBold.segments(line).filter(\.bold).map(\.text)
+    }
+
+    /// 粗体以 `\Omega`、`\n` 这类命令结尾时，命令后的第一个 `*` 不能被当成
+    /// `\command*` 的星号后缀吞掉，否则闭合的 `**` 失配，粗体整段失效。
+    func testBoldEndingInBackslashCommandStillPairs() {
+        let cases: [(String, String)] = [
+            (#"**单位 \Omega**"#, #"单位 \Omega"#),
+            (#"**\alpha**"#, #"\alpha"#),
+            (#"**换行符 \n** 和 **角 \theta 的值**"#, #"换行符 \n 和 角 \theta 的值"#),
+            (#"带星号的 \section* 与 **重点**"#, #"带星号的 \section* 与 重点"#),
+        ]
+        for (source, expected) in cases {
+            XCTAssertEqual(NotesExportDocument.strippingMarkdown(source), expected, source)
+            let new = PDFNotesWriter.inlineRuns(source, size: PDFNotesWriter.bodySize, bold: false)
+            XCTAssertEqual(new, legacyInlineRuns(source, size: PDFNotesWriter.bodySize, bold: false), source)
+        }
+        XCTAssertEqual(boldPieces(#"**单位 \Omega**"#), [#"单位 \Omega"#])
+        XCTAssertEqual(boldPieces(#"**\alpha**"#), [#"\alpha"#])
+        // 公式里的 `**` 仍然不配对。
+        XCTAssertEqual(NotesExportDocument.strippingMarkdown(#"$\alpha**$ 与 **b**"#), #"$\alpha**$ 与 b"#)
+    }
+
+    /// `***注意***` 按 CommonMark 是粗体外再套一层 `*`：去掉粗体，外层 `*` 留作字面，
+    /// 和修复前的纯文本、PDF 输出一致；单独一行的 `***` 分隔线不动。
+    func testTripleStarRunsStripBoldAndKeepOneLiteralStar() {
+        for source in ["***注意***", "***注意** 后文", "前文 **注意***"] {
+            XCTAssertEqual(NotesExportDocument.strippingMarkdown(source), legacyStrippingMarkdown(source), source)
+        }
+        XCTAssertEqual(NotesExportDocument.strippingMarkdown("***注意***"), "*注意*")
+        XCTAssertEqual(NotesExportDocument.strippingMarkdown("***注意** 后文"), "*注意 后文")
+        XCTAssertEqual(NotesExportDocument.strippingMarkdown("前文 **注意***"), "前文 注意*")
+        XCTAssertEqual(NotesExportDocument.strippingMarkdown("***\n  *** "), "***\n  *** ")
+        XCTAssertEqual(boldPieces("***注意***"), ["注意"])
+        let new = PDFNotesWriter.inlineRuns("***注意***", size: PDFNotesWriter.bodySize, bold: false)
+        XCTAssertEqual(new, legacyInlineRuns("***注意***", size: PDFNotesWriter.bodySize, bold: false))
+    }
+
+    /// 正文里不加空格的幂运算（两侧都是 ASCII 字母或数字）不当粗体，
+    /// 和汉字相邻的粗体照常去掉。
+    func testUnspacedPowerOperatorsInProseStayLiteral() {
+        for source in ["面积 = x**2 + y**2", "(a+b)**2 + c**2", "2**10 = 1024", "x**(n+1) + y**2"] {
+            XCTAssertEqual(NotesExportDocument.strippingMarkdown(source), source)
+            XCTAssertEqual(boldPieces(source), [], source)
+        }
+        let cases: [(String, String)] = [
+            ("这是**重点**内容", "这是重点内容"),
+            ("使用**API**接口", "使用API接口"),
+            ("**GPT-4**模型与 x**2", "GPT-4模型与 x**2"),
+        ]
+        for (source, expected) in cases {
+            XCTAssertEqual(NotesExportDocument.strippingMarkdown(source), expected, source)
+        }
+    }
+
     /// 普通笔记（粗体标签 + 正文）的导出必须和修复前逐字节一致 ✓：
     /// 下面是修复前两段实现的原样副本，只用于比对，不参与导出。
     private func legacyStrippingMarkdown(_ source: String) -> String {
