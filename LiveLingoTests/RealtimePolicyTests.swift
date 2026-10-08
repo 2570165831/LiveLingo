@@ -1597,6 +1597,8 @@ final class RealtimePolicyTests: XCTestCase {
         XCTAssertNotNil(queue.items.first?.retryPending)
         XCTAssertFalse(queue.canRemoveFailedJob, "等待自动重试期间不应显示为可移除的失败任务")
         XCTAssertTrue(queue.status.contains("自动重试"))
+        // retryPending is published before the asynchronous journal write finishes.
+        try await queue.waitForPendingStorage()
         var saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
         XCTAssertEqual(saved.jobs.first?.prefix, "Retained thinking ")
         XCTAssertTrue(saved.jobs.first?.events?.contains { $0.code == "enqueued" } == true)
@@ -1608,19 +1610,26 @@ final class RealtimePolicyTests: XCTestCase {
 
         // 手动重试：清掉等待中的退避窗口，从检查点继续。
         await queue.shutdownForTesting()
+        var resumedPrefix: String?
         let restored = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, prefix, _, _, _ in
             guard prefix == "Retained thinking " else { throw QwenRuntimeError.invalidResponse }
+            resumedPrefix = prefix
             try await Task.sleep(for: .seconds(30))
             return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
         }
         addTeardownBlock { await restored.shutdownForTesting() }
         let jobID = try XCTUnwrap(restored.items.first?.id)
         restored.retryJob(jobID)
-        for _ in 0..<400 where !restored.running { try await Task.sleep(for: .milliseconds(10)) }
+        let resumed = await waitForReviewState({ resumedPrefix != nil }, seconds: 4)
+        XCTAssertTrue(resumed, "恢复后的生成器应当收到保留的检查点")
+        XCTAssertEqual(resumedPrefix, "Retained thinking ")
         XCTAssertTrue(restored.running, "手动重试后应当从检查点继续生成")
         restored.setSleeping(true)
-        try await Task.sleep(for: .milliseconds(50))
+        let stopped = await waitForReviewState({ !restored.running }, seconds: 4)
+        XCTAssertTrue(stopped, "睡眠中断后应当停止生成")
+        try await restored.waitForPendingStorage()
         saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
+        XCTAssertEqual(saved.jobs.first?.prefix, "Retained thinking ")
         XCTAssertTrue(saved.jobs.first?.events?.contains { $0.code == "resumed" } == true)
         XCTAssertTrue(saved.jobs.first?.events?.contains { $0.code == "cancelled" && $0.detail == "sleep" } == true)
         XCTAssertLessThanOrEqual(saved.jobs.first?.events?.count ?? 0, LearningReviewQueue.maximumEventsPerJob)
