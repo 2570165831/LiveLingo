@@ -1,8 +1,9 @@
 name: CI
 
+# Manual only for now: the app uses Speech APIs (AnalyzerInputConverter) from the
+# macOS 27 SDK, and GitHub-hosted runners currently top out at Xcode 26.6.
+# Re-enable `push` to dev once an image with Xcode 27 is available.
 on:
-  push:
-    branches: [dev]
   workflow_dispatch:
 
 concurrency:
