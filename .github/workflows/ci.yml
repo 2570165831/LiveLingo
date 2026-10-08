@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  xcode-tests:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the newest installed Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          newest=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$newest"
+          xcodebuild -version
+          sw_vers
+
+      - name: Build and test
+        run: |
+          set -o pipefail
+          xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo -configuration Debug \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= test 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+
+      - name: Check compiler warnings and test preference cleanup
+        if: always()
+        run: |
+          python3 Scripts/check_build_warnings.py "$RUNNER_TEMP/xcodebuild.log"
+          python3 Scripts/check_test_preferences.py "$RUNNER_TEMP/xcodebuild.log"
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          retention-days: 7
