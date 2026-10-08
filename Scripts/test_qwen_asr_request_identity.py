@@ -4,7 +4,9 @@ from email.message import Message
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -24,11 +26,10 @@ OTHER_AUDIO = b'SYNTHETIC_AUDIO_B'
 
 class ASRRequestIdentityTests(unittest.TestCase):
     def setUp(self):
-        # The supplied gate owns TMPDIR. Preserve all synthetic evidence in this
-        # task's sibling directory without consulting the process environment.
-        root = Path(tempfile.gettempdir()).parent / 'py-05' / 'fixtures'
-        root.mkdir(parents=True, exist_ok=True)
-        self.directory = Path(tempfile.mkdtemp(prefix=self._testMethodName + '-', dir=root))
+        # Synthetic fixtures live only inside the temporary directory and are
+        # removed after each test, including every "retired" temporary file.
+        self.directory = Path(tempfile.mkdtemp(prefix=self._testMethodName + '-'))
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
         self.service = base.source_module('Scripts/qwen_asr_service.py',
             MODEL_STATE_LOCK=threading.Lock(), MODEL_LOCK=threading.Lock(),
             MODELS={}, MODEL_LAST_USED={}, UNLOADING_MODELS=set(),
@@ -140,6 +141,20 @@ class ASRRequestIdentityTests(unittest.TestCase):
         self.assert_duplicate(self.post())
         self.assert_finished_once()
 
+    def test_failed_duplicate_upload_never_answers_with_the_owner_identity(self):
+        self.assertEqual(self.post()[0], 200)
+        truncated = self.handler()
+        truncated.headers.replace_header('Content-Length', str(len(AUDIO) + 8))
+        truncated.do_POST()
+        truncated.send_json.assert_called_once()
+        self.assert_duplicate(truncated.send_json.call_args.args)
+        stalled = self.handler()
+        stalled.read_audio_body = Mock(side_effect=TimeoutError('Audio upload deadline exceeded'))
+        stalled.do_POST()
+        stalled.send_json.assert_called_once()
+        self.assert_duplicate(stalled.send_json.call_args.args)
+        self.assert_finished_once()
+
     def test_effective_default_parameters_keep_legacy_duplicate_response(self):
         self.assertEqual(self.post()[0], 200)
         self.assert_duplicate(self.post(query='language=English&enhance=off&model=1.7b'))
@@ -241,6 +256,22 @@ class ASRRequestIdentityTests(unittest.TestCase):
         self.assertEqual(set(self.service._REQUEST_IDENTITIES),
                          set(self.service.resource_snapshot()['completed_requests']))
         self.assertEqual(self.service.transcribe_audio.call_count, 4)
+
+
+class ASRRequestIdentityFixtureTests(unittest.TestCase):
+    def test_fixtures_stay_inside_tmpdir_and_are_removed(self):
+        case = ASRRequestIdentityTests('test_changed_model_is_a_parameter_conflict')
+        case.setUp()
+        directory = case.directory
+        try:
+            temporary_root = os.path.realpath(tempfile.gettempdir())
+            self.assertEqual(os.path.commonpath([os.path.realpath(directory), temporary_root]), temporary_root)
+            (directory / 'synthetic.wav').write_bytes(AUDIO)
+            case.retire(directory / 'synthetic.wav')
+            self.assertTrue((directory / 'retired' / 'synthetic.wav').exists())
+        finally:
+            case.doCleanups()
+        self.assertFalse(directory.exists(), 'synthetic fixtures must not outlive the test')
 
 
 if __name__ == '__main__':
