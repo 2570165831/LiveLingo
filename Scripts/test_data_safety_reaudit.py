@@ -260,6 +260,162 @@ class WorkerReauditTests(ReauditFiles):
         self.assertFalse(checkpoint.exists())
         self.assertEqual(saves, [])
 
+    def run_control_worker(self, save_error, *, before_step=False, shutdown=False,
+                           control_id=None, invalid_control=False, step_failure=False,
+                           existing_checkpoint=False):
+        events, saves, steps = [], [], []
+        state = Path(tempfile.mkdtemp(prefix='state-', dir=self.directory))
+        identity = base.hashlib.sha256(b'synthetic').hexdigest()
+        checkpoint = state / (identity + '.safetensors')
+        if existing_checkpoint:
+            checkpoint.write_text('synthetic-A')
+        failed_saves = 0 if step_failure else 1 if before_step else 2
+
+        class Generation:
+            def __init__(self, engine, prompt, schema=None, thinking=False, prefix='', **kwargs):
+                self.identity = identity
+                self.wire = self.text = prefix
+                self.thinking_count = self.final_count = 0
+                self.done = False
+
+            def step(self):
+                steps.append(self.wire)
+                self.wire += '|invalid-step-tail' if step_failure else '|tail'
+                self.text = self.wire
+                if step_failure:
+                    raise OSError(errno.EIO, 'synthetic broken step')
+                self.done = True
+                return 'done'
+
+            def save(self, path):
+                saves.append(self.wire)
+                if len(saves) <= failed_saves:
+                    raise save_error()
+                Path(path).write_text(self.wire)
+
+            @classmethod
+            def restore(cls, engine, path, expected_identity):
+                return cls(engine, 'synthetic', prefix=Path(path).read_text())
+
+        engine = base.types.ModuleType('engine')
+        engine.Engine = lambda *args: object()
+        engine.Generation = Generation
+        schemas = base.types.ModuleType('schemas')
+        schemas.note_schema = schemas.review_schema = lambda data: {}
+        worker = base.source_module('Scripts/mlx_runtime/worker.py', discover_mlx=lambda: None)
+        worker.protocol = base.io.StringIO()
+        worker.os.unlink = self.retire
+        controls = [dict(op='shutdown' if shutdown else 'checkpoint', id='request',
+                         controlID=control_id)]
+        if not shutdown:
+            if invalid_control:
+                controls.append(dict(op='synthetic-invalid', id='request', controlID='invalid-control'))
+            controls.extend([dict(op='checkpoint', id='request', controlID='retry-control'),
+                             dict(op='shutdown', controlID='finish-control')])
+        command_queue = None
+        controls_sent = before_step
+
+        def reader(input_fd, stop_fd, stopping, destination):
+            nonlocal command_queue
+            command_queue = destination
+            destination.put(dict(op='generate', id='request', prompt='synthetic',
+                                 prefix='synthetic-A', purpose='note', input='{}'))
+            if before_step:
+                for command in controls:
+                    destination.put(command)
+
+        def send(kind, request_id=None, **fields):
+            nonlocal controls_sent
+            events.append(dict(event=kind, id=request_id, **fields))
+            if kind == 'error' and not controls_sent:
+                controls_sent = True
+                for command in controls:
+                    command_queue.put(command)
+
+        worker.read_commands = reader
+        worker.send = send
+        with patch.dict(sys.modules, engine=engine, schemas=schemas), \
+                patch.object(sys, 'argv', ['worker', '--model', 'synthetic',
+                                          '--state-directory', str(state)]), \
+                base.contextlib.redirect_stderr(base.io.StringIO()):
+            worker.main()
+        return events, saves, steps, checkpoint
+
+    def check_control_save_retry(self, *, before_step=False, control_id=None,
+                                 invalid_control=False):
+        for error_type in (TypeError, ValueError, RuntimeError, OSError):
+            with self.subTest(error=error_type.__name__, controlID=control_id):
+                factory = lambda: error_type('synthetic control serializer failure')
+                events, saves, steps, checkpoint = self.run_control_worker(
+                    factory, before_step=before_step, control_id=control_id,
+                    invalid_control=invalid_control)
+                errors = [item for item in events if item['event'] == 'error']
+                save_errors = [item for item in errors if item.get('controlID') != 'invalid-control']
+                self.assertEqual(len(save_errors), 1 if before_step else 2)
+                self.assertTrue(all(item['recoverable'] for item in save_errors),
+                                'A serializer failure retains valid progress regardless of exception type')
+                self.assertEqual(save_errors[-1]['controlID'], control_id)
+                if invalid_control:
+                    invalid = next(item for item in errors if item.get('controlID') == 'invalid-control')
+                    self.assertFalse(invalid['recoverable'], 'Save-stage classification must not leak to validation')
+                retry = next(item for item in events if item.get('controlID') == 'retry-control')
+                self.assertEqual((retry['event'], retry['state']), ('checkpoint', 'saved'))
+                expected_wire = 'synthetic-A' if before_step else 'synthetic-A|tail'
+                self.assertEqual(checkpoint.read_text(), expected_wire)
+                self.assertEqual(saves, [expected_wire] * 3)
+                self.assertEqual(steps, [] if before_step else ['synthetic-A'],
+                                 'Control retries must not rerun inference')
+                self.assertEqual(events[-1]['state'], 'ready_to_exit')
+
+    def test_p2_checkpoint_save_failure_without_control_id_is_retryable(self):
+        self.check_control_save_retry()
+
+    def test_p2_checkpoint_save_failure_with_control_id_is_retryable(self):
+        self.check_control_save_retry(control_id='checkpoint-control')
+
+    def test_p2_active_checkpoint_save_failure_is_retryable_without_leaking_to_validation(self):
+        self.check_control_save_retry(before_step=True, control_id='active-checkpoint', invalid_control=True)
+
+    def test_p2_paused_checkpoint_save_failure_is_retryable_without_leaking_to_validation(self):
+        self.check_control_save_retry(control_id='paused-checkpoint', invalid_control=True)
+
+    def test_p2_shutdown_save_failure_is_retryable_with_and_without_control_id(self):
+        for control_id in (None, 'shutdown-control'):
+            for error_type in (TypeError, ValueError, RuntimeError, OSError):
+                with self.subTest(error=error_type.__name__, controlID=control_id):
+                    events, saves, steps, checkpoint = self.run_control_worker(
+                        lambda: error_type('synthetic shutdown serializer failure'),
+                        shutdown=True, control_id=control_id)
+                    receipt = next(item for item in events if item['event'] == 'shutdown')
+                    self.assertEqual(receipt['state'], 'checkpoint_failed')
+                    self.assertEqual(receipt['failedRequests'], ['request'])
+                    self.assertEqual(receipt['controlID'], control_id)
+                    self.assertTrue(receipt.get('recoverable'), 'Shutdown save failure keeps valid progress retryable')
+                    self.assertFalse(checkpoint.exists())
+                    self.assertEqual(saves, ['synthetic-A|tail'] * 2)
+                    self.assertEqual(steps, ['synthetic-A'])
+
+    def test_p3_oserror_step_mutation_is_not_cached_or_saved(self):
+        for control_id in (None, 'step-checkpoint'):
+            for existing_checkpoint in (False, True):
+                with self.subTest(controlID=control_id, existing_checkpoint=existing_checkpoint):
+                    events, saves, steps, checkpoint = self.run_control_worker(
+                        lambda: RuntimeError('synthetic unused serializer'), step_failure=True,
+                        control_id=control_id, existing_checkpoint=existing_checkpoint)
+                    receipts = [item for item in events if item['event'] == 'checkpoint']
+                    self.assertEqual(len(receipts), 2)
+                    self.assertTrue(all(item['state'] == 'absent' for item in receipts))
+                    self.assertEqual(receipts[0]['controlID'], control_id)
+                    self.assertEqual([item['wire'] for item in events if item['event'] == 'snapshot'],
+                                     ['synthetic-A'], 'No snapshot may publish the invalid tail')
+                    self.assertEqual(saves, [], 'Neither checkpoint nor shutdown may save the invalid generation')
+                    self.assertEqual(steps, ['synthetic-A'])
+                    self.assertFalse(any(item['event'] == 'done' for item in events))
+                    self.assertEqual(checkpoint.exists(), existing_checkpoint)
+                    if existing_checkpoint:
+                        self.assertEqual(checkpoint.read_text(), 'synthetic-A')
+                    self.assertEqual(events[-1]['state'], 'ready_to_exit')
+
 
 class RecoveryReauditTests(ReauditFiles):
     recovery = base.RecoveryDataSafetyTests.recovery
@@ -308,6 +464,9 @@ class RecoveryReauditTests(ReauditFiles):
         real_sync = os.fsync
 
         def fail_link(pending, final, **kwargs):
+            # Production now passes fd-relative names; inspect the same owned
+            # synthetic pending without changing the complete-byte assertion.
+            pending = target.parent / pending
             self.assertFalse(target.exists(), 'Nothing occupies final before atomic publication')
             self.assertEqual(self.pending_bytes(pending, kwargs['src_dir_fd']), expected)
             events.append('publish')

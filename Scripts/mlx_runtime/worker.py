@@ -247,6 +247,7 @@ def main():
     last_checkpoint = {}
     last_emit = {}
     checkpointed = set()
+    saving_checkpoint = False
     last_model_use = time.monotonic()
     send('ready', version=2)
     memory.apply_limit()
@@ -267,11 +268,14 @@ def main():
              message=safe_error_message(error, review=command.get('purpose') == 'review'
                                        or purposes.get(request_id) == 'review'),
              controlID=command.get('controlID'),
-             recoverable=not isinstance(error, (ValueError, KeyError, TypeError)))
+             recoverable=saving_checkpoint or not isinstance(error, (ValueError, KeyError, TypeError)))
 
     def persist(generation):
+        nonlocal saving_checkpoint
         if getattr(generation, '_retain_checkpoint', True) is False:
             return
+        # Classify failures by the save stage, including explicit controls.
+        saving_checkpoint = True
         generation.save(state_directory/(generation.identity+'.safetensors'))
         token = checkpoint_token(state_directory, generation.identity)
         if token is not None:
@@ -290,6 +294,7 @@ def main():
             if path.stem not in protected:
                 remove_checkpoint(state_directory, path.stem)
                 total -= info.st_size
+        saving_checkpoint = False
 
     def checkpoint_path(generation):
         return state_directory/(generation.identity+'.safetensors')
@@ -311,7 +316,7 @@ def main():
                     failures.append(request)
                     print('Checkpoint failure:', generation_detail(error), file=sys.stderr)
             send('shutdown', request_id, state='checkpoint_failed' if failures else 'ready_to_exit',
-                 failedRequests=failures, **control)
+                 failedRequests=failures, recoverable=bool(failures), **control)
             return False
         if op in ('ack','cancel','discard'):
             identity = identities.get(request_id)
@@ -498,6 +503,7 @@ def main():
                 try: command = commands.get(timeout=timeout)
                 except queue.Empty: pass
             while command is not None:
+                saving_checkpoint=False
                 try: keep_running=handle(command)
                 except Exception as error: command_failed(command, error)
                 if not keep_running: break
@@ -532,9 +538,7 @@ def main():
                     # Keep a completed checkpoint until the app acknowledges a
                     # committed result; a lost pipe must not discard the batch.
                     if request_id in checkpointed:
-                        saving_checkpoint=True
                         persist(generation)
-                        saving_checkpoint=False
                     completed[request_id]=generation.identity
                     send('done',request_id,wire=generation.wire,text=generation.text,
                          thinkingTokens=generation.thinking_count,finalTokens=generation.final_count,
@@ -548,16 +552,14 @@ def main():
                     # Text journals remain frequent; heavy tensor checkpoints
                     # are bounded to avoid continuously writing large caches.
                     if request_id in checkpointed and now-last_checkpoint.get(request_id,now)>=30:
-                        saving_checkpoint=True
                         persist(generation)
-                        saving_checkpoint=False
                         last_checkpoint[request_id]=now
                     active[request_id]=generation
                     # Throttled sample: never a cache clear on the token path.
                     memory.log_event('generating')
             except Exception as error:
                 finished='error'
-                if request_id in checkpointed and (saving_checkpoint or isinstance(error, OSError)):
+                if request_id in checkpointed and saving_checkpoint:
                     # Keep one failed save hot for an explicit checkpoint retry.
                     # Publish the full text before interruption so eviction never
                     # hides progress from the caller's independent text journal.
@@ -588,6 +590,7 @@ def main():
             while True:
                 try: command=commands.get_nowait()
                 except queue.Empty: break
+                saving_checkpoint=False
                 try: keep_running=handle(command)
                 except Exception as error: command_failed(command, error)
                 if not keep_running: break

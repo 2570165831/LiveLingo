@@ -245,6 +245,38 @@ def require_unchanged_source(source: Path, handle, layout: Layout) -> None:
             raise SourceChanged("源文件在处理过程中被改动或替换")
 
 
+def require_output_identity(path: Path, identity: tuple[int, int], directory: int) -> None:
+    current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+    if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != identity:
+        raise OSError("输出路径在导出过程中被替换，本次结果不能确认为成功")
+
+def open_output(path: Path, directory: int):
+    descriptor = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=directory)
+    try:
+        privatize_new(descriptor, 0o600)
+        return os.fdopen(descriptor, "wb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+def exclusive_rename(pending: Path, target: Path, *, src_dir_fd: int,
+                     dst_dir_fd: int) -> None:
+    """Use macOS exclusive atomic rename relative to already bound directories."""
+    if sys.platform != 'darwin':
+        raise OSError(errno.ENOTSUP, 'Exclusive atomic rename is unavailable')
+    import ctypes
+    rename = getattr(ctypes.CDLL(None, use_errno=True), 'renameatx_np', None)
+    if rename is None:
+        raise OSError(errno.ENOTSUP, 'Exclusive atomic rename is unavailable')
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    # RENAME_EXCL from the macOS SDK's sys/stdio.h. EEXIST preserves both files.
+    if rename(src_dir_fd, os.fsencode(pending), dst_dir_fd, os.fsencode(target), 0x00000004) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(target))
+
+
 def preserve_incomplete(target: Path, identity: tuple[int, int] | None, *,
                         include_sensitive_diagnostics: bool = False,
                         directory: BoundDirectory | None = None) -> None:
@@ -281,48 +313,59 @@ def preserve_incomplete(target: Path, identity: tuple[int, int] | None, *,
             print(f"    无法改名失败输出，请保留检查：{str(target)!r}（{error!s}）", file=sys.stderr)
 
 
-def rename_no_replace(pending: Path, target: Path, *, directory: BoundDirectory | None = None) -> None:
-    """Use macOS exclusive atomic rename; never reserve/copy into final."""
-    if sys.platform != 'darwin':
-        raise OSError(errno.ENOTSUP, 'Exclusive atomic rename is unavailable')
-    import ctypes
-    library = ctypes.CDLL(None, use_errno=True)
-    if directory is None:
-        rename = getattr(library, 'renamex_np', None)
-        if rename is None:
-            raise OSError(errno.ENOTSUP, 'Exclusive atomic rename is unavailable')
-        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
-        arguments = (os.fsencode(pending), os.fsencode(target), 0x00000004)
-    else:
-        directory.require_bound()
-        rename = getattr(library, 'renameatx_np', None)
-        if rename is None:
-            raise OSError(errno.ENOTSUP, 'Exclusive atomic rename is unavailable')
-        rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
-        arguments = (directory.fd, os.fsencode(pending.name), directory.fd, os.fsencode(target.name), 0x00000004)
-    rename.restype = ctypes.c_int
-    if rename(*arguments) != 0:
-        code = ctypes.get_errno()
-        raise OSError(code, os.strerror(code), str(target))
+def rename_no_replace(pending: Path, target: Path, *, src_dir_fd: int,
+                      dst_dir_fd: int, identity: tuple[int, int] | None = None) -> None:
+    if identity is not None:
+        require_output_identity(pending, identity, src_dir_fd)
+    exclusive_rename(pending, target, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
 
 
-def publish_no_replace(pending: Path, target: Path, *, directory: BoundDirectory | None = None) -> bool:
+def publish_no_replace(pending: Path, target: Path, directory: int,
+                       identity: tuple[int, int], *, include_sensitive_diagnostics: bool = False) -> bool:
     """Return whether pending was moved rather than linked to the final name."""
     try:
-        if directory is None:
-            os.link(pending, target, follow_symlinks=False)
-        else:
-            directory.require_bound()
-            os.link(pending.name, target.name, src_dir_fd=directory.fd, dst_dir_fd=directory.fd,
-                    follow_symlinks=False)
+        os.link(pending.name, target.name, src_dir_fd=directory, dst_dir_fd=directory,
+                follow_symlinks=False)
     except OSError as error:
         if error.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.ENOSYS):
             raise
-        if directory is None:
-            rename_no_replace(pending, target)
-        else:
-            rename_no_replace(pending, target, directory=directory)
-        return True
+        require_output_identity(pending, identity, directory)
+        # Capture the candidate in a private namespace before checking it. A
+        # replacement at the original pending name can never become final.
+        staging = f".{target.name}.{uuid.uuid4().hex}.publishing"
+        os.mkdir(staging, 0o700, dir_fd=directory)
+        protected = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory)
+        protected_state = os.fstat(protected)
+        captured = False
+        try:
+            privatize_new(protected, 0o700)
+            rename_no_replace(Path(pending.name), Path(pending.name),
+                              src_dir_fd=directory, dst_dir_fd=protected)
+            captured = True
+            require_output_identity(pending, identity, protected)
+            rename_no_replace(Path(pending.name), Path(target.name),
+                              src_dir_fd=protected, dst_dir_fd=directory, identity=identity)
+            captured = False
+            return True
+        finally:
+            if captured:
+                try:
+                    # Restore either the owned file or the foreign candidate;
+                    # an intervening writer at pending is never overwritten.
+                    exclusive_rename(Path(pending.name), Path(pending.name),
+                                     src_dir_fd=protected, dst_dir_fd=directory)
+                except OSError as restore_error:
+                    if include_sensitive_diagnostics:
+                        print(f"    发布候选已保留，请检查：{str(target.parent / staging)!r}（{restore_error}）",
+                              file=sys.stderr)
+            os.close(protected)
+            try:
+                current = os.stat(staging, dir_fd=directory, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == (protected_state.st_dev, protected_state.st_ino):
+                    os.rmdir(staging, dir_fd=directory)
+            except OSError:
+                pass  # A nonempty/replaced staging directory is retained.
     return False
 
 
@@ -343,7 +386,7 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
     except FileNotFoundError:
         pass
     else:
-        raise FileExistsError("输出路径已存在，不覆盖")
+        raise FileExistsError(errno.EEXIST, "输出路径已存在，不覆盖", str(target))
     pending = target.with_name(f"{target.name}.{uuid.uuid4().hex}.pending")
     published = False
     with os.fdopen(open_source_fd(source), "rb") as handle:
@@ -352,14 +395,9 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
         remaining = layout.usable
         created_identity = None
         try:
-            # 以 0600 原子创建；O_EXCL 也拒绝已有软链接，不先创建宽权限文件再收紧。
-            directory.require_bound()
-            descriptor = os.open(pending.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                 0o600, dir_fd=directory.fd)
-            with os.fdopen(descriptor, "wb") as output:
+            with open_output(pending, directory.fd) as output:
                 created = os.fstat(output.fileno())
                 created_identity = (created.st_dev, created.st_ino)
-                privatize_new(output.fileno(), 0o600)
                 header = header_bytes(layout.fmt_chunk, remaining)
                 output.write(header)
                 while remaining > 0:
@@ -374,27 +412,18 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
                 os.fsync(output.fileno())
             require_unchanged_source(source, handle, layout)
             directory.require_bound()
-            pending_state = os.stat(pending.name, dir_fd=directory.fd, follow_symlinks=False)
-            if not stat.S_ISREG(pending_state.st_mode) or (pending_state.st_dev, pending_state.st_ino) != created_identity:
-                raise OSError("临时输出路径在导出过程中被替换")
-            # Hard-link publication fails atomically if another writer owns the
-            # final name. A crash during copying leaves only the pending name.
-            moved = publish_no_replace(pending, target, directory=directory)
+            require_output_identity(pending, created_identity, directory.fd)
+            moved = publish_no_replace(pending, target, directory.fd, created_identity,
+                                       include_sensitive_diagnostics=include_sensitive_diagnostics)
             published = True
-            final_target = os.stat(target.name, dir_fd=directory.fd, follow_symlinks=False)
-            if not stat.S_ISREG(final_target.st_mode) or (final_target.st_dev, final_target.st_ino) != created_identity:
-                raise OSError("输出路径在发布过程中被替换")
+            require_output_identity(target, created_identity, directory.fd)
             if not moved:
-                pending_state = os.stat(pending.name, dir_fd=directory.fd, follow_symlinks=False)
-                if not stat.S_ISREG(pending_state.st_mode) or (pending_state.st_dev, pending_state.st_ino) != created_identity:
-                    raise OSError("临时输出路径在发布过程中被替换")
-                os.unlink(pending.name, dir_fd=directory.fd)  # 完整数据仍在 target。
+                require_output_identity(pending, created_identity, directory.fd)
+                os.unlink(pending.name, dir_fd=directory.fd)
             os.fsync(directory.fd)
             require_unchanged_source(source, handle, layout)
+            require_output_identity(target, created_identity, directory.fd)
             directory.require_bound()
-            final_target = os.stat(target.name, dir_fd=directory.fd, follow_symlinks=False)
-            if not stat.S_ISREG(final_target.st_mode) or (final_target.st_dev, final_target.st_ino) != created_identity:
-                raise OSError("输出路径在导出过程中被替换，本次结果不能确认为成功")
         except BaseException:
             preserve_incomplete(target if published else pending, created_identity,
                                 include_sensitive_diagnostics=include_sensitive_diagnostics,

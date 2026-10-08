@@ -442,7 +442,15 @@ class ASRDataSafetyTests(SyntheticFiles):
 class RecoveryDataSafetyTests(SyntheticFiles):
     def recovery(self):
         module = source_module('Scripts/recover-orphan-recordings.py')
-        module.os.unlink = self.retire
+        def retire_output(path, *args, **kwargs):
+            if not Path(path).is_absolute() and kwargs.get('dir_fd') is not None:
+                bound = os.fstat(kwargs['dir_fd'])
+                fixture = self.directory.stat()
+                if (bound.st_dev, bound.st_ino) != (fixture.st_dev, fixture.st_ino):
+                    raise RuntimeError('Output cleanup must remain in this synthetic fixture')
+                path = self.directory / path
+            return self.retire(path, *args, **kwargs)
+        module.os.unlink = retire_output
         return module
 
     def recording(self, module, frames=600):
@@ -459,7 +467,7 @@ class RecoveryDataSafetyTests(SyntheticFiles):
         source = self.recording(module, frames=module.COPY_BLOCK // 2 + 1)
         layout = module.inspect(source)
         target = self.directory / 'recovered.wav'
-        original_fdopen = module.os.fdopen
+        original_open = module.open_output
         class InterruptedOutput:
             def __init__(self, handle): self.handle, self.writes = handle, 0
             def __enter__(self): return self
@@ -471,13 +479,13 @@ class RecoveryDataSafetyTests(SyntheticFiles):
                 value = self.handle.write(data)
                 self.handle.flush()
                 return value
-        def opened(descriptor, mode='r', *args, **kwargs):
-            handle = original_fdopen(descriptor, mode, *args, **kwargs)
-            return InterruptedOutput(handle) if mode in ('wb', 'xb') else handle
+        def opened(path, directory):
+            handle = original_open(path, directory)
+            return InterruptedOutput(handle)
         pid = os.fork()
         if pid == 0:
             try:
-                with patch.object(module.os, 'fdopen', opened): module.export_recording(source, layout, target)
+                with patch.object(module, 'open_output', opened): module.export_recording(source, layout, target)
             except BaseException:
                 os._exit(75)
             os._exit(74)

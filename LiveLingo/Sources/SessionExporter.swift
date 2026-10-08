@@ -459,10 +459,19 @@ enum SessionExporter {
         return target
     }
 
-    private static func replaceLink(_ target: String, at destination: URL, operations: PublicationOperations) throws {
+    private static func replaceLink(_ target: String, at destination: URL, operations: PublicationOperations,
+                                    didPublish: ((stat) -> Void)? = nil) throws {
         let pending = destination.deletingLastPathComponent().appendingPathComponent(".export-link-\(UUID())")
         try operations.createSymbolicLink(target, pending)
+        var identity = stat()
+        if didPublish != nil {
+            guard lstat(pending.path, &identity) == 0, identity.st_mode & S_IFMT == S_IFLNK else {
+                throw SessionStoreError.unsafePath(pending.path)
+            }
+        }
         guard rename(pending.path, destination.path) == 0 else { throw SessionStoreError.io(operation: "publish export pointer", code: errno) }
+        // Record ownership before syncing, which can fail after the rename.
+        didPublish?(identity)
         try SessionArchiveCoding.syncDirectory(destination.deletingLastPathComponent())
     }
 
@@ -621,17 +630,47 @@ enum SessionExporter {
         if selected == directory {
             try replaceLink("versions/" + previous.lastPathComponent, at: current, operations: operations)
         }
-        for name in members.keys.sorted() {
-            let url = directory.appendingPathComponent(name)
-            try operations.beforeMemberPublication(name)
-            try requireRootMemberUnchanged(at: url, original: rootFiles[name])
-            var info = stat()
-            if lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK { continue }
-            try replaceLink(".exports/current/" + name, at: url, operations: operations)
+        var introducedAliases: [String: stat] = [:]
+        do {
+            for name in members.keys.sorted() {
+                let url = directory.appendingPathComponent(name)
+                try operations.beforeMemberPublication(name)
+                try requireRootMemberUnchanged(at: url, original: rootFiles[name])
+                var info = stat()
+                if lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK { continue }
+                try replaceLink(".exports/current/" + name, at: url, operations: operations) { identity in
+                    if rootFiles[name] == nil { introducedAliases[name] = identity }
+                }
+            }
+            // A legacy writer can replace an already checked alias while later
+            // members publish. Recheck the whole set at the pointer boundary.
+            for name in members.keys.sorted() {
+                let url = directory.appendingPathComponent(name)
+                var info = stat()
+                guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK,
+                      try fm.destinationOfSymbolicLink(atPath: url.path) == ".exports/current/" + name else {
+                    throw SessionStoreError.invalidState("导出期间文件已被另一个写者修改，停止发布并保留原件")
+                }
+            }
+            // All managed aliases share this one atomic commit point. The previous
+            // generation and any foreign root view remain independently readable.
+            try replaceLink("versions/" + staged.lastPathComponent, at: current, operations: operations)
+        } catch {
+            // A first partial export must not leave dangling aliases that block
+            // retry. Retire only absent-before aliases still owned by this call;
+            // replacements by another writer and complete generations stay put.
+            for (name, identity) in introducedAliases {
+                let url = directory.appendingPathComponent(name)
+                var info = stat()
+                if lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK,
+                   info.st_dev == identity.st_dev, info.st_ino == identity.st_ino,
+                   (try? fm.destinationOfSymbolicLink(atPath: url.path)) == ".exports/current/" + name {
+                    _ = unlink(url.path)
+                }
+            }
+            try? SessionArchiveCoding.syncDirectory(directory)
+            throw error
         }
-        // All managed aliases share this one atomic commit point. The previous
-        // generation and any foreign root view remain independently readable.
-        try replaceLink("versions/" + staged.lastPathComponent, at: current, operations: operations)
     }
 
     private static func writeExportGeneration(_ files: [String: Data], under parent: URL,
@@ -739,6 +778,11 @@ enum SessionExporter {
                 try operations.beforeMemberPublication(name)
                 try requireRootMemberUnchanged(at: directory.appendingPathComponent(name), original: originalFiles[name])
                 try replaceRootMember(members[name]!, at: directory.appendingPathComponent(name))
+            }
+            // Earlier members may have changed while the rest were written.
+            // Keep the transaction until the whole root view matches this version.
+            for name in members.keys.sorted() {
+                try requireRootMemberUnchanged(at: directory.appendingPathComponent(name), original: members[name])
             }
             try SessionArchiveCoding.atomicWrite(SessionArchiveCoding.encode(ExportPointer(generation: staged.lastPathComponent)), pointer)
             try retireLegacyExportPointer(in: store)

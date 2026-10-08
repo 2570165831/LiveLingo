@@ -653,6 +653,113 @@ struct DataSafetyReviewTests {
         #expect(disk.retiredJobs?.first(where: { $0.id == first.id })?.reports.count == 1)
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func n16SupersedingAdmissionRetiresEachIDOnceAndRestarts(_ invalidateDuringOutput: Bool,
+                                                          _ failAdmissionSave: Bool) async throws {
+        let root = try DataSafetyFixtures.make("N16-enqueue-reentry")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let book = try notebook("old-input")
+        let store = SessionStore(directory: directory)
+        let saved = try store.save(SessionSnapshot(segments: book.batches.flatMap(\.evidence),
+            batches: book.batches, notebookRevision: book.revision))
+        let journal = root.appendingPathComponent("queue.json")
+        var calls = 0
+        let q = queue(journal) { _, _, _, _, _ in calls += 1; return Self.response }
+        q.setContext(recording: true, concurrent: false, resourcesAvailable: false)
+        try await q.enqueueAsync(directory: directory, notebook: book,
+            sessionID: saved.sessionID, inputRevision: saved.inputRevision)
+        let oldID = try #require(q.items.first?.id)
+        let previous = try #require(saved.segments.first)
+        let replacement = TranscriptSegment(id: previous.id, startTime: previous.startTime,
+            endTime: previous.endTime, english: "The synthetic marker has a revised input.",
+            chinese: "合成标记的输入已经修订。", sessionID: saved.sessionID,
+            inputRevision: saved.inputRevision + 1)
+        _ = try store.append(.inputRevision(.init(fromRevision: saved.inputRevision,
+            toRevision: saved.inputRevision + 1, previousSegment: previous,
+            replacementSegment: replacement, retainedBatches: saved.batches,
+            reason: "Synthetic confirmed revision")))
+        let revised = try store.append(.appendBatch(LearningNoteBatch(id: UUID(), evidence: [replacement],
+            note: LearningNote(topic: "合成修订", points: [.init(kind: "核心结论", text: "输入已经修订。")]))))
+        let newBook = try LearningNotebook(snapshot: revised)
+        var entered = false
+        var callbackError: Error?
+        var heldLock: Int32 = -1
+        defer { if heldLock >= 0 { _ = flock(heldLock, LOCK_UN); _ = Darwin.close(heldLock) } }
+        q.onUpdate = { _, _, _ in
+            guard !entered,
+                  q.journalForTesting.jobs.contains(where: { $0.id == oldID }) else { return }
+            entered = true
+            do {
+                if invalidateDuringOutput {
+                    try q.invalidateInputs(sessionID: saved.sessionID, inputRevision: revised.inputRevision)
+                }
+                if failAdmissionSave {
+                    heldLock = Darwin.open(journal.appendingPathExtension("lock").path,
+                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0o600)
+                    guard heldLock >= 0, flock(heldLock, LOCK_EX | LOCK_NB) == 0 else {
+                        throw POSIXError(.EIO)
+                    }
+                }
+            }
+            catch { callbackError = error }
+        }
+        var admissionError: Error?
+        do {
+            try await q.enqueueAsync(directory: directory, notebook: newBook,
+                sessionID: saved.sessionID, inputRevision: revised.inputRevision)
+        } catch { admissionError = error }
+        #expect(entered)
+        #expect(callbackError == nil)
+        #expect((admissionError != nil) == failAdmissionSave)
+        if failAdmissionSave {
+            #expect(q.currentFailure != nil)
+            #expect(q.journalForTesting.jobs.contains { $0.id == oldID } == !invalidateDuringOutput,
+                "Admission rollback must retain a retirement performed by a reentrant callback")
+            #expect(q.journalForTesting.retiredJobs?.contains { $0.id == oldID } == (invalidateDuringOutput ? true : nil))
+            _ = flock(heldLock, LOCK_UN)
+            _ = Darwin.close(heldLock)
+            heldLock = -1
+            q.onUpdate = nil
+            q.togglePause()
+            try await q.waitForPendingStorage()
+            try await q.enqueueAsync(directory: directory, notebook: newBook,
+                sessionID: saved.sessionID, inputRevision: revised.inputRevision)
+        }
+        try await q.waitForPendingStorage()
+        await q.shutdownForTesting()
+        #expect(q.currentFailure == nil)
+        let bytes = try Data(contentsOf: journal)
+        let disk = try read(journal)
+        try disk.validateIntegrity()
+        let all = disk.jobs + (disk.retiredJobs ?? [])
+        #expect(disk.jobs.count == 1)
+        #expect(disk.jobs.first?.identity?.inputRevision == revised.inputRevision)
+        #expect(disk.retiredJobs?.count == 1)
+        #expect(all.filter { $0.id == oldID }.count == 1)
+        #expect(Set(all.map(\.id)).count == all.count)
+        let restored = queue(journal) { _, _, _, _, _ in calls += 1; return Self.response }
+        await restored.shutdownForTesting()
+        #expect(restored.currentFailure == nil)
+        #expect(restored.items.count == 1)
+        #expect(try Data(contentsOf: journal) == bytes)
+        #expect(calls == 0)
+    }
+
+    @Test func n16JournalRejectsDuplicateLiveAndRetiredIDsBeforeWriting() throws {
+        let root = try DataSafetyFixtures.make("N16-journal-ids")
+        defer { DataSafetyFixtures.preserve(root) }
+        let saved = try job(try course(root, "course"), notebook())
+        let duplicate = LearningReviewQueue.Journal(jobs: [saved], userPaused: true,
+            version: LearningReviewQueue.journalVersion, retiredJobs: [saved])
+        let encoded = try JSONEncoder().encode(duplicate)
+        let decoded = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: encoded)
+        var rejected = false
+        do { try decoded.validateIntegrity() }
+        catch is ReviewIdentityError { rejected = true }
+        #expect(rejected, "A valid checksum must not permit duplicate live/history IDs")
+    }
+
     @Test func manualEnqueueRejectsCandidateInvalidatedByOutputCallback() async throws {
         let root = try DataSafetyFixtures.make("review-enqueue-ownership")
         defer { DataSafetyFixtures.preserve(root) }

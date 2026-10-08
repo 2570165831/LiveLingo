@@ -3569,6 +3569,14 @@ final class LearningReviewQueue: ObservableObject {
                     throw ReviewIdentityError.unreadable("复查日志完整性校验失败，原文件已保留")
                 }
             }
+            try validateJobIDs()
+        }
+
+        func validateJobIDs() throws {
+            let all = jobs + (retiredJobs ?? [])
+            guard Set(all.map(\.id)).count == all.count else {
+                throw ReviewIdentityError.conflict("复查日志含有重复任务 ID")
+            }
         }
     }
     static let journalVersion = 4
@@ -4165,9 +4173,6 @@ final class LearningReviewQueue: ObservableObject {
                 userPaused = journal.userPaused
                 try journal.validateIntegrity()
                 let all = journal.jobs + (journal.retiredJobs ?? [])
-                guard Set(all.map(\.id)).count == all.count else {
-                    throw ReviewIdentityError.conflict("复查日志含有重复任务 ID")
-                }
                 for entry in all {
                     guard entry.next >= 0, entry.next <= entry.batches.count,
                           entry.reports.count <= entry.next else {
@@ -4589,19 +4594,47 @@ final class LearningReviewQueue: ObservableObject {
             }
             return
         }
-        let before = jobs, retiredBefore = retiredJobs
-        for var old in jobs where plan.supersededIDs.contains(old.id) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var retirements: [(original: Job, retired: Job)] = []
+        for original in jobs where plan.supersededIDs.contains(original.id) {
+            var old = original
             old.supersededByRevision = plan.candidate.identity?.inputRevision
             old.prefix = ""; old.prefixInputDigest = nil; old.retryPending = nil
             let snapshot = try await validatedSnapshotAsync(old, at: old.directory, allowHistorical: true)
             try await writeOutputsAsync(old, validatedSnapshot: snapshot)
-            retiredJobs.append(old)
+            retirements.append((original, old))
         }
+        try Task.checkCancellation()
+        // Each await (including onUpdate) may already have retired a task.
+        // Validate the complete plan before changing any queue membership.
+        let ownedRetirements = try retirements.filter { entry in
+            if let current = jobs.first(where: { $0.id == entry.original.id }) {
+                guard try encoder.encode(current) == encoder.encode(entry.original),
+                      !retiredJobs.contains(where: { $0.id == current.id }) else {
+                    throw ReviewIdentityError.conflict("复查任务在报告保存期间发生变化，未继续入队")
+                }
+                return true
+            }
+            guard retiredJobs.contains(where: { $0.id == entry.original.id }) else {
+                throw ReviewIdentityError.conflict("复查任务在报告保存期间已移除，未继续入队")
+            }
+            return false
+        }
+        let before = jobs, retiredBefore = retiredJobs
+        retiredJobs.append(contentsOf: ownedRetirements.map(\.retired))
         jobs.removeAll { plan.supersededIDs.contains($0.id) }
         jobs.append(plan.candidate)
+        let submittedJobs = try encoder.encode(jobs)
+        let submittedRetiredJobs = try encoder.encode(retiredJobs)
         do { try await saveAndWait() }
         catch {
-            jobs = before; retiredJobs = retiredBefore
+            // Roll back only our unchanged submission. A later source edit or
+            // callback owns its new state, even if this save failed.
+            if (try? encoder.encode(jobs)) == submittedJobs,
+               (try? encoder.encode(retiredJobs)) == submittedRetiredJobs {
+                jobs = before; retiredJobs = retiredBefore
+            }
             refreshStatus()
             throw error
         }
@@ -5394,6 +5427,7 @@ final class LearningReviewQueue: ObservableObject {
         }
         let frozen = Journal(jobs: jobs, userPaused: userPaused,
             version: Self.journalVersion, retiredJobs: retiredJobs.isEmpty ? nil : retiredJobs)
+        try frozen.validateJobIDs()
         let previous = persistenceTail
         let output = outputTail
         let writer = storage
@@ -5513,6 +5547,7 @@ private actor LearningReviewStorage {
 
     func save(_ journal: LearningReviewQueue.Journal, sequence: Int) throws -> Data {
         guard sequence > lastSavedSequence else { throw CancellationError() }
+        try journal.validateJobIDs()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(journal)

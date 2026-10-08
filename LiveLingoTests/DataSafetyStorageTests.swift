@@ -228,6 +228,118 @@ final class DataSafetyStorageTests: XCTestCase {
         try SessionExporter.export(segments: [first, second], sessionDirectory: root, summary: "重试合成笔记", operations: operations)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(".exports/publishing.json").path))
     }
+    func testN14FirstExportEIOAllowsNormalRetryWithoutInjection() throws {
+        let root = try DataSafetyFixtures.make("N14-first-export-retry")
+        defer { DataSafetyFixtures.preserve(root) }
+        let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Synthetic retry source.", chinese: "合成重试原文。")
+        let store = SessionStore(directory: root)
+        let snapshot = try store.save(SessionSnapshot(segments: [segment]))
+        let snapshotBytes = try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName))
+        let recording = Data("SYNTHETIC_RECORDING_RETAINED".utf8)
+        try recording.write(to: root.appendingPathComponent("recording.wav"))
+        var operations = SessionExporter.PublicationOperations()
+        operations.beforeMemberPublication = { name in
+            if name == "bilingual.srt" {
+                throw SessionStoreError.io(operation: "synthetic first export failure", code: EIO)
+            }
+        }
+        XCTAssertThrowsError(try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成首次笔记", createdAt: Date(timeIntervalSince1970: 0), operations: operations)) { error in
+            guard let failure = error as? SessionStoreError, case let .io(_, code) = failure else {
+                return XCTFail("Expected the injected EIO, got \(error)")
+            }
+            XCTAssertEqual(code, EIO)
+        }
+        // Retry with the default operations: no failure/capability injection remains.
+        XCTAssertNoThrow(try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成重试笔记", createdAt: Date(timeIntervalSince1970: 0)))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), snapshotBytes)
+        XCTAssertEqual(try store.load(), snapshot)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("recording.wav")), recording)
+        let selected = try SessionExporter.currentExportDirectory(in: root)
+        for name in ["bilingual.jsonl", "bilingual.srt", "manifest.json", "summary-zh-Hans.md", "transcript-en.txt", "transcript-zh-Hans.txt"] {
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(name)),
+                           try Data(contentsOf: selected.appendingPathComponent(name)), name)
+        }
+        XCTAssertEqual(try Data(contentsOf: selected.appendingPathComponent("summary-zh-Hans.md")), Data("合成重试笔记\n".utf8))
+    }
+
+    func testN15SymlinkLateForeignSummaryRejectsInconsistentSuccessAndPreservesVersions() throws {
+        try assertN15LateForeignSummaryPreserved(portable: false)
+    }
+
+    func testN15PortableLateForeignSummaryRejectsInconsistentSuccessAndPreservesVersions() throws {
+        try assertN15LateForeignSummaryPreserved(portable: true)
+    }
+
+    private func assertN15LateForeignSummaryPreserved(portable: Bool) throws {
+        let root = try DataSafetyFixtures.make(portable ? "N15-late-foreign-portable" : "N15-late-foreign-symlink")
+        defer { DataSafetyFixtures.preserve(root) }
+        let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Synthetic late-writer source.", chinese: "合成并发原文。")
+        let store = SessionStore(directory: root)
+        let snapshot = try store.save(SessionSnapshot(segments: [segment]))
+        let snapshotBytes = try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName))
+        let recording = Data("SYNTHETIC_RECORDING_RETAINED".utf8)
+        try recording.write(to: root.appendingPathComponent("recording.wav"))
+        var operations = SessionExporter.PublicationOperations()
+        if portable {
+            operations.createSymbolicLink = { _, _ in
+                throw SessionStoreError.io(operation: "synthetic unavailable symlink", code: ENOTSUP)
+            }
+        }
+        try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成旧笔记", createdAt: Date(timeIntervalSince1970: 0), operations: operations)
+        let names = ["bilingual.jsonl", "bilingual.srt", "manifest.json", "summary-zh-Hans.md", "transcript-en.txt", "transcript-zh-Hans.txt"]
+        let previous = try SessionExporter.currentExportDirectory(in: root)
+        let previousIndex = try Data(contentsOf: previous.appendingPathComponent("export-index.json"))
+        var previousFiles: [String: Data] = [:]
+        for name in names { previousFiles[name] = try Data(contentsOf: previous.appendingPathComponent(name)) }
+        let foreign = Data("SYNTHETIC_FOREIGN_NOTE_AFTER_MEMBER_CHECK\n".utf8)
+        operations.beforeMemberPublication = { name in
+            if name == "transcript-zh-Hans.txt" {
+                // Replace an already checked member just before the last member.
+                try foreign.write(to: root.appendingPathComponent("summary-zh-Hans.md"), options: .atomic)
+            }
+        }
+        XCTAssertThrowsError(try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成新笔记", createdAt: Date(timeIntervalSince1970: 0), operations: operations))
+        let selected = try SessionExporter.currentExportDirectory(in: root)
+        for name in names {
+            XCTAssertEqual(try Data(contentsOf: selected.appendingPathComponent(name)), previousFiles[name], name)
+            XCTAssertEqual(try Data(contentsOf: previous.appendingPathComponent(name)), previousFiles[name], name)
+        }
+        XCTAssertEqual(try Data(contentsOf: previous.appendingPathComponent("export-index.json")), previousIndex)
+        let recoveredRoot = root.appendingPathComponent(".exports/recovered")
+        let recoveries = FileManager.default.fileExists(atPath: recoveredRoot.path)
+            ? try FileManager.default.contentsOfDirectory(at: recoveredRoot, includingPropertiesForKeys: nil) : []
+        let recoveredForeign = recoveries.filter {
+            (try? Data(contentsOf: $0.appendingPathComponent("summary-zh-Hans.md"))) == foreign
+        }
+        XCTAssertTrue((try? Data(contentsOf: root.appendingPathComponent("summary-zh-Hans.md"))) == foreign
+            || !recoveredForeign.isEmpty, "The late foreign summary must remain readable at the root or in a verified recovery")
+        let versions = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent(".exports/versions"), includingPropertiesForKeys: nil)
+        let nextSummary = Data("合成新笔记\n".utf8)
+        let next = try XCTUnwrap(versions.first {
+            (try? Data(contentsOf: $0.appendingPathComponent("summary-zh-Hans.md"))) == nextSummary
+        }, "The complete attempted generation must be retained")
+        let nextIndexObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: next.appendingPathComponent("export-index.json"))) as? [String: Any])
+        let nextIndex = try XCTUnwrap(nextIndexObject["members"] as? [String: String])
+        XCTAssertEqual(Set(nextIndex.keys), Set(names))
+        for name in names {
+            let bytes = try Data(contentsOf: next.appendingPathComponent(name))
+            XCTAssertEqual(bytes, name == "summary-zh-Hans.md" ? nextSummary : previousFiles[name], name)
+            XCTAssertEqual(nextIndex[name], SessionArchiveCoding.digest(bytes), name)
+        }
+        for recovery in recoveredForeign {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: recovery.appendingPathComponent("export-index.json"))) as? [String: Any])
+            let index = try XCTUnwrap(object["members"] as? [String: String])
+            XCTAssertEqual(index["summary-zh-Hans.md"], SessionArchiveCoding.digest(foreign))
+        }
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), snapshotBytes)
+        XCTAssertEqual(try store.load(), snapshot)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("recording.wav")), recording)
+    }
+
     private func checkpoint(_ value: SessionSnapshot) -> SessionGenerationCheckpoint {
         let input = "Synthetic frozen input"
         return SessionGenerationCheckpoint(sessionID: value.sessionID, inputRevision: value.inputRevision,
