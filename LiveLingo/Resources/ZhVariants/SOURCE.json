@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "archiveURL": "https://github.com/BYVoid/OpenCC/archive/refs/tags/ver.1.1.9.tar.gz",
   "archiveSHA256": "ad4bcd8d87219a240a236d4a55c9decd2132a9436697d2882ead85c8939b0a99",
-  "converterVersion": "opencc-ver.1.1.9+livelingo-v1",
+  "converterVersion": "opencc-ver.1.1.9+livelingo-v2",
   "files": [
     {
       "path": "LICENSE",
@@ -135,7 +135,36 @@
     "sha256": "3ba0897b18daf25b5ab7e752d45cdcd526f8202789d39663188bb34115eb1f30"
   },
   "projectTables": {
-    "status": "pending native-speaker review",
-    "activeMappings": 0
+    "status": "LLM reviewed; not native-speaker checked",
+    "reviewer": "Codex (current conversation)",
+    "reviewDate": "2026-10-08",
+    "activeMappings": 75,
+    "reviewedSyntheticSentences": 356,
+    "files": [
+      {
+        "path": "TW-reviewed-phrases.txt",
+        "sha256": "b682a7424de9e4ec43a44ac329dfd4d6d41624dc59cb54c607d429efde696767",
+        "bytes": 8379,
+        "activeMappings": 27
+      },
+      {
+        "path": "HK-reviewed-phrases.txt",
+        "sha256": "62722781973c801ce820a2a1c7aab8e429e3849988d0a6137c93ca0d7b6f662b",
+        "bytes": 3329,
+        "activeMappings": 9
+      },
+      {
+        "path": "LiveLingo-TW-overlay.txt",
+        "sha256": "e9b6ee7ffaebefbd97feab0699c35b38a619326bfc816b58fe4c3507d20c5062",
+        "bytes": 5997,
+        "activeMappings": 20
+      },
+      {
+        "path": "LiveLingo-HK-overlay.txt",
+        "sha256": "0bdb948ce3841c3007b11cfaacf4778370d00c09c2295992f7b5b03d7ec67526",
+        "bytes": 6656,
+        "activeMappings": 19
+      }
+    ]
   }
 }

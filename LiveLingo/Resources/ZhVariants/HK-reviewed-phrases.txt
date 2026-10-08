@@ -1,0 +1,30 @@
+# 用语经大模型审阅，非母语者人工审校。
+# Reviewer: Codex（本会话大模型）；2026-10-08；公开资料限定。
+# Subject overlays precede regional phrases; replacements are not recursive.
+# HK-reviewed-phrases-01; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局生涯規劃資訊網站：創新及科技業；電腦軟件；職業條件；完整複合詞
+# https://lifeplanning.edb.gov.hk/tc/career/career-information/4.html
+計算機軟件	電腦軟件
+# HK-reviewed-phrases-02; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局生涯規劃資訊網站：創新及科技業；電腦硬件；系統管理員
+# https://lifeplanning.edb.gov.hk/tc/career/career-information/4.html
+計算機硬件	電腦硬件
+# HK-reviewed-phrases-03; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局／課程發展議會：資訊及通訊科技課程及評估指引（2021）；電腦系統／網絡；第B、C單元
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/technology-edu/curriculum-doc/ICT_C%26A%20Guide_c_final.pdf
+計算機網絡	電腦網絡
+# HK-reviewed-phrases-04; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局／課程發展議會：資訊及通訊科技課程及評估指引（2021）；互聯網及其應用；第C單元
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/technology-edu/curriculum-doc/ICT_C%26A%20Guide_c_final.pdf
+因特網	互聯網
+# HK-reviewed-phrases-05; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局／課程發展議會：資訊及通訊科技課程及評估指引（2021）；資訊及通訊科技；科目名稱
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/technology-edu/curriculum-doc/ICT_C%26A%20Guide_c_final.pdf
+信息技術	資訊科技
+# HK-reviewed-phrases-06; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局／課程發展議會：資訊及通訊科技課程及評估指引（2021）；軟件許可；例子5
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/technology-edu/curriculum-doc/ICT_C%26A%20Guide_c_final.pdf
+軟件	軟件
+# HK-reviewed-phrases-07; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局生涯規劃資訊網站：創新及科技業；電腦硬件；系統管理員
+# https://lifeplanning.edb.gov.hk/tc/career/career-information/4.html
+硬件	硬件
+# HK-reviewed-phrases-08; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局／課程發展議會：資訊及通訊科技課程及評估指引（2021）；數據庫；選修A
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/technology-edu/curriculum-doc/ICT_C%26A%20Guide_c_final.pdf
+數據庫	數據庫
+# HK-reviewed-phrases-09; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局／課程發展議會：資訊及通訊科技課程及評估指引（2015）；字串；數據類型；印刷頁36、38；不全局改字符
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/technology-edu/curriculum-doc/ICT_CAGuide_c_2015.pdf
+字符串	字串

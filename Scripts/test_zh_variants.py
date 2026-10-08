@@ -40,10 +40,58 @@ class ChineseVariantsTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             Converter(FIXTURES / "missing")
 
-    def test_project_tables_pending_review_are_empty(self):
-        for name in ("TW-reviewed-phrases", "LiveLingo-TW-overlay", "LiveLingo-HK-overlay"):
-            lines = (RESOURCE_ROOT / (name + ".txt")).read_text().splitlines()
-            self.assertFalse([line for line in lines if line.strip() and not line.startswith("#")])
+    def test_reviewed_tables_have_sources_hashes_and_two_cases_per_entry(self):
+        source = json.loads((RESOURCE_ROOT / "SOURCE.json").read_text())
+        tables = source["projectTables"]
+        self.assertEqual(tables["status"], "LLM reviewed; not native-speaker checked")
+        self.assertEqual(tables["activeMappings"], 75)
+        with (FIXTURES / "terms.tsv").open() as handle:
+            cases = list(csv.DictReader(handle, delimiter="\t", quoting=csv.QUOTE_NONE))
+        entries = {}
+        for file in tables["files"]:
+            path = RESOURCE_ROOT / file["path"]
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), file["sha256"])
+            self.assertEqual(path.stat().st_size, file["bytes"])
+            lines = path.read_text().splitlines()
+            self.assertIn("用语经大模型审阅，非母语者人工审校。", lines[0])
+            current = None
+            count = 0
+            for line in lines:
+                if line.startswith("# ") and "; 学科：" in line:
+                    current = line.split(";", 1)[0][2:]
+                    self.assertIn("审阅者：", line)
+                    self.assertIn("来源：", line)
+                elif line.strip() and not line.startswith("#"):
+                    self.assertIsNotNone(current)
+                    self.assertNotIn(current, entries)
+                    entries[current] = line
+                    count += 1
+            self.assertEqual(count, file["activeMappings"])
+            self.assertEqual(sum(line.startswith("# https://") for line in lines), count)
+        self.assertEqual(len(entries), tables["activeMappings"])
+        for entry in entries:
+            pair = [row for row in cases if row["entry"] == entry]
+            self.assertEqual({row["kind"] for row in pair}, {"term-positive", "term-counterexample"})
+            self.assertEqual(len(pair), 2)
+        self.assertEqual(len(cases), 150)
+        for row in cases:
+            for mode, column in (("s2tw", "llmTW"), ("s2hk", "llmHK")):
+                self.assertEqual(self.converter.render(row["source"], mode, project_tables=True).encode(),
+                                 row[column].encode(), row["id"] + mode)
+
+    def test_reviewed_original_synthetic_gold(self):
+        with (FIXTURES / "cases.tsv").open() as handle:
+            for row in csv.DictReader(handle, delimiter="\t"):
+                for mode, column in (("s2tw", "llmTW"), ("s2hk", "llmHK")):
+                    self.assertEqual(self.converter.render(row["source"], mode, project_tables=True), row[column])
+
+    def test_subject_collisions_and_longer_accepted_spelling(self):
+        self.assertEqual(self.converter.render("数学函数、研究对象、实验程序、观测数据。", "s2tw", project_tables=True),
+                         "數學函數、研究對象、實驗程序、觀測數據。")
+        self.assertEqual(self.converter.render("比热容量与比热容。", "s2hk", project_tables=True),
+                         "比熱容量與比熱容。")
+        self.assertEqual(self.converter.render("聚合酶链反应，16 个比特，比特币。", "s2tw", project_tables=True),
+                         "聚合酶鏈反應，16 個位元，比特幣。")
 
     def test_swift_python_parity(self):
         executable = os.environ.get("LIVELINGO_ZH_VARIANTS_CLI")

@@ -418,6 +418,7 @@ class Converter:
         self.hk = Dictionary(root, ["HKVariants.txt"])
         self.tw_phrases = Dictionary(root, ["TWPhrasesIT.txt", "TWPhrasesName.txt", "TWPhrasesOther.txt"])
         self.reviewed = Dictionary(root, ["TW-reviewed-phrases.txt"])
+        self.hk_reviewed = Dictionary(root, ["HK-reviewed-phrases.txt"])
         self.tw_overlay = Dictionary(root, ["LiveLingo-TW-overlay.txt"])
         self.hk_overlay = Dictionary(root, ["LiveLingo-HK-overlay.txt"])
 
@@ -432,7 +433,7 @@ class Converter:
             result.append(convert_group(segment, [self.hk if mode == "s2hk" else self.tw]))
         text = "".join(result)
         if project_tables:
-            text = convert_group(text, [self.hk_overlay] if mode == "s2hk" else [self.tw_overlay, self.reviewed])
+            text = convert_group(text, [self.hk_overlay, self.hk_reviewed] if mode == "s2hk" else [self.tw_overlay, self.reviewed])
         return text
 
     def render(self, text: str, mode="s2tw", *, project_tables=False) -> str:

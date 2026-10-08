@@ -214,9 +214,9 @@ consult the current preference. When a snapshot exists, its effective target
 snapshots fail with `inconsistentExport`, as do target mismatches.
 
 Generation accepts `--target zh-Hans` (also the default), `--target zh-Hant-TW`
-and `--target zh-Hant-HK`. The two regional codes are explicit CLI opt-ins while
-their GUI release flags remain closed. Parser rejection tests use
-`parseForTesting(releasedTargets: Set(OutputLanguage.released))` to retain that
+and `--target zh-Hant-HK`. All three Chinese targets are released in the GUI.
+Closed-policy parser rejection tests explicitly use
+`parseForTesting(releasedTargets: [.simplifiedChinese])` to retain that
 release guard. Other codes, duplicate flags, and `--target` in verification,
 reopen, resume, or typed-translation modes
 are rejected before files or runtimes are touched. Opening and resuming use the

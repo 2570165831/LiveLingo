@@ -43,7 +43,7 @@ import Darwin
         _ language: OutputLanguage, root: URL
     ) async throws {
         let prefix = "production_release_cli_reopen_" + language.rawValue
-        try expect(!language.isReleased && OutputLanguage.released == [.simplifiedChinese],
+        try expect(language.isReleased && OutputLanguage.released == [.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong],
                    prefix + "_production_release_boundary")
         let directory = root.appendingPathComponent(prefix, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -82,7 +82,8 @@ import Darwin
         let model = AppModel(reviewQueue: queue, pipeline: pipeline, translation: .unavailable, notes: .unavailable,
             backgroundServices: false, scheduledNotes: false, defaults: defaults)
         do {
-            try expect(model.outputLanguageChoices == [.simplifiedChinese] && !model.showsOutputLanguageSelector,
+            try expect(model.outputLanguageChoices == [.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong]
+                && model.showsOutputLanguageSelector,
                        prefix + "_no_release_injection")
             var events: [String] = []
             let observed = try await model.cliOpenSaved(directory: directory, resume: false, highQuality: false,

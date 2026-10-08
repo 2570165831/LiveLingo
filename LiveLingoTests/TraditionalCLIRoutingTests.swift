@@ -41,7 +41,7 @@ final class TraditionalCLIRoutingTests: XCTestCase {
                 XCTAssertEqual(model.phase, phase)
                 XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
             }
-            XCTAssertFalse(target.isReleased)
+            XCTAssertTrue(target.isReleased)
             XCTAssertEqual(model.outputLanguage, .simplifiedChinese)
         }
         XCTAssertEqual(converter.debugLoadCount, 1)

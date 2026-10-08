@@ -52,3 +52,9 @@ xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo -configuration Debug \
 请不要附上：签名证书、私钥、钥匙串导出、公证凭据、`.env`、完整录音、完整转写或含个人信息的会议内容。需要样例时请提供最小化的合成片段。
 
 安全或敏感问题请先私下联系维护者，不要直接公开细节。
+
+## 中文用语与命名
+
+语言名称写法是项目命名规范，以 OutputLanguage 中的原名为准。用语经大模型审阅，非母语者人工审校；不得把 LLM 期望列标成母语者人工金样。四份 ZhVariants 项目表的每条映射必须注明学科、审阅者、官方公开出处及具体词目或章节，不确定的条目不收。通用词表与学科覆盖分开，覆盖表先匹配，替换结果不递归转换。
+
+新增条目同时加入 terms.tsv 的正例与反例，特别检查数学函数、研究对象、实验程序、测量数据、长词、代码、公式、JSON 键。更新 SOURCE.json 的项目表计数、哈希和 converterVersion；保留上游字典与原始 OpenCC 用例。审阅样本、过程脚本与报告放在任务工作目录，不进入仓库。参见 [中文用语说明](docs/CHINESE_TERMINOLOGY.md)。

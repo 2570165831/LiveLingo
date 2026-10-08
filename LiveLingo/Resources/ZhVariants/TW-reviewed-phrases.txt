@@ -1,3 +1,84 @@
-# 待母語者審閱 — no active mappings
-# Format: source<TAB>target; add subject, reviewer and source as a preceding comment.
-# Unapproved example (comment only): 軟件 → 軟體; source: TWPhrasesIT.txt, key 軟件
+# 用语经大模型审阅，非母语者人工审校。
+# Reviewer: Codex（本会话大模型）；2026-10-08；公开资料限定。
+# Subject overlays precede regional phrases; replacements are not recursive.
+# TW-reviewed-phrases-01; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；軟件包／套裝軟體
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+軟件包	套裝軟體
+# TW-reviewed-phrases-02; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；軟件／軟體
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+軟件	軟體
+# TW-reviewed-phrases-03; 学科：课堂设备; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第1頁；打印機／印表機
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=1&powerMode=0
+打印機	印表機
+# TW-reviewed-phrases-04; 学科：课堂设备; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；攝像機／攝影機
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+攝像機	攝影機
+# TW-reviewed-phrases-05; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；數據庫／資料庫
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+數據庫	資料庫
+# TW-reviewed-phrases-06; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；操作系統／作業系統
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+操作系統	作業系統
+# TW-reviewed-phrases-07; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；只讀存儲器／唯讀記憶體
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+只讀存儲器	唯讀記憶體
+# TW-reviewed-phrases-08; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；存儲器／記憶體
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+存儲器	記憶體
+# TW-reviewed-phrases-09; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；磁盤／磁碟
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+磁盤	磁碟
+# TW-reviewed-phrases-10; 学科：计算机史; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；軟盤／軟碟
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+軟盤	軟碟
+# TW-reviewed-phrases-11; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；字符／字元
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+字符	字元
+# TW-reviewed-phrases-12; 学科：跨学科; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；知識產權／智慧財產權
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+知識產權	智慧財產權
+# TW-reviewed-phrases-13; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；智能終端／智慧型終端機
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+智能終端	智慧型終端機
+# TW-reviewed-phrases-14; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第4頁；硬件／硬體
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=4&powerMode=0
+硬件	硬體
+# TW-reviewed-phrases-15; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：電腦軟體；電腦軟體；完整複合詞
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=46507&la=0&powerMode=0
+計算機軟件	電腦軟體
+# TW-reviewed-phrases-16; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第4頁；硬件／硬體；電腦限定詞；另見電腦軟體釋義
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=4&powerMode=0
+計算機硬件	電腦硬體
+# TW-reviewed-phrases-17; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：電腦網路；電腦網路；完整複合詞
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=46520&la=0&powerMode=0
+計算機網絡	電腦網路
+# TW-reviewed-phrases-18; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：網際網路；網際網路；Internet
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=162814&la=0&powerMode=0
+因特網	網際網路
+# TW-reviewed-phrases-19; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：位元組；位元組；byte
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=161303&la=0&powerMode=0
+字節	位元組
+# TW-reviewed-phrases-20; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：檔名（釋義中的字串）；檔名釋義中的字串；比字符優先的完整詞
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=44384&la=0&powerMode=0
+字符串	字串
+# TW-reviewed-phrases-21; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；字段／資料欄
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+字段	資料欄
+# TW-reviewed-phrases-22; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：電腦網路；電腦網路釋義；只改網絡詞形
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=46520&la=0&powerMode=0
+網絡	網路
+# TW-reviewed-phrases-23; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：程式設計；程式設計釋義中的資料結構；完整複合詞
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=124562&la=0&powerMode=0
+數據結構	資料結構
+# TW-reviewed-phrases-24; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：位元組；位元組釋義中的八個位元；限定量詞，保留比特等名稱
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=161303&la=0&powerMode=0
+個比特	個位元
+# TW-reviewed-phrases-25; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：資訊；資訊釋義明列大陸稱信息；僅替換技術複合詞，不處理一般信息
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=137246&la=0&powerMode=0
+信息技術	資訊技術
+# TW-reviewed-phrases-26; 学科：地理; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：紐西蘭；紐西蘭（New Zealand）；完整地名
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=57940&la=0&powerMode=0
+新西蘭	紐西蘭
+# TW-reviewed-phrases-27; 学科：地理; 审阅者：Codex（本会话大模型）; 来源：教育部 TaiwanGPS：雪梨大學獎學金（2023-09-06；Sydney 對照連結）；雪梨大學（University of Sydney）對照；地理名稱，原文欄位／程式識別符不轉
+# https://twgps.moe.edu.tw/Post/11302
+悉尼	雪梨

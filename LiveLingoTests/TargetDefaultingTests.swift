@@ -3,8 +3,8 @@ import XCTest
 @testable import LiveLingo
 
 final class TargetDefaultingTests: XCTestCase, @unchecked Sendable {
-    func testOnlySimplifiedChineseIsReleased() {
-        XCTAssertEqual(OutputLanguage.released, [.simplifiedChinese])
+    func testOnlyTheThreeChineseProfilesAreReleased() {
+        XCTAssertEqual(OutputLanguage.released, [.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong])
         XCTAssertEqual(OutputLanguage.simplifiedChinese.generationTarget, .simplifiedChinese)
         XCTAssertNil(OutputLanguage.simplifiedChinese.persistedLocale)
         XCTAssertEqual(OutputLanguage.simplifiedChinese.autonym, "简体中文")

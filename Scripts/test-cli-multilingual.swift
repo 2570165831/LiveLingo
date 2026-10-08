@@ -443,21 +443,21 @@ import Foundation
             ["--resume-saved", "synthetic", "--target", "zh-Hans"],
             ["--translate-text", "synthetic", "--target", "zh-Hans"]
         ] {
-            do { _ = try LiveLingoCLI.parseForTesting(arguments, releasedTargets: Set(OutputLanguage.released)) }
+            do { _ = try LiveLingoCLI.parseForTesting(arguments, releasedTargets: [.simplifiedChinese]) }
             catch LiveLingoCLI.CLIError.invalidArguments { continue }
             throw Failure(name: "target_option_must_be_validated_before_io")
         }
         passed.append("validated_generation_target_and_mode_boundaries")
-        // CLI explicitly opts in to the two unreleased converters; the strict
-        // released-profile parser above retains the UI release guard.
+        // The frozen closed-policy parser above retains all its rejection
+        // assertions; production GUI and CLI now release the three Chinese profiles.
         for target in [OutputLanguage.traditionalChineseTaiwan, .traditionalChineseHongKong] {
             guard case .generate(let command) = try LiveLingoCLI.parse(base + ["--target", target.rawValue]) else {
                 throw Failure(name: "traditional_cli_target_not_forwarded")
             }
             try expect(command.target == target, "traditional_cli_target_preserved")
-            try expect(!target.isReleased, "traditional_target_remains_unreleased")
+            try expect(target.isReleased && OutputLanguage.releasedLanguage(target.rawValue) == target, "traditional_target_is_released")
         }
-        passed.append("explicit_traditional_cli_targets_without_gui_release")
+        passed.append("released_traditional_cli_targets")
 
 
         let course = try fixtureDirectory(root, name: "single-line-english-target")
@@ -592,7 +592,7 @@ import Foundation
             let manifest = try JSONSerialization.jsonObject(with: saved["manifest.json"]!) as! [String: Any]
             try expect(manifest["targetLocale"] as? String == target.rawValue
                 && manifest["sourceLanguages"] as? [String] == ["ja", "yue", "zh"]
-                && manifest["converterVersion"] as? String == "opencc-ver.1.1.9+livelingo-v1"
+                && manifest["converterVersion"] as? String == "opencc-ver.1.1.9+livelingo-v2"
                 && manifest["converterVersion"] as? String == ChineseScriptConverter.version,
                 "traditional_manifest_target_languages_and_converter_version")
             try expect(try LiveLingoCLI.verifySaved(course, emit: false) == segments.count, "traditional_snapshot_round_trip")

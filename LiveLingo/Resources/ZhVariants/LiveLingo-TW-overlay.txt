@@ -1,3 +1,63 @@
-# 待母語者審閱 — no active mappings
-# Format: source<TAB>target; add subject, reviewer and source as a preceding comment.
-# Unapproved example (comment only): 電離能 → [待母語者審閱]; source: project Simplified Chinese prompt term 电离能
+# 用语经大模型审阅，非母语者人工审校。
+# Reviewer: Codex（本会话大模型）；2026-10-08；公开资料限定。
+# Subject overlays precede regional phrases; replacements are not recursive.
+# LiveLingo-TW-overlay-01; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：國家教育研究院：化學工程名詞第四版（2017）；ionization energy；印刷頁109
+# https://teric.naer.edu.tw/wSite/PDFReader?fileName=1509603345316&format=pdf&xmlId=1991054
+電離能	游離能
+# LiveLingo-TW-overlay-02; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：國家教育研究院：化學工程名詞第四版（2017）；ionization constant；印刷頁109
+# https://teric.naer.edu.tw/wSite/PDFReader?fileName=1509603345316&format=pdf&xmlId=1991054
+電離常數	游離常數
+# LiveLingo-TW-overlay-03; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：國家教育研究院：化學工程名詞第四版（2017）；ionization potential；印刷頁109
+# https://teric.naer.edu.tw/wSite/PDFReader?fileName=1509603345316&format=pdf&xmlId=1991054
+電離電位	游離電位
+# LiveLingo-TW-overlay-04; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：國家教育研究院：化學工程名詞第四版（2017）；activation energy；印刷頁4
+# https://teric.naer.edu.tw/wSite/PDFReader?fileName=1509603345316&format=pdf&xmlId=1991054
+活化能	活化能
+# LiveLingo-TW-overlay-05; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：國家教育研究院：化學工程名詞第四版（2017）；scalar；印刷頁182
+# https://teric.naer.edu.tw/wSite/PDFReader?fileName=1509603345316&format=pdf&xmlId=1991054
+標量	純量
+# LiveLingo-TW-overlay-06; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：向量；向量，亦稱矢量
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=110150&la=0&powerMode=0
+矢量	向量
+# LiveLingo-TW-overlay-07; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：國家教育研究院：化學工程名詞第四版（2017）；Speed／速率；印刷頁203
+# https://teric.naer.edu.tw/wSite/PDFReader?fileName=1509603345316&format=pdf&xmlId=1991054
+速率	速率
+# LiveLingo-TW-overlay-08; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：向量；向量釋義中的速度
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=110150&la=0&powerMode=0
+速度	速度
+# LiveLingo-TW-overlay-09; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：向量；向量釋義中的動量
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=110150&la=0&powerMode=0
+動量	動量
+# LiveLingo-TW-overlay-10; 学科：数学; 审阅者：Codex（本会话大模型）; 来源：國家教育研究院：化學工程名詞第四版（2017）；normal distribution；印刷頁137
+# https://teric.naer.edu.tw/wSite/PDFReader?fileName=1509603345316&format=pdf&xmlId=1991054
+正態分佈	常態分布
+# LiveLingo-TW-overlay-11; 学科：数学; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：函數；函數；數學定義；禁止一概轉函式
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=81722&la=0&powerMode=0
+函數	函數
+# LiveLingo-TW-overlay-12; 学科：数学; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：機率；機率，也稱概率
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=87463&la=0&powerMode=0
+概率	機率
+# LiveLingo-TW-overlay-13; 学科：生物; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：細胞色素；細胞色素釋義中的粒線體
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=105104&la=0&powerMode=0
+線粒體	粒線體
+# LiveLingo-TW-overlay-14; 学科：生物; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：細胞色素；細胞色素釋義中的細胞膜
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=105104&la=0&powerMode=0
+細胞膜	細胞膜
+# LiveLingo-TW-overlay-15; 学科：生物; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：酵素；酵素也稱酶；只替換反應複合詞
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=107210&la=0&powerMode=0
+酶反應	酵素反應
+# LiveLingo-TW-overlay-16; 学科：生物; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：酵素；酵素也稱酶；只替換活性複合詞
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=107210&la=0&powerMode=0
+酶活性	酵素活性
+# LiveLingo-TW-overlay-17; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；數據庫文件／資料庫檔案
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+數據庫文件	資料庫檔案
+# LiveLingo-TW-overlay-18; 学科：计算机／物理; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：常見大陸地區語詞對照表，第3頁；集成電路／積體電路
+# https://dict.revised.moe.edu.tw/appendix.jsp?ID=37&la=0&page=3&powerMode=0
+集成電路	積體電路
+# LiveLingo-TW-overlay-19; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：程式設計；程式設計；禁止套用於實驗程序
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=124562&la=0&powerMode=0
+程序設計	程式設計
+# LiveLingo-TW-overlay-20; 学科：数学; 审阅者：Codex（本会话大模型）; 来源：教育部重編國語辭典修訂本：變數；變數；代數定義；保護程式識別符不變
+# https://dict.revised.moe.edu.tw/dictView.jsp?ID=19166&la=0&powerMode=0
+變量	變數

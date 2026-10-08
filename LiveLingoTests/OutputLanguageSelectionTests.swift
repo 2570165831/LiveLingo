@@ -27,14 +27,15 @@ final class OutputLanguageSelectionTests: XCTestCase {
         return (model, defaults, root)
     }
 
-    func testSingleReleasedLanguageHidesSelectorAndAutonymsAreExact() throws {
+    func testRestrictedReleasePolicyHidesSelectorAndAutonymsAreExact() throws {
         let (model, _, _) = try fixture()
+        model.setReleasedOutputLanguagesForTesting([.simplifiedChinese])
         XCTAssertEqual(model.outputLanguageChoices, [.simplifiedChinese])
         XCTAssertFalse(model.showsOutputLanguageSelector)
         XCTAssertEqual(OutputLanguage.allCases.map { $0.profile.autonym },
             ["简体中文", "繁體中文（中國台灣）", "繁體中文（中國港澳）", "English", "Español", "Français"])
-        XCTAssertFalse(OutputLanguage.traditionalChineseTaiwan.isReleased)
-        XCTAssertFalse(OutputLanguage.traditionalChineseHongKong.isReleased)
+        XCTAssertFalse(model.outputLanguageChoices.contains(.traditionalChineseTaiwan))
+        XCTAssertFalse(model.outputLanguageChoices.contains(.traditionalChineseHongKong))
         model.setReleasedOutputLanguagesForTesting([.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong])
         XCTAssertTrue(model.showsOutputLanguageSelector)
         XCTAssertEqual(model.outputLanguageChoices, [.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong])
@@ -42,6 +43,7 @@ final class OutputLanguageSelectionTests: XCTestCase {
 
     func testAbsentOrUnreleasedPreferenceReturnsHansWithoutWriting() throws {
         let (model, defaults, _) = try fixture()
+        model.setReleasedOutputLanguagesForTesting([.simplifiedChinese])
         XCTAssertNil(defaults.object(forKey: "LiveLingo.outputLanguage"))
         XCTAssertEqual(model.newCourseOutputLanguagePreference, .simplifiedChinese)
         XCTAssertNil(defaults.object(forKey: "LiveLingo.outputLanguage"))
@@ -147,35 +149,37 @@ final class OutputLanguageSelectionTests: XCTestCase {
                        "Both frozen notebook evidence and current captions must survive a reading-only override")
     }
 
-    func testProductionReleaseGateCannotEnableTraditionalDisplay() throws {
+    func testRestrictedReleaseGateCannotEnableTraditionalDisplay() throws {
         let (model, _, _) = try fixture()
+        model.setReleasedOutputLanguagesForTesting([.simplifiedChinese])
         XCTAssertFalse(model.setChineseDisplayLanguage(.traditionalChineseTaiwan))
         XCTAssertEqual(model.chineseReadingLanguage, .simplifiedChinese)
         XCTAssertFalse(model.showsChineseReadingSelector)
     }
 
-    func testProductionReleaseGateRejectsTaiwanSnapshotWithoutReplacingCourse() async throws {
+    func testRestrictedReleaseGateRejectsTaiwanSnapshotWithoutReplacingCourse() async throws {
         try await assertUnreleasedCourseIsRejected(.traditionalChineseTaiwan, legacyManifest: false)
     }
 
-    func testProductionReleaseGateRejectsHongKongSnapshotWithoutReplacingCourse() async throws {
+    func testRestrictedReleaseGateRejectsHongKongSnapshotWithoutReplacingCourse() async throws {
         try await assertUnreleasedCourseIsRejected(.traditionalChineseHongKong, legacyManifest: false)
     }
 
-    func testProductionReleaseGateRejectsTaiwanLegacyManifestWithoutReplacingCourse() async throws {
+    func testRestrictedReleaseGateRejectsTaiwanLegacyManifestWithoutReplacingCourse() async throws {
         try await assertUnreleasedCourseIsRejected(.traditionalChineseTaiwan, legacyManifest: true)
     }
 
-    func testProductionReleaseGateRejectsHongKongLegacyManifestWithoutReplacingCourse() async throws {
+    func testRestrictedReleaseGateRejectsHongKongLegacyManifestWithoutReplacingCourse() async throws {
         try await assertUnreleasedCourseIsRejected(.traditionalChineseHongKong, legacyManifest: true)
     }
 
     private func assertUnreleasedCourseIsRejected(_ language: OutputLanguage, legacyManifest: Bool,
                                                  file: StaticString = #filePath, line: UInt = #line) async throws {
         let (model, defaults, root) = try fixture()
-        // Use the production release list, without the test-only language injection.
+        // Keep every rejection and preservation assertion under an explicitly closed policy.
+        model.setReleasedOutputLanguagesForTesting([.simplifiedChinese])
         XCTAssertEqual(model.outputLanguageChoices, [.simplifiedChinese], file: file, line: line)
-        XCTAssertFalse(language.isReleased, file: file, line: line)
+        XCTAssertFalse(model.outputLanguageChoices.contains(language), file: file, line: line)
 
         let currentDirectory = root.appendingPathComponent("current")
         let currentID = UUID()
@@ -231,7 +235,7 @@ final class OutputLanguageSelectionTests: XCTestCase {
 
         do {
             try await model.openSavedSession(unopenedDirectory, allowAutomaticProcessing: false)
-            XCTFail("The ordinary GUI restore route accepted an unreleased language", file: file, line: line)
+            XCTFail("The restricted GUI restore route accepted an unreleased language", file: file, line: line)
         } catch SessionStoreError.invalidState(let message) {
             XCTAssertTrue(message.contains("尚未开放"), file: file, line: line)
             XCTAssertTrue(message.contains(language.profile.autonym), file: file, line: line)
@@ -265,6 +269,36 @@ final class OutputLanguageSelectionTests: XCTestCase {
     private func savedCourseFileBytes(in directory: URL) throws -> [String: Data] {
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         return try Dictionary(uniqueKeysWithValues: files.map { ($0.lastPathComponent, try Data(contentsOf: $0)) })
+    }
+
+    func testProductionReleaseOffersThreeChineseChoicesAndRestoresEachVariant() async throws {
+        let (model, defaults, root) = try fixture()
+        let expected: [OutputLanguage] = [.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong]
+        XCTAssertEqual(OutputLanguage.released, expected)
+        XCTAssertEqual(model.outputLanguageChoices, expected)
+        XCTAssertTrue(model.showsOutputLanguageSelector)
+        XCTAssertEqual(model.newCourseOutputLanguagePreference, .simplifiedChinese)
+        XCTAssertNil(defaults.object(forKey: "LiveLingo.outputLanguage"))
+        for language in expected.dropFirst() {
+            XCTAssertTrue(language.isReleased)
+            XCTAssertEqual(OutputLanguage.releasedLanguage(language.rawValue), language)
+            model.newCourseOutputLanguagePreference = language
+            XCTAssertEqual(defaults.string(forKey: "LiveLingo.outputLanguage"), language.rawValue)
+            let directory = root.appendingPathComponent(language.rawValue)
+            try SessionStore(directory: directory).save(SessionSnapshot(
+                createdAt: Date(timeIntervalSince1970: 1_000), targetLocale: language.rawValue))
+            try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+            await model.chineseDisplayPreparationForTesting?.value
+            XCTAssertEqual(model.outputLanguage, language)
+            XCTAssertEqual(model.captionTarget, .simplifiedChinese)
+            XCTAssertEqual(model.chineseReadingChoices, expected)
+            XCTAssertTrue(model.showsChineseReadingSelector)
+            XCTAssertEqual(model.savedOutputLanguageLabel, "输出语言：" + language.autonym)
+            XCTAssertTrue(model.setChineseDisplayLanguage(.simplifiedChinese))
+            XCTAssertEqual(model.chineseReadingLanguage, .simplifiedChinese)
+            XCTAssertEqual(model.outputLanguage, language)
+            XCTAssertEqual(try XCTUnwrap(SessionStore(directory: directory).load()).schemaVersion, 1)
+        }
     }
 
     func testLegacyRenderedNotesDoNotPermitASecondRegionalConversion() async throws {

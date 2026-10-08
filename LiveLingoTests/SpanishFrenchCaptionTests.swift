@@ -144,7 +144,7 @@ final class SpanishFrenchCaptionTests: XCTestCase {
         }
     }
     func testProfilesRemainHiddenAndUserDecisionsAreCentralized() {
-        XCTAssertEqual(OutputLanguage.released, [.simplifiedChinese])
+        XCTAssertEqual(OutputLanguage.released, [.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong])
         XCTAssertEqual(LatinOutputDefaults.translationRoute, .direct)
         for target in [CaptionTranslationTarget.spanish, .french] {
             let language = OutputLanguage(rawValue: target.rawValue)!

@@ -47,6 +47,50 @@ final class ChineseScriptConverterTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testEveryReviewedTermAndCounterexampleMatchesLiteralRegionalGold() throws {
+        let converter = try ChineseScriptConverter(resourceDirectory: resources)
+        let url = try fixtures.deletingLastPathComponent().appendingPathComponent("terms.tsv")
+        let rows = try String(contentsOf: url, encoding: .utf8).split(separator: "\n").dropFirst()
+        XCTAssertEqual(rows.count, 150)
+        var kinds: [String: Set<String>] = [:]
+        for row in rows {
+            let fields = row.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            XCTAssertEqual(fields.count, 9)
+            guard fields.count == 9 else { continue }
+            kinds[fields[1], default: []].insert(fields[3])
+            for (region, column) in [(ChineseScriptConverter.Region.taiwan, 6), (.hongKong, 7)] {
+                XCTAssertEqual(Data(try converter.render(fields[5], to: region).utf8),
+                               Data(fields[column].utf8), fields[0])
+            }
+        }
+        XCTAssertEqual(kinds.count, 75)
+        for pair in kinds.values { XCTAssertEqual(pair, ["term-positive", "term-counterexample"]) }
+    }
+
+    func testReviewedProjectTableHashesAreBundledWithProvenance() throws {
+        struct File: Decodable { let path, sha256: String; let activeMappings: Int }
+        struct Tables: Decodable { let status: String; let files: [File]; let activeMappings: Int }
+        struct Source: Decodable { let projectTables: Tables }
+        let tables = try JSONDecoder().decode(Source.self, from:
+            Data(contentsOf: resources.appendingPathComponent("SOURCE.json"))).projectTables
+        XCTAssertEqual(tables.status, "LLM reviewed; not native-speaker checked")
+        XCTAssertEqual(tables.activeMappings, 75)
+        XCTAssertEqual(tables.files.count, 4)
+        XCTAssertEqual(tables.files.reduce(0) { $0 + $1.activeMappings }, 75)
+        for file in tables.files {
+            XCTAssertEqual(try digest(resources.appendingPathComponent(file.path)), file.sha256)
+        }
+    }
+
+    func testSubjectWordsAndLongerSpellingAreNotOverConverted() throws {
+        let converter = try ChineseScriptConverter(resourceDirectory: resources)
+        XCTAssertEqual(try converter.render("数学函数、研究对象、实验程序、观测数据。", to: .taiwan),
+                       "數學函數、研究對象、實驗程序、觀測數據。")
+        XCTAssertEqual(try converter.render("比热容量与比热容。", to: .hongKong), "比熱容量與比熱容。")
+        XCTAssertEqual(try converter.render("聚合酶链反应，16 个比特，比特币。", to: .taiwan),
+                       "聚合酶鏈反應，16 個位元，比特幣。")
+    }
+
     func testRawOpenCCConversionRemainsIndependentOfProtectedRendering() throws {
         let converter = try ChineseScriptConverter(resourceDirectory: resources)
         let raw = #"`record["头发"]` \label{eq:头发}"#

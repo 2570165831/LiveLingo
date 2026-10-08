@@ -16,7 +16,7 @@ final class ChineseScriptConverter: @unchecked Sendable {
         }
     }
 
-    static let version = "opencc-ver.1.1.9+livelingo-v1"
+    static let version = "opencc-ver.1.1.9+livelingo-v2"
     static let shared = ChineseScriptConverter()
     private let directory: URL?
     private let lock = NSLock()
@@ -95,7 +95,7 @@ final class ChineseScriptConverter: @unchecked Sendable {
             // A replacement is emitted once and never recursively reconverted.
             let result = region == .taiwan
                 ? Dictionary.convert(base, dictionaries: [data.taiwanOverlay, data.reviewedTaiwan])
-                : Dictionary.convert(base, dictionaries: [data.hongKongOverlay])
+                : Dictionary.convert(base, dictionaries: [data.hongKongOverlay, data.reviewedHongKong])
             storeInCache(result, for: key)
             return result
         }
@@ -218,7 +218,9 @@ final class ChineseScriptConverter: @unchecked Sendable {
 
     private struct Tables {
         let phrases, characters, taiwan, hongKong, taiwanPhrases: Dictionary
-        let reviewedTaiwan, taiwanOverlay, hongKongOverlay: Dictionary
+        // 用语经大模型审阅，非母语者人工审校。 Each entry cites a public
+        // terminology source; subject overrides precede regional phrase tables.
+        let reviewedTaiwan, reviewedHongKong, taiwanOverlay, hongKongOverlay: Dictionary
         init(directory: URL) throws {
             phrases = try Dictionary(["STPhrases.txt"], in: directory)
             characters = try Dictionary(["STCharacters.txt"], in: directory)
@@ -226,6 +228,7 @@ final class ChineseScriptConverter: @unchecked Sendable {
             hongKong = try Dictionary(["HKVariants.txt"], in: directory)
             taiwanPhrases = try Dictionary(["TWPhrasesIT.txt", "TWPhrasesName.txt", "TWPhrasesOther.txt"], in: directory)
             reviewedTaiwan = try Dictionary(["TW-reviewed-phrases.txt"], in: directory)
+            reviewedHongKong = try Dictionary(["HK-reviewed-phrases.txt"], in: directory)
             taiwanOverlay = try Dictionary(["LiveLingo-TW-overlay.txt"], in: directory)
             hongKongOverlay = try Dictionary(["LiveLingo-HK-overlay.txt"], in: directory)
         }

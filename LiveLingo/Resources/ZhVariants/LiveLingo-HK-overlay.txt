@@ -1,3 +1,60 @@
-# 待母語者審閱 — no active mappings
-# Format: source<TAB>target; add subject, reviewer and source as a preceding comment.
-# Unapproved example (comment only): 電離能 → [待母語者審閱]; source: project Simplified Chinese prompt term 电离能
+# 用语经大模型审阅，非母语者人工审校。
+# Reviewer: Codex（本会话大模型）；2026-10-08；公开资料限定。
+# Subject overlays precede regional phrases; replacements are not recursive.
+# LiveLingo-HK-overlay-01; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：香港教育局：綜合科學課程及評估指引補充說明（2014）；單元C4.4；相繼電離能
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/science-edu/IS_C1toE3_SupplementaryNotes_C_201401.pdf
+電離能	電離能
+# LiveLingo-HK-overlay-02; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：香港教育局：綜合科學課程及評估指引補充說明（2014）；單元C4.6；貴氣體
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/science-edu/IS_C1toE3_SupplementaryNotes_C_201401.pdf
+稀有氣體	貴氣體
+# LiveLingo-HK-overlay-03; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：香港教育局：綜合科學課程及評估指引補充說明（2014）；單元C4.4；原子序
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/science-edu/IS_C1toE3_SupplementaryNotes_C_201401.pdf
+原子序數	原子序
+# LiveLingo-HK-overlay-04; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：香港教育局：綜合科學課程及評估指引補充說明（2014）；單元C4.4；電子排佈
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/science-edu/IS_C1toE3_SupplementaryNotes_C_201401.pdf
+電子排布	電子排佈
+# LiveLingo-HK-overlay-05; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：香港教育局：化學課程及評估指引補充說明（2018）；催化劑；工業生產／活化能
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/science-edu/ref-and-resources/Supplementory_note_for_Chem_20180822_Chi.pdf
+催化劑	催化劑
+# LiveLingo-HK-overlay-06; 学科：化学; 审阅者：Codex（本会话大模型）; 来源：香港教育局：化學課程及評估指引補充說明（2018）；活化能；工業生產
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/science-edu/ref-and-resources/Supplementory_note_for_Chem_20180822_Chi.pdf
+活化能	活化能
+# LiveLingo-HK-overlay-07; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：香港教育局：物理科英漢詞彙表（2020）；scalar；印刷頁97
+# https://www.edb.gov.hk/attachment/en/curriculum-development/kla/science-edu/ref-and-resources/PhyGlossary_2020.pdf
+標量	標量
+# LiveLingo-HK-overlay-08; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：香港教育局：物理科英漢詞彙表（2020）；vector；印刷頁116；向量亦可
+# https://www.edb.gov.hk/attachment/en/curriculum-development/kla/science-edu/ref-and-resources/PhyGlossary_2020.pdf
+矢量	矢量
+# LiveLingo-HK-overlay-09; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：香港教育局：物理科英漢詞彙表（2020）；speed；保留速率和速度差異
+# https://www.edb.gov.hk/attachment/en/curriculum-development/kla/science-edu/ref-and-resources/PhyGlossary_2020.pdf
+速率	速率
+# LiveLingo-HK-overlay-10; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：香港教育局：物理科英漢詞彙表（2020）；velocity；印刷頁116
+# https://www.edb.gov.hk/attachment/en/curriculum-development/kla/science-edu/ref-and-resources/PhyGlossary_2020.pdf
+速度	速度
+# LiveLingo-HK-overlay-11; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：香港教育局：物理科英漢詞彙表（2020）；specific heat capacity；印刷頁102；比熱容亦可；保留官方認可的兩種同義說法，不強制統一
+# https://www.edb.gov.hk/attachment/en/curriculum-development/kla/science-edu/ref-and-resources/PhyGlossary_2020.pdf
+比熱容	比熱容
+# LiveLingo-HK-overlay-12; 学科：数学; 审阅者：Codex（本会话大模型）; 来源：香港教育局：數學建模學與教資源；指數函數與對數函數；學習單位
+# https://www.edb.gov.hk/tc/curriculum-development/kla/ma/res/mmres.html
+函數	函數
+# LiveLingo-HK-overlay-13; 学科：数学; 审阅者：Codex（本会话大模型）; 来源：香港教育局：數學建模學與教資源；續概率；學習單位
+# https://www.edb.gov.hk/tc/curriculum-development/kla/ma/res/mmres.html
+概率	概率
+# LiveLingo-HK-overlay-14; 学科：生物; 审阅者：Codex（本会话大模型）; 来源：香港教育局：生物課程及評估指引（2015更新）；細胞能量學；呼吸作用
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/science-edu/Bio_C_and_A_Guide_updated_c_20151126.pdf
+線粒體	線粒體
+# LiveLingo-HK-overlay-15; 学科：生物; 审阅者：Codex（本会话大模型）; 来源：香港教育局：生物課程及評估指引（2015更新）；細胞能量學；酶和酶反應
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/science-edu/Bio_C_and_A_Guide_updated_c_20151126.pdf
+酶反應	酶反應
+# LiveLingo-HK-overlay-16; 学科：生物; 审阅者：Codex（本会话大模型）; 来源：香港教育局：酵母凝膠珠轉化酶探究（Yeast Bead Invertase Investigation）；資料3，什麼是酵母和酵母凝膠珠；PDF第9頁（索引8），印刷頁2.2-8；細胞器
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/science-edu/ref-and-resources/biopw/2/2_Yeast_Bead_Invertase_C.pdf
+細胞器	細胞器
+# LiveLingo-HK-overlay-17; 学科：计算机／物理; 审阅者：Codex（本会话大模型）; 来源：香港教育局：物理科英漢詞彙表（2020）；integrated circuit；印刷頁58
+# https://www.edb.gov.hk/attachment/en/curriculum-development/kla/science-edu/ref-and-resources/PhyGlossary_2020.pdf
+集成電路	集成電路
+# LiveLingo-HK-overlay-18; 学科：计算机; 审阅者：Codex（本会话大模型）; 来源：香港教育局／課程發展議會：資訊及通訊科技課程及評估指引（2021）；計算思維與程式編寫；第D單元
+# https://www.edb.gov.hk/attachment/tc/curriculum-development/kla/technology-edu/curriculum-doc/ICT_C%26A%20Guide_c_final.pdf
+程序設計	程式編寫
+# LiveLingo-HK-overlay-19; 学科：物理; 审阅者：Codex（本会话大模型）; 来源：香港教育局：物理科英漢詞彙表（2020）；specific heat capacity；印刷頁102；完整長詞防重複量
+# https://www.edb.gov.hk/attachment/en/curriculum-development/kla/science-edu/ref-and-resources/PhyGlossary_2020.pdf
+比熱容量	比熱容量

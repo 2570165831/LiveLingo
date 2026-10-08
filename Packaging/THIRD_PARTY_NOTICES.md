@@ -72,5 +72,14 @@ combined with this GPL-3.0 application without relicensing the upstream data.
 | `s2hk.json` | `3708e756ea01783e9cf6b3cce527580810b3d539b8c7fcc3594dd1517aa05bff` |
 | `s2twp.json` | `72d187574510542be608c862d5359d29480ee61f137082df8a06d74f7bcfc79c` |
 
-The separate project phrase/subject tables contain no active mappings. Their
-commented examples await Taiwan and Hong Kong/Macau native-speaker review.
+The four separate LiveLingo-authored phrase/subject tables contain 75 entries
+(including 24 identity/protection entries). Each entry cites a public Ministry
+of Education, National Academy for Educational Research, or Hong Kong Education
+Bureau terminology source. Only short factual terms are recorded; definitions
+and complete source glossaries are not redistributed. Project tables are part
+of this GPL-3.0 application; upstream OpenCC files remain Apache-2.0.
+
+用语经大模型审阅，非母语者人工审校。 Review used 356 synthetic sentences;
+this is LLM review, not native-speaker certification. SOURCE.json records each
+project table's SHA-256, size and count. Converter version livelingo-v2 identifies
+the new project tables independently of the unchanged upstream ver.1.1.9.

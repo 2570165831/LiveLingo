@@ -135,7 +135,7 @@ final class TraditionalSessionExporterTests: XCTestCase {
             let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with:
                 Data(contentsOf: root.appendingPathComponent("manifest.json"))) as? [String: Any])
             XCTAssertEqual(manifest["targetLocale"] as? String, variant.language.rawValue)
-            XCTAssertEqual(manifest["converterVersion"] as? String, "opencc-ver.1.1.9+livelingo-v1")
+            XCTAssertEqual(manifest["converterVersion"] as? String, "opencc-ver.1.1.9+livelingo-v2")
             XCTAssertEqual(manifest["sourceLanguages"] as? [String], ["ja", "zh"])
         }
         XCTAssertEqual(input, segments, "Rendering must not rewrite stored segment fields")

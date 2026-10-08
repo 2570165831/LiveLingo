@@ -32,6 +32,7 @@ final class TraditionalCaptionPresentationTests: XCTestCase {
             "TWPhrasesOther.txt": "# Synthetic empty dictionary\n",
             // A deliberate non-idempotent chain detects double rendering.
             "TW-reviewed-phrases.txt": "甲\t乙\n乙\t丙\n",
+            "HK-reviewed-phrases.txt": "# Synthetic empty dictionary\n",
             "LiveLingo-TW-overlay.txt": "# Synthetic empty overlay\n",
             "LiveLingo-HK-overlay.txt": "# Synthetic empty overlay\n",
         ]
@@ -89,13 +90,13 @@ final class TraditionalCaptionPresentationTests: XCTestCase {
         XCTAssertEqual(converter.debugCacheEntryCount, 0)
     }
 
-    func testTraditionalRenderersWorkWhileGUIReleaseGateStaysClosed() throws {
+    func testTraditionalRenderersAreReleasedAfterTerminologyReview() throws {
         let converter = ChineseScriptConverter(resourceDirectory: try dictionaries())
         for (language, expected) in traditionalLanguages {
             XCTAssertTrue(language.rendererIsAvailable)
             XCTAssertNotNil(OutputLanguage.savedRenderer(for: language.rawValue))
-            XCTAssertFalse(language.isReleased)
-            XCTAssertNil(OutputLanguage.releasedLanguage(language.rawValue))
+            XCTAssertTrue(language.isReleased)
+            XCTAssertEqual(OutputLanguage.releasedLanguage(language.rawValue), language)
             XCTAssertEqual(try language.render("头发在这里。", converter: converter), expected)
         }
         XCTAssertEqual(converter.debugLoadCount, 1)

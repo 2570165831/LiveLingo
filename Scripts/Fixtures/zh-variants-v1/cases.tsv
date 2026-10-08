@@ -1,11 +1,11 @@
-id	source	nativeTW	nativeHK	reviewStatus
-1	头发发展以后皇后干燥干线这里公里台湾面条关系只有标准			pending native-speaker review
-2	软件网络视频打印内存			pending native-speaker review
-3	电离能特征值速率速度负权环菲利普斯曲线			pending native-speaker review
-4	函数研究对象文件实验程序数据			pending native-speaker review
-5	【公式待核对】pH 7.4 CaCO₃ H₂O DNA			pending native-speaker review
-6	（本段暂无译文）[翻译失败：synthetic]			pending native-speaker review
-7	学习笔记需要回听来源检查原文：			pending native-speaker review
-8	DNA é $a+b$ \(x^2\) かな 한글 😀			pending native-speaker review
-9	发后干里面系只准台			pending native-speaker review
-10	这段公开合成文本没有课堂数据。			pending native-speaker review
+id	source	llmTW	llmHK	reviewStatus
+1	头发发展以后皇后干燥干线这里公里台湾面条关系只有标准	頭髮發展以後皇后乾燥幹線這裡公里臺灣麵條關係只有標準	頭髮發展以後皇后乾燥幹線這裏公里台灣麪條關係只有標準	LLM reviewed; not native-speaker checked
+2	软件网络视频打印内存	軟體網路視頻打印內存	軟件網絡視頻打印內存	LLM reviewed; not native-speaker checked
+3	电离能特征值速率速度负权环菲利普斯曲线	游離能特徵值速率速度負權環菲利普斯曲線	電離能特徵值速率速度負權環菲利普斯曲線	LLM reviewed; not native-speaker checked
+4	函数研究对象文件实验程序数据	函數研究對象文件實驗程序數據	函數研究對象文件實驗程序數據	LLM reviewed; not native-speaker checked
+5	【公式待核对】pH 7.4 CaCO₃ H₂O DNA	【公式待核對】pH 7.4 CaCO₃ H₂O DNA	【公式待核對】pH 7.4 CaCO₃ H₂O DNA	LLM reviewed; not native-speaker checked
+6	（本段暂无译文）[翻译失败：synthetic]	（本段暫無譯文）[翻譯失敗：synthetic]	（本段暫無譯文）[翻譯失敗：synthetic]	LLM reviewed; not native-speaker checked
+7	学习笔记需要回听来源检查原文：	學習筆記需要回聽來源檢查原文：	學習筆記需要回聽來源檢查原文：	LLM reviewed; not native-speaker checked
+8	DNA é $a+b$ \(x^2\) かな 한글 😀	DNA é $a+b$ \(x^2\) かな 한글 😀	DNA é $a+b$ \(x^2\) かな 한글 😀	LLM reviewed; not native-speaker checked
+9	发后干里面系只准台	發後幹裡面系只准臺	發後幹裏面系只准台	LLM reviewed; not native-speaker checked
+10	这段公开合成文本没有课堂数据。	這段公開合成文本沒有課堂數據。	這段公開合成文本沒有課堂數據。	LLM reviewed; not native-speaker checked

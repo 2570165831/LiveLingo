@@ -1,6 +1,6 @@
 import Foundation
 
-/// Provisional Chinese display policies. They never rewrite a course's stamped
+/// User-approved Chinese display policies. They never rewrite a course's stamped
 /// targetLocale, generator input, or Simplified Chinese archival draft.
 enum ChineseOutputDefaults {
     static let fixedTextFollowsDisplayLanguage = true
@@ -81,10 +81,10 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
             appleLanguagePair: .init(source: "en", target: "zh-Hans"), isReleased: true),
         .traditionalChineseTaiwan: .init(autonym: "繁體中文（中國台灣）", promptName: "Simplified Chinese", script: .han,
             generationLocale: "zh-Hans", renderer: .taiwan, passThroughSources: ["zh"],
-            appleLanguagePair: .init(source: "en", target: "zh-Hans"), isReleased: false),
+            appleLanguagePair: .init(source: "en", target: "zh-Hans"), isReleased: true),
         .traditionalChineseHongKong: .init(autonym: "繁體中文（中國港澳）", promptName: "Simplified Chinese", script: .han,
             generationLocale: "zh-Hans", renderer: .hongKong, passThroughSources: ["zh"],
-            appleLanguagePair: .init(source: "en", target: "zh-Hans"), isReleased: false),
+            appleLanguagePair: .init(source: "en", target: "zh-Hans"), isReleased: true),
         .english: .init(autonym: "English", promptName: "English", script: .latin,
             generationLocale: "en", renderer: .identity, passThroughSources: ["en"],
             appleLanguagePair: nil, isReleased: false),
@@ -104,8 +104,8 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
     /// The default is omitted from persistence to preserve existing bytes.
     var persistedLocale: String? { self == .simplifiedChinese ? nil : rawValue }
     static var released: [Self] { allCases.filter(\.isReleased) }
-    /// Explicit CLI opt-in is the only creation route for unreleased Chinese
-    /// variants. Latin targets retain their existing release boundary.
+    /// Chinese variants are released for both GUI and CLI creation. Latin
+    /// targets retain their existing release boundary.
     static var cliGenerationLanguages: [Self] {
         allCases.filter { $0.isReleased || $0 == .traditionalChineseTaiwan || $0 == .traditionalChineseHongKong }
     }
