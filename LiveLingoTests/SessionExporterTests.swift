@@ -579,7 +579,7 @@ struct SessionExporterTests {
         let source = "Lagrange's principle predicts how an equilibrium responds to stress. Faraday's law says magnetic flux induces an electromagnetic force."
 
         #expect(
-            AcademicInputNormalizer.normalize(source)
+            AcademicInputNormalizer.normalize(source, recentContext: "Adding more reactant raises its concentration.")
                 == "Le Chatelier's principle predicts how an equilibrium responds to stress. Faraday's law says magnetic flux induces an electromotive force."
         )
     }

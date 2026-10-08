@@ -123,6 +123,7 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
         let model = models.appendingPathComponent("lmstudio-community/Qwen3.5-9B-MLX-4bit")
         try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
         for name in ["config.json", "tokenizer.json"] { try Data("{}".utf8).write(to: model.appendingPathComponent(name)) }
+        try Data().write(to: model.appendingPathComponent("model.safetensors"))
         let overrides = [
             "LIVELINGO_MLX_PYTHON": "/usr/bin/python3",
             "LIVELINGO_MLX_WORKER": script.path,

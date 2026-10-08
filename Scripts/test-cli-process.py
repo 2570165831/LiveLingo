@@ -104,6 +104,7 @@ def main() -> None:
         model.mkdir(parents=True)
         for filename in ('config.json', 'tokenizer.json'):
             (model / filename).write_text('{}')
+        (model / 'model.safetensors').write_bytes(b'')
     outside = root / 'synthetic-outside-state'
     outside.mkdir()
     canary = outside / 'learning-review-queue.json'

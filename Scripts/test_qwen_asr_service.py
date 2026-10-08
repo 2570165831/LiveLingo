@@ -740,6 +740,20 @@ class ServiceResponsivenessTests(unittest.TestCase):
         self.assertEqual(len({row[2] for row in events}), 1)
 
 
+class ModelAvailabilityTests(unittest.TestCase):
+    def test_available_models_require_config_and_a_weight_file(self):
+        # Existence only: readiness never opens the synthetic weight files.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {key: root / key for key in ('complete', 'config-only', 'weights-only', 'empty', 'missing')}
+            for key in ('complete', 'config-only', 'weights-only', 'empty'): paths[key].mkdir()
+            for key in ('complete', 'config-only'): (paths[key] / 'config.json').write_text('{}')
+            for key in ('complete', 'weights-only'): (paths[key] / 'model.safetensors').write_bytes(b'')
+            (paths['config-only'] / 'weights.safetensors').mkdir()
+            with patch.object(service, 'MODEL_PATHS', paths):
+                self.assertEqual(service.available_model_keys(), ['complete'])
+
+
 class SpeechBandEnhancementTests(unittest.TestCase):
     sample_rate = 44_100
 

@@ -126,7 +126,7 @@ private struct FloatingSubtitleContent: View {
 /// Preview wording shared by the classroom window and floating captions.
 extension AppModel {
     func floatingSubtitlePresentation(mode: FloatingSubtitleDisplayMode) -> FloatingSubtitlePresentation {
-        var translatedText = previewChineseDisplay
+        var translatedText = floatingTranslationWithoutPreview ?? previewChineseDisplay
         var hasTranslation = true
         if mode == .translationOnly {
             if let caption = confirmedNonEnglishCaption {
@@ -144,6 +144,23 @@ extension AppModel {
         return FloatingSubtitlePresentation(sourceText: previewEnglishDisplay, translatedText: translatedText,
                                             caption: nonEnglishPreviewPresentation, mode: mode,
                                             hasUsableTranslation: hasTranslation)
+    }
+
+    /// Without live preview (turned off, or macOS 14) the floating window shows
+    /// the formal translation of the sentence on the source line, which only
+    /// happens at a pause. New speech gets a hint, never the older Chinese.
+    /// The main-window preview keeps previewChineseDisplay.
+    private var floatingTranslationWithoutPreview: String? {
+        guard !(previewTranslationEnabled && supportsPreviewTranslation), confirmedNonEnglishCaption == nil,
+              captionTarget.sourcePolicy(for: nil).usesEnglishTranslationPipeline else { return nil }
+        if volatileEnglish.isEmpty, let caption = segments.last,
+           captionTarget.sourcePolicy(for: caption.sourceLanguage).usesEnglishTranslationPipeline {
+            if caption.hasUsableTranslation {
+                return captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter)
+            }
+            return caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…"
+        }
+        return previewTranslationEnabled ? "当前系统不支持初译；停顿时显示正式译文" : "初译已关闭；停顿时显示正式译文"
     }
 
     private var confirmedNonEnglishCaption: TranscriptSegment? {

@@ -200,6 +200,49 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         XCTAssertNil(select(model, mode: .translationOnly).translation, "The preceding formal translation must not replace new speech")
     }
 
+    func testBilingualShowsTheFinishedFormalTranslationAtPausesWhenPreviewIsUnavailable() throws {
+        let (model, _) = try fixture()
+        let formal = TranscriptSegment(startTime: 0, endTime: 2, english: "The water is cold.", chinese: "水很冷。")
+        let next = TranscriptSegment(startTime: 2, endTime: 4, english: "A new untranslated sentence.")
+        var translating = next
+        translating.beginTranslation()
+        var failed = next
+        failed.failTranslation("synthetic failure")
+        // Preview switched off on a supported system, then a macOS 14 host.
+        for (enabled, supported, hint, mainWindow) in [
+            (false, true, "初译已关闭；停顿时显示正式译文", "初译已关闭"),
+            (true, false, "当前系统不支持初译；停顿时显示正式译文", "当前系统不支持初译；正式译文随后显示")
+        ] {
+            model.previewTranslationEnabled = enabled
+            model.previewTranslationSupportForTesting = supported
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertEqual(select(model, mode: .bilingual).translation?.text, hint)
+            model.loadPresentationForTesting(phase: .recording, evidence: [formal])
+            XCTAssertEqual(select(model, mode: .bilingual).source, .init(text: "The water is cold.", languageName: nil))
+            XCTAssertEqual(select(model, mode: .bilingual).translation, .init(text: "水很冷。", languageName: nil))
+            model.receiveLivePreviewForTesting("A new untranslated sentence.", chinese: "")
+            XCTAssertEqual(select(model, mode: .bilingual).source?.text, "A new untranslated sentence.")
+            XCTAssertEqual(select(model, mode: .bilingual).translation?.text, hint,
+                           "The preceding formal translation must not be paired with new speech")
+            XCTAssertEqual(model.previewChineseDisplay, mainWindow, "The main-window preview keeps its wording")
+            for (caption, status) in [(next, "等待正式译文…"), (translating, "等待正式译文…"), (failed, "本段翻译未完成")] {
+                model.loadPresentationForTesting(phase: .recording, evidence: [formal, caption])
+                XCTAssertEqual(select(model, mode: .bilingual).source?.text, "A new untranslated sentence.")
+                XCTAssertEqual(select(model, mode: .bilingual).translation?.text, status)
+                XCTAssertNil(select(model, mode: .translationOnly).translation)
+            }
+            model.loadPresentationForTesting(phase: .idle, evidence: [formal])
+            XCTAssertEqual(select(model, mode: .bilingual).translation?.text, "水很冷。")
+        }
+        model.previewTranslationEnabled = true
+        model.previewTranslationSupportForTesting = nil
+        model.loadPresentationForTesting(phase: .recording, evidence: [formal])
+        if model.supportsPreviewTranslation {
+            XCTAssertEqual(select(model, mode: .bilingual).translation?.text, "等待初译…",
+                           "With preview available the floating window keeps its original wording")
+        }
+    }
+
     func testEverySupportedLanguageKeepsItsSingleLineOrBilingualPolicy() {
         for language in SpokenLanguage.all {
             let segment = TranscriptSegment(startTime: 0, endTime: 2, english: "synthetic source",
@@ -236,7 +279,8 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             XCTAssertNil(select(model, mode: .translationOnly).source)
             XCTAssertEqual(select(model, mode: .translationOnly).translation, .init(text: "水很冷。", languageName: label))
         }
-        for status in ["初译已关闭", "当前系统不支持初译；正式译文随后显示", "等待初译…", "等待正式译文…", "本段翻译未完成"] {
+        for status in ["初译已关闭", "当前系统不支持初译；正式译文随后显示", "等待初译…", "等待正式译文…", "本段翻译未完成",
+                       "初译已关闭；停顿时显示正式译文", "当前系统不支持初译；停顿时显示正式译文"] {
             let presentation = FloatingSubtitlePresentation(sourceText: "The water is cold.", translatedText: status,
                                                             caption: nil, mode: .translationOnly, hasUsableTranslation: false)
             XCTAssertEqual(presentation.source, .init(text: "The water is cold.", languageName: nil))

@@ -151,6 +151,33 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
+    func testLeChatelierCorrectionRequiresChemicalEquilibriumEvidence() {
+        let chemistry = "Adding more reactant shifts the equilibrium to the right."
+        // Real principle names, comparisons and mechanics wording stay as spoken.
+        for (source, recent) in [
+            ("Compare Lagrange's principle with Le Chatelier's principle when discussing equilibrium and stress.", ""),
+            ("Compare Lagrange's principle with Le Chatelier's principle when discussing equilibrium and stress.", chemistry),
+            ("In static equilibrium, Lagrange's principle of virtual work gives the stress in each member.", ""),
+            ("At equilibrium the stress concentration follows from Lagrange's principle.", ""),
+            ("The Lagrange's principle and stresses in disequilibrium.", ""),
+            ("Schrodinger's principle links equilibrium and stress in this quantum model.", "")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), source, source)
+        }
+        for (source, recent, expected) in [
+            ("Lashari's principle says the equilibrium shifts to relieve the stress.", "",
+             "Le Chatelier's principle says the equilibrium shifts to relieve the stress."),
+            ("Lagrange's principle tells us how the system responds to stress.", chemistry,
+             "Le Chatelier's principle tells us how the system responds to stress."),
+            ("The Lagrange's principle explains the stress on an equilibrium when K c is fixed.", "",
+             "The Le Chatelier's principle explains the stress on an equilibrium when K c is fixed.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), expected, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(expected, recentContext: recent), expected,
+                           "Normalization must be idempotent")
+        }
+    }
+
     func testIncompleteOrUnsupportedSpokenNumbersStayUnchanged() {
         for source in ["Use one hundred fifty parts per million.",
                        "Use twenty and five parts per million.",
@@ -3086,5 +3113,179 @@ extension TranslationAcceptanceTests {
             XCTAssertNil(RepairNumericNovelty.rejection(candidate: candidate,
                 requestJSON: try numericRepairJSON(target: target), existingChinese: old), target)
         }
+    }
+}
+
+// Issue #6: a stable Chinese prefix is spliced with a re-translated English
+// tail only when both sides plainly hold the same earlier sentences.
+extension TranslationAcceptanceTests {
+    private actor RepairTargetRecorder {
+        private(set) var targets: [String] = []
+        func record(_ input: String) throws {
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: String])
+            targets.append(try XCTUnwrap(fields["target_translate_only"]))
+        }
+    }
+
+    func testPreviousRepairKeepsChineseWhenSentencesDoNotAlign() async throws {
+        // The model reply is a faithful translation of the old English tail,
+        // so each old splice result below came from punctuation alone.
+        let cases = [
+            // "? " is not an English split point, but ？ ends the Chinese prefix.
+            ("Check the sign. Is the force positive? Then it points up",
+             "检查符号。力是正的吗？那么它指向上方。", "力是正的吗？那么它指向上方。"),
+            // "e.g. " was the last English split point.
+            ("Measure the length. Use SI units, e.g. meters", "测量长度。使用国际单位，例如米。", "米。"),
+            // Three English sentences, two Chinese ones.
+            ("Heat the water. Add salt. Stir gently", "把水加热。加入盐并轻轻搅拌。", "轻轻搅拌。")
+        ]
+        for (english, chinese, reply) in cases {
+            let recorder = RepairTargetRecorder()
+            let result = try await QwenTranslationClient.repairPreviousCaption(
+                previous: english, previousChinese: chinese, current: "and then we continue.",
+                context: "", modelName: QwenModelProfile.energySaver.translationModel,
+                request: { input, _, _ in try await recorder.record(input); return reply })
+            XCTAssertNil(result.previous, english)
+            XCTAssertNil(result.rejection, english)
+            let targets = await recorder.targets
+            XCTAssertEqual(targets, [], "Keeping the line must not spend a generation: " + english)
+        }
+    }
+
+    func testPreviousRepairStillSplicesAlignedTail() async throws {
+        let recorder = RepairTargetRecorder()
+        let result = try await QwenTranslationClient.repairPreviousCaption(
+            previous: "Check the direction. The force acts", previousChinese: "先检查方向。力起作用。",
+            current: "toward the center.", context: "Earlier lecture context.",
+            modelName: QwenModelProfile.energySaver.translationModel,
+            request: { input, _, _ in try await recorder.record(input); return "力起作用。" })
+        let targets = await recorder.targets
+        XCTAssertEqual(targets, ["The force acts"])
+        XCTAssertEqual(result.previous, "先检查方向。力起作用。")
+        XCTAssertNil(result.rejection)
+    }
+
+    func testPreviousRepairAlignmentReasons() {
+        typealias Reason = PreviousRepairAlignment.Reason
+        let cases: [(String, String, Reason?)] = [
+            ("Check the direction. The force acts", "先检查方向。力起作用。", nil),
+            ("Heat the water. Add salt. Stir gently.", "把水加热。加入盐。轻轻搅拌。", nil),
+            ("The value is 3.5 meters. It grows", "数值是3.5米。它在增长。", nil),
+            ("Use a ruler, e.g., a long one. Then measure", "用尺子，例如长尺子。然后测量。", nil),
+            ("Check the sign. Is the force positive? Then it points up", "检查符号。力是正的吗？那么它指向上方。",
+             .englishQuestionOrExclamation),
+            ("Measure the length. Use SI units, e.g. Meters work", "测量长度。使用国际单位，例如米。", .englishAbbreviation),
+            ("We met Dr. Smith. He waved", "我们见到了史密斯博士。他挥手。", .englishAbbreviation),
+            ("J. Smith spoke. Then he left", "J·史密斯发言了。然后他离开了。", .englishAbbreviation),
+            ("Wait... Then go. Now", "等等。然后走。现在。", .englishAmbiguousPeriod),
+            ("The answer is 3. 5 is next. Done", "答案是3.5。下一个。完成。", .englishAmbiguousPeriod),
+            ("He said \"stop.\" Then he left. Go", "他说“停。”然后他离开了。走。", .englishAmbiguousPeriod),
+            ("Use the approx value in cm. then add. Done", "用厘米近似值。然后相加。完成。", .englishAmbiguousPeriod),
+            ("First step. Then stop", "第一步！然后停下。", .chineseAmbiguousBoundary),
+            ("He said stop. Then left", "他说“停。”然后离开了。", .chineseAmbiguousBoundary),
+            ("Heat the water. Add salt. Stir gently", "把水加热。加入盐并轻轻搅拌。", .sentenceCountMismatch),
+            ("One. Two", "一和二。", .sentenceCountMismatch)
+        ]
+        for (english, chinese, expected) in cases {
+            XCTAssertEqual(PreviousRepairAlignment.misalignment(english: english, chinese: chinese), expected, english)
+        }
+        XCTAssertEqual(QwenTranslationClient.previousRepairScope(previous: "Check the direction. The force acts",
+                                                                 previousChinese: "先检查方向。力起作用。"),
+                       .tail(prefix: "先检查方向。", head: "Check the direction. ", tail: "The force acts"))
+        XCTAssertEqual(QwenTranslationClient.previousRepairScope(previous: "Heat the water. Add salt. Stir gently",
+                                                                 previousChinese: "把水加热。加入盐并轻轻搅拌。"),
+                       .keep(.sentenceCountMismatch))
+        XCTAssertEqual(QwenTranslationClient.previousRepairScope(previous: "The force acts",
+                                                                 previousChinese: "力起作用。"), .whole)
+        XCTAssertEqual(QwenTranslationClient.previousRepairScope(previous: "Why? Because it moves",
+                                                                 previousChinese: "为什么？因为它在运动。"), .keep(nil))
+    }
+
+    /// Offline measurement for issue #6 over the repo's non-private English and
+    /// Chinese fixture pairs, each treated as a previous caption. No model call;
+    /// it prints category counts only, never caption text.
+    func testPreviousRepairAlignmentCountsOverRepoFixtures() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        func object(_ path: String) throws -> Any {
+            try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent(path)))
+        }
+        // Repair only runs on English captions: every letter must be Latin script.
+        var origins: [[String]: String] = [:], loaded: [String: Int] = [:]
+        func add(_ origin: String, _ english: Any?, _ chinese: Any?) {
+            guard let english = english as? String, let chinese = chinese as? String,
+                  case let letters = english.unicodeScalars.filter(CharacterSet.letters.contains),
+                  !letters.isEmpty, letters.allSatisfy({ $0.value < 0x250 }),
+                  chinese.unicodeScalars.contains(where: TranslationAcceptance.isHan) else { return }
+            loaded[origin, default: 0] += 1
+            if origins[[english, chinese]] == nil { origins[[english, chinese]] = origin }
+        }
+        let verdicts = try XCTUnwrap(object("LiveLingoTests/Fixtures/acceptance-verdicts-zh-Hans.json") as? [String: Any])
+        for item in try XCTUnwrap(verdicts["translations"] as? [[String: Any]]) {
+            add("acceptance-verdicts", item["source"], item["existingChinese"])
+            if let expected = item["expected"] as? [String: Any], expected["normalizedCategory"] as? String == "accepted" {
+                add("acceptance-verdicts", item["source"], expected["captionOutput"])
+            }
+        }
+        for gate in try XCTUnwrap(verdicts["gates"] as? [[String: Any]]) {
+            for caption in gate["captions"] as? [[String: Any]] ?? [] where caption["usable"] as? Bool == true {
+                add("acceptance-verdicts", caption["source"], caption["chinese"])
+            }
+        }
+        let golden = try XCTUnwrap(object("LiveLingoTests/Fixtures/default-target-golden.json") as? [String: Any])
+        let files = try XCTUnwrap(golden["files"] as? [String: [String: Any]])
+        for line in try XCTUnwrap(files["bilingual.jsonl"]?["text"] as? String).split(separator: "\n") {
+            let row = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            add("default-target-golden", row["english"], row["chinese"])
+        }
+        let learning = root.appendingPathComponent("Scripts/Fixtures/learning-quality-v1")
+        for name in try FileManager.default.contentsOfDirectory(atPath: learning.path).sorted()
+        where name.hasSuffix(".json") {
+            guard let fixture = try object("Scripts/Fixtures/learning-quality-v1/" + name) as? [String: Any],
+                  let stages = fixture["stages"] as? [[[String: Any]]] else { continue }
+            for caption in stages.joined() {
+                add("learning-quality-v1/" + name.dropLast(5), caption["english"], caption["chinese"])
+            }
+        }
+        for origin in ["acceptance-verdicts", "default-target-golden", "learning-quality-v1/"] {
+            XCTAssertGreaterThan(loaded.filter { $0.key.hasPrefix(origin) }.values.reduce(0, +), 0, origin)
+        }
+
+        // The pre-fix decision, kept verbatim so the comparison is independent.
+        func legacy(_ english: String, _ chinese: String) -> (decision: String, tail: String?) {
+            let prefix = QwenTranslationClient.stableTranslationPrefix(chinese)
+            let source = english.trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = source.dropLast(source.last.map { ".!?".contains($0) } == true ? 1 : 0)
+            let split = body.range(of: ". ", options: .backwards)
+            if prefix.isEmpty { return ("whole", nil) }
+            guard let split else { return ("keep_no_english_split", nil) }
+            return ("tail", String(source[split.upperBound...]))
+        }
+        var before: [String: Int] = [:], after: [String: Int] = [:], changed: [String: Int] = [:]
+        var changedByOrigin: [String: Int] = [:]
+        for (pair, origin) in origins {
+            let old = legacy(pair[0], pair[1])
+            let scope = QwenTranslationClient.previousRepairScope(previous: pair[0], previousChinese: pair[1])
+            let new: String
+            switch scope {
+            case .whole: new = "whole"
+            case .keep(nil): new = "keep_no_english_split"
+            case .keep(let reason?): new = "keep_" + reason.rawValue
+            case let .tail(prefix, _, tail):
+                new = "tail"
+                XCTAssertEqual(old.tail, tail, "An aligned splice must keep the old English tail")
+                XCTAssertEqual(prefix, QwenTranslationClient.stableTranslationPrefix(pair[1]))
+            }
+            before[old.decision, default: 0] += 1
+            after[new, default: 0] += 1
+            if new != old.decision {
+                XCTAssertEqual(old.decision, "tail", "Only old tail splices may change")
+                changed[new, default: 0] += 1
+                changedByOrigin[origin, default: 0] += 1
+            }
+        }
+        let report: [String: Any] = ["pairs": origins.count, "loaded": loaded, "before": before, "after": after,
+                                     "tailNowKept": changed, "tailNowKeptByOrigin": changedByOrigin]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+        print("ISSUE6_PREVIOUS_REPAIR_COUNTS " + String(decoding: data, as: UTF8.self))
     }
 }

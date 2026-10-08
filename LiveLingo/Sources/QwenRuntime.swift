@@ -587,7 +587,7 @@ enum QwenRuntimeError: LocalizedError {
         case .lmStudioUnavailable:
             return "本机语言模型运行进程尚未就绪。"
         case .modelUnavailable(let name):
-            return "离线包未找到模型：\(name)"
+            return "离线包中的模型缺失或不完整：\(name)，请重新安装 LiveLingo。"
         case .invalidResponse:
             return "本机模型返回了无法识别的数据。"
         case .requestTimedOut:
@@ -728,7 +728,7 @@ enum QwenASRClient {
                 let missing = modelKeys.filter { !available.contains($0) }
                 if !missing.isEmpty {
                     throw QwenRuntimeError.requestFailed(
-                        "本机缺少转写模型：\(missing.joined(separator: ", "))。"
+                        "本机转写模型缺失或不完整：\(missing.joined(separator: ", "))，请重新安装 LiveLingo。"
                     )
                 }
             }
@@ -1987,22 +1987,19 @@ enum QwenTranslationClient {
                 ?? RepairNumericNovelty.rejection(candidate: output, requestJSON: input,
                                                   existingChinese: previousChinese, targetCode: target.rawValue))
         }
-        let prefix = stableTranslationPrefix(previousChinese, target: target)
-        let source = previous.trimmingCharacters(in: .whitespacesAndNewlines)
-        let body = source.dropLast(source.last.map { ".!?".contains($0) } == true ? 1 : 0)
-        let split = body.range(of: ". ", options: .backwards)
-        let tail = split.map { String(source[$0.upperBound...]) } ?? source
-        // An existing Chinese prefix is immutable. Without a corresponding
-        // English tail, the previous result could never be applied.
-        guard prefix.isEmpty || split != nil else {
+        let prefix: String, tail: String, before: String
+        switch previousRepairScope(previous: previous, previousChinese: previousChinese, target: target) {
+        case .keep:
             return PreviousRepair(previous: nil, rejection: nil)
+        case .whole:
+            (prefix, tail, before) = ("", previous, context)
+        case let .tail(stable, head, english):
+            (prefix, tail, before) = (stable, english, context + " " + head)
         }
-        // Only map a tail when both languages contain an earlier sentence.
-        let canRepairTail = !prefix.isEmpty && split != nil
+        let canRepairTail = !prefix.isEmpty
         let previousOutput: (text: String, rejection: String?)
         do {
-            previousOutput = try await contextual(canRepairTail ? tail : previous,
-                before: context + (canRepairTail ? " " + String(source[..<split!.upperBound]) : ""), after: current)
+            previousOutput = try await contextual(tail, before: before, after: current)
             try Task.checkCancellation()
         } catch is CancellationError {
             throw CancellationError()
@@ -2017,7 +2014,7 @@ enum QwenTranslationClient {
         // 相邻修复的产物会与"稳定前缀"拼接 ✓，所以必须拿**它**做长度判据 ✓ ——
         // 否则模型"顺手把上下文也翻了" ✗ 时（提示词要求别翻 ✗ 但偶发不听 ✓），
         // 中文里就会多出前面几句 ✗，而拿"整段前英文"比是**比错了对象** ✗（比例仍在阈值内 ✗），拦不住 ✓。
-        let repairSource = canRepairTail ? tail : previous
+        let repairSource = tail
         let previousRejection = previousOutput.rejection
             ?? TranslationAcceptance.rejection(candidate: previousTranslation, source: repairSource, target: target)?.reason
         let normalizedPrevious = target.normalize(previousTranslation)
@@ -2043,6 +2040,37 @@ enum QwenTranslationClient {
             revisedPrevious = plausible ? normalizedPrevious : nil
         }
         return PreviousRepair(previous: revisedPrevious, rejection: previousRejection)
+    }
+
+    enum PreviousRepairScope: Equatable, Sendable {
+        /// No stable prefix: re-translate the whole previous caption.
+        case whole
+        /// Re-translate only the English `tail`; `head` is context and `prefix` stays.
+        case tail(prefix: String, head: String, tail: String)
+        /// Keep the existing translation without a model call. A reason is set
+        /// only when issue #6 alignment, not a missing split point, blocked it.
+        case keep(PreviousRepairAlignment.Reason?)
+    }
+
+    static func previousRepairScope(previous: String, previousChinese: String,
+                                    target: CaptionTranslationTarget = .simplifiedChinese) -> PreviousRepairScope {
+        let prefix = stableTranslationPrefix(previousChinese, target: target)
+        // Only map a tail when both languages contain an earlier sentence.
+        guard !prefix.isEmpty else { return .whole }
+        let source = previous.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = source.dropLast(source.last.map { ".!?".contains($0) } == true ? 1 : 0)
+        // An existing Chinese prefix is immutable. Without a corresponding
+        // English tail, the previous result could never be applied.
+        guard let split = body.range(of: ". ", options: .backwards) else { return .keep(nil) }
+        // Issue #6: splicing assumes the prefix holds exactly the English head.
+        // When that is not plainly true, keep the line rather than drop or
+        // duplicate a sentence. Other targets keep their existing behavior.
+        if target == .simplifiedChinese,
+           let reason = PreviousRepairAlignment.misalignment(english: source, chinese: previousChinese) {
+            return .keep(reason)
+        }
+        return .tail(prefix: prefix, head: String(source[..<split.upperBound]),
+                     tail: String(source[split.upperBound...]))
     }
 
     static func boundaryTranslationTarget(_ current: String, previous: String,
@@ -2882,7 +2910,22 @@ enum AcademicInputNormalizer {
            normalized.range(of: "principle", options: .caseInsensitive) != nil,
            normalized.range(of: "stress", options: .caseInsensitive) != nil {
             normalized = replacing(
-                pattern: #"\b(?:The\s+)?(?:Schrodinger|Lashari|Lagrange|Le\s+Chatelier)'?s\s+principle\b"#,
+                pattern: #"\bLe\s+Chatelier'?s\s+principle\b"#,
+                in: normalized,
+                with: "Le Chatelier's principle"
+            )
+        }
+        // ASR often hears Le Chatelier as these names, but Lagrange's and
+        // Schrodinger's principles are real in mechanics and quantum courses.
+        // Rewrite only with chemical-equilibrium evidence in this segment or
+        // recent context, and never beside Le Chatelier itself (a comparison).
+        let equilibriumContext = recentContext + " " + normalized
+        if normalized.range(of: "Chatelier", options: .caseInsensitive) == nil,
+           contains(#"\bequilibri(?:um|a)\b"#, in: equilibriumContext),
+           contains(#"\bstress(?:es|ed)?\b"#, in: equilibriumContext),
+           contains(chemicalEquilibriumCue, in: equilibriumContext) {
+            normalized = replacing(
+                pattern: #"\b(?:Schrodinger|Lashari|Lagrange)'?s\s+principle\b"#,
                 in: normalized,
                 with: "Le Chatelier's principle"
             )
@@ -2952,6 +2995,14 @@ enum AcademicInputNormalizer {
             in: text, with: "s = ut + ½at²"
         )
         return text
+    }
+
+    // Mechanics also has equilibrium, stress, reactions and stress
+    // concentration, so each cue must be specific to chemical equilibrium.
+    private static let chemicalEquilibriumCue = #"\b(?:reactants?|reagents?|(?<!stress\s)concentrations?|(?:chemical|reversible|forward|reverse)\s+reactions?|equilibrium\s+(?:shifts?|shifted|constant|mixture)|shifts?\s+the\s+equilibrium|products?\s+side|exothermic|endothermic|partial\s+pressures?)\b|(?-i:\bK\s*(?:sub\s+)?[cp]\b)"#
+
+    private static func contains(_ pattern: String, in source: String) -> Bool {
+        source.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     private static func replacing(pattern: String, in source: String, with replacement: String) -> String {

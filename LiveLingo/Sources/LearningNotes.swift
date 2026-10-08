@@ -2030,7 +2030,7 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
             return ReviewFailure(stage: .generation, code: LearningFailureCode.code(for: qwen),
                                  detail: qwen.errorDescription ?? "")
         case .modelUnavailable:
-            return ReviewFailure(stage: .generation, code: "model_unavailable", detail: "离线包缺少本次需要的模型")
+            return ReviewFailure(stage: .generation, code: "model_unavailable", detail: "离线包中本次需要的模型缺失或不完整，请重新安装")
         case .invalidResponse:
             return ReviewFailure(stage: .generation, code: "invalid_response", detail: "本机模型返回了无法识别的数据")
         case .requestFailed(let message), .generationInterrupted(let message),

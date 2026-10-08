@@ -238,6 +238,7 @@ final class DefaultTargetGoldenTests: XCTestCase {
             for name in ["config.json", "tokenizer.json"] {
                 try Data("{}".utf8).write(to: model.appendingPathComponent(name))
             }
+            try Data().write(to: model.appendingPathComponent("model.safetensors"))
         }
         try Data(Self.noteResponse.utf8).write(to: directory.appendingPathComponent("note-response.json"))
         try Data(Self.reviewResponse.utf8).write(to: directory.appendingPathComponent("review-response.json"))
