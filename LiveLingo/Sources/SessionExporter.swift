@@ -67,6 +67,11 @@ enum SessionWorkspace {
     }
 
     static func recordingRecoveries(in root: URL) throws -> [RecordingRecovery] {
+        if FileManager.default.fileExists(atPath: root.path) {
+            do {
+                try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false).recoverTemporaryItems()
+            } catch { SensitiveFileIO.recordTemporaryRecoveryScanFailure() }
+        }
         let url = root.appendingPathComponent("pending-recordings.json")
         try SessionArchiveCoding.requireRegularFileIfPresent(url)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
@@ -502,13 +507,14 @@ enum SessionExporter {
         }
         try SessionArchiveCoding.syncDirectory(staged)
         guard try verifyEmptyDirectory() else { throw SessionStoreError.invalidState("首次导出期间目录出现新内容，保留现场") }
+        let boundDestination = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
+        let boundParent = try boundDestination.ownedParentForTemporaryRecovery()
+        try boundParent?.recordInitialExportReplacement(destination: directory.lastPathComponent, staged: staged.lastPathComponent)
         do {
             try operations.exchangeDirectories(staged, directory)
             // SWAP leaves the verified empty directory at the staging path.
             // It contains no export, recording, or unique recovery evidence.
-            if try FileManager.default.contentsOfDirectory(atPath: staged.path).isEmpty {
-                try FileManager.default.removeItem(at: staged)
-            }
+            try boundParent?.removeEmptyDirectory(named: staged.lastPathComponent, matching: SensitiveFileIO.Identity(admitted))
         } catch {
             guard unsupportedPublication(error) else { throw error }
             guard try verifyEmptyDirectory() else { throw SessionStoreError.invalidState("首次导出目录已改变，保留现场") }

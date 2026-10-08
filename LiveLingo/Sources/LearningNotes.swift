@@ -4897,21 +4897,15 @@ final class LearningReviewQueue: ObservableObject {
     private func reconcile() {
         // 测试收尾后不再自动起任务（仅测试置位）。
         guard !testingStopped else { refreshStatus(); return }
-        // Failed jobs remain visible, but never hold up a runnable recording.
+        // Keep blocked jobs visible, and preserve FIFO among runnable courses.
+        // A retry waiting out its deadline yields without losing its budget.
         // Reorder only after the previous request has fully stopped.
+        let now = Date().timeIntervalSince1970
         if task == nil, managementPending == 0, persistenceFailure == nil,
-           jobs.first?.failure != nil, let index = jobs.firstIndex(where: { $0.failure == nil }) {
-            let before = jobs
-            jobs.insert(jobs.remove(at: index), at: 0)
-            do { try save() }
-            catch { jobs = before; persistenceFailure = "复查队列保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
-        }
-        // 2026-09-20（父任务验收第 4 点）：升级后"等待手动开始"的旧任务不能挡住**后来明确提交**的任务 ✓。
-        // 把它往后挪一格，让已明确排队的那项先跑 ✓；它自己仍留在队列里等用户点"开始复查" ✓，
-        // 用户不需要先跑整课才能复查某一批 ✓。
-        if task == nil, managementPending == 0, persistenceFailure == nil,
-           jobs.first?.failure == nil, jobs.first?.awaitingManualStart == true,
-           let index = jobs.firstIndex(where: { $0.failure == nil && $0.awaitingManualStart != true }) {
+           let index = jobs.firstIndex(where: {
+               $0.failure == nil && $0.awaitingManualStart != true
+                   && ($0.retryPending?.notBefore ?? 0) <= now
+           }), index > 0 {
             let before = jobs
             jobs.insert(jobs.remove(at: index), at: 0)
             do { try save() }
@@ -5218,7 +5212,7 @@ final class LearningReviewQueue: ObservableObject {
                                                  batchCount: batchCount, request: failure.requestID,
                                                  detail: "attempt=\(attempt) delay_s=\(Int(delay)) code=\(failure.code)"), at: 0)
                     ReviewLog.info("review event=retry_scheduled attempt=\(attempt) delay_s=\(Int(delay)) stage=\(failure.stage.rawValue) code=\(failure.code)")
-                    scheduleRetry(after: delay)
+                    rebindRetryTimer()
                     persistOrPause()
                     return
                 }
@@ -5275,9 +5269,9 @@ final class LearningReviewQueue: ObservableObject {
 
     /// Waits out the backoff window and then lets the normal reconcile pass
     /// decide whether the batch may run (recording, sleep and memory still win).
-    private func scheduleRetry(after delay: TimeInterval) {
+    private func scheduleRetry(for job: Job, after delay: TimeInterval) {
         retryTask?.cancel()
-        guard let job = jobs.first, let retry = job.retryPending else {
+        guard let retry = job.retryPending else {
             retryTask = nil; retryTimerBinding = nil; retryTimerToken = nil
             return
         }
@@ -5289,39 +5283,48 @@ final class LearningReviewQueue: ObservableObject {
         retryTask = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(delay)) } catch { return }
             guard let self, !Task.isCancelled, self.retryTimerToken == token,
-                  self.jobs.first?.id == id, self.jobs.first?.retryPending?.notBefore == deadline else { return }
+                  self.jobs.first(where: { $0.id == id })?.retryPending?.notBefore == deadline else { return }
             self.retryTask = nil
             self.retryTimerBinding = nil
             self.retryTimerToken = nil
-            self.runScheduledRetry()
+            self.runScheduledRetry(for: id)
         }
     }
 
     private func rebindRetryTimer() {
+        let now = Date().timeIntervalSince1970
+        // The earliest eligible deadline may belong to a course behind the
+        // active one. Binding by ID keeps queue movement from losing its wakeup.
+        let next = jobs.compactMap { job -> (job: Job, retry: RetryState)? in
+            guard job.failure == nil, job.awaitingManualStart != true,
+                  let retry = job.retryPending, retry.notBefore > now else { return nil }
+            return (job, retry)
+        }.min { $0.retry.notBefore < $1.retry.notBefore }
         guard !testingStopped, !restoreBlocked, persistenceFailure == nil, !userPaused,
-              let job = jobs.first, job.awaitingManualStart != true,
-              let retry = job.retryPending, retry.notBefore > Date().timeIntervalSince1970 else {
+              let next else {
             retryTask?.cancel()
             retryTask = nil; retryTimerBinding = nil; retryTimerToken = nil
             return
         }
-        if retryTimerBinding?.id == job.id, retryTimerBinding?.deadline == retry.notBefore { return }
-        scheduleRetry(after: max(0, retry.notBefore - Date().timeIntervalSince1970))
+        if retryTimerBinding?.id == next.job.id, retryTimerBinding?.deadline == next.retry.notBefore { return }
+        scheduleRetry(for: next.job, after: max(0, next.retry.notBefore - now))
     }
 
-    private func runScheduledRetry() {
-        guard let job = jobs.first, let retry = job.retryPending else { return }
+    private func runScheduledRetry(for id: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == id }),
+              jobs[index].failure == nil, jobs[index].awaitingManualStart != true,
+              let retry = jobs[index].retryPending else { return }
         guard !userPaused else { return }          // never fight a manual pause
         guard retry.notBefore <= Date().timeIntervalSince1970 else {
-            scheduleRetry(after: retry.notBefore - Date().timeIntervalSince1970)
+            rebindRetryTimer()
             return
         }
         // Keep the attempt count: it is the bounded-retry budget. Only the
         // backoff window is considered satisfied here.
-        jobs[0].retryPending?.notBefore = 0
+        jobs[index].retryPending?.notBefore = 0
         recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "retry_started",
-                                     batch: jobs[0].next, batchCount: jobs[0].batches.count,
-                                     detail: "attempt=\(retry.attempts) code=\(retry.code)"), at: 0)
+                                     batch: jobs[index].next, batchCount: jobs[index].batches.count,
+                                     detail: "attempt=\(retry.attempts) code=\(retry.code)"), at: index)
         do { try save() } catch { persistenceFailure = "复查进度保存失败，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
         reconcile()
     }

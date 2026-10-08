@@ -1,6 +1,175 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import LiveLingo
+
+private actor C06TranscriptionGate {
+    private var released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+    func release() { released = true; waiter?.resume(); waiter = nil }
+}
+
+private final class C06TranscriptionProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = 0
+    private var peak = 0
+    private var calls: [String] = []
+    private var commits: [UUID] = []
+    func start(_ name: String) {
+        lock.withLock { active += 1; peak = max(peak, active); calls.append(name) }
+    }
+    func finish() { lock.withLock { active -= 1 } }
+    func commit(_ sessionID: UUID) { lock.withLock { commits.append(sessionID) } }
+    var snapshot: (active: Int, peak: Int, calls: [String], commits: [UUID]) {
+        lock.withLock { (active, peak, calls, commits) }
+    }
+}
+
+struct C06TranscriptionFairnessTests {
+    private func directory() throws -> URL {
+        let buildRoot = TestFixtureDirectory.root.deletingLastPathComponent()
+        let root = buildRoot.appendingPathComponent("c06-fairness/fixtures", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func work(_ session: UUID, ordinal: Int,
+                      status: TranscriptionWorkRecord.Status = .pending) -> TranscriptionWorkRecord {
+        let first = Int64(ordinal) * 16_000
+        var record = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: ordinal,
+            audioFile: "synthetic-\(ordinal).wav", startFrame: first, endFrame: first + 16_000,
+            sampleRate: 16_000, start: Double(ordinal), end: Double(ordinal + 1),
+            captureStart: nil, captureEnd: nil, modelKey: "synthetic-no-model",
+            fallbackModelKey: nil, appleEvidence: "")
+        record.status = status
+        return record
+    }
+
+    private func eventually(_ condition: @escaping @Sendable () -> Bool) async -> Bool {
+        for _ in 0..<400 {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return condition()
+    }
+
+    private func audio(in root: URL, name: String) throws -> URL {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_000))
+        buffer.frameLength = 16_000
+        let samples = try #require(buffer.floatChannelData?[0])
+        for frame in 0..<16_000 { samples[frame] = 0.125 }
+        let url = root.appendingPathComponent(name)
+        let writer = try AVAudioFile(forWriting: url, settings: format.settings,
+            commonFormat: .pcmFormatFloat32, interleaved: false)
+        try writer.write(from: buffer)
+        return url
+    }
+
+    @Test(arguments: [TranscriptionWorkRecord.Status.pending, .manualPending])
+    func c06ContinuousFreshWorkCannotStarveOlderRetry(freshStatus: TranscriptionWorkRecord.Status) throws {
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory(), sessionID: UUID())
+        var exhausted = work(journal.sessionID, ordinal: 0, status: .retryWaiting)
+        exhausted.automaticRetryCount = DurableTranscriptionJournal.maximumAutomaticRetries
+        let retry = work(journal.sessionID, ordinal: 1, status: .retryWaiting)
+        try journal.put(exhausted)
+        try journal.put(retry)
+        var selected: [UUID] = []
+        for ordinal in 2..<10 {
+            try journal.put(work(journal.sessionID, ordinal: ordinal, status: freshStatus))
+            var claimed = try #require(try journal.claimNext())
+            selected.append(claimed.id)
+            #expect(claimed.id != exhausted.id, "耗尽预算的 retry 不得再被自动领取")
+            if claimed.id == retry.id {
+                #expect(claimed.attempt == .automaticRetry)
+                #expect(claimed.automaticRetryCount == 1)
+            } else {
+                #expect(claimed.automaticRetryCount == 0)
+            }
+            claimed.status = .completed
+            try journal.put(claimed)
+            if claimed.id == retry.id { break }
+        }
+        #expect(selected.contains(retry.id), "持续输入新任务时，已可运行的 retry 必须得到有限等待")
+        #expect(selected.first == retry.id, "先入队且可运行的 retry 不得被新 pending/manual 越过")
+        #expect(journal.record(id: retry.id)?.automaticRetryCount == 1)
+        #expect(journal.record(id: exhausted.id)?.automaticRetryCount == DurableTranscriptionJournal.maximumAutomaticRetries)
+    }
+
+    @Test func c06RunnableTranscriptionFIFOAndRetryBudgetSurviveClaims() throws {
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory(), sessionID: UUID())
+        let first = work(journal.sessionID, ordinal: 0)
+        var exhausted = work(journal.sessionID, ordinal: 1, status: .retryWaiting)
+        exhausted.automaticRetryCount = DurableTranscriptionJournal.maximumAutomaticRetries
+        let manual = work(journal.sessionID, ordinal: 2, status: .manualPending)
+        let retry = work(journal.sessionID, ordinal: 3, status: .retryWaiting)
+        for record in [first, exhausted, manual, retry] { try journal.put(record) }
+        for expected in [first, manual, retry] {
+            var claimed = try #require(try journal.claimNext())
+            #expect(claimed.id == expected.id)
+            #expect(claimed.automaticRetryCount == (expected.id == retry.id ? 1 : 0))
+            #expect(claimed.manualRetryCount == (expected.id == manual.id ? 1 : 0))
+            claimed.status = .completed
+            try journal.put(claimed)
+        }
+        #expect(try journal.claimNext() == nil)
+        #expect(journal.record(id: exhausted.id)?.automaticRetryCount == DurableTranscriptionJournal.maximumAutomaticRetries)
+    }
+
+    @Test func c06UncooperativeCancelledOwnerBlocksNewGenerationUntilReturn() async throws {
+        let root = try directory(), oldSession = UUID(), newSession = UUID()
+        let oldRoot = root.appendingPathComponent("old", isDirectory: true)
+        let newRoot = root.appendingPathComponent("new", isDirectory: true)
+        let oldAudio = try audio(in: oldRoot, name: "old.wav")
+        let newAudio = try audio(in: newRoot, name: "new.wav")
+        let gate = C06TranscriptionGate(), probe = C06TranscriptionProbe()
+        let queue = DurableTranscriptionQueue { url, _, _ in
+            probe.start(url.lastPathComponent)
+            defer { probe.finish() }
+            if url.lastPathComponent == "old.wav" { await gate.wait() }
+            return "A complete synthetic transcription from the current owner."
+        }
+        let handler: @Sendable (SpeechPipeline.Event) -> Void = { event in
+            if case .identifiedFinal(let commit) = event { probe.commit(commit.sessionID) }
+        }
+        do {
+            try await queue.configure(directory: oldRoot, sessionID: oldSession,
+                persistent: true, identified: true, handler: handler)
+            queue.submit(.init(audioURL: oldAudio, modelKey: "synthetic-no-model", fallbackModelKey: nil,
+                start: 0, end: 1, appleEvidence: "", recordingURL: nil, sessionID: oldSession), handler: handler)
+            #expect(await eventually { probe.snapshot.calls == ["old.wav"] })
+            try await queue.configure(directory: newRoot, sessionID: newSession,
+                persistent: true, identified: true, handler: handler)
+            queue.submit(.init(audioURL: newAudio, modelKey: "synthetic-no-model", fallbackModelKey: nil,
+                start: 0, end: 1, appleEvidence: "", recordingURL: nil, sessionID: newSession), handler: handler)
+            try await Task.sleep(for: .milliseconds(100))
+            #expect(probe.snapshot.calls == ["old.wav"], "取消不等于旧 ASR owner 已结束")
+            #expect(probe.snapshot.active == 1)
+            #expect(probe.snapshot.peak == 1)
+            #expect(queue.state?.sessionID == newSession)
+            #expect(queue.records.first?.status == .pending)
+            #expect(probe.snapshot.commits.isEmpty)
+            await gate.release()
+            #expect(await eventually { probe.snapshot.calls == ["old.wav", "new.wav"] })
+            await queue.finish()
+            #expect(probe.snapshot.peak == 1)
+            #expect(probe.snapshot.active == 0)
+            #expect(probe.snapshot.commits == [newSession], "旧 owner 的晚到结果不得提交到新会话")
+            #expect(queue.records.first?.status == .completed)
+            await queue.cancel()
+        } catch {
+            await gate.release()
+            await queue.cancel()
+            throw error
+        }
+    }
+}
 
 /// Every disk operation is restricted to a newly allocated synthetic course.
 struct SessionPersistenceTests {

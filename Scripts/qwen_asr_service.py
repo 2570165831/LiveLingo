@@ -71,6 +71,8 @@ MODEL_LAST_USED = {}
 UNLOADING_MODELS = set()
 REQUEST_STATES = {}
 COMPLETED_REQUESTS = {}
+# Private input bindings share the receipt lifetime; no text/result replay.
+_REQUEST_IDENTITIES = {}
 MAX_COMPLETION_RECEIPTS = 256
 MAX_INFERENCE_REQUESTS = 3  # one running, at most two submitted ahead
 INFERENCE_SLOTS = threading.BoundedSemaphore(MAX_INFERENCE_REQUESTS)
@@ -556,8 +558,31 @@ def finish_request(request_id, model_key):
         REQUEST_STATES.pop(request_id, None)
         COMPLETED_REQUESTS[request_id] = {'model': model_key, 'state': 'finished'}
         while len(COMPLETED_REQUESTS) > MAX_COMPLETION_RECEIPTS:
-            COMPLETED_REQUESTS.pop(next(iter(COMPLETED_REQUESTS)))
+            retired_id = next(iter(COMPLETED_REQUESTS))
+            COMPLETED_REQUESTS.pop(retired_id)
+            _REQUEST_IDENTITIES.pop(retired_id, None)
         signal_idle_maintenance()
+
+
+def request_input_identity(audio, model_key, should_enhance, language_mode):
+    """Bind raw bytes and effective output parameters, never temporary paths."""
+    from hashlib import sha256
+    return (sha256(audio).digest(), model_key, should_enhance, language_mode)
+
+
+def duplicate_request_payload(request_id, identity):
+    """Called under MODEL_STATE_LOCK; expose only fixed conflict categories."""
+    original = _REQUEST_IDENTITIES.get(request_id)
+    payload = {"error": "Request ID is already in use"}
+    if original is None:
+        payload['reason'] = 'input_identity_unavailable'
+    elif original[1:] != identity[1:]:
+        payload['reason'] = 'parameters_mismatch'
+    elif original[0] is None:
+        payload['reason'] = 'input_identity_pending'
+    elif original[0] != identity[0]:
+        payload['reason'] = 'audio_content_mismatch'
+    return payload
 
 
 def unload_idle_models(now=None, idle_seconds=IDLE_MODEL_SECONDS):
@@ -773,15 +798,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         with MODEL_STATE_LOCK:
             if request_id in REQUEST_STATES or request_id in COMPLETED_REQUESTS:
-                INFERENCE_SLOTS.release()
                 duplicate = True
             else:
                 REQUEST_STATES[request_id] = {'model': model_key, 'state': 'waiting'}
+                _REQUEST_IDENTITIES[request_id] = (None, model_key, should_enhance, language_mode)
                 duplicate = False
                 signal_idle_maintenance()
-        if duplicate:
-            self.send_json(409, {"error": "Request ID is already in use"})
-            return
         temporary_path = None
         model_input_path = None
         cleanup_deferred = False
@@ -803,6 +825,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             audio = self.read_audio_body(size)
             receiving_audio = False
+            identity = request_input_identity(audio, model_key, should_enhance, language_mode)
+            with MODEL_STATE_LOCK:
+                if duplicate:
+                    duplicate_payload = duplicate_request_payload(request_id, identity)
+                else:
+                    _REQUEST_IDENTITIES[request_id] = identity
+            if duplicate:
+                self.send_json(409, duplicate_payload)
+                return
             with temporary_audio('.wav') as temporary:
                 temporary_path = temporary.name
                 temporary.write(audio)
@@ -853,7 +884,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(500, {"error": safe_exception_code(error),
                                  "request_id": request_id, "model": model_key})
         finally:
-            if not cleanup_deferred: cleanup()
+            if duplicate:
+                # This handler never owns the original request or its input.
+                INFERENCE_SLOTS.release()
+            elif not cleanup_deferred:
+                cleanup()
 
     def supplied_token(self) -> str:
         token = self.headers.get(TOKEN_HEADER, "") or ""
