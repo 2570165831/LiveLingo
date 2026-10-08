@@ -5,7 +5,8 @@ import CryptoKit
 import Darwin
 
 /// Uses only synthetic exports and a standard-library Python pipe worker.
-/// No AppModel, real review queue, audio device or model weights are opened.
+/// Regional reopen tests use an isolated AppModel with unavailable generators.
+/// No real review queue, audio device or model weights are opened.
 @main struct CLILifecycleTests {
     struct Failure: Error { let name: String }
     static func expect(_ condition: Bool, _ name: String) throws {
@@ -36,6 +37,90 @@ import Darwin
             result[file.lastPathComponent] = try Data(contentsOf: file)
         }
         return result
+    }
+
+    @MainActor static func testProductionReleaseCLIOpenSavedPreservesTraditionalTarget(
+        _ language: OutputLanguage, root: URL
+    ) async throws {
+        let prefix = "production_release_cli_reopen_" + language.rawValue
+        try expect(!language.isReleased && OutputLanguage.released == [.simplifiedChinese],
+                   prefix + "_production_release_boundary")
+        let directory = root.appendingPathComponent(prefix, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        try wav(at: directory)
+        let audioURL = directory.appendingPathComponent(SessionWorkspace.recordingFileName)
+        let audioBytes = try Data(contentsOf: audioURL)
+        let session = UUID()
+        let segment = TranscriptSegment(startTime: 0, endTime: 0.01,
+            english: "Synthetic completed course for an explicit CLI reopen.", chinese: "合成课程已完成。",
+            sessionID: session)
+        var notebook = LearningNotebook()
+        try notebook.append(evidence: [segment], note: .init(topic: "合成已完成课程", points: [
+            .init(kind: "核心结论", text: "显式 CLI 只恢复已保存内容。", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2))
+        var snapshot = SessionSnapshot(sessionID: session, segments: [segment],
+            processing: .init(phase: .completed), createdAt: Date(timeIntervalSince1970: 1_000),
+            targetLocale: language.rawValue)
+        notebook.writeState(to: &snapshot)
+        let store = SessionStore(directory: directory)
+        let saved = try store.save(snapshot)
+        let fingerprint = try saved.inputFingerprint()
+
+        let suite = "LiveLingo-Test-" + UUID().uuidString
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            try cleanup.remove()
+            throw Failure(name: prefix + "_isolated_preferences_unavailable")
+        }
+        let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("review-queue.json"),
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
+                throw Failure(name: prefix + "_unexpected_review_generation")
+            }
+        await queue.shutdownForTesting()
+        let pipeline = SpeechPipeline(transcriber: { _, _, _, _ in throw QwenRuntimeError.runtimeUnavailable },
+            enableAudioAnalysis: false, enableMicrophoneWatchdog: false)
+        let model = AppModel(reviewQueue: queue, pipeline: pipeline, translation: .unavailable, notes: .unavailable,
+            backgroundServices: false, scheduledNotes: false, defaults: defaults)
+        do {
+            try expect(model.outputLanguageChoices == [.simplifiedChinese] && !model.showsOutputLanguageSelector,
+                       prefix + "_no_release_injection")
+            var events: [String] = []
+            let observed = try await model.cliOpenSaved(directory: directory, resume: false, highQuality: false,
+                exportNotes: false, runReview: false, report: { event, _ in events.append(event) })
+            try expect(model.phase == .saved(directory) && observed.sessionID == session,
+                       prefix + "_restored_session_identity")
+            try expect(model.outputLanguage == language && observed.snapshot.targetLocale == language.rawValue,
+                       prefix + "_regional_target_preserved")
+            try expect(model.captionTarget == .simplifiedChinese, prefix + "_generator_stays_simplified")
+            try expect(observed.snapshot.processing.phase == .completed && !observed.processingPaused,
+                       prefix + "_completed_processing_preserved")
+            try expect(model.segments == saved.segments && observed.snapshot.segments == saved.segments
+                && observed.snapshot.batches == saved.batches && observed.notes == notebook.markdown(),
+                       prefix + "_synthetic_evidence_and_notes_preserved")
+            try expect(try observed.snapshot.inputFingerprint() == fingerprint,
+                       prefix + "_input_fingerprint_preserved")
+            try expect(!observed.captureActive && observed.pendingWorkers == 0
+                && !observed.reviewHasWork && !observed.reviewRunning && observed.reviewFailure == nil,
+                       prefix + "_no_capture_generation_or_review")
+            try expect(!observed.archiveErrorPresent && observed.journalIncompleteTailBytes == 0,
+                       prefix + "_archive_restored_without_error")
+            try expect(observed.exportPaths.isEmpty && observed.exports.isEmpty && events == ["opened", "finished"],
+                       prefix + "_open_only_without_resume_or_exports")
+            let reopenedAudioBytes = try Data(contentsOf: audioURL)
+            try expect(observed.audioFrames == 160 && observed.audioSampleRate == 16_000
+                && reopenedAudioBytes == audioBytes, prefix + "_silent_audio_preserved")
+            let reloaded = try store.loadDetailed()
+            try expect(reloaded.origin == .snapshot && reloaded.snapshot?.targetLocale == language.rawValue,
+                       prefix + "_persisted_regional_target_preserved")
+            try expect(defaults.object(forKey: "LiveLingo.outputLanguage") == nil,
+                       prefix + "_creation_preference_untouched")
+        } catch {
+            await queue.shutdownForTesting()
+            try cleanup.remove(defaults)
+            throw error
+        }
+        await queue.shutdownForTesting()
+        try cleanup.remove(defaults)
     }
 
     @MainActor static func main() async {
@@ -141,6 +226,11 @@ import Darwin
             let digest = try LiveLingoCLI.hashFile(digestFile)
             try expect(digest.bytes == bytes.count && digest.sha256 == SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(), "streamed_hash")
             passed.append("streamed_hash")
+
+            for language in [OutputLanguage.traditionalChineseTaiwan, .traditionalChineseHongKong] {
+                try await testProductionReleaseCLIOpenSavedPreservesTraditionalTarget(language, root: root)
+                passed.append("production_release_cli_reopen_" + language.rawValue)
+            }
 
             // Save/restore only these keys; never log the process environment.
             let keys = ["LIVELINGO_ASR_ENDPOINT", "LIVELINGO_ASR_TOKEN", "LIVELINGO_PREFERENCES_SUITE",

@@ -37,7 +37,7 @@ for source in "$root"/LiveLingo/Sources/*.swift; do
  case "$(basename "$source")" in LiveLingoApp.swift|ContentView.swift|FloatingSubtitleView.swift|SavedProcessingView.swift) ;; *) sources+=("$source");; esac
 done
 if [[ "$lifecycle_tests" == 1 ]]; then
- xcrun swiftc -D LIVELINGO_CLI -D LIVELINGO_CLI_LIFECYCLE_TESTS -swift-version 6 -parse-as-library -O -target arm64-apple-macos14.0 -module-cache-path "$module_cache" "${sources[@]}" "$root/Scripts/livelingo-cli.swift" "$root/Scripts/test-cli-lifecycle.swift" -o "$output/livelingo-cli-lifecycle-tests"
+ xcrun swiftc -D LIVELINGO_CLI -D LIVELINGO_CLI_LIFECYCLE_TESTS -swift-version 6 -parse-as-library -O -target arm64-apple-macos14.0 -module-cache-path "$module_cache" "${sources[@]}" "$root/Scripts/livelingo-cli.swift" "$root/LiveLingoTests/TestPreferenceCleanup.swift" "$root/Scripts/test-cli-lifecycle.swift" -o "$output/livelingo-cli-lifecycle-tests"
  printf 'Built %s/livelingo-cli-lifecycle-tests\n' "$output"
 else
  xcrun swiftc -D LIVELINGO_CLI -swift-version 6 -parse-as-library -O -target arm64-apple-macos14.0 -module-cache-path "$module_cache" "${sources[@]}" "$root/Scripts/livelingo-cli.swift" -o "$output/livelingo-cli"

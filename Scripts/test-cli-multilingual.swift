@@ -667,8 +667,47 @@ import Foundation
             passed.append("traditional_notes_heading_and_fingerprint_" + target.rawValue)
             try traditionalBoundMarkerChecks(course, target: target, segments: segments, cli: cli)
             passed.append("traditional_bound_run_marker_" + target.rawValue)
+            try traditionalTechnicalRoundTrip(root, target: target, cli: cli)
+            passed.append("traditional_technical_identifiers_binary_" + target.rawValue)
         }
         return passed
+    }
+
+    static func traditionalTechnicalRoundTrip(_ root: URL, target: OutputLanguage, cli: URL) throws {
+        let course = try fixtureDirectory(root, name: "technical-identifiers-" + target.rawValue)
+        let code = #"`record["头发"]`"#
+        let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Synthetic code example.",
+            chinese: "说明：" + code + "，头发在这里。")
+        let prose = target == .traditionalChineseTaiwan ? "頭髮在這裡。" : "頭髮在這裏。"
+        let summary = "## 学习笔记\n" + code + "\n```python\n" + #"record = {"头发": 3}"#
+            + "\n" + #"print(record["头发"])"# + "\n```\n头发在这里。"
+        try SessionStore(directory: course).save(SessionSnapshot(segments: [segment], targetLocale: target.persistedLocale))
+        try SessionExporter.export(segments: [segment], sessionDirectory: course, summary: summary,
+            createdAt: Date(timeIntervalSince1970: 0), target: target)
+        let saved = try fileBytes(course)
+        let label = target == .traditionalChineseTaiwan ? "說明：" : "説明："
+        let expectedLine = label + code + "，" + prose
+        try expect(saved[SessionExporter.targetTranscriptFileName(for: target.rawValue)] == Data((expectedLine + "\n").utf8),
+            "technical_identifiers_handwritten_transcript")
+        let expectedSummary = "## 學習筆記\n" + code + "\n```python\n" + #"record = {"头发": 3}"#
+            + "\n" + #"print(record["头发"])"# + "\n```\n" + prose + "\n"
+        try expect(saved[SessionExporter.targetSummaryFileName(for: target.rawValue)] == Data(expectedSummary.utf8),
+            "technical_identifiers_handwritten_summary")
+        let result = try runCLI(cli, directory: course)
+        try expect(result.status == 0 && result.savedReceipt?["segments"] as? Int == 1,
+            "binary_technical_identifiers_round_trip")
+        try expectNoCaptionLog(result, segments: [segment])
+        try expect(try fileBytes(course) == saved, "technical_identifiers_verify_is_read_only")
+
+        // A converted key is actual content tampering, even if its surrounding
+        // prose looks like the chosen regional output.
+        let transcript = course.appendingPathComponent(SessionExporter.targetTranscriptFileName(for: target.rawValue))
+        try Data((expectedLine.replacingOccurrences(of: "头发", with: "頭髮") + "\n").utf8).write(to: transcript)
+        let rejected = try runCLI(cli, directory: course)
+        try expectBinaryFailure(rejected, reason: .inconsistentExport, name: "binary_converted_technical_key_rejected")
+        try expectNoCaptionLog(rejected, segments: [segment])
+        try saved[transcript.lastPathComponent]!.write(to: transcript)
+        try expect(try fileBytes(course) == saved, "technical_identifier_test_restores_original_export")
     }
 
     static func traditionalLegacyRoundTrip(_ root: URL, target: OutputLanguage, expected: String,

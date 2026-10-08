@@ -58,5 +58,90 @@ class ChineseVariantsTests(unittest.TestCase):
             self.assertEqual(reply.stdout, self.converter.convert(raw, mode).encode())
 
 
+class ChineseVariantsRenderingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.converter = Converter()
+
+    def render(self, text, mode="s2tw"):
+        # The baseline has only convert(); exercise its actual output for the
+        # red phase rather than failing solely because the render API is absent.
+        renderer = getattr(self.converter, "render", self.converter.convert)
+        return renderer(text, mode, project_tables=True)
+
+    def assert_rendered(self, source, taiwan, hong_kong=None):
+        for mode, expected in (("s2tw", taiwan), ("s2hk", hong_kong or taiwan)):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.render(source, mode).encode(), expected.encode())
+
+    def test_raw_opencc_conversion_remains_independent(self):
+        source = r'`record["头发"]` \label{eq:头发}'
+        for mode in ("s2tw", "s2hk", "s2twp"):
+            self.assertEqual(self.converter.convert(source, mode), r'`record["頭髮"]` \label{eq:頭髮}')
+
+    def test_inline_code_with_different_backtick_lengths(self):
+        code = '`record["头发"]`，``record["头发"] + `头发` ``，```record["头发"] + ``头发`` ```'
+        self.assert_rendered("头发在这里。" + code + "头发在这里。",
+                             "頭髮在這裡。" + code + "頭髮在這裡。",
+                             "頭髮在這裏。" + code + "頭髮在這裏。")
+
+    def test_fenced_backtick_and_tilde_code_preserve_crlf_and_utf8(self):
+        code = '````python\r\nrecord = {"头发": 3}\r\nrecord["头发"] # e\u0301 😀\r\n```\r\n这里仍然是代码\r\n```` \t\r\n~~~json\r\n{"头发": "这里"}\r\n~~~\r\n'
+        self.assert_rendered("头发在这里。\r\n" + code + "头发在这里。\r\n",
+                             "頭髮在這裡。\r\n" + code + "頭髮在這裡。\r\n",
+                             "頭髮在這裏。\r\n" + code + "頭髮在這裏。\r\n")
+
+    def test_unclosed_and_mismatched_fences(self):
+        code = '~~~python\nrecord["头发"]\n```\n这里仍然是代码\n~~\n后面仍然是代码\n'
+        self.assert_rendered("头发在这里。\n" + code,
+                             "頭髮在這裡。\n" + code, "頭髮在這裏。\n" + code)
+
+    def test_indented_code_and_ordinary_prose(self):
+        source = '头发在这里。\n\n    record["头发"]\n\tprint(record["头发"])\n\n- 头发在这里。\n  头发在这里。\n    - 头发在这里。\n'
+        taiwan = '頭髮在這裡。\n\n    record["头发"]\n\tprint(record["头发"])\n\n- 頭髮在這裡。\n  頭髮在這裡。\n    - 頭髮在這裡。\n'
+        self.assert_rendered(source, taiwan, taiwan.replace("這裡", "這裏"))
+
+    def test_json_keys_and_natural_language_values(self):
+        source = r'{"头发":"头发在这里。","对象":{"后面":"头发"},"数组":[{"这里":"后面"}],"头\"发":"这里","头\u53d1":"这里"}'
+        taiwan = r'{"头发":"頭髮在這裡。","对象":{"后面":"頭髮"},"数组":[{"这里":"後面"}],"头\"发":"這裡","头\u53d1":"這裡"}'
+        self.assert_rendered(source, taiwan, taiwan.replace("這裡", "這裏"))
+        for mode in ("s2tw", "s2hk"):
+            rendered = json.loads(self.render(source, mode))
+            self.assertIn("头发", rendered)
+            self.assertNotIn("頭髮", rendered)
+
+    def test_math_and_latex_chinese_identifiers(self):
+        technical = r'\(x_{\mathrm{头发}}=1\) \[\text{这里}\label{eq:头发}\] $x_{头发}$ $$\label{eq:头发}$$ \label{eq:头发} \ref{eq:头发} \eqref{eq:头发} \cite[这里]{头发} \newcommand{\头发}[1]{#1}'
+        self.assert_rendered("头发在这里。" + technical + "头发在这里。",
+                             "頭髮在這裡。" + technical + "頭髮在這裡。",
+                             "頭髮在這裏。" + technical + "頭髮在這裏。")
+
+    def test_multiline_inline_code_and_display_math(self):
+        source = '头发在这里。``record[\r\n"头发"]``\r\n$$\r\nx_{头发}=1\r\n\\label{eq:头发}\r\n$$\r\n头发在这里。'
+        taiwan = '頭髮在這裡。``record[\r\n"头发"]``\r\n$$\r\nx_{头发}=1\r\n\\label{eq:头发}\r\n$$\r\n頭髮在這裡。'
+        self.assert_rendered(source, taiwan, taiwan.replace("這裡", "這裏"))
+
+    def test_ordinary_quotes_currency_and_unmatched_backticks(self):
+        source = r'"头发"在这里。头发价格 $5，后面是 $6。\$头发在这里。\$ `头发在这里。'
+        taiwan = r'"頭髮"在這裡。頭髮價格 $5，後面是 $6。\$頭髮在這裡。\$ `頭髮在這裡。'
+        self.assert_rendered(source, taiwan, taiwan.replace("這裡", "這裏"))
+
+    def test_dollar_math_beginning_with_digits_or_whitespace(self):
+        self.assert_rendered("$3+x_{头发}$", "$3+x_{头发}$")
+        self.assert_rendered("$ x_{头发} $", "$ x_{头发} $")
+        self.assert_rendered("头发价格 $5，后面是 $6；公式 $3+x_{头发}$ 和 $ x_{头发} $，后面是头发。",
+                             "頭髮價格 $5，後面是 $6；公式 $3+x_{头发}$ 和 $ x_{头发} $，後面是頭髮。")
+
+    def test_swift_python_rendering_parity(self):
+        executable = os.environ.get("LIVELINGO_ZH_VARIANTS_RENDER_CLI")
+        if not executable:
+            self.skipTest("Build the Foundation-only protected-rendering probe first")
+        source = '头发在这里。\r\n```python\r\nrecord["头发"]\r\n```\r\n' + r'{"头发":"这里"} `record["头发"]` \label{eq:头发}'
+        for mode in ("s2tw", "s2hk"):
+            reply = subprocess.run([executable, mode], input=source.encode(), capture_output=True, timeout=30)
+            self.assertEqual(reply.returncode, 0, reply.stderr.decode())
+            self.assertEqual(reply.stdout, self.render(source, mode).encode())
+
+
 if __name__ == "__main__":
     unittest.main()

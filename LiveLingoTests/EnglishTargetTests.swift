@@ -65,6 +65,9 @@ final class EnglishTargetTests: XCTestCase {
             let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
             let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
                 backgroundServices: false, scheduledNotes: false, defaults: defaults)
+            // Isolate legacy notebook recovery after release; production GUI
+            // release rejection is covered without this override elsewhere.
+            model.setReleasedOutputLanguagesForTesting([.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong])
             addTeardownBlock {
                 await model.resetTranslationSessionForTesting()?.value
                 await queue.shutdownForTesting()

@@ -40,6 +40,9 @@ final class CourseOutputLanguageTests: XCTestCase {
         XCTAssertEqual(model.outputLanguage, .simplifiedChinese)
         XCTAssertEqual(defaults.outputReads, 0)
 
+        // This test isolates stored-target ownership after release. Production
+        // unreleased restores are rejected by OutputLanguageSelectionTests.
+        model.setReleasedOutputLanguagesForTesting([.simplifiedChinese, .traditionalChineseTaiwan])
         let stamped = root.appendingPathComponent("stamped")
         try SessionStore(directory: stamped).save(SessionSnapshot(createdAt: Date(timeIntervalSince1970: 1_000),
             targetLocale: "zh-Hant-TW"))

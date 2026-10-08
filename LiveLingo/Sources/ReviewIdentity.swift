@@ -91,6 +91,10 @@ enum ReviewInputBinding {
     /// Loading a snapshot is read-only; old Markdown never invents batch IDs.
     static func snapshot(in directory: URL) throws -> SessionSnapshot? {
         let result = try SessionStore(directory: directory).loadDetailed()
+        return try snapshot(from: result)
+    }
+
+    private static func snapshot(from result: SessionLoadResult) throws -> SessionSnapshot? {
         guard result.origin == .snapshot else { return nil }
         guard result.incompleteTailBytes == 0 else {
             throw SessionStoreError.incompleteJournalTail(bytes: result.incompleteTailBytes)
@@ -127,7 +131,8 @@ enum ReviewInputBinding {
             throw ReviewIdentityError.conflict("任务内的冻结输入与校验值不一致")
         }
         if let identity { try identity.validate(scope: scope, batches: batches) }
-        if let snapshot = try snapshot(in: directory) {
+        let archive = try SessionStore(directory: directory).loadDetailed()
+        if let snapshot = try snapshot(from: archive) {
             if let identity {
                 guard snapshot.sessionID == identity.sessionID else {
                     throw ReviewIdentityError.conflict("所选目录属于另一份课程")
@@ -187,9 +192,18 @@ enum ReviewInputBinding {
             }
             // The non-regional code belongs to historical verifier fixtures.
             let language = try OutputLanguage.storedLanguage(locale == "zh-Hant" ? nil : locale)
+            // Old review jobs may not have frozen batches. The checked legacy
+            // JSONL still retains both unrendered fields, so it can prove the
+            // schedule boundary even when either field contains the separator.
+            // Bound jobs have already required their identity snapshot above.
+            let evidence = batches.flatMap(\.evidence) + (archive.snapshot?.segments ?? [])
             let rendered = try ClassroomMarkdownRendering.render(original, language: language,
-                scheduleEvidence: batches.flatMap(\.evidence))
+                scheduleEvidence: evidence)
             guard saved == Data((rendered + "\n").utf8) else {
+                if language.profile.renderer != .identity,
+                   ClassroomMarkdownRendering.hasUnresolvedScheduleBoundary(original, evidence: evidence) {
+                    throw ReviewIdentityError.unreadable("旧课程缺少可核对的原文与译文边界，请恢复完整字幕归档或使用已保存的笔记原文")
+                }
                 throw ReviewIdentityError.conflict("所选目录的笔记与复查原文不同")
             }
         }

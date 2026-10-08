@@ -2023,10 +2023,13 @@ private struct SummaryMarkdownView: View {
         let _ = SummaryRenderingDiagnostics.record(\.summaryBodies)
         #endif
         let lines = self.lines
+        let document = language.profile.renderer == .identity || isLegacyRendered
+            ? nil : ChineseScriptConverter.RenderText(lines.joined(separator: "\n"))
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, _ in
                 switch SummaryMarkdownLine.displayed(lines, at: index, language: language,
-                    isLegacyRendered: isLegacyRendered, scheduleEvidence: scheduleEvidence, converter: converter) {
+                    isLegacyRendered: isLegacyRendered, scheduleEvidence: scheduleEvidence,
+                    converter: converter, document: document) {
                 case let .reviewChange(original, proposed):
                     ReviewChangeView(original: original, proposed: proposed)
                 case .hidden, .blank:

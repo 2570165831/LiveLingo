@@ -1778,6 +1778,14 @@ final class AppModel: ObservableObject {
     }
 
     func openSavedSession(_ directory: URL, allowAutomaticProcessing: Bool = true) async throws {
+        try await openSavedSession(directory, allowAutomaticProcessing: allowAutomaticProcessing,
+                                   allowUnreleasedChineseOutput: false)
+    }
+
+    /// The ordinary GUI entry point cannot opt in to unreleased Chinese output.
+    /// Only the explicit CLI reopen path calls this overload with the opt-in.
+    private func openSavedSession(_ directory: URL, allowAutomaticProcessing: Bool,
+                                  allowUnreleasedChineseOutput: Bool) async throws {
         guard !phase.isBusy, !archiveLoading else { return }
         archiveLoading = true
         defer { archiveLoading = false }
@@ -1786,9 +1794,7 @@ final class AppModel: ObservableObject {
         guard var snapshot = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
         _ = try LearningNotebook(snapshot: snapshot)
         var restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)
-        guard restoredLanguage.generationTarget != nil, ![OutputLanguage.english, .spanish, .french].contains(restoredLanguage) || releasedOutputLanguage(restoredLanguage.rawValue) != nil else {
-            throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
-        }
+        try validateSavedOutputLanguage(restoredLanguage, allowUnreleasedChineseOutput: allowUnreleasedChineseOutput)
         let sameDirectory = sessionDirectory.map(SessionDirectoryLocation.canonical)
             == SessionDirectoryLocation.canonical(directory)
         let priorPaused = sameDirectory ? processingPaused : snapshot.processing.paused
@@ -1798,9 +1804,7 @@ final class AppModel: ObservableObject {
             guard let latest = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
             snapshot = latest
             restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)
-            guard restoredLanguage.generationTarget != nil, ![OutputLanguage.english, .spanish, .french].contains(restoredLanguage) || releasedOutputLanguage(restoredLanguage.rawValue) != nil else {
-                throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
-            }
+            try validateSavedOutputLanguage(restoredLanguage, allowUnreleasedChineseOutput: allowUnreleasedChineseOutput)
         }
         if loaded.incompleteTailBytes > 0 {
             _ = try await Task.detached { try store.preserveIncompleteTailAndResume() }.value
@@ -1875,6 +1879,16 @@ final class AppModel: ObservableObject {
             resumeSavedProcessing()
         } else {
             persistCurrentSession()
+        }
+    }
+
+    private func validateSavedOutputLanguage(_ language: OutputLanguage, allowUnreleasedChineseOutput: Bool) throws {
+        guard language.generationTarget != nil, ![OutputLanguage.english, .spanish, .french].contains(language) || releasedOutputLanguage(language.rawValue) != nil else {
+            throw SessionStoreError.invalidState("课程输出语言尚不支持继续处理")
+        }
+        guard ![OutputLanguage.traditionalChineseTaiwan, .traditionalChineseHongKong].contains(language)
+                || releasedOutputLanguage(language.rawValue) != nil || allowUnreleasedChineseOutput else {
+            throw SessionStoreError.invalidState("课程输出语言“\(language.profile.autonym)”尚未开放，暂不能在界面中打开；原文件已保留")
         }
     }
 
@@ -5020,7 +5034,7 @@ extension AppModel {
         activeInputMode = .systemAudio
         var exported: [URL] = []
         do {
-            try await openSavedSession(directory, allowAutomaticProcessing: false)
+            try await openSavedSession(directory, allowAutomaticProcessing: false, allowUnreleasedChineseOutput: true)
             // openSavedSession reports a busy phase by returning silently.
             guard case .saved(let opened) = phase,
                   SessionDirectoryLocation.canonical(opened) == SessionDirectoryLocation.canonical(directory),

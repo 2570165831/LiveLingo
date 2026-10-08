@@ -145,9 +145,19 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
     /// apply this renderer exactly once; release gating is independent.
     func render(_ text: String, converter: ChineseScriptConverter = .shared) throws -> String {
         switch self {
-        case .traditionalChineseTaiwan: return try converter.convert(text, to: .taiwan)
-        case .traditionalChineseHongKong: return try converter.convert(text, to: .hongKong)
+        case .traditionalChineseTaiwan: return try converter.render(text, to: .taiwan)
+        case .traditionalChineseHongKong: return try converter.render(text, to: .hongKong)
         case .simplifiedChinese, .english, .spanish, .french: return text
+        }
+    }
+
+    /// Markdown supplies context from the complete document, including code or
+    /// math spans that continue across the line currently displayed by the UI.
+    func render(_ text: ChineseScriptConverter.RenderText, converter: ChineseScriptConverter = .shared) throws -> String {
+        switch self {
+        case .traditionalChineseTaiwan: return try converter.render(text, to: .taiwan)
+        case .traditionalChineseHongKong: return try converter.render(text, to: .hongKong)
+        case .simplifiedChinese, .english, .spanish, .french: return text.text
         }
     }
 

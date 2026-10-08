@@ -339,4 +339,142 @@ final class TraditionalSessionExporterTests: XCTestCase {
             guard case ReviewIdentityError.conflict = error else { return XCTFail("Unexpected error: \(error)") }
         }
     }
+
+    func testLegacyReviewWithoutFrozenBatchesUsesArchivedScheduleFields() throws {
+        let evidence = TranscriptSegment(startTime: 1, endTime: 2,
+            english: "Assignment due Friday — 図書館で登记します。",
+            chinese: "这里登记 — 后天确认。", sourceLanguage: "ja")
+        let original = "## 课程安排与待办\n- [00:01] Assignment due Friday — 図書館で登记します。 — 这里登记 — 后天确认。"
+        for (language, target) in [(OutputLanguage.traditionalChineseTaiwan, "這裡登記 — 後天確認。"),
+                                   (.traditionalChineseHongKong, "這裏登記 — 後天確認。")] {
+            let root = try directory()
+            try SessionExporter.export(segments: [evidence], sessionDirectory: root, summary: original,
+                createdAt: Date(timeIntervalSince1970: 0), target: language)
+            let expected = "## 課程安排與待辦\n- [00:01] Assignment due Friday — 図書館で登记します。 — " + target + "\n"
+            let summaryURL = root.appendingPathComponent("summary-" + language.rawValue + ".md")
+            let archived = try Data(contentsOf: root.appendingPathComponent("bilingual.jsonl"))
+            XCTAssertEqual(try Data(contentsOf: summaryURL), Data(expected.utf8))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(SessionStore.snapshotFileName).path))
+            XCTAssertNoThrow(try ReviewInputBinding.validate(identity: nil, scope: .wholeLesson, batches: [],
+                digest: nil, original: original, in: root, allowHistorical: false))
+            XCTAssertThrowsError(try ReviewInputBinding.validate(identity: nil, scope: .wholeLesson, batches: [],
+                digest: nil, original: original.replacingOccurrences(of: "后天确认", with: "明天确认"),
+                in: root, allowHistorical: true))
+            XCTAssertThrowsError(try ReviewInputBinding.validate(identity: nil, scope: .wholeLesson, batches: [],
+                digest: nil, original: original.replacingOccurrences(of: "図書館で登记", with: "図書館で确认"),
+                in: root, allowHistorical: true))
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("bilingual.jsonl")), archived)
+            XCTAssertEqual(try Data(contentsOf: summaryURL), Data(expected.utf8))
+        }
+    }
+
+    func testLegacyReviewRejectsCorruptArchivedEvidenceAndMissingBoundSnapshot() throws {
+        let evidence = TranscriptSegment(startTime: 1, endTime: 2, english: "図書館 — 登记。",
+            chinese: "这里登记 — 后天确认。", sourceLanguage: "ja")
+        let original = "## 课程安排与待办\n- [00:01] 図書館 — 登记。 — 这里登记 — 后天确认。"
+        for language in [OutputLanguage.traditionalChineseTaiwan, .traditionalChineseHongKong] {
+            let root = try directory()
+            try SessionExporter.export(segments: [evidence], sessionDirectory: root, summary: original, target: language)
+            let identity = try ReviewIdentity(sessionID: UUID(), scope: .wholeLesson, inputRevision: 0)
+            let batch = LearningNoteBatch(id: UUID(), evidence: [evidence],
+                note: .init(topic: "合成笔记", points: [.init(kind: "核心结论", text: "这里登记 — 后天确认。")]))
+            XCTAssertThrowsError(try ReviewInputBinding.validate(identity: identity, scope: .wholeLesson,
+                batches: [batch], digest: nil, original: original, in: root, allowHistorical: true)) { error in
+                guard case ReviewIdentityError.conflict(let detail) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(detail, "课程身份快照缺失，请恢复完整课程目录")
+            }
+            try Data("{corrupt}\n".utf8).write(to: root.appendingPathComponent("bilingual.jsonl"))
+            XCTAssertThrowsError(try ReviewInputBinding.validate(identity: nil, scope: .wholeLesson,
+                batches: [], digest: nil, original: original, in: root, allowHistorical: true))
+        }
+    }
+
+    func testLegacyReviewWithoutArchivedBoundaryReportsUnverifiableInput() throws {
+        let original = "## 课程安排与待办\n- [00:01] Assignment — 図書館で登记。 — 这里登记 — 后天确认。"
+        for (language, target) in [(OutputLanguage.traditionalChineseTaiwan, "這裡登記 — 後天確認。"),
+                                   (.traditionalChineseHongKong, "這裏登記 — 後天確認。")] {
+            let root = try directory()
+            try Data(("{\"targetLocale\":\"" + language.rawValue + "\"}").utf8)
+                .write(to: root.appendingPathComponent("manifest.json"))
+            let saved = "## 課程安排與待辦\n- [00:01] Assignment — 図書館で登记。 — " + target
+            try Data((saved + "\n").utf8)
+                .write(to: root.appendingPathComponent("summary-" + language.rawValue + ".md"))
+            XCTAssertThrowsError(try ReviewInputBinding.validate(identity: nil, scope: .wholeLesson, batches: [],
+                digest: nil, original: original, in: root, allowHistorical: false)) { error in
+                guard case ReviewIdentityError.unreadable(let detail) = error else {
+                    return XCTFail("An unproven boundary must not be reported as different notes: \(error)")
+                }
+                XCTAssertTrue(detail.contains("原文与译文"))
+            }
+            // The archived rendered text itself remains a valid legacy input.
+            XCTAssertNoThrow(try ReviewInputBinding.validate(identity: nil, scope: .wholeLesson, batches: [],
+                digest: nil, original: saved, in: root, allowHistorical: false))
+        }
+    }
+
+    func testRegionalSessionExportsPreserveTechnicalIdentifiers() throws {
+        let code = #"record["头发"]"#
+        let python = #"record = {"头发": 3}"# + "\n" + #"print(record["头发"])"#
+        let json = #"{"头发": "这里"}"#
+        let markdown = "说明：头发在这里。\n\n`" + code + "`\n\n```python\n" + python + "\n```\n\n" + json
+        let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Synthetic code example.",
+            chinese: "说明：`" + code + "`，头发在这里。")
+        for (language, natural, value) in [(OutputLanguage.traditionalChineseTaiwan, "頭髮在這裡。", "這裡"),
+                                          (.traditionalChineseHongKong, "頭髮在這裏。", "這裏")] {
+            let root = try directory()
+            try SessionExporter.export(segments: [segment], sessionDirectory: root, summary: markdown, target: language)
+            let summary = try String(contentsOf: root.appendingPathComponent("summary-" + language.rawValue + ".md"), encoding: .utf8)
+            let label = language == .traditionalChineseTaiwan ? "說明：" : "説明："
+            XCTAssertEqual(summary.components(separatedBy: "\n").first, label + natural)
+            XCTAssertTrue(summary.contains("`" + code + "`"))
+            XCTAssertTrue(summary.contains(python))
+            XCTAssertTrue(summary.contains(#"{"头发": ""# + value + #""}"#))
+            for name in ["transcript-" + language.rawValue + ".txt", "bilingual.srt"] {
+                let text = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
+                XCTAssertTrue(text.contains("`" + code + "`"), name)
+                XCTAssertTrue(text.contains(natural), name)
+            }
+            let restored = try XCTUnwrap(SessionStore(directory: root).loadDetailed().snapshot)
+            XCTAssertEqual(restored.segments, [segment])
+        }
+    }
+
+    func testEveryNotesFormatPreservesExecutableChineseKeys() throws {
+        let declaration = #"record = {"头发": 3}"#
+        let expression = #"print(record["头发"])"#
+        let notes = "说明：头发在这里。\n\n`record[\"头发\"]`\n\n```python\n" + declaration + "\n" + expression + "\n```"
+        for (language, natural) in [(OutputLanguage.traditionalChineseTaiwan, "頭髮在這裡。"),
+                                    (.traditionalChineseHongKong, "頭髮在這裏。")] {
+            let snapshot = NotesExportSnapshot(className: "Synthetic", sessionName: nil, scope: .wholeLesson,
+                scopeDetail: "", coverageLine: "", notesMarkdown: notes, reviewMarkdown: nil, transcript: [],
+                generatedAt: Date(timeIntervalSince1970: 0), includesReviewAdvice: false,
+                includesTranscript: false, target: language)
+            for format in NotesExportFormat.allCases {
+                let text = try documentText(NotesExportDocument.data(snapshot, format: format), format: format)
+                XCTAssertTrue(text.contains(natural), format.rawValue)
+                XCTAssertTrue(text.contains(#"record["头发"]"#), format.rawValue)
+                XCTAssertTrue(text.contains(declaration), format.rawValue)
+                XCTAssertTrue(text.contains(expression), format.rawValue)
+                // Execute the expression actually extracted from each format
+                // against the original keys, rather than deriving an expected
+                // string from the renderer that is under test.
+                let extracted = try XCTUnwrap(text.components(separatedBy: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first { $0.hasPrefix("print(record[") })
+                let process = Process(), output = Pipe(), errors = Pipe()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+                process.arguments = ["-B", "-c", declaration + "\n" + extracted]
+                process.standardOutput = output
+                process.standardError = errors
+                try process.run()
+                let result = output.fileHandleForReading.readDataToEndOfFile()
+                _ = errors.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                XCTAssertEqual(process.terminationStatus, 0, format.rawValue)
+                XCTAssertEqual(result, Data("3\n".utf8), format.rawValue)
+            }
+        }
+    }
 }

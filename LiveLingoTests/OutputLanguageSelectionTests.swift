@@ -154,6 +154,119 @@ final class OutputLanguageSelectionTests: XCTestCase {
         XCTAssertFalse(model.showsChineseReadingSelector)
     }
 
+    func testProductionReleaseGateRejectsTaiwanSnapshotWithoutReplacingCourse() async throws {
+        try await assertUnreleasedCourseIsRejected(.traditionalChineseTaiwan, legacyManifest: false)
+    }
+
+    func testProductionReleaseGateRejectsHongKongSnapshotWithoutReplacingCourse() async throws {
+        try await assertUnreleasedCourseIsRejected(.traditionalChineseHongKong, legacyManifest: false)
+    }
+
+    func testProductionReleaseGateRejectsTaiwanLegacyManifestWithoutReplacingCourse() async throws {
+        try await assertUnreleasedCourseIsRejected(.traditionalChineseTaiwan, legacyManifest: true)
+    }
+
+    func testProductionReleaseGateRejectsHongKongLegacyManifestWithoutReplacingCourse() async throws {
+        try await assertUnreleasedCourseIsRejected(.traditionalChineseHongKong, legacyManifest: true)
+    }
+
+    private func assertUnreleasedCourseIsRejected(_ language: OutputLanguage, legacyManifest: Bool,
+                                                 file: StaticString = #filePath, line: UInt = #line) async throws {
+        let (model, defaults, root) = try fixture()
+        // Use the production release list, without the test-only language injection.
+        XCTAssertEqual(model.outputLanguageChoices, [.simplifiedChinese], file: file, line: line)
+        XCTAssertFalse(language.isReleased, file: file, line: line)
+
+        let currentDirectory = root.appendingPathComponent("current")
+        let currentID = UUID()
+        let currentSegment = TranscriptSegment(startTime: 0, endTime: 1,
+            english: "Synthetic current course must remain open.", chinese: "合成当前课程必须保留。",
+            sessionID: currentID)
+        var notebook = LearningNotebook()
+        try notebook.append(evidence: [currentSegment], note: .init(topic: "合成当前课程", points: [
+            .init(kind: "核心结论", text: "当前字幕与笔记必须保留。", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2))
+        var currentSnapshot = SessionSnapshot(sessionID: currentID, segments: [currentSegment],
+            processing: .init(phase: .completed), createdAt: Date(timeIntervalSince1970: 1_000))
+        notebook.writeState(to: &currentSnapshot)
+        try SessionStore(directory: currentDirectory).save(currentSnapshot)
+        try await model.openSavedSession(currentDirectory, allowAutomaticProcessing: false)
+        try await model.flushSavedCourseForTesting()
+        let currentFiles = try savedCourseFileBytes(in: currentDirectory)
+        let currentPhase = model.phase
+        let currentSegments = model.segments
+        let currentBatches = model.learningNotebookForTesting.batches
+        let currentSummary = model.lectureSummary
+        let currentLatestSummary = model.latestSummaryUpdate
+        let currentNotice = model.archiveNotice
+        let currentReview = model.reviewAdvice
+
+        let unopenedDirectory = root.appendingPathComponent("unreleased")
+        let unopenedSegment = TranscriptSegment(startTime: 2, endTime: 3,
+            english: "Synthetic unreleased course must not replace the current course.", chinese: "合成未开放课程。",
+            sessionID: UUID())
+        let targetSummary = "## 合成未開放課程\n原檔必須保留。\n"
+        if legacyManifest {
+            try FileManager.default.createDirectory(at: unopenedDirectory, withIntermediateDirectories: true)
+            try Data("{\"targetLocale\":\"\(language.rawValue)\"}\n".utf8)
+                .write(to: unopenedDirectory.appendingPathComponent("manifest.json"))
+            var jsonl = try SessionArchiveCoding.encode(unopenedSegment)
+            jsonl.append(Data("\n".utf8))
+            try jsonl.write(to: unopenedDirectory.appendingPathComponent("bilingual.jsonl"))
+            try Data(targetSummary.utf8)
+                .write(to: unopenedDirectory.appendingPathComponent("summary-\(language.rawValue).md"))
+        } else {
+            try SessionStore(directory: unopenedDirectory).save(SessionSnapshot(
+                sessionID: try XCTUnwrap(unopenedSegment.sessionID), segments: [unopenedSegment],
+                legacyMarkdown: targetSummary, processing: .init(phase: .completed),
+                createdAt: Date(timeIntervalSince1970: 2_000), targetLocale: language.rawValue))
+        }
+        let unopenedStore = SessionStore(directory: unopenedDirectory)
+        let loaded = try unopenedStore.loadDetailed()
+        XCTAssertEqual(loaded.origin, legacyManifest ? .legacy : .snapshot, file: file, line: line)
+        let unopenedSnapshot = try XCTUnwrap(loaded.snapshot, file: file, line: line)
+        XCTAssertEqual(try OutputLanguage.savedLanguage(in: unopenedDirectory, snapshot: unopenedSnapshot,
+            origin: loaded.origin), language, file: file, line: line)
+        let unopenedFiles = try savedCourseFileBytes(in: unopenedDirectory)
+
+        do {
+            try await model.openSavedSession(unopenedDirectory, allowAutomaticProcessing: false)
+            XCTFail("The ordinary GUI restore route accepted an unreleased language", file: file, line: line)
+        } catch SessionStoreError.invalidState(let message) {
+            XCTAssertTrue(message.contains("尚未开放"), file: file, line: line)
+            XCTAssertTrue(message.contains(language.profile.autonym), file: file, line: line)
+        } catch {
+            XCTFail("Expected a clear unreleased-language error, got \(error)", file: file, line: line)
+        }
+
+        XCTAssertEqual(model.phase, currentPhase, file: file, line: line)
+        XCTAssertEqual(model.captureHealthSessionIDForTesting, currentID, file: file, line: line)
+        XCTAssertEqual(model.reviewDisplayDirectory, currentDirectory, file: file, line: line)
+        XCTAssertEqual(model.segments, currentSegments, file: file, line: line)
+        XCTAssertEqual(model.learningNotebookForTesting.batches, currentBatches, file: file, line: line)
+        XCTAssertEqual(model.lectureSummary, currentSummary, file: file, line: line)
+        XCTAssertEqual(model.latestSummaryUpdate, currentLatestSummary, file: file, line: line)
+        XCTAssertEqual(model.archiveNotice, currentNotice, file: file, line: line)
+        XCTAssertEqual(model.reviewAdvice, currentReview, file: file, line: line)
+        XCTAssertEqual(model.outputLanguage, .simplifiedChinese, file: file, line: line)
+        XCTAssertEqual(model.captionTarget, .simplifiedChinese, file: file, line: line)
+        XCTAssertEqual(model.chineseReadingLanguage, .simplifiedChinese, file: file, line: line)
+        XCTAssertEqual(model.captionDisplayLanguage, .simplifiedChinese, file: file, line: line)
+        XCTAssertNil(model.chineseDisplayPreparationForTesting, file: file, line: line)
+        XCTAssertFalse(model.archiveLoading, file: file, line: line)
+        XCTAssertNil(defaults.object(forKey: "LiveLingo.outputLanguage"), file: file, line: line)
+        XCTAssertEqual(try savedCourseFileBytes(in: currentDirectory), currentFiles, file: file, line: line)
+        XCTAssertEqual(try savedCourseFileBytes(in: unopenedDirectory), unopenedFiles, file: file, line: line)
+        XCTAssertEqual(try unopenedStore.loadDetailed().snapshot, unopenedSnapshot, file: file, line: line)
+        XCTAssertEqual(FileManager.default.fileExists(atPath: unopenedDirectory
+            .appendingPathComponent(SessionStore.snapshotFileName).path), !legacyManifest, file: file, line: line)
+    }
+
+    private func savedCourseFileBytes(in directory: URL) throws -> [String: Data] {
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        return try Dictionary(uniqueKeysWithValues: files.map { ($0.lastPathComponent, try Data(contentsOf: $0)) })
+    }
+
     func testLegacyRenderedNotesDoNotPermitASecondRegionalConversion() async throws {
         let (model, _, root) = try fixture()
         model.setReleasedOutputLanguagesForTesting([.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong])

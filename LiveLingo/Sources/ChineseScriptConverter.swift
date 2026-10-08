@@ -101,6 +101,17 @@ final class ChineseScriptConverter: @unchecked Sendable {
         }
     }
 
+    /// Rendering is separate from raw OpenCC conversion: technical fragments
+    /// keep their exact UTF-8 bytes, while prose uses the original algorithm.
+    func render(_ text: String, to region: Region) throws -> String {
+        try render(RenderText(text), to: region)
+    }
+
+    func render(_ text: RenderText, to region: Region) throws -> String {
+        try prepare()
+        return try text.render { try convert($0, to: region) }
+    }
+
     /// Called only with lock held. Oversized entries bypass the cache without
     /// changing conversion or evicting reusable short captions.
     private func storeInCache(_ result: String, for key: CacheKey) {
@@ -224,6 +235,310 @@ final class ChineseScriptConverter: @unchecked Sendable {
                 if mode == .s2twp { result = Dictionary.convert(result, dictionaries: [taiwanPhrases]) }
                 return Dictionary.convert(result, dictionaries: [mode == .s2hk ? hongKong : taiwan])
             }.joined()
+        }
+    }
+}
+
+extension ChineseScriptConverter {
+    /// The byte scanner is mirrored by Scripts.zh_variants.RenderText. Keeping
+    /// original slices avoids Unicode normalization and JSON re-serialization.
+    struct RenderText {
+        private let bytes: [UInt8]
+        private let protected: [Bool]
+        var text: String { String(decoding: bytes, as: UTF8.self) }
+        var byteCount: Int { bytes.count }
+        var isFullyProtected: Bool { !bytes.isEmpty && protected.allSatisfy { $0 } }
+
+        init(_ text: String) {
+            var scanner = Scanner(bytes: Array(text.utf8))
+            scanner.blocks()
+            scanner.blockProtected = scanner.protected
+            scanner.inlineCode()
+            scanner.latex()
+            scanner.jsonKeys()
+            bytes = scanner.bytes
+            protected = scanner.protected
+        }
+
+        private init(bytes: [UInt8], protected: [Bool]) {
+            self.bytes = bytes
+            self.protected = protected
+        }
+
+        func slice(_ range: Range<Int>) -> Self {
+            Self(bytes: Array(bytes[range]), protected: Array(protected[range]))
+        }
+
+        func render(_ convert: (String) throws -> String) rethrows -> String {
+            var result = "", start = 0
+            while start < bytes.count {
+                var end = start + 1
+                while end < bytes.count, protected[end] == protected[start] { end += 1 }
+                let text = String(decoding: bytes[start..<end], as: UTF8.self)
+                result += protected[start] ? text : try convert(text)
+                start = end
+            }
+            return result
+        }
+
+        private struct Scanner {
+            let bytes: [UInt8]
+            var protected: [Bool]
+            var blockProtected: [Bool] = []
+            private static let whitespace: Set<UInt8> = [32, 9, 13, 10]
+            private static let mathEnvironments: Set<String> = [
+                "math", "displaymath", "equation", "equation*", "align", "align*", "aligned",
+                "gather", "gather*", "multline", "multline*", "eqnarray", "eqnarray*",
+                "cases", "matrix", "pmatrix", "bmatrix", "vmatrix", "Vmatrix"
+            ]
+
+            init(bytes: [UInt8]) {
+                self.bytes = bytes
+                protected = Array(repeating: false, count: bytes.count)
+            }
+
+            mutating func mark(_ range: Range<Int>) {
+                for index in range { protected[index] = true }
+            }
+
+            func escaped(_ index: Int) -> Bool {
+                var start = index
+                while start > 0, bytes[start - 1] == 92 { start -= 1 }
+                return (index - start) % 2 != 0
+            }
+
+            func runEnd(_ index: Int, byte: UInt8) -> Int {
+                var end = index
+                while end < bytes.count, bytes[end] == byte { end += 1 }
+                return end
+            }
+
+            func spaceEnd(_ index: Int, end: Int? = nil) -> Int {
+                var index = index
+                let end = end ?? bytes.count
+                while index < end, Self.whitespace.contains(bytes[index]) { index += 1 }
+                return index
+            }
+
+            func balancedEnd(_ index: Int) -> Int? {
+                guard bytes[index] == 123 || bytes[index] == 91 else { return nil }
+                var stack: [UInt8] = [bytes[index] == 123 ? 125 : 93]
+                var cursor = index + 1
+                while cursor < bytes.count {
+                    let byte = bytes[cursor]
+                    if byte == 92 { cursor += 2; continue }
+                    if byte == 123 || (byte == 91 && stack.last != 125) {
+                        stack.append(byte == 123 ? 125 : 93)
+                    } else if byte == stack.last {
+                        stack.removeLast()
+                        if stack.isEmpty { return cursor + 1 }
+                    }
+                    cursor += 1
+                }
+                return nil
+            }
+
+            mutating func blocks() {
+                var fence: (byte: UInt8, count: Int)?
+                var indented = false, previousBlank = true, start = 0
+                while start < bytes.count {
+                    let end = bytes[start...].firstIndex(of: 10).map { $0 + 1 } ?? bytes.count
+                    var contentEnd = end
+                    while contentEnd > start, bytes[contentEnd - 1] == 13 || bytes[contentEnd - 1] == 10 { contentEnd -= 1 }
+                    var index = start, columns = 0
+                    while index < contentEnd, bytes[index] == 32 || bytes[index] == 9 {
+                        columns += bytes[index] == 32 ? 1 : 4 - columns % 4
+                        index += 1
+                    }
+                    let blank = index == contentEnd
+                    var marker = index
+                    if columns <= 3 {
+                        while marker < contentEnd, bytes[marker] == 62 {
+                            marker += 1
+                            if marker < contentEnd, bytes[marker] == 32 { marker += 1 }
+                        }
+                    }
+                    let isList = index + 1 < contentEnd && [45, 43, 42].contains(bytes[index]) && [32, 9].contains(bytes[index + 1])
+                    if fence == nil, isList, columns <= 3 { marker = spaceEnd(index + 1, end: contentEnd) }
+                    let markerEnd = marker < contentEnd && [96, 126].contains(bytes[marker])
+                        ? runEnd(marker, byte: bytes[marker]) : marker
+                    let count = markerEnd - marker
+                    if let active = fence {
+                        mark(start..<end)
+                        if columns <= 3, count >= active.count, bytes[marker] == active.byte,
+                           spaceEnd(markerEnd, end: contentEnd) == contentEnd { fence = nil }
+                        previousBlank = blank
+                        start = end
+                        continue
+                    }
+                    if columns <= 3, count >= 3,
+                       bytes[marker] == 126 || !bytes[markerEnd..<contentEnd].contains(96) {
+                        fence = (bytes[marker], count)
+                        mark(start..<end)
+                        indented = false
+                    } else if indented && blank {
+                        mark(start..<end)
+                    } else if columns >= 4 && (indented || previousBlank) && !(isList && !indented) {
+                        mark(start..<end)
+                        indented = true
+                    } else {
+                        indented = false
+                    }
+                    previousBlank = blank
+                    start = end
+                }
+            }
+
+            mutating func inlineCode() {
+                var index = 0
+                while index < bytes.count {
+                    guard !protected[index], bytes[index] == 96, !escaped(index) else { index += 1; continue }
+                    let openingEnd = runEnd(index, byte: 96)
+                    var cursor = openingEnd, closingEnd: Int?
+                    while cursor < bytes.count, !protected[cursor] {
+                        if bytes[cursor] == 96 {
+                            let end = runEnd(cursor, byte: 96)
+                            if end - cursor == openingEnd - index { closingEnd = end; break }
+                            cursor = end
+                        } else { cursor += 1 }
+                    }
+                    if let closingEnd { mark(index..<closingEnd); index = closingEnd }
+                    else { index = openingEnd }
+                }
+            }
+
+            func delimiterEnd(_ start: Int, delimiter: [UInt8]) -> Int? {
+                var cursor = start
+                while cursor < bytes.count {
+                    if blockProtected[cursor] { return nil }
+                    if cursor + delimiter.count <= bytes.count,
+                       bytes[cursor..<(cursor + delimiter.count)].elementsEqual(delimiter), !escaped(cursor) {
+                        return cursor + delimiter.count
+                    }
+                    cursor += 1
+                }
+                return nil
+            }
+
+            func commandEnd(_ start: Int) -> Int {
+                var end = start
+                while end < bytes.count {
+                    let byte = bytes[end]
+                    let length = byte < 128 ? 1 : (byte < 224 ? 2 : (byte < 240 ? 3 : 4))
+                    guard end + length <= bytes.count,
+                          let scalar = String(decoding: bytes[end..<(end + length)], as: UTF8.self).unicodeScalars.first else { break }
+                    switch scalar.properties.generalCategory {
+                    case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter: end += length
+                    default: return end
+                    }
+                }
+                return end
+            }
+
+            func hasMathSyntax(_ range: Range<Int>) -> Bool {
+                var start = range.lowerBound, end = range.upperBound
+                while start < end, Self.whitespace.contains(bytes[start]) { start += 1 }
+                while end > start, Self.whitespace.contains(bytes[end - 1]) { end -= 1 }
+                let operators: Set<UInt8> = [95, 94, 92, 61, 43, 45, 42, 47, 60, 62]
+                guard start < end, !operators.contains(bytes[end - 1]),
+                      !bytes[start..<end].contains(13), !bytes[start..<end].contains(10) else { return false }
+                let body = String(decoding: bytes[start..<end], as: UTF8.self)
+                guard !"，。；！？：".contains(where: { body.contains($0) }) else { return false }
+                return bytes[start..<end].contains { operators.contains($0) }
+            }
+
+            mutating func latex() {
+                var index = 0
+                while index < bytes.count {
+                    guard !protected[index], !escaped(index) else { index += 1; continue }
+                    if bytes[index] == 36 {
+                        let openingEnd = runEnd(index, byte: 36), length = runEnd(index, byte: 36) - index
+                        guard [1, 2].contains(length), openingEnd < bytes.count else {
+                            index = openingEnd
+                            continue
+                        }
+                        var cursor = openingEnd, closing: Int?
+                        while cursor < bytes.count, !blockProtected[cursor] {
+                            if bytes[cursor] == 36, !escaped(cursor) {
+                                let end = runEnd(cursor, byte: 36)
+                                if end - cursor == length {
+                                    let conventional = !Self.whitespace.contains(bytes[openingEnd]) && !(48...57).contains(bytes[openingEnd])
+                                        && !Self.whitespace.contains(bytes[cursor - 1])
+                                    if length == 2 || ((end == bytes.count || !(48...57).contains(bytes[end]))
+                                        && (conventional || hasMathSyntax(openingEnd..<cursor))) { closing = end }
+                                }
+                                // Stop at a rejected pair instead of swallowing
+                                // prose/currency through a later real formula.
+                                if closing != nil || length == 1 { break }
+                                cursor = end
+                            } else { cursor += 1 }
+                        }
+                        if let closing { mark(index..<closing); index = closing }
+                        else { index = openingEnd }
+                        continue
+                    }
+                    guard bytes[index] == 92, index + 1 < bytes.count else { index += 1; continue }
+                    if [40, 91].contains(bytes[index + 1]),
+                       let end = delimiterEnd(index + 2, delimiter: bytes[index + 1] == 40 ? [92, 41] : [92, 93]) {
+                        mark(index..<end)
+                        index = end
+                        continue
+                    }
+                    var endOfCommand = commandEnd(index + 1)
+                    guard endOfCommand > index + 1 else { index += 2; continue }
+                    let command = String(decoding: bytes[(index + 1)..<endOfCommand], as: UTF8.self)
+                    if endOfCommand < bytes.count, bytes[endOfCommand] == 42 { endOfCommand += 1 }
+                    var end = endOfCommand
+                    if command == "verb", end < bytes.count, !Self.whitespace.contains(bytes[end]) {
+                        if let closing = bytes[(end + 1)...].firstIndex(of: bytes[end]), !bytes[end..<closing].contains(10) { end = closing + 1 }
+                    } else {
+                        while true {
+                            let group = spaceEnd(end)
+                            guard group < bytes.count, [123, 91].contains(bytes[group]), let groupEnd = balancedEnd(group) else { break }
+                            let environment = String(decoding: bytes[(group + 1)..<(groupEnd - 1)], as: UTF8.self)
+                            if command == "begin", group == spaceEnd(endOfCommand), Self.mathEnvironments.contains(environment),
+                               let mathEnd = delimiterEnd(groupEnd, delimiter: Array("\\end{\(environment)}".utf8)) {
+                                end = mathEnd
+                                break
+                            }
+                            end = groupEnd
+                        }
+                    }
+                    mark(index..<end)
+                    index = end
+                }
+            }
+
+            mutating func jsonKeys() {
+                var stack: [UInt8] = [], index = 0
+                while index < bytes.count {
+                    if protected[index] { index += 1; continue }
+                    let byte = bytes[index]
+                    if byte == 123 {
+                        let following = spaceEnd(index + 1)
+                        if !stack.isEmpty || (following < bytes.count && [34, 125].contains(bytes[following])) { stack.append(123) }
+                    } else if byte == 91 && !stack.isEmpty {
+                        stack.append(91)
+                    } else if [125, 93].contains(byte), stack.last == (byte == 125 ? 123 : 91) {
+                        stack.removeLast()
+                    } else if byte == 34 {
+                        var end = index + 1
+                        while end < bytes.count {
+                            if bytes[end] == 92 { end += 2 }
+                            else if [34, 13, 10].contains(bytes[end]) { break }
+                            else { end += 1 }
+                        }
+                        if end < bytes.count, bytes[end] == 34 {
+                            end += 1
+                            let following = spaceEnd(end)
+                            if stack.last == 123, following < bytes.count, bytes[following] == 58 { mark(index..<end) }
+                            index = end
+                            continue
+                        }
+                    }
+                    index += 1
+                }
+            }
         }
     }
 }
