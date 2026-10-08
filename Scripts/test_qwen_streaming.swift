@@ -3,6 +3,8 @@ import Darwin
 
 // Compile alongside QwenRuntime.swift and TranscriptSegment.swift. The mock
 // binds a random loopback port and never contacts the installed model service.
+// A missing transport prerequisite fails the run; only
+// LIVELINGO_ALLOW_LOOPBACK_SKIP=1 turns it into an explicit SKIP.
 @main
 struct QwenStreamingChecks {
     struct CheckFailure: Error, CustomStringConvertible {
@@ -21,6 +23,15 @@ struct QwenStreamingChecks {
 
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw CheckFailure(description: message) }
+    }
+
+    /// Transport coverage is required unless the caller explicitly opts out.
+    static func transportPrerequisiteMissing(_ reason: String) throws {
+        guard ProcessInfo.processInfo.environment["LIVELINGO_ALLOW_LOOPBACK_SKIP"] == "1" else {
+            throw CheckFailure(description: "FAIL qwen_streaming_transport: \(reason); transport checks did not run. "
+                + "Set LIVELINGO_ALLOW_LOOPBACK_SKIP=1 only to skip them explicitly")
+        }
+        print("SKIP qwen_streaming_transport: \(reason); parser checks completed; skipped because LIVELINGO_ALLOW_LOOPBACK_SKIP=1")
     }
 
     static func startupLine(from handle: FileHandle) throws -> String {
@@ -122,7 +133,7 @@ struct QwenStreamingChecks {
         }
         let python = URL(fileURLWithPath: "/usr/bin/python3")
         guard FileManager.default.isExecutableFile(atPath: python.path) else {
-            print("SKIP qwen_streaming_transport: system Python unavailable; parser checks completed")
+            try transportPrerequisiteMissing("system Python unavailable for the loopback mock")
             return
         }
         let evidenceRoot = CommandLine.arguments.count > 1
@@ -143,7 +154,7 @@ struct QwenStreamingChecks {
         if portLine == "SKIP mock-loopback-unavailable" {
             process.waitUntilExit()
             try require(process.terminationStatus == 77, "Invalid loopback prerequisite response")
-            print("SKIP qwen_streaming_transport: loopback unavailable before mock startup; parser checks completed")
+            try transportPrerequisiteMissing("loopback unavailable before mock startup")
             return
         }
         guard let port = Int(portLine), (1...65_535).contains(port) else {

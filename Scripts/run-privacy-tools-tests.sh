@@ -56,7 +56,18 @@ build_entry livelingo-cli-translation-failure-tests -D LIVELINGO_CLI_LIFECYCLE_T
 "$task_gate_root/offline-clis/livelingo-cli-multilingual-tests" "$task_gate_root/offline-clis/livelingo-cli" "$task_gate_root/cli-multilingual-tests"
 "$task_gate_root/offline-clis/livelingo-cli-target-review-tests" "$task_gate_root/cli-target-review-tests"
 "$task_gate_root/offline-clis/livelingo-cli-translation-failure-tests" "$task_gate_root/cli-translation-failure-tests"
-/opt/homebrew/bin/python3.13 -B Scripts/test-cli-process.py "$task_gate_root/offline-clis/livelingo-cli" "$task_gate_root/cli-process-tests" "$task_gate_root/cli-lifecycle-tests"
+/opt/homebrew/bin/python3.13 -B Scripts/test-cli-process.py "$task_gate_root/offline-clis/livelingo-cli" "$task_gate_root/cli-process-tests" "$task_gate_root/cli-lifecycle-tests" \
+    | tee "$task_gate_root/cli-process-tests.log"
+grep -q '"event": "process_tests_passed"' "$task_gate_root/cli-process-tests.log" \
+    || { printf 'Process tests did not report completion.\n' >&2; exit 1; }
+task_gate_skips=""
+if grep -q '"event": "process_tests_skipped"' "$task_gate_root/cli-process-tests.log"; then
+    if [[ "${LIVELINGO_ALLOW_LOOPBACK_SKIP:-}" != 1 ]]; then
+        printf 'Process tests skipped a required case; see %s.\n' "$task_gate_root/cli-process-tests.log" >&2
+        exit 1
+    fi
+    task_gate_skips="owned-asr-health-failure (LIVELINGO_ALLOW_LOOPBACK_SKIP=1)"
+fi
 "$task_gate_root/offline-clis/livelingo-cli" --help > "$task_gate_root/cli-help.txt"
 "$task_gate_root/offline-clis/learning-quality-cli" --input Scripts/Fixtures/learning-quality-v1/constant-acceleration.json --output "$task_gate_root/quality-cli-dry-run" --dry-run
 # Match run-python-gates.sh's full discovery environment and skipped optional
@@ -66,4 +77,8 @@ unset LIVELINGO_TARGET_ACCEPTANCE_CLI
 LIVELINGO_TARGET_ACCEPTANCE_CLI="$task_gate_root/offline-clis/target-acceptance-cli" \
     /opt/homebrew/bin/python3.13 -B -m unittest Scripts.test_target_acceptance_cli
 /opt/homebrew/bin/python3.13 -B Scripts/test-release-flow.py
-printf 'Privacy tool gates passed.\n'
+if [[ -n "$task_gate_skips" ]]; then
+    printf 'Privacy tool gates passed with explicit skips: %s. Not full verification.\n' "$task_gate_skips"
+else
+    printf 'Privacy tool gates passed.\n'
+fi

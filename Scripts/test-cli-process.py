@@ -3,6 +3,8 @@
 
 Usage: test-cli-process.py CLI NEW_EVIDENCE_DIRECTORY SYNTHETIC_FIXTURES [--check-fixtures]
 --check-fixtures validates provenance without creating output or starting transport.
+The owned-ASR case needs loopback. Without it the script fails, unless
+LIVELINGO_ALLOW_LOOPBACK_SKIP=1 explicitly records a process_tests_skipped event.
 The fixtures directory comes from test-cli-lifecycle.swift. Evidence is retained.
 """
 import base64
@@ -163,6 +165,12 @@ def main() -> None:
         print(json.dumps({'event': 'synthetic_fixtures_verified',
                           'members': len(manifest['files']), 'transport_started': False}))
         return
+    # Decide before creating evidence: missing loopback is a failure, never a
+    # silent pass. Only the explicit opt-out records a visible skip instead.
+    loopback_reason = loopback_prerequisite()
+    if loopback_reason is not None and os.environ.get('LIVELINGO_ALLOW_LOOPBACK_SKIP') != '1':
+        raise SystemExit('FAIL process tests: ' + loopback_reason + '; owned-asr-health-failure cannot run. '
+                         'Set LIVELINGO_ALLOW_LOOPBACK_SKIP=1 only to skip it explicitly.')
     root.mkdir(exist_ok=False)
     # A caller may supply an installed CLI. This private copy deliberately has
     # no ASRRuntime/Models resources, so missing-ASR never starts a real runtime.
@@ -306,9 +314,9 @@ def main() -> None:
         passed.append(name)
     # Exercise ASRRuntime's exact child ownership without any inference package
     # or audio device. A health failure ends before Speech authorization starts.
-    reason = loopback_prerequisite()
-    if reason is not None:
-        skipped.append({'case': 'owned-asr-health-failure', 'reason': reason})
+    if loopback_reason is not None:
+        skipped.append({'case': 'owned-asr-health-failure', 'reason': loopback_reason,
+                        'optOut': 'LIVELINGO_ALLOW_LOOPBACK_SKIP=1'})
     else:
         case = root / 'owned-asr-health-failure'
         case.mkdir()
@@ -580,7 +588,8 @@ def main() -> None:
     passed.append('verify-saved-is-not-whole-run')
     if skipped:
         print(json.dumps({'event': 'process_tests_skipped', 'count': len(skipped), 'cases': skipped}))
-    print(json.dumps({'event': 'process_tests_passed', 'count': len(passed), 'cases': passed}))
+    print(json.dumps({'event': 'process_tests_passed', 'count': len(passed), 'skipped': len(skipped),
+                      'cases': passed}))
 
 
 if __name__ == '__main__':
