@@ -6,7 +6,7 @@
 
 <!-- TODO: 在这里放一张课堂界面截图（双语字幕 + 笔记），例如 docs/images/classroom.png -->
 
-[English summary](#english)
+中文 | [English](README.en.md)
 
 ## 中文输出语言
 
@@ -28,15 +28,15 @@
 
 ## 下载
 
-**[下载完整安装包（Google Drive，约 14.3 GB）](https://drive.google.com/file/d/11nM4jOR_lnf0seLDZg4L9Smt_sLtuO2Z/view?usp=sharing)**
+**[下载 0.2.0（GitHub 发布页）](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0)**：下载页面 Assets 里全部 8 个分卷，按页面上的合并说明合成一个约 14.3 GB 的 `.dmg`。单个分卷不能安装；发布页下方的 `Source code` 是源码，不是安装包。
 
-Google Drive 下载不了时，可以从 [GitHub 发布页](https://github.com/2570165831/LiveLingo/releases/tag/v0.1.0%2B20260924.0014) 下载同一个安装包的分卷，按页面上的说明合并。发布页下方的 `Source code` 是源码，不是安装包。
+**第一次打开时请保持联网。** 这是 macOS 自己的安全检查（Gatekeeper），不是 LiveLingo 在联网：从网上下载的 App 第一次打开时，系统会向苹果确认它经过了苹果的公证（即提交给苹果做过恶意软件扫描）。0.2.0 的公证记录只附在安装包上，拖进“应用程序”的 App 本身没带，所以系统要联网查一次；断网时会提示无法验证而拒绝打开。查过一次之后就不再需要。LiveLingo 本身不上传任何录音、文字或使用数据，转写、翻译和笔记都在本机运行。
 
 | 要求 | |
 | --- | --- |
 | 电脑 | Apple 芯片 Mac（M 系列）。Intel 机型不支持 |
 | 系统 | macOS 14 或更新 |
-| 硬盘 | 安装包约 14.3 GB，装好后的 App 约 16 GB；安装时两者同时在硬盘上，需要约 30 GB 可用空间，装完可以删掉安装包 |
+| 硬盘 | 安装包约 14.3 GB，装好后的 App 约 16 GB；安装时两者同时在硬盘上，需要约 31 GB 可用空间（用分卷合并时约 45 GB），装完可以删掉安装包 |
 <!-- TODO: 补一行“内存”，等实测出 4B / 9B 模型运行时需要的内存后再写 -->
 
 ## 三步上手
@@ -52,7 +52,7 @@ Google Drive 下载不了时，可以从 [GitHub 发布页](https://github.com/2
 - **翻译和笔记可能出错**：模型会漏译、误译或写错知识点。重要内容请对照英文原文。
 - **macOS 14 上没有“同步初译”**：这个功能用苹果的翻译接口，需要 macOS 15 及以上。macOS 14 上中文要等正式翻译完成后才出现，不影响翻译本身。
 - **英文逐词预览需要系统资源**：它用的是 macOS 自带的英语识别。预览不出来时，打开“系统设置 → 键盘 → 听写”，开启听写并添加“英语（美国）”，联网等系统准备好资源。正式转写不受影响。详见[苹果的听写说明](https://support.apple.com/en-euro/guide/mac-help/mh40584/mac)。
-- **只支持 Apple 芯片**：Intel 和通用版本没有构建，也没有验证过。
+- **只支持 Apple 芯片**：Intel 和通用版本没有构建，也没有验证过。目前没有 Windows 版；想参与的话见 [issue #1](https://github.com/2570165831/LiveLingo/issues/1)。
 - **安装包很大**：转写和翻译模型都在包里，换来的是装好就能离线用。
 
 ## 用到的模型
@@ -83,12 +83,3 @@ Google Drive 下载不了时，可以从 [GitHub 发布页](https://github.com/2
 自有代码采用 **GPL-3.0-only**（见 [LICENSE](LICENSE)），允许商业使用和收费；分发程序或修改版时须按许可证提供源码。软件按现状提供，不提供担保。第三方依赖和模型继续适用各自的许可证，离线许可文本和必要的对应源码保留在 [Packaging/MLXLicenses](Packaging/MLXLicenses/)。
 
 官方版本计划免费提供。这是项目自己的发行安排，不是对其他分发者附加的收费限制。
-
-## English
-
-LiveLingo is a macOS app for English-language classes. It transcribes English from the microphone or system audio, translates it into Chinese in real time, and builds study notes as the class goes on. Everything runs on your Mac: the speech and language models are bundled, nothing is uploaded, and no Python or model download is needed.
-
-- Requires an Apple silicon Mac with macOS 14 or later, and about 30 GB of free disk space to install (14.3 GB download, 16 GB installed).
-- Download: [full DMG on Google Drive](https://drive.google.com/file/d/11nM4jOR_lnf0seLDZg4L9Smt_sLtuO2Z/view?usp=sharing), or the split files on the [release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.1.0%2B20260924.0014).
-- The interface is in Chinese. Translations and notes can be wrong; check important points against the English transcript.
-- License: GPL-3.0-only. Building from source: [docs/BUILDING.md](docs/BUILDING.md) (in Chinese).
