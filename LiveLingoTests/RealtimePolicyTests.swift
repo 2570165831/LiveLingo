@@ -1530,7 +1530,6 @@ final class RealtimePolicyTests: XCTestCase {
     @MainActor
     func testReviewFailureSnapshotKeepsInputAndFinalAnswerOnly() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingoReviewSnapshot-\(UUID())")
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         var book = LearningNotebook()
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Oxygen is the terminal electron acceptor.")],
@@ -1542,7 +1541,11 @@ final class RealtimePolicyTests: XCTestCase {
             await update("PRIVATE-THINKING-MARKER 我已检查全部要点。")
             return #"{"corrections":[{"index":0,"original":"与笔记不一致的原文","kind":"核心结论","text":"修改","reason":"理由"}],"reviewVersion":2,"additions":[]}"#
         }
-        addTeardownBlock { await queue.shutdownForTesting() }
+        addTeardownBlock {
+            let shutdown = Task { @MainActor in await queue.shutdownForTesting() }
+            try await TestTaskLifetime.value(shutdown)
+            try FileManager.default.removeItem(at: root)
+        }
         try queue.enqueue(directory: root, notebook: book)
         for _ in 0..<400 where !queue.canRemoveFailedJob { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertTrue(queue.canRemoveFailedJob)
@@ -1569,6 +1572,10 @@ final class RealtimePolicyTests: XCTestCase {
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         let report = try String(contentsOf: root.appendingPathComponent("summary-review.md"), encoding: .utf8)
         XCTAssertFalse(report.contains("PRIVATE-THINKING-MARKER"))
+        // The failure flag is visible before the asynchronous journal save.
+        // Await that owned save before checking its exact event contents.
+        let stored = Task { @MainActor in try await queue.waitForPendingStorage() }
+        try await TestTaskLifetime.value(stored)
         let saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
         XCTAssertTrue(saved.jobs.first?.events?.contains { $0.code == "failed" } == true)
         XCTAssertTrue(saved.jobs.first?.events?.contains { $0.code == "diagnostics" } == true)

@@ -3,6 +3,7 @@ import Darwin
 import Testing
 @testable import LiveLingo
 
+@Suite(.isolatedStorage)
 struct SessionTreeMigrationTests {
     private enum Fault: Error { case injected }
     private struct Fixture {

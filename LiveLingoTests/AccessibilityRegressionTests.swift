@@ -33,7 +33,7 @@ final class AccessibilityRegressionTests: XCTestCase {
     }
 
     private var screenshots: URL {
-        TestFixtureDirectory.root.deletingLastPathComponent().appendingPathComponent("screenshots", isDirectory: true)
+        TestFixtureDirectory.root.appendingPathComponent("screenshots", isDirectory: true)
     }
 
     private func fixture() throws -> (AppModel, UserDefaults) {
@@ -203,7 +203,7 @@ final class AccessibilityRegressionTests: XCTestCase {
     func testTemporaryDirectoryIsInsideThisInvocationsBuildRoot() throws {
         XCTAssertEqual(SessionDirectoryLocation.canonical(FileManager.default.temporaryDirectory),
                        SessionDirectoryLocation.canonical(TestFixtureDirectory.root))
-        XCTAssertEqual(screenshots.deletingLastPathComponent(), TestFixtureDirectory.root.deletingLastPathComponent())
+        XCTAssertEqual(screenshots.deletingLastPathComponent(), TestFixtureDirectory.root)
         let fixture = try DataSafetyFixtures.make("a11y-path-boundary")
         XCTAssertEqual(fixture.deletingLastPathComponent(), TestFixtureDirectory.root)
         DataSafetyFixtures.preserve(fixture)

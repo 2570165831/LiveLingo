@@ -103,17 +103,17 @@ final class CaptionIdentityTests: XCTestCase {
                 XCTFail("字幕生命周期测试不能发起复查")
                 throw CancellationError()
             }
+        let model = AppModel(reviewQueue: queue, translation: translation,
+                             notes: notes, backgroundServices: false,
+                             scheduledNotes: scheduledNotes, defaults: preferences)
+        model.resetTranslationSessionForTesting()
         addTeardownBlock {
-            await queue.shutdownForTesting()
+            try await TestTaskLifetime.stop(model, queue: queue)
             try preferenceCleanup.remove()
             if FileManager.default.fileExists(atPath: root.path) {
                 try FileManager.default.removeItem(at: root)
             }
         }
-        let model = AppModel(reviewQueue: queue, translation: translation,
-                             notes: notes, backgroundServices: false,
-                             scheduledNotes: scheduledNotes, defaults: preferences)
-        model.resetTranslationSessionForTesting()
         return model
     }
 

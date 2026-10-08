@@ -17,7 +17,7 @@ enum DataSafetyFixtures {
     }
 
     static func preserve(_ root: URL) {
-        let destination = TestFixtureDirectory.root.deletingLastPathComponent()
+        let destination = TestFixtureDirectory.root
             .appendingPathComponent("fixtures", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)

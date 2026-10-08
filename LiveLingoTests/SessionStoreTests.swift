@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import LiveLingo
 
+@Suite(.isolatedStorage)
 struct PreviewIsolationTests {
     private struct Fixture {
         let base: URL
@@ -106,6 +107,7 @@ struct PreviewIsolationTests {
     #endif
 }
 
+@Suite(.isolatedStorage)
 struct SessionStoreTests {
     private struct Fixture {
         let root: URL

@@ -63,7 +63,7 @@ bundle ID 固定为 `com.jianhongli.LiveLingo.preview`，显示名和窗口标�
 
 仅此可选路线核对证书有效期及匹配私钥身份，不公证、不发布、不导入或解锁钥匙串。当前任务只授权 ad-hoc，不能运行此路线。
 
-完整回归使用标准 `xcodebuild test`：`-destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO`，DerivedData 复用输出根目录的 `dd-test`，不强制 Intel、不关闭测试链接器自动签名、不启用预览编译条件，也不以直接调用 `xctest` 代替。标准测试产物可能为 linker-signed，与交付预览包分开记录；不额外执行测试签名命令。Xcode 自动启动 App 测试宿主；scheme 的测试模式不创建正式 AppModel、不预热模型，这不等于启动交付预览包或完成 GUI 验收。日志用 `run-preview-tool.py --log /新的日志路径 -- /usr/bin/xcodebuild ...` 在落盘前过滤环境诊断；再执行 `check_build_warnings.py` 和 `check_test_preferences.py`。如实记录失败，不能仅凭一次失败断言是环境问题。
+完整回归通过 `Scripts/run-xcode-tests.py` 调用标准 `xcodebuild test`，例如 `python3 Scripts/run-xcode-tests.py --name full-1 --derived-data ../work/dd-test --output-root ../work/test-results --parallel YES --workers 2`。默认 macOS arm64 destination、`CODE_SIGNING_ALLOWED=NO`；DerivedData 复用同一份，两个并行宿主各用独立临时目录。共享进程级保存锁的 Swift Testing 套件通过异步作用域隔离，仍执行全部用例及原有断言。不关闭测试链接器自动签名、不启用预览编译条件，也不以直接调用 `xctest` 代替。标准测试产物可能为 linker-signed，与交付预览包分开记录；不额外执行测试签名命令。Xcode 自动启动 App 测试宿主；scheme 的测试模式不创建正式 AppModel、不预热模型，这不等于启动交付预览包或完成 GUI 验收。脚本在落盘前过滤环境诊断，成功后执行 `check_build_warnings.py` 和 `check_test_preferences.py`，并提供 30 分钟总超时、线程采样和仅针对自己任务的停止流程。脚本回执与 `.xcresult` 一起复核；如实记录失败，不能仅凭一次失败断言是环境问题。限时、隔离及清理约定见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 
 `Scripts/recover-orphan-recordings.py` 检查异常退出后尚未收尾的 WAV。只在头部完整、编码支持且音频边界可确认时恢复；正常音频后的元数据、非零数据长度及结构不明确的文件不会被任意扩展。
 **默认只报告，加 `--export` 才写出新文件，源文件始终只读，也不覆盖已有同名输出**。恢复期间源文件变化时，该次输出不计为成功；参数见其 `--help`。

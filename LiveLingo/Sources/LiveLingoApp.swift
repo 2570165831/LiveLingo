@@ -9,15 +9,28 @@ import ObjectiveC
 private enum UnitTestTemporaryDirectory {
     static let directory: URL? = {
         guard AppRuntimeEnvironment.isUnitTesting else { return nil }
-        var directory = Bundle.main.bundleURL
-        while directory.path != "/" {
-            let parent = directory.deletingLastPathComponent()
-            if directory.lastPathComponent == "Products", parent.lastPathComponent == "Build" {
-                return parent.deletingLastPathComponent().appendingPathComponent("tmp", isDirectory: true)
+        var base: URL?
+        // Xcode may copy a parallel host away from Build/Products. The scheme
+        // provides its invocation's scratch base; never derive it from HOME.
+        if let path = ProcessInfo.processInfo.environment["LIVELINGO_TEST_TMPDIR"], path.hasPrefix("/") {
+            base = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        } else {
+            var directory = Bundle.main.bundleURL
+            while directory.path != "/" {
+                let parent = directory.deletingLastPathComponent()
+                if directory.lastPathComponent == "Products", parent.lastPathComponent == "Build" {
+                    base = parent.deletingLastPathComponent().appendingPathComponent("tmp", isDirectory: true)
+                    break
+                }
+                directory = parent
             }
-            directory = parent
         }
-        return nil
+        guard let base, base.path != "/" else { return nil }
+        let directory = base.appendingPathComponent(
+            "worker-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)", isDirectory: true)
+        do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+        catch { preconditionFailure("Cannot create the isolated test worker directory") }
+        return directory
     }()
     private static let install: Void = {
         guard AppRuntimeEnvironment.isUnitTesting, directory != nil,
@@ -26,6 +39,10 @@ private enum UnitTestTemporaryDirectory {
         method_exchangeImplementations(original, replacement)
     }()
     static func configure() { _ = install }
+}
+
+extension AppRuntimeEnvironment {
+    static var unitTestTemporaryDirectory: URL? { UnitTestTemporaryDirectory.directory }
 }
 
 private extension FileManager {

@@ -611,10 +611,17 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
     @MainActor
     func testNoticeUsesExistingRecordingStatusAndDoesNotReplaceOtherNotices() async throws {
         let directory = try directory()
+        let suite = "LiveLingo-Test-\(UUID().uuidString)"
+        let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("review.json"), observeSleep: false,
             diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
         let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
-            backgroundServices: false, scheduledNotes: false)
+            backgroundServices: false, scheduledNotes: false, defaults: defaults)
+        addTeardownBlock {
+            try await TestTaskLifetime.stop(model, queue: queue)
+            try preferenceCleanup.remove()
+        }
         model.loadPresentationForTesting(phase: .recording, evidence: [], notice: "已有课堂提示")
         let id = model.captureHealthSessionIDForTesting
         let warning = CaptureHealthIssue.digitalSilence.message(for: .systemAudio)
@@ -625,6 +632,5 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(model.isRecording)
         model.receiveTranscriptionNoticeForTesting(.captureHealth(.init(sessionID: id, message: nil)))
         XCTAssertEqual(model.errorMessage, "已有课堂提示")
-        await queue.shutdownForTesting()
     }
 }

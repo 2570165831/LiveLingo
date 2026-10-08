@@ -452,6 +452,7 @@ enum ReviewIdentityScenarios {
 
 #if !REVIEW_IDENTITY_STANDALONE
 @MainActor
+@Suite(.isolatedStorage)
 struct ReviewIdentityTests {
     @Test func legacyNotebookRestoresOriginalSourcesWithoutChangingReviewProgress() async throws {
         try await ReviewIdentityScenarios.withFixture { f in

@@ -3,6 +3,7 @@ import Testing
 @testable import LiveLingo
 
 /// Every disk operation is restricted to a newly allocated synthetic course.
+@Suite(.isolatedStorage)
 struct SessionPersistenceTests {
     @Test func successfulStorageRetryPreservesCaptureFailureAndLegacyErrors() throws {
         var state = SessionProcessingState()
@@ -26,6 +27,11 @@ struct SessionPersistenceTests {
     }
 
     private struct Fixture {
+        private final class CleanupState: @unchecked Sendable {
+            let lock = NSLock()
+            var preserved = false
+        }
+        private let cleanup = CleanupState()
         let root: URL
         init() throws {
             root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
@@ -35,10 +41,54 @@ struct SessionPersistenceTests {
         var directory: URL { root.appendingPathComponent("course", isDirectory: true) }
         var store: SessionStore { SessionStore(directory: directory) }
         var journal: URL { directory.appendingPathComponent(SessionStore.journalFileName) }
-        func clean() { try? FileManager.default.removeItem(at: root) }
+        func preserve() { cleanup.lock.withLock { cleanup.preserved = true } }
+        func clean() {
+            guard !cleanup.lock.withLock({ cleanup.preserved }) else { return }
+            try? FileManager.default.removeItem(at: root)
+        }
     }
 
     private enum Fault: Error { case injected, timedOut }
+
+    @MainActor
+    private func waitForEvent(_ stream: AsyncStream<Void>, fixture: Fixture,
+                              timeout: Duration = .seconds(5)) async throws {
+        let read = Task { @MainActor in
+            var iterator = stream.makeAsyncIterator()
+            return await iterator.next()
+        }
+        do {
+            let value: Void? = try await TestTaskLifetime.value(read, timeout: timeout)
+            guard value != nil else { throw Fault.timedOut }
+        } catch {
+            read.cancel()
+            fixture.preserve()
+            throw error
+        }
+    }
+
+    @MainActor @Test func missingWriteEventTimesOutAndPreservesItsFixture() async throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        let stream = AsyncStream<Void>.makeStream()
+        defer { stream.continuation.finish() }
+        await #expect(throws: TestTaskLifetime.Failure.self) {
+            try await waitForEvent(stream.stream, fixture: fixture, timeout: .milliseconds(100))
+        }
+        fixture.clean()
+        #expect(FileManager.default.fileExists(atPath: fixture.root.path))
+        // The synthetic probe has no writer; remove its deliberately preserved directory.
+        try FileManager.default.removeItem(at: fixture.root)
+    }
+
+    @MainActor @Test func finishedWriteEventStreamFailsInsteadOfPretendingItArrived() async throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        let stream = AsyncStream<Void>.makeStream()
+        stream.continuation.finish()
+        await #expect(throws: Fault.self) { try await waitForEvent(stream.stream, fixture: fixture) }
+        fixture.clean()
+        #expect(FileManager.default.fileExists(atPath: fixture.root.path))
+        try FileManager.default.removeItem(at: fixture.root)
+    }
 
     private final class Writes: @unchecked Sendable {
         enum Failure: Equatable { case snapshotBefore(Int), snapshotAfter(Int), journalBefore(Int), journalAfter(Int) }
@@ -293,8 +343,7 @@ struct SessionPersistenceTests {
         let coordinator = SessionSaveCoordinator(directory: fixture.directory, sessionID: desired.sessionID,
                                                   coalescingInterval: .zero, writer: writer)
         coordinator.submit(desired)
-        var entered = barrier.started.makeAsyncIterator()
-        _ = await entered.next()
+        try await waitForEvent(barrier.started, fixture: fixture)
         for index in 0..<200 {
             desired.processing.lastCapturedTime = Double(index)
             coordinator.submit(desired)
@@ -330,8 +379,7 @@ struct SessionPersistenceTests {
         let failures = AsyncStream<Void>.makeStream()
         coordinator.onFailure = { _ in failures.continuation.yield() }
         coordinator.submit(desired)
-        var failed = failures.stream.makeAsyncIterator()
-        _ = await failed.next()
+        try await waitForEvent(failures.stream, fixture: fixture)
         try await Task.sleep(for: .milliseconds(30))
         #expect(writes.snapshotCount == 1)
         #expect(coordinator.lastError != nil)
@@ -359,15 +407,13 @@ struct SessionPersistenceTests {
         let failures = AsyncStream<Void>.makeStream()
         coordinator.onFailure = { _ in failures.continuation.yield() }
         coordinator.submit(desired)
-        var entered = barrier.started.makeAsyncIterator()
-        _ = await entered.next()
+        try await waitForEvent(barrier.started, fixture: fixture)
         for index in 0..<20 {
             desired.segments.append(segment(english: "Accepted while saving: \(index)."))
             coordinator.submit(desired)
         }
         barrier.release()
-        var failed = failures.stream.makeAsyncIterator()
-        _ = await failed.next()
+        try await waitForEvent(failures.stream, fixture: fixture)
         try await Task.sleep(for: .milliseconds(30))
         #expect(barrier.count == 1)
         #expect(coordinator.hasPendingWrite)

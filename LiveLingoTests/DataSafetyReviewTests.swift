@@ -5,7 +5,7 @@ import Testing
 @testable import LiveLingo
 
 /// Synthetic, deterministic faults in the real queue. No runtime or preferences.
-@Suite(.serialized)
+@Suite(.serialized, .isolatedStorage)
 @MainActor
 struct DataSafetyReviewTests {
     private static let response = #"{"reviewVersion":2,"corrections":[],"additions":[]}"#

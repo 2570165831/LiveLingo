@@ -48,8 +48,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
             throw CancellationError()
         }, allowConcurrent: true)
         addTeardownBlock {
-            _ = await MainActor.run { model.resetTranslationSessionForTesting() }
-            await queue.shutdownForTesting()
+            try await TestTaskLifetime.stop(model, queue: queue)
             try preferenceCleanup.remove()
             if FileManager.default.fileExists(atPath: root.path) {
                 try FileManager.default.removeItem(at: root)
