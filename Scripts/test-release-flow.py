@@ -266,6 +266,11 @@ def module(name, path):
     return result
 
 
+MODEL_FILES = module("model_files_fixture", ROOT / "Scripts/model_files.py")
+WEIGHT_HEADER = json.dumps({"weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}}).encode()
+WEIGHT_FIXTURE = struct.pack("<Q", len(WEIGHT_HEADER)) + WEIGHT_HEADER + bytes(4)
+
+
 class ReleaseFlowTests(unittest.TestCase):
     cases = []
     mutations = 0
@@ -294,15 +299,19 @@ class ReleaseFlowTests(unittest.TestCase):
         (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "LiveLingo"}))
         (contents / ".fake-signature").write_text(json.dumps({"fixture": "not a real signature"}))
         for relative in ("LanguageRuntime/worker.py", "LanguageRuntime/runtime-manifest.json", "ASRRuntime/qwen_asr_service.py",
-                         "ASRRuntime/python/bin/python3", "THIRD_PARTY_NOTICES.md", "LICENSE",
-                         "Models/mlx-community/Qwen3.5-4B-MLX-8bit/config.json", "Models/lmstudio-community/Qwen3.5-9B-MLX-4bit/config.json",
-                         "Models/mlx-community/parakeet-tdt-0.6b-v2/config.json", "Models/mlx-community/Qwen3-ASR-1.7B-4bit/config.json"):
+                         "ASRRuntime/python/bin/python3", "THIRD_PARTY_NOTICES.md", "LICENSE"):
             item = contents / "Resources" / relative; item.parent.mkdir(parents=True, exist_ok=True); item.write_text("fixture")
             if relative == "ASRRuntime/python/bin/python3":
                 item.write_bytes(NATIVE_FIXTURE)
             elif item.suffix == ".json":
                 item.write_text(json.dumps({"components": [], "python": "python"}
                                            if item.name == "runtime-manifest.json" else {}))
+        # Each bundled model gets its loader files and one tiny valid weight file.
+        for relative, required in MODEL_FILES.REQUIRED_MODEL_FILES.items():
+            model = contents / "Resources/Models" / relative; model.mkdir(parents=True)
+            for name in required:
+                (model / name).write_text("{}" if name.endswith(".json") else "fixture")
+            (model / "model.safetensors").write_bytes(WEIGHT_FIXTURE)
         keychain = case / "fixture.keychain-db"; keychain.write_text("not a keychain")
         env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": str(self.scratch)}
         env.update(LIVELINGO_TEST_TOOL_DIR=str(tools), LIVELINGO_PYTHON=str(tools / "python-verify-stub"),
@@ -451,6 +460,20 @@ class ReleaseFlowTests(unittest.TestCase):
                 self.assertEqual(before, os.readlink(item) if item.is_symlink() else item.read_bytes())
                 self.assertFalse(self.calls(events, "hdiutil", "create"))
                 self.assertFalse(self.calls(events, "notarytool", "submit"))
+                self.assertFalse((case / "release with spaces.dmg").exists())
+
+    def test_incomplete_models_are_rejected_before_any_release_tool(self):
+        for kind, relative in (("weights", "lmstudio-community/Qwen3.5-9B-MLX-4bit/model.safetensors"),
+                               ("loader-file", "mlx-community/Qwen3-ASR-1.7B-4bit/vocab.json")):
+            with self.subTest(kind=kind):
+                case, app, env, command = self.fixture("models-" + kind)
+                (app / "Contents/Resources/Models" / relative).unlink()
+                result, events = self.execute(case, env, command)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("model-files: " + str(Path(relative).parent), result.stderr)
+                self.assertIn("模型文件不完整", result.stderr)
+                self.assertEqual(events, [])
+                self.assertFalse(list(case.glob("stage-*")))
                 self.assertFalse((case / "release with spaces.dmg").exists())
 
     def test_resumed_private_stage_is_rejected_before_more_notary_calls(self):
