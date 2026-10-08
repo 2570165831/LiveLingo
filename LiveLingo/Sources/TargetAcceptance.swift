@@ -1756,7 +1756,7 @@ enum LatinTargetLengthGuard {
 }
 
 enum LatinStableTranslationPrefix {
-    private static let abbreviation = try! NSRegularExpression(pattern:
+    static let abbreviation = try! NSRegularExpression(pattern:
         #"(?i)(?<!\p{L})(?:e\.g\.|i\.e\.|p\.\s*ej\.|p\.\s*ex\.|etc\.|vs\.|cf\.|mr\.|mrs\.|ms\.|dr\.|prof\.|sr\.|sra\.|srta\.|dra\.|ud\.|uds\.|pág\.|p\.|ec\.|eq\.|éq\.|pr\.|aprox\.|approx\.|mme\.|mlle\.|m\.|fig\.|vol\.|no\.|núm\.|nº\.|(?:[a-z]\.){2,})(?!\p{L})"#)
 
     /// Match the existing repair contract: the final sentence is still the
@@ -1792,6 +1792,72 @@ enum LatinStableTranslationPrefix {
         if ends.last == characters.count { ends.removeLast() }
         guard let end = ends.last else { return "" }
         return String(characters[..<end])
+    }
+}
+
+/// Issue #6: a Simplified Chinese stable prefix may be spliced with a
+/// re-translated English tail only when both sides plainly hold the same
+/// earlier sentences. This is a conservative punctuation check, not semantic
+/// alignment; any doubt keeps the existing translation instead of splicing.
+enum PreviousRepairAlignment {
+    /// Category names only. They never carry caption text.
+    enum Reason: String, CaseIterable, Sendable {
+        case englishQuestionOrExclamation = "english_question_or_exclamation"
+        case englishAbbreviation = "english_abbreviation"
+        case englishAmbiguousPeriod = "english_ambiguous_period"
+        case chineseAmbiguousBoundary = "chinese_ambiguous_boundary"
+        case sentenceCountMismatch = "sentence_count_mismatch"
+    }
+
+    /// `nil` only when every earlier English sentence ends with a plain ". "
+    /// (the existing split point) and the Chinese has the same number of
+    /// earlier sentences, each ending with 。. Both sides drop one final mark
+    /// exactly as the tail split and `stableTranslationPrefix` do.
+    static func misalignment(english: String, chinese: String) -> Reason? {
+        let source = english.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = String(source.dropLast(source.last.map { ".!?".contains($0) } == true ? 1 : 0))
+        let protected = LatinStableTranslationPrefix.abbreviation.matches(in: body,
+            range: NSRange(location: 0, length: (body as NSString).length)).map(\.range)
+        let characters = Array(body)
+        var offset = 0, englishSentences = 1
+        for index in characters.indices {
+            let c = characters[index]
+            defer { offset += String(c).utf16.count }
+            // The English split only knows ". ", while the Chinese prefix also ends at ？！.
+            if "?!".contains(c) { return .englishQuestionOrExclamation }
+            guard c == "." else { continue }
+            let next = index + 1 < characters.count ? characters[index + 1] : nil
+            // 3.5, U.S, example.com: not a sentence end.
+            if let next, next.isLetter || next.isNumber { continue }
+            if protected.contains(where: { NSLocationInRange(offset, $0) }) {
+                if next == " " { return .englishAbbreviation }
+                continue
+            }
+            guard next == " " else { return .englishAmbiguousPeriod }
+            // A single letter before ". " is usually an initial, as in "J. Smith".
+            if index > 0, characters[index - 1].isLetter,
+               index == 1 || !characters[index - 2].isLetter { return .englishAbbreviation }
+            // Ellipsis.
+            if index > 0, characters[index - 1] == "." { return .englishAmbiguousPeriod }
+            guard let following = characters[(index + 1)...].first(where: { !$0.isWhitespace }) else {
+                return .englishAmbiguousPeriod
+            }
+            // A decimal split by ASR, such as "3. 5".
+            if index > 0, characters[index - 1].isNumber, following.isNumber { return .englishAmbiguousPeriod }
+            // A real sentence start is capitalized; lowercase suggests an unlisted abbreviation.
+            if following.isLowercase { return .englishAmbiguousPeriod }
+            englishSentences += 1
+        }
+        let trimmed = chinese.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chineseBody = Array(trimmed.dropLast(trimmed.last.map { "。！？!?".contains($0) } == true ? 1 : 0))
+        var chineseSentences = 1
+        for index in chineseBody.indices where "。！？!?".contains(chineseBody[index]) {
+            // A closing quote after 。 would be cut away from the stable prefix.
+            guard chineseBody[index] == "。", index + 1 < chineseBody.count,
+                  !"。！？!?\"'”’」』)）]】".contains(chineseBody[index + 1]) else { return .chineseAmbiguousBoundary }
+            chineseSentences += 1
+        }
+        return englishSentences == chineseSentences ? nil : .sentenceCountMismatch
     }
 }
 
