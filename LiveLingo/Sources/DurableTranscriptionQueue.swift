@@ -624,8 +624,13 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     if activeWasPreempted || task.isCancelled {
                         if record.interruptedRetryStaysOtherLanguage { record.status = .otherLanguage }
                         else {
+                            // Yielding to fresh captions is not a finished attempt:
+                            // refund the automatic retry debited at claim time.
+                            let refunded = activeWasPreempted && claimed.attempt == .automaticRetry
+                                && record.automaticRetryCount > 0
+                            if refunded { record.automaticRetryCount -= 1 }
                             record.status = record.automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries ? .retryWaiting : .failed
-                            record.failure = "补转已让出资源，已用重试次数保留。"
+                            record.failure = refunded ? "补转已让给新字幕，未计入自动重试次数。" : "补转已让出资源，已用重试次数保留。"
                             record.failureReason = .interrupted
                         }
                         try owner.journal.put(record)

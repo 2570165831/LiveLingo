@@ -708,8 +708,49 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         await gate.release(); await queue.finish()
         XCTAssertEqual(calls.value, 3)
         XCTAssertEqual(queue.records.first { $0.id == chunk }?.text, "The old interval now has a valid result.")
-        XCTAssertEqual(queue.records.first { $0.id == chunk }?.automaticRetryCount, 2)
+        // The preempted attempt never finished, so only the completed retry is charged.
+        XCTAssertEqual(queue.records.first { $0.id == chunk }?.automaticRetryCount, 1)
         XCTAssertTrue(queue.records.allSatisfy { $0.status == .completed })
+    }
+
+    func testFreshCaptionPreemptsAutomaticRetryWithoutSpendingItsBudget() async throws {
+        let root = try directory(), session = UUID(), chunk = UUID()
+        let old = try audio(root, name: "old.wav"), next = try audio(root, name: "new.wav")
+        let gate = AudioTestGate(), entered = AudioTestBox(false)
+        let calls = AudioTestBox<[String]>([])
+        let owner = AudioTestBox<DurableTranscriptionQueue?>(nil)
+        let atFreshCall = AudioTestBox<(status: TranscriptionWorkRecord.Status, budget: Int)?>(nil)
+        let queue = DurableTranscriptionQueue { url, _, enhanced in
+            calls.update { $0.append("\(url.lastPathComponent):\(enhanced)") }
+            if url.lastPathComponent == "new.wav" {
+                if let record = owner.value?.records.first(where: { $0.id == chunk }) {
+                    atFreshCall.update { $0 = (record.status, record.automaticRetryCount) }
+                }
+                return "The newly captured caption has priority."
+            }
+            let attempt = calls.value.filter { $0.hasPrefix("old.wav") }.count
+            if attempt == 2 { entered.update { $0 = true }; await gate.wait() }
+            return attempt >= 3 ? "The repaired interval finished after the caption." : ""
+        }
+        owner.update { $0 = queue }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: old, modelKey: "primary", fallbackModelKey: nil, start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, id: chunk, sessionID: session), handler: { _ in })
+        try await waitUntil { entered.value }
+        XCTAssertEqual(queue.records.first { $0.id == chunk }?.automaticRetryCount, 1, "claiming debits before ASR")
+        queue.submit(.init(audioURL: next, modelKey: "primary", fallbackModelKey: nil, start: 1, end: 2,
+                           appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await gate.release(); await queue.finish()
+        XCTAssertEqual(calls.value, ["old.wav:false", "old.wav:true", "new.wav:false", "old.wav:true"],
+                       "the fresh caption runs before the preempted repair is claimed again")
+        XCTAssertEqual(atFreshCall.value?.status, .retryWaiting)
+        XCTAssertEqual(atFreshCall.value?.budget, 0, "yielding to captions must not spend the retry budget")
+        let repaired = try XCTUnwrap(queue.records.first { $0.id == chunk })
+        XCTAssertEqual(repaired.status, .completed)
+        XCTAssertEqual(repaired.automaticRetryCount, 1)
+        owner.update { $0 = nil }
+        let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        XCTAssertEqual(reopened.record(id: chunk)?.automaticRetryCount, 1, "the refund is durable")
     }
 
     func testAutomaticASRReuseIsDiscardedWhenTheSessionChanges() async throws {

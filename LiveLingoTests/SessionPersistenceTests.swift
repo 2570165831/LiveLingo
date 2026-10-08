@@ -72,7 +72,9 @@ struct C06TranscriptionFairnessTests {
         return url
     }
 
-    @Test(arguments: [TranscriptionWorkRecord.Status.pending, .manualPending])
+    /// Repairs are FIFO among themselves. Fresh live captions (`.pending`) keep
+    /// priority over every repair; see `c06FreshCaptionsKeepPriorityOverRepairs`.
+    @Test(arguments: [TranscriptionWorkRecord.Status.manualPending])
     func c06ContinuousFreshWorkCannotStarveOlderRetry(freshStatus: TranscriptionWorkRecord.Status) throws {
         let journal = try DurableTranscriptionJournal(sessionDirectory: directory(), sessionID: UUID())
         var exhausted = work(journal.sessionID, ordinal: 0, status: .retryWaiting)
@@ -100,6 +102,27 @@ struct C06TranscriptionFairnessTests {
         #expect(selected.first == retry.id, "先入队且可运行的 retry 不得被新 pending/manual 越过")
         #expect(journal.record(id: retry.id)?.automaticRetryCount == 1)
         #expect(journal.record(id: exhausted.id)?.automaticRetryCount == DurableTranscriptionJournal.maximumAutomaticRetries)
+    }
+
+    @Test func c06FreshCaptionsKeepPriorityOverRepairs() throws {
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory(), sessionID: UUID())
+        let olderRetry = work(journal.sessionID, ordinal: 0, status: .retryWaiting)
+        let manual = work(journal.sessionID, ordinal: 1, status: .manualPending)
+        let newerRetry = work(journal.sessionID, ordinal: 2, status: .retryWaiting)
+        let firstCaption = work(journal.sessionID, ordinal: 3)
+        let secondCaption = work(journal.sessionID, ordinal: 4)
+        for record in [olderRetry, manual, newerRetry, firstCaption, secondCaption] { try journal.put(record) }
+        var order: [UUID] = []
+        while var claimed = try journal.claimNext() {
+            order.append(claimed.id)
+            claimed.status = .completed
+            try journal.put(claimed)
+        }
+        #expect(order == [firstCaption.id, secondCaption.id, olderRetry.id, manual.id, newerRetry.id],
+            "新字幕按到达顺序优先；补转之间按入队顺序")
+        #expect(journal.record(id: olderRetry.id)?.automaticRetryCount == 1)
+        #expect(journal.record(id: newerRetry.id)?.automaticRetryCount == 1)
+        #expect(journal.record(id: manual.id)?.manualRetryCount == 1)
     }
 
     @Test func c06RunnableTranscriptionFIFOAndRetryBudgetSurviveClaims() throws {
