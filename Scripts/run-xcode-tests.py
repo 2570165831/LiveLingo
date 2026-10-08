@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import signal
 import re
+import shutil
 import stat
 import subprocess
 import threading
@@ -16,6 +17,9 @@ import sys
 
 REPO = Path(__file__).resolve().parent.parent
 DD = OUT = None
+WORKER = re.compile(r'worker-(\d+)-[0-9A-Fa-f-]{36}')
+# The warning gate only counts when this log compiled every Swift source of both.
+COMPILED_TARGETS = ('LiveLingo', 'LiveLingoTests')
 spec = importlib.util.spec_from_file_location('redact', REPO / 'Scripts/run-preview-tool.py')
 redact = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(redact)
@@ -61,17 +65,34 @@ def test_host_output(section):
         yield from test_host_output(child)
 
 
-def preference_events(scratch, host_pids, previous_workers):
-    """Read only new, observed hosts' UUID-only audit streams, never old runs."""
-    events = []
-    paths = []
+def invocation_workers(scratch, host_pids, previous_workers):
+    """Return new worker directories of observed hosts, plus unattributed new names."""
+    owned, unattributed = [], []
     for worker in sorted(scratch.glob('worker-*')):
-        match = re.fullmatch(r'worker-(\d+)-[0-9A-Fa-f-]{36}', worker.name)
-        if worker.name in previous_workers or not match or int(match[1]) not in host_pids:
+        if worker.name in previous_workers:
             continue
-        path = worker / 'test-preferences.events'
+        match = WORKER.fullmatch(worker.name)
+        if not match or int(match[1]) not in host_pids:
+            unattributed.append(worker.name)
+            continue
         if worker.is_symlink() or worker.resolve().parent != scratch.resolve():
             raise ValueError('invalid worker directory')
+        owned.append(worker)
+    return owned, unattributed
+
+
+def preference_events(scratch, host_pids, previous_workers, allow_empty=False):
+    """Read only new, observed hosts' UUID-only audit streams, never old runs.
+
+    allow_empty is for focused runs: their tests may create no preference suite.
+    Zero events then still require an observed host worker and no new worker
+    this runner cannot attribute, so an unread audit stream cannot be skipped.
+    """
+    events = []
+    paths = []
+    owned, unattributed = invocation_workers(scratch, host_pids, previous_workers)
+    for worker in owned:
+        path = worker / 'test-preferences.events'
         try:
             status = path.lstat()
         except FileNotFoundError:
@@ -85,9 +106,34 @@ def preference_events(scratch, host_pids, previous_workers):
                 raise ValueError('invalid preference audit event')
         events.extend(lines)
         paths.append(str(path))
-    if not events:
+    if not events and (not allow_empty or not owned or unattributed):
         raise ValueError('no preference audit events for this invocation')
     return events, paths
+
+
+def retire_workers(scratch, host_pids, previous_workers):
+    """Remove this invocation's audited worker directories, all inside DerivedData/tmp."""
+    owned, _ = invocation_workers(scratch, host_pids, previous_workers)
+    removed = []
+    for worker in owned:
+        status = worker.lstat()
+        if status.st_uid != os.getuid() or not stat.S_ISDIR(status.st_mode):
+            raise ValueError('invalid worker directory')
+        shutil.rmtree(worker)
+        removed.append(worker.name)
+    return removed
+
+
+def sandboxed_host(app):
+    """True unless the existing Debug host is readable and carries no sandbox entitlement."""
+    if not (app / 'Contents/MacOS/LiveLingo').is_file():
+        return True
+    shown = subprocess.run(['/usr/bin/codesign', '-d', '--entitlements', '-', '--xml', str(app)],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           text=True, errors='replace')
+    # An unsigned (linker-signed) host has no entitlements; codesign may report
+    # "not signed" with a non-zero status, which is also safe here.
+    return 'com.apple.security.app-sandbox' in shown.stdout
 
 
 def main():
@@ -100,6 +146,8 @@ def main():
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--only', action='append', default=[])
     parser.add_argument('--action', choices=('test', 'test-without-building'), default='test')
+    parser.add_argument('--keep-workers', action='store_true',
+                        help="keep this run's worker directories under DerivedData/tmp after success")
     args = parser.parse_args()
     if not args.name or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._' for c in args.name) or args.name in ('.', '..'):
         parser.error('name must be a simple file stem')
@@ -122,6 +170,12 @@ def main():
         parser.error('another test invocation owns this DerivedData')
     if owned_hosts():
         parser.error('a test host is already running from this DerivedData')
+    # CODE_SIGNING_ALLOWED=NO keeps the Debug host (production bundle ID,
+    # ENABLE_APP_SANDBOX=YES) out of the real app container. test-without-building
+    # reuses whatever host exists, so refuse one that was built signed.
+    if args.action == 'test-without-building' and sandboxed_host(
+            DD / 'Build/Products/Debug/LiveLingo.app'):
+        parser.error('the existing Debug host is missing or sandboxed; rebuild with --action test')
     previous_workers = {path.name for path in (DD / 'tmp').glob('worker-*')}
     log_path = OUT / (args.name + '.log')
     result_path = OUT / (args.name + '.xcresult')
@@ -134,7 +188,10 @@ def main():
                '-test-timeouts-enabled', 'YES',
                '-default-test-execution-time-allowance', '120',
                '-maximum-test-execution-time-allowance', '180',
-               'CODE_SIGNING_ALLOWED=NO', args.action]
+               'CODE_SIGNING_ALLOWED=NO']
+    # Clean first: warnings appear only for files Xcode compiles, so the warning
+    # gate needs a full compile of both targets in this very log.
+    command += ['clean', 'test'] if args.action == 'test' else [args.action]
     if args.parallel == 'YES':
         command += ['-parallel-testing-worker-count', str(args.workers)]
     command += ['-only-testing:' + name for name in args.only]
@@ -268,7 +325,8 @@ def main():
             print(receipt['host_output_error'])
             return 1
     try:
-        events, audit_paths = preference_events(DD / 'tmp', set(observed_hosts), previous_workers)
+        events, audit_paths = preference_events(DD / 'tmp', set(observed_hosts), previous_workers,
+                                                allow_empty=bool(args.only))
         verification_log = OUT / (args.name + '-preferences.log')
         with verification_log.open('x', encoding='utf-8') as log:
             # Preserve the actual Xcode completion marker and failure evidence,
@@ -286,9 +344,15 @@ def main():
         return 1
     guards = []
     for script in ('check_build_warnings.py', 'check_test_preferences.py'):
-        checked_log = verification_log if script == 'check_test_preferences.py' else log_path
+        if script == 'check_test_preferences.py':
+            checked_log = verification_log
+            # A focused run may create no suite; a full run must still have events.
+            options = ['--allow-no-events'] if args.only else []
+        else:
+            checked_log = log_path
+            options = ['--require-compiled-targets', *COMPILED_TARGETS]
         checked = subprocess.run([sys.executable,
-                                  str(REPO / 'Scripts' / script), str(checked_log)],
+                                  str(REPO / 'Scripts' / script), str(checked_log), *options],
                                  cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, errors='replace')
         output = ''.join(redact.filtered(checked.stdout.splitlines(keepends=True)))
@@ -296,8 +360,17 @@ def main():
         guards.append({'guard': script, 'exit_code': checked.returncode})
         print(output.rstrip())
     receipt['guards'] = guards
+    passed = all(item['exit_code'] == 0 for item in guards)
+    # Keep worker directories (fixtures, screenshots) as evidence after a
+    # failure; after a pass their events are already in the verification log.
+    if passed and not args.keep_workers:
+        try:
+            receipt['removed_workers'] = retire_workers(DD / 'tmp', set(observed_hosts), previous_workers)
+        except (ValueError, OSError):
+            receipt['worker_cleanup_error'] = 'could not remove this invocation worker directories'
+            print(receipt['worker_cleanup_error'])
     (OUT / (args.name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
-    return 0 if all(item['exit_code'] == 0 for item in guards) else 1
+    return 0 if passed else 1
 
 
 if __name__ == '__main__':

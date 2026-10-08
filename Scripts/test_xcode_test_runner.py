@@ -149,12 +149,14 @@ class RunnerHarness:
         self.args = argparse.Namespace(
             name="synthetic", derived_data=self.dd, output_root=self.output,
             parallel="YES", workers=2, only=["SyntheticSuite/testFails"],
-            action="test")
+            action="test", keep_workers=False)
         self.timeout = timeout
         self.escalate = escalate
         self.exit_code = (-signal.SIGKILL if escalate else -signal.SIGTERM) \
             if timeout else exit_code
         self.guard_exit_code = 0
+        self.guard_commands = []
+        self.sandboxed = False
         self.now = 0.0
         self.launched = False
         self.sample_count = 0
@@ -194,6 +196,8 @@ class RunnerHarness:
                 "TEST_PREFERENCE_CREATED suite=LiveLingo-Test-00000000-0000-0000-0000-000000000001\n",
                 "TEST_PREFERENCE_CLEANED suite=LiveLingo-Test-00000000-0000-0000-0000-000000000001\n",
             ], ["synthetic preference audit"])),
+            "retire_workers": Mock(return_value=["worker-810001-synthetic"]),
+            "sandboxed_host": Mock(side_effect=lambda app: self.sandboxed),
             "threading": SimpleNamespace(Thread=self.make_reader),
             "time": SimpleNamespace(
                 monotonic=lambda: self.now,
@@ -251,6 +255,7 @@ class RunnerHarness:
 
     def popen(self, command, **kwargs):
         self.case.assertEqual(command[0], "/usr/bin/xcodebuild")
+        self.command = command
         self.case.assertEqual(kwargs["cwd"], REPO)
         self.case.assertTrue(kwargs["start_new_session"])
         self.case.assertEqual(kwargs["env"], {
@@ -300,6 +305,7 @@ class RunnerHarness:
                            ("check_build_warnings.py", "check_test_preferences.py"))
         filename = "synthetic-preferences.log" if Path(command[1]).name == "check_test_preferences.py" else "synthetic.log"
         self.case.assertEqual(command[2], str(self.output / filename))
+        self.guard_commands.append(command)
         return SimpleNamespace(stdout=FAILURE_OUTPUT, returncode=self.guard_exit_code)
 
     def receipt(self):
@@ -561,6 +567,115 @@ class RunnerEvidenceTests(unittest.TestCase):
             self.assertEqual(harness.receipt()["samples"][0]["error"],
                              "sample evidence already exists")
             harness.assert_filtered_writes()
+
+
+class GateAndCleanupTests(unittest.TestCase):
+    def test_full_run_cleans_before_testing_and_requires_compile_and_events(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.args.only = []
+            self.assertEqual(harness.runner.main(), 0)
+            command = harness.command
+            start = command.index("CODE_SIGNING_ALLOWED=NO") + 1
+            self.assertEqual(command[start:start + 2], ["clean", "test"])
+            self.assertFalse(any(item.startswith("-only-testing") for item in command))
+            warnings, preferences = harness.guard_commands
+            self.assertEqual(warnings[3:], ["--require-compiled-targets", "LiveLingo", "LiveLingoTests"])
+            self.assertEqual(preferences[3:], [])
+            self.assertFalse(harness.runner.preference_events.call_args.kwargs["allow_empty"])
+            harness.runner.retire_workers.assert_called_once()
+            self.assertEqual(harness.receipt()["removed_workers"], ["worker-810001-synthetic"])
+
+    def test_focused_run_may_have_no_suites_but_still_requires_full_compile(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            self.assertEqual(harness.runner.main(), 0)
+            command = harness.command
+            start = command.index("CODE_SIGNING_ALLOWED=NO") + 1
+            self.assertEqual(command[start:start + 2], ["clean", "test"])
+            self.assertEqual(command[-1], "-only-testing:SyntheticSuite/testFails")
+            warnings, preferences = harness.guard_commands
+            self.assertEqual(warnings[3:], ["--require-compiled-targets", "LiveLingo", "LiveLingoTests"])
+            self.assertEqual(preferences[3:], ["--allow-no-events"])
+            self.assertTrue(harness.runner.preference_events.call_args.kwargs["allow_empty"])
+
+    def test_failed_guard_or_keep_flag_retains_worker_directories(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.guard_exit_code = 1
+            self.assertEqual(harness.runner.main(), 1)
+            harness.runner.retire_workers.assert_not_called()
+            self.assertNotIn("removed_workers", harness.receipt())
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.args.keep_workers = True
+            self.assertEqual(harness.runner.main(), 0)
+            harness.runner.retire_workers.assert_not_called()
+
+    def test_without_building_refuses_a_sandboxed_host_before_launch(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.args.action = "test-without-building"
+            harness.sandboxed = True
+            with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                harness.runner.main()
+            harness.subprocess.Popen.assert_not_called()
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.args.action = "test-without-building"
+            # Nothing is compiled: the warning gate must fail on its own log.
+            harness.guard_exit_code = 1
+            self.assertEqual(harness.runner.main(), 1)
+            command = harness.command
+            self.assertEqual(command[command.index("CODE_SIGNING_ALLOWED=NO") + 1], "test-without-building")
+            self.assertNotIn("clean", command)
+
+
+class WorkerDirectoryTests(unittest.TestCase):
+    def layout(self, scratch):
+        names = {
+            "old": "worker-810001-00000000-0000-0000-0000-000000000001",
+            "current": "worker-810001-00000000-0000-0000-0000-000000000002",
+            "other": "worker-810002-00000000-0000-0000-0000-000000000003",
+        }
+        paths = {key: scratch / name for key, name in names.items()}
+        for path in paths.values():
+            path.mkdir()
+            (path / "screenshots").mkdir()
+            (path / "screenshots" / "synthetic.png").write_bytes(b"synthetic")
+        return paths
+
+    def test_focused_empty_audit_requires_an_attributed_worker_and_no_strangers(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+            scratch = Path(temporary)
+            paths = self.layout(scratch)
+            previous = {paths["old"].name}
+            with self.assertRaisesRegex(ValueError, "no preference audit events"):
+                runner.preference_events(scratch, {810001}, previous)
+            with self.assertRaisesRegex(ValueError, "no preference audit events"):
+                runner.preference_events(scratch, {810001}, previous, allow_empty=True)
+            previous.add(paths["other"].name)
+            self.assertEqual(runner.preference_events(scratch, {810001}, previous, allow_empty=True),
+                             ([], []))
+            with self.assertRaisesRegex(ValueError, "no preference audit events"):
+                runner.preference_events(scratch, {810009}, previous, allow_empty=True)
+
+    def test_retire_removes_only_this_invocations_observed_workers(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+            scratch = Path(temporary) / "tmp"
+            scratch.mkdir()
+            outside = Path(temporary) / "outside"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("synthetic outside content\n")
+            paths = self.layout(scratch)
+            link = scratch / "worker-810001-00000000-0000-0000-0000-000000000004"
+            link.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "invalid worker directory"):
+                runner.retire_workers(scratch, {810001}, {paths["old"].name})
+            self.assertTrue((outside / "keep.txt").exists())
+            link.unlink()
+            self.assertEqual(runner.retire_workers(scratch, {810001}, {paths["old"].name}),
+                             [paths["current"].name])
+            self.assertFalse(paths["current"].exists())
+            self.assertTrue((paths["old"] / "screenshots" / "synthetic.png").exists())
+            self.assertTrue((paths["other"] / "screenshots" / "synthetic.png").exists())
+            self.assertTrue((outside / "keep.txt").exists())
 
 
 class TimeoutTerminationTests(unittest.TestCase):
