@@ -2931,6 +2931,32 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// CLI post-capture wait for the saved drain. The drain is an unstructured
+    /// task, so a signal that cancels the caller never reaches it. On
+    /// cancellation stop waiting, park the course (resumable, like the UI's
+    /// pause) and throw into the caller's cleanup. Uncancelled, this is a plain wait.
+    func waitForSavedDrainOrPark() async throws {
+        if let drain = processingTask {
+            let (wake, wakeContinuation) = AsyncStream<Never>.makeStream()
+            Task { await drain.value; wakeContinuation.finish() }
+            await withTaskCancellationHandler {
+                for await _ in wake {}
+            } onCancel: { wakeContinuation.finish() }
+        }
+        guard Task.isCancelled else { return }
+        // A signal during stop may leave no saved course to park.
+        if case .saved = phase { try await parkSavedProcessing() }
+        throw CancellationError()
+    }
+
+    /// CLI wait for one note batch: a cancelled caller stops the batch instead
+    /// of waiting it out; the caller's next cancellation check then throws.
+    static func awaitStoppingOnCancel(_ task: Task<Void, Never>) async {
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: { task.cancel() }
+    }
+
     func resumeSavedProcessing(retryID: UUID? = nil) {
         guard case .saved(let directory) = phase, !legacyProvenanceUnavailable else { return }
         let identity = sessionID, epoch = generation
@@ -5668,7 +5694,7 @@ extension AppModel {
             stopOverlapStarted = false
             let started = ProcessInfo.processInfo.systemUptime
             await stopSession()
-            await processingTask?.value
+            try await waitForSavedDrainOrPark()
             guard case .saved = phase else { throw QwenRuntimeError.requestFailed(phaseLabel) }
             if let archiveError { throw QwenRuntimeError.requestFailed(archiveError) }
 
@@ -5685,9 +5711,11 @@ extension AppModel {
                 }
                 await refreshRuntimeResources()?.value
                 scheduleSummaryRefresh(force: true)
-                if let summaryTask { await summaryTask.value }
+                if let summaryTask { await Self.awaitStoppingOnCancel(summaryTask) }
                 else { try await Task.sleep(for: .milliseconds(250)) }
             }
+            // A batch that completed despite the signal must not lead to a finished export.
+            try Task.checkCancellation()
             try await flushSessionArchive()
             try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage,
                 summaryIsLegacyRendered: summaryIsLegacyRendered, summaryEvidence: notesScheduleEvidence,
@@ -5840,7 +5868,7 @@ extension AppModel {
                     guard ProcessInfo.processInfo.systemUptime < deadline else {
                         throw QwenRuntimeError.requestFailed("CLI resume timed out; saved progress is retained")
                     }
-                    if let summaryTask { await summaryTask.value }
+                    if let summaryTask { await Self.awaitStoppingOnCancel(summaryTask) }
                     else { try await Task.sleep(for: .milliseconds(50)) }
                 }
                 guard sessionID == identity, generation == epoch else {
@@ -5875,9 +5903,10 @@ extension AppModel {
                     }
                     await refreshRuntimeResources()?.value
                     scheduleSummaryRefresh(force: true)
-                    if let summaryTask { await summaryTask.value }
+                    if let summaryTask { await Self.awaitStoppingOnCancel(summaryTask) }
                     else { try await Task.sleep(for: .milliseconds(250)) }
                 }
+                try Task.checkCancellation()
                 try await flushSessionArchive()
                 try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage,
                 summaryIsLegacyRendered: summaryIsLegacyRendered, summaryEvidence: notesScheduleEvidence,
