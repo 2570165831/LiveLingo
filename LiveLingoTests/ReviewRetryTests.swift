@@ -2,6 +2,16 @@ import Foundation
 import Testing
 @testable import LiveLingo
 
+private actor C06ReviewGate {
+    private var released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+    func release() { released = true; waiter?.resume(); waiter = nil }
+}
+
 /// 第 1–3 项：有界自动重试、中断与失败分开、每场统计。
 @MainActor
 struct ReviewRetryTests {
@@ -91,6 +101,134 @@ struct ReviewRetryTests {
                            generate: @escaping LearningReviewQueue.Generator) -> LearningReviewQueue {
         LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
                             generate: generate, retryDelays: retryDelays)
+    }
+
+    private func c06Directory() throws -> URL {
+        let buildRoot = TestFixtureDirectory.root.deletingLastPathComponent()
+        let root = buildRoot.appendingPathComponent("c06-fairness/fixtures", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func c06Job(in root: URL, label: String,
+                        retry: LearningReviewQueue.RetryState? = nil) throws -> LearningReviewQueue.Job {
+        let directory = root.appendingPathComponent(label, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let notebook = makeNotebook(label: label)
+        var job = LearningReviewQueue.Job(directory: directory, batches: notebook.batches,
+            original: notebook.markdown(), retryPending: retry)
+        job.prefixInputDigest = try LearningReviewQueue.prepareInput(job).prefixInputDigest
+        return job
+    }
+
+    @Test func c06BackoffHeadDoesNotBlockRunnableCoursesOrRunEarly() async throws {
+        let root = try c06Directory(), journal = root.appendingPathComponent("queue.json")
+        let retry = LearningReviewQueue.RetryState(attempts: 1,
+            notBefore: Date().timeIntervalSince1970 + 60, code: "request_failed")
+        let waiting = try c06Job(in: root, label: "C06-A", retry: retry)
+        let second = try c06Job(in: root, label: "C06-B")
+        let third = try c06Job(in: root, label: "C06-C")
+        try writeQueueJournal([waiting, second, third], version: LearningReviewQueue.journalVersion, to: journal)
+        var calls: [String] = []
+        let queue = makeQueue(journal: journal) { input, _, _, _, _ in
+            let label = ["C06-A", "C06-B", "C06-C"].first { input.contains($0) } ?? "unknown"
+            calls.append(label)
+            return Self.emptyV2Response
+        }
+        do {
+            queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+            #expect(await waitFor({ queue.items.count == 1 && !queue.running }, seconds: 1),
+                "队首退避时，其他可运行课程应当完成")
+            #expect(calls == ["C06-B", "C06-C"], "可运行课程保持 FIFO，退避任务不得提前运行")
+            #expect(queue.items.first?.id == waiting.id)
+            #expect(queue.items.first?.retryPending == retry, "让位不能清掉退避时间或重试预算")
+            #expect(queue.items.first?.failure == nil)
+            try await queue.waitForPendingStorage()
+            let saved = try persistedJournal(journal)
+            #expect(saved.jobs.map(\.id) == [waiting.id])
+            #expect(saved.jobs.first?.retryPending == retry)
+            await queue.shutdownForTesting()
+        } catch {
+            await queue.shutdownForTesting()
+            throw error
+        }
+    }
+
+    @Test func c06EarlierRetryDeadlineWakesBehindLaterHead() async throws {
+        let root = try c06Directory(), journal = root.appendingPathComponent("queue.json")
+        let laterRetry = LearningReviewQueue.RetryState(attempts: 1,
+            notBefore: Date().timeIntervalSince1970 + 60, code: "request_failed")
+        let earlierRetry = LearningReviewQueue.RetryState(attempts: 1,
+            notBefore: Date().timeIntervalSince1970 + 0.25, code: "request_failed")
+        let later = try c06Job(in: root, label: "C06-A", retry: laterRetry)
+        let earlier = try c06Job(in: root, label: "C06-B", retry: earlierRetry)
+        try writeQueueJournal([later, earlier], version: LearningReviewQueue.journalVersion, to: journal)
+        var calls: [String] = []
+        var earlierStartedAt: TimeInterval?
+        let queue = makeQueue(journal: journal) { input, _, _, _, _ in
+            calls.append(input.contains("C06-B") ? "C06-B" : "C06-A")
+            earlierStartedAt = Date().timeIntervalSince1970
+            return Self.emptyV2Response
+        }
+        do {
+            queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+            #expect(await waitFor({ queue.items.count == 1 && !queue.running }, seconds: 1),
+                "所有课程均在退避时，后排较早到期的任务也应按期唤醒")
+            #expect(calls == ["C06-B"])
+            #expect((earlierStartedAt ?? 0) >= earlierRetry.notBefore)
+            #expect(queue.items.first?.id == later.id)
+            #expect(queue.items.first?.retryPending == laterRetry)
+            await queue.shutdownForTesting()
+        } catch {
+            await queue.shutdownForTesting()
+            throw error
+        }
+    }
+
+    @Test func c06DueRetryBehindActiveCourseWaitsForOwnerAndKeepsItsBudget() async throws {
+        let root = try c06Directory(), journal = root.appendingPathComponent("queue.json")
+        let retry = LearningReviewQueue.RetryState(attempts: 1,
+            notBefore: Date().timeIntervalSince1970 + 2, code: "request_failed")
+        let waiting = try c06Job(in: root, label: "C06-A", retry: retry)
+        let runnable = try c06Job(in: root, label: "C06-B")
+        try writeQueueJournal([waiting, runnable], version: LearningReviewQueue.journalVersion, to: journal)
+        let gate = C06ReviewGate()
+        var calls: [String] = []
+        var activeWasCancelled = false
+        var retryStartedAt: TimeInterval?
+        let queue = makeQueue(journal: journal) { input, _, _, _, _ in
+            if input.contains("C06-B") {
+                calls.append("C06-B")
+                await gate.wait()
+                activeWasCancelled = Task.isCancelled
+            } else {
+                calls.append("C06-A")
+                retryStartedAt = Date().timeIntervalSince1970
+            }
+            return Self.emptyV2Response
+        }
+        do {
+            queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+            #expect(await waitFor({ calls == ["C06-B"] }, seconds: 1),
+                "可运行课程要在队首退避到期之前取得 owner")
+            #expect(queue.items.first(where: { $0.id == runnable.id })?.active == true)
+            #expect(await waitFor({ Date().timeIntervalSince1970 >= retry.notBefore }, seconds: 3))
+            queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+            #expect(calls == ["C06-B"], "到期的 retry 不能越过仍未返回的 owner")
+            #expect(queue.items.first(where: { $0.id == runnable.id })?.active == true)
+            #expect(queue.items.first(where: { $0.id == waiting.id })?.retryPending?.attempts == 1)
+            await gate.release()
+            #expect(await waitFor { queue.items.isEmpty && !queue.running })
+            #expect(calls == ["C06-B", "C06-A"])
+            #expect(!activeWasCancelled, "retry 到期不能取消正在运行的其他课程")
+            #expect((retryStartedAt ?? 0) >= retry.notBefore)
+            await queue.shutdownForTesting()
+        } catch {
+            await gate.release()
+            await queue.shutdownForTesting()
+            throw error
+        }
     }
 
     // MARK: - 策略本身

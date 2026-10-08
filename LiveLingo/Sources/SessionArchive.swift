@@ -550,6 +550,7 @@ final class SessionStore: @unchecked Sendable {
     private let journalWrite: @Sendable (Data, URL) throws -> Void
     private let didRead: @Sendable () -> Void
     private let legacySessionID: UUID
+    private var inspectedTemporaryItems = false
 
     init(directory: URL, legacySessionID: UUID = UUID(),
          atomicWrite: @escaping @Sendable (Data, URL) throws -> Void = SessionArchiveCoding.atomicWrite,
@@ -984,16 +985,33 @@ final class SessionStore: @unchecked Sendable {
             fd = try parent.openRegularFile(named: ".session-store.lock",
                                             flags: writing ? O_RDWR : O_RDONLY, create: writing)
         } catch SensitiveFileIO.Failure.system(_, let code) where !writing && code == ENOENT {
+            inspectTemporaryItems()
             return try action()
         } catch {
             throw SessionStoreError.unsafePath(directory.path)
         }
         defer { _ = Darwin.close(fd) }
-        guard flock(fd, writing ? LOCK_EX : LOCK_SH) == 0 else {
+        guard flock(fd, writing || !inspectedTemporaryItems ? LOCK_EX : LOCK_SH) == 0 else {
             throw SessionStoreError.io(operation: "lock", code: errno)
         }
         defer { _ = flock(fd, LOCK_UN) }
+        inspectTemporaryItems()
         return try action()
+    }
+
+    private func inspectTemporaryItems() {
+        guard !inspectedTemporaryItems else { return }
+        inspectedTemporaryItems = true
+        // Recovery is best effort and must not turn a readable course into a
+        // failed open. Each uncertain candidate is recorded without its content.
+        do {
+            let root = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
+            try root.recoverTemporaryItems()
+            let parent = try SensitiveFileIO.Directory.open(at: directory.deletingLastPathComponent(), create: false, tighten: false)
+            try parent.recoverTemporaryItems(initialExportTarget: directory.lastPathComponent)
+        } catch {
+            SensitiveFileIO.recordTemporaryRecoveryScanFailure()
+        }
     }
 }
 

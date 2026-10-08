@@ -27,6 +27,185 @@ enum DataSafetyFixtures {
 }
 
 final class DataSafetyStorageTests: XCTestCase {
+    private func interruptedWrite(_ bytes: Data, to destination: URL, orphan: URL) throws {
+        XCTAssertThrowsError(try SensitiveFileIO.$beforeTemporaryCommit.withValue({ pending in
+            guard Darwin.rename(pending.path, orphan.path) == 0 else {
+                throw SessionStoreError.io(operation: "stage synthetic interruption", code: errno)
+            }
+            throw SessionStoreError.io(operation: "synthetic process interruption", code: EIO)
+        }) { try SessionArchiveCoding.atomicWrite(bytes, destination) })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.path))
+    }
+
+    func testDU05ReopenRetiresOwnedDuplicateAndKeepsUnknownTemporary() throws {
+        let root = try DataSafetyFixtures.make("DU05-duplicate")
+        defer { DataSafetyFixtures.preserve(root) }
+        let stored = try SessionStore(directory: root).save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        let bytes = try Data(contentsOf: destination)
+        let orphan = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        let unknown = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try bytes.write(to: unknown)
+        try interruptedWrite(bytes, to: destination, orphan: orphan)
+        XCTAssertEqual(try SessionStore(directory: root).load(), stored)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path), "A registered, unused duplicate is safe to retire on reopen")
+        XCTAssertEqual(try Data(contentsOf: unknown), bytes, "A familiar name alone proves no ownership")
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+    }
+
+    func testDU05ReopenRetiresOwnedEmptyWriteAndPreservesUniqueCandidate() throws {
+        let root = try DataSafetyFixtures.make("DU05-empty")
+        defer { DataSafetyFixtures.preserve(root) }
+        let stored = try SessionStore(directory: root).save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        let original = try Data(contentsOf: destination)
+        let empty = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        let unique = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        let uniqueBytes = Data("synthetic unique uncommitted recovery evidence".utf8)
+        try interruptedWrite(Data(), to: destination, orphan: empty)
+        try interruptedWrite(uniqueBytes, to: destination, orphan: unique)
+        XCTAssertEqual(try SessionStore(directory: root).load(), stored)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: empty.path))
+        XCTAssertEqual(try Data(contentsOf: unique), uniqueBytes)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+    }
+
+    func testDU05ReopenRetiresOnlyRegisteredEmptyInitialExportSibling() throws {
+        let parent = try DataSafetyFixtures.make("DU05-initial")
+        defer { DataSafetyFixtures.preserve(parent) }
+        let course = parent.appendingPathComponent("course", isDirectory: true)
+        try FileManager.default.createDirectory(at: course, withIntermediateDirectories: false)
+        let unknown = parent.appendingPathComponent(".course.initial-export-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: unknown, withIntermediateDirectories: false)
+        var operations = SessionExporter.PublicationOperations()
+        operations.exchangeDirectories = { staged, destination in
+            guard renameatx_np(AT_FDCWD, staged.path, AT_FDCWD, destination.path, UInt32(RENAME_SWAP)) == 0 else {
+                throw SessionStoreError.io(operation: "synthetic export exchange", code: errno)
+            }
+            throw SessionStoreError.io(operation: "synthetic interruption after exchange", code: EIO)
+        }
+        XCTAssertThrowsError(try SessionExporter.export(segments: [], sessionDirectory: course, operations: operations))
+        let abandoned = try FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(".course.initial-export-") && $0 != unknown }
+        XCTAssertEqual(abandoned.count, 1)
+        XCTAssertNoThrow(try SessionStore(directory: course).load())
+        for item in abandoned { XCTAssertFalse(FileManager.default.fileExists(atPath: item.path)) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unknown.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: course.appendingPathComponent("manifest.json").path))
+    }
+
+    func testDU05RecoveryKeepsActiveWriterAndRecordsUnknownIdentity() throws {
+        let root = try DataSafetyFixtures.make("DU05-active")
+        defer { DataSafetyFixtures.preserve(root) }
+        let destination = root.appendingPathComponent("snapshot.json")
+        let unknown = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try Data().write(to: unknown)
+        try SensitiveFileIO.$beforeTemporaryCommit.withValue({ pending in
+            let directory = try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false)
+            let results = try directory.recoverTemporaryItems()
+            XCTAssertEqual(results.first(where: { $0.name == pending.lastPathComponent })?.reason, "active_or_unavailable")
+            XCTAssertEqual(results.first(where: { $0.name == unknown.lastPathComponent })?.reason, "unregistered")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: pending.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: unknown.path))
+        }) { try SessionArchiveCoding.atomicWrite(Data("synthetic committed body".utf8), destination) }
+        XCTAssertEqual(try Data(contentsOf: destination), Data("synthetic committed body".utf8))
+    }
+
+    func testDU05RecoveryPreservesReferencesAndReplacedInodes() throws {
+        let root = try DataSafetyFixtures.make("DU05-references")
+        defer { DataSafetyFixtures.preserve(root) }
+        let destination = root.appendingPathComponent("snapshot.json")
+        let bytes = Data("synthetic committed body".utf8)
+        try SessionArchiveCoding.atomicWrite(bytes, destination)
+        let linked = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        let aliased = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        let replaced = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        for orphan in [linked, aliased, replaced] { try interruptedWrite(bytes, to: destination, orphan: orphan) }
+        XCTAssertEqual(link(linked.path, root.appendingPathComponent("retained-hardlink").path), 0)
+        try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("retained-alias").path,
+            withDestinationPath: "./" + aliased.lastPathComponent)
+        let retained = root.appendingPathComponent("retained-original")
+        try FileManager.default.moveItem(at: replaced, to: retained)
+        try FileManager.default.copyItem(at: retained, to: replaced)
+        let directory = try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false)
+        let results = try directory.recoverTemporaryItems()
+        XCTAssertEqual(results.first(where: { $0.name == linked.lastPathComponent })?.reason, "unknown_identity")
+        XCTAssertEqual(results.first(where: { $0.name == aliased.lastPathComponent })?.reason, "referenced")
+        XCTAssertEqual(results.first(where: { $0.name == replaced.lastPathComponent })?.reason, "unknown_receipt")
+        for item in [linked, aliased, replaced, retained, destination] { XCTAssertEqual(try Data(contentsOf: item), bytes) }
+    }
+
+    func testDU05RecoveryNeverFollowsTemporarySymlinksOrCorruptReceipts() throws {
+        let root = try DataSafetyFixtures.make("DU05-unsafe")
+        defer { DataSafetyFixtures.preserve(root) }
+        let protected = root.appendingPathComponent("protected.json")
+        let bytes = Data("synthetic protected body".utf8)
+        try SessionArchiveCoding.atomicWrite(bytes, protected)
+        let symlink = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        let corrupt = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: protected)
+        try interruptedWrite(bytes, to: protected, orphan: corrupt)
+        let fd = Darwin.open(corrupt.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { _ = Darwin.close(fd) }
+        let bad = Data("not a creation receipt".utf8)
+        XCTAssertEqual(bad.withUnsafeBytes { fsetxattr(fd, "com.jianhongli.LiveLingo.temporary-v1", $0.baseAddress, $0.count, 0, 0) }, 0)
+        let results = try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false).recoverTemporaryItems()
+        XCTAssertEqual(results.first(where: { $0.name == symlink.lastPathComponent })?.reason, "unknown_identity")
+        XCTAssertEqual(results.first(where: { $0.name == corrupt.lastPathComponent })?.reason, "inspection_failed")
+        XCTAssertEqual(try Data(contentsOf: corrupt), bytes)
+        XCTAssertEqual(try Data(contentsOf: protected), bytes)
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: symlink.path), protected.path)
+    }
+
+    func testDU05RecoveryKeepsIndirectSiblingReferences() throws {
+        let root = try DataSafetyFixtures.make("DU05-indirect-reference")
+        defer { DataSafetyFixtures.preserve(root) }
+        let destination = root.appendingPathComponent("snapshot.json")
+        let bytes = Data("synthetic committed body".utf8)
+        try SessionArchiveCoding.atomicWrite(bytes, destination)
+        let orphan = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try interruptedWrite(bytes, to: destination, orphan: orphan)
+        try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("directory-alias").path,
+            withDestinationPath: ".")
+        try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("indirect-reference").path,
+            withDestinationPath: "directory-alias/" + orphan.lastPathComponent)
+        let results = try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false).recoverTemporaryItems()
+        XCTAssertEqual(results.first(where: { $0.name == orphan.lastPathComponent })?.reason, "referenced")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.path))
+    }
+
+    func testDU05StartupInventoryPreservesUncommittedInitialExport() throws {
+        let parent = try DataSafetyFixtures.make("DU05-uncommitted-export")
+        defer { DataSafetyFixtures.preserve(parent) }
+        let course = parent.appendingPathComponent("course", isDirectory: true)
+        try FileManager.default.createDirectory(at: course, withIntermediateDirectories: false)
+        var operations = SessionExporter.PublicationOperations()
+        operations.exchangeDirectories = { _, _ in throw SessionStoreError.io(operation: "synthetic interruption before exchange", code: EIO) }
+        XCTAssertThrowsError(try SessionExporter.export(segments: [], sessionDirectory: course, operations: operations))
+        let staged = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)
+            .first { $0.lastPathComponent.hasPrefix(".course.initial-export-") })
+        let manifest = try Data(contentsOf: staged.appendingPathComponent("manifest.json"))
+        XCTAssertEqual(try SessionWorkspace.recordingRecoveries(in: parent), [])
+        XCTAssertEqual(try Data(contentsOf: staged.appendingPathComponent("manifest.json")), manifest)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: course.path).isEmpty)
+    }
+
+    func testDU05UnavailableTrackingParentDoesNotBlockInitialExport() throws {
+        let parent = try DataSafetyFixtures.make("DU05-unavailable-parent")
+        defer { DataSafetyFixtures.preserve(parent) }
+        let course = parent.appendingPathComponent("course", isDirectory: true)
+        try FileManager.default.createDirectory(at: course, withIntermediateDirectories: false)
+        try SensitiveFileIO.$temporaryTrackingParentUnavailable.withValue(true) {
+            try SessionExporter.export(segments: [], sessionDirectory: course)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: course.appendingPathComponent("manifest.json").path))
+        let siblings = try FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(".course.initial-export-") }
+        XCTAssertEqual(siblings.count, 1, "An unavailable trusted parent permits publication but preserves its residual")
+        for sibling in siblings { XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: sibling.path).isEmpty) }
+    }
+
     func testN02StaleRecoveryIndexSaveMergesAnotherRecording() throws {
         let root = try DataSafetyFixtures.make("N02")
         defer { DataSafetyFixtures.preserve(root) }

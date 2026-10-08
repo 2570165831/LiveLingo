@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 /// Restrict new objects and preserve replacement permissions where supported.
 /// Missing capabilities permit portable saves; unexpected permission failures
@@ -11,6 +12,8 @@ enum SensitiveFileIO {
     @TaskLocal static var operationErrors: [OptionalOperation: Int32] = [:]
     @TaskLocal static var operationObserver: (@Sendable (OptionalOperation) -> Void)?
     @TaskLocal static var aclReadError: Int32?
+    @TaskLocal static var beforeTemporaryCommit: (@Sendable (URL) throws -> Void)?
+    @TaskLocal static var temporaryTrackingParentUnavailable = false
     #endif
 
     private static func perform(_ operation: OptionalOperation, _ call: () -> Int32) -> Int32 {
@@ -84,6 +87,41 @@ enum SensitiveFileIO {
         init(_ info: stat) {
             device = info.st_dev; inode = info.st_ino; owner = info.st_uid
         }
+    }
+
+    // An inode number alone can be reused after deletion. The birth time and
+    // containing directory bind this creation receipt to the actual object.
+    private struct TemporaryIdentity: Codable, Equatable {
+        let identity: Identity
+        let birthSeconds: Int64
+        let birthNanoseconds: Int64
+        init(_ info: stat) {
+            identity = Identity(info)
+            birthSeconds = Int64(info.st_birthtimespec.tv_sec)
+            birthNanoseconds = Int64(info.st_birthtimespec.tv_nsec)
+        }
+    }
+
+    private struct TemporaryReceipt: Codable {
+        var version = 1
+        let kind: String
+        let parent: TemporaryIdentity
+        let item: TemporaryIdentity
+        let destination: String
+        let digest: String?
+        let replacement: TemporaryIdentity?
+    }
+    private static let temporaryAttribute = "com.jianhongli.LiveLingo.temporary-v1"
+    private static let recoveryLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "TemporaryRecovery")
+
+    struct TemporaryRecovery: Equatable {
+        let name: String
+        let reason: String
+        var removed: Bool { reason == "removed_empty" || reason == "removed_duplicate" }
+    }
+
+    static func recordTemporaryRecoveryScanFailure() {
+        recoveryLog.notice("temporary_recovery reason=scan_failed")
     }
 
     static func prepareDirectory(_ url: URL) throws {
@@ -213,6 +251,29 @@ enum SensitiveFileIO {
         }
 
         var identity: Identity { get throws { Identity(try status(fd)) } }
+
+        /// Shared ancestors remain usable for export, but do not become a
+        /// trusted cleanup namespace merely because this child is ours.
+        func ownedParentForTemporaryRecovery() throws -> Directory? {
+            let parentFD = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            guard parentFD >= 0 else { throw system("bind temporary parent") }
+            var transferred = false
+            defer { if !transferred { _ = Darwin.close(parentFD) } }
+            let info = try status(parentFD)
+            #if DEBUG
+            let unavailable = temporaryTrackingParentUnavailable
+            #else
+            let unavailable = false
+            #endif
+            guard info.st_uid == getuid(), !unavailable else {
+                recoveryLog.notice("temporary_recovery reason=shared_parent_preserved")
+                return nil
+            }
+            let parent = Directory(fd: parentFD, url: url.deletingLastPathComponent())
+            transferred = true
+            try parent.assertStillAtOriginalPath()
+            return parent
+        }
 
         /// The caller owns the returned descriptor. An existing leaf is never
         /// opened for writing by this creation-only operation.
@@ -358,6 +419,18 @@ enum SensitiveFileIO {
             // also runs if writing, syncing, closing or replacing fails.
             var pending = true
             defer { if pending { removeIfMatching(temporary, identity: pendingIdentity) } }
+            // Keep the lease through close/rename. Recovery never treats an
+            // active writer's temporary inode as abandoned.
+            let lease = dup(item)
+            guard lease >= 0 else { _ = Darwin.close(item); throw system("lease private temporary file") }
+            defer { _ = Darwin.close(lease) }
+            guard flock(lease, LOCK_EX | LOCK_NB) == 0 else {
+                _ = Darwin.close(item)
+                throw system("lock private temporary file")
+            }
+            recordTemporary(item: lease, kind: "write", destination: name,
+                            digest: SessionArchiveCoding.digest(data), replacement: nil)
+            defer { if !pending { _ = fremovexattr(lease, temporaryAttribute, 0) } }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
             try writeBytes(data, to: item)
@@ -385,6 +458,9 @@ enum SensitiveFileIO {
                 }
             }
             try handle.synchronize()
+            #if DEBUG
+            try beforeTemporaryCommit?(url.appendingPathComponent(temporary))
+            #endif
             try handle.close()
             if let original {
                 guard let current = try entryStatus(name), Identity(current) == Identity(original),
@@ -505,6 +581,190 @@ enum SensitiveFileIO {
                 }
                 if name != ".", name != ".." { result.append(name) }
             }
+        }
+
+        private func recordTemporary(item: Int32, kind: String, destination: String,
+                                     digest: String?, replacement: TemporaryIdentity?) {
+            do {
+                let receipt = TemporaryReceipt(kind: kind, parent: TemporaryIdentity(try status(fd)),
+                    item: TemporaryIdentity(try status(item)), destination: destination,
+                    digest: digest, replacement: replacement)
+                let bytes = try JSONEncoder().encode(receipt)
+                let result = bytes.withUnsafeBytes {
+                    fsetxattr(item, temporaryAttribute, $0.baseAddress, $0.count, 0, 0)
+                }
+                guard result == 0, fsync(item) == 0 else {
+                    recoveryLog.notice("temporary_recovery reason=receipt_unavailable")
+                    return
+                }
+            } catch {
+                recoveryLog.notice("temporary_recovery reason=receipt_unavailable")
+            }
+        }
+
+        /// The caller holds the empty destination's publication lock. After a
+        /// swap, only that exact empty inode and the exact published replacement
+        /// can establish that the staging entry has no recovery value.
+        func recordInitialExportReplacement(destination: String, staged: String) throws {
+            guard let original = try directoryIfPresent(named: destination),
+                  let replacement = try directoryIfPresent(named: staged),
+                  try original.names().isEmpty else { throw Failure.unsafePath }
+            recordTemporary(item: original.fd, kind: "initial_empty", destination: destination,
+                digest: nil, replacement: TemporaryIdentity(try status(replacement.fd)))
+        }
+
+        func removeEmptyDirectory(named name: String, matching identity: Identity) throws {
+            guard let owned = try directoryIfPresent(named: name), try owned.identity == identity,
+                  try owned.names().isEmpty,
+                  let current = try entryStatus(name), Identity(current) == identity else { throw Failure.unsafePath }
+            guard unlinkat(fd, name, AT_REMOVEDIR) == 0 else { throw system("retire empty temporary directory") }
+            try synchronize()
+        }
+
+        /// No recursive removal, no filename-only ownership, and no disposal
+        /// of unique uncommitted bytes. Unsupported/missing receipts are kept.
+        @discardableResult
+        func recoverTemporaryItems(initialExportTarget: String? = nil) throws -> [TemporaryRecovery] {
+            try assertStillAtOriginalPath()
+            let allNames = try names().sorted()
+            var results: [TemporaryRecovery] = []
+            for name in allNames {
+                let write = initialExportTarget == nil && [".session-write-", ".sensitive-write-"].contains { prefix in
+                    name.hasPrefix(prefix) && name.hasSuffix(".tmp") &&
+                        UUID(uuidString: String(name.dropFirst(prefix.count).dropLast(4))) != nil
+                }
+                let initial = name.hasPrefix(".") && name.range(of: ".initial-export-", options: .backwards).map {
+                    UUID(uuidString: String(name[$0.upperBound...])) != nil &&
+                        (initialExportTarget == nil || String(name[name.index(after: name.startIndex)..<$0.lowerBound]) == initialExportTarget)
+                } == true
+                guard write || initial else { continue }
+                let reason: String
+                do { reason = try recoverTemporaryItem(name, allNames: allNames, write: write) }
+                catch { reason = "inspection_failed" }
+                results.append(TemporaryRecovery(name: name, reason: reason))
+                let fingerprint = SessionArchiveCoding.digest(Data(name.utf8))
+                recoveryLog.notice("temporary_recovery id=\(fingerprint, privacy: .public) reason=\(reason, privacy: .public)")
+            }
+            return results
+        }
+
+        private func recoverTemporaryItem(_ name: String, allNames: [String], write: Bool) throws -> String {
+            guard let before = try entryStatus(name) else { return "already_absent" }
+            try requireOwner(before)
+            let kind = before.st_mode & S_IFMT
+            guard (write && kind == S_IFREG && before.st_nlink == 1) || (!write && kind == S_IFDIR) else {
+                return "unknown_identity"
+            }
+            let item = openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | (write ? 0 : O_DIRECTORY))
+            guard item >= 0 else { throw pathFailure("inspect temporary object") }
+            defer { _ = Darwin.close(item) }
+            guard TemporaryIdentity(try status(item)) == TemporaryIdentity(before) else { return "identity_changed" }
+            guard flock(item, LOCK_EX | LOCK_NB) == 0 else { return "active_or_unavailable" }
+            defer { _ = flock(item, LOCK_UN) }
+            let length = fgetxattr(item, temporaryAttribute, nil, 0, 0, 0)
+            guard length > 0, length <= 4096 else { return "unregistered" }
+            var bytes = Data(count: length)
+            let read = bytes.withUnsafeMutableBytes { fgetxattr(item, temporaryAttribute, $0.baseAddress, $0.count, 0, 0) }
+            guard read == length,
+                  let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+                  Set(object.keys).isSubset(of: ["version", "kind", "parent", "item", "destination", "digest", "replacement"]),
+                  let receipt = try? JSONDecoder().decode(TemporaryReceipt.self, from: bytes), receipt.version == 1,
+                  receipt.parent == TemporaryIdentity(try status(fd)), receipt.item == TemporaryIdentity(before),
+                  receipt.kind == (write ? "write" : "initial_empty") else { return "unknown_receipt" }
+            try validateName(receipt.destination)
+            // Sibling aliases are references too. Never follow them or read
+            // arbitrary files while deciding whether a temporary item is unused.
+            for sibling in allNames {
+                guard let info = try entryStatus(sibling), info.st_mode & S_IFMT == S_IFLNK else { continue }
+                guard let value = try linkTarget(named: sibling) else { return "reference_unknown" }
+                guard let referenced = try referencesTemporary(value, name: name, identity: receipt.item) else {
+                    return "reference_unknown"
+                }
+                if referenced { return "referenced" }
+            }
+            let reason: String
+            var destinationIdentity: TemporaryIdentity?
+            if write {
+                let current = try status(item)
+                guard current.st_nlink == 1 else { return "referenced" }
+                if current.st_size == 0 { reason = "removed_empty" }
+                else {
+                    guard let expected = receipt.digest, SessionArchiveCoding.isDigest(expected),
+                          let destination = try entryStatus(receipt.destination) else { return "unique_candidate" }
+                    try requireRegular(destination)
+                    let target = try openRegularFile(named: receipt.destination, flags: O_RDONLY, create: false)
+                    let handle = FileHandle(fileDescriptor: target, closeOnDealloc: true)
+                    defer { try? handle.close() }
+                    let pending = FileHandle(fileDescriptor: item, closeOnDealloc: false)
+                    guard SessionArchiveCoding.digest(try pending.readToEnd() ?? Data()) == expected,
+                          SessionArchiveCoding.digest(try handle.readToEnd() ?? Data()) == expected else { return "unique_candidate" }
+                    destinationIdentity = TemporaryIdentity(destination)
+                    reason = "removed_duplicate"
+                }
+            } else {
+                let owned = Directory(fd: dup(item), url: url.appendingPathComponent(name, isDirectory: true))
+                guard owned.fd >= 0, try owned.names().isEmpty else { return "nonempty_candidate" }
+                guard name.hasPrefix("." + receipt.destination + ".initial-export-"),
+                      let replacement = receipt.replacement,
+                      let destination = try entryStatus(receipt.destination), destination.st_mode & S_IFMT == S_IFDIR,
+                      TemporaryIdentity(destination) == replacement, replacement != receipt.item else { return "publication_unknown" }
+                destinationIdentity = replacement
+                reason = "removed_empty"
+            }
+            try assertStillAtOriginalPath()
+            guard let current = try entryStatus(name), TemporaryIdentity(current) == receipt.item,
+                  !write || current.st_nlink == 1 else { return "identity_changed" }
+            if let destinationIdentity {
+                guard let destination = try entryStatus(receipt.destination), TemporaryIdentity(destination) == destinationIdentity else {
+                    return "destination_changed"
+                }
+            }
+            guard unlinkat(fd, name, write ? 0 : AT_REMOVEDIR) == 0 else { throw system("retire unused temporary object") }
+            try synchronize()
+            return reason
+        }
+
+        private func linkTarget(named name: String) throws -> String? {
+            var target = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+            let count = readlinkat(fd, name, &target, target.count - 1)
+            guard count >= 0, count < target.count - 1 else { return nil }
+            return String(bytes: target.prefix(Int(count)).map { UInt8(bitPattern: $0) }, encoding: .utf8)
+        }
+
+        /// Resolve only inside this bound directory. Outside references,
+        /// ambiguous '..' paths and cycles are unknown, so the item is kept.
+        private func referencesTemporary(_ target: String, name: String,
+                                         identity: TemporaryIdentity) throws -> Bool? {
+            let base = try systemAliasPath(url.standardizedFileURL.path)
+            let candidate = try systemAliasPath(url.appendingPathComponent(name).standardizedFileURL.path)
+            var pending = target.hasPrefix("/") ? URL(fileURLWithPath: target) : url.appendingPathComponent(target)
+            if target.split(separator: "/").contains("..") { return nil }
+            for _ in 0..<32 {
+                let path = try systemAliasPath(pending.standardizedFileURL.path)
+                guard path == base || path.hasPrefix(base + "/") else { return nil }
+                if path == candidate || path.hasPrefix(candidate + "/") { return true }
+                let parts = path.dropFirst(base.count).split(separator: "/").map(String.init)
+                if parts.isEmpty { return true }
+                var directory = self
+                var redirected = false
+                for (index, part) in parts.enumerated() {
+                    guard let info = try directory.entryStatus(part) else { return nil }
+                    let kind = info.st_mode & S_IFMT
+                    if kind == S_IFLNK {
+                        guard let link = try directory.linkTarget(named: part),
+                              !link.split(separator: "/").contains("..") else { return nil }
+                        pending = link.hasPrefix("/") ? URL(fileURLWithPath: link) : directory.url.appendingPathComponent(link)
+                        for remaining in parts.dropFirst(index + 1) { pending.appendPathComponent(remaining) }
+                        redirected = true
+                        break
+                    }
+                    if index == parts.count - 1 { return TemporaryIdentity(info) == identity }
+                    guard kind == S_IFDIR, let next = try directory.directoryIfPresent(named: part) else { return nil }
+                    directory = next
+                }
+                if !redirected { return nil }
+            }
+            return nil
         }
 
         private func entryStatus(_ name: String) throws -> stat? {
