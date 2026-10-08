@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from Scripts import privacy_package as privacy
+from Scripts import model_files
 from Scripts.test_model_files import write_model
 
 
@@ -24,7 +25,7 @@ CANARY = "synthetic classroom canary"
 def load_script(name):
     spec = importlib.util.spec_from_file_location(name.replace("-", "_"), ROOT / "Scripts" / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
-    with patch.dict(sys.modules, privacy_package=privacy):
+    with patch.dict(sys.modules, privacy_package=privacy, model_files=model_files):
         spec.loader.exec_module(module)
     return module
 

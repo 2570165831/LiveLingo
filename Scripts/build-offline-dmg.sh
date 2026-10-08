@@ -235,6 +235,8 @@ if [[ -L "${package_root}/Applications" ]]; then
 else
   check_package_privacy "${package_root}" app-only
 fi
+"${python_bin}" "${project_root}/Scripts/model_files.py" check --app "${staged_app}" || \
+  fail "暂存 App 内模型文件不完整（缺权重、分片或分词器等），拒绝继续"
 "${python_bin}" "${sign_script}" --verify-only --app "${staged_app}" --identity "${sign_identity}"
 "${codesign_bin}" --verify --deep --strict --verbose=2 "${staged_app}"
 check_authority "${staged_app}" "${sign_identity}"
