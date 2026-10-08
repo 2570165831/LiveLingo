@@ -595,8 +595,14 @@ final class AppModel: ObservableObject {
             previewWake?.signal()
         }
     }
-    @Published var previewTranslationEnabled = true {
-        didSet { resetPreviewTranslation() }
+    /// On by default for new preferences. An explicit prior choice is retained.
+    @Published var previewTranslationEnabled: Bool {
+        didSet {
+            if previewTranslationEnabled != oldValue {
+                preferences.set(previewTranslationEnabled, forKey: Self.previewTranslationDefaultsKey)
+            }
+            resetPreviewTranslation()
+        }
     }
     private(set) var previewChinese: String {
         get { captionStream.previewChinese }
@@ -1258,6 +1264,7 @@ final class AppModel: ObservableObject {
         noteBatchCharacters = savedBatchCharacters ?? SummaryRefreshPolicy.automaticBatchCharacters
         let savedFocusMode = preferences.bool(forKey: Self.focusModeDefaultsKey)
         let savedPreventIdleSleep = (preferences.object(forKey: Self.preventIdleSleepDefaultsKey) as? Bool) ?? true
+        previewTranslationEnabled = (preferences.object(forKey: Self.previewTranslationDefaultsKey) as? Bool) ?? true
         let onBattery = PowerSourceMonitor.isOnBattery()
         processingFocusEnabled = savedFocusMode
         preventIdleSleepWhileRecording = savedPreventIdleSleep
@@ -4968,6 +4975,7 @@ final class AppModel: ObservableObject {
     private static let focusModeDefaultsKey = "LiveLingo.processingFocus"
     private static let noteBatchDefaultsKey = "LiveLingo.noteBatchCharacters"
     private static let preventIdleSleepDefaultsKey = "LiveLingo.preventIdleSleepWhileRecording"
+    private static let previewTranslationDefaultsKey = "LiveLingo.previewTranslationEnabled"
 }
 
 enum SimplifiedChineseNormalizer {
