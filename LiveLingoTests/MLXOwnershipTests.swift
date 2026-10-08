@@ -19,6 +19,15 @@ private actor ModelSwitchProbe {
     }
 }
 
+private final class MLXOwnershipRetirementProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+    var events: [String] { lock.withLock { recorded } }
+    func record(_ event: MLXRuntime.RetirementEventForTesting) {
+        lock.withLock { recorded.append(event.rawValue) }
+    }
+}
+
 @MainActor
 final class TranslationModelLifetimeTests: XCTestCase {
     private let old = QwenModelProfile.highQuality.translationModel
@@ -94,13 +103,17 @@ final class TranslationModelLifetimeTests: XCTestCase {
 final class MLXOwnershipTests: XCTestCase {
     private let model = "qwen3.5-4b-mlx"
 
-    private func makeRuntime(timeout: TimeInterval = 1) throws -> (MLXRuntime, URL) {
+    private func makeRuntime(timeout: TimeInterval = 1,
+                             onRetirementEvent: (@Sendable (MLXRuntime.RetirementEventForTesting) -> Void)? = nil)
+        throws -> (MLXRuntime, URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("mlx-ownership-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let script = directory.appendingPathComponent("fake-worker.pl")
         try Self.worker.write(to: script, atomically: true, encoding: .utf8)
-        return (MLXRuntime(testConfiguration: .init(python: URL(fileURLWithPath: "/usr/bin/perl"),
-            script: script, models: directory, state: directory, controlTimeout: timeout)), directory)
+        var configuration = MLXRuntime.TestConfiguration(python: URL(fileURLWithPath: "/usr/bin/perl"),
+            script: script, models: directory, state: directory, controlTimeout: timeout)
+        configuration.onRetirementEvent = onRetirementEvent
+        return (MLXRuntime(testConfiguration: configuration), directory)
     }
 
     private func generate(_ runtime: MLXRuntime, prompt: String,
@@ -217,7 +230,8 @@ final class MLXOwnershipTests: XCTestCase {
     }
 
     func testClosedOutputKeepsRetiringProcessVisibleUntilActualExit() async throws {
-        let (runtime, directory) = try makeRuntime(timeout: 0.5)
+        let probe = MLXOwnershipRetirementProbe()
+        let (runtime, directory) = try makeRuntime(timeout: 0.5, onRetirementEvent: { probe.record($0) })
         defer { try? FileManager.default.removeItem(at: directory) }
         let task = Task { try await generate(runtime, prompt: "close-pipe") }
         await waitFor { await runtime.resourceStates()[self.model]?.retiring == true }
@@ -228,6 +242,9 @@ final class MLXOwnershipTests: XCTestCase {
         _ = await task.result
         await waitFor { await runtime.resourceStates().isEmpty }
         XCTAssertNotEqual(Darwin.kill(retained.processIdentifier, 0), 0)
+        XCTAssertEqual(probe.events,
+            ["inputClosed", "forceKillSent", "exitObserved", "stdoutJoined", "stderrJoined", "retired"],
+            "Stdout EOF cannot release ownership before exact-child exit and both reader joins")
     }
 
     func testImmediateAcknowledgementsCompleteWithoutChangingResultsOrWorker() async throws {

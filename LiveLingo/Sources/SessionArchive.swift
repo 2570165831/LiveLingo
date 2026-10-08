@@ -548,15 +548,18 @@ final class SessionStore: @unchecked Sendable {
     let directory: URL
     private let atomicWrite: @Sendable (Data, URL) throws -> Void
     private let journalWrite: @Sendable (Data, URL) throws -> Void
+    private let didRead: @Sendable () -> Void
     private let legacySessionID: UUID
 
     init(directory: URL, legacySessionID: UUID = UUID(),
          atomicWrite: @escaping @Sendable (Data, URL) throws -> Void = SessionArchiveCoding.atomicWrite,
-         journalWrite: @escaping @Sendable (Data, URL) throws -> Void = SessionArchiveCoding.appendAndSync) {
+         journalWrite: @escaping @Sendable (Data, URL) throws -> Void = SessionArchiveCoding.appendAndSync,
+         didRead: @escaping @Sendable () -> Void = {}) {
         self.directory = directory.standardizedFileURL.resolvingSymlinksInPath()
         self.legacySessionID = legacySessionID
         self.atomicWrite = atomicWrite
         self.journalWrite = journalWrite
+        self.didRead = didRead
     }
 
     func load() throws -> SessionSnapshot? { try loadDetailed().snapshot }
@@ -575,7 +578,40 @@ final class SessionStore: @unchecked Sendable {
 
     @discardableResult
     func save(_ value: SessionSnapshot) throws -> SessionSnapshot {
-        try locked(writing: true) {
+        try withWriteTransaction { try $0.save(value) }
+    }
+
+    @discardableResult
+    func append(_ event: SessionJournalEvent, expectedRevision: Int? = nil) throws -> SessionSnapshot {
+        try withWriteTransaction { try $0.append(event, expectedRevision: expectedRevision) }
+    }
+
+    /// The disk identity and complete hash chain are checked once while both
+    /// writer locks remain held. Every accepted event still reaches its original
+    /// file/parent sync boundary before advancing the in-memory revision.
+    func withWriteTransaction<T>(requiringExistingDirectory: Bool = false,
+                                 _ action: (WriteTransaction) throws -> T) throws -> T {
+        try locked(writing: true, requiringExistingDirectory: requiringExistingDirectory) {
+            let current = try read()
+            return try action(WriteTransaction(store: self, result: current.result,
+                                               needsCheckpoint: current.needsCheckpoint))
+        }
+    }
+
+    final class WriteTransaction {
+        private let store: SessionStore
+        private var result: SessionLoadResult
+        private var needsCheckpoint: Bool
+        var snapshot: SessionSnapshot? { result.snapshot }
+
+        fileprivate init(store: SessionStore, result: SessionLoadResult, needsCheckpoint: Bool) {
+            self.store = store
+            self.result = result
+            self.needsCheckpoint = needsCheckpoint
+        }
+
+        @discardableResult
+        func save(_ value: SessionSnapshot, skippingUnchanged: Bool = false) throws -> SessionSnapshot {
             try value.validate()
             // UI state can retain pre-encoding Date fractions after a journal
             // append. Compare the same persisted representation on both sides,
@@ -583,11 +619,10 @@ final class SessionStore: @unchecked Sendable {
             let snapshot = try SessionArchiveCoding.decode(SessionSnapshot.self,
                 from: SessionArchiveCoding.encode(value))
             try snapshot.validate()
-            let current = try read()
-            guard current.result.incompleteTailBytes == 0 else {
-                throw SessionStoreError.incompleteJournalTail(bytes: current.result.incompleteTailBytes)
+            guard result.incompleteTailBytes == 0 else {
+                throw SessionStoreError.incompleteJournalTail(bytes: result.incompleteTailBytes)
             }
-            if let stored = current.result.snapshot, current.result.origin == .snapshot {
+            if let stored = result.snapshot, result.origin == .snapshot {
                 guard stored.sessionID == snapshot.sessionID else {
                     throw SessionStoreError.identityConflict("保存内容属于另一课程")
                 }
@@ -596,19 +631,22 @@ final class SessionStore: @unchecked Sendable {
                       snapshot.lastJournalDigest == stored.lastJournalDigest else {
                     throw SessionStoreError.staleSnapshot
                 }
-                try Self.validatePreservation(from: stored, to: snapshot)
+                try SessionStore.validatePreservation(from: stored, to: snapshot)
+                var content = snapshot
+                content.updatedAt = stored.updatedAt
+                if skippingUnchanged, !needsCheckpoint, content == stored { return stored }
             } else {
                 guard snapshot.storageRevision == 0, snapshot.lastJournalSequence == 0,
                       snapshot.lastJournalDigest == SessionArchiveCoding.genesisDigest else {
                     throw SessionStoreError.staleSnapshot
                 }
-                if var legacy = current.result.snapshot {
+                if var legacy = result.snapshot {
                     // The first explicit default snapshot remains authoritative
                     // over derived export metadata, as before. Imported targets
                     // are preserved by callers carrying the loaded snapshot;
                     // an existing snapshot's target is always immutable above.
                     if snapshot.targetLocale == nil { legacy.targetLocale = nil }
-                    try Self.validatePreservation(from: legacy, to: snapshot)
+                    try SessionStore.validatePreservation(from: legacy, to: snapshot)
                 }
             }
             var saved = snapshot
@@ -617,22 +655,22 @@ final class SessionStore: @unchecked Sendable {
             let payload = try SessionArchiveCoding.encode(saved)
             let envelope = SnapshotEnvelope(schemaVersion: try SessionArchiveCoding.minimumReaderVersion(for: payload),
                                             payload: payload, checksum: SessionArchiveCoding.digest(payload))
-            try atomicWrite(try SessionArchiveCoding.encode(envelope), directory.appendingPathComponent(Self.snapshotFileName))
+            try store.atomicWrite(try SessionArchiveCoding.encode(envelope), store.directory.appendingPathComponent(SessionStore.snapshotFileName))
             // Date's epoch conversion can round fractional timestamps. Return
             // exactly the value that subsequent readers will compare.
-            return try SessionArchiveCoding.decode(SessionSnapshot.self, from: payload)
+            let persisted = try SessionArchiveCoding.decode(SessionSnapshot.self, from: payload)
+            result = .init(snapshot: persisted, origin: .snapshot)
+            needsCheckpoint = false
+            return persisted
         }
-    }
 
-    @discardableResult
-    func append(_ event: SessionJournalEvent, expectedRevision: Int? = nil) throws -> SessionSnapshot {
-        try locked(writing: true) {
-            let current = try read()
-            guard current.result.origin == .snapshot, var snapshot = current.result.snapshot else {
+        @discardableResult
+        func append(_ event: SessionJournalEvent, expectedRevision: Int? = nil) throws -> SessionSnapshot {
+            guard result.origin == .snapshot, var snapshot = result.snapshot else {
                 throw SessionStoreError.missingSnapshot
             }
-            guard current.result.incompleteTailBytes == 0 else {
-                throw SessionStoreError.incompleteJournalTail(bytes: current.result.incompleteTailBytes)
+            guard result.incompleteTailBytes == 0 else {
+                throw SessionStoreError.incompleteJournalTail(bytes: result.incompleteTailBytes)
             }
             if let expectedRevision, expectedRevision != snapshot.storageRevision {
                 throw SessionStoreError.staleSnapshot
@@ -643,14 +681,16 @@ final class SessionStore: @unchecked Sendable {
                                         previousDigest: old.lastJournalDigest, event: event)
             let persistedEvent = try row.event(line: row.sequence)
             try persistedEvent.apply(to: &snapshot)
-            try Self.validatePreservation(from: old, to: snapshot, retiringCheckpointIDs: persistedEvent.retiringCheckpointIDs)
+            try SessionStore.validatePreservation(from: old, to: snapshot, retiringCheckpointIDs: persistedEvent.retiringCheckpointIDs)
             var bytes = try SessionArchiveCoding.encode(row)
             bytes.append(0x0A)
-            let url = directory.appendingPathComponent(Self.journalFileName)
-            try journalWrite(bytes, url)
+            let url = store.directory.appendingPathComponent(SessionStore.journalFileName)
+            try store.journalWrite(bytes, url)
             snapshot.storageRevision += 1
             snapshot.lastJournalSequence = row.sequence
             snapshot.lastJournalDigest = row.checksum
+            result.snapshot = snapshot
+            needsCheckpoint = true
             return snapshot
         }
     }
@@ -722,9 +762,11 @@ final class SessionStore: @unchecked Sendable {
         var result: SessionLoadResult
         var journalData: Data = Data()
         var validJournalBytes: Int = 0
+        var needsCheckpoint: Bool = false
     }
 
     private func read() throws -> ReadState {
+        didRead()
         let snapshotURL = directory.appendingPathComponent(Self.snapshotFileName)
         let journalURL = directory.appendingPathComponent(Self.journalFileName)
         try SessionArchiveCoding.requireRegularFileIfPresent(snapshotURL)
@@ -812,7 +854,8 @@ final class SessionStore: @unchecked Sendable {
             throw SessionStoreError.corruptSnapshot
         }
         return ReadState(result: .init(snapshot: snapshot, origin: .snapshot, incompleteTailBytes: tailCount),
-                         journalData: bytes, validJournalBytes: position)
+                         journalData: bytes, validJournalBytes: position,
+                         needsCheckpoint: sequence > checkpointSequence)
     }
 
     private func readLegacy() throws -> SessionSnapshot? {
@@ -914,17 +957,22 @@ final class SessionStore: @unchecked Sendable {
             && (!old.hasUsableTranslation || old.chinese == new.chinese && new.hasUsableTranslation)
     }
 
-    private func locked<T>(writing: Bool, _ action: () throws -> T) throws -> T {
+    private func locked<T>(writing: Bool, requiringExistingDirectory: Bool = false,
+                           _ action: () throws -> T) throws -> T {
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireSessionDirectory(directory)
         #endif
         Self.processLock.lock()
         defer { Self.processLock.unlock() }
         try SessionArchiveCoding.privateIO(at: directory) {
-            if writing {
+            if writing && !requiringExistingDirectory {
                 try SensitiveFileIO.prepareDirectory(directory)
             } else if FileManager.default.fileExists(atPath: directory.path) {
                 _ = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: true)
+            } else if requiringExistingDirectory {
+                // A previously bound saver must never recreate a course after
+                // migration, including the empty directory used for its lock.
+                throw SessionStoreError.missingSnapshot
             }
             for name in [Self.snapshotFileName, Self.journalFileName, ".session-store.lock"] {
                 try SensitiveFileIO.tightenFileIfPresent(directory.appendingPathComponent(name))

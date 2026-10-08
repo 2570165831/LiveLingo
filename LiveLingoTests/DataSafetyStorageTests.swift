@@ -6,7 +6,7 @@ import XCTest
 enum DataSafetyFixtures {
     static func make(_ label: String) throws -> URL {
         let designated = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("work/dd-safety/tmp", isDirectory: true)
+            .deletingLastPathComponent().appendingPathComponent("work/dd-energy/tmp", isDirectory: true)
         guard SessionDirectoryLocation.canonical(FileManager.default.temporaryDirectory)
             == SessionDirectoryLocation.canonical(designated) else {
             throw NSError(domain: "DataSafetyFixture", code: 1,
@@ -19,7 +19,7 @@ enum DataSafetyFixtures {
 
     static func preserve(_ root: URL) {
         let destination = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("work/dd-safety/fixtures", isDirectory: true)
+            .deletingLastPathComponent().appendingPathComponent("work/dd-energy/fixtures", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
             try FileManager.default.moveItem(at: root, to: destination.appendingPathComponent(root.lastPathComponent))

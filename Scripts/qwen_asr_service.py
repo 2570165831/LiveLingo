@@ -75,6 +75,8 @@ MAX_COMPLETION_RECEIPTS = 256
 MAX_INFERENCE_REQUESTS = 3  # one running, at most two submitted ahead
 INFERENCE_SLOTS = threading.BoundedSemaphore(MAX_INFERENCE_REQUESTS)
 IDLE_MODEL_SECONDS = 120.0
+IDLE_UNLOAD_RETRY_SECONDS = 5.0
+IDLE_MAINTENANCE = None
 INFERENCE_WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-inference")
 AUTO_SELF_CHECKS = {}  # model key -> (loaded object identity, check result); no model references
 ASR_TEXT_TOKEN = 151704
@@ -284,6 +286,7 @@ def model_for(key: str):
             MODELS[key] = loaded
             MODEL_LAST_USED[key] = time.monotonic()
             AUTO_SELF_CHECKS.pop(key, None)
+            signal_idle_maintenance()
         RequestLog.emit(f"ASR loaded model={key} seconds={time.monotonic() - started:.3f}")
     return MODELS[key]
 
@@ -522,11 +525,13 @@ def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, 
         finally:
             with MODEL_STATE_LOCK:
                 if model_key in MODELS: MODEL_LAST_USED[model_key] = time.monotonic()
+                signal_idle_maintenance()
 
 
 def run_registered_transcription(request_id, model_input_path, model_key, language_mode=None, probe_input_path=None):
     with MODEL_STATE_LOCK:
         REQUEST_STATES[request_id] = {'model': model_key, 'state': 'running'}
+        signal_idle_maintenance()
     try:
         return transcribe_audio(model_input_path, model_key, language_mode, probe_input_path)
     finally:
@@ -534,6 +539,7 @@ def run_registered_transcription(request_id, model_input_path, model_key, langua
         # Keep the request registered until the model call actually returns.
         with MODEL_STATE_LOCK:
             REQUEST_STATES[request_id] = {'model': model_key, 'state': 'finished'}
+            signal_idle_maintenance()
 
 
 def resource_snapshot():
@@ -551,6 +557,7 @@ def finish_request(request_id, model_key):
         COMPLETED_REQUESTS[request_id] = {'model': model_key, 'state': 'finished'}
         while len(COMPLETED_REQUESTS) > MAX_COMPLETION_RECEIPTS:
             COMPLETED_REQUESTS.pop(next(iter(COMPLETED_REQUESTS)))
+        signal_idle_maintenance()
 
 
 def unload_idle_models(now=None, idle_seconds=IDLE_MODEL_SECONDS):
@@ -572,6 +579,7 @@ def unload_idle_models(now=None, idle_seconds=IDLE_MODEL_SECONDS):
                 AUTO_SELF_CHECKS.pop(key, None)
                 retired.append(key)
             pending_release = set(UNLOADING_MODELS)
+            signal_idle_maintenance()
         if pending_release:
             gc.collect()
             try:
@@ -581,24 +589,74 @@ def unload_idle_models(now=None, idle_seconds=IDLE_MODEL_SECONDS):
                 pass
             with MODEL_STATE_LOCK:
                 UNLOADING_MODELS.difference_update(pending_release)
+                signal_idle_maintenance()
             RequestLog.emit('ASR unloaded models=' + ','.join(sorted(pending_release)))
     return sorted(retired)
 
 
-def start_idle_maintenance():
-    stopped = threading.Event()
-    def maintain():
-        while not stopped.wait(5):
-            with MODEL_STATE_LOCK:
-                busy = bool(REQUEST_STATES)
-                loaded = bool(MODELS) or bool(UNLOADING_MODELS)
-            if busy or not loaded: continue
+def signal_idle_maintenance():
+    """Called with MODEL_STATE_LOCK held; startup needs no maintenance thread."""
+    if IDLE_MAINTENANCE is not None:
+        IDLE_MAINTENANCE.condition.notify_all()
+
+
+def idle_maintenance_deadline(now):
+    """Called under the state lock; handlers retain ownership through cleanup."""
+    if REQUEST_STATES:
+        return None
+    if UNLOADING_MODELS:
+        return now
+    return min((MODEL_LAST_USED[key] + IDLE_MODEL_SECONDS
+                for key in MODELS if key in MODEL_LAST_USED), default=None)
+
+
+class IdleMaintenance:
+    """Wait for state changes or the earliest unload deadline, never a heartbeat."""
+    def __init__(self):
+        self.condition = threading.Condition(MODEL_STATE_LOCK)
+        self.stopped = False
+        self.thread = None
+
+    def set(self):
+        # Keep the previous stop-handle interface and wake an indefinite wait.
+        with self.condition:
+            self.stopped = True
+            self.condition.notify_all()
+
+    def run(self):
+        retry_at = None
+        while True:
+            with self.condition:
+                if self.stopped:
+                    return
+                now = time.monotonic()
+                deadline = idle_maintenance_deadline(now)
+                if deadline is not None and retry_at is not None:
+                    deadline = max(deadline, retry_at)
+                remaining = None if deadline is None else max(0.0, deadline - now)
+                if remaining is None or remaining > 0:
+                    self.condition.wait(remaining)
+                    continue
             # One maintenance future at a time, on the same thread as MLX.
-            try: INFERENCE_WORKER.submit(unload_idle_models).result()
+            try:
+                INFERENCE_WORKER.submit(unload_idle_models).result()
+                retry_at = None
             except Exception as error:
+                # A failed cache release stays visible and retries with a bound
+                # delay, rather than spinning on an already expired deadline.
+                retry_at = time.monotonic() + IDLE_UNLOAD_RETRY_SECONDS
                 RequestLog.emit(f'ASR idle-unload failed code={safe_exception_code(error)}')
-    threading.Thread(target=maintain, name='asr-idle-maintenance', daemon=True).start()
-    return stopped
+
+
+def start_idle_maintenance():
+    global IDLE_MAINTENANCE
+    maintenance = IdleMaintenance()
+    with MODEL_STATE_LOCK:
+        IDLE_MAINTENANCE = maintenance
+    maintenance.thread = threading.Thread(target=maintenance.run,
+                                         name='asr-idle-maintenance', daemon=True)
+    maintenance.thread.start()
+    return maintenance
 
 
 class RequestLog:
@@ -720,6 +778,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 REQUEST_STATES[request_id] = {'model': model_key, 'state': 'waiting'}
                 duplicate = False
+                signal_idle_maintenance()
         if duplicate:
             self.send_json(409, {"error": "Request ID is already in use"})
             return
@@ -886,8 +945,75 @@ def validate_bind_host(host: str) -> str:
     return str(address)
 
 
+def wakeable_http_server_class(base):
+    """Keep the stdlib request dispatch, with a separate shutdown wakeup fd.
+
+    The factory also permits an unbound base in CPU-only transport tests.
+    """
+    import selectors
+    import socket
+
+    class WakeableHTTPServer(base):
+        def __init__(self, *args, **kwargs):
+            self._http_stopping = threading.Event()
+            self._http_done = threading.Event()
+            self._http_wake_read, self._http_wake_write = socket.socketpair()
+            self._http_wake_read.setblocking(False)
+            self._http_wake_write.setblocking(False)
+            try:
+                super().__init__(*args, **kwargs)
+            except BaseException:
+                self._http_wake_read.close()
+                self._http_wake_write.close()
+                raise
+
+        def serve_forever(self, poll_interval=0.5):
+            # Accept the stdlib argument for compatibility; shutdown wakes the
+            # selector explicitly, so its timeout is always indefinite.
+            self._http_done.clear()
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(self, selectors.EVENT_READ)
+                    selector.register(self._http_wake_read, selectors.EVENT_READ)
+                    while not self._http_stopping.is_set():
+                        ready = selector.select()
+                        if self._http_stopping.is_set():
+                            break
+                        for key, _ in ready:
+                            if key.fileobj is self._http_wake_read:
+                                try:
+                                    self._http_wake_read.recv(4096)
+                                except BlockingIOError:
+                                    pass
+                            elif key.fileobj is self:
+                                self._handle_request_noblock()
+                        self.service_actions()
+            finally:
+                self._http_stopping.clear()
+                self._http_done.set()
+
+        def shutdown(self):
+            # Like BaseServer.shutdown, call from a different thread while
+            # serve_forever runs. A full wakeup fd is already readable.
+            self._http_stopping.set()
+            try:
+                self._http_wake_write.send(b'\0')
+            except BlockingIOError:
+                pass
+            self._http_done.wait()
+
+        def server_close(self):
+            try:
+                super().server_close()
+            finally:
+                self._http_wake_read.close()
+                self._http_wake_write.close()
+
+    return WakeableHTTPServer
+
+
 def create_server(host: str, port: int) -> tuple:
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = wakeable_http_server_class(ThreadingHTTPServer)((host, port), Handler)
     server.handle_error = lambda *_: print('ASR http failure code=http_error', flush=True)
     return server, server.server_address[0], server.server_address[1]
 
@@ -938,9 +1064,79 @@ def request_shutdown(server, reason: str) -> None:
         os._exit(0)
 
 
-def start_parent_watchdog(server, parent_pid=None, poll_seconds: float = 1.0) -> tuple:
+class ParentExitMonitor:
+    """Native parent-exit event plus a private fd to interrupt the blocking wait."""
+    def __init__(self, parent_pid):
+        import select
+        import selectors
+        import socket
+
+        self.kqueue = None
+        self.selector = None
+        self.pidfd = None
+        self.wake_read, self.wake_write = socket.socketpair()
+        self.wake_read.setblocking(False)
+        self.wake_write.setblocking(False)
+        try:
+            if hasattr(select, 'kqueue'):
+                self.kqueue = select.kqueue()
+                self.kqueue.control([
+                    select.kevent(parent_pid, filter=select.KQ_FILTER_PROC,
+                                  flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                                  fflags=select.KQ_NOTE_EXIT),
+                    select.kevent(self.wake_read.fileno(), filter=select.KQ_FILTER_READ,
+                                  flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE),
+                ], 0, 0)
+            elif hasattr(os, 'pidfd_open'):
+                self.pidfd = os.pidfd_open(parent_pid)
+                self.selector = selectors.DefaultSelector()
+                self.selector.register(self.pidfd, selectors.EVENT_READ)
+                self.selector.register(self.wake_read, selectors.EVENT_READ)
+            else:
+                raise NotImplementedError('No parent-exit event available')
+        except BaseException:
+            self.close()
+            raise
+
+    def wait(self):
+        if self.kqueue is not None:
+            import select
+            events = self.kqueue.control(None, 2, None)
+            return any(event.filter == select.KQ_FILTER_PROC and
+                       event.fflags & select.KQ_NOTE_EXIT for event in events)
+        return any(key.fileobj == self.pidfd for key, _ in self.selector.select())
+
+    def wake(self):
+        try:
+            self.wake_write.send(b'\0')
+        except BlockingIOError:
+            pass
+
+    def close(self):
+        if self.kqueue is not None:
+            self.kqueue.close()
+        if self.selector is not None:
+            self.selector.close()
+        if self.pidfd is not None:
+            os.close(self.pidfd)
+        self.wake_read.close()
+        self.wake_write.close()
+
+
+def start_parent_watchdog(server, parent_pid=None, poll_seconds: float = 5.0) -> tuple:
     """Watch for a dead parent: stdin EOF or reparenting both mean 'exit now'."""
     parent_pid = os.getppid() if parent_pid is None else parent_pid
+    if poll_seconds <= 0:
+        raise ValueError('Parent fallback interval must be positive')
+    stopped = threading.Event()
+    monitor_lock = threading.Lock()
+    monitor = None
+
+    def stop_watchers():
+        stopped.set()
+        with monitor_lock:
+            if monitor is not None:
+                monitor.wake()
 
     def watch_stdin():
         try:
@@ -951,14 +1147,46 @@ def start_parent_watchdog(server, parent_pid=None, poll_seconds: float = 1.0) ->
                     break
         except Exception:
             pass
+        stop_watchers()
         request_shutdown(server, "parent stdin closed")
 
     def watch_parent():
-        while True:
-            if os.getppid() != parent_pid:
-                request_shutdown(server, "parent process exited")
-                return
-            time.sleep(poll_seconds)
+        nonlocal monitor
+        if stopped.is_set():
+            return
+        try:
+            native = ParentExitMonitor(parent_pid)
+        except (OSError, NotImplementedError, AttributeError):
+            native = None
+        with monitor_lock:
+            monitor = native
+            if stopped.is_set() and native is not None:
+                native.wake()
+        try:
+            if native is not None and not stopped.is_set():
+                try:
+                    dead = os.getppid() != parent_pid or native.wait()
+                except OSError:
+                    dead = None  # Event failure retains the portable fallback.
+                if dead is True and not stopped.is_set():
+                    stop_watchers()
+                    request_shutdown(server, "parent process exited")
+                    return
+                if dead is False:
+                    return  # Explicit wake from stdin EOF.
+            # Native registration may be unavailable/denied. EOF remains an
+            # immediate event; inherited pipes get at most this 5-second check.
+            while not stopped.is_set():
+                if os.getppid() != parent_pid:
+                    stop_watchers()
+                    request_shutdown(server, "parent process exited")
+                    return
+                stopped.wait(poll_seconds)
+        finally:
+            with monitor_lock:
+                monitor = None
+            if native is not None:
+                native.close()
 
     stdin_thread = threading.Thread(target=watch_stdin, name="asr-parent-stdin", daemon=True)
     parent_thread = threading.Thread(target=watch_parent, name="asr-parent-pid", daemon=True)

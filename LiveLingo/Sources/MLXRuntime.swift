@@ -78,11 +78,76 @@ actor MLXRuntime {
                 }
             }
         }
+        func closeInput() async -> Bool {
+            // Serialize EOF with any in-flight write. Cancellation of unload
+            // cannot abandon the pipe or close a descriptor under a writer.
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                queue.async {
+                    self.failure = self.failure ?? POSIXError(.EPIPE)
+                    do { try self.handle.close(); continuation.resume(returning: true) }
+                    catch { continuation.resume(returning: false) }
+                }
+            }
+        }
+    }
+    private final class Reader: @unchecked Sendable {
+        let stream: AsyncThrowingStream<Data, Error>
+        let finished: Task<Void, Never>
+        init(_ handle: FileHandle) {
+            let pair = AsyncThrowingStream<Data, Error>.makeStream()
+            stream = pair.stream
+            finished = Task.detached {
+                await withCheckedContinuation { (joined: CheckedContinuation<Void, Never>) in
+                    DispatchQueue(label: "LiveLingo.MLX.read.\(UUID())").async {
+                        do {
+                            var buffer = [UInt8](repeating: 0, count: 65_536)
+                            while true {
+                                let count = Darwin.read(handle.fileDescriptor, &buffer, buffer.count)
+                                if count == 0 { break }
+                                if count < 0 {
+                                    if errno == EINTR { continue }
+                                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                                }
+                                pair.continuation.yield(Data(buffer.prefix(count)))
+                            }
+                            pair.continuation.finish()
+                        } catch { pair.continuation.finish(throwing: error) }
+                        try? handle.close()
+                        joined.resume()
+                    }
+                }
+            }
+        }
+    }
+    private final class ExitSignal: @unchecked Sendable {
+        private let lock = NSLock()
+        private var exited = false
+        private var waiter: CheckedContinuation<Void, Never>?
+        func recordExit() {
+            let continuation = lock.withLock {
+                exited = true
+                let continuation = waiter
+                waiter = nil
+                return continuation
+            }
+            continuation?.resume()
+        }
+        func wait() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let alreadyExited = lock.withLock {
+                    if exited { return true }
+                    waiter = continuation
+                    return false
+                }
+                if alreadyExited { continuation.resume() }
+            }
+        }
     }
     private final class Worker: @unchecked Sendable {
         let id = UUID()
         let process: Process
         let writer: Writer
+        let exited = ExitSignal()
         var buffer = Data()
         var diagnostics = Data()
         var requests: Set<String> = []
@@ -90,8 +155,17 @@ actor MLXRuntime {
         var retiring = false
         var modelLoaded = false
         var lastActivity = ProcessInfo.processInfo.systemUptime
+        // Actor-owned tasks, including the blocking reads behind the streams.
+        // Keep the child visible until both reads AND consumers have joined.
+        var stdoutReader: Reader?
+        var stderrReader: Reader?
+        var stdoutTask: Task<Void, Never>?
+        var stderrTask: Task<Void, Never>?
+        var retirementTask: Task<Void, Never>?
         init(process: Process, input: FileHandle) {
             self.process = process; writer = Writer(input)
+            let signal = exited
+            process.terminationHandler = { _ in signal.recordExit() }
         }
     }
     private var workers: [String: Worker] = [:]
@@ -142,7 +216,7 @@ actor MLXRuntime {
 
     func resourceStates() -> [String: ResourceState] {
         var visible = workers
-        for (model, worker) in retiringWorkers where worker.process.isRunning {
+        for (model, worker) in retiringWorkers {
             visible[model] = worker
         }
         return visible.mapValues { worker in
@@ -164,6 +238,9 @@ actor MLXRuntime {
     enum RetryWaitPhaseForTesting: Sendable {
         case requestRelease, workerExit
     }
+    enum RetirementEventForTesting: String, Sendable {
+        case inputClosed, forceKillSent, exitObserved, stdoutJoined, stderrJoined, retired
+    }
     struct TestConfiguration: Sendable {
         let python: URL
         let script: URL
@@ -175,6 +252,8 @@ actor MLXRuntime {
         var onRetryWait: (@Sendable (RetryWaitPhaseForTesting) async -> Void)?
         var onWorkerLaunched: (@Sendable (Process, FileHandle) -> Void)?
         var onExitWait: (@Sendable () -> Void)?
+        var onRetirementEvent: (@Sendable (RetirementEventForTesting) -> Void)?
+        var beforeReaderJoin: (@Sendable () async -> Void)?
     }
     private var testConfiguration: TestConfiguration?
     init(testConfiguration: TestConfiguration? = nil) {
@@ -187,6 +266,12 @@ actor MLXRuntime {
     func controlForExitTesting(to handle: FileHandle, timeout: TimeInterval) async throws {
         controlTimeout = timeout
         try await control("shutdown", id: nil, worker: Worker(process: Process(), input: handle))
+    }
+    static func waitForExitForTesting(timeout: TimeInterval, killTimeout: TimeInterval = 2,
+                                     isRunning: @escaping @Sendable () -> Bool,
+                                     forceKill: @escaping @Sendable () -> Void) async -> Bool {
+        await waitForOwnedExit(timeout: timeout, killTimeout: killTimeout,
+                               isRunning: isRunning, forceKill: forceKill)
     }
     #endif
     private static let relativeModels = [
@@ -232,33 +317,13 @@ actor MLXRuntime {
         }
     }
 
-    private static func chunks(_ handle: FileHandle) -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream { continuation in
-            DispatchQueue(label: "LiveLingo.MLX.read.\(UUID())").async {
-                do {
-                    var buffer = [UInt8](repeating: 0, count: 65_536)
-                    while true {
-                        let count = Darwin.read(handle.fileDescriptor, &buffer, buffer.count)
-                        if count == 0 { break }
-                        if count < 0 {
-                            if errno == EINTR { continue }
-                            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                        }
-                        continuation.yield(Data(buffer.prefix(count)))
-                    }
-                    continuation.finish()
-                } catch { continuation.finish(throwing: error) }
-                try? handle.close()
-            }
-        }
-    }
-
     private func worker(_ model: String) throws -> Worker {
-        if let retiring = retiringWorkers[model], retiring.process.isRunning {
+        if retiringWorkers[model] != nil {
             throw QwenRuntimeError.generationInterrupted("上一个模型进程正在退出，任务保留等待重试。")
         }
-        if let existing = workers[model], existing.process.isRunning {
-            guard !existing.retiring else {
+        if let existing = workers[model] {
+            guard existing.process.isRunning, !existing.retiring else {
+                if !existing.process.isRunning { _ = beginRetirement(existing, model: model, graceful: false) }
                 throw QwenRuntimeError.generationInterrupted("模型正在卸载，任务保留等待重试。")
             }
             return existing
@@ -285,7 +350,12 @@ actor MLXRuntime {
         #endif
         process.arguments = interpreterArguments + [script.path, "--model", directory.path,
                                                      "--state-directory", state.path]
+        #if DEBUG
+        // Scripted children need no host environment or production overrides.
+        var environment = testConfiguration == nil ? ProcessInfo.processInfo.environment : [:]
+        #else
         var environment = ProcessInfo.processInfo.environment
+        #endif
         environment.removeValue(forKey: "PYTHONHOME"); environment.removeValue(forKey: "PYTHONPATH")
         environment["HF_HUB_OFFLINE"] = "1"; environment["TRANSFORMERS_OFFLINE"] = "1"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"; environment["TOKENIZERS_PARALLELISM"] = "false"
@@ -302,18 +372,19 @@ actor MLXRuntime {
         testConfiguration?.onWorkerLaunched?(process, input.fileHandleForWriting)
         #endif
         let identifier = worker.id
-        Task {
+        let stdout = Reader(output.fileHandleForReading), stderr = Reader(errors.fileHandleForReading)
+        worker.stdoutReader = stdout; worker.stderrReader = stderr
+        worker.stdoutTask = Task {
             do {
-                for try await chunk in Self.chunks(output.fileHandleForReading) {
+                for try await chunk in stdout.stream {
                     try receive(chunk, model: model, workerID: identifier)
                 }
                 ended(model, workerID: identifier, error: nil)
             } catch { ended(model, workerID: identifier, error: error) }
         }
-        Task {
+        worker.stderrTask = Task {
             do {
-                for try await chunk in Self.chunks(errors.fileHandleForReading) {
-                    guard workers[model]?.id == identifier else { break }
+                for try await chunk in stderr.stream {
                     worker.diagnostics.append(chunk)
                     if worker.diagnostics.count > 8_192 { worker.diagnostics = Data(worker.diagnostics.suffix(8_192)) }
                 }
@@ -411,36 +482,91 @@ actor MLXRuntime {
         for token in Array(controls.keys) where controls[token]?.workerID == workerID && controls[token]?.result == nil {
             resolveControl(token, with: .failure(error ?? QwenRuntimeError.generationInterrupted("模型进程在确认请求前退出；保留上次有效进度。")))
         }
-        if worker.process.isRunning {
-            retiringWorkers[model] = worker
-            worker.process.terminate()
-            Task { await self.waitForExit(worker, model: model) }
-        }
+        _ = beginRetirement(worker, model: model, graceful: false)
     }
 
-    private func waitForExit(_ worker: Worker, model: String) async {
-        let deadline = (ExitDeadline.current ?? ExitDeadline(seconds: controlTimeout + 2)).limited(to: controlTimeout)
-        while worker.process.isRunning && !deadline.isExpired {
+    private func beginRetirement(_ worker: Worker, model: String, graceful: Bool) -> Task<Void, Never> {
+        // unload, stdout EOF and control failure all join this one owner. The
+        // caller can be cancelled without cancelling child retirement.
+        if let existing = worker.retirementTask { return existing }
+        worker.retiring = true
+        retiringWorkers[model] = worker
+        if !graceful, worker.process.isRunning { worker.process.terminate() }
+        let retirement = Task {
+            if graceful {
+                do { try await control("shutdown", id: nil, worker: worker) }
+                catch { Self.memoryLog.error("model=\(model, privacy: .public) shutdown_unacknowledged") }
+            }
+            let inputClosed = await worker.writer.closeInput()
             #if DEBUG
-            testConfiguration?.onExitWait?()
+            if inputClosed { testConfiguration?.onRetirementEvent?(.inputClosed) }
             #endif
-            await Self.sleepForRetirement(0.05)
+            if !inputClosed { Self.memoryLog.error("model=\(model, privacy: .public) input_close_failed") }
+            await waitForExit(worker)
+            // If the bounded kill wait expires (including a revoked quit
+            // deadline), keep this exact owner until Foundation observes exit.
+            // This is an event wait, never another cancelled polling loop.
+            await worker.exited.wait()
+            #if DEBUG
+            testConfiguration?.onRetirementEvent?(.exitObserved)
+            if let beforeReaderJoin = testConfiguration?.beforeReaderJoin { await beforeReaderJoin() }
+            #endif
+            await worker.stdoutReader?.finished.value
+            await worker.stdoutTask?.value
+            #if DEBUG
+            testConfiguration?.onRetirementEvent?(.stdoutJoined)
+            #endif
+            await worker.stderrReader?.finished.value
+            await worker.stderrTask?.value
+            #if DEBUG
+            testConfiguration?.onRetirementEvent?(.stderrJoined)
+            #endif
+            worker.stdoutReader = nil; worker.stderrReader = nil
+            worker.stdoutTask = nil; worker.stderrTask = nil
+            if workers[model]?.id == worker.id { workers[model] = nil }
+            if retiringWorkers[model]?.id == worker.id { retiringWorkers[model] = nil }
+            worker.retirementTask = nil
+            #if DEBUG
+            testConfiguration?.onRetirementEvent?(.retired)
+            #endif
         }
-        if worker.process.isRunning {
+        worker.retirementTask = retirement
+        return retirement
+    }
+
+    private func waitForExit(_ worker: Worker) async {
+        #if DEBUG
+        let onWait = testConfiguration?.onExitWait
+        let onEvent = testConfiguration?.onRetirementEvent
+        #else
+        let onWait: (@Sendable () -> Void)? = nil
+        #endif
+        _ = await Self.waitForOwnedExit(timeout: controlTimeout, isRunning: { worker.process.isRunning }, forceKill: {
             // Process is a child owned by this Worker instance. Never enumerate
             // or signal another application's model processes.
             _ = Darwin.kill(worker.process.processIdentifier, SIGKILL)
-        }
-        let killDeadline = (ExitDeadline.current ?? ExitDeadline(seconds: 2)).limited(to: 2)
-        while worker.process.isRunning && !killDeadline.isExpired {
             #if DEBUG
-            testConfiguration?.onExitWait?()
+            onEvent?(.forceKillSent)
             #endif
-            await Self.sleepForRetirement(0.02)
+        }, onWait: onWait)
+    }
+
+    private static func waitForOwnedExit(timeout: TimeInterval, killTimeout: TimeInterval = 2,
+                                         isRunning: @escaping @Sendable () -> Bool,
+                                         forceKill: @escaping @Sendable () -> Void,
+                                         onWait: (@Sendable () -> Void)? = nil) async -> Bool {
+        let deadline = (ExitDeadline.current ?? ExitDeadline(seconds: timeout + killTimeout)).limited(to: timeout)
+        while isRunning() && !deadline.isExpired {
+            onWait?()
+            await sleepForRetirement(min(0.05, deadline.remaining))
         }
-        if !worker.process.isRunning, retiringWorkers[model]?.id == worker.id {
-            retiringWorkers[model] = nil
+        if isRunning() { forceKill() }
+        let killDeadline = (ExitDeadline.current ?? ExitDeadline(seconds: killTimeout)).limited(to: killTimeout)
+        while isRunning() && !killDeadline.isExpired {
+            onWait?()
+            await sleepForRetirement(min(0.02, killDeadline.remaining))
         }
+        return !isRunning()
     }
 
     private static func sleepForRetirement(_ seconds: TimeInterval) async {
@@ -606,17 +732,14 @@ actor MLXRuntime {
     }
 
     func unload(_ model: String) async {
-        guard let worker = workers[model], worker.requests.isEmpty, !worker.retiring else { return }
-        worker.retiring = true
-        do { try await control("shutdown", id: nil, worker: worker) }
-        catch { Self.memoryLog.error("model=\(model, privacy: .public) shutdown_unacknowledged") }
-        retiringWorkers[model] = worker
-        await waitForExit(worker, model: model)
-        if !worker.process.isRunning, workers[model]?.id == worker.id { workers[model] = nil }
+        guard let worker = workers[model] ?? retiringWorkers[model] else { return }
+        if let retirement = worker.retirementTask { await retirement.value; return }
+        guard worker.requests.isEmpty else { return }
+        await beginRetirement(worker, model: model, graceful: true).value
     }
 
     func shutdown() async {
-        for model in Array(workers.keys) { await unload(model) }
+        for model in Set(workers.keys).union(retiringWorkers.keys) { await unload(model) }
     }
 
     func generate(model: String, prompt: String, input: String, prefix: String,
@@ -629,6 +752,15 @@ actor MLXRuntime {
         let id = UUID().uuidString
         onRequestIdentity?(id)
         return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            // A reaped PID can precede the reader joins. Settle that existing
+            // owner before admission; never drop it to make room for a retry.
+            if let exited = workers[model], !exited.process.isRunning {
+                _ = beginRetirement(exited, model: model, graceful: false)
+            }
+            if let retiring = retiringWorkers[model], !retiring.process.isRunning {
+                try await finishRetirementBeforeRetry(model)
+            }
             try Task.checkCancellation()
             let worker = try worker(model)
             let pair = AsyncThrowingStream<Event, Error>.makeStream()

@@ -9,7 +9,8 @@ import ObjectiveC
 private enum UnitTestTemporaryDirectory {
     static let directory: URL? = {
         guard let path = ProcessInfo.processInfo.environment["LIVELINGO_TEST_TMPDIR"],
-              path.hasPrefix("/"), path.hasSuffix("/dd-safety/tmp") else { return nil }
+              path.hasPrefix("/"),
+              ["/dd-safety/tmp", "/dd-energy/tmp"].contains(where: path.hasSuffix) else { return nil }
         return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
     }()
     private static let install: Void = {

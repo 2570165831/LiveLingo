@@ -6,6 +6,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E10000000000000000000003 /* MLXExitCancellationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000004 /* MLXExitCancellationTests.swift */; };
+		E10000000000000000000001 /* SessionEnergyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002 /* SessionEnergyTests.swift */; };
 		DAFB00000000000000000005 /* DataSafetyRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAFA00000000000000000005 /* DataSafetyRuntimeTests.swift */; };
 		DAFB00000000000000000004 /* DataSafetyAudioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAFA00000000000000000004 /* DataSafetyAudioTests.swift */; };
 		DAFB00000000000000000003 /* DataSafetyReviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAFA00000000000000000003 /* DataSafetyReviewTests.swift */; };
@@ -147,6 +149,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		E10000000000000000000004 /* MLXExitCancellationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLXExitCancellationTests.swift; sourceTree = "<group>"; };
+		E10000000000000000000002 /* SessionEnergyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionEnergyTests.swift; sourceTree = "<group>"; };
 		DAFA00000000000000000005 /* DataSafetyRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSafetyRuntimeTests.swift; sourceTree = "<group>"; };
 		DAFA00000000000000000004 /* DataSafetyAudioTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSafetyAudioTests.swift; sourceTree = "<group>"; };
 		DAFA00000000000000000003 /* DataSafetyReviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSafetyReviewTests.swift; sourceTree = "<group>"; };
@@ -422,7 +426,9 @@
 				A20000000000000000000022 /* CaptionStabilityPublicationTests.swift */,
 				3B3A361BF6A43DB2222C7A97 /* ReviewIdentityTests.swift */,
 				7B302D42994401027F0893B5 /* SessionPersistenceTests.swift */,
+				E10000000000000000000002 /* SessionEnergyTests.swift */,
 				337292BF21D61DC3DF379BC0 /* ResourceSchedulingTests.swift */,0464AE938D0DA8BDFC01AC02 /* CaptionIdentityTests.swift */, A604E8F57B707990169FA517 /* SessionTreeMigrationTests.swift */, E3E7681F6F6509C442F83158 /* SessionStoreTests.swift */, EA1F1D3944F74AA19F668906 /* SourceLanguagePolicyTests.swift */, EA1F1D3944F74AA19F668908 /* LanguageCompatibilityTests.swift */, 6B24813D3AB630C6B987A16C /* AudioRemediationTests.swift */, 8A7AEC88E07581EB6259A137 /* MLXOwnershipTests.swift */, 61481391EF47F304FE7C5586 /* TranscriptStateTests.swift */, A20000000000000000000008 /* SessionExporterTests.swift */,
+				E10000000000000000000004 /* MLXExitCancellationTests.swift */,
 				E80300000000000000000002 /* PrivacyStorageTests.swift */,
 				E80200000000000000000002 /* PrivacyTransportTests.swift */,
 				E80100000000000000000002 /* PrivacyRuntimeTests.swift */, A20000000000000000000013 /* RealtimePolicyTests.swift */, A20000000000000000000019 /* TranslationAcceptanceTests.swift */, A2000000000000000000001A /* AudioContinuityTests.swift */, A2000000000000000000001B /* ExportAndPriorityTests.swift */, A2000000000000000000001C /* ReviewRetryTests.swift */, A2000000000000000000001D /* MediaImportTests.swift */, A2000000000000000000001E /* ClassroomPresentationTests.swift */, A2000000000000000000001F /* LearningFollowUpTests.swift */, 4C6F7E0AA37E495AAA0B5C85 /* CountLanguageAcceptanceTests.swift */, 9505FFEB607E48AF8146001F /* NumberLiteralIntegrityTests.swift */, B0AE357E04C9DB48AE7E5DAE /* CodeIndexProvenanceTests.swift */,);
@@ -602,6 +608,7 @@
 				789000000000000000000001 /* MultilingualLearningNotesTests.swift in Sources */,
 				F74C17E4B9DBAB4B17E9A433 /* ReviewIdentityTests.swift in Sources */,
 				0D3DFC0CF75D7D67AC572AD4 /* SessionPersistenceTests.swift in Sources */,
+				E10000000000000000000001 /* SessionEnergyTests.swift in Sources */,
 				A10000000000000000000020 /* CausalBoundaryRegressionTests.swift in Sources */,
 				A10000000000000000000025 /* CaptionStabilityDraftTests.swift in Sources */,
 				C4DB2CDE54194730B47985D8 /* WaveformFreshnessAcceptanceTests.swift in Sources */,
@@ -622,6 +629,7 @@
 				0E5D0123C95A0E85803EF27C /* MultilingualTranslationTests.swift in Sources */,
 				426BDE147DC859D73739A60C /* AudioRemediationTests.swift in Sources */,
 				0CE01B4507E3276B965D388A /* MLXOwnershipTests.swift in Sources */,
+				E10000000000000000000003 /* MLXExitCancellationTests.swift in Sources */,
 				84845F083D7F515C9602CB68 /* TranscriptStateTests.swift in Sources */,A10000000000000000000008 /* SessionExporterTests.swift in Sources */,
 				E80300000000000000000001 /* PrivacyStorageTests.swift in Sources */,
 				E80200000000000000000001 /* PrivacyTransportTests.swift in Sources */,
