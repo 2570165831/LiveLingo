@@ -23,11 +23,11 @@ The app's interface is currently in Chinese, and translations go from English in
 
 **Keep your Mac online the first time you open the app.** This is macOS's own security check (Gatekeeper), not LiveLingo going online. The first time you open an app downloaded from the internet, macOS asks Apple to confirm that it was notarized, meaning it was submitted to Apple and scanned for malware. In 0.2.0 the notarization ticket is attached to the disk image but not to the app you drag into Applications, so macOS has to look it up online once; offline, it reports that the app cannot be verified and refuses to open it. After that first check no connection is needed. LiveLingo itself never uploads any recordings, text or usage data; transcription, translation and notes all run on your Mac.
 
-| Requirement | |
-| --- | --- |
-| Computer | Apple silicon Mac (M series). Intel Macs are not supported |
-| System | macOS 14 or later |
-| Disk | The disk image is about 14.3 GB and the installed app about 16 GB. Both are on disk during installation, so you need about 31 GB free (about 45 GB if you merge the split files). You can delete the disk image afterwards |
+**Requirements**
+
+- **Computer**: Apple silicon Mac (M series). Intel Macs are not supported
+- **System**: macOS 14 or later
+- **Disk**: The disk image is about 14.3 GB and the installed app about 16 GB. Both are on disk during installation, so you need about 31 GB free (about 45 GB if you merge the split files). You can delete the disk image afterwards
 
 ## Getting started
 
