@@ -16,7 +16,9 @@ from unittest.mock import Mock, call, patch
 
 def source_layout():
     directory = Path(__file__).resolve().parent
-    return directory.parent, directory / "run-xcode-tests.py", Path(tempfile.gettempdir())
+    # The runner resolves its output root; resolve here too so that the default
+    # macOS TMPDIR (/var/folders -> /private/var/folders) yields the same keys.
+    return directory.parent, directory / "run-xcode-tests.py", Path(tempfile.gettempdir()).resolve()
 
 
 REPO, RUNNER_SOURCE, WORK = source_layout()
