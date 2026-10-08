@@ -4167,15 +4167,17 @@ final class LearningReviewQueue: ObservableObject {
             resolvedJournal = try PreviewDataIsolation.dataURL("learning-review-queue.json")
         } catch { preconditionFailure("Preview review queue must stay in its own data directory") }
         #else
+        // Validate the configured data root even when the caller supplies the
+        // journal (the CLI always does): a malformed root must still trap.
+        let environmentRoot = ProcessInfo.processInfo.environment["LIVELINGO_DATA_DIRECTORY"]
+        if let environmentRoot {
+            precondition(environmentRoot.hasPrefix("/") && environmentRoot != "/",
+                         "LIVELINGO_DATA_DIRECTORY must name an absolute local data directory")
+        }
         let resolvedJournal: URL
         if let journalURL {
             resolvedJournal = journalURL
         } else {
-            let environmentRoot = ProcessInfo.processInfo.environment["LIVELINGO_DATA_DIRECTORY"]
-            if let environmentRoot {
-                precondition(environmentRoot.hasPrefix("/") && environmentRoot != "/",
-                             "LIVELINGO_DATA_DIRECTORY must name an absolute local data directory")
-            }
             let configuredRoot = environmentRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/LiveLingo")
             resolvedJournal = configuredRoot.appendingPathComponent("learning-review-queue.json")
