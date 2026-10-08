@@ -11,7 +11,11 @@ final class OutputLanguageBaselineTests: XCTestCase {
         override func object(forKey defaultName: String) -> Any? { nil }
         override func bool(forKey defaultName: String) -> Bool { false }
         override func set(_ value: Any?, forKey defaultName: String) {
-            preconditionFailure("Presentation baselines must not persist preferences")
+            // The preview toggle is a user setting and persists by design; drop
+            // that write here so any other preference write still fails.
+            guard defaultName == "LiveLingo.previewTranslationEnabled", value is Bool else {
+                preconditionFailure("Presentation baselines must not persist preferences")
+            }
         }
     }
 

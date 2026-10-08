@@ -595,8 +595,14 @@ final class AppModel: ObservableObject {
             previewWake?.signal()
         }
     }
-    @Published var previewTranslationEnabled = true {
-        didSet { resetPreviewTranslation() }
+    /// On by default for new preferences. An explicit prior choice is retained.
+    @Published var previewTranslationEnabled: Bool {
+        didSet {
+            if previewTranslationEnabled != oldValue {
+                preferences.set(previewTranslationEnabled, forKey: Self.previewTranslationDefaultsKey)
+            }
+            resetPreviewTranslation()
+        }
     }
     private(set) var previewChinese: String {
         get { captionStream.previewChinese }
@@ -1258,6 +1264,7 @@ final class AppModel: ObservableObject {
         noteBatchCharacters = savedBatchCharacters ?? SummaryRefreshPolicy.automaticBatchCharacters
         let savedFocusMode = preferences.bool(forKey: Self.focusModeDefaultsKey)
         let savedPreventIdleSleep = (preferences.object(forKey: Self.preventIdleSleepDefaultsKey) as? Bool) ?? true
+        previewTranslationEnabled = (preferences.object(forKey: Self.previewTranslationDefaultsKey) as? Bool) ?? true
         let onBattery = PowerSourceMonitor.isOnBattery()
         processingFocusEnabled = savedFocusMode
         preventIdleSleepWhileRecording = savedPreventIdleSleep
@@ -2922,6 +2929,32 @@ final class AppModel: ObservableObject {
             do { try await parkSavedProcessing() }
             catch { archiveError = "处理暂停时保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
         }
+    }
+
+    /// CLI post-capture wait for the saved drain. The drain is an unstructured
+    /// task, so a signal that cancels the caller never reaches it. On
+    /// cancellation stop waiting, park the course (resumable, like the UI's
+    /// pause) and throw into the caller's cleanup. Uncancelled, this is a plain wait.
+    func waitForSavedDrainOrPark() async throws {
+        if let drain = processingTask {
+            let (wake, wakeContinuation) = AsyncStream<Never>.makeStream()
+            Task { await drain.value; wakeContinuation.finish() }
+            await withTaskCancellationHandler {
+                for await _ in wake {}
+            } onCancel: { wakeContinuation.finish() }
+        }
+        guard Task.isCancelled else { return }
+        // A signal during stop may leave no saved course to park.
+        if case .saved = phase { try await parkSavedProcessing() }
+        throw CancellationError()
+    }
+
+    /// CLI wait for one note batch: a cancelled caller stops the batch instead
+    /// of waiting it out; the caller's next cancellation check then throws.
+    static func awaitStoppingOnCancel(_ task: Task<Void, Never>) async {
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: { task.cancel() }
     }
 
     func resumeSavedProcessing(retryID: UUID? = nil) {
@@ -4968,6 +5001,7 @@ final class AppModel: ObservableObject {
     private static let focusModeDefaultsKey = "LiveLingo.processingFocus"
     private static let noteBatchDefaultsKey = "LiveLingo.noteBatchCharacters"
     private static let preventIdleSleepDefaultsKey = "LiveLingo.preventIdleSleepWhileRecording"
+    private static let previewTranslationDefaultsKey = "LiveLingo.previewTranslationEnabled"
 }
 
 enum SimplifiedChineseNormalizer {
@@ -5660,7 +5694,7 @@ extension AppModel {
             stopOverlapStarted = false
             let started = ProcessInfo.processInfo.systemUptime
             await stopSession()
-            await processingTask?.value
+            try await waitForSavedDrainOrPark()
             guard case .saved = phase else { throw QwenRuntimeError.requestFailed(phaseLabel) }
             if let archiveError { throw QwenRuntimeError.requestFailed(archiveError) }
 
@@ -5677,9 +5711,11 @@ extension AppModel {
                 }
                 await refreshRuntimeResources()?.value
                 scheduleSummaryRefresh(force: true)
-                if let summaryTask { await summaryTask.value }
+                if let summaryTask { await Self.awaitStoppingOnCancel(summaryTask) }
                 else { try await Task.sleep(for: .milliseconds(250)) }
             }
+            // A batch that completed despite the signal must not lead to a finished export.
+            try Task.checkCancellation()
             try await flushSessionArchive()
             try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage,
                 summaryIsLegacyRendered: summaryIsLegacyRendered, summaryEvidence: notesScheduleEvidence,
@@ -5832,7 +5868,7 @@ extension AppModel {
                     guard ProcessInfo.processInfo.systemUptime < deadline else {
                         throw QwenRuntimeError.requestFailed("CLI resume timed out; saved progress is retained")
                     }
-                    if let summaryTask { await summaryTask.value }
+                    if let summaryTask { await Self.awaitStoppingOnCancel(summaryTask) }
                     else { try await Task.sleep(for: .milliseconds(50)) }
                 }
                 guard sessionID == identity, generation == epoch else {
@@ -5867,9 +5903,10 @@ extension AppModel {
                     }
                     await refreshRuntimeResources()?.value
                     scheduleSummaryRefresh(force: true)
-                    if let summaryTask { await summaryTask.value }
+                    if let summaryTask { await Self.awaitStoppingOnCancel(summaryTask) }
                     else { try await Task.sleep(for: .milliseconds(250)) }
                 }
+                try Task.checkCancellation()
                 try await flushSessionArchive()
                 try SessionExporter.export(segments: segments, sessionDirectory: directory, summary: lectureSummary, target: outputLanguage,
                 summaryIsLegacyRendered: summaryIsLegacyRendered, summaryEvidence: notesScheduleEvidence,

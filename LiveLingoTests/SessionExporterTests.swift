@@ -46,6 +46,36 @@ struct SessionExporterTests {
         }
     }
 
+    @Test @MainActor func previewTranslationChoiceSurvivesRelaunch() throws {
+        let key = "LiveLingo.previewTranslationEnabled"
+        for choice: Bool? in [nil, false, true] {
+            let suite = "LiveLingo-Test-\(UUID().uuidString)"
+            let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer {
+                do { try preferenceCleanup.remove(defaults) }
+                catch { Issue.record(error) }
+            }
+            if let choice { defaults.set(choice, forKey: key) }
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+            defer { try? FileManager.default.removeItem(at: root) }
+            func relaunch() -> AppModel {
+                let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue-\(UUID()).json"),
+                    observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
+                return AppModel(reviewQueue: queue, backgroundServices: false, defaults: defaults)
+            }
+            let model = relaunch()
+            #expect(model.previewTranslationEnabled == (choice ?? true))
+            #expect(defaults.object(forKey: key) as? Bool == choice, "Launching must not write the preference")
+            model.previewTranslationEnabled = false
+            #expect(defaults.object(forKey: key) as? Bool == false)
+            #expect(relaunch().previewTranslationEnabled == false)
+            model.previewTranslationEnabled = true
+            #expect(defaults.object(forKey: key) as? Bool == true)
+            #expect(relaunch().previewTranslationEnabled == true)
+        }
+    }
+
     @Test func stableCaptionsKeepContextWhileEnglishPreviewStreamsSeparately() {
         #expect(SpeechPipeline.stableChunkDuration == 10)
     }

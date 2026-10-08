@@ -37,7 +37,7 @@ final class MultilingualCaptionGateTests: XCTestCase {
             try preferenceCleanup.remove()
             try FileManager.default.removeItem(at: directory)
         }
-        // No preference setters: the isolated suite is read without persisting values.
+        // Only the preview toggle persists, and only into this isolated suite.
         return AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
                         backgroundServices: false, scheduledNotes: false, defaults: defaults)
     }

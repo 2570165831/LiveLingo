@@ -150,6 +150,16 @@ private final class CaptionSchedulingNoteProbe {
 }
 
 @MainActor
+private final class CaptionSchedulingFlag {
+    var value = false
+}
+
+@MainActor
+private final class CaptionSchedulingOutcome {
+    var result: Result<Void, Error>?
+}
+
+@MainActor
 private final class CaptionSchedulingFixture {
     let clock = CaptionSchedulingClock()
     let model: AppModel
@@ -739,4 +749,148 @@ final class CaptionStabilitySchedulingTests: XCTestCase {
         XCTAssertEqual(f.clock.now, 0, "Final sealing does not wait for the live-tail deadline")
     }
 
+    // MARK: - CLI cancellation after capture
+
+    private struct HeldSavedDrain {
+        let f: CaptionSchedulingFixture
+        let probe: CaptionSchedulingNoteProbe
+        let gate: CaptionSchedulingRepairGate
+        let cancelled: CaptionSchedulingFlag
+        let directory: URL
+        let evidence: [TranscriptSegment]
+        let pending: DeferredCaptionRepair
+    }
+
+    /// A resumed saved course whose drain is held by an in-flight repair model
+    /// call. The fake call ends only on success or when its caller is cancelled.
+    private func heldSavedDrain() async throws -> HeldSavedDrain {
+        let gate = CaptionSchedulingRepairGate()
+        let cancelled = CaptionSchedulingFlag()
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.repair = { _ in
+            try await withTaskCancellationHandler {
+                try await gate.wait()
+            } onCancel: {
+                Task { @MainActor in
+                    cancelled.value = true
+                    gate.finish(.failure(CancellationError()))
+                }
+            }
+        }
+        // Released drains may seal the stable pair before the final tail note.
+        let probe = CaptionSchedulingNoteProbe([Self.pairNote, Self.tailNote])
+        let f = try fixture(probe, translation: deps)
+        f.repairGate = gate
+        let directory = f.root.appendingPathComponent("cli-drain", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var snapshot = SessionSnapshot()
+        let evidence = captions(session: snapshot.sessionID)
+        let pending = DeferredCaptionRepair(sessionID: snapshot.sessionID,
+            previous: evidence[1], current: evidence[2], context: [evidence[0]],
+            normalizedCurrent: evidence[2].english, modelName: "test")
+        snapshot.segments = evidence
+        snapshot.processing.pendingCaptionRepairs = [pending]
+        snapshot.processing.paused = true
+        snapshot.processing.phase = .paused
+        _ = try SessionStore(directory: directory).save(snapshot)
+        f.model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await f.model.openSavedSession(directory, allowAutomaticProcessing: false)
+        f.model.resumeSavedProcessing()
+        try await eventually { gate.entered && f.model.savedProcessingTaskForTesting != nil }
+        f.retainedTasks += [try XCTUnwrap(f.model.translationTaskForTesting),
+                            try XCTUnwrap(f.model.savedProcessingTaskForTesting)]
+        return HeldSavedDrain(f: f, probe: probe, gate: gate, cancelled: cancelled,
+                              directory: directory, evidence: evidence, pending: pending)
+    }
+
+    private func startCLIDrainWait(_ held: HeldSavedDrain,
+                                   outcome: CaptionSchedulingOutcome) -> Task<Void, Never> {
+        let model = held.f.model
+        let waiter = Task { @MainActor in
+            do { try await model.waitForSavedDrainOrPark(); outcome.result = .success(()) }
+            catch { outcome.result = .failure(error) }
+        }
+        held.f.retainedTasks.append(waiter)
+        return waiter
+    }
+
+    private func assertParkedAfterCLICancellation(_ held: HeldSavedDrain, outcome: CaptionSchedulingOutcome,
+                                                  file: StaticString = #filePath, line: UInt = #line) throws {
+        let model = held.f.model
+        XCTAssertThrowsError(try XCTUnwrap(outcome.result, file: file, line: line).get(), file: file, line: line) {
+            XCTAssertTrue($0 is CancellationError, "A signal must reach the CLI's cancellation cleanup",
+                          file: file, line: line)
+        }
+        XCTAssertTrue(held.cancelled.value, "The in-flight model call must observe the signal", file: file, line: line)
+        XCTAssertTrue(model.savedProcessingIsPaused, file: file, line: line)
+        XCTAssertNil(model.savedPauseTaskForTesting, "The park and its flush finish before the wait throws",
+                     file: file, line: line)
+        XCTAssertNil(model.savedProcessingTaskForTesting, file: file, line: line)
+        XCTAssertNil(model.translationTaskForTesting, file: file, line: line)
+        XCTAssertNil(model.summaryTaskForTesting, file: file, line: line)
+        XCTAssertNil(model.archiveError, file: file, line: line)
+        XCTAssertTrue(held.probe.inputs.isEmpty, "The backlog's final notes must not run after the signal",
+                      file: file, line: line)
+        let parked = try XCTUnwrap(SessionStore(directory: held.directory).load(), file: file, line: line)
+        XCTAssertTrue(parked.processing.paused, "The saved course stays resumable", file: file, line: line)
+        XCTAssertEqual(parked.processing.pendingCaptionRepairs, [held.pending], file: file, line: line)
+        XCTAssertEqual(parked.segments, held.evidence, file: file, line: line)
+        XCTAssertTrue(parked.batches.isEmpty, file: file, line: line)
+    }
+
+    func testCancelledCLIDrainWaitParksResumableCourseInsteadOfFinishingBacklog() async throws {
+        let held = try await heldSavedDrain()
+        let outcome = CaptionSchedulingOutcome()
+        let waiter = startCLIDrainWait(held, outcome: outcome)
+        await yieldToScheduledTasks()
+        XCTAssertNil(outcome.result, "Without a signal the CLI keeps waiting for the held drain")
+        waiter.cancel()
+        try await eventually { outcome.result != nil }
+        try assertParkedAfterCLICancellation(held, outcome: outcome)
+    }
+
+    func testCLIDrainWaitCancelledBeforeEntryStillParks() async throws {
+        let held = try await heldSavedDrain()
+        let outcome = CaptionSchedulingOutcome()
+        // A signal during stopSession cancels the run before the wait starts.
+        startCLIDrainWait(held, outcome: outcome).cancel()
+        try await eventually { outcome.result != nil }
+        try assertParkedAfterCLICancellation(held, outcome: outcome)
+    }
+
+    func testUncancelledCLIDrainWaitFinishesBacklogWithoutParking() async throws {
+        let held = try await heldSavedDrain()
+        let outcome = CaptionSchedulingOutcome()
+        _ = startCLIDrainWait(held, outcome: outcome)
+        await yieldToScheduledTasks()
+        XCTAssertNil(outcome.result)
+        held.gate.finish(.success(.init(previous: nil, rejection: "Retain the accepted previous caption")))
+        try await eventually { outcome.result != nil }
+        XCTAssertNoThrow(try XCTUnwrap(outcome.result).get())
+        XCTAssertFalse(held.cancelled.value)
+        XCTAssertFalse(held.f.model.savedProcessingIsPaused)
+        XCTAssertNil(held.f.model.savedProcessingTaskForTesting)
+        XCTAssertFalse(held.probe.inputs.isEmpty, "The final notes still run when no signal arrives")
+        let saved = try XCTUnwrap(SessionStore(directory: held.directory).load())
+        XCTAssertFalse(saved.processing.paused)
+    }
+
+    func testCancelledCLINoteBatchWaitStopsTheBatch() async throws {
+        let started = CaptionSchedulingFlag(), cancelled = CaptionSchedulingFlag(), returned = CaptionSchedulingFlag()
+        let batch = Task { @MainActor in
+            started.value = true
+            do { try await Task.sleep(for: .seconds(600)) } catch { cancelled.value = true }
+        }
+        defer { batch.cancel() }
+        let waiter = Task { @MainActor in
+            await AppModel.awaitStoppingOnCancel(batch)
+            returned.value = true
+        }
+        try await eventually { started.value }
+        await yieldToScheduledTasks()
+        XCTAssertFalse(returned.value)
+        waiter.cancel()
+        try await eventually { returned.value }
+        XCTAssertTrue(cancelled.value, "Ctrl-C must not wait out a whole note batch")
+    }
 }
