@@ -13,17 +13,21 @@ final class ClassroomPresentationTests: XCTestCase {
     func testWaveformStopsRefreshingWithoutInputAndResumesForSamples() async throws {
         // Both motion policies use a synthetic calendar clock. The host's
         // accessibility preference and changes to its date cannot choose a case.
+        // The public accessibilityReduceMotion key is read-only; its writable
+        // backing key feeds the same @Environment value production reads, so
+        // the waveform still takes the policy from its environment.
         for reduceMotion in [false, true] {
             let meter = CaptureMeterState()
             let clock = TestWallClock()
             let freshness = WaveformFreshnessState(now: clock.now)
             func root(active: Bool) -> some View {
                 SummaryRenderingDiagnostics.meterViewForTesting(meter: meter, active: active,
-                    freshness: freshness, reduceMotion: reduceMotion)
+                    freshness: freshness)
                     .frame(width: 300, height: 30)
                     .padding(20)
                     .background(Color.white)
                     .environment(\.colorScheme, .light)
+                    .environment(\._accessibilityReduceMotion, reduceMotion)
             }
             let controller = NSHostingController(rootView: root(active: true))
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 70),
@@ -74,6 +78,9 @@ final class ClassroomPresentationTests: XCTestCase {
             try await settle(view)
             let sampleBodies = SummaryRenderingDiagnostics.counts.waveformBodies
             XCTAssertGreaterThan(sampleBodies, 0, "New samples must still reach the actual waveform")
+            XCTAssertEqual(SummaryRenderingDiagnostics.counts.reducedMotionWaveformBodies,
+                           reduceMotion ? sampleBodies : 0,
+                           "The waveform must take its motion policy from the environment")
             XCTAssertNotEqual(try pixels(), silentInput)
             try attach("waveform-receiving-motion-\(reduceMotion)")
 

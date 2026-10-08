@@ -114,6 +114,7 @@ enum SummaryRenderingDiagnostics {
         var streamingRows: [String: Int] = [:]
         var floatingBodies = 0
         var waveformBodies = 0
+        var reducedMotionWaveformBodies = 0
     }
     static var counts = Counts()
     static func record(_ key: WritableKeyPath<Counts, Int>) {
@@ -130,10 +131,8 @@ enum SummaryRenderingDiagnostics {
         SummaryMarkdownView(text: text)
     }
     static func meterViewForTesting(meter: CaptureMeterState, active: Bool,
-                                    freshness: WaveformFreshnessState,
-                                    reduceMotion: Bool) -> some View {
-        RecordingMeterView(meter: meter, active: active, freshness: freshness,
-                           reduceMotionOverride: reduceMotion)
+                                    freshness: WaveformFreshnessState) -> some View {
+        RecordingMeterView(meter: meter, active: active, freshness: freshness)
     }
 }
 #endif
@@ -1304,12 +1303,12 @@ struct RecordingWaveform: View {
     let samples: [Float]
     let active: Bool
     let receiving: Bool
-    var reduceMotionOverride: Bool? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         #if DEBUG
         let _ = SummaryRenderingDiagnostics.record(\.waveformBodies)
+        let _ = reduceMotion ? SummaryRenderingDiagnostics.record(\.reducedMotionWaveformBodies) : ()
         #endif
         GeometryReader { geometry in
             let gap: CGFloat = 1
@@ -1325,7 +1324,7 @@ struct RecordingWaveform: View {
             }
             .frame(maxHeight: .infinity)
         }
-        .animation((reduceMotionOverride ?? reduceMotion) ? nil : .linear(duration: SpeechPipeline.waveformUpdateInterval), value: samples)
+        .animation(reduceMotion ? nil : .linear(duration: SpeechPipeline.waveformUpdateInterval), value: samples)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(!active ? "音量显示已暂停" : receiving ? "正在接收音频" : "等待音频输入")
         .accessibilityAddTraits(.isImage)
@@ -2055,21 +2054,20 @@ private struct RecordingMeterView: View {
     @ObservedObject var meter: CaptureMeterState
     @StateObject private var freshness: WaveformFreshnessState
     let active: Bool
-    private let reduceMotionOverride: Bool?
 
+    /// The autoclosure keeps @StateObject's lazy, once-per-identity creation:
+    /// parent re-renders rebuild this view without allocating a discarded
+    /// state object. Tests may still inject a clock-controlled instance.
     init(meter: CaptureMeterState, active: Bool,
-         freshness: WaveformFreshnessState = WaveformFreshnessState(),
-         reduceMotionOverride: Bool? = nil) {
+         freshness: @autoclosure @escaping @MainActor () -> WaveformFreshnessState = WaveformFreshnessState()) {
         self.meter = meter
         self.active = active
-        self.reduceMotionOverride = reduceMotionOverride
-        _freshness = StateObject(wrappedValue: freshness)
+        _freshness = StateObject(wrappedValue: freshness())
     }
 
     var body: some View {
         RecordingWaveform(samples: meter.waveformSamples, active: active,
-                          receiving: active && freshness.isReceiving,
-                          reduceMotionOverride: reduceMotionOverride)
+                          receiving: active && freshness.isReceiving)
             .onAppear { freshness.mount(active: active, lastUpdate: meter.lastAudioLevelAt) }
             .onChange(of: active) { _, active in
                 freshness.update(active: active, lastUpdate: meter.lastAudioLevelAt)
