@@ -76,7 +76,7 @@ else
 fi
 
 # Validate before mkdir, and reuse only this dedicated architecture's cache.
-output_root="$(python3 - "$output_root" "$project_root" <<'PY'
+output_root="$(python3 -B - "$output_root" "$project_root" <<'PY'
 from pathlib import Path
 import os
 import sys
@@ -97,7 +97,7 @@ print(root)
 PY
 )"
 derived_data="${derived_data:-${output_root}/dd-test}"
-derived_data="$(python3 - "$derived_data" "$output_root" <<'PY'
+derived_data="$(python3 -B - "$derived_data" "$output_root" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1])
@@ -114,7 +114,7 @@ PY
 models=""
 if [[ "$reference_models" == 1 ]]; then
   [[ "$installed_app" == /* ]] || fail "--installed-app must be an absolute path"
-  models="$(python3 - "$installed_app" <<'PY'
+  models="$(python3 -B - "$installed_app" <<'PY'
 from pathlib import Path
 import plistlib
 import sys
@@ -136,7 +136,7 @@ fi
 if [[ "$signing_mode" == developer ]]; then
   # Optional offline signing: validate certificate dates and the exact private
   # key identity. Never import/export/unlock a keychain or auto-select an identity.
-  python3 - "$certificate" <<'PY'
+  python3 -B - "$certificate" <<'PY'
 from datetime import datetime, timezone
 import subprocess
 import sys
@@ -159,7 +159,7 @@ dirty=0
 mkdir -p "$output_root"
 run_directory="$(/usr/bin/mktemp -d "${output_root}/package-${short_commit}-XXXXXX")"
 info_plist="${run_directory}/PreviewInfo.plist"
-python3 - "$project_root/LiveLingo/Resources/Info.plist" "$info_plist" "$commit" "$short_commit" "$dirty" "$signing_mode" <<'PY'
+python3 -B - "$project_root/LiveLingo/Resources/Info.plist" "$info_plist" "$commit" "$short_commit" "$dirty" "$signing_mode" <<'PY'
 from pathlib import Path
 import plistlib
 import sys
@@ -180,7 +180,7 @@ PY
 echo "Building unsigned ${architecture} preview; log: ${run_directory}/build.log"
 # CODE_SIGNING_ALLOWED alone does not stop the linker's implicit ad-hoc signing.
 # Do not use build-release.sh: its signing environment is intentionally separate.
-python3 "${project_root}/Scripts/run-preview-tool.py" --log "${run_directory}/build.log" -- \
+python3 -B "${project_root}/Scripts/run-preview-tool.py" --log "${run_directory}/build.log" -- \
   /usr/bin/xcodebuild -quiet -hideShellScriptEnvironment \
   -project "${project_root}/LiveLingo.xcodeproj" -scheme LiveLingo \
   -configuration Release -destination "platform=macOS,arch=${architecture}" \
@@ -198,7 +198,7 @@ python3 "${project_root}/Scripts/run-preview-tool.py" --log "${run_directory}/bu
     tail -50 "${run_directory}/build.log" >&2
     fail "xcodebuild failed; full log retained"
   }
-python3 "${project_root}/Scripts/check_build_warnings.py" "${run_directory}/build.log"
+python3 -B "${project_root}/Scripts/check_build_warnings.py" "${run_directory}/build.log"
 
 app="${run_directory}/LiveLingo 预览版.app"
 # Move this build product instead of duplicating the bundle. Never touch the
@@ -218,17 +218,17 @@ cp "${project_root}/docs/PREVIEW-OPEN-zh-Hans.txt" "${run_directory}/打开预�
 printf '\n本包签名模式：%s\n' "$signing_mode" >>"${app}/Contents/Resources/Preview-README.txt"
 
 # Start from an unsigned, model-free build; sign all nested code before the app.
-python3 "${project_root}/Scripts/preview-app-metadata.py" "$app" --unsigned >"${run_directory}/unsigned-receipt.json"
+python3 -B "${project_root}/Scripts/preview-app-metadata.py" "$app" --unsigned >"${run_directory}/unsigned-receipt.json"
 if [[ "$signing_mode" != unsigned ]]; then
   signing_arguments=(--identity -)
   if [[ "$signing_mode" == developer ]]; then signing_arguments=(--identity "$identity" --keychain "$keychain"); fi
-  python3 "${project_root}/Scripts/sign-preview-app.py" "$app" \
+  python3 -B "${project_root}/Scripts/sign-preview-app.py" "$app" \
     --entitlements "${project_root}/LiveLingo/Resources/LiveLingo.entitlements" \
     "${signing_arguments[@]}"
 fi
 receipt_arguments=()
 if [[ "$signing_mode" == adhoc ]]; then receipt_arguments=(--adhoc); fi
-python3 "${project_root}/Scripts/preview-app-metadata.py" "$app" "${receipt_arguments[@]}" >"${run_directory}/receipt.json"
+python3 -B "${project_root}/Scripts/preview-app-metadata.py" "$app" "${receipt_arguments[@]}" >"${run_directory}/receipt.json"
 if /usr/bin/codesign -dv --verbose=4 "$app" >"${run_directory}/codesign-display.log" 2>&1; then
   [[ "$signing_mode" != unsigned ]] || fail "Unexpected signature reported by codesign"
 else
