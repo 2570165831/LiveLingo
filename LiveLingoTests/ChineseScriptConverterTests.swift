@@ -156,6 +156,19 @@ final class ChineseScriptConverterTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    /// The export's code masks come from the same scan as rendering: block code
+    /// is whole lines, inline code and formulas are only in `all`.
+    func testProtectedMasksSeparateCodeBlocksFromInlineProtection() {
+        let text = "a `b` $x$\n```\nc\n```\nd"
+        let masks = ChineseScriptConverter.RenderText.protectedMasks(text)
+        let bytes = Array(text.utf8)
+        func marked(_ mask: [Bool]) -> String { String(decoding: zip(bytes, mask).filter(\.1).map(\.0), as: UTF8.self) }
+        XCTAssertEqual(masks.blocks.count, bytes.count)
+        XCTAssertEqual(marked(masks.blocks), "```\nc\n```\n")
+        XCTAssertEqual(marked(masks.all), "`b`$x$```\nc\n```\n")
+        XCTAssertEqual(ChineseScriptConverter.RenderText(text).render { $0.uppercased() }, "A `b` $x$\n```\nc\n```\nD")
+    }
+
     func testTechnicalRenderingIdentityPathsNeverLoadDictionaries() throws {
         let converter = ChineseScriptConverter(resourceDirectory: nil)
         let input = "头发在这里。\r\n```python\r\nrecord[\"头发\"]\r\n```\r\n" + #"{"头发":"这里"} \label{eq:头发}"#

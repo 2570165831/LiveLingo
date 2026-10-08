@@ -181,6 +181,167 @@ final class NotesExportTests: XCTestCase {
         XCTAssertTrue(text.contains("00:00–00:05"))
     }
 
+    // MARK: - 粗体标记只去成对的 `**`（issue #10）
+
+    /// 纯文本只去掉真正成对的 `**`：代码里的 `__init__`、正文里的 `x ** 2`、
+    /// 不成对的 `**` 和 `snake__case` 都必须原样保留。
+    func testPlainTextStripsOnlyRealBoldAndKeepsCodeAndOperators() {
+        let cases: [(String, String)] = [
+            ("- **例子**：构造函数 `__init__` 被调用", "- 例子：构造函数 `__init__` 被调用"),
+            ("x ** 2 与 2 ** 10 = 1024", "x ** 2 与 2 ** 10 = 1024"),
+            (#"if __name__ == "__main__":"#, #"if __name__ == "__main__":"#),
+            ("snake__case 与 **重点**", "snake__case 与 重点"),
+            ("**重点** 和 **难点**", "重点 和 难点"),
+            ("a ** b，**未闭合", "a ** b，**未闭合"),
+            ("**see `a**b`**", "see `a**b`"),
+            ("## **标题**\r", "标题\r"),
+            ("> **引用**：内容", "引用：内容"),
+        ]
+        for (source, expected) in cases {
+            XCTAssertEqual(NotesExportDocument.strippingMarkdown(source), expected, source)
+        }
+    }
+
+    /// 围栏和缩进代码块整行原样保留：不去 `#`、`> `，也不碰里面的 `**`/`__`。
+    func testPlainTextKeepsFencedAndIndentedCodeBlocksVerbatim() {
+        let fence = "```python\n# 注释\ndef __init__(self): return 2 ** 3\n> 不是引用\nf(**a)**2\n```"
+        XCTAssertEqual(NotesExportDocument.strippingMarkdown("## 例子\n\(fence)\n- **要点**：x"),
+                       "例子\n\(fence)\n- 要点：x")
+        let indented = "    y = f(**opts)**2\n    z = __b__"
+        XCTAssertEqual(NotesExportDocument.strippingMarkdown("说明：\n\n\(indented)\n\n**结束**"),
+                       "说明：\n\n\(indented)\n\n结束")
+        // 同一行在代码块外才按粗体处理 ✓（证明上面保留的是代码块判定，不是规则本身）。
+        XCTAssertEqual(NotesExportDocument.strippingMarkdown("y = f(**opts)**2"), "y = f(opts)2")
+    }
+
+    func testPlainTextExportKeepsCodeInNotesAndReviewAdvice() throws {
+        let notes = """
+        ## Python 类
+        - **例子**：构造函数 `__init__` 在 `if __name__ == "__main__":` 之前定义，2 ** 10 = 1024。
+        ```python
+        # 计算平方
+        print(3 ** 2)
+        ```
+        """
+        let review = """
+        # 9B 思考复查 1/1 批（约 5 分钟/批）
+
+        ## 第 1 批 · Python 类
+        - **9B 建议（待核对）**：`__init__` 不要写成 `init`，x ** 2 是平方。
+        """
+        let text = String(decoding: try NotesExportDocument.data(
+            snapshot(notes: notes, review: review, withReview: true, withTranscript: false), format: .plainText),
+            as: UTF8.self)
+        XCTAssertTrue(text.contains("- 例子：构造函数 `__init__` 在 `if __name__ == \"__main__\":` 之前定义，2 ** 10 = 1024。"), text)
+        XCTAssertTrue(text.contains("```python\n# 计算平方\nprint(3 ** 2)\n```"), text)
+        XCTAssertTrue(text.contains("- 9B 建议（待核对）：`__init__` 不要写成 `init`，x ** 2 是平方。"), text)
+    }
+
+    /// PDF/Word 的粗体判定与纯文本共用同一套配对：运算符和不成对的 `**` 不加粗。
+    func testPDFBoldRunsUseTheSamePairingAsPlainText() {
+        let boldFont = PDFNotesWriter.font(size: PDFNotesWriter.bodySize, bold: true).fontName
+        func rendered(_ source: String) -> (text: String, bold: [String]) {
+            let runs = PDFNotesWriter.inlineRuns(source, size: PDFNotesWriter.bodySize, bold: false)
+            let bold = runs.filter { ($0.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.fontName == boldFont }
+            return (runs.map(\.string).joined(), bold.map(\.string))
+        }
+        XCTAssertEqual(rendered("2 ** 10 = 1024，而 x ** 2 是平方").text, "2 ** 10 = 1024，而 x ** 2 是平方")
+        XCTAssertEqual(rendered("2 ** 10 = 1024，而 x ** 2 是平方").bold, [])
+        XCTAssertEqual(rendered("**重点** 和 a ** b 以及 **未闭合").text, "重点 和 a ** b 以及 **未闭合")
+        XCTAssertEqual(rendered("**重点** 和 a ** b 以及 **未闭合").bold, ["重点"])
+        XCTAssertEqual(rendered("**see `a**b`**").text, "see `a**b`")
+        XCTAssertEqual(rendered("**see `a**b`**").bold.joined(), "see `a**b`")
+    }
+
+    /// 普通笔记（粗体标签 + 正文）的导出必须和修复前逐字节一致 ✓：
+    /// 下面是修复前两段实现的原样副本，只用于比对，不参与导出。
+    private func legacyStrippingMarkdown(_ source: String) -> String {
+        source.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            var text = String(line)
+            if let range = text.range(of: #"^\s{0,3}#{1,6}\s+"#, options: .regularExpression) {
+                text.removeSubrange(range)
+            }
+            text = text.replacingOccurrences(of: "**", with: "")
+            text = text.replacingOccurrences(of: "__", with: "")
+            if text.hasPrefix("> ") { text = String(text.dropFirst(2)) }
+            return text
+        }.joined(separator: "\n")
+    }
+
+    private func legacyInlineRuns(_ source: String, size: CGFloat, bold: Bool) -> [NSAttributedString] {
+        var runs: [NSAttributedString] = []
+        let pattern = try? NSRegularExpression(pattern: #"\*\*([^*]+)\*\*"#)
+        let ns = source as NSString
+        var cursor = 0
+        func appendPlain(_ piece: String, strong: Bool) {
+            guard !piece.isEmpty else { return }
+            for run in FormulaDisplay.runs(piece) {
+                let fontSize = run.script == 0 ? size : size * 0.72
+                let font = PDFNotesWriter.font(size: fontSize, bold: strong || (run.math && !run.text.isEmpty))
+                var attributes: [NSAttributedString.Key: Any] = [.font: font]
+                if run.script != 0 {
+                    attributes[.baselineOffset] = run.script > 0 ? size * 0.34 : -size * 0.16
+                }
+                if run.math {
+                    attributes[.foregroundColor] = NSColor.labelColor
+                }
+                runs.append(NSAttributedString(string: run.text, attributes: attributes))
+            }
+        }
+        if let pattern {
+            for match in pattern.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
+                if match.range.location > cursor {
+                    appendPlain(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), strong: bold)
+                }
+                appendPlain(ns.substring(with: match.range(at: 1)), strong: true)
+                cursor = NSMaxRange(match.range)
+            }
+        }
+        if cursor < ns.length {
+            appendPlain(ns.substring(from: cursor), strong: bold)
+        }
+        if runs.isEmpty { runs.append(NSAttributedString(string: source, attributes: [.font: PDFNotesWriter.font(size: size, bold: bold)])) }
+        return runs
+    }
+
+    func testOrdinaryNotesExportExactlyAsBeforeTheBoldPairingFix() throws {
+        var book = LearningNotebook()
+        try book.append(evidence: [
+            segment(0, 300, "The mass stays the same in a closed system.", "在封闭系统中质量保持不变。"),
+            segment(300, 600, "Temperature and pressure change together.", "温度与压强一起变化。"),
+        ], note: LearningNote(topic: "质量守恒", points: [
+            .init(kind: "核心结论", text: "质量在封闭系统中保持不变。", sourceIDs: ["en0s0"]),
+            .init(kind: "易错点", text: "质量守恒不等于体积不变。", sourceIDs: ["zh0s0"]),
+            .init(kind: "核心结论", text: "温度与压强成正比。", sourceIDs: ["missing"]),
+            .init(kind: "待确认", text: "速度随温度升高而增大。", needsContext: "这项速度属于哪个对象？", sourceIDs: ["en0s0"]),
+        ], sourceVersion: 2))
+        let fixture = snapshot()
+        let review = try XCTUnwrap(fixture.reviewMarkdown)
+        let fixtures = [
+            fixture.notesMarkdown,
+            review,
+            NotesExportDocument.reviewSection(review),
+            book.markdown(),
+            "- **要点 1**：第一条内容。\n- **要点 2**：第二条内容。",
+            "## 电子云与原子轨道\n- **公式**：速率 $v = \\frac{d}{t}$，数列 $a_n = b^2$ 表示第 n 项的平方（待核对）。",
+            "## 公式\n- 质能方程 $E = mc^2$，下标写法 $a_n$。",
+            (1...60).map { "- **要点 \($0)**：包含公式 $a_\($0) = b^2$ 与待核对标记。" }.joined(separator: "\n"),
+            "- **Example**: the mass stays the same.\n- **Pending**: which object?\n\n> **Note**：引用里的 **粗体**。",
+        ]
+        for source in fixtures {
+            XCTAssertEqual(NotesExportDocument.strippingMarkdown(source), legacyStrippingMarkdown(source), source)
+            for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
+                let style = PDFNotesWriter.Style.markdown(String(line))
+                let text = PDFNotesWriter.text(of: style, line: String(line))
+                for bold in [false, true] {
+                    let new = PDFNotesWriter.inlineRuns(text, size: PDFNotesWriter.bodySize, bold: bold)
+                    let old = legacyInlineRuns(text, size: PDFNotesWriter.bodySize, bold: bold)
+                    XCTAssertEqual(new, old, text)
+                }
+            }
+        }
+    }
+
     func testDefaultFileNameCarriesClassDateScopeAndFormat() {
         for format in NotesExportFormat.allCases {
             let name = NotesExportDocument.defaultFileName(snapshot(), format: format)

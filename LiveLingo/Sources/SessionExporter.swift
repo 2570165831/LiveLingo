@@ -1486,17 +1486,28 @@ enum NotesExportDocument {
 
     /// Drops Markdown syntax while keeping headings, paragraphs, formulas,
     /// timestamps and the “待核对/待确认” markers readable in plain text.
+    /// Fenced and indented code blocks are copied verbatim, and only `**` that
+    /// really pairs up as bold is removed (see `MarkdownBold`).
     static func strippingMarkdown(_ source: String) -> String {
-        source.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
-            var text = String(line)
+        let bytes = Array(source.utf8)
+        let masks = ChineseScriptConverter.RenderText.protectedMasks(source)
+        var lines: [String] = [], start = 0
+        while start <= bytes.count {
+            let end = bytes[start...].firstIndex(of: 10) ?? bytes.count
+            defer { start = end + 1 }
+            if start < end, masks.blocks[start] {
+                lines.append(String(decoding: bytes[start..<end], as: UTF8.self))
+                continue
+            }
+            var text = MarkdownBold.segments(Array(bytes[start..<end]), protected: Array(masks.all[start..<end]))
+                .map(\.text).joined()
             if let range = text.range(of: #"^\s{0,3}#{1,6}\s+"#, options: .regularExpression) {
                 text.removeSubrange(range)
             }
-            text = text.replacingOccurrences(of: "**", with: "")
-            text = text.replacingOccurrences(of: "__", with: "")
             if text.hasPrefix("> ") { text = String(text.dropFirst(2)) }
-            return text
-        }.joined(separator: "\n")
+            lines.append(text)
+        }
+        return lines.joined(separator: "\n")
     }
 
     static let dateFormatter: DateFormatter = {
@@ -1690,13 +1701,11 @@ enum PDFNotesWriter {
         return result
     }
 
-    /// Inline runs: `**bold**` plus `$…$` / `\(…)` formulas, which are rendered
-    /// with real sub/superscript baselines instead of raw LaTeX-ish markers.
+    /// Inline runs: `**bold**` (paired by `MarkdownBold`) plus `$…$` / `\(…)`
+    /// formulas, which are rendered with real sub/superscript baselines
+    /// instead of raw LaTeX-ish markers.
     static func inlineRuns(_ source: String, size: CGFloat, bold: Bool) -> [NSAttributedString] {
         var runs: [NSAttributedString] = []
-        let pattern = try? NSRegularExpression(pattern: #"\*\*([^*]+)\*\*"#)
-        let ns = source as NSString
-        var cursor = 0
 
         func appendPlain(_ piece: String, strong: Bool) {
             guard !piece.isEmpty else { return }
@@ -1714,17 +1723,8 @@ enum PDFNotesWriter {
             }
         }
 
-        if let pattern {
-            for match in pattern.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
-                if match.range.location > cursor {
-                    appendPlain(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), strong: bold)
-                }
-                appendPlain(ns.substring(with: match.range(at: 1)), strong: true)
-                cursor = NSMaxRange(match.range)
-            }
-        }
-        if cursor < ns.length {
-            appendPlain(ns.substring(from: cursor), strong: bold)
+        for segment in MarkdownBold.segments(source) {
+            appendPlain(segment.text, strong: segment.bold || bold)
         }
         if runs.isEmpty { runs.append(NSAttributedString(string: source, attributes: [.font: font(size: size, bold: bold)])) }
         return runs
@@ -1743,5 +1743,67 @@ enum PDFNotesWriter {
             if let font = NSFont(name: name, size: size) { return font }
         }
         return NSFont.systemFont(ofSize: size, weight: bold ? .semibold : .regular)
+    }
+}
+
+/// `**bold**` pairing shared by the plain-text and PDF/Word exports. A `**`
+/// run opens only before non-whitespace and closes only after non-whitespace,
+/// pairs stay on one line, and runs inside code spans or formulas never count,
+/// so `x ** 2`, a lone `**` and `` `a**b` `` stay literal. `__` is never bold
+/// here: in these notes it is far more often `__init__` than emphasis.
+enum MarkdownBold {
+    /// The line split into plain and bold pieces, with paired delimiters removed.
+    static func segments(_ line: String) -> [(text: String, bold: Bool)] {
+        segments(Array(line.utf8), protected: ChineseScriptConverter.RenderText.protectedMasks(line).all)
+    }
+
+    static func segments(_ bytes: [UInt8], protected: [Bool]) -> [(text: String, bold: Bool)] {
+        var result: [(text: String, bold: Bool)] = []
+        var start = 0, depth = 0
+        for delimiter in delimiters(bytes, protected: protected) {
+            if delimiter.offset > start {
+                result.append((String(decoding: bytes[start..<delimiter.offset], as: UTF8.self), depth > 0))
+            }
+            depth += delimiter.opens ? 1 : -1
+            start = delimiter.offset + 2
+        }
+        if start < bytes.count { result.append((String(decoding: bytes[start...], as: UTF8.self), false)) }
+        return result
+    }
+
+    /// Offsets of the `**` runs that pair up, in order, each marked as opener
+    /// or closer. A closer takes the nearest open opener, as in CommonMark.
+    static func delimiters(_ bytes: [UInt8], protected: [Bool]) -> [(offset: Int, opens: Bool)] {
+        var openers: [Int] = [], pairs: [(offset: Int, opens: Bool)] = []
+        var index = 0
+        while index < bytes.count {
+            guard bytes[index] == 42, !protected[index] else { index += 1; continue }
+            var end = index + 1
+            while end < bytes.count, bytes[end] == 42, !protected[end] { end += 1 }
+            var backslashes = 0
+            while index - backslashes > 0, bytes[index - backslashes - 1] == 92 { backslashes += 1 }
+            if end - index == 2, backslashes % 2 == 0 {
+                let closes = index > 0 && !whitespace(bytes, endingAt: index)
+                let opens = end < bytes.count && !whitespace(bytes, startingAt: end)
+                if closes, let opener = openers.popLast() {
+                    pairs += [(opener, true), (index, false)]
+                } else if opens {
+                    openers.append(index)
+                }
+            }
+            index = end
+        }
+        return pairs.sorted { $0.offset < $1.offset }
+    }
+
+    private static func whitespace(_ bytes: [UInt8], startingAt index: Int) -> Bool {
+        let scalar = String(decoding: bytes[index..<min(index + 4, bytes.count)], as: UTF8.self).unicodeScalars.first
+        return scalar?.properties.isWhitespace ?? true
+    }
+
+    private static func whitespace(_ bytes: [UInt8], endingAt index: Int) -> Bool {
+        var start = index - 1
+        while start > 0, bytes[start] & 0xC0 == 0x80 { start -= 1 }
+        return whitespace(bytes, startingAt: start)
     }
 }

@@ -253,14 +253,27 @@ extension ChineseScriptConverter {
         var isFullyProtected: Bool { !bytes.isEmpty && protected.allSatisfy { $0 } }
 
         init(_ text: String) {
+            let scanner = Self.scan(text)
+            bytes = scanner.bytes
+            protected = scanner.protected
+        }
+
+        /// UTF-8 byte masks for callers that only need to know where code is:
+        /// `blocks` covers fenced and indented code blocks, `all` adds inline
+        /// code, formulas and JSON keys (everything `render` leaves untouched).
+        static func protectedMasks(_ text: String) -> (blocks: [Bool], all: [Bool]) {
+            let scanner = scan(text)
+            return (scanner.blockProtected, scanner.protected)
+        }
+
+        private static func scan(_ text: String) -> Scanner {
             var scanner = Scanner(bytes: Array(text.utf8))
             scanner.blocks()
             scanner.blockProtected = scanner.protected
             scanner.inlineCode()
             scanner.latex()
             scanner.jsonKeys()
-            bytes = scanner.bytes
-            protected = scanner.protected
+            return scanner
         }
 
         private init(bytes: [UInt8], protected: [Bool]) {
