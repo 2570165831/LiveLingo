@@ -143,7 +143,7 @@ final class SpanishFrenchCaptionTests: XCTestCase {
             catch SessionStoreError.invalidState { }
         }
     }
-    func testProfilesRemainHiddenAndPendingChoicesAreCentralized() {
+    func testProfilesRemainHiddenAndUserDecisionsAreCentralized() {
         XCTAssertEqual(OutputLanguage.released, [.simplifiedChinese])
         XCTAssertEqual(LatinOutputDefaults.translationRoute, .direct)
         for target in [CaptionTranslationTarget.spanish, .french] {
@@ -155,7 +155,8 @@ final class SpanishFrenchCaptionTests: XCTestCase {
             XCTAssertEqual(language.profile.passThroughSources, [target.rawValue])
             XCTAssertTrue(target.keepsSourceAsCaption(language: target.rawValue))
             XCTAssertFalse(target.keepsSourceAsCaption(language: nil))
-            XCTAssertEqual(language.profile.appleLanguagePair, .init(source: "en", target: target.rawValue))
+            XCTAssertEqual(language.profile.appleLanguagePair,
+                .init(source: "en", target: target == .spanish ? "es" : "fr-FR"))
         }
     }
     func testDirectAndPivotCallsGoThroughTheRealTranslationClient() async throws {
@@ -183,6 +184,32 @@ final class SpanishFrenchCaptionTests: XCTestCase {
                 let prompts = await requests.prompts
                 XCTAssertEqual(prompts.count, 1)
                 XCTAssertTrue(prompts[0].contains(LatinCaptionPrompts.system(for: target)))
+            }
+        }
+    }
+    func testSelectedStandardsReachBothModelsAndEveryCaptionAttempt() async throws {
+        for target in [CaptionTranslationTarget.spanish, .french] {
+            for model in [QwenModelProfile.energySaver.translationModel, QwenModelProfile.highQuality.translationModel] {
+                for attempt in [CaptionTranslationAttempt.standard, .repairContent, .expandedBudget] {
+                    let expected = reply(target)
+                    let result = try await QwenTranslationClient.translate("The water is cold and the pressure decreases.",
+                        modelName: model, target: target, attempt: attempt,
+                        request: { _, prompt, _ in
+                            if target == .spanish {
+                                XCTAssertTrue(prompt.contains("RAE"))
+                                XCTAssertTrue(prompt.contains("ASALE"))
+                                XCTAssertTrue(prompt.contains("pan-Hispanic standard"))
+                                XCTAssertTrue(prompt.contains("without favoring Spain or any one Latin American region"))
+                            } else {
+                                XCTAssertTrue(prompt.contains("standard metropolitan French as used in France"))
+                            }
+                            if attempt == .repairContent {
+                                XCTAssertTrue(prompt.contains(LatinCaptionPrompts.recovery(for: target)))
+                            }
+                            return expected
+                        })
+                    XCTAssertEqual(result, expected)
+                }
             }
         }
     }
@@ -406,20 +433,20 @@ final class SpanishFrenchCaptionTests: XCTestCase {
     }
     func testCaptionPromptDigestsAreFrozen() {
         let values: [(String, String)] = [
-            (LatinCaptionPrompts.system(for: .spanish), "13f0b5c331a5a80f595d77c769f7b09edde3ca67767b5c48baacf35eeb38fd02"),
-            (LatinCaptionPrompts.system(for: .spanish, faithful: true), "0b6f9fde637eb3ca255442009838697429c1e1a4ae0ee15c9c157990ab9e9d1f"),
-            (LatinCaptionPrompts.system(for: .french), "eb2eb316f7f715c1a2c5cbd745d0dd5f6ff8620a67c9491ffc35227ecf884714"),
-            (LatinCaptionPrompts.system(for: .french, faithful: true), "af1de3b4473ec090f733439ae9fe4d08d0d273c8a2ebdc06e8ee076b4ec5b0c5"),
+            (LatinCaptionPrompts.system(for: .spanish), "a36e57bc45ee9a976acafd406bc1f42e1c01c162cbb3188c213548d440385d40"),
+            (LatinCaptionPrompts.system(for: .spanish, faithful: true), "cc5d8239d4e991f9869793116059c8691e9a4d63482f92a8715b1d6f11e1d371"),
+            (LatinCaptionPrompts.system(for: .french), "fdba153142bb46642ce8c5fc9ae3dbc4f3aa252acdef925b35328492b1e03055"),
+            (LatinCaptionPrompts.system(for: .french, faithful: true), "1a0c130dddd17ddf17fe5110ec58b2fe6930295b6c5b3682123881be55206dd7"),
             (LatinCaptionPrompts.spanishSystem, "9f32f2fb8495477d1e9379e9c805dc33aca3700877c42a5c615718baeee0186c"),
             (LatinCaptionPrompts.spanishFaithful, "f24cde87591fbf8d3b187eff5853fa9fbb74e028675c649f40ed19029416eea4"),
             (LatinCaptionPrompts.spanishWrapper4B, "a01cb7a9ff47f1ecdb6a5513944a8369d9da5868eff2427569481cc1ce1492cc"),
             (LatinCaptionPrompts.spanishWrapper9B, "a7f5ccfc803555e4d550ede407dfbd9eb9b23afd9fd375492f1078c6826cfa1c"),
-            (LatinCaptionPrompts.spanishRecovery, "8ca99808d4abe8d5f30aee67035c0237001fe32349e6328c226b0ca121408713"),
+            (LatinCaptionPrompts.spanishRecovery, "dc29eaa5d6b04c366597cdf6dfd0ebe721ff1e3abd137bd9d82270d1c0ab7c47"),
             (LatinCaptionPrompts.frenchSystem, "8ed0fa1212c3f08af05da23cdfdcb0d27b1fb33047d180a3c88d0e5e17895c64"),
             (LatinCaptionPrompts.frenchFaithful, "32713b24845fe3d177284e3bc67dec1581d221cd31638a0e69100a6afc37ad7c"),
             (LatinCaptionPrompts.frenchWrapper4B, "d28fe49e177ccc6a2a2f13f7097e993890e1f5e974b9f9a08986e0a8e7b21773"),
             (LatinCaptionPrompts.frenchWrapper9B, "1e85e3c79f0605f2473f322a4d44e581cce28e7889e06895b4be36abd499cb7d"),
-            (LatinCaptionPrompts.frenchRecovery, "091c9472bac227ed3868c117937623e87ac4388e21d6fd546cbdbf9aff56b940"),
+            (LatinCaptionPrompts.frenchRecovery, "c469434df4b930fed15c2d6e80aecbb9b9f80a6d9dbd0806334ab4b776e37f0c"),
         ]
         for (prompt, digest) in values { XCTAssertEqual(SessionArchiveCoding.digest(Data(prompt.utf8)), digest) }
     }

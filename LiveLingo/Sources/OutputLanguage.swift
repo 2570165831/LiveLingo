@@ -19,12 +19,25 @@ enum ChineseOutputDefaults {
     }
 }
 
-/// Pending user choices live here. Changing a route requires the G3 comparison.
+/// User decisions recorded in target-languages/PLAN.md, section VII.4.
+/// Changing the translation route still requires the G3 comparison.
 enum LatinOutputDefaults {
     static let spanishPromptName = "Spanish"
     static let frenchPromptName = "French"
-    static let spanishStyleInstruction = "Use neutral Spanish wording without selecting a regional variety."
-    static let frenchStyleInstruction = "Use neutral French wording without selecting a regional variety."
+    static let spanishStyleInstruction = "Use Spanish according to the pan-Hispanic standard of the Real Academia Española (RAE) and the Asociación de Academias de la Lengua Española (ASALE). Use standard spelling, grammar and academic terminology shared across the Spanish-speaking world without favoring Spain or any one Latin American region."
+    static let frenchStyleInstruction = "Use standard metropolitan French as used in France, with its standard spelling, grammar and academic terminology."
+
+    // Apple uses es_ES/fr_FR in its offline package catalog. Request generic es
+    // without making that Spain-labelled package the formal Spanish standard;
+    // the formal prompts above govern pan-Hispanic output. Request fr-FR to
+    // explicitly select France for the preliminary French translation. These
+    // identifiers do not prove a package is installed; the installed-only gate
+    // still skips a missing package without requesting a download.
+    static let spanishAppleLanguageIdentifier = "es"
+    static let frenchAppleLanguageIdentifier = "fr-FR"
+
+    // User decision: same-language es/fr speech is the original caption, with
+    // no translation or regional restyling. This also keeps its wording intact.
     static let spanishPassThroughSources: Set<String> = ["es"]
     static let frenchPassThroughSources: Set<String> = ["fr"]
     static let translationRoute: CaptionTranslationRoute = .direct
@@ -77,10 +90,10 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
             appleLanguagePair: nil, isReleased: false),
         .spanish: .init(autonym: "Español", promptName: LatinOutputDefaults.spanishPromptName, script: .latin,
             generationLocale: "es", renderer: .identity, passThroughSources: LatinOutputDefaults.spanishPassThroughSources,
-            appleLanguagePair: .init(source: "en", target: "es"), isReleased: false),
+            appleLanguagePair: .init(source: "en", target: LatinOutputDefaults.spanishAppleLanguageIdentifier), isReleased: false),
         .french: .init(autonym: "Français", promptName: LatinOutputDefaults.frenchPromptName, script: .latin,
             generationLocale: "fr", renderer: .identity, passThroughSources: LatinOutputDefaults.frenchPassThroughSources,
-            appleLanguagePair: .init(source: "en", target: "fr"), isReleased: false),
+            appleLanguagePair: .init(source: "en", target: LatinOutputDefaults.frenchAppleLanguageIdentifier), isReleased: false),
     ]
 
     var id: String { rawValue }

@@ -187,7 +187,7 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
     private func object(_ text: String) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
     }
-    func testLiteralPromptsRemainUnreleasedAndUseNeutralNames() {
+    func testLiteralPromptsRemainUnreleasedAndUseChosenStandards() {
         for target in targets {
             XCTAssertFalse(target.learningNotePrompt.isEmpty)
             XCTAssertTrue(target.learningNotePrompt.contains(target.promptName))
@@ -196,6 +196,16 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
             XCTAssertEqual(LearningReviewQueue.reviewPrompt(for: target.rawValue, allowUnreleased: true), target.learningReviewPrompt)
             XCTAssertEqual(LearningPrompts.generationPrompt(target: target), target.learningNotePrompt)
             XCTAssertFalse(OutputLanguage(rawValue: target.rawValue)!.isReleased)
+            for prompt in [target.learningNotePrompt, target.learningReviewPrompt,
+                LearningPrompts.generationPrompt(target: target, recoveringAfterOutputLimit: true)] {
+                if target == .spanish {
+                    XCTAssertTrue(prompt.contains("RAE"))
+                    XCTAssertTrue(prompt.contains("ASALE"))
+                    XCTAssertTrue(prompt.contains("pan-Hispanic standard"))
+                } else {
+                    XCTAssertTrue(prompt.contains("standard metropolitan French as used in France"))
+                }
+            }
         }
     }
     func testArabicLocaleValuesBindAcrossEnglishAndTargetGroups() {
@@ -294,8 +304,8 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
     }
     func testIndependentLearningPromptDigestsAreFrozen() {
         let expected: [(CaptionTranslationTarget, [String])] = [
-            (.spanish, ["55a0a2e95bd0e207ecf00e6787b98a5b7ee635eaeb7c14ed14df5f39a9c2f30d", "66087ccda675a66be0aa52ef1ce91add69224ea4f76efb0265c054505ea1f2ba", "19789a9068af441b4db0d2082ecb0350117729e816e757e618234c3332589bc5"]),
-            (.french, ["0894e13c4f69a1e08401a8878d6a0f2c1549ad366ee96bda466cd6c5254465a0", "49a1e81fde20c0a12847c68850ee7731615591e1b8cce2a045c553f642713c84", "cb345034aabdc6c6384c8081c421e67d3da8e01bda5572b7387bf7244298ac5b"])]
+            (.spanish, ["724a0b4f6b6b92ea4b36ee56adde3e7ab6cb22594e1147a25ad550e061b6262f", "30465762263d6707329719fdfc951a831d95b5a4639b69ad53dde259bb2b55fc", "ef8513ed29136e6caced4ef3d34eb9d1eecbd3bbd4c826f569a1d6279cc28f68"]),
+            (.french, ["cf66bd0eb21d21e69436727802e35acf84b07229ecbca826ac2fb41165f6131b", "881190538b94ba9866c58afc125a14783e096effe25f244bbaaf6bba44bb1510", "05f7eb408bb098a30fdded60c3c064126ef78a39733d6a7181d73f28102be43b"])]
         for (target, hashes) in expected {
             let prompts = [target.learningNotePrompt, target.learningReviewPrompt,
                 LearningPrompts.generationPrompt(target: target, recoveringAfterOutputLimit: true)]
