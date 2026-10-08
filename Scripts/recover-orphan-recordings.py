@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
+import errno
 import os
 import stat
 import struct
@@ -132,12 +133,27 @@ def follows_chunk_chain(handle, offset: int, size: int) -> bool:
     return offset + 8 + chunk_size <= size
 
 
+def open_source_fd(path: Path) -> int:
+    """Walk every ancestor through no-follow directory handles, then open leaf."""
+    path = Path(path).absolute()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory = os.open(path.anchor, flags)
+    try:
+        for component in path.parts[1:-1]:
+            child = os.open(component, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        return os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
 def inspect(path: Path) -> Layout:
     """解析并确认这是“头部未收尾”的录音；任何不确定都转 NotRecoverable。
 
     单次打开、按块/按头读取：不反复读取整个文件。
     """
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
+    with os.fdopen(open_source_fd(path), "rb") as handle:
         state = os.fstat(handle.fileno())
         if not stat.S_ISREG(state.st_mode):
             raise NotRecoverable("不是普通文件")
@@ -216,7 +232,11 @@ def require_unchanged_source(source: Path, handle, layout: Layout) -> None:
     expected = (layout.source_device, layout.source_inode, layout.source_size,
                 layout.source_mtime_ns, layout.source_ctime_ns)
     try:
-        states = (os.fstat(handle.fileno()), source.lstat())
+        current = open_source_fd(source)
+        try:
+            states = (os.fstat(handle.fileno()), os.fstat(current))
+        finally:
+            os.close(current)
     except OSError as error:
         raise SourceChanged("源文件路径在处理过程中变化") from error
     for state in states:
@@ -261,6 +281,51 @@ def preserve_incomplete(target: Path, identity: tuple[int, int] | None, *,
             print(f"    无法改名失败输出，请保留检查：{str(target)!r}（{error!s}）", file=sys.stderr)
 
 
+def rename_no_replace(pending: Path, target: Path, *, directory: BoundDirectory | None = None) -> None:
+    """Use macOS exclusive atomic rename; never reserve/copy into final."""
+    if sys.platform != 'darwin':
+        raise OSError(errno.ENOTSUP, 'Exclusive atomic rename is unavailable')
+    import ctypes
+    library = ctypes.CDLL(None, use_errno=True)
+    if directory is None:
+        rename = getattr(library, 'renamex_np', None)
+        if rename is None:
+            raise OSError(errno.ENOTSUP, 'Exclusive atomic rename is unavailable')
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        arguments = (os.fsencode(pending), os.fsencode(target), 0x00000004)
+    else:
+        directory.require_bound()
+        rename = getattr(library, 'renameatx_np', None)
+        if rename is None:
+            raise OSError(errno.ENOTSUP, 'Exclusive atomic rename is unavailable')
+        rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+        arguments = (directory.fd, os.fsencode(pending.name), directory.fd, os.fsencode(target.name), 0x00000004)
+    rename.restype = ctypes.c_int
+    if rename(*arguments) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(target))
+
+
+def publish_no_replace(pending: Path, target: Path, *, directory: BoundDirectory | None = None) -> bool:
+    """Return whether pending was moved rather than linked to the final name."""
+    try:
+        if directory is None:
+            os.link(pending, target, follow_symlinks=False)
+        else:
+            directory.require_bound()
+            os.link(pending.name, target.name, src_dir_fd=directory.fd, dst_dir_fd=directory.fd,
+                    follow_symlinks=False)
+    except OSError as error:
+        if error.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.ENOSYS):
+            raise
+        if directory is None:
+            rename_no_replace(pending, target)
+        else:
+            rename_no_replace(pending, target, directory=directory)
+        return True
+    return False
+
+
 def export_recording(source: Path, layout: Layout, target: Path, *,
                      include_sensitive_diagnostics: bool = False,
                      directory: BoundDirectory | None = None) -> int:
@@ -281,7 +346,7 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
         raise FileExistsError("输出路径已存在，不覆盖")
     pending = target.with_name(f"{target.name}.{uuid.uuid4().hex}.pending")
     published = False
-    with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
+    with os.fdopen(open_source_fd(source), "rb") as handle:
         require_unchanged_source(source, handle, layout)
         handle.seek(layout.data_offset)
         remaining = layout.usable
@@ -314,16 +379,16 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
                 raise OSError("临时输出路径在导出过程中被替换")
             # Hard-link publication fails atomically if another writer owns the
             # final name. A crash during copying leaves only the pending name.
-            os.link(pending.name, target.name, src_dir_fd=directory.fd, dst_dir_fd=directory.fd,
-                    follow_symlinks=False)
+            moved = publish_no_replace(pending, target, directory=directory)
             published = True
             final_target = os.stat(target.name, dir_fd=directory.fd, follow_symlinks=False)
             if not stat.S_ISREG(final_target.st_mode) or (final_target.st_dev, final_target.st_ino) != created_identity:
                 raise OSError("输出路径在发布过程中被替换")
-            pending_state = os.stat(pending.name, dir_fd=directory.fd, follow_symlinks=False)
-            if not stat.S_ISREG(pending_state.st_mode) or (pending_state.st_dev, pending_state.st_ino) != created_identity:
-                raise OSError("临时输出路径在发布过程中被替换")
-            os.unlink(pending.name, dir_fd=directory.fd)  # 完整数据仍在 target。
+            if not moved:
+                pending_state = os.stat(pending.name, dir_fd=directory.fd, follow_symlinks=False)
+                if not stat.S_ISREG(pending_state.st_mode) or (pending_state.st_dev, pending_state.st_ino) != created_identity:
+                    raise OSError("临时输出路径在发布过程中被替换")
+                os.unlink(pending.name, dir_fd=directory.fd)  # 完整数据仍在 target。
             os.fsync(directory.fd)
             require_unchanged_source(source, handle, layout)
             directory.require_bound()

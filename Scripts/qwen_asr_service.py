@@ -15,6 +15,7 @@ import gc
 import re
 import stat
 from contextlib import contextmanager
+import queue
 from importlib.metadata import version
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -257,7 +258,7 @@ def cleanup_temporary_audio():
                 release_temporary_audio(path)
             except (OSError, ValueError):
                 try:
-                    print('ASR cleanup failed code=temporary_audio_cleanup_failed', flush=True)
+                    RequestLog.emit('ASR cleanup failed code=temporary_audio_cleanup_failed')
                 except OSError:
                     pass
 
@@ -276,14 +277,14 @@ def model_for(key: str):
         from mlx_audio.stt.utils import load_model
 
         started = time.monotonic()
-        print(f"ASR loading model={key}", flush=True)
+        RequestLog.emit(f"ASR loading model={key}")
         with measure("asr_load"):
             loaded = load_model(str(path))
         with MODEL_STATE_LOCK:
             MODELS[key] = loaded
             MODEL_LAST_USED[key] = time.monotonic()
             AUTO_SELF_CHECKS.pop(key, None)
-        print(f"ASR loaded model={key} seconds={time.monotonic() - started:.3f}", flush=True)
+        RequestLog.emit(f"ASR loaded model={key} seconds={time.monotonic() - started:.3f}")
     return MODELS[key]
 
 
@@ -580,7 +581,7 @@ def unload_idle_models(now=None, idle_seconds=IDLE_MODEL_SECONDS):
                 pass
             with MODEL_STATE_LOCK:
                 UNLOADING_MODELS.difference_update(pending_release)
-            print('ASR unloaded models=' + ','.join(sorted(pending_release)), flush=True)
+            RequestLog.emit('ASR unloaded models=' + ','.join(sorted(pending_release)))
     return sorted(retired)
 
 
@@ -595,9 +596,46 @@ def start_idle_maintenance():
             # One maintenance future at a time, on the same thread as MLX.
             try: INFERENCE_WORKER.submit(unload_idle_models).result()
             except Exception as error:
-                print(f'ASR idle-unload failed code={safe_exception_code(error)}', flush=True)
+                RequestLog.emit(f'ASR idle-unload failed code={safe_exception_code(error)}')
     threading.Thread(target=maintain, name='asr-idle-maintenance', daemon=True).start()
     return stopped
+
+
+class RequestLog:
+    """Best-effort diagnostics: one daemon writer and a bounded pending queue.
+
+    A full stdout pipe may stall the writer, but never admission, inference
+    deadlines, HTTP response logging or request cleanup. Drop excess messages.
+    """
+    messages = queue.Queue(maxsize=128)
+    start_lock = threading.Lock()
+    thread = None
+
+    @classmethod
+    def emit(cls, message):
+        try:
+            cls.messages.put_nowait(message)
+        except queue.Full:
+            pass
+
+    @classmethod
+    def start(cls):
+        with cls.start_lock:
+            if cls.thread is None:
+                cls.thread = threading.Thread(target=cls.drain, name='asr-request-log', daemon=True)
+                cls.thread.start()
+        return cls.thread
+
+    @classmethod
+    def drain(cls):
+        while True:
+            message = cls.messages.get()
+            if message is None:
+                return
+            try:
+                print(message, flush=True)
+            except Exception:
+                pass
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -699,7 +737,7 @@ class Handler(BaseHTTPRequestHandler):
                     release_temporary_audio(path)
                 except (OSError, ValueError):
                     try:
-                        print('ASR cleanup failed code=temporary_audio_cleanup_failed', flush=True)
+                        RequestLog.emit('ASR cleanup failed code=temporary_audio_cleanup_failed')
                     except OSError:
                         pass
 
@@ -714,32 +752,40 @@ class Handler(BaseHTTPRequestHandler):
                 model_input_path, enhancement = speech_band_enhance(temporary_path)
             started = time.monotonic()
             log_id = uuid.uuid4().hex
-            print(f"ASR request id={log_id} model={model_key} bytes={size}", flush=True)
+            RequestLog.emit(f"ASR request id={log_id} model={model_key} bytes={size}")
             future = INFERENCE_WORKER.submit(run_registered_transcription, request_id, model_input_path, model_key,
                                              language_mode, temporary_path)
             try:
                 text = future.result(timeout=INFERENCE_TIMEOUT_SECONDS)
             except TimeoutError:
-                if future.done(): raise  # The inference itself raised, rather than a wait deadline.
-                if future.cancel():
+                if future.done():
+                    # It may have completed just after the wait expired. Fetch
+                    # its actual result/error rather than rethrowing the wait.
+                    text = future.result()
+                elif future.cancel():
                     self.send_json(504, {"error": "ASR queue deadline exceeded", "request_id": request_id,
                                          "model": model_key, "retryable": True})
                     return
-                # A running tensor call cannot be cancelled by a HTTP timeout.
-                # Retain its input/slot until actual completion or process exit.
-                cleanup_deferred = True
-                future.add_done_callback(lambda finished: cleanup())
-                request_shutdown(self.server, 'inference deadline exceeded')
-                return
-            print(f"ASR completed id={log_id} model={model_key} seconds={time.monotonic() - started:.3f}", flush=True)
+                elif future.done():
+                    # cancel() also returns false for an already completed
+                    # future; that race must not retire unrelated requests.
+                    text = future.result()
+                else:
+                    # A running tensor call cannot be cancelled by a HTTP timeout.
+                    # Retain its input/slot until actual completion or process exit.
+                    cleanup_deferred = True
+                    future.add_done_callback(lambda finished: cleanup())
+                    request_shutdown(self.server, 'inference deadline exceeded')
+                    return
+            RequestLog.emit(f"ASR completed id={log_id} model={model_key} seconds={time.monotonic() - started:.3f}")
             payload = {"text": text, "model": model_key, "request_id": request_id,
                        "audio_enhancement": enhancement}
             if language_mode == "auto":
                 payload.update(text)
                 label = text['detected_label'] if text['detected_label'] in LANGUAGE_CODES else 'unknown'
-                print(f"ASR language id={log_id} label={label} "
+                RequestLog.emit(f"ASR language id={log_id} label={label} "
                       f"p={text['language_probability']} p_en={text['english_probability']} "
-                      f"decode={text['decode']}", flush=True)
+                      f"decode={text['decode']}")
             self.send_json(200, payload)
         except TimeoutError as error:
             self.send_json(408 if receiving_audio else 500,
@@ -938,9 +984,9 @@ def main(argv=None) -> int:
     MODEL_ROOT = resolve_model_root(args.models_dir)
     MODEL_PATHS = build_model_paths(MODEL_ROOT)
     server, bound_host, bound_port = create_server(host, args.port)
+    RequestLog.start()
     announce_ready(server, bound_host)
-    print(f"LiveLingo local ASR service listening on http://{bound_host}:{bound_port}",
-          flush=True)
+    RequestLog.emit(f"LiveLingo local ASR service listening on http://{bound_host}:{bound_port}")
     if SUPERVISED:
         start_parent_watchdog(server)
     maintenance = start_idle_maintenance()

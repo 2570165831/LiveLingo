@@ -522,6 +522,7 @@ def main():
                 continue
             request_id,generation=active.popitem(last=False)
             finished=None
+            saving_checkpoint=False
             try:
                 with measure(generation_stage(purposes.get(request_id))):
                     state=generation.step()
@@ -530,7 +531,10 @@ def main():
                 if state=='done':
                     # Keep a completed checkpoint until the app acknowledges a
                     # committed result; a lost pipe must not discard the batch.
-                    if request_id in checkpointed: persist(generation)
+                    if request_id in checkpointed:
+                        saving_checkpoint=True
+                        persist(generation)
+                        saving_checkpoint=False
                     completed[request_id]=generation.identity
                     send('done',request_id,wire=generation.wire,text=generation.text,
                          thinkingTokens=generation.thinking_count,finalTokens=generation.final_count,
@@ -544,13 +548,16 @@ def main():
                     # Text journals remain frequent; heavy tensor checkpoints
                     # are bounded to avoid continuously writing large caches.
                     if request_id in checkpointed and now-last_checkpoint.get(request_id,now)>=30:
-                        persist(generation); last_checkpoint[request_id]=now
+                        saving_checkpoint=True
+                        persist(generation)
+                        saving_checkpoint=False
+                        last_checkpoint[request_id]=now
                     active[request_id]=generation
                     # Throttled sample: never a cache clear on the token path.
                     memory.log_event('generating')
             except Exception as error:
                 finished='error'
-                if request_id in checkpointed and isinstance(error, OSError):
+                if request_id in checkpointed and (saving_checkpoint or isinstance(error, OSError)):
                     # Keep one failed save hot for an explicit checkpoint retry.
                     # Publish the full text before interruption so eviction never
                     # hides progress from the caller's independent text journal.
@@ -562,7 +569,7 @@ def main():
                     send('snapshot', request_id, wire=generation.wire)
                 send('error',request_id,message=describe_request_error(request_id,error),
                      code='output_budget_exhausted' if getattr(error,'code',None)=='output_budget_exhausted' else None,
-                     recoverable=not isinstance(error,(ValueError,KeyError,TypeError)))
+                     recoverable=saving_checkpoint or not isinstance(error,(ValueError,KeyError,TypeError)))
             finally:
                 if request_id not in active:
                     last_checkpoint.pop(request_id,None);last_emit.pop(request_id,None)
