@@ -37,13 +37,41 @@ class CheckToleranceTests(unittest.TestCase):
 
     def test_rounding_follows_the_written_digits(self):
         for expression in ('1 eV = 1.602e-19 J', '1 eV = 1.6e-19 J', '1 u = 1.66e-27 kg',
-                           '1 mile = 1.609 km', '1.609 km = 1 mile', '1 mile = 1609.3 m'):
+                           '1 mile = 1.609 km', '1.609 km = 1 mile', '1 mile = 1609.3 m',
+                           '1 mile = 1609 m'):
             self.assertStatus(expression, 'matches')
-        # Too far for the digits written, or plain integers taken as exact.
+        # Too far for the digits written.
         for expression in ('1 eV = 1.7e-19 J', '1 eV = 1.603e-19 J', '1 u = 1.67e-27 kg',
                            '1 mile = 1.5 km', '1 mile = 1.62 km', '1 mile = 2 km',
-                           '1 mile = 1609 m', '1e-27 kg = 0 kg', '1e-27 kg = 0.0 kg'):
+                           '1e-27 kg = 0 kg', '1e-27 kg = 0.0 kg'):
             self.assertStatus(expression, 'differs')
+
+    def test_written_integers_round_like_decimals(self):
+        # 1609 m carries the same four written digits as 1.609 km, so the
+        # verdict may not depend on which unit the result is written in.
+        for expression in ('1 mile = 1609 m', '1609 m = 1 mile', '1 lb = 454 g',
+                           '1 hp = 746 W', '1 atm = 101 kPa', '1 Btu = 1055 J'):
+            self.assertStatus(expression, 'matches')
+        for expression in ('1 lb = 455 g', '1 mile = 1608 m', '1 km = 1001 m'):
+            self.assertStatus(expression, 'differs')
+        # One digit and trailing zeros stay exact, so 1 X = ... is a definition.
+        for expression in ('1 yd = 1 m', '1 mile = 2 km', '1 mile = 1610 m'):
+            self.assertStatus(expression, 'differs')
+        for language in ('es', 'fr'):
+            self.assertStatus('1 lb = 454 g', 'matches', language)
+            self.assertStatus('1 lb = 455 g', 'differs', language)
+        self.assertStatus('1 mile = 1.609 m', 'matches', 'es')
+        self.assertStatus('1 mile = 1.608 m', 'differs', 'es')
+        self.assertStatus('1 mile = 1 609 m', 'matches', 'fr')
+
+    def test_rounding_ties_do_not_depend_on_float_noise(self):
+        # 0.13 - 0.125 is 0.0050000000000000044 in float.
+        for expression in ('12.5 cm = 0.13 m', '12.5 cm = 0.12 m', '2.5 dm = 0.3 m',
+                           '0.13 m = 12.5 cm'):
+            self.assertStatus(expression, 'matches')
+        self.assertStatus('12.5 cm = 0.14 m', 'differs')
+        for language in ('es', 'fr'):
+            self.assertStatus('12,5 cm = 0,13 m', 'matches', language)
 
     def test_locale_precision_comes_from_the_typed_literal(self):
         for language in ('es', 'fr'):

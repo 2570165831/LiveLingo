@@ -60,9 +60,11 @@ def reaction(expression):
 
 
 def rounding_step(side, language=None):
-    """Half a unit in the last digit of the side's number as typed. Plain
-    integers and zero are exact. es/fr normalization drops trailing zeros
-    ('1,50' -> '15e-1'), so the written precision comes from the raw literal."""
+    """Half a unit in the last digit of the side's number as typed. Zero,
+    one-digit integers and integers ending in zero are exact ('1 mile', '1000 m'
+    are definitions or ambiguous); other integers get half a unit ('1609 m').
+    es/fr normalization drops trailing zeros ('1,50' -> '15e-1'), so the
+    written precision comes from the raw literal."""
     side = side.strip()
     if language in ('es', 'fr'):
         from latin_numbers import literals
@@ -74,7 +76,10 @@ def rounding_step(side, language=None):
     else:
         raw = coefficient = QUANTITY.fullmatch(side)[1]
         last = Decimal(raw).as_tuple().exponent
-    if Decimal(coefficient) == 0 or (last == 0 and not re.search('[eE]', raw)): return 0
+    if Decimal(coefficient) == 0: return 0
+    if last == 0 and not re.search('[eE]', raw):
+        digits = re.sub(r'\D', '', raw).lstrip('0')
+        if len(digits) == 1 or digits.endswith('0'): return 0
     return float(Decimal(5).scaleb(last - 1))
 
 
@@ -107,11 +112,14 @@ def check(expression, language=None):
                     value, expected = a.to(b.units).magnitude, b.magnitude
                     # Relative at any magnitude, plus the rounding implied by
                     # the digits written on either side (1 eV = 1.602e-19 J).
-                    # No absolute floor, and opposite signs never agree.
+                    # No absolute floor, and opposite signs never agree. A
+                    # rounding tie (12.5 cm = 0.13 m) must not hinge on float
+                    # noise, so allow the same 1e-9 relative noise as above.
                     step_a, step_b = (rounding_step(side, language) for side in written.split('='))
                     slack = max(step_b, abs(UNITS.Quantity(a.magnitude+step_a, a.units).to(b.units).magnitude-value))
+                    noise = 1e-9*max(abs(value), abs(expected))
                     ok = math.isclose(value, expected, rel_tol=1e-9, abs_tol=0) or (
-                        value*expected > 0 and abs(value-expected) <= slack)
+                        value*expected > 0 and abs(value-expected) <= slack+noise)
                     scope='仅核对写出的单位换算；不判断量的归属或题设'
                 method='Pint'
             else:
