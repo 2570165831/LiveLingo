@@ -296,6 +296,8 @@ final class TraditionalCaptionPresentationTests: XCTestCase {
             XCTAssertEqual(model.previewChineseDisplay, "初译已关闭")
             XCTAssertEqual(model.floatingSubtitlePresentation(mode: .translationOnly).translation?.text, expected,
                            "Confirmed English translation remains available with initial preview disabled")
+            XCTAssertEqual(model.floatingSubtitlePresentation(mode: .bilingual).translation?.text, expected,
+                           "Bilingual floating captions show the converted formal translation at a pause")
         }
     }
 
@@ -310,7 +312,8 @@ final class TraditionalCaptionPresentationTests: XCTestCase {
             XCTAssertEqual(model.previewChineseDisplay, preview)
             let floating = model.floatingSubtitlePresentation(mode: .bilingual)
             XCTAssertEqual(floating.source?.text, "The hair is here.")
-            XCTAssertEqual(floating.translation?.text, preview)
+            XCTAssertEqual(floating.translation?.text, model.supportsPreviewTranslation
+                ? preview : "当前系统不支持初译；停顿时显示正式译文")
             XCTAssertEqual(model.previewChinese, "头发在这里。")
         }
     }

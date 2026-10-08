@@ -38,7 +38,7 @@ The app's interface is currently in Chinese, and translations go from English in
 ## Known limitations
 
 - **Translations and notes can be wrong**: the models can skip or mistranslate sentences and get facts wrong in the notes. Check important points against the English transcript.
-- **No instant draft translation on macOS 14**: this feature uses Apple's translation framework, which needs macOS 15 or later. On macOS 14 the Chinese appears once the full translation is done; the translation itself is not affected.
+- **No instant draft translation on macOS 14**: this feature uses Apple's translation framework, which needs macOS 15 or later. On macOS 14 the Chinese appears once the full translation is done; the translation itself is not affected. Floating captions show the finished translation of the last sentence when the speaker pauses.
 - **The word-by-word English preview needs system resources**: it uses the English speech recognition built into macOS. If no preview appears, open System Settings → Keyboard → Dictation, turn on Dictation, add “English (United States)”, and stay online while macOS downloads what it needs. The main transcription is not affected. See [Apple's dictation guide](https://support.apple.com/guide/mac-help/mh40584/mac).
 - **Apple silicon only**: Intel and universal builds have not been made or tested. There is no Windows version; if you would like to help with one, see [issue #1](https://github.com/2570165831/LiveLingo/issues/1).
 - **Large download**: the speech and translation models are inside the package, which is what lets the app work offline right after installation.

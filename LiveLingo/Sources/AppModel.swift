@@ -762,7 +762,11 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// Lets unit tests stand in for a macOS 14 host; ignored outside tests.
+    var previewTranslationSupportForTesting: Bool?
+
     var supportsPreviewTranslation: Bool {
+        if let supported = previewTranslationSupportForTesting, AppRuntimeEnvironment.isUnitTesting { return supported }
         if #available(macOS 15.0, *) { return true }
         return false
     }
