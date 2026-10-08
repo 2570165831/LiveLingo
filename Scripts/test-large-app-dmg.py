@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Opt-in local >4 GiB sparse-file/ditto/UDZO experiment with new temp fixtures."""
+"""Opt-in local >4 GiB sparse-file/ditto/UDZO experiment with new temp fixtures.
+
+Run it with --run-experiment --temporary-directory "$TMPDIR". Without a mode the
+script exits non-zero, so a bare invocation can never look like verification.
+"""
 import argparse
 import hashlib
 import importlib.util
@@ -50,14 +54,16 @@ def main():
                         help="explicit scratch parent matching the harness-controlled TMPDIR")
     arguments = parser.parse_args()
     if not arguments.run_experiment and not arguments.check_prerequisites:
-        print("SKIP large-app-dmg: heavy experiment requires --run-experiment")
-        return
+        parser.error("no mode selected; nothing was verified. Run the experiment with "
+                     "--run-experiment --temporary-directory \"$TMPDIR\", or check tools only "
+                     "with --check-prerequisites")
     reason = prerequisite_reason()
     if reason is not None:
-        print("SKIP large-app-dmg: " + reason)
-        return
+        # An explicitly requested experiment or check that cannot run fails.
+        mode = "experiment" if arguments.run_experiment else "prerequisite check"
+        raise SystemExit("FAIL large-app-dmg " + mode + ": " + reason + "; experiment not run")
     if arguments.check_prerequisites:
-        print("PASS large-app-dmg prerequisites only; experiment not run")
+        print("PASS large-app-dmg prerequisites only; experiment not run, nothing verified")
         return
     if arguments.temporary_directory is None:
         parser.error("--run-experiment requires --temporary-directory matching controlled TMPDIR")
