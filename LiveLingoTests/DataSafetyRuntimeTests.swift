@@ -204,6 +204,64 @@ final class DataSafetyRuntimeTests: XCTestCase {
         if cleaned { await task.value }
     }
 
+    // N05: reuse the review timeout-note payload and a real pipe whose sole
+    // reader never reads. No caller cancellation precedes the observations.
+    func testN05NoteTimeoutDuringBlockedSendPreservesGenerationInterrupted() async throws {
+        let root = try DataSafetyFixtures.make("runtime-N05-timeout-note")
+        let script = root.appendingPathComponent("fake-child.pl")
+        try ("my $mode = 'never-read';\n" + Self.mlxChild)
+            .write(to: script, atomically: true, encoding: .utf8)
+        let children = DataSafetyRuntimeChildren(script: script)
+        var configuration = MLXRuntime.TestConfiguration(python: children.interpreter,
+            script: script, models: root, state: root, controlTimeout: 0.15,
+            interpreterArguments: [])
+        configuration.onWorkerLaunched = { child, input in
+            children.record(child)
+            XCTAssertEqual(fcntl(input.fileDescriptor, F_GETNOSIGPIPE), 1,
+                "Observe production SIGPIPE suppression without changing the pipe")
+        }
+        let runtime = MLXRuntime(testConfiguration: configuration)
+        let probe = DataSafetyRuntimeProbe()
+        let model = self.model
+        let generation = Task {
+            do {
+                let text = try await runtime.generate(model: model,
+                    prompt: String(repeating: "x", count: 1_048_576), input: "", prefix: "synthetic retained prefix",
+                    thinking: false, purpose: "note", finalBudget: 64, timeout: 0.15, onUpdate: { _ in })
+                XCTFail("The non-reading synthetic worker cannot complete a note request")
+                probe.finish(.success(text))
+            } catch {
+                if let failure = error as? QwenRuntimeError, case .generationInterrupted = failure {
+                    XCTAssertTrue(failure.preservesGenerationProgress,
+                        "A timed-out note must preserve the caller's existing prefix and draft")
+                } else {
+                    let failure = error as NSError
+                    XCTFail("The note timeout was replaced by \(failure.domain):\(failure.code)")
+                }
+                probe.finish(.failed)
+            }
+        }
+        addTeardownBlock {
+            generation.cancel()
+            await children.retireAll()
+            // Keep the synthetic evidence in the designated dd-safety/tmp.
+        }
+        let ready = await eventually {
+            let state = await runtime.resourceStates()[model]
+            return FileManager.default.fileExists(atPath: root.appendingPathComponent("ready").path)
+                && children.count == 1 && state?.outstandingRequests == 1
+        }
+        XCTAssertTrue(ready, "The request must own a live child that keeps stdin open without reading")
+        guard ready else { return }
+        let settled = await eventually { probe.outcome != nil && children.runningCount == 0 }
+        XCTAssertTrue(settled, "The note timeout must settle and retire its child before independent cleanup")
+        guard settled else { return }
+        await generation.value
+        let released = await eventually { await runtime.resourceStates().isEmpty }
+        XCTAssertTrue(released, "A timed-out request must leave no runtime requests or pending controls")
+        XCTAssertEqual(children.count, 1)
+    }
+
     func testF04CancellationDuringDeliveryACKReleasesLeaseAndThrowsCancellation() async throws {
         let (runtime, root, children) = try mlx("delayed-ack", timeout: 2)
         let (task, probe) = generate(runtime, prompt: "synthetic")

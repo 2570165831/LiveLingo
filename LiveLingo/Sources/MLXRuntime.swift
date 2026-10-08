@@ -96,6 +96,10 @@ actor MLXRuntime {
     }
     private var workers: [String: Worker] = [:]
     private var streams: [String: AsyncThrowingStream<Event, Error>.Continuation] = [:]
+    // A request may terminate while its initial send is still blocked. Retain
+    // the first stream failure until generate() can observe it, even if worker
+    // retirement has already removed its stream and ownership entries.
+    private var requestFailures: [String: Error] = [:]
     private var requestModels: [String: String] = [:]
     private var resumableRequests: Set<String> = []
     private var requestActivity: [String: TimeInterval] = [:]
@@ -369,7 +373,7 @@ actor MLXRuntime {
                     failure = event.recoverable == true
                         ? .generationInterrupted(message) : .requestFailed(message)
                 }
-                continuation.finish(throwing: failure)
+                finishRequest(id, throwing: failure)
                 forget(id, worker: worker)
             } else {
                 continuation.yield(event)
@@ -386,11 +390,18 @@ actor MLXRuntime {
         resumableRequests.remove(id); worker.requests.remove(id)
     }
 
+    private func finishRequest(_ id: String, throwing error: Error) {
+        guard let continuation = streams[id] else { return }
+        let failure = requestFailures[id] ?? error
+        requestFailures[id] = failure
+        continuation.finish(throwing: failure)
+    }
+
     private func ended(_ model: String, workerID: UUID, error: Error?) {
         guard let worker = workers[model], worker.id == workerID else { return }
         for id in worker.requests {
             let message = "本机模型通信已结束，正在确认进程退出。"
-            streams[id]?.finish(throwing: error ?? (resumableRequests.contains(id)
+            finishRequest(id, throwing: error ?? (resumableRequests.contains(id)
                 ? QwenRuntimeError.generationInterrupted(message) : QwenRuntimeError.processExited))
             streams[id] = nil; requestModels[id] = nil
             resumableRequests.remove(id)
@@ -577,7 +588,7 @@ actor MLXRuntime {
         guard let model = requestModels[id], let worker = workers[model] else { return }
         guard requestControls[id] == nil else { return }
         let resumable = resumableRequests.contains(id)
-        streams[id]?.finish(throwing: timedOut ? (resumable
+        finishRequest(id, throwing: timedOut ? (resumable
             ? QwenRuntimeError.generationInterrupted("本机模型请求超时，已保留已有文字进度。")
             : QwenRuntimeError.requestTimedOut) : CancellationError())
         streams[id] = nil
@@ -641,13 +652,21 @@ actor MLXRuntime {
                 }
                 catch { }
             }
-            defer { deadline.cancel() }
+            defer {
+                deadline.cancel()
+                requestFailures[id] = nil
+            }
             do {
                 var command: [String: Any] = ["op":"generate", "id":id, "prompt":prompt, "input":input, "prefix":prefix,
                                 "thinking":thinking, "purpose":purpose, "thinkingBudget":thinkingBudget,
                                 "finalBudget":finalBudget, "retainCheckpoint":MLXRequestContext.retainsCheckpoint]
                 if !usePrefixCache || !MLXRequestContext.retainsCheckpoint { command["usePrefixCache"] = false }
-                try await send(command, to: worker)
+                do { try await send(command, to: worker) }
+                catch {
+                    // Timeout/exit may have finished the stream during send().
+                    // A later EPIPE must not erase that established outcome.
+                    throw requestFailures[id] ?? error
+                }
                 for try await event in pair.stream {
                     try Task.checkCancellation()
                     if let wire = event.wire { try await onUpdate(wire) }

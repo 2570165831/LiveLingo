@@ -241,6 +241,7 @@ struct ReviewRetryTests {
         #expect(stats.failures == 1)
         #expect(item.retryPending == nil, "重试用尽后不应再挂着等待中的重试")
 
+        try await queue.waitForPendingStorage()
         let journalEvents = try events(journal: journal)
         #expect(journalEvents.filter { $0.code == "retry_scheduled" }.count == 2)
         #expect(journalEvents.filter { $0.code == "failed" }.count == 1)
@@ -324,6 +325,7 @@ struct ReviewRetryTests {
         #expect(item.interruption == nil, "完成一批后旧的终端中断标记要清掉")
 
         // 报告文件里也要能看到中断/统计，而不是把未完成写成失败。
+        try await queue.waitForPendingStorage()
         let report = try String(contentsOf: directory.appendingPathComponent("summary-review.md"), encoding: .utf8)
         #expect(report.contains("本场统计：完成 1 批"))
         #expect(!report.contains("复查失败"))
@@ -346,6 +348,7 @@ struct ReviewRetryTests {
         try queue.enqueue(directory: session, notebook: notebook)
 
         // 从 journal 读出任务 id（jobs 是私有的，但队列会原子写盘）
+        try await queue.waitForPendingStorage()
         let journalData = try Data(contentsOf: journal)
         let decoded = try JSONSerialization.jsonObject(with: journalData) as? [String: Any]
         let firstJob = (decoded?["jobs"] as? [[String: Any]])?.first
@@ -530,6 +533,7 @@ struct ReviewRetryTests {
             deliveredPrefix = prefix
             return Self.emptyV2Response
         }
+        try await queue.waitForPendingStorage()
         #expect(try journalJobs(journal).first?.prefix == "已经想了一半的前缀", "指纹一致时前缀必须保留")
         #expect(!queue.frontJobAwaitingManualStart, "有 version 的日志不得被当成旧日志迁移")
         queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
@@ -549,6 +553,7 @@ struct ReviewRetryTests {
             restoredPrefix = prefix
             return Self.emptyV2Response
         }
+        try await restored.waitForPendingStorage()
         let saved = try #require(try journalJobs(journal).first)
         #expect(saved.prefix.isEmpty, "丢前缀必须立刻存盘")
         #expect(saved.prefixInputDigest == nil)
@@ -582,6 +587,7 @@ struct ReviewRetryTests {
             mismatchedPrefix = prefix
             return Self.emptyV2Response
         }
+        try await mismatched.waitForPendingStorage()
         let mismatchedSaved = try #require(try journalJobs(journal).first)
         #expect(mismatchedSaved.prefix.isEmpty)
         #expect(mismatchedSaved.prefixInputDigest == nil)
@@ -640,6 +646,7 @@ struct ReviewRetryTests {
         #expect(queue.status.contains("已排队，等待开始（不会自动运行）"), "实际状态：\(queue.status)")
 
         // 进度在盘上（不只是内存里）：前缀、报告、批次、下一步、版本号一个都不能丢。
+        try await queue.waitForPendingStorage()
         let reloaded = try persistedJournal(journal)
         let reloadedJob = try #require(reloaded.jobs.first)
         #expect(reloadedJob.prefix == "旧前缀", "迁移不得丢掉未完成的思考前缀")
@@ -691,6 +698,7 @@ struct ReviewRetryTests {
         #expect(paused.frontJobAwaitingManualStart, "未完成的任务同样要等明确开始")
         #expect(paused.items.first?.completed == 1)
         #expect(paused.items.first?.total == 2)
+        try await paused.waitForPendingStorage()
         #expect(try persistedJournal(pausedJournal).userPaused, "盘上的暂停状态不得被改写")
         #expect(paused.status.contains("已手动暂停"), "暂停优先显示，实际状态：\(paused.status)")
         #expect(!paused.running)

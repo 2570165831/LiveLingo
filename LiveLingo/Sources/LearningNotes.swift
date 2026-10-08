@@ -2178,6 +2178,14 @@ final class ReviewRequestIdentityBox: @unchecked Sendable {
     }
 }
 
+#if DEBUG
+/// Observes the real private-storage boundary without replacing its safety checks.
+/// Task-local scope keeps synthetic delays out of unrelated queue operations.
+enum ReviewStorageTestHooks {
+    @TaskLocal static var beforeDirectoryAccess: (@Sendable (URL) -> Void)?
+}
+#endif
+
 /// Bounds for the local failure snapshots. A zero limit disables the store.
 struct ReviewDiagnosticsPolicy: Equatable, Sendable {
     var maximumFiles: Int
@@ -2193,7 +2201,7 @@ struct ReviewDiagnosticsPolicy: Equatable, Sendable {
 
 /// Metadata is the default. Prepared input/final answer require an explicit
 /// debugging policy; reasoning, credentials and recordings are always excluded.
-struct ReviewDiagnosticSnapshot: Codable {
+struct ReviewDiagnosticSnapshot: Codable, Sendable {
     var version = 1
     var createdAt: String
     var jobID: String
@@ -2340,6 +2348,9 @@ struct ReviewDiagnosticsStore: Sendable {
     }
 
     private func prepareDirectory() throws {
+        #if DEBUG
+        ReviewStorageTestHooks.beforeDirectoryAccess?(directory)
+        #endif
         try SensitiveFileIO.prepareDirectory(directory)
     }
 
@@ -3354,7 +3365,7 @@ final class LearningReviewQueue: ObservableObject {
 
     /// Unreleased locales may be stored, but cannot borrow another target's
     /// instructions. Traditional Chinese shares the Simplified Chinese model.
-    static func reviewPrompt(for targetLocale: String?, allowUnreleased: Bool = false) -> String? {
+    nonisolated static func reviewPrompt(for targetLocale: String?, allowUnreleased: Bool = false) -> String? {
         guard let language = OutputLanguage(rawValue: targetLocale ?? "zh-Hans"),
               let target = language.generationTarget else { return nil }
         switch target {
@@ -3415,7 +3426,7 @@ final class LearningReviewQueue: ObservableObject {
         return job
     }
 
-    static func resolvedTargetLocale(_ requested: String?, snapshot: SessionSnapshot?) throws -> String? {
+    nonisolated static func resolvedTargetLocale(_ requested: String?, snapshot: SessionSnapshot?) throws -> String? {
         let resolved = SessionSnapshot.normalizedTargetLocale(requested ?? snapshot?.targetLocale)
         try validateTargetLocale(resolved, snapshot: snapshot)
         return resolved
@@ -3517,7 +3528,7 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     /// 日志版本：缺失表示旧版本写的（升级迁移据此判断 ✓），显式写出后新日志不再被迁移。
-    struct Journal: Codable {
+    struct Journal: Codable, Sendable {
         var jobs: [Job]
         var userPaused: Bool
         var version: Int? = nil
@@ -3584,6 +3595,16 @@ final class LearningReviewQueue: ObservableObject {
     private var restoreBlocked = false
     private var storedJournalVersion: Int? = 4
     private let journalURL: URL
+    private lazy var storage = LearningReviewStorage(journalURL: journalURL,
+        expectedBytes: lastPersistedJournalBytes)
+    private var persistenceTail: Task<Void, Error>?
+    private var outputTail: Task<Void, Error>?
+    private var outputSequence = 0
+    private var admissionTask: Task<Void, Error>?
+    private var admissionToken: UUID?
+    private var persistenceEpoch = UUID()
+    private var persistencePending = 0
+    private var reconcileAfterPersistence = false
     private let generate: Generator
     private var allowUnreleasedTargets = false
 
@@ -3638,7 +3659,7 @@ final class LearningReviewQueue: ObservableObject {
             let retiredBefore = self.retiredJobs
             do {
                 try edit()
-                try self.save()
+                try await self.saveAndWait()
                 self.managementError = nil
             } catch {
                 self.jobs = before
@@ -3912,7 +3933,7 @@ final class LearningReviewQueue: ObservableObject {
         return report
     }
 
-    static func reportEntry(for job: Job) -> ReviewReportEntry {
+    nonisolated static func reportEntry(for job: Job) -> ReviewReportEntry {
         ReviewReportEntry(jobID: job.id, identity: job.identity, scope: job.resolvedScope,
             inputDigest: job.inputDigest, completed: job.next, total: job.batches.count,
             supersededByRevision: job.supersededByRevision, updatedAt: Date(),
@@ -3924,7 +3945,7 @@ final class LearningReviewQueue: ObservableObject {
         _ = try Self.validatedSnapshot(job, at: directory, allowHistorical: allowHistorical)
     }
 
-    private nonisolated static func validatedSnapshot(_ job: Job, at directory: URL,
+    fileprivate nonisolated static func validatedSnapshot(_ job: Job, at directory: URL,
                                                      allowHistorical: Bool) throws -> SessionSnapshot? {
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireCourseDirectory(directory)
@@ -4001,7 +4022,7 @@ final class LearningReviewQueue: ObservableObject {
 
     /// One renderer for the on-disk report and `reviewReportMarkdown(for:)`.
     /// A job that has not finished a single batch still yields a progress line.
-    static func reportMarkdown(for job: Job) -> String {
+    nonisolated static func reportMarkdown(for job: Job) -> String {
         let scope = job.resolvedScope
         let target = (try? OutputLanguage.storedLanguage(job.targetLocale))?.generationTarget ?? .simplifiedChinese
         var header = ClassroomFixedText.reviewDisclaimer.noteText(target: target) + "\n\n"
@@ -4025,12 +4046,12 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     /// 实测（2026-09-18，本机）：9B 思考复查约 306 秒/批（255 秒素材 2 批的平均）。
-    static func reportProgress(next: Int, total: Int, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
+    nonisolated static func reportProgress(next: Int, total: Int, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
         ClassroomFixedText.reviewProgress.noteFormat([String(next), String(total)], target: target)
     }
 
     /// 局部复查的进度行必须写明范围 ✓：否则"1/1 批"会被读成整课结论 ✓。
-    static func reportProgress(next: Int, total: Int, scope: LearningReviewScope?, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
+    nonisolated static func reportProgress(next: Int, total: Int, scope: LearningReviewScope?, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
         guard let scope, !scope.isWholeLesson else { return reportProgress(next: next, total: total, target: target) }
         return ClassroomFixedText.reviewScopedProgress.noteFormat([scope.label(target: target), String(next), String(total)], target: target)
     }
@@ -4038,10 +4059,33 @@ final class LearningReviewQueue: ObservableObject {
     // Only an explicit UI action removes a failed queue entry. Recording files
     // and already written notes/reports are never deleted.
     func removeFailedJob() {
-        guard canRemoveFailedJob else { return }
+        guard canRemoveFailedJob, managementPending == 0 else { return }
         let removed = jobs.removeFirst()
-        do { try save(); persistenceFailure = nil }
+        managementPending += 1
+        do {
+            let pending = try scheduleSave()
+            let epoch = persistenceEpoch
+            let confirmation = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.managementPending -= 1; self.reconcile() }
+                do {
+                    try await pending.value
+                    if self.persistenceEpoch == epoch { self.persistenceFailure = nil }
+                } catch {
+                    if self.persistenceEpoch == epoch {
+                        if !self.jobs.contains(where: { $0.id == removed.id }),
+                           !self.retiredJobs.contains(where: { $0.id == removed.id }) {
+                            self.jobs.insert(removed, at: 0)
+                        }
+                        self.persistenceFailure = "复查队列保存失败，未移除任务：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+                    }
+                    throw error
+                }
+            }
+            persistenceTail = confirmation
+        }
         catch {
+            managementPending -= 1
             jobs.insert(removed, at: 0)
             persistenceFailure = "复查队列保存失败，未移除任务：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
         }
@@ -4498,6 +4542,184 @@ final class LearningReviewQueue: ObservableObject {
         reconcile()
     }
 
+    /// The GUI admission path. Disk validation, report reads and bookmarks are
+    /// prepared by the serial storage actor; only queue state lives here.
+    func enqueueAsync(directory: URL, notebook: LearningNotebook, scope: LearningReviewScope = .wholeLesson,
+                      sessionID: UUID? = nil, inputRevision: Int? = nil, targetLocale: String? = nil) async throws {
+        guard admissionTask == nil else { throw ReviewIdentityError.conflict("上一项复查仍在入队，请稍后再试") }
+        let token = UUID()
+        admissionToken = token
+        let request = Task { @MainActor in
+            try await self.enqueueOwned(directory: directory, notebook: notebook, scope: scope,
+                sessionID: sessionID, inputRevision: inputRevision, targetLocale: targetLocale)
+        }
+        admissionTask = request
+        defer {
+            if admissionToken == token { admissionTask = nil; admissionToken = nil }
+        }
+        try await withTaskCancellationHandler {
+            try await request.value
+        } onCancel: {
+            request.cancel()
+        }
+    }
+
+    private func enqueueOwned(directory: URL, notebook: LearningNotebook, scope: LearningReviewScope,
+                              sessionID: UUID?, inputRevision: Int?, targetLocale: String?) async throws {
+        guard managementPending == 0 else { throw ReviewIdentityError.conflict("课程目录切换尚未完成，请稍后发起复查") }
+        guard persistenceFailure == nil else { throw QwenRuntimeError.requestFailed(persistenceFailure!) }
+        managementPending += 1
+        defer { managementPending -= 1; reconcile() }
+        let active = task
+        active?.cancel()
+        await active?.value
+        try await waitForPendingStorage()
+        try Task.checkCancellation()
+        guard let plan = try await storage.prepareEnqueue(directory: directory, notebook: notebook, scope: scope,
+            sessionID: sessionID, inputRevision: inputRevision, targetLocale: targetLocale,
+            jobs: jobs, retiredJobs: retiredJobs, allowUnreleased: allowUnreleasedTargets) else { return }
+        try Task.checkCancellation()
+        if let existingID = plan.existingID {
+            guard let existing = jobs.firstIndex(where: { $0.id == existingID }) else {
+                throw ReviewIdentityError.conflict("复查任务在核对期间发生变化")
+            }
+            if jobs[existing].awaitingManualStart == true {
+                jobs[existing].awaitingManualStart = false
+                try await saveAndWait()
+            }
+            return
+        }
+        let before = jobs, retiredBefore = retiredJobs
+        for var old in jobs where plan.supersededIDs.contains(old.id) {
+            old.supersededByRevision = plan.candidate.identity?.inputRevision
+            old.prefix = ""; old.prefixInputDigest = nil; old.retryPending = nil
+            let snapshot = try await validatedSnapshotAsync(old, at: old.directory, allowHistorical: true)
+            try await writeOutputsAsync(old, validatedSnapshot: snapshot)
+            retiredJobs.append(old)
+        }
+        jobs.removeAll { plan.supersededIDs.contains($0.id) }
+        jobs.append(plan.candidate)
+        do { try await saveAndWait() }
+        catch {
+            jobs = before; retiredJobs = retiredBefore
+            refreshStatus()
+            throw error
+        }
+        guard let index = jobs.firstIndex(where: { $0.id == plan.candidate.id }) else {
+            throw ReviewIdentityError.conflict("复查任务在保存期间发生变化")
+        }
+        do { try await writeOutputsAsync(jobs[index], validatedSnapshot: plan.snapshot) }
+        catch {
+            guard let current = jobs.firstIndex(where: { $0.id == plan.candidate.id }) else { throw error }
+            jobs[current].failure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+            recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "failed",
+                stage: ReviewFailureStage.output.rawValue, batch: 0,
+                batchCount: plan.candidate.batches.count,
+                detail: "error_code=\((error as NSError).code)"), at: current)
+            try await saveAndWait()
+        }
+        guard let current = jobs.firstIndex(where: { $0.id == plan.candidate.id }),
+              jobs[current].identity == plan.candidate.identity,
+              jobs[current].inputDigest == plan.candidate.inputDigest else {
+            throw ReviewIdentityError.conflict("复查任务在报告保存期间已失效，未继续入队")
+        }
+        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "enqueued", batch: 0,
+            batchCount: plan.candidate.batches.count, detail: plan.candidate.resolvedScope.label), at: current)
+        try await saveAndWait()
+    }
+
+    fileprivate struct EnqueuePlan: Sendable {
+        var candidate: Job
+        var snapshot: SessionSnapshot?
+        var existingID: UUID?
+        var supersededIDs: Set<UUID>
+    }
+
+    fileprivate nonisolated static func prepareEnqueue(directory: URL, notebook: LearningNotebook,
+        scope: LearningReviewScope, sessionID: UUID?, inputRevision: Int?, targetLocale: String?,
+        jobs: [Job], retiredJobs: [Job], allowUnreleased: Bool) throws -> EnqueuePlan? {
+        let reviewable = notebook.batches.filter { !$0.note.points.isEmpty }
+        let snapshot = try ReviewInputBinding.snapshot(in: directory)
+        let resolvedTarget = try resolvedTargetLocale(targetLocale, snapshot: snapshot)
+        guard let prompt = reviewPrompt(for: resolvedTarget, allowUnreleased: allowUnreleased) else {
+            throw QwenRuntimeError.requestFailed("输出语言 \(resolvedTarget ?? "zh-Hans") 尚无复查提示词，不能开始生成")
+        }
+        let requestedID = sessionID ?? snapshot?.sessionID
+        let requestedRevision = inputRevision ?? snapshot?.inputRevision
+        guard (requestedID == nil) == (requestedRevision == nil) else {
+            throw ReviewIdentityError.conflict("课程 ID 和输入版本必须一起提供")
+        }
+        var resolvedScope = scope
+        let batches = try ReviewInputBinding.selected(reviewable, scope: scope)
+        guard !batches.isEmpty else { return nil }
+        if !scope.isWholeLesson, requestedID != nil || scope.batchID != nil {
+            guard let position = reviewable.firstIndex(where: { $0.id == batches[0].id }) else {
+                throw ReviewIdentityError.conflict("批次 ID 无法定位")
+            }
+            resolvedScope = .batch(position + 1, id: batches[0].id)
+        }
+        let identity: ReviewIdentity?
+        if let requestedID, let requestedRevision {
+            identity = try ReviewIdentity(sessionID: requestedID, scope: resolvedScope,
+                inputRevision: requestedRevision, notebookRevision: notebook.revision)
+        } else { identity = nil }
+        let digest = try ReviewInputBinding.digest(batches)
+        let courseDigest = try ReviewInputBinding.digest(reviewable)
+        let candidate = Job(directory: directory, batches: batches, original: notebook.markdown(),
+            prompt: prompt, targetLocale: resolvedTarget,
+            directoryBookmark: try? directory.bookmarkData(options: .withSecurityScope,
+                includingResourceValuesForKeys: nil, relativeTo: nil), scope: resolvedScope,
+            identity: identity, inputDigest: digest, courseInputDigest: courseDigest,
+            courseBatchDigests: try Dictionary(uniqueKeysWithValues: reviewable.map {
+                ($0.id.uuidString, try ReviewInputBinding.digest([$0]))
+            }))
+        let validated = try validatedSnapshot(candidate, at: directory, allowHistorical: false)
+        _ = try ReviewReportCollection.render(try ReviewReportCollection.read(in: directory) + [reportEntry(for: candidate)])
+        let target = SessionDirectoryLocation.canonical(directory)
+        if let identity {
+            for job in jobs + retiredJobs {
+                guard let other = job.identity, other.sessionID == identity.sessionID,
+                      other.inputRevision == identity.inputRevision else { continue }
+                if let oldRevision = other.notebookRevision, let newRevision = identity.notebookRevision,
+                   oldRevision < newRevision {
+                    _ = try validatedSnapshot(job, at: directory, allowHistorical: true)
+                } else if job.courseInputDigest != nil && job.courseInputDigest != courseDigest {
+                    throw ReviewIdentityError.conflict("同一课程 ID 与版本的内容不同，请选择原课程")
+                }
+            }
+        }
+        func sameScope(_ job: Job) -> Bool {
+            if let identity, let other = job.identity { return identity.hasSameScope(as: other) }
+            guard SessionDirectoryLocation.canonical(job.directory) == target else { return false }
+            if resolvedScope.isWholeLesson { return job.resolvedScope.isWholeLesson }
+            return !job.resolvedScope.isWholeLesson && job.batches.first?.id == batches.first?.id
+        }
+        if let existing = jobs.first(where: sameScope),
+           existing.identity?.inputRevision == identity?.inputRevision,
+           existing.identity?.notebookRevision == identity?.notebookRevision {
+            guard try ReviewInputBinding.digest(existing.batches) == digest else {
+                throw ReviewIdentityError.conflict("同一范围和版本对应了不同输入")
+            }
+            if existing.identity != nil, SessionDirectoryLocation.canonical(existing.directory) != target {
+                throw ReviewIdentityError.conflict("这份课程已绑定另一目录，请先重新定位现有任务")
+            }
+            return EnqueuePlan(candidate: candidate, snapshot: validated, existingID: existing.id, supersededIDs: [])
+        }
+        let superseded = jobs.filter(sameScope)
+        if let identity {
+            for old in superseded {
+                guard let oldIdentity = old.identity,
+                      oldIdentity.inputRevision < identity.inputRevision
+                        || (oldIdentity.inputRevision == identity.inputRevision
+                            && (oldIdentity.notebookRevision ?? Int.max) < (identity.notebookRevision ?? -1)) else {
+                    throw ReviewIdentityError.conflict("已有任务的版本更新或尚未核对身份")
+                }
+            }
+        }
+        return EnqueuePlan(candidate: candidate, snapshot: validated, existingID: nil,
+            supersededIDs: Set(superseded.map(\.id)))
+    }
+
     func setSleeping(_ value: Bool) {
         sleeping = value
         reconcile()
@@ -4507,11 +4729,15 @@ final class LearningReviewQueue: ObservableObject {
     /// Completed reports and resumable generation remain in the journal.
     func pauseAndWait() async {
         userPaused = true
-        persistOrPause()
         let active = task
         active?.cancel()
+        let admission = admissionTask
+        admission?.cancel()
+        persistOrPause()
         await active?.value
+        _ = try? await admission?.value
         reconcile()
+        try? await waitForPendingStorage()
     }
 
     /// A persisted generation failure/manual-start choice does not prevent
@@ -4531,7 +4757,11 @@ final class LearningReviewQueue: ObservableObject {
         retryTimerToken = nil
         let active = task
         active?.cancel()
+        let admission = admissionTask
+        admission?.cancel()
         await active?.value
+        _ = try? await admission?.value
+        try? await waitForPendingStorage()
         task = nil
         running = false
         refreshStatus()
@@ -4546,7 +4776,13 @@ final class LearningReviewQueue: ObservableObject {
 
     func togglePause() {
         guard !restoreBlocked else { refreshStatus(); return }
-        if persistenceFailure != nil, !jobs.isEmpty { persistenceFailure = nil }
+        guard persistenceFailure == nil || managementPending == 0 else { refreshStatus(); return }
+        if persistenceFailure != nil {
+            persistenceFailure = nil
+            persistenceEpoch = UUID()
+            persistenceTail = nil
+            outputTail = nil
+        }
         else if userPaused { userPaused = false }
         else if jobs.first?.failure != nil {
             jobs[0].failure = nil
@@ -4635,6 +4871,10 @@ final class LearningReviewQueue: ObservableObject {
         }
         lastBlockReason = nil
         guard task == nil, !jobs.isEmpty else { return }
+        guard persistencePending == 0 else {
+            reconcileAfterPersistence = true
+            return
+        }
         running = true
         refreshStatus()
         recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "started",
@@ -4723,7 +4963,7 @@ final class LearningReviewQueue: ObservableObject {
                 job = restored
                 if repaired {
                     phase = .journal
-                    try save()
+                    try await saveAndWait()
                     phase = .directory
                 }
             }
@@ -4742,7 +4982,10 @@ final class LearningReviewQueue: ObservableObject {
                 guard completed.supersededByRevision == nil, completed.total == job.batches.count,
                       completed.identity == job.identity, completed.inputDigest == job.inputDigest,
                       completed.scope.stableKey == job.resolvedScope.stableKey,
-                      let reports = completed.batchReports else {
+                      let reports = completed.batchReports,
+                      reports.count == completed.completed,
+                      job.reports.count == job.next,
+                      Array(reports.prefix(job.reports.count)) == job.reports else {
                     throw ReviewIdentityError.conflict("已保存报告与队列进度不同，请核对原任务；未重复生成")
                 }
                 jobs[0].next = completed.completed
@@ -4772,7 +5015,8 @@ final class LearningReviewQueue: ObservableObject {
                 timings["prepare"] = Self.milliseconds(since: prepareStarted)
                 if jobs.first?.id == job.id {
                     jobs[0].prefixInputDigest = Self.prefixDigest(for: jobs[0])
-                    persistOrPause()
+                    phase = .journal
+                    try await saveAndWait()
                 }
                 phase = .generation
                 let generationStarted = ProcessInfo.processInfo.systemUptime
@@ -4842,13 +5086,16 @@ final class LearningReviewQueue: ObservableObject {
             }
             phase = .output
             let outputStarted = ProcessInfo.processInfo.systemUptime
-            try writeOutputs(jobs[0], validatedSnapshot: validated)
+            let outputJob = jobs[0]
+            try await writeOutputsAsync(outputJob, validatedSnapshot: validated)
+            try Task.checkCancellation()
+            guard ownsAttempt(outputJob, identity) else { return }
             timings["output"] = Self.milliseconds(since: outputStarted)
             let finishing = jobs[0].next == jobs[0].batches.count
             phase = .journal
             let journalStarted = ProcessInfo.processInfo.systemUptime
             let finished = finishing ? jobs.removeFirst() : nil
-            do { try save() }
+            do { try await saveAndWait() }
             catch {
                 if let finished { jobs.insert(finished, at: 0) }
                 throw error
@@ -4874,7 +5121,7 @@ final class LearningReviewQueue: ObservableObject {
         } catch {
             timings[phase.rawValue] = Self.milliseconds(since: phaseStarted)
             if phase == .journal {
-                persistenceFailure = "复查进度保存失败，已保留完成结果并暂停：\(error.localizedDescription)"
+                persistenceFailure = "复查进度保存失败，已保留完成结果并暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
                 return
             }
             // Progress preservation keeps its original rule: a completed (but
@@ -4916,9 +5163,11 @@ final class LearningReviewQueue: ObservableObject {
                 var message = "本批复查失败，保留原笔记：\(failure.description)"
                 var snapshotWritten = false
                 if generationAttempted {
-                    snapshotWritten = writeDiagnosticSnapshot(job: jobs[0], failure: failure, input: preparedInput,
+                    let failedJob = jobs[0]
+                    snapshotWritten = await writeDiagnosticSnapshot(job: failedJob, failure: failure, input: preparedInput,
                                                               response: finalResponse, timings: timings,
                                                               requestCount: identity.count)
+                    guard !Task.isCancelled, ownsAttempt(failedJob, identity) else { return }
                     if snapshotWritten { message += "；已保存本地私有诊断快照" }
                 }
                 jobs[0].failure = message
@@ -4939,11 +5188,11 @@ final class LearningReviewQueue: ObservableObject {
                         let failed = jobs[0]
                         let snapshot = try await validatedSnapshotAsync(failed, at: failed.directory, allowHistorical: true)
                         if !Task.isCancelled, ownsAttempt(failed, identity) {
-                            try writeOutputs(failed, validatedSnapshot: snapshot)
+                            try await writeOutputsAsync(failed, validatedSnapshot: snapshot)
                         }
                     } catch {
                         if jobs.first?.id == job.id, jobs[0].failure != nil {
-                            jobs[0].failure! += "；复查报告保存失败：\(ReviewFailure.sanitized(error.localizedDescription))"
+                            jobs[0].failure! += "；复查报告保存失败：\(ReviewFailure.sanitized(LearningFailureCode.label(for: LearningFailureCode.code(for: error))))"
                         }
                     }
                 }
@@ -5041,7 +5290,7 @@ final class LearningReviewQueue: ObservableObject {
     /// prefix is intentionally absent: only the prepared input and the final
     /// answer (never the wire stream) are eligible for local diagnosis.
     private func writeDiagnosticSnapshot(job: Job, failure: ReviewFailure, input: String?, response: String?,
-                                         timings: [String: Int], requestCount: Int) -> Bool {
+                                         timings: [String: Int], requestCount: Int) async -> Bool {
         guard let diagnostics else { return false }
         let snapshot = ReviewDiagnosticSnapshot(
             createdAt: ISO8601DateFormatter().string(from: Date()),
@@ -5065,75 +5314,128 @@ final class LearningReviewQueue: ObservableObject {
             inputOmitted: input == nil ? true : nil,
             finalResponse: response,
             responseOmitted: response == nil ? true : nil)
-        return diagnostics.write(snapshot) != nil
+        #if DEBUG
+        let storageObserver = ReviewStorageTestHooks.beforeDirectoryAccess
+        #endif
+        return await Task.detached {
+            #if DEBUG
+            // Detached diagnostic work must explicitly inherit the test probe.
+            return ReviewStorageTestHooks.$beforeDirectoryAccess.withValue(storageObserver) {
+                diagnostics.write(snapshot) != nil
+            }
+            #else
+            return diagnostics.write(snapshot) != nil
+            #endif
+        }.value
     }
 
     private func writeOutputs(_ job: Job) throws {
-        let snapshot = try Self.validatedSnapshot(job, at: job.directory, allowHistorical: true)
-        try writeOutputs(job, validatedSnapshot: snapshot)
-    }
-
-    private func writeOutputs(_ job: Job, validatedSnapshot snapshot: SessionSnapshot?) throws {
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: job.directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw QwenRuntimeError.requestFailed("录音目录已移动或不可用")
-        }
-        // 实测（2026-09-18，本机）：9B 思考复查约 306 秒/批（255 秒素材 2 批的平均）。
-        let progress = Self.reportProgress(next: job.next, total: job.batches.count, scope: job.scope)
-        try ReviewReportCollection.save(Self.reportEntry(for: job), in: job.directory)
-        // 局部复查只写自己的独立文件 ✓：`summary-review.md` 是整课报告 ✓，不覆盖、不冒充 ✓。
-        // `summary-before-review.md` 是"整课复查前正文"的备份 ✓，局部复查没有这个语义，不写 ✓。
-        if job.resolvedScope.isWholeLesson {
-            let originalURL = job.directory.appendingPathComponent("summary-before-review.md")
-            if !FileManager.default.fileExists(atPath: originalURL.path) {
-                try SensitiveFileIO.atomicWrite(Data((job.original + "\n").utf8), to: originalURL)
+        let previous = outputTail
+        let journal = persistenceTail
+        let writer = storage
+        let epoch = persistenceEpoch
+        outputSequence += 1
+        let request = Task { @MainActor [weak self] in
+            do {
+                _ = try? await previous?.value
+                try await journal?.value
+                guard let self, self.persistenceEpoch == epoch else { throw CancellationError() }
+                let result = try await writer.writeOutputs(job)
+                if self.persistenceEpoch == epoch {
+                    self.onUpdate?(job.directory, result.markdown, result.progress)
+                }
+            } catch {
+                if let self, self.persistenceEpoch == epoch {
+                    self.persistenceFailure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+                    self.task?.cancel()
+                    self.refreshStatus()
+                }
+                throw error
             }
         }
-        let report = try ReviewReportCollection.markdown(in: job.directory, queueReports: [], validatedSnapshot: snapshot,
-            sessionID: job.identity?.sessionID)
-        onUpdate?(job.directory, report ?? Self.reportMarkdown(for: job), progress)
+        outputTail = request
+    }
+
+    private func writeOutputsAsync(_ job: Job, validatedSnapshot snapshot: SessionSnapshot?) async throws {
+        try Task.checkCancellation()
+        let result = try await storage.writeOutputs(job, validatedSnapshot: snapshot)
+        try Task.checkCancellation()
+        onUpdate?(job.directory, result.markdown, result.progress)
     }
 
     private func save() throws {
+        _ = try scheduleSave()
+    }
+
+    private func saveAndWait() async throws {
+        try await scheduleSave().value
+    }
+
+    /// A completion boundary for callers that need the queued disk state.
+    /// Synchronous controls deliberately return before slow storage finishes.
+    func waitForPendingStorage() async throws {
+        while persistenceTail != nil || outputTail != nil {
+            let pending = persistenceTail
+            let output = outputTail
+            let epoch = persistenceEpoch
+            let sequence = persistenceSequence
+            let outputs = outputSequence
+            try await pending?.value
+            try await output?.value
+            if epoch == persistenceEpoch, sequence == persistenceSequence, outputs == outputSequence { return }
+        }
+    }
+
+    private var persistenceSequence = 0
+
+    private func scheduleSave() throws -> Task<Void, Error> {
         guard !restoreBlocked else {
             throw ReviewIdentityError.unreadable("复查日志尚未通过读取校验，禁止写回")
         }
-        #if LIVELINGO_PREVIEW
-        try PreviewDataIsolation.requireContained(journalURL, in: PreviewDataIsolation.dataDirectory)
-        #endif
-        try SensitiveFileIO.prepareDirectory(journalURL.deletingLastPathComponent())
-        try SensitiveFileIO.tightenFileIfPresent(journalURL)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(Journal(jobs: jobs, userPaused: userPaused,
-            version: Self.journalVersion, retiredJobs: retiredJobs.isEmpty ? nil : retiredJobs))
-        // Cooperating writers serialize the comparison and replacement. The
-        // byte comparison also detects non-cooperating external replacements.
-        let lockURL = journalURL.appendingPathExtension("lock")
-        let journalRoot = try SensitiveFileIO.Directory.open(at: journalURL.deletingLastPathComponent(), create: false, tighten: false)
-        let descriptor = try journalRoot.openRegularFile(named: lockURL.lastPathComponent, flags: O_RDWR, create: true)
-        defer { _ = Darwin.close(descriptor) }
-        var lockStatus = stat()
-        guard fstat(descriptor, &lockStatus) == 0, lockStatus.st_mode & S_IFMT == S_IFREG else {
-            throw ReviewIdentityError.unreadable("复查日志锁不是普通文件，未写回")
+        let frozen = Journal(jobs: jobs, userPaused: userPaused,
+            version: Self.journalVersion, retiredJobs: retiredJobs.isEmpty ? nil : retiredJobs)
+        let previous = persistenceTail
+        let output = outputTail
+        let writer = storage
+        let epoch = persistenceEpoch
+        persistencePending += 1
+        persistenceSequence += 1
+        let sequence = persistenceSequence
+        let request = Task { @MainActor [weak self] in
+            defer {
+                if let self {
+                    self.persistencePending -= 1
+                    if self.persistencePending == 0, self.reconcileAfterPersistence {
+                        self.reconcileAfterPersistence = false
+                        self.reconcile()
+                    }
+                }
+            }
+            do {
+                try await previous?.value
+                // A report failure must not discard the queue's frozen result.
+                // Its visible error is retained while the journal still commits.
+                _ = try? await output?.value
+                guard let self, self.persistenceEpoch == epoch else { throw CancellationError() }
+                let bytes = try await writer.save(frozen, sequence: sequence)
+                if self.persistenceEpoch == epoch {
+                    self.lastPersistedJournalBytes = bytes
+                    self.storedJournalVersion = Self.journalVersion
+                }
+            } catch {
+                if let self, self.persistenceEpoch == epoch {
+                    self.persistenceFailure = "复查进度保存失败，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+                    self.task?.cancel()
+                    self.refreshStatus()
+                }
+                throw error
+            }
         }
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { _ = flock(descriptor, LOCK_UN) }
-        let onDisk = try Self.journalBytes(at: journalURL)
-        guard onDisk == lastPersistedJournalBytes else {
-            throw ReviewIdentityError.conflict("复查日志已被其他写者替换，未覆盖外部状态；请重新打开")
-        }
-        // 2026-09-18：写前脏检查。
-        // 背景：电源监视器等每 5 秒会走一遍 reconcile() → persistOrPause() → save()，
-        // 此前**无条件整份重写**这个日志（实测 808 KB × ≈13 次/分钟 ≈ 14.7 GB/天，
-        // 而内容多数时候一字未变）。用稳定排序编码后比较，未变就不写。
-        if data == onDisk { return }
-        try SensitiveFileIO.atomicWrite(data, to: journalURL)
-        lastPersistedJournalBytes = data
-        storedJournalVersion = Self.journalVersion
+        persistenceTail = request
+        return request
     }
 
-    private nonisolated static func journalBytes(at url: URL) throws -> Data? {
+    fileprivate nonisolated static func journalBytes(at url: URL) throws -> Data? {
         var status = stat()
         guard lstat(url.path, &status) == 0 else {
             if errno == ENOENT { return nil }
@@ -5183,5 +5485,96 @@ final class LearningReviewQueue: ObservableObject {
             status = "\(progress) · 上次因\(interruption.label)中断，进度已保存"
         }
         else { status = "\(progress) · 后台整理" }
+    }
+}
+
+/// Blocking filesystem work is serialized outside MainActor. The comparison,
+/// checksum and replacement remain one owned operation under the disk lock.
+private actor LearningReviewStorage {
+    /// Distinct queue actors in this process must not contend with each other
+    /// on LOCK_NB. Keep cross-process contention nonblocking and retain CAS.
+    private static let processLock = NSLock()
+    private let journalURL: URL
+    private var expectedBytes: Data?
+    private var lastSavedSequence = 0
+
+    init(journalURL: URL, expectedBytes: Data?) {
+        self.journalURL = journalURL
+        self.expectedBytes = expectedBytes
+    }
+
+    func prepareEnqueue(directory: URL, notebook: LearningNotebook, scope: LearningReviewScope,
+        sessionID: UUID?, inputRevision: Int?, targetLocale: String?, jobs: [LearningReviewQueue.Job],
+        retiredJobs: [LearningReviewQueue.Job], allowUnreleased: Bool) throws -> LearningReviewQueue.EnqueuePlan? {
+        try LearningReviewQueue.prepareEnqueue(directory: directory, notebook: notebook, scope: scope,
+            sessionID: sessionID, inputRevision: inputRevision, targetLocale: targetLocale,
+            jobs: jobs, retiredJobs: retiredJobs, allowUnreleased: allowUnreleased)
+    }
+
+    func save(_ journal: LearningReviewQueue.Journal, sequence: Int) throws -> Data {
+        guard sequence > lastSavedSequence else { throw CancellationError() }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(journal)
+        Self.processLock.lock()
+        defer { Self.processLock.unlock() }
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireContained(journalURL, in: PreviewDataIsolation.dataDirectory)
+        #endif
+        #if DEBUG
+        ReviewStorageTestHooks.beforeDirectoryAccess?(journalURL.deletingLastPathComponent())
+        #endif
+        try SensitiveFileIO.prepareDirectory(journalURL.deletingLastPathComponent())
+        try SensitiveFileIO.tightenFileIfPresent(journalURL)
+        let lockURL = journalURL.appendingPathExtension("lock")
+        let journalRoot = try SensitiveFileIO.Directory.open(at: journalURL.deletingLastPathComponent(), create: false, tighten: false)
+        let descriptor = try journalRoot.openRegularFile(named: lockURL.lastPathComponent, flags: O_RDWR, create: true)
+        defer { _ = Darwin.close(descriptor) }
+        var lockStatus = stat()
+        guard fstat(descriptor, &lockStatus) == 0, lockStatus.st_mode & S_IFMT == S_IFREG else {
+            throw ReviewIdentityError.unreadable("复查日志锁不是普通文件，未写回")
+        }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        let onDisk = try LearningReviewQueue.journalBytes(at: journalURL)
+        guard onDisk == expectedBytes else {
+            throw ReviewIdentityError.conflict("复查日志已被其他写者替换，未覆盖外部状态；请重新打开")
+        }
+        // The external-byte check precedes the unchanged-content shortcut.
+        if data != onDisk { try SensitiveFileIO.atomicWrite(data, to: journalURL) }
+        expectedBytes = data
+        lastSavedSequence = sequence
+        return data
+    }
+
+    struct Output: Sendable {
+        var markdown: String
+        var progress: String
+    }
+
+    func writeOutputs(_ job: LearningReviewQueue.Job) throws -> Output {
+        let snapshot = try LearningReviewQueue.validatedSnapshot(job, at: job.directory, allowHistorical: true)
+        return try writeOutputs(job, validatedSnapshot: snapshot)
+    }
+
+    func writeOutputs(_ job: LearningReviewQueue.Job, validatedSnapshot snapshot: SessionSnapshot?) throws -> Output {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: job.directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw QwenRuntimeError.requestFailed("录音目录已移动或不可用")
+        }
+        let entry = LearningReviewQueue.reportEntry(for: job)
+        try ReviewReportCollection.save(entry, in: job.directory)
+        if job.resolvedScope.isWholeLesson {
+            let originalURL = job.directory.appendingPathComponent("summary-before-review.md")
+            if !FileManager.default.fileExists(atPath: originalURL.path) {
+                try (job.original + "\n").write(to: originalURL, atomically: true, encoding: .utf8)
+            }
+        }
+        let report = try ReviewReportCollection.markdown(in: job.directory, queueReports: [],
+            validatedSnapshot: snapshot, sessionID: job.identity?.sessionID)
+        return Output(markdown: report ?? entry.markdown,
+            progress: LearningReviewQueue.reportProgress(next: job.next, total: job.batches.count, scope: job.scope))
     }
 }

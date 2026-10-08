@@ -1,4 +1,5 @@
 import Dispatch
+import Darwin
 import Foundation
 import Testing
 @testable import LiveLingo
@@ -115,9 +116,10 @@ struct DataSafetyReviewTests {
         let a = queue(journal), b = queue(journal)
         await a.shutdownForTesting()
         await b.shutdownForTesting()
-        try a.enqueue(directory: second, notebook: notebook("second"))
+        try await a.enqueueAsync(directory: second, notebook: notebook("second"))
         let latest = try Data(contentsOf: journal)
         b.togglePause()
+        try? await b.waitForPendingStorage()
         #expect(b.currentFailure != nil)
         #expect(try Data(contentsOf: journal) == latest)
         #expect(try read(journal).jobs.count == 2)
@@ -201,7 +203,7 @@ struct DataSafetyReviewTests {
         var injected = false
         let q = queue(journal) { _, _, _, _, _ in calls += 1; return Self.response }
         q.setContext(recording: false, concurrent: true, resourcesAvailable: false)
-        try q.enqueue(directory: directory, notebook: notebook())
+        try await q.enqueueAsync(directory: directory, notebook: notebook())
         q.onUpdate = { _, _, _ in
             guard !injected else { return }
             injected = true
@@ -300,7 +302,7 @@ struct DataSafetyReviewTests {
             do { while true { try await Task.sleep(for: .milliseconds(10)) } }
             catch { if calls == 2 { secondCancelled = true }; throw error }
         }
-        try q.enqueue(directory: directory, notebook: notebook())
+        try await q.enqueueAsync(directory: directory, notebook: notebook())
         #expect(await waitFor { firstUpdate != nil })
         await q.pauseAndWait()
         q.togglePause()
@@ -385,4 +387,451 @@ struct DataSafetyReviewTests {
         #expect(q.currentFailure == saved.failure)
         #expect(try read(journal).jobs.first?.failure == saved.failure)
     }
+
+    private func recoveryJob(in directory: URL, notebook book: LearningNotebook,
+                             bound: Bool) throws -> LearningReviewQueue.Job {
+        var saved = try job(directory, book)
+        saved.prefixInputDigest = nil
+        if bound {
+            let snapshot = try SessionStore(directory: directory).save(SessionSnapshot(
+                segments: book.batches.flatMap(\.evidence), batches: book.batches,
+                notebookRevision: book.revision))
+            saved.identity = try ReviewIdentity(sessionID: snapshot.sessionID, scope: .wholeLesson,
+                inputRevision: snapshot.inputRevision, notebookRevision: snapshot.notebookRevision)
+            saved.courseInputDigest = try ReviewInputBinding.digest(snapshot.batches)
+        }
+        return saved
+    }
+
+    private func assertRejectedRecovery(_ pending: LearningReviewQueue.Job, journal: URL,
+                                        directory: URL, alias: Data, manifest: Data) async throws {
+        var calls = 0
+        let q = queue(journal) { _, _, _, _, _ in calls += 1; throw CancellationError() }
+        q.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor { !q.running && (q.currentFailure != nil || q.items.isEmpty) })
+        await q.shutdownForTesting()
+        #expect(q.currentFailure != nil, "Conflicting recovery data must visibly pause the queue")
+        #expect(calls == 0, "A recovery conflict must never enter the generator")
+        #expect(q.items.count == 1, "The unfinished job must remain available for recovery")
+        let disk = try read(journal)
+        #expect(disk.jobs.count == 1)
+        #expect(disk.jobs.first?.id == pending.id)
+        #expect(disk.jobs.first?.identity == pending.identity)
+        #expect(disk.jobs.first?.next == pending.next)
+        #expect(disk.jobs.first?.reports == pending.reports)
+        #expect(try Data(contentsOf: directory.appendingPathComponent("summary-review.md")) == alias)
+        #expect(try Data(contentsOf: directory.appendingPathComponent(ReviewReportCollection.manifestFileName)) == manifest,
+                "Keep the conflicting manifest bytes as well as the previously committed report")
+    }
+
+    @Test(arguments: [false, true])
+    func completedReportRecoveryRejectsChangedBatchBodies(_ bound: Bool) async throws {
+        let root = try DataSafetyFixtures.make("review-recovery-body")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let pending = try recoveryJob(in: directory, notebook: notebook(), bound: bound)
+        let journal = root.appendingPathComponent("queue.json")
+        try write([pending], to: journal, paused: false)
+        var completed = pending
+        completed.next = 1
+        completed.reports = ["## Synthetic completed advisory\nSYNTHETIC_ORIGINAL_ADVISORY"]
+        try ReviewReportCollection.save(LearningReviewQueue.reportEntry(for: completed), in: directory)
+        let alias = try Data(contentsOf: directory.appendingPathComponent("summary-review.md"))
+        let manifestURL = directory.appendingPathComponent(ReviewReportCollection.manifestFileName)
+        var raw = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any])
+        var entries = try #require(raw["entries"] as? [[String: Any]])
+        entries[0]["batchReports"] = ["## Synthetic completed advisory\nSYNTHETIC_MUTATED_ADVISORY"]
+        raw["entries"] = entries
+        let changed = try JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys])
+        try changed.write(to: manifestURL, options: .atomic)
+        #expect(throws: ReviewIdentityError.self) { _ = try ReviewReportCollection.read(in: directory) }
+        try await assertRejectedRecovery(pending, journal: journal, directory: directory,
+                                         alias: alias, manifest: changed)
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func completedReportRecoveryRejectsMissingBatchBodies(_ bound: Bool, _ missing: Bool) async throws {
+        let root = try DataSafetyFixtures.make("review-recovery-count")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let pending = try recoveryJob(in: directory, notebook: notebook(batches: 2), bound: bound)
+        let journal = root.appendingPathComponent("queue.json")
+        try write([pending], to: journal, paused: false)
+        var completed = pending
+        completed.next = 2
+        completed.reports = ["## Synthetic first advisory\nFIRST_RETAINED_BODY",
+                             "## Synthetic second advisory\nSECOND_RETAINED_BODY"]
+        try ReviewReportCollection.save(LearningReviewQueue.reportEntry(for: completed), in: directory)
+        let alias = try Data(contentsOf: directory.appendingPathComponent("summary-review.md"))
+        let manifestURL = directory.appendingPathComponent(ReviewReportCollection.manifestFileName)
+        var raw = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any])
+        var entries = try #require(raw["entries"] as? [[String: Any]])
+        if missing { entries[0].removeValue(forKey: "batchReports") }
+        else { entries[0]["batchReports"] = Array(completed.reports.prefix(1)) }
+        raw["entries"] = entries
+        let changed = try JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys])
+        try changed.write(to: manifestURL, options: .atomic)
+        try await assertRejectedRecovery(pending, journal: journal, directory: directory,
+                                         alias: alias, manifest: changed)
+    }
+
+    @Test(arguments: [false, true])
+    func completedReportRecoveryCannotReplaceTheJournalsCompletedPrefix(_ bound: Bool) async throws {
+        let root = try DataSafetyFixtures.make("review-recovery-prefix")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        var pending = try recoveryJob(in: directory, notebook: notebook(batches: 2), bound: bound)
+        pending.next = 1
+        pending.reports = ["## Synthetic first advisory\nJOURNAL_RETAINED_PREFIX"]
+        let journal = root.appendingPathComponent("queue.json")
+        try write([pending], to: journal, paused: false)
+        var completed = pending
+        completed.next = 2
+        completed.reports = ["## Synthetic first advisory\nCONFLICTING_SAVED_PREFIX",
+                             "## Synthetic second advisory\nSECOND_RETAINED_BODY"]
+        try ReviewReportCollection.save(LearningReviewQueue.reportEntry(for: completed), in: directory)
+        // This manifest is internally valid. The conflict is with the separate
+        // journal's already committed prefix, not an invalid checksum fixture.
+        #expect(try ReviewReportCollection.read(in: directory).first?.batchReports == completed.reports)
+        let alias = try Data(contentsOf: directory.appendingPathComponent("summary-review.md"))
+        let manifest = try Data(contentsOf: directory.appendingPathComponent(ReviewReportCollection.manifestFileName))
+        try await assertRejectedRecovery(pending, journal: journal, directory: directory,
+                                         alias: alias, manifest: manifest)
+    }
+
+    @Test(arguments: [false, true])
+    func validCompletedReportRecoveryRetainsEveryBatchWithoutGeneration(_ bound: Bool) async throws {
+        let root = try DataSafetyFixtures.make("review-recovery-valid")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let pending = try recoveryJob(in: directory, notebook: notebook(batches: 2), bound: bound)
+        let journal = root.appendingPathComponent("queue.json")
+        try write([pending], to: journal, paused: false)
+        var completed = pending
+        completed.next = 2
+        completed.reports = ["## Synthetic first advisory\nFIRST_RETAINED_BODY\n\n- retained detail",
+                             "## Synthetic second advisory\nSECOND_RETAINED_BODY"]
+        try ReviewReportCollection.save(LearningReviewQueue.reportEntry(for: completed), in: directory)
+        let alias = try Data(contentsOf: directory.appendingPathComponent("summary-review.md"))
+        var calls = 0
+        let q = queue(journal) { _, _, _, _, _ in calls += 1; throw CancellationError() }
+        q.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor { !q.running && (q.items.isEmpty || q.currentFailure != nil) })
+        await q.shutdownForTesting()
+        #expect(q.currentFailure == nil)
+        #expect(calls == 0)
+        #expect(try read(journal).jobs.isEmpty)
+        #expect(try ReviewReportCollection.read(in: directory).first?.batchReports == completed.reports)
+        #expect(try Data(contentsOf: directory.appendingPathComponent("summary-review.md")) == alias)
+    }
+
+    @Test func manualEnqueueYieldsMainActorWhileAnotherStoreOwnsLock() async throws {
+        let root = try DataSafetyFixtures.make("review-enqueue-main-actor")
+        defer { DataSafetyFixtures.preserve(root) }
+        let writing = try course(root, "writer"), reading = try course(root, "reader")
+        let journal = root.appendingPathComponent("queue.json")
+        let book = try notebook()
+        var calls = 0
+        let q = queue(journal) { _, _, _, _, _ in calls += 1; throw CancellationError() }
+        q.setContext(recording: false, concurrent: true, resourcesAvailable: false)
+        let delay = ReviewSafetyStorageDelay()
+        defer { delay.release() }
+        let writer = SessionStore(directory: writing, atomicWrite: { data, url in
+            delay.waitOnce()
+            try data.write(to: url, options: .atomic)
+        })
+        let writeTask = Task.detached { try writer.save(SessionSnapshot()) }
+        #expect(await waitFor { delay.entered })
+        let attempted = ReviewRequestIdentityBox()
+        let operation = Task { @MainActor in
+            attempted.record("synthetic-enqueue-started")
+            try await q.enqueueAsync(directory: reading, notebook: book)
+        }
+        let pulse = Task { @MainActor in
+            let started = await waitFor { attempted.latest != nil }
+            if started { delay.releaseFromHeartbeat() }
+            return started
+        }
+        try await operation.value
+        #expect(await pulse.value)
+        _ = try await writeTask.value
+        #expect(delay.releasedByHeartbeat,
+                "Enqueue must let MainActor release the real store lock before the fallback timeout")
+        #expect(!delay.timedOut, "A heartbeat after a timeout cannot demonstrate UI responsiveness")
+        await q.pauseAndWait()
+        #expect(q.currentFailure == nil)
+        #expect(calls == 0)
+        #expect(try read(journal).jobs.first?.directory == reading)
+        #expect(try read(journal).jobs.first?.batches == book.batches)
+        await q.shutdownForTesting()
+    }
+
+    @Test(arguments: ["pause", "primary-action", "resource-refresh"])
+    func queuePersistenceYieldsMainActorDuringSyntheticSlowStorage(_ action: String) async throws {
+        let root = try DataSafetyFixtures.make("review-persistence-main-actor")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let storage = try course(root, "queue-storage")
+        let journal = storage.appendingPathComponent("queue.json")
+        var saved = try job(directory, notebook())
+        saved.prefixInputDigest = nil
+        try write([saved], to: journal, paused: false)
+        var calls = 0
+        let q = queue(journal) { _, _, _, _, _ in calls += 1; throw CancellationError() }
+        q.setContext(recording: false, concurrent: true, resourcesAvailable: false)
+        try await q.waitForPendingStorage()
+        let delay = ReviewSafetyStorageDelay()
+        defer { delay.release() }
+        try await ReviewStorageTestHooks.$beforeDirectoryAccess.withValue({ url in
+            guard url.standardizedFileURL.path == storage.standardizedFileURL.path else { return }
+            delay.waitOnce()
+        }) {
+            let operation = Task { @MainActor in
+                switch action {
+                case "pause": await q.pauseAndWait()
+                case "primary-action": q.performPrimaryAction()
+                default:
+                    // A changed resource context still blocks generation while its
+                    // pause event requires a real journal persistence operation.
+                    q.setContext(recording: true, concurrent: false, resourcesAvailable: true)
+                }
+            }
+            let pulse = Task { @MainActor in
+                let entered = await waitFor { delay.entered }
+                if entered { delay.releaseFromHeartbeat() }
+                return entered
+            }
+            await operation.value
+            #expect(await pulse.value, "The delay must engage on this synthetic journal's actual storage path")
+            #expect(delay.waitedOnMainThread == false, "The filesystem operation must execute off MainActor")
+            #expect(delay.releasedByHeartbeat)
+            #expect(!delay.timedOut)
+            await q.pauseAndWait()
+            #expect(q.currentFailure == nil)
+            #expect(calls == 0)
+            let disk = try read(journal)
+            #expect(disk.userPaused)
+            #expect(disk.jobs.first?.id == saved.id)
+            #expect(disk.jobs.first?.batches == saved.batches)
+            #expect(disk.jobs.first?.reports == saved.reports)
+            await q.shutdownForTesting()
+        }
+    }
+
+    @Test func completedOutputCallbackCannotRemoveAnotherCompletedJob() async throws {
+        let root = try DataSafetyFixtures.make("review-output-ownership")
+        defer { DataSafetyFixtures.preserve(root) }
+        let a = try course(root, "a"), b = try course(root, "b")
+        let journal = root.appendingPathComponent("queue.json")
+        let first = try recoveryJob(in: a, notebook: notebook("a"), bound: true)
+        var second = try job(b, notebook("b"))
+        second.next = second.batches.count
+        second.reports = ["## Synthetic completed second report\nKeep this unrelated advice."]
+        second.prefixInputDigest = nil
+        try write([first, second], to: journal)
+        var calls = 0, invalidated = false
+        var callbackError: Error?
+        let q = queue(journal) { _, _, _, _, _ in calls += 1; return Self.response }
+        q.onUpdate = { directory, _, progress in
+            guard directory == a, progress.contains("1/1"), !invalidated else { return }
+            invalidated = true
+            q.setContext(recording: true, concurrent: false, resourcesAvailable: false)
+            do { try q.invalidateInputs(sessionID: first.identity!.sessionID, inputRevision: 1) }
+            catch { callbackError = error }
+        }
+        q.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        q.performPrimaryAction()
+        #expect(await waitFor { invalidated && !q.running })
+        await q.shutdownForTesting()
+        #expect(callbackError == nil)
+        #expect(calls == 1)
+        #expect(q.items.map(\.id) == [second.id], "A stale output continuation must not remove the next job")
+        let disk = try read(journal)
+        #expect(disk.jobs.map(\.id) == [second.id])
+        #expect(disk.jobs.first?.reports == second.reports)
+        #expect(disk.retiredJobs?.first(where: { $0.id == first.id })?.next == 1)
+        #expect(disk.retiredJobs?.first(where: { $0.id == first.id })?.reports.count == 1)
+    }
+
+    @Test func manualEnqueueRejectsCandidateInvalidatedByOutputCallback() async throws {
+        let root = try DataSafetyFixtures.make("review-enqueue-ownership")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let book = try notebook()
+        let snapshot = try SessionStore(directory: directory).save(SessionSnapshot(
+            segments: book.batches.flatMap(\.evidence), batches: book.batches,
+            notebookRevision: book.revision))
+        let journal = root.appendingPathComponent("queue.json")
+        let q = queue(journal)
+        q.setContext(recording: true, concurrent: false, resourcesAvailable: false)
+        var invalidated = false
+        var callbackError: Error?
+        q.onUpdate = { _, _, _ in
+            guard !invalidated else { return }
+            invalidated = true
+            do { try q.invalidateInputs(sessionID: snapshot.sessionID, inputRevision: 1) }
+            catch { callbackError = error }
+        }
+        var rejected = false
+        do { try await q.enqueueAsync(directory: directory, notebook: book) }
+        catch is ReviewIdentityError { rejected = true }
+        await q.shutdownForTesting()
+        #expect(invalidated)
+        #expect(callbackError == nil)
+        #expect(rejected, "Admission must report the candidate was invalidated while its report was saved")
+        #expect(q.items.isEmpty)
+        let disk = try read(journal)
+        #expect(disk.jobs.isEmpty)
+        #expect(disk.retiredJobs?.count == 1)
+        #expect(disk.retiredJobs?.first?.batches == book.batches)
+    }
+
+    @Test(arguments: [false, true])
+    func failedRemovalRestoresItsJobAndCanRetryStorage(_ lastJob: Bool) async throws {
+        let root = try DataSafetyFixtures.make("review-removal-rollback")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let journal = root.appendingPathComponent("queue.json")
+        var failed = try job(directory, notebook("failed"))
+        failed.failure = "Synthetic generation failure"
+        var other = try job(directory, notebook("other"))
+        other.failure = "Another synthetic failure"
+        try write(lastJob ? [failed] : [failed, other], to: journal)
+        let q = queue(journal)
+        try await q.waitForPendingStorage()
+        let original = try Data(contentsOf: journal)
+        let lock = Darwin.open(journal.appendingPathExtension("lock").path,
+            O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        #expect(lock >= 0)
+        defer { _ = flock(lock, LOCK_UN); _ = Darwin.close(lock) }
+        #expect(flock(lock, LOCK_EX | LOCK_NB) == 0)
+        q.removeFailedJob()
+        _ = try? await q.waitForPendingStorage()
+        #expect(await waitFor { q.currentFailure != nil })
+        #expect(q.items.map(\.id) == (lastJob ? [failed.id] : [failed.id, other.id]))
+        #expect(try Data(contentsOf: journal) == original)
+        #expect(flock(lock, LOCK_UN) == 0)
+        q.performPrimaryAction()
+        _ = try? await q.waitForPendingStorage()
+        #expect(q.currentFailure == failed.failure, "Retrying storage must retain the original generation failure")
+        #expect(try read(journal).jobs.first?.id == failed.id)
+        q.removeFailedJob()
+        _ = try? await q.waitForPendingStorage()
+        #expect(await waitFor { q.items.count == (lastJob ? 0 : 1) })
+        #expect(try read(journal).jobs.map(\.id) == (lastJob ? [] : [other.id]))
+        await q.shutdownForTesting()
+    }
+
+    @Test func anEmptyQueueCanRetryAnUnconfirmedPauseSave() async throws {
+        let root = try DataSafetyFixtures.make("review-empty-retry")
+        defer { DataSafetyFixtures.preserve(root) }
+        let journal = root.appendingPathComponent("queue.json")
+        try write([], to: journal, paused: false)
+        let q = queue(journal)
+        let lock = Darwin.open(journal.appendingPathExtension("lock").path,
+            O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        #expect(lock >= 0)
+        defer { _ = flock(lock, LOCK_UN); _ = Darwin.close(lock) }
+        #expect(flock(lock, LOCK_EX | LOCK_NB) == 0)
+        await q.pauseAndWait()
+        #expect(q.currentFailure != nil)
+        #expect(flock(lock, LOCK_UN) == 0)
+        q.performPrimaryAction()
+        _ = try? await q.waitForPendingStorage()
+        #expect(q.currentFailure == nil)
+        #expect(try read(journal).userPaused)
+        #expect(try read(journal).jobs.isEmpty)
+        await q.shutdownForTesting()
+    }
+
+    @Test func failureDiagnosticsYieldMainActorDuringSyntheticSlowStorage() async throws {
+        let root = try DataSafetyFixtures.make("review-diagnostics-main-actor")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let journal = root.appendingPathComponent("queue.json")
+        let diagnostics = root.appendingPathComponent("ReviewDiagnostics")
+        try write([try job(directory, notebook())], to: journal)
+        let finalResponse = "{synthetic invalid final JSON"
+        var generatedInputHash: String?
+        let q = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .standard,
+            generate: { input, _, _, _, _ in
+                generatedInputHash = ReviewInputBinding.digest(Data(input.utf8))
+                return finalResponse
+            }, retryDelays: [0.01, 0.01], startupSnapshotReader: { _ in nil })
+        try await q.waitForPendingStorage()
+        let delay = ReviewSafetyStorageDelay()
+        defer { delay.release() }
+        try await ReviewStorageTestHooks.$beforeDirectoryAccess.withValue({ url in
+            guard url.standardizedFileURL.path == diagnostics.standardizedFileURL.path else { return }
+            delay.waitOnce()
+        }) {
+            let pulse = Task { @MainActor in
+                let entered = await waitFor { delay.entered }
+                if entered { delay.releaseFromHeartbeat() }
+                return entered
+            }
+            q.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+            q.performPrimaryAction()
+            #expect(await pulse.value, "The delay must engage on this synthetic diagnostics storage path")
+            #expect(delay.waitedOnMainThread == false)
+            #expect(delay.releasedByHeartbeat)
+            #expect(!delay.timedOut)
+            #expect(await waitFor { !q.running && q.currentFailure != nil })
+            await q.shutdownForTesting()
+            let files = try FileManager.default.contentsOfDirectory(at: diagnostics, includingPropertiesForKeys: nil)
+            #expect(files.count == 1)
+            let data = try Data(contentsOf: #require(files.first))
+            let snapshot = try JSONDecoder().decode(ReviewDiagnosticSnapshot.self, from: data)
+            #expect(snapshot.containsReasoning == false)
+            #expect(snapshot.stage == "decode")
+            #expect(snapshot.code == "invalid_json")
+            #expect(generatedInputHash != nil)
+            #expect(snapshot.inputSHA256 == generatedInputHash)
+            #expect(snapshot.responseSHA256 == ReviewInputBinding.digest(Data(finalResponse.utf8)))
+            #expect(snapshot.inputBytes > 0)
+            #expect(snapshot.responseBytes == finalResponse.utf8.count)
+            #expect(snapshot.input == nil)
+            #expect(snapshot.finalResponse == nil)
+            #expect(snapshot.inputOmitted == true)
+            #expect(snapshot.responseOmitted == true)
+            let storedJSON = String(decoding: data, as: UTF8.self)
+            #expect(!storedJSON.contains(finalResponse))
+            #expect(!storedJSON.contains("The synthetic marker fixture 0 is green."))
+        }
+    }
+}
+
+/// The timeout makes a failing synchronous call bounded. A passing result must
+/// be released by a MainActor heartbeat, never by that timeout.
+private final class ReviewSafetyStorageDelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var claimed = false
+    private var didTimeout = false
+    private var heartbeatReleased = false
+    private var mainThread: Bool?
+
+    var entered: Bool { lock.withLock { claimed } }
+    var timedOut: Bool { lock.withLock { didTimeout } }
+    var waitedOnMainThread: Bool? { lock.withLock { mainThread } }
+    var releasedByHeartbeat: Bool { lock.withLock { heartbeatReleased && !didTimeout } }
+
+    func waitOnce() {
+        let shouldWait = lock.withLock {
+            guard !claimed else { return false }
+            mainThread = Thread.isMainThread
+            claimed = true
+            return true
+        }
+        guard shouldWait else { return }
+        let result = semaphore.wait(timeout: .now() + 2)
+        lock.withLock { didTimeout = result == .timedOut }
+    }
+
+    func releaseFromHeartbeat() {
+        lock.withLock { heartbeatReleased = true }
+        semaphore.signal()
+    }
+
+    func release() { semaphore.signal() }
 }

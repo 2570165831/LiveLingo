@@ -331,6 +331,7 @@ final class TranslationFailurePersistenceTests: XCTestCase {
             XCTAssertTrue(queue.userPaused)
             XCTAssertFalse(queue.running)
             XCTAssertEqual(queue.items.count, 1)
+            try await queue.waitForPendingStorage()
             let restored = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: url))
             let job = try XCTUnwrap(restored.jobs.first)
             XCTAssertEqual(job.identity?.sessionID, sessionID)

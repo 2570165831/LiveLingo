@@ -32,9 +32,16 @@ struct ReviewReportEntry: Codable, Equatable, Sendable {
               !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               updatedAt.timeIntervalSince1970.isFinite,
               fileName == scope.reportFileName,
-              (batchReports?.count ?? 0) <= completed,
+              batchReports == nil || batchReports?.count == completed,
               supersededByRevision == nil || supersededByRevision! >= 0 else {
             throw ReviewIdentityError.unreadable("报告的范围、进度或文件名无效")
+        }
+        if let batchReports, !batchReports.isEmpty {
+            let body = batchReports.joined(separator: "\n\n")
+            guard batchReports.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+                  markdown.range(of: body, options: .literal) != nil else {
+                throw ReviewIdentityError.unreadable("逐批报告正文与已保存报告不一致")
+            }
         }
         if let identity {
             guard identity == (try ReviewIdentity(sessionID: identity.sessionID, scope: scope,
@@ -51,8 +58,31 @@ struct ReviewReportEntry: Codable, Equatable, Sendable {
 enum ReviewReportCollection {
     static let manifestFileName = "summary-review-index.json"
     private struct Manifest: Codable {
-        var version = 1
+        var version = 2
         var entries: [ReviewReportEntry]
+        var checksum: String? = nil
+
+        private struct Payload: Encodable {
+            var version: Int
+            var entries: [ReviewReportEntry]
+        }
+
+        func contentChecksum() throws -> String {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            return ReviewInputBinding.digest(try encoder.encode(Payload(version: version, entries: entries)))
+        }
+
+        func validateIntegrity() throws {
+            guard version == 1 || version == 2 else {
+                throw ReviewIdentityError.unreadable("报告索引版本不受支持")
+            }
+            if version == 2 || checksum != nil {
+                guard checksum == (try contentChecksum()) else {
+                    throw ReviewIdentityError.unreadable("报告索引完整性校验失败，原文件已保留")
+                }
+            }
+        }
     }
 
     /// Saves history first. A crash before the latest-file refresh leaves a
@@ -91,7 +121,9 @@ enum ReviewReportCollection {
         try checkConflicts(entries)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        try SensitiveFileIO.atomicWrite(encoder.encode(Manifest(entries: entries)),
+        var manifest = Manifest(entries: entries)
+        manifest.checksum = try manifest.contentChecksum()
+        try SensitiveFileIO.atomicWrite(encoder.encode(manifest),
             to: directory.appendingPathComponent(manifestFileName))
         try SensitiveFileIO.atomicWrite(Data((entry.markdown + "\n").utf8),
             to: directory.appendingPathComponent(entry.fileName))
@@ -185,8 +217,8 @@ enum ReviewReportCollection {
             do {
                 let bytes = try data(at: manifestURL)
                 let manifest = try JSONDecoder().decode(Manifest.self, from: bytes)
-                guard manifest.version == 1,
-                      Set(manifest.entries.map(\.jobID)).count == manifest.entries.count else {
+                try manifest.validateIntegrity()
+                guard Set(manifest.entries.map(\.jobID)).count == manifest.entries.count else {
                     throw ReviewIdentityError.unreadable("报告索引版本无效或任务 ID 重复")
                 }
                 entries = manifest.entries

@@ -5,6 +5,29 @@ import XCTest
 
 @MainActor
 final class DataSafetyAppTests: XCTestCase {
+    func testN03AppConversionPreservesAnUnreadableRecoveryIndex() async throws {
+        let root = try DataSafetyFixtures.make("N03-app")
+        defer { DataSafetyFixtures.preserve(root) }
+        let index = root.appendingPathComponent("pending-recordings.json")
+        let bytes = Data(#"{"version":99,"recordings":[],"futureState":"SYNTHETIC_RETAIN"}"#.utf8)
+        try bytes.write(to: index)
+        let suite = "LiveLingo-Test-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+        let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Synthetic audio." }, enableAudioAnalysis: false)
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"), observeSleep: false,
+            diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
+        let model = AppModel(reviewQueue: queue, pipeline: pipeline, backgroundServices: false,
+            defaults: defaults, recoveryDirectory: root)
+        let staging = root.appendingPathComponent(SessionWorkspace.temporaryPrefix + UUID().uuidString)
+        try await model.beginLiveCourseForTesting(directory: staging, outputRoot: root)
+        await model.convertCurrentSessionToRecording(in: root)
+        XCTAssertEqual(try Data(contentsOf: index), bytes)
+        XCTAssertNotNil(model.archiveError)
+        await pipeline.stopCapture(continueTranscribing: false)
+        await queue.shutdownForTesting()
+    }
     private actor CallCounter {
         private(set) var value = 0
         func increment() { value += 1 }

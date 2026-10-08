@@ -72,8 +72,9 @@ enum ReviewIdentityScenarios {
             return queue
         }
 
-        func savedJournal() throws -> LearningReviewQueue.Journal {
-            try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
+        func savedJournal() async throws -> LearningReviewQueue.Journal {
+            try await queue.waitForPendingStorage()
+            return try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
         }
 
         func putJournal(_ value: LearningReviewQueue.Journal) throws {
@@ -146,7 +147,7 @@ enum ReviewIdentityScenarios {
             try f.queue.enqueue(directory: f.directory, notebook: f.book,
                 scope: .batch(999, id: f.book.batches[0].id), sessionID: f.sessionID, inputRevision: 0)
             try check(f.queue.items.count == 2, "Same scope duplicated or another scope disappeared")
-            let jobs = try f.savedJournal().jobs
+            let jobs = try await f.savedJournal().jobs
             try check(jobs.allSatisfy { $0.identity?.sessionID == f.sessionID }, "Queue did not save session identity")
             try check(jobs.last?.resolvedScope.batchID == f.book.batches[0].id, "Local batch UUID was not frozen")
             try check(jobs.last?.resolvedScope.batchNumber == 1, "Stored label did not resolve from current order")
@@ -183,6 +184,7 @@ enum ReviewIdentityScenarios {
             _ = try SessionStore(directory: other).save(snapshot)
             try f.queue.enqueue(directory: other, notebook: f.book, sessionID: otherID, inputRevision: 0)
             try check(f.queue.items.count == 2, "Two courses with the same wording were deduplicated")
+            try await f.queue.waitForPendingStorage()
             try rejects("Export accepted another course ID") {
                 _ = try f.queue.collectedReviewReportMarkdown(for: f.directory, sessionID: otherID)
             }
@@ -195,17 +197,19 @@ enum ReviewIdentityScenarios {
             try f.queue.enqueue(directory: f.directory, notebook: f.book, scope: .batch(2))
             let oldID = f.queue.items[0].id
             let localID = f.queue.items[1].id
+            try await f.queue.waitForPendingStorage()
             let revised = try f.reviseFirst()
             try f.queue.invalidateInputs(sessionID: f.sessionID, inputRevision: 1,
                                          affectedBatchIDs: [f.book.batches[0].id])
             try check(f.queue.items.map(\.id) == [localID], "Unrelated local scope was lost")
-            let saved = try f.savedJournal()
+            let saved = try await f.savedJournal()
             try check(saved.retiredJobs?.first?.id == oldID, "Historical task identity was lost")
             try check(saved.retiredJobs?.first?.supersededByRevision == 1, "Retired task lacks revision marker")
             try check(saved.retiredJobs?.first?.prefix.isEmpty == true, "Stale unfinished prefix survived")
             let newBook = try LearningNotebook(snapshot: revised)
             try f.queue.enqueue(directory: f.directory, notebook: newBook, sessionID: f.sessionID, inputRevision: 1)
             try check(f.queue.items.count == 2, "New whole-course scope failed to coexist with valid local scope")
+            try await f.queue.waitForPendingStorage()
             let text = try f.queue.collectedReviewReportMarkdown(for: f.directory, sessionID: f.sessionID, inputRevision: 1)
             try check(text?.contains("历史版本") == true && text?.contains("输入版本 1") == true,
                       "Versioned export discarded history or omitted current input revision")
@@ -217,7 +221,7 @@ enum ReviewIdentityScenarios {
             f.queue.togglePause()
             try f.queue.enqueue(directory: f.directory, notebook: f.book)
             try f.queue.enqueue(directory: f.directory, notebook: f.book, scope: .batch(1))
-            let before = try f.savedJournal()
+            let before = try await f.savedJournal()
             let moved = f.root.appendingPathComponent("moved")
             try FileManager.default.copyItem(at: f.directory, to: moved)
             f.queue.relocateJob(before.jobs[0].id, to: moved)
@@ -226,7 +230,7 @@ enum ReviewIdentityScenarios {
                     $0.directory.standardizedFileURL == moved.standardizedFileURL
                 }
             }
-            let after = try f.savedJournal()
+            let after = try await f.savedJournal()
             try check(after.jobs.map(\.id) == before.jobs.map(\.id), "Relocation recreated queue jobs")
             try check(after.jobs.map(\.next) == before.jobs.map(\.next), "Relocation reset completed progress")
             try check(after.jobs.map(\.reports) == before.jobs.map(\.reports), "Relocation changed completed reports")
@@ -257,6 +261,7 @@ enum ReviewIdentityScenarios {
                 from: JSONSerialization.data(withJSONObject: json))
             try JSONEncoder().encode(journal).write(to: f.journal, options: .atomic)
             let queue = f.makeQueue()
+            try await queue.waitForPendingStorage()
             let moved = f.root.appendingPathComponent("local-moved")
             try FileManager.default.copyItem(at: f.directory, to: moved)
             guard let id = queue.items.first?.id else { throw Failure(description: "Local job failed to reload") }
@@ -273,6 +278,7 @@ enum ReviewIdentityScenarios {
             let whole = try f.entry(text: "## 整课已完成意见\n完整的整课建议保留。")
             try ReviewReportCollection.save(whole, in: f.directory)
             try f.queue.enqueue(directory: f.directory, notebook: f.book, scope: .batch(1))
+            try await f.queue.waitForPendingStorage()
             let report = try f.queue.collectedReviewReportMarkdown(for: f.directory)
             try check(report?.contains("完整的整课建议保留") == true, "Pending local review hid a completed whole report")
             try check(report?.contains("第 1 批（局部）") == true, "Local scope disappeared from export")
@@ -285,6 +291,7 @@ enum ReviewIdentityScenarios {
             let whole = try f.entry(text: "## 完整结果\n这份报告已经完成。")
             try ReviewReportCollection.save(whole, in: f.directory)
             try f.queue.enqueue(directory: f.directory, notebook: f.book)
+            try await f.queue.waitForPendingStorage()
             let report = try f.queue.collectedReviewReportMarkdown(for: f.directory)
             try check(report?.contains("这份报告已经完成") == true, "An unfinished retry replaced a completed report")
             try check(report?.contains("0/2 批") == false, "Same range/version was exported twice")
@@ -294,6 +301,7 @@ enum ReviewIdentityScenarios {
     static func corruptLocalReportCannotHideBehindAnotherRange() async throws {
         try await withFixture { f in
             try f.queue.enqueue(directory: f.directory, notebook: f.book)
+            try await f.queue.waitForPendingStorage()
             let local = f.directory.appendingPathComponent("summary-review-batch-1.md")
             let corrupt = Data([0xFF, 0xFE, 0x80])
             try corrupt.write(to: local)
@@ -307,6 +315,7 @@ enum ReviewIdentityScenarios {
     static func damagedManifestIsVisibleAndPreserved() async throws {
         try await withFixture { f in
             try f.queue.enqueue(directory: f.directory, notebook: f.book)
+            try await f.queue.waitForPendingStorage()
             let file = f.directory.appendingPathComponent(ReviewReportCollection.manifestFileName)
             let damaged = Data("{\"version\":1,\"entries\":[".utf8)
             try damaged.write(to: file)
@@ -324,6 +333,7 @@ enum ReviewIdentityScenarios {
             try "旧局部意见\n".write(to: f.directory.appendingPathComponent("summary-review-batch-1.md"),
                                     atomically: true, encoding: .utf8)
             try f.queue.enqueue(directory: f.directory, notebook: f.book, scope: .batch(2))
+            try await f.queue.waitForPendingStorage()
             let report = try f.queue.collectedReviewReportMarkdown(for: f.directory)
             try check(report?.contains("旧整课意见") == true, "Legacy whole report was lost")
             try check(report?.contains("旧局部意见") == true, "Legacy local report was lost")
@@ -361,7 +371,7 @@ enum ReviewIdentityScenarios {
             legacy.prefixInputDigest = LearningReviewQueue.prefixDigest(for: legacy)
             try f.putJournal(.init(jobs: [legacy], userPaused: true, version: 2))
             let restored = f.makeQueue()
-            let saved = try f.savedJournal()
+            let saved = try await f.savedJournal()
             try check(restored.userPaused, "Legacy manual pause was lost")
             try check(saved.jobs[0].id == legacy.id, "Legacy job ID was regenerated")
             try check(saved.jobs[0].batches.map(\.id) == legacy.batches.map(\.id), "Legacy batch IDs were regenerated")
@@ -392,7 +402,7 @@ enum ReviewIdentityScenarios {
             try queue.invalidateInputs(sessionID: f.sessionID, inputRevision: 1,
                                        affectedBatchIDs: [f.book.batches[0].id])
             try await until("Superseded generator did not stop") { !queue.running }
-            let saved = try f.savedJournal()
+            let saved = try await f.savedJournal()
             guard let retired = saved.retiredJobs?.first else { throw Failure(description: "Partial history was lost") }
             try check(retired.next == 1 && retired.reports.count == 1, "Completed advice was discarded with the unfinished prefix")
             try check(retired.prefix.isEmpty, "Invalidated prefix remained resumable")
@@ -450,10 +460,11 @@ struct ReviewIdentityTests {
                 original: f.book.markdown(), next: 1, reports: ["已完成第一批"], scope: .wholeLesson)
             try f.putJournal(.init(jobs: [job], userPaused: true, version: 2))
             let queue = f.makeQueue()
+            try await queue.waitForPendingStorage()
             let before = try Data(contentsOf: f.journal)
             let legacy = SessionSnapshot(sessionID: f.sessionID, segments: f.book.batches.flatMap(\.evidence),
                                          legacyMarkdown: f.book.markdown())
-            let restoredJournal = try f.savedJournal()
+            let restoredJournal = try await f.savedJournal()
             let restoredJob = try #require(restoredJournal.jobs.first)
             #expect(restoredJob.resolvedScope.isWholeLesson)
             #expect(!restoredJob.batches.isEmpty)
@@ -466,7 +477,7 @@ struct ReviewIdentityTests {
             #expect(recovered.latestEvidenceIDs == f.book.batches.last?.ids)
             #expect(queue.userPaused)
             #expect(try Data(contentsOf: f.journal) == before)
-            let saved = try f.savedJournal()
+            let saved = try await f.savedJournal()
             #expect(saved.jobs.first?.next == 1)
             #expect(saved.jobs.first?.reports == ["已完成第一批"])
             var changed = legacy
@@ -512,6 +523,7 @@ struct ReviewIdentityTests {
                 #expect(writerStopped)
                 let copied = try SessionTreeMigration.copyVerified(from: f.directory, to: target)
                 try queue.relocatePausedCourse(sessionID: f.sessionID, from: f.directory, to: target)
+                try await queue.waitForPendingStorage()
                 return try SessionTreeMigration.retireVerifiedCopy(copied)
             }
             #expect(receipt.preservedSourceDirectory != nil)
@@ -533,22 +545,24 @@ struct ReviewIdentityTests {
             f.queue.togglePause()
             try f.queue.enqueue(directory: f.directory, notebook: f.book)
             try f.queue.enqueue(directory: f.directory, notebook: f.book, scope: .batch(1))
-            let before = try f.savedJournal()
+            let before = try await f.savedJournal()
             let target = f.root.appendingPathComponent("failed-move")
             do {
                 _ = try await f.queue.withCourseWritersPaused(sessionID: f.sessionID, directory: f.directory) {
                     let copied = try SessionTreeMigration.copyVerified(from: f.directory, to: target)
                     try f.queue.relocatePausedCourse(sessionID: f.sessionID, from: f.directory, to: target)
+                    try await f.queue.waitForPendingStorage()
                     try Data("unexpected write".utf8).write(to: target.appendingPathComponent("late.txt"))
                     do { return try SessionTreeMigration.retireVerifiedCopy(copied) }
                     catch {
                         try f.queue.relocatePausedCourse(sessionID: f.sessionID, from: target, to: f.directory)
+                        try await f.queue.waitForPendingStorage()
                         throw error
                     }
                 }
                 Issue.record("Changed destination was accepted")
             } catch is SessionMigrationError {}
-            let after = try f.savedJournal()
+            let after = try await f.savedJournal()
             #expect(after.jobs.map(\.id) == before.jobs.map(\.id))
             #expect(after.jobs.map(\.directory) == before.jobs.map(\.directory))
             #expect(after.userPaused)
@@ -560,6 +574,7 @@ struct ReviewIdentityTests {
     @Test func appendedNotesPreserveFrozenReviewAndAllowANewScope() async throws {
         try await ReviewIdentityScenarios.withFixture { f in
             try f.queue.enqueue(directory: f.directory, notebook: f.book)
+            try await f.queue.waitForPendingStorage()
             var grown = f.book
             let evidence = TranscriptSegment(startTime: 20, endTime: 28,
                 english: "The next sample has a temperature of 40 degrees Celsius.",
@@ -574,12 +589,13 @@ struct ReviewIdentityTests {
             try f.queue.enqueue(directory: f.directory, notebook: grown,
                 scope: .batch(3, id: grown.batches[2].id))
             #expect(f.queue.items.count == 2)
+            try await f.queue.waitForPendingStorage()
             let reports = try #require(try f.queue.collectedReviewReportMarkdown(for: f.directory))
             #expect(reports.contains("笔记版本 2"))
             #expect(reports.contains("笔记版本 3"))
             try f.queue.enqueue(directory: f.directory, notebook: grown)
             #expect(f.queue.items.count == 2)
-            let saved = try f.savedJournal()
+            let saved = try await f.savedJournal()
             #expect(saved.retiredJobs?.count == 1)
             #expect(saved.retiredJobs?.first?.identity?.notebookRevision == 2)
             #expect(saved.jobs.first(where: { $0.resolvedScope.isWholeLesson })?.identity?.notebookRevision == 3)

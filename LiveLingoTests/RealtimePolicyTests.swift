@@ -2,6 +2,17 @@ import AVFoundation
 import XCTest
 @testable import LiveLingo
 
+@MainActor
+private func waitForReviewState(_ condition: @escaping @MainActor () -> Bool,
+                                seconds: Double = 3) async -> Bool {
+    let deadline = ContinuousClock.now + .seconds(seconds)
+    while ContinuousClock.now < deadline {
+        if condition() { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return condition()
+}
+
 final class RealtimePolicyTests: XCTestCase {
     func testPreviewReservesSharedAssetsBeforeCheckingReadiness() async throws {
         let state = PreviewAssetFixture(installedOnDevice: true)
@@ -764,10 +775,10 @@ final class RealtimePolicyTests: XCTestCase {
         addTeardownBlock { await queue.shutdownForTesting() }
         queue.setContext(recording: true, concurrent: false, resourcesAvailable: true)
         for dir in dirs { try queue.enqueue(directory: dir, notebook: book) }
+        await queue.shutdownForTesting()
         var saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
         saved.jobs[0].failure = "模拟失败"
         try JSONEncoder().encode(saved).write(to: journal)
-        await queue.shutdownForTesting()
         let restored = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in #"{"corrections":[],"reviewVersion":2,"additions":[]}"# }
         addTeardownBlock { await restored.shutdownForTesting() }
         restored.setContext(recording: false, concurrent: false, resourcesAvailable: true)
@@ -789,9 +800,16 @@ final class RealtimePolicyTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         var book = LearningNotebook()
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Atoms")], note: .init(topic: "原子", points: [.init(kind: "核心结论", text: "原笔记")]))
+        var prefixPublished = false
+        var lateResponseReturned = false
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"), observeSleep: false, diagnostics: .disabled) { _, _, _, _, update in
             await update("saved-prefix")
-            try? await Task.sleep(for: .milliseconds(150))
+            prefixPublished = true
+            // Cancellation releases this synthetic request, which deliberately
+            // sends one more update and a final response after being cancelled.
+            try? await Task.sleep(for: .seconds(60))
+            await update("saved-prefix-late")
+            lateResponseReturned = true
             return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
         }
         addTeardownBlock { await queue.shutdownForTesting() }
@@ -803,14 +821,23 @@ final class RealtimePolicyTests: XCTestCase {
         }
         let first = try XCTUnwrap(queue.items.first?.id)
         queue.setContext(recording: false, concurrent: false, resourcesAvailable: true)
-        try await Task.sleep(for: .milliseconds(20))
+        let published = await waitForReviewState { prefixPublished }
+        XCTAssertTrue(published, "The active request must publish its checkpoint before moving")
         queue.moveJobToEnd(first)
         queue.setSleeping(true)
-        try await Task.sleep(for: .milliseconds(80))
+        let moved = await waitForReviewState {
+            lateResponseReturned && queue.items.last?.id == first && !queue.running
+        }
+        XCTAssertTrue(moved, "The cancelled request and queue move must finish before reading disk")
+        try await queue.waitForPendingStorage()
+        XCTAssertNil(queue.managementError)
+        XCTAssertEqual(queue.items.count, 2)
         XCTAssertEqual(queue.items.last?.id, first)
         XCTAssertEqual(queue.items.last?.completed, 0)
         let saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: root.appendingPathComponent("queue.json")))
         XCTAssertEqual(saved.jobs.last?.prefix, "saved-prefix")
+        XCTAssertEqual(saved.jobs.last?.next, 0)
+        XCTAssertEqual(saved.jobs.last?.reports, [])
     }
 
     @MainActor
@@ -924,6 +951,7 @@ final class RealtimePolicyTests: XCTestCase {
         restored.removeFailedJob()
         XCTAssertFalse(restored.hasWork)
         XCTAssertEqual(try String(contentsOf: original, encoding: .utf8), "保留笔记")
+        try await restored.waitForPendingStorage()
         let saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
         XCTAssertTrue(saved.jobs.isEmpty)
     }
@@ -935,14 +963,24 @@ final class RealtimePolicyTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         var book = LearningNotebook()
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Atoms")], note: .init(topic: "原子", points: [.init(kind: "核心结论", text: "原笔记")]))
-        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _, _ in #"{"corrections":[],"reviewVersion":2,"additions":[]}"# }
+        var calls = 0
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _, _ in
+            calls += 1
+            return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
+        }
         addTeardownBlock { await queue.shutdownForTesting() }
         queue.togglePause()
         try queue.enqueue(directory: root, notebook: book)
+        // The external edit follows admission's initial report/journal writes.
+        // Otherwise it tests an admission-write conflict instead of review.
+        try await queue.waitForPendingStorage()
         let file = root.appendingPathComponent("summary-zh-Hans.md")
         try "人工补充的内容\n".write(to: file, atomically: true, encoding: .utf8)
         queue.togglePause()
-        try await Task.sleep(for: .milliseconds(100))
+        let rejected = await waitForReviewState { queue.currentFailure != nil && !queue.running }
+        XCTAssertTrue(rejected, "Review must finish rejecting the externally changed notes")
+        try await queue.waitForPendingStorage()
+        XCTAssertEqual(calls, 0)
         XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "人工补充的内容\n")
         XCTAssertTrue(queue.hasWork)
         XCTAssertFalse(queue.running)
@@ -1823,8 +1861,10 @@ final class ReviewExportIntegrationTests: XCTestCase {
         }
         let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled, generate: generate)
         addTeardownBlock { await queue.shutdownForTesting() }
-        try queue.enqueue(directory: recording, notebook: book)
-        for _ in 0..<1000 where queue.hasWork { await Task.yield() }
+        try await queue.enqueueAsync(directory: recording, notebook: book)
+        let completed = await waitForReviewState { !queue.hasWork && !queue.running }
+        XCTAssertTrue(completed, queue.status)
+        try await queue.waitForPendingStorage()
         XCTAssertFalse(queue.hasWork, queue.status)
         XCTAssertNil(queue.reviewReportMarkdown(for: recording))
         let report = try XCTUnwrap(ReviewExportSource.markdown(for: recording, queue: queue))

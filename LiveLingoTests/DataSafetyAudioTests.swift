@@ -1,4 +1,5 @@
 import AVFoundation
+import Darwin
 import Foundation
 import XCTest
 @testable import LiveLingo
@@ -371,6 +372,95 @@ final class DataSafetyAudioTests: XCTestCase, @unchecked Sendable {
         let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
         XCTAssertFalse(reopened.processingState.isCapturing)
         XCTAssertFalse(reopened.isPaused)
+    }
+
+    // N04: the same real directory flock as the review stop-lock probe. The
+    // holder stays locked until the admission observation, so cleanup cannot
+    // turn acceptance during journal backpressure into a passing result.
+    private func assertStopClosesAdmissionBeforeLockedJournal(persistent: Bool) async throws {
+        let root = try DataSafetyFixtures.make(persistent ? "N04-persistent" : "N04-live")
+        let session = UUID(), p = pipeline()
+        let recording = root.appendingPathComponent("recording.wav")
+        let input = try await p.startSyntheticCapture(format: format(), recordingURL: recording,
+            sessionID: session, persistsSession: persistent, eventHandler: { _ in })
+        XCTAssertEqual(input.submit(pcm(1_600)), .accepted)
+        await input.drain()
+        let workDirectory = try XCTUnwrap(p.syntheticWorkDirectory)
+        let log = workDirectory.appendingPathComponent("work.jsonl")
+        let before = try Data(contentsOf: log)
+        let script = root.appendingPathComponent("hold-directory-lock.pl")
+        let ready = root.appendingPathComponent("holder-ready")
+        let release = root.appendingPathComponent("release-holder")
+        try #"""
+        use strict;
+        use warnings;
+        use Fcntl qw(O_RDONLY O_NOFOLLOW LOCK_EX LOCK_UN);
+        use Time::HiRes qw(time sleep);
+        sysopen(my $directory, $ARGV[0], O_RDONLY | O_NOFOLLOW) or exit(41);
+        flock($directory, LOCK_EX) or exit(42);
+        open(my $marker, '>', $ARGV[1]) or exit(43);
+        print {$marker} 'locked';
+        close($marker) or exit(44);
+        my $deadline = time() + 5;
+        while (!-e $ARGV[2] && time() < $deadline) { sleep(0.005); }
+        my $released = -e $ARGV[2];
+        flock($directory, LOCK_UN) or exit(45);
+        close($directory) or exit(46);
+        exit($released ? 0 : 47);
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        let holder = Process()
+        holder.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        holder.arguments = [script.path, workDirectory.path, ready.path, release.path]
+        holder.environment = [:]
+        holder.standardOutput = FileHandle.nullDevice
+        holder.standardError = FileHandle.nullDevice
+        try holder.run()
+        addTeardownBlock {
+            // Only this Process was launched by this fixture; no PID search.
+            if holder.isRunning { holder.terminate() }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+            while holder.isRunning, ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            if holder.isRunning { _ = Darwin.kill(holder.processIdentifier, SIGKILL) }
+            await p.stopCapture(continueTranscribing: false)
+            // Keep the synthetic evidence in the designated dd-safety/tmp.
+        }
+        try await eventually { FileManager.default.fileExists(atPath: ready.path) }
+        XCTAssertTrue(holder.isRunning, "The synthetic holder must own the directory lock")
+        let started = DataSafetyAudioBox(false), stopped = DataSafetyAudioBox(false)
+        let stopping = Task.detached {
+            started.update { $0 = true }
+            await p.stopCapture(continueTranscribing: false)
+            stopped.update { $0 = true }
+        }
+        try await eventually { started.value }
+        try await Task.sleep(for: .milliseconds(50))
+        let submission = input.submit(pcm(1_600, value: 0.75))
+        XCTAssertTrue(holder.isRunning, "Observe admission before releasing the real flock")
+        XCTAssertFalse(stopped.value, "Journal finalization must still wait for the held lock")
+        XCTAssertEqual(submission, .closed, "A stop request must seal ingress before pause journal I/O")
+        XCTAssertEqual(try Data(contentsOf: log), before, "The held lock must prevent journal writes")
+        try Data().write(to: release)
+        try await eventually { !holder.isRunning && stopped.value }
+        await stopping.value
+        XCTAssertEqual(holder.terminationStatus, 0, "The holder must exit after the explicit release")
+        XCTAssertEqual(input.submit(pcm(1_600)), .closed)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: workDirectory.deletingLastPathComponent(),
+            sessionID: session)
+        XCTAssertTrue(journal.isPaused, "Pause must be durable before the final work can run")
+        XCTAssertFalse(journal.processingState.isCapturing)
+        XCTAssertEqual(journal.records.reduce(Int64(0)) { $0 + $1.endFrame - $1.startFrame }, 1_600,
+            "Only PCM accepted before the stop boundary may become work")
+        XCTAssertEqual(try AVAudioFile(forReading: recording).length, 1_600)
+    }
+
+    func testN04LiveStopClosesAdmissionBeforeLockedPauseJournal() async throws {
+        try await assertStopClosesAdmissionBeforeLockedJournal(persistent: false)
+    }
+
+    func testN04ForcedPersistentStopClosesAdmissionBeforeLockedPauseJournal() async throws {
+        try await assertStopClosesAdmissionBeforeLockedJournal(persistent: true)
     }
 
     private func assertStopDuringStartup(_ gate: DataSafetyMicrophone.Gate) async throws {

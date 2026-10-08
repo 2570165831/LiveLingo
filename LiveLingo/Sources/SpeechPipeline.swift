@@ -874,6 +874,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     func stopCapture(continueTranscribing: Bool = true, preservingStartup reservation: UUID? = nil) async {
         let token = stateLock.withLock { () -> UUID in
             if startupOwner != reservation { cancelledStartup = startupOwner }
+            // Establish the stop boundary before any journal I/O can wait on
+            // another writer's directory lock. Accepted PCM still drains below.
+            isStopping = true
+            ingress?.seal()
             return generation
         }
         // Pause before the final chunk is submitted: live-only stop must not
@@ -885,8 +889,6 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         let task = stateLock.withLock { () -> Task<Void, Never> in
             if let finalizerTask { return finalizerTask }
             let token = generation
-            isStopping = true
-            ingress?.seal()
             let task = Task { [self] in await finalizeCapture(generation: token) }
             finalizerTask = task
             return task

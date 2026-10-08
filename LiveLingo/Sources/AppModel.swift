@@ -1168,8 +1168,9 @@ final class AppModel: ObservableObject {
                     if sessionID == identity { reviewQueueNotice = "课程内容已更新，请重新选择需要核对的范围。" }
                     return
                 }
-                try noteReviewQueue.enqueue(directory: directory, notebook: notebook, scope: scope,
+                try await noteReviewQueue.enqueueAsync(directory: directory, notebook: notebook, scope: scope,
                     sessionID: sessionSnapshot == nil ? nil : identity, inputRevision: revision)
+                guard sessionID == identity, generation == epoch else { return }
                 reviewQueueNotice = "已加入复查队列：\(scope.label) · 只给出核对意见，不会自动修改笔记正文"
             } catch {
                 guard sessionID == identity, generation == epoch else { return }
@@ -1437,17 +1438,17 @@ final class AppModel: ObservableObject {
 
     private func storeRecordingRecovery(_ recovery: SessionWorkspace.RecordingRecovery) throws {
         let root = recordingRecoveryDirectory ?? recovery.directory.deletingLastPathComponent()
-        let updated = recoverableRecordings.filter { $0.id != recovery.id } + [recovery]
-        try SessionWorkspace.saveRecordingRecoveries(updated, in: root)
+        let merged = try SessionWorkspace.saveRecordingRecoveries([recovery], in: root,
+            expected: recoverableRecordings.filter { $0.id == recovery.id })
         recordingRecoveryDirectory = root
-        recoverableRecordings = updated
-        preferences.set(try SessionArchiveCoding.encode(updated), forKey: "LiveLingo.pendingRecordingRecovery")
+        recoverableRecordings = merged
+        preferences.set(try SessionArchiveCoding.encode(merged), forKey: "LiveLingo.pendingRecordingRecovery")
     }
 
     private func retireRecordingRecovery(session: UUID) throws {
         guard recoverableRecordings.contains(where: { $0.id == session }), let root = recordingRecoveryDirectory else { return }
-        let remaining = recoverableRecordings.filter { $0.id != session }
-        try SessionWorkspace.saveRecordingRecoveries(remaining, in: root)
+        let retiring = recoverableRecordings.filter { $0.id == session }
+        let remaining = try SessionWorkspace.saveRecordingRecoveries([], in: root, retiring: retiring)
         recoverableRecordings = remaining
         if remaining.isEmpty { preferences.removeObject(forKey: "LiveLingo.pendingRecordingRecovery") }
         else { preferences.set(try SessionArchiveCoding.encode(remaining), forKey: "LiveLingo.pendingRecordingRecovery") }
@@ -1978,13 +1979,10 @@ final class AppModel: ObservableObject {
         try SessionWorkspace.retryPendingTemporarySessions()
         usesInjectedRetry = false
         #endif
-        // The default journal retry covers the system temporary root. A live
-        // recording may now use the stable recovery root; retry only this
-        // owned, already-requested cleanup before releasing its locator.
-        if temporaryCleanupRequested, !usesInjectedRetry, let root = temporarySessionDirectory,
-           SessionDirectoryLocation.canonical(root.deletingLastPathComponent())
-                != SessionDirectoryLocation.canonical(try SessionWorkspace.temporaryRoot()) {
-            try discardTemporarySession(root)
+        // Retry only the recovery root bound to this model. Injected retries
+        // replace all journal access, including this stable recovery root.
+        if !usesInjectedRetry, let root = recordingRecoveryDirectory {
+            try SessionWorkspace.retryPendingTemporarySessions(in: root)
         }
         // A successful retry has disposed every requested registration, including
         // our failed root. Do not attempt a second discard after its record left.
@@ -4888,6 +4886,9 @@ final class AppModel: ObservableObject {
                         from: temporarySessionDirectory, to: copied.destinationDirectory)
                     let retired: SessionMigrationReceipt
                     do {
+                        try await waitForLifecycle { [self] in
+                            try await noteReviewQueue.waitForPendingStorage()
+                        }
                         // No suspension or raced background deletion between
                         // the lease check and retirement of the verified source.
                         try validateLifecycleCompletion(revision)
@@ -4895,6 +4896,9 @@ final class AppModel: ObservableObject {
                     } catch {
                         try noteReviewQueue.relocatePausedCourse(sessionID: identity,
                             from: copied.destinationDirectory, to: temporarySessionDirectory)
+                        try await waitForLifecycle { [self] in
+                            try await noteReviewQueue.waitForPendingStorage()
+                        }
                         throw error
                     }
                     // Publish the verified destination without another await.

@@ -40,6 +40,7 @@ enum SessionWorkspace {
         return fileManager.temporaryDirectory
         #endif
     }
+    private static let recoveryLock = NSLock()
 
     struct RecordingRecovery: Codable, Equatable, Identifiable, Sendable {
         let id: UUID
@@ -69,7 +70,15 @@ enum SessionWorkspace {
         let url = root.appendingPathComponent("pending-recordings.json")
         try SessionArchiveCoding.requireRegularFileIfPresent(url)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        let index = try SessionArchiveCoding.decode(RecoveryIndex.self, from: Data(contentsOf: url))
+        let bytes = try Data(contentsOf: url)
+        // An older reader must never rewrite state it did not understand.
+        guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              Set(object.keys) == Set(["version", "recordings"]),
+              let records = object["recordings"] as? [[String: Any]],
+              records.allSatisfy({ Set($0.keys).isSubset(of: ["id", "directory", "outputRoot", "needsPromotion", "createdAt"]) }) else {
+            throw SessionStoreError.invalidState("录音恢复索引含未知状态，原文件已保留")
+        }
+        let index = try SessionArchiveCoding.decode(RecoveryIndex.self, from: bytes)
         guard index.version == 1, Set(index.recordings.map(\.id)).count == index.recordings.count,
               index.recordings.allSatisfy({ $0.directory.isFileURL && $0.outputRoot.isFileURL }) else {
             throw SessionStoreError.invalidState("录音恢复索引无效，原文件已保留")
@@ -77,10 +86,48 @@ enum SessionWorkspace {
         return index.recordings
     }
 
-    static func saveRecordingRecoveries(_ recordings: [RecordingRecovery], in root: URL) throws {
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try SessionArchiveCoding.atomicWrite(SessionArchiveCoding.encode(RecoveryIndex(recordings: recordings)),
-            root.appendingPathComponent("pending-recordings.json"))
+    @discardableResult
+    static func saveRecordingRecoveries(_ recordings: [RecordingRecovery], in root: URL,
+                                        retiring: [RecordingRecovery] = [],
+                                        expected: [RecordingRecovery] = []) throws -> [RecordingRecovery] {
+        recoveryLock.lock()
+        defer { recoveryLock.unlock() }
+        try SensitiveFileIO.prepareDirectory(root)
+        var info = stat()
+        guard lstat(root.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else {
+            throw SessionStoreError.unsafePath(root.path)
+        }
+        let lockURL = root.appendingPathComponent(".recording-recovery.lock")
+        try SessionArchiveCoding.requireRegularFileIfPresent(lockURL)
+        let recoveryRoot = try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false)
+        let fd = try recoveryRoot.openRegularFile(named: lockURL.lastPathComponent, flags: O_RDWR, create: true)
+        defer { _ = Darwin.close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { throw SessionStoreError.io(operation: "lock recording recoveries", code: errno) }
+        defer { _ = flock(fd, LOCK_UN) }
+        // Load and validate under the same lock as merge/retirement. A read
+        // failure blocks publication and leaves the original bytes intact.
+        var merged = try recordingRecoveries(in: root)
+        guard Set(recordings.map(\.id)).count == recordings.count,
+              recordings.allSatisfy({ $0.directory.isFileURL && $0.outputRoot.isFileURL }) else {
+            throw SessionStoreError.invalidState("录音恢复记录无效")
+        }
+        for retired in retiring {
+            if let existing = merged.first(where: { $0.id == retired.id }), existing != retired {
+                throw SessionStoreError.identityConflict("录音恢复位置已被更新，保留新记录")
+            }
+            merged.removeAll { $0.id == retired.id }
+        }
+        for incoming in recordings {
+            if let existing = merged.first(where: { $0.id == incoming.id }), existing != incoming,
+               !expected.contains(existing) {
+                throw SessionStoreError.identityConflict("录音恢复记录已有新版本，保留原件")
+            }
+            merged.removeAll { $0.id == incoming.id }
+            merged.append(incoming)
+        }
+        let bytes = try SessionArchiveCoding.encode(RecoveryIndex(recordings: merged))
+        try SessionArchiveCoding.atomicWrite(bytes, root.appendingPathComponent("pending-recordings.json"))
+        return try SessionArchiveCoding.decode(RecoveryIndex.self, from: bytes).recordings
     }
 
     static func makeTemporarySessionDirectory(
@@ -174,8 +221,13 @@ enum SessionWorkspace {
     /// Only records created by this App and explicitly marked for cleanup are
     /// retried. Active sessions and unknown historical directories are retained.
     static func retryPendingTemporarySessions(fileManager: FileManager = .default) throws {
+        try retryPendingTemporarySessions(in: temporaryRoot(fileManager: fileManager), fileManager: fileManager)
+    }
+
+    static func retryPendingTemporarySessions(in location: URL, fileManager: FileManager = .default) throws {
         cleanupLock.lock(); defer { cleanupLock.unlock() }
-        let root = try SensitiveFileIO.Directory.open(at: temporaryRoot(fileManager: fileManager), create: false, tighten: false)
+        guard fileManager.fileExists(atPath: location.path) else { return }
+        let root = try SensitiveFileIO.Directory.open(at: location, create: false, tighten: false)
         guard let journal = try root.directoryIfPresent(named: cleanupDirectoryName) else { return }
         try journal.assertPrivate()
         for name in try journal.names().sorted() where isRecordName(name) {
@@ -284,9 +336,38 @@ enum SessionWorkspace {
 
 enum SessionExporter {
     private static let exportLock = NSLock()
+    struct PublicationOperations: Sendable {
+        var beforeMemberPublication: @Sendable (String) throws -> Void = { _ in }
+        var createSymbolicLink: @Sendable (String, URL) throws -> Void = { target, path in
+            guard symlink(target, path.path) == 0 else {
+                throw SessionStoreError.io(operation: "stage export pointer", code: errno)
+            }
+        }
+        var exchangeDirectories: @Sendable (URL, URL) throws -> Void = { staged, directory in
+            guard renameatx_np(AT_FDCWD, staged.path, AT_FDCWD, directory.path, UInt32(RENAME_SWAP)) == 0 else {
+                throw SessionStoreError.io(operation: "publish initial export", code: errno)
+            }
+        }
+    }
     private struct ExportIndex: Codable {
         var version = 1
         let members: [String: String]
+    }
+    private struct ExportPointer: Codable {
+        var version = 1
+        let generation: String
+    }
+    private struct PortableTransaction: Codable {
+        var version = 1
+        let rollback: String
+        let next: String
+        let names: [String]
+        let originallyPresent: [String]
+    }
+
+    private static func unsupportedPublication(_ error: Error) -> Bool {
+        guard let failure = error as? SessionStoreError, case let .io(_, code) = failure else { return false }
+        return [ENOTSUP, EXDEV, ENOSYS].contains(code)
     }
 
     private static func requireDirectory(_ url: URL) throws {
@@ -301,14 +382,32 @@ enum SessionExporter {
     /// the same atomic pointer; the historical file contents remain unchanged.
     static func currentExportDirectory(in directory: URL) throws -> URL {
         let store = directory.appendingPathComponent(".exports", isDirectory: true)
-        let current = store.appendingPathComponent("current")
-        var info = stat()
-        guard lstat(current.path, &info) == 0 else {
-            if errno == ENOENT { return directory }
-            throw SessionStoreError.io(operation: "read export index", code: errno)
+        var storeInfo = stat()
+        if lstat(store.path, &storeInfo) != 0 {
+            guard errno == ENOENT else { throw SessionStoreError.io(operation: "inspect export store", code: errno) }
+            return directory
         }
-        guard info.st_mode & S_IFMT == S_IFLNK else { throw SessionStoreError.unsafePath(current.path) }
-        let link = try FileManager.default.destinationOfSymbolicLink(atPath: current.path)
+        try requireDirectory(store)
+        let current = store.appendingPathComponent("current")
+        let portable = store.appendingPathComponent("current.json")
+        var info = stat()
+        let link: String
+        if lstat(portable.path, &info) == 0 {
+            try SessionArchiveCoding.requireRegularFileIfPresent(portable)
+            let pointer = try SessionArchiveCoding.decode(ExportPointer.self, from: Data(contentsOf: portable))
+            guard pointer.version == 1, UUID(uuidString: pointer.generation) != nil else {
+                throw SessionStoreError.corruptSnapshot
+            }
+            link = "versions/" + pointer.generation
+        } else {
+            guard errno == ENOENT else { throw SessionStoreError.io(operation: "read portable export index", code: errno) }
+            guard lstat(current.path, &info) == 0 else {
+                if errno == ENOENT { return directory }
+                throw SessionStoreError.io(operation: "read export index", code: errno)
+            }
+            guard info.st_mode & S_IFMT == S_IFLNK else { throw SessionStoreError.unsafePath(current.path) }
+            link = try FileManager.default.destinationOfSymbolicLink(atPath: current.path)
+        }
         let parts = link.split(separator: "/")
         guard parts.count == 2, parts[0] == "versions", UUID(uuidString: String(parts[1])) != nil else {
             throw SessionStoreError.unsafePath(current.path)
@@ -321,19 +420,24 @@ enum SessionExporter {
             == SessionDirectoryLocation.canonical(store.appendingPathComponent("versions", isDirectory: true)) else {
             throw SessionStoreError.unsafePath(selected.path)
         }
+        try validateExportGeneration(selected)
+        return selected
+    }
+
+    private static func validateExportGeneration(_ selected: URL) throws {
+        try requireDirectory(selected)
         let indexURL = selected.appendingPathComponent("export-index.json")
         try SessionArchiveCoding.requireRegularFileIfPresent(indexURL)
         let index = try SessionArchiveCoding.decode(ExportIndex.self, from: Data(contentsOf: indexURL))
         guard index.version == 1 else { throw SessionStoreError.unsupportedSchema(index.version) }
         for (name, digest) in index.members {
-            guard !name.contains("/"), name != ".", name != "..", SessionArchiveCoding.isDigest(digest) else {
+            guard !name.isEmpty, !name.contains("/"), !name.utf8.contains(0), name != ".", name != "..", SessionArchiveCoding.isDigest(digest) else {
                 throw SessionStoreError.corruptSnapshot
             }
             let url = selected.appendingPathComponent(name)
             try SessionArchiveCoding.requireRegularFileIfPresent(url)
             guard SessionArchiveCoding.digest(try Data(contentsOf: url)) == digest else { throw SessionStoreError.corruptSnapshot }
         }
-        return selected
     }
 
     /// Migration accepts only registered aliases and the relative generation
@@ -355,9 +459,9 @@ enum SessionExporter {
         return target
     }
 
-    private static func replaceLink(_ target: String, at destination: URL) throws {
+    private static func replaceLink(_ target: String, at destination: URL, operations: PublicationOperations) throws {
         let pending = destination.deletingLastPathComponent().appendingPathComponent(".export-link-\(UUID())")
-        guard symlink(target, pending.path) == 0 else { throw SessionStoreError.io(operation: "stage export pointer", code: errno) }
+        try operations.createSymbolicLink(target, pending)
         guard rename(pending.path, destination.path) == 0 else { throw SessionStoreError.io(operation: "publish export pointer", code: errno) }
         try SessionArchiveCoding.syncDirectory(destination.deletingLastPathComponent())
     }
@@ -365,7 +469,7 @@ enum SessionExporter {
     /// An empty standalone export keeps the frozen, flat file listing. Its
     /// first publication exchanges the whole empty directory with a fully
     /// synchronized sibling. Existing courses use the version pointer below.
-    private static func publishInitialExport(_ rendered: [String: Data], in directory: URL) throws -> Bool {
+    private static func publishInitialExport(_ rendered: [String: Data], in directory: URL, operations: PublicationOperations) throws -> Bool {
         try requireDirectory(directory)
         let descriptor = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
         guard descriptor >= 0 else { throw SessionStoreError.io(operation: "open initial export", code: errno) }
@@ -398,20 +502,31 @@ enum SessionExporter {
         }
         try SessionArchiveCoding.syncDirectory(staged)
         guard try verifyEmptyDirectory() else { throw SessionStoreError.invalidState("首次导出期间目录出现新内容，保留现场") }
-        guard renameatx_np(AT_FDCWD, staged.path, AT_FDCWD, directory.path, UInt32(RENAME_SWAP)) == 0 else {
-            throw SessionStoreError.io(operation: "publish initial export", code: errno)
+        do {
+            try operations.exchangeDirectories(staged, directory)
+            // SWAP leaves the verified empty directory at the staging path.
+            // It contains no export, recording, or unique recovery evidence.
+            if try FileManager.default.contentsOfDirectory(atPath: staged.path).isEmpty {
+                try FileManager.default.removeItem(at: staged)
+            }
+        } catch {
+            guard unsupportedPublication(error) else { throw error }
+            guard try verifyEmptyDirectory() else { throw SessionStoreError.invalidState("首次导出目录已改变，保留现场") }
+            // POSIX rename can atomically replace an empty directory without
+            // requiring RENAME_SWAP, symlinks, or hardlinks.
+            guard Darwin.rename(staged.path, directory.path) == 0 else {
+                throw SessionStoreError.io(operation: "publish initial export with rename", code: errno)
+            }
         }
-        // The old empty directory and failed staging attempts remain siblings
-        // for recoverable cleanup; no temporary member enters the export list.
         try SessionArchiveCoding.syncDirectory(parent)
         return true
     }
 
-    private static func publishExport(_ rendered: [String: Data], in directory: URL) throws {
+    private static func publishExport(_ rendered: [String: Data], in directory: URL, operations: PublicationOperations) throws {
         exportLock.lock()
         defer { exportLock.unlock() }
         try SensitiveFileIO.prepareDirectory(directory)
-        if try publishInitialExport(rendered, in: directory) { return }
+        if try publishInitialExport(rendered, in: directory, operations: operations) { return }
         let fm = FileManager.default
         let store = directory.appendingPathComponent(".exports", isDirectory: true)
         if fm.fileExists(atPath: store.path) {
@@ -431,18 +546,25 @@ enum SessionExporter {
         defer { _ = Darwin.close(descriptor) }
         guard flock(descriptor, LOCK_EX) == 0 else { throw SessionStoreError.io(operation: "lock export", code: errno) }
         defer { _ = flock(descriptor, LOCK_UN) }
+        try recoverPortablePublication(in: directory)
         let selected = try currentExportDirectory(in: directory)
         var members = rendered
-        // The old empty-summary contract retains a prior generated summary.
         let priorNames = try fm.contentsOfDirectory(at: selected, includingPropertiesForKeys: nil)
             .map(\.lastPathComponent).filter { $0.hasPrefix("summary-") && $0.hasSuffix(".md") }
         for name in priorNames where members[name] == nil {
-            let url = selected.appendingPathComponent(name)
-            try SessionArchiveCoding.requireRegularFileIfPresent(url)
-            members[name] = try Data(contentsOf: url)
+            let rootMember = directory.appendingPathComponent(name)
+            var info = stat()
+            let source = lstat(rootMember.path, &info) == 0 && info.st_mode & S_IFMT == S_IFREG
+                ? rootMember : selected.appendingPathComponent(name)
+            try SessionArchiveCoding.requireRegularFileIfPresent(source)
+            members[name] = try Data(contentsOf: source)
         }
-        // Reject every bad destination before changing any visible member.
-        for name in members.keys {
+        // Read and validate every visible destination before publication. Old
+        // writers replace aliases with regular files; preserve that complete
+        // root view instead of silently discarding it or blocking all retries.
+        var rootFiles: [String: Data] = [:]
+        var foreignRoot = false
+        for name in members.keys.sorted() {
             let destination = directory.appendingPathComponent(name)
             var info = stat()
             if lstat(destination.path, &info) != 0 {
@@ -450,60 +572,258 @@ enum SessionExporter {
                 continue
             }
             if info.st_mode & S_IFMT == S_IFLNK {
-                guard try fm.destinationOfSymbolicLink(atPath: destination.path) == ".exports/current/" + name else {
+                guard selected != directory,
+                      try fm.destinationOfSymbolicLink(atPath: destination.path) == ".exports/current/" + name else {
                     throw SessionStoreError.unsafePath(destination.path)
                 }
             } else {
                 guard info.st_mode & S_IFMT == S_IFREG else { throw SessionStoreError.unsafePath(destination.path) }
-                if selected != directory {
-                    guard try Data(contentsOf: destination) == Data(contentsOf: selected.appendingPathComponent(name)) else {
-                        throw SessionStoreError.invalidState("导出文件已被其他写者替换，保留现场")
-                    }
-                }
+            }
+            let bytes = try Data(contentsOf: destination)
+            rootFiles[name] = bytes
+            if selected != directory, info.st_mode & S_IFMT == S_IFREG,
+               (try? Data(contentsOf: selected.appendingPathComponent(name))) != bytes {
+                foreignRoot = true
             }
         }
-        func generation(_ files: [String: Data]) throws -> URL {
-            let url = store.appendingPathComponent("versions/\(UUID())", isDirectory: true)
-            try SensitiveFileIO.prepareDirectory(url)
-            do {
-                for (name, bytes) in files {
-                    let prior = selected.appendingPathComponent(name)
-                    try SessionArchiveCoding.requireRegularFileIfPresent(prior)
-                    if fm.fileExists(atPath: prior.path) {
-                        try fm.copyItem(at: prior, to: url.appendingPathComponent(name))
-                    }
-                    try SessionArchiveCoding.atomicWrite(bytes, url.appendingPathComponent(name))
-                }
-                let index = ExportIndex(members: files.mapValues(SessionArchiveCoding.digest))
-                try SessionArchiveCoding.atomicWrite(SessionArchiveCoding.encode(index), url.appendingPathComponent("export-index.json"))
-                try SessionArchiveCoding.syncDirectory(url)
-                return url
-            } catch {
-                let preserved = store.appendingPathComponent("superseded", isDirectory: true)
-                try? fm.createDirectory(at: preserved, withIntermediateDirectories: true)
-                try? fm.moveItem(at: url, to: preserved.appendingPathComponent(url.lastPathComponent))
-                throw error
+        func generation(_ files: [String: Data], under parent: URL = versions) throws -> URL {
+            try writeExportGeneration(files, under: parent, preservingPermissionsFrom: selected)
+        }
+        if foreignRoot {
+            let recovered = store.appendingPathComponent("recovered", isDirectory: true)
+            var info = stat()
+            if lstat(recovered.path, &info) == 0 { try requireDirectory(recovered) }
+            else {
+                guard errno == ENOENT else { throw SessionStoreError.io(operation: "inspect export recovery", code: errno) }
+                try fm.createDirectory(at: recovered, withIntermediateDirectories: false)
             }
+            _ = try generation(rootFiles, under: recovered)
         }
         let staged = try generation(members)
+        var portable = fm.fileExists(atPath: store.appendingPathComponent("current.json").path)
+        if !portable {
+            let probe = store.appendingPathComponent(".link-capability-\(UUID())")
+            do {
+                try operations.createSymbolicLink("versions", probe)
+                guard unlink(probe.path) == 0 else { throw SessionStoreError.io(operation: "retire export capability probe", code: errno) }
+            } catch {
+                guard unsupportedPublication(error) else { throw error }
+                portable = true
+            }
+        }
+        let previous = selected == directory || portable ? try generation(rootFiles) : selected
+        if portable {
+            try publishPortable(members, staged: staged, previous: previous,
+                                originalFiles: rootFiles, in: directory, operations: operations)
+            return
+        }
         let current = store.appendingPathComponent("current")
         if selected == directory {
-            var old: [String: Data] = [:]
-            for name in members.keys where fm.fileExists(atPath: directory.appendingPathComponent(name).path) {
-                old[name] = try Data(contentsOf: directory.appendingPathComponent(name))
-            }
-            let legacy = try generation(old)
-            try replaceLink("versions/" + legacy.lastPathComponent, at: current)
+            try replaceLink("versions/" + previous.lastPathComponent, at: current, operations: operations)
         }
-        for name in members.keys {
+        for name in members.keys.sorted() {
             let url = directory.appendingPathComponent(name)
+            try operations.beforeMemberPublication(name)
+            try requireRootMemberUnchanged(at: url, original: rootFiles[name])
             var info = stat()
             if lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK { continue }
-            try replaceLink(".exports/current/" + name, at: url)
+            try replaceLink(".exports/current/" + name, at: url, operations: operations)
         }
-        // The only commit point. Before this rename every alias reads the old
-        // generation; afterwards every alias reads the verified new generation.
-        try replaceLink("versions/" + staged.lastPathComponent, at: current)
+        // All managed aliases share this one atomic commit point. The previous
+        // generation and any foreign root view remain independently readable.
+        try replaceLink("versions/" + staged.lastPathComponent, at: current, operations: operations)
+    }
+
+    private static func writeExportGeneration(_ files: [String: Data], under parent: URL,
+                                              preservingPermissionsFrom metadata: URL? = nil) throws -> URL {
+        try requireDirectory(parent)
+        let url = parent.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try SensitiveFileIO.prepareDirectory(url)
+        for (name, bytes) in files {
+            if let prior = metadata?.appendingPathComponent(name) {
+                try SessionArchiveCoding.requireRegularFileIfPresent(prior)
+                if FileManager.default.fileExists(atPath: prior.path) {
+                    try FileManager.default.copyItem(at: prior, to: url.appendingPathComponent(name))
+                }
+            }
+            try SessionArchiveCoding.atomicWrite(bytes, url.appendingPathComponent(name))
+        }
+        let index = ExportIndex(members: files.mapValues(SessionArchiveCoding.digest))
+        try SessionArchiveCoding.atomicWrite(SessionArchiveCoding.encode(index), url.appendingPathComponent("export-index.json"))
+        try SessionArchiveCoding.syncDirectory(url)
+        try SessionArchiveCoding.syncDirectory(parent)
+        return url
+    }
+
+    private static func rootMemberBytes(at url: URL) throws -> Data? {
+        var info = stat()
+        if lstat(url.path, &info) != 0 {
+            guard errno == ENOENT else { throw SessionStoreError.io(operation: "inspect export member", code: errno) }
+            return nil
+        }
+        guard info.st_mode & S_IFMT == S_IFREG || (info.st_mode & S_IFMT == S_IFLNK
+            && (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) == ".exports/current/" + url.lastPathComponent) else {
+            throw SessionStoreError.unsafePath(url.path)
+        }
+        return try Data(contentsOf: url)
+    }
+
+    private static func requireRootMemberUnchanged(at url: URL, original: Data?) throws {
+        guard try rootMemberBytes(at: url) == original else {
+            throw SessionStoreError.invalidState("导出期间文件已被另一个写者修改，停止发布并保留原件")
+        }
+    }
+
+    private static func retireLegacyExportPointer(in store: URL) throws {
+        let current = store.appendingPathComponent("current")
+        var info = stat()
+        if lstat(current.path, &info) != 0 {
+            guard errno == ENOENT else { throw SessionStoreError.io(operation: "inspect legacy export pointer", code: errno) }
+            return
+        }
+        guard info.st_mode & S_IFMT == S_IFLNK else { throw SessionStoreError.unsafePath(current.path) }
+        let link = try FileManager.default.destinationOfSymbolicLink(atPath: current.path)
+        let parts = link.split(separator: "/")
+        guard parts.count == 2, parts[0] == "versions", UUID(uuidString: String(parts[1])) != nil else {
+            throw SessionStoreError.unsafePath(current.path)
+        }
+        try requireDirectory(store.appendingPathComponent("versions", isDirectory: true))
+        try validateExportGeneration(store.appendingPathComponent(link, isDirectory: true))
+        guard unlink(current.path) == 0 else { throw SessionStoreError.io(operation: "retire legacy export pointer", code: errno) }
+        try SessionArchiveCoding.syncDirectory(store)
+    }
+
+    private static func replaceRootMember(_ bytes: Data, at destination: URL) throws {
+        var info = stat()
+        if lstat(destination.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG {
+            try SensitiveFileIO.atomicWrite(bytes, to: destination)
+            return
+        }
+        // The destination was validated under the publication lock. Rename a
+        // fully synced regular file over a managed alias without following it.
+        let pending = destination.deletingLastPathComponent().appendingPathComponent(".export-file-\(UUID())")
+        if lstat(destination.path, &info) == 0 {
+            guard info.st_mode & S_IFMT == S_IFLNK,
+                  try FileManager.default.destinationOfSymbolicLink(atPath: destination.path)
+                    == ".exports/current/" + destination.lastPathComponent else {
+                throw SessionStoreError.unsafePath(destination.path)
+            }
+            let selected = try currentExportDirectory(in: destination.deletingLastPathComponent())
+            let prior = selected.appendingPathComponent(destination.lastPathComponent)
+            try SessionArchiveCoding.requireRegularFileIfPresent(prior)
+            try FileManager.default.copyItem(at: prior, to: pending)
+        } else if errno != ENOENT {
+            throw SessionStoreError.io(operation: "inspect portable export member", code: errno)
+        }
+        try SessionArchiveCoding.atomicWrite(bytes, pending)
+        guard Darwin.rename(pending.path, destination.path) == 0 else {
+            throw SessionStoreError.io(operation: "publish portable export member", code: errno)
+        }
+        try SessionArchiveCoding.syncDirectory(destination.deletingLastPathComponent())
+    }
+
+    private static func publishPortable(_ members: [String: Data], staged: URL, previous: URL,
+                                        originalFiles: [String: Data], in directory: URL, operations: PublicationOperations) throws {
+        let store = directory.appendingPathComponent(".exports", isDirectory: true)
+        let marker = store.appendingPathComponent("publishing.json")
+        let pointer = store.appendingPathComponent("current.json")
+        // A normal file rename provides the immutable generation commit point
+        // on volumes that cannot create symlinks. Root compatibility files are
+        // recoverable via this durable transaction before the first replacement.
+        try SessionArchiveCoding.atomicWrite(SessionArchiveCoding.encode(ExportPointer(generation: previous.lastPathComponent)), pointer)
+        let transaction = PortableTransaction(rollback: previous.lastPathComponent, next: staged.lastPathComponent,
+            names: members.keys.sorted(), originallyPresent: originalFiles.keys.sorted())
+        try SessionArchiveCoding.atomicWrite(SessionArchiveCoding.encode(transaction), marker)
+        do {
+            for name in members.keys.sorted() {
+                try operations.beforeMemberPublication(name)
+                try requireRootMemberUnchanged(at: directory.appendingPathComponent(name), original: originalFiles[name])
+                try replaceRootMember(members[name]!, at: directory.appendingPathComponent(name))
+            }
+            try SessionArchiveCoding.atomicWrite(SessionArchiveCoding.encode(ExportPointer(generation: staged.lastPathComponent)), pointer)
+            try retireLegacyExportPointer(in: store)
+            try FileManager.default.removeItem(at: marker)
+            try SessionArchiveCoding.syncDirectory(store)
+        } catch {
+            // Restore the previous visible set on ordinary failures. If repair
+            // itself fails, keep the transaction and both complete generations
+            // so the next publication can finish recovery before writing.
+            try? recoverPortablePublication(in: directory)
+            throw error
+        }
+    }
+
+    private static func recoverPortablePublication(in directory: URL) throws {
+        let fm = FileManager.default
+        let store = directory.appendingPathComponent(".exports", isDirectory: true)
+        let marker = store.appendingPathComponent("publishing.json")
+        try SessionArchiveCoding.requireRegularFileIfPresent(marker)
+        guard fm.fileExists(atPath: marker.path) else { return }
+        let bytes = try Data(contentsOf: marker)
+        guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              Set(object.keys) == Set(["version", "rollback", "next", "names", "originallyPresent"]) else {
+            throw SessionStoreError.invalidState("导出恢复记录含未知状态，原文件已保留")
+        }
+        let transaction = try SessionArchiveCoding.decode(PortableTransaction.self, from: bytes)
+        guard transaction.version == 1, UUID(uuidString: transaction.rollback) != nil,
+              UUID(uuidString: transaction.next) != nil,
+              Set(transaction.names).count == transaction.names.count,
+              Set(transaction.originallyPresent).isSubset(of: Set(transaction.names)),
+              transaction.names.allSatisfy(isExportMemberName) else {
+            throw SessionStoreError.invalidState("导出恢复记录无效，原文件已保留")
+        }
+        let selected = try currentExportDirectory(in: directory)
+        let committed = selected.lastPathComponent == transaction.next
+        guard committed || selected.lastPathComponent == transaction.rollback else {
+            throw SessionStoreError.invalidState("导出恢复记录与当前版本冲突，保留现场")
+        }
+        let other = store.appendingPathComponent("versions/" + (committed ? transaction.rollback : transaction.next), isDirectory: true)
+        try validateExportGeneration(other)
+        // Preserve an unexpected root view as a verified immutable recovery
+        // before restoring the committed generation. An unavailable backup
+        // blocks repair and leaves the external bytes and transaction intact.
+        var observed: [String: Data] = [:]
+        var hasForeignBytes = false
+        for name in transaction.names {
+            let root = directory.appendingPathComponent(name)
+            guard let bytes = try rootMemberBytes(at: root) else { continue }
+            observed[name] = bytes
+            if (try? Data(contentsOf: selected.appendingPathComponent(name))) != bytes
+                    && (try? Data(contentsOf: other.appendingPathComponent(name))) != bytes {
+                hasForeignBytes = true
+            }
+        }
+        if hasForeignBytes {
+            let recovered = store.appendingPathComponent("recovered", isDirectory: true)
+            if fm.fileExists(atPath: recovered.path) { try requireDirectory(recovered) }
+            else { try fm.createDirectory(at: recovered, withIntermediateDirectories: false) }
+            let preserved = try writeExportGeneration(observed, under: recovered)
+            try validateExportGeneration(preserved)
+        }
+        for name in transaction.names {
+            let root = directory.appendingPathComponent(name)
+            try requireRootMemberUnchanged(at: root, original: observed[name])
+            if committed || transaction.originallyPresent.contains(name) {
+                try replaceRootMember(Data(contentsOf: selected.appendingPathComponent(name)), at: root)
+            } else if fm.fileExists(atPath: root.path) {
+                try SessionArchiveCoding.requireRegularFileIfPresent(root)
+                try fm.removeItem(at: root)
+            }
+        }
+        try SessionArchiveCoding.syncDirectory(directory)
+        try retireLegacyExportPointer(in: store)
+        try fm.removeItem(at: marker)
+        try SessionArchiveCoding.syncDirectory(store)
+    }
+
+    private static func isExportMemberName(_ name: String) -> Bool {
+        if ["bilingual.jsonl", "bilingual.srt", "manifest.json", "transcript-en.txt", "transcript-target-en.txt"].contains(name) { return true }
+        for (prefix, suffix) in [("summary-", ".md"), ("transcript-", ".txt")] {
+            if name.hasPrefix(prefix), name.hasSuffix(suffix) {
+                return isValidTargetLocale(String(name.dropFirst(prefix.count).dropLast(suffix.count)))
+            }
+        }
+        return false
     }
     struct Manifest: Codable, Equatable {
         let createdAt: Date
@@ -661,7 +981,8 @@ enum SessionExporter {
         target: OutputLanguage = .simplifiedChinese,
         summaryIsLegacyRendered: Bool = false,
         summaryEvidence: [TranscriptSegment] = [],
-        converter: ChineseScriptConverter = .shared
+        converter: ChineseScriptConverter = .shared,
+        operations: PublicationOperations = .init()
     ) throws {
         // Check the actual dictionary, including empty/legacy-only exports.
         // Release metadata does not determine whether saved text can render.
@@ -707,7 +1028,7 @@ enum SessionExporter {
             converterVersion: target.profile.renderer == .identity ? nil : ChineseScriptConverter.version
         )
         members["manifest.json"] = try encoder.encode(manifest)
-        try publishExport(members, in: sessionDirectory)
+        try publishExport(members, in: sessionDirectory, operations: operations)
     }
 
     /// 2026-09-18：给人看的出口（字幕/转写/笔记导出）不该出现 `[翻译失败：…]` 这种英文错误串 ✗。
