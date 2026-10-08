@@ -587,7 +587,7 @@ enum QwenRuntimeError: LocalizedError {
         case .lmStudioUnavailable:
             return "本机语言模型运行进程尚未就绪。"
         case .modelUnavailable(let name):
-            return "离线包未找到模型：\(name)"
+            return "离线包中的模型缺失或不完整：\(name)，请重新安装 LiveLingo。"
         case .invalidResponse:
             return "本机模型返回了无法识别的数据。"
         case .requestTimedOut:
@@ -728,7 +728,7 @@ enum QwenASRClient {
                 let missing = modelKeys.filter { !available.contains($0) }
                 if !missing.isEmpty {
                     throw QwenRuntimeError.requestFailed(
-                        "本机缺少转写模型：\(missing.joined(separator: ", "))。"
+                        "本机转写模型缺失或不完整：\(missing.joined(separator: ", "))，请重新安装 LiveLingo。"
                     )
                 }
             }

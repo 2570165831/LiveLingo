@@ -362,3 +362,79 @@ while (my $line = <STDIN>) {
 }
 """#
 }
+
+/// Readiness only checks that files exist; it never parses weight headers.
+final class MLXModelReadinessTests: XCTestCase {
+    private var root: URL!
+    private var model: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("mlx-readiness-\(UUID())")
+        model = root.appendingPathComponent("models/mlx-community/Qwen3.5-4B-MLX-8bit")
+        try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
+        for name in ["config.json", "tokenizer.json"] { try write("{}", to: name) }
+        let worker = root.appendingPathComponent("worker.py")
+        try Data().write(to: worker)
+        let environment = ["LIVELINGO_MLX_PYTHON": "/usr/bin/python3", "LIVELINGO_MLX_WORKER": worker.path,
+                           "LIVELINGO_MLX_MODELS": root.appendingPathComponent("models").path,
+                           "LIVELINGO_MLX_STATE": root.appendingPathComponent("state").path]
+        var previous: [String: String?] = [:]
+        for (key, value) in environment {
+            previous[key] = .some(ProcessInfo.processInfo.environment[key])
+            setenv(key, value, 1)
+        }
+        let restore = previous, directory = root!
+        addTeardownBlock {
+            for (key, value) in restore {
+                if let value { setenv(key, value, 1) } else { unsetenv(key) }
+            }
+            try? FileManager.default.removeItem(at: directory)
+        }
+    }
+
+    private func write(_ text: String, to name: String) throws {
+        try Data(text.utf8).write(to: model.appendingPathComponent(name))
+    }
+
+    private func assertIncomplete(_ message: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try MLXRuntime.checkModel("qwen3.5-4b-mlx"), message, file: file, line: line) { error in
+            guard case QwenRuntimeError.modelUnavailable = error else {
+                return XCTFail("Expected modelUnavailable, got \(error)", file: file, line: line)
+            }
+            XCTAssertTrue(error.localizedDescription.contains("请重新安装"), file: file, line: line)
+        }
+    }
+
+    func testConfigAndTokenizerWithoutWeightsAreNotReady() {
+        assertIncomplete("A model without any weight file must not pass readiness")
+        try? write("", to: "notes.safetensors")
+        assertIncomplete("Only model*.safetensors files count as model weights")
+    }
+
+    func testSingleWeightFileIsReady() throws {
+        try write("", to: "model.safetensors")
+        XCTAssertNoThrow(try MLXRuntime.checkModel("qwen3.5-4b-mlx"))
+    }
+
+    func testIndexRequiresEveryReferencedShard() throws {
+        try write(#"{"weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}"#,
+                  to: "model.safetensors.index.json")
+        try write("", to: "model-00001-of-00002.safetensors")
+        assertIncomplete("A missing shard listed in the index must not pass readiness")
+        try write("", to: "model-00002-of-00002.safetensors")
+        XCTAssertNoThrow(try MLXRuntime.checkModel("qwen3.5-4b-mlx"))
+    }
+
+    func testUnusableIndexIsNotReadyEvenWithAWeightFile() throws {
+        try write("", to: "model.safetensors")
+        try Data().write(to: model.deletingLastPathComponent().appendingPathComponent("outside.safetensors"))
+        for index in ["not json", #"{"weight_map": {}}"#, #"{"weight_map": {"a": "../outside.safetensors"}}"#] {
+            try write(index, to: "model.safetensors.index.json")
+            assertIncomplete("An unusable shard index must not pass readiness")
+        }
+        try FileManager.default.createDirectory(at: model.appendingPathComponent("shard.safetensors"),
+                                                withIntermediateDirectories: true)
+        try write(#"{"weight_map": {"a": "shard.safetensors"}}"#, to: "model.safetensors.index.json")
+        assertIncomplete("A directory is not a weight file")
+    }
+}

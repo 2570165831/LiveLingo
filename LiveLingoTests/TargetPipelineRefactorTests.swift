@@ -102,6 +102,7 @@ final class TargetPipelineRefactorTests: XCTestCase {
             let model = models.appendingPathComponent(relative)
             try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
             for name in ["config.json", "tokenizer.json"] { try Data("{}".utf8).write(to: model.appendingPathComponent(name)) }
+            try Data().write(to: model.appendingPathComponent("model.safetensors"))
         }
         let environment = ["LIVELINGO_MLX_PYTHON": "/usr/bin/python3", "LIVELINGO_MLX_WORKER": script.path,
                            "LIVELINGO_MLX_MODELS": models.path, "LIVELINGO_MLX_STATE": root.appendingPathComponent("state").path]

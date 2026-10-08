@@ -265,8 +265,13 @@ def cleanup_temporary_audio():
                     pass
 
 
+def model_files_present(path: Path) -> bool:
+    # Existence only so readiness stays fast; loading validates the weights.
+    return (path / "config.json").is_file() and any(weight.is_file() for weight in path.glob("*.safetensors"))
+
+
 def available_model_keys() -> list:
-    return [key for key, path in MODEL_PATHS.items() if path.is_dir()]
+    return [key for key, path in MODEL_PATHS.items() if path.is_dir() and model_files_present(path)]
 
 
 def model_for(key: str):

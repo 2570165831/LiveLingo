@@ -278,6 +278,7 @@ import Darwin
             let model = models.appendingPathComponent("mlx-community/Qwen3.5-4B-MLX-8bit")
             try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
             for name in ["config.json", "tokenizer.json"] { try Data("{}".utf8).write(to: model.appendingPathComponent(name)) }
+            try Data().write(to: model.appendingPathComponent("model.safetensors"))
             setenv("LIVELINGO_MLX_PYTHON", "/opt/homebrew/bin/python3", 1)
             setenv("LIVELINGO_MLX_WORKER", fake.path, 1)
             setenv("LIVELINGO_MLX_MODELS", models.path, 1)

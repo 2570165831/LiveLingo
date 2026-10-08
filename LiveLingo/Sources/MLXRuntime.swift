@@ -312,9 +312,30 @@ actor MLXRuntime {
             throw QwenRuntimeError.runtimeUnavailable
         }
         guard FileManager.default.fileExists(atPath: directory.appendingPathComponent("config.json").path),
-              FileManager.default.fileExists(atPath: directory.appendingPathComponent("tokenizer.json").path) else {
+              FileManager.default.fileExists(atPath: directory.appendingPathComponent("tokenizer.json").path),
+              weightsArePresent(in: directory) else {
             throw QwenRuntimeError.modelUnavailable(model)
         }
+    }
+
+    /// Existence only, so readiness stays fast; the worker validates weight
+    /// contents when it loads. An index must name only shards in this folder.
+    private static func weightsArePresent(in directory: URL) -> Bool {
+        func isFile(_ name: String) -> Bool {
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path,
+                                                  isDirectory: &isDirectory) && !isDirectory.boolValue
+        }
+        let index = directory.appendingPathComponent("model.safetensors.index.json")
+        if FileManager.default.fileExists(atPath: index.path) {
+            guard let data = try? Data(contentsOf: index),
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let shards = (payload["weight_map"] as? [String: String]).map({ Set($0.values) }),
+                  !shards.isEmpty else { return false }
+            return shards.allSatisfy { !$0.contains("/") && isFile($0) }
+        }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        return names.contains { $0.hasPrefix("model") && $0.hasSuffix(".safetensors") && isFile($0) }
     }
 
     private func worker(_ model: String) throws -> Worker {
