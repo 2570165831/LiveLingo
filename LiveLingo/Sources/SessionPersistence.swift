@@ -12,7 +12,10 @@ actor SessionArchiveWriter {
     }
 
     /// Injection keeps failure tests confined to their own temporary directory.
-    init(store: SessionStore) { self.store = store }
+    init(store: SessionStore, restored: SessionSnapshot? = nil) {
+        self.store = store
+        committed = restored
+    }
 
     @discardableResult
     func commit(_ value: SessionSnapshot) throws -> SessionSnapshot {
@@ -113,11 +116,18 @@ final class SessionSaveCoordinator {
     var onSaved: ((SessionSnapshot) -> Void)?
 
     init(directory: URL, sessionID: UUID, restored: SessionSnapshot? = nil,
-         coalescingInterval: Duration = .milliseconds(500), writer: SessionArchiveWriter? = nil) {
+         coalescingInterval: Duration = .milliseconds(500), writer: SessionArchiveWriter? = nil,
+         storageProgress: ExitDeadline.StorageProgress? = nil) {
         self.directory = directory
         self.sessionID = sessionID
         self.interval = coalescingInterval
-        self.writer = writer ?? SessionArchiveWriter(directory: directory, restored: restored)
+        self.writer = writer ?? SessionArchiveWriter(store: SessionStore(directory: directory,
+            legacySessionID: restored?.sessionID ?? UUID(),
+            atomicWrite: { data, url in
+                try ExitDeadline.$storageProgress.withValue(storageProgress) { try SessionArchiveCoding.atomicWrite(data, url) }
+            }, journalWrite: { data, url in
+                try ExitDeadline.$storageProgress.withValue(storageProgress) { try SessionArchiveCoding.appendAndSync(data, url) }
+            }), restored: restored)
     }
 
     func submit(_ snapshot: SessionSnapshot) {

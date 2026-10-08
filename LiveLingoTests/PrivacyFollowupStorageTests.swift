@@ -207,4 +207,58 @@ struct PrivacyFollowupStorageTests {
         let result = NotesExportDocument.reviewSection(advice.joined(separator: "\n"))
         for line in advice { #expect(result.contains(line)) }
     }
+
+    @Test func R12ColonAdviceIsPreservedAndCompleteFailureWrappersAreRedacted() {
+        let advice = ["读取路径失败：先检查课程目录和权限，再重试导出。",
+                      "报告保存失败：建议检查剩余空间。", "复查报告读取失败：可以稍后再试。",
+                      "读取路径失败：Check the course directory and try again."]
+        let failures = ["复查报告读取失败，未导出：SYNTHETIC_PRIVATE_DIAGNOSTIC",
+                        "读取复查报告目录失败，未导出：SYNTHETIC_PRIVATE_DIAGNOSTIC",
+                        "局部复查报告读取失败，未导出：synthetic.md（请求失败）"]
+        let result = NotesExportDocument.reviewSection((advice + failures).joined(separator: "\n"))
+        for line in advice { #expect(result.contains(line)) }
+        for line in failures { #expect(!result.contains(line)) }
+        #expect(!result.contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"))
+        #expect(result.contains("本批复查未完成，原笔记已保留。"))
+    }
+
+    @Test func R05UnsupportedStorageCapabilitiesDoNotBlockNewOrReplacementWrites() throws {
+        let root = try fixture(); defer { retain(root) }
+        let operations: [Set<SensitiveFileIO.OptionalOperation>] = [
+            [.setACL], [.readACL, .setACL, .mode, .owner], [.link, .swap],
+            [.link, .exclusiveRename, .swap, .directorySync]
+        ]
+        for (index, unsupported) in operations.enumerated() {
+            let leaf = root.appendingPathComponent("portable-\(index).json")
+            try SensitiveFileIO.$unsupportedOperations.withValue(unsupported) {
+                try SensitiveFileIO.atomicWrite(Data("new synthetic body".utf8), to: leaf)
+                #expect(try Data(contentsOf: leaf) == Data("new synthetic body".utf8))
+                try SensitiveFileIO.atomicWrite(Data("updated synthetic body".utf8), to: leaf)
+                #expect(try Data(contentsOf: leaf) == Data("updated synthetic body".utf8))
+            }
+        }
+    }
+
+    @Test func R05FallbackStillRespectsExistingReadOnlyObject() throws {
+        let root = try fixture(); defer { retain(root) }
+        let leaf = root.appendingPathComponent("read-only.json")
+        let original = Data("synthetic retained body".utf8)
+        try original.write(to: leaf)
+        try #require(chmod(leaf.path, 0o400) == 0)
+        try SensitiveFileIO.$unsupportedOperations.withValue([.link, .swap, .exclusiveRename, .setACL]) { () throws -> Void in
+            #expect(throws: (any Error).self) { try SensitiveFileIO.atomicWrite(Data("replacement".utf8), to: leaf) }
+            #expect(try Data(contentsOf: leaf) == original)
+            #expect(try mode(leaf) == 0o400)
+        }
+    }
+
+    @Test func R05UnreadableACLMetadataDoesNotBlockWritableReplacement() throws {
+        let root = try fixture(); defer { retain(root) }
+        let leaf = root.appendingPathComponent("writable-with-unavailable-acl.json")
+        try Data("previous synthetic body".utf8).write(to: leaf)
+        try SensitiveFileIO.$aclReadError.withValue(EACCES) {
+            try SensitiveFileIO.atomicWrite(Data("updated synthetic body".utf8), to: leaf)
+            #expect(try Data(contentsOf: leaf) == Data("updated synthetic body".utf8))
+        }
+    }
 }

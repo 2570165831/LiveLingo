@@ -1,9 +1,26 @@
 import Darwin
 import Foundation
 
-/// Newly created objects are private. Existing objects are validated without
-/// changing their permissions; replacements preserve their access constraints.
+/// Restrict new objects and preserve replacement permissions where supported.
+/// Existing objects are validated without changing their permissions; missing
+/// permission or optional rename capabilities do not prevent ordinary saves.
 enum SensitiveFileIO {
+    enum OptionalOperation: Sendable, Hashable { case readACL, setACL, mode, owner, link, swap, exclusiveRename, directorySync }
+    #if DEBUG
+    @TaskLocal static var unsupportedOperations: Set<OptionalOperation> = []
+    @TaskLocal static var aclReadError: Int32?
+    #endif
+
+    private static func perform(_ operation: OptionalOperation, _ call: () -> Int32) -> Int32 {
+        #if DEBUG
+        if unsupportedOperations.contains(operation) { errno = ENOTSUP; return -1 }
+        #endif
+        return call()
+    }
+
+    private static func unsupported(_ code: Int32) -> Bool {
+        code == ENOTSUP || code == EOPNOTSUPP || code == ENOSYS || code == EINVAL
+    }
     enum Failure: Error {
         case unsafePath
         case system(operation: String, code: Int32)
@@ -132,7 +149,7 @@ enum SensitiveFileIO {
 
         func assertPrivate() throws {
             guard try status(fd).st_mode & 0o077 == 0 else { throw Failure.unsafePath }
-            let acl = try readACL(fd)
+            guard let acl = try readACL(fd) else { return }
             defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
             guard try firstAllowEntry(acl) == nil else { throw Failure.unsafePath }
         }
@@ -281,7 +298,7 @@ enum SensitiveFileIO {
                 originalFD = openat(fd, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
                 guard originalFD >= 0 else { throw pathFailure("write access to existing file") }
                 guard Identity(try status(originalFD)) == Identity(original) else { throw Failure.unsafePath }
-                originalACL = try readACL(originalFD)
+                originalACL = try? readACL(originalFD)
             }
             let temporary = temporaryPrefix + UUID().uuidString + ".tmp"
             try validateName(temporary)
@@ -293,46 +310,53 @@ enum SensitiveFileIO {
             defer { if pending { removeIfMatching(temporary, identity: pendingIdentity) } }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
-            try handle.write(contentsOf: data)
-            if let original, let originalACL {
-                guard fchown(item, original.st_uid, original.st_gid) == 0 else { throw system("preserve file owner") }
-                guard fchmod(item, original.st_mode & 0o7777) == 0 else { throw system("preserve file mode") }
-                guard acl_set_fd(item, originalACL) == 0 else { throw system("preserve file ACL") }
-                let verified = try readACL(item)
-                defer { _ = acl_free(UnsafeMutableRawPointer(verified)) }
-                guard try aclText(verified) == aclText(originalACL),
-                      try status(item).st_mode & 0o7777 == original.st_mode & 0o7777 else { throw Failure.unsafePath }
+            try writeBytes(data, to: item)
+            if let original {
+                // Metadata is best effort: removable/network volumes may lack
+                // Unix ownership, mode bits or ACLs. Effective write access to
+                // the existing inode was still checked by the kernel above.
+                _ = perform(.owner) { fchown(item, original.st_uid, original.st_gid) }
+                _ = perform(.mode) { fchmod(item, original.st_mode & 0o7777) }
+                if let originalACL { _ = perform(.setACL) { acl_set_fd(item, originalACL) } }
             }
             try handle.synchronize()
             try handle.close()
             if let original {
                 guard let current = try entryStatus(name), Identity(current) == Identity(original),
-                      current.st_mode == original.st_mode,
-                      let originalACL else { throw Failure.unsafePath }
-                let currentACL = try readACL(originalFD)
-                defer { _ = acl_free(UnsafeMutableRawPointer(currentACL)) }
-                guard try aclText(currentACL) == aclText(originalACL) else { throw Failure.unsafePath }
+                      current.st_mode == original.st_mode else { throw Failure.unsafePath }
+                let currentACL = try? readACL(originalFD)
+                defer { if let currentACL { _ = acl_free(UnsafeMutableRawPointer(currentACL)) } }
+                try compareAvailableACLs(currentACL, originalACL)
             } else if try entryStatus(name) != nil { throw Failure.unsafePath }
             if original == nil {
-                guard linkat(fd, temporary, fd, name, 0) == 0 else { throw pathFailure("commit private file") }
-                guard unlinkat(fd, temporary, 0) == 0 else { throw system("unlink private temporary file") }
+                if perform(.link, { linkat(fd, temporary, fd, name, 0) }) == 0 {
+                    guard unlinkat(fd, temporary, 0) == 0 else { throw system("unlink private temporary file") }
+                } else {
+                    guard unsupported(errno) || errno == EPERM else { throw pathFailure("commit private file") }
+                    try commitByRename(temporary, to: name, requireAbsent: true)
+                }
                 pending = false
-            } else if let original, let originalACL {
+            } else if let original {
                 // Swap keeps the replaced inode reachable until its identity
                 // and constraints have been checked after the atomic commit.
                 // A concurrent chmod/ACL edit or pathname replacement is
                 // rolled back instead of silently losing that restriction.
-                guard renameatx_np(fd, temporary, fd, name, UInt32(RENAME_SWAP)) == 0 else {
-                    throw pathFailure("replace private file")
+                if perform(.swap, { renameatx_np(fd, temporary, fd, name, UInt32(RENAME_SWAP)) }) != 0 {
+                    guard unsupported(errno) else { throw pathFailure("replace private file") }
+                    try commitByRename(temporary, to: name, requireAbsent: false)
+                    pending = false
+                    try synchronize()
+                    ExitDeadline.storageDidProgress()
+                    return
                 }
                 do {
                     guard let replaced = try entryStatus(temporary), Identity(replaced) == Identity(original),
                           replaced.st_mode == original.st_mode, replaced.st_gid == original.st_gid else {
                         throw Failure.unsafePath
                     }
-                    let replacedACL = try readACL(originalFD)
-                    defer { _ = acl_free(UnsafeMutableRawPointer(replacedACL)) }
-                    guard try aclText(replacedACL) == aclText(originalACL) else { throw Failure.unsafePath }
+                    let replacedACL = try? readACL(originalFD)
+                    defer { if let replacedACL { _ = acl_free(UnsafeMutableRawPointer(replacedACL)) } }
+                    try compareAvailableACLs(replacedACL, originalACL)
                     guard unlinkat(fd, temporary, 0) == 0 else { throw system("retire replaced file") }
                 } catch {
                     if let current = try entryStatus(name), Identity(current) == pendingIdentity {
@@ -343,6 +367,19 @@ enum SensitiveFileIO {
                 pending = false
             }
             try synchronize()
+            ExitDeadline.storageDidProgress()
+        }
+
+        private func commitByRename(_ temporary: String, to name: String, requireAbsent: Bool) throws {
+            if requireAbsent {
+                if perform(.exclusiveRename, { renameatx_np(fd, temporary, fd, name, UInt32(RENAME_EXCL)) }) == 0 { return }
+                guard unsupported(errno) else { throw pathFailure("commit private file") }
+                guard try entryStatus(name) == nil else { throw Failure.unsafePath }
+            }
+            // Plain same-directory rename is the baseline-compatible fallback.
+            // The last-check/rename race against same-user attackers is an
+            // explicitly documented limitation, not a filesystem requirement.
+            guard renameat(fd, temporary, fd, name) == 0 else { throw pathFailure("commit private file") }
         }
 
         func append(_ data: Data, named name: String) throws {
@@ -358,10 +395,11 @@ enum SensitiveFileIO {
             try requireRegular(opened)
             if let original, Identity(opened) != Identity(original) { throw Failure.unsafePath }
             guard fcntl(item, F_SETFL, fcntl(item, F_GETFL) | O_APPEND) == 0 else { throw system("set append mode") }
-            try handle.write(contentsOf: data)
+            try writeBytes(data, to: item)
             try handle.synchronize()
             try handle.close()
             try synchronize()
+            ExitDeadline.storageDidProgress()
         }
 
         func truncate(named name: String, to length: UInt64) throws {
@@ -418,7 +456,7 @@ enum SensitiveFileIO {
         }
 
         private func synchronize() throws {
-            guard fsync(fd) == 0 else { throw system("sync private directory") }
+            guard perform(.directorySync, { fsync(fd) }) == 0 || unsupported(errno) else { throw system("sync private directory") }
         }
     }
 
@@ -429,10 +467,38 @@ enum SensitiveFileIO {
         return String(cString: text)
     }
 
-    private static func readACL(_ fd: Int32) throws -> acl_t {
+    private static func writeBytes(_ data: Data, to fd: Int32) throws {
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), min(1_048_576, bytes.count - offset))
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else {
+                    if count == 0 { errno = EIO }
+                    throw system("write private file")
+                }
+                offset += count
+                ExitDeadline.storageDidProgress()
+            }
+        }
+    }
+
+    private static func readACL(_ fd: Int32) throws -> acl_t? {
+        #if DEBUG
+        if let aclReadError { throw Failure.system(operation: "read existing ACL", code: aclReadError) }
+        if unsupportedOperations.contains(.readACL) { return nil }
+        #endif
         if let acl = acl_get_fd(fd) { return acl }
+        if unsupported(errno) { return nil }
         guard errno == ENOENT, let empty = acl_init(0) else { throw system("read existing ACL") }
         return empty
+    }
+
+    private static func compareAvailableACLs(_ lhs: acl_t?, _ rhs: acl_t?) throws {
+        // A readable, changing ACL is still rejected. Inaccessible ACL metadata
+        // must not prevent a save whose effective write access was granted.
+        guard let lhs, let rhs, let left = try? aclText(lhs), let right = try? aclText(rhs) else { return }
+        guard left == right else { throw Failure.unsafePath }
     }
 
     private static func validateName(_ name: String) throws {
@@ -487,9 +553,10 @@ enum SensitiveFileIO {
         // Remove group/other and executable-file bits without restoring an
         // owner permission the user deliberately removed (for example 0500).
         let mode: mode_t = info.st_mode & (directory ? 0o700 : 0o600)
-        guard fchmod(fd, mode) == 0 else { throw system("set private permissions") }
-        try removeAllowACLs(fd)
-        guard try status(fd).st_mode & 0o777 == mode else { throw Failure.unsafePath }
+        _ = perform(.mode) { fchmod(fd, mode) }
+        // Only mutate this invocation's new inode; permission support is not
+        // a precondition for saving on FAT/exFAT and network filesystems.
+        try? removeAllowACLs(fd)
     }
 
     private static func firstAllowEntry(_ acl: acl_t) throws -> acl_entry_t? {
@@ -514,7 +581,7 @@ enum SensitiveFileIO {
 
     private static func removeAllowACLs(_ fd: Int32) throws {
         guard let acl = acl_get_fd(fd) else {
-            if errno == ENOENT { return }
+            if errno == ENOENT || unsupported(errno) { return }
             throw system("read private ACL")
         }
         defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }

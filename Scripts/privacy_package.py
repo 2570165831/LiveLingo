@@ -10,6 +10,7 @@ identified, not content-reviewed; allowed scripts/licenses/prose are unreviewed.
 Unsupported structured formats and unidentified binary data stop the check.
 """
 import copy
+import base64
 from datetime import datetime
 import json
 import os
@@ -21,7 +22,7 @@ import stat
 import struct
 import subprocess
 import sys
-from xml.parsers.expat import ExpatError
+from xml.parsers.expat import ExpatError, ParserCreate
 
 
 class PrivacyError(ValueError):
@@ -52,8 +53,8 @@ CONTENT_SUFFIXES = (".srt", ".vtt", ".wav", ".m4a", ".mp3", ".aiff", ".flac", ".
 JSON_LIMIT = 64 * 1024 * 1024
 FILE_PROBE_LIMIT = 4096
 PLIST_SUFFIXES = frozenset({".plist", ".stringsdict", ".entitlements", ".xcent"})
-UNSUPPORTED_METADATA_SUFFIXES = frozenset({".xml", ".yaml", ".yml", ".toml", ".strings"})
-STRUCTURED_SUFFIXES = PLIST_SUFFIXES | UNSUPPORTED_METADATA_SUFFIXES | {".json", ".safetensors"}
+UNSUPPORTED_METADATA_SUFFIXES = frozenset({".xml", ".yaml", ".yml", ".toml"})
+STRUCTURED_SUFFIXES = PLIST_SUFFIXES | UNSUPPORTED_METADATA_SUFFIXES | {".json", ".safetensors", ".strings", ".pth", ".pem"}
 TEXT_SUFFIXES = frozenset({".py", ".pyi", ".sh", ".bash", ".zsh", ".md", ".rst", ".txt",
                            ".c", ".h", ".cpp", ".hpp", ".tcl"})
 TEXT_NAMES = frozenset({"license", "licence", "copying", "notice", "copyright", "readme",
@@ -107,9 +108,33 @@ def metadata_kind(data):
     return None
 
 
+class _UniqueMetadata(dict):
+    def __setitem__(self, key, value):
+        if key in self:
+            raise PrivacyError("duplicate-metadata-key")
+        super().__setitem__(key, value)
+
+
+def _unique_json(pairs):
+    result = _UniqueMetadata()
+    for key, value in pairs:
+        result[key] = value
+    return result
+
+
 def parse_metadata(data, kind):
     try:
-        return json.loads(data) if kind == "json" else plistlib.loads(data)
+        if kind == "json":
+            return json.loads(data, object_pairs_hook=_unique_json)
+        if not data.startswith(b"bplist"):
+            # plistlib discards XML comments/attributes/processing instructions.
+            # Check them without resolving a DTD or any external entity.
+            parser = ParserCreate()
+            parser.CommentHandler = validate_metadata
+            parser.ProcessingInstructionHandler = lambda target, value: validate_metadata(value)
+            parser.StartElementHandler = lambda name, attrs: validate_metadata(attrs)
+            parser.Parse(data, True)
+        return plistlib.loads(data, dict_type=_UniqueMetadata)
     except (UnicodeError, ValueError, TypeError, OverflowError, RecursionError,
             plistlib.InvalidFileException, ExpatError, struct.error):
         raise PrivacyError("invalid-package-" + kind) from None
@@ -293,6 +318,71 @@ def allowed_text_file(path, data):
     return False
 
 
+def inspect_portable_resource(path, data, counts):
+    """Support bounded runtime resources without making arbitrary text exempt."""
+    text = decode_metadata_text(data)
+    if text is None:
+        raise PrivacyError("invalid-portable-resource")
+    if path.name == "py.typed":
+        if text.strip() not in ("", "partial"):
+            raise PrivacyError("invalid-typing-marker")
+    elif path.suffix.lower() == ".pth":
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith(("import ", "import\t")):
+                raise PrivacyError("executable-package-path-file")
+            validate_metadata(line)
+    elif path.suffix.lower() == ".pem":
+        blocks = list(re.finditer(r"-----BEGIN CERTIFICATE-----\s+([A-Za-z0-9+/=\s]+?)"
+                                  r"\s+-----END CERTIFICATE-----", text))
+        remainder = re.sub(r"-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+?"
+                           r"\s+-----END CERTIFICATE-----", "", text)
+        if not blocks or remainder.strip():
+            raise PrivacyError("unsupported-pem-resource")
+        for block in blocks:
+            try:
+                der = base64.b64decode(re.sub(r"\s", "", block[1]), validate=True)
+            except ValueError:
+                raise PrivacyError("invalid-certificate-resource") from None
+            result = subprocess.run(["/usr/bin/openssl", "x509", "-inform", "DER", "-noout"],
+                                    input=der, capture_output=True, timeout=10)
+            if result.returncode:
+                raise PrivacyError("invalid-certificate-resource")
+        # Certificates needed by the portable trust store are format-validated
+        # opaque resources. This does not inspect all certificate identities.
+        counts["opaque_binary_files"] += 1
+        return
+    else:  # OpenStep .strings, including UTF-16; never execute the resource.
+        if path.parent.name != "Resources" and not path.parent.name.endswith(".lproj"):
+            raise PrivacyError("unsupported-package-metadata-format")
+        token = re.compile(r'\s+|/\*.*?\*/|//[^\n]*|"(?:[^"\\]|\\.)*"|[^\s=;"/]+|[=;]', re.S)
+        entries = []
+        offset = 0
+        for match in token.finditer(text):
+            if match.start() != offset:
+                raise PrivacyError("invalid-strings-resource")
+            offset = match.end()
+            value = match[0]
+            if value.isspace():
+                continue
+            if value.startswith(("/*", "//")):
+                validate_metadata(value[2:-2] if value.startswith("/*") else value[2:])
+            else:
+                entries.append(value)
+        if offset != len(text) or len(entries) % 4 or any(
+                entries[i + 1] != "=" or entries[i + 3] != ";" for i in range(0, len(entries), 4)):
+            raise PrivacyError("invalid-strings-resource")
+        result = subprocess.run(["/usr/bin/plutil", "-convert", "xml1", "-o", "-", "--", "-"],
+                                input=data, capture_output=True, timeout=10)
+        if result.returncode:
+            raise PrivacyError("invalid-strings-resource")
+        value = parse_metadata(result.stdout, "plist")
+        if not isinstance(value, dict) or len(value) != len(entries) // 4:
+            raise PrivacyError("duplicate-metadata-key")
+        validate_metadata(value)
+    counts["metadata_files"] += 1
+
+
 def inspect_safetensors(path, size, counts):
     # Read only the bounded JSON header, never load tensor/model data. Tensor
     # bytes remain opaque even when the header passes the metadata policy.
@@ -329,6 +419,13 @@ def inspect_safetensors(path, size, counts):
 def inspect_metadata_file(path, counts, public_copy):
     suffix = path.suffix.lower()
     size = path.stat().st_size
+    if path.name == "py.typed" or suffix in (".pth", ".pem", ".strings"):
+        if size > JSON_LIMIT:
+            raise PrivacyError("unreviewed-large-metadata")
+        data = path.read_bytes()
+        if suffix != ".strings" or not metadata_kind(data):
+            inspect_portable_resource(path, data, counts)
+            return
     if suffix == ".safetensors":
         inspect_safetensors(path, size, counts)
         return

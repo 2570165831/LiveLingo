@@ -2,12 +2,28 @@ import Foundation
 
 struct ExitDeadlineExceeded: Error, Sendable {}
 
-/// One monotonic budget shared by capture, writer joins, persistence and service
-/// retirement. Expiration permanently revokes this attempt's cleanup permission.
+/// A hard limit for control messages, or an inactivity limit for application
+/// exit. Only actual storage progress renews an inactivity lease.
 final class ExitDeadline: @unchecked Sendable {
     @TaskLocal static var current: ExitDeadline?
+    @TaskLocal static var storageProgress: StorageProgress?
+
+    /// Writers already running when quit is requested can publish real byte
+    /// progress through this shared binding without inheriting a new TaskLocal.
+    final class StorageProgress: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deadline: ExitDeadline?
+        func attach(_ deadline: ExitDeadline?) { lock.withLock { self.deadline = deadline } }
+        func record() { lock.withLock { deadline }?.recordProgress() }
+    }
+
+    static func storageDidProgress() {
+        current?.recordProgress()
+        storageProgress?.record()
+    }
     static let applicationTimeout: TimeInterval = 15
-    private let end: ContinuousClock.Instant
+    private var end: ContinuousClock.Instant
+    private let inactivityTimeout: TimeInterval?
     private let parent: ExitDeadline?
     private let lock = NSLock()
     private var revoked = false
@@ -15,27 +31,46 @@ final class ExitDeadline: @unchecked Sendable {
 
     init(seconds: TimeInterval = applicationTimeout) {
         end = ContinuousClock.now.advanced(by: .seconds(max(0, seconds)))
+        inactivityTimeout = nil
+        parent = nil
+    }
+
+    init(inactivityTimeout: TimeInterval) {
+        self.inactivityTimeout = max(0, inactivityTimeout)
+        end = ContinuousClock.now.advanced(by: .seconds(max(0, inactivityTimeout)))
         parent = nil
     }
 
     private init(end: ContinuousClock.Instant, parent: ExitDeadline) {
         self.end = end
+        inactivityTimeout = nil
         self.parent = parent
     }
 
     /// A local control limit can only shorten the inherited absolute deadline.
     func limited(to seconds: TimeInterval) -> ExitDeadline {
-        ExitDeadline(end: min(end, ContinuousClock.now.advanced(by: .seconds(max(0, seconds)))), parent: self)
+        ExitDeadline(end: min(lock.withLock { end }, ContinuousClock.now.advanced(by: .seconds(max(0, seconds)))), parent: self)
     }
 
     var remaining: TimeInterval {
-        let components = ContinuousClock.now.duration(to: end).components
+        let components = ContinuousClock.now.duration(to: lock.withLock { end }).components
         return max(0, Double(components.seconds) + Double(components.attoseconds) / 1e18)
     }
 
     var hasPendingOperations: Bool { lock.withLock { pending > 0 } }
-    var isExpired: Bool { lock.withLock { revoked } || parent?.isExpired == true || ContinuousClock.now >= end }
+    var isExpired: Bool { lock.withLock { revoked || ContinuousClock.now >= end } || parent?.isExpired == true }
     func revoke() { lock.withLock { revoked = true } }
+    func recordProgress() {
+        lock.withLock {
+            // A synchronous successful write can finish after the clock limit
+            // while the main actor's timer has not run. Publish that fact. A
+            // timer which already revoked the lease cannot be resurrected.
+            if !revoked, let inactivityTimeout {
+                end = ContinuousClock.now.advanced(by: .seconds(inactivityTimeout))
+            }
+        }
+        parent?.recordProgress()
+    }
     func check(ignoringTaskCancellation: Bool = false) throws {
         guard !isExpired else { throw ExitDeadlineExceeded() }
         if !ignoringTaskCancellation { try Task.checkCancellation() }
@@ -66,11 +101,19 @@ final class ExitDeadline: @unchecked Sendable {
         }
         let observer = Task { completion.resolve(await work.result) }
         let timer = Task {
-            do { try await ContinuousClock().sleep(until: end) }
-            catch { return }
-            self.revoke()
-            completion.resolve(.failure(ExitDeadlineExceeded()))
-            work.cancel()
+            while !Task.isCancelled {
+                do { try await ContinuousClock().sleep(until: self.lock.withLock { self.end }) }
+                catch { return }
+                let expired = self.lock.withLock {
+                    if self.revoked || ContinuousClock.now >= self.end { self.revoked = true; return true }
+                    return false
+                }
+                if expired || self.parent?.isExpired == true {
+                    completion.resolve(.failure(ExitDeadlineExceeded()))
+                    work.cancel()
+                    return
+                }
+            }
         }
         defer { timer.cancel() }
         let value = try await withTaskCancellationHandler {

@@ -722,6 +722,27 @@ enum NotesExportDocument {
     /// - 批次标题（`## 第 N 批 …`）降为子级（`### …`）✓，保留原有的批号与主题 ✓；
     /// - 正常建议原样保留；旧机器失败行改为固定说明，不再次导出自由诊断；
     /// - 不再另加"复查批次 1/2/3"编号 ✓（报告里已经有批号，重复编号会对不上 ✓）。
+    private static func legacyFailureLine(_ line: String) -> Bool {
+        // These complete wrappers originate in the queue/load error paths.
+        // An ordinary "失败：先检查…" recommendation has no failure identity.
+        let explicit = ["本批复查失败，保留原笔记：", "复查进度读取失败，已保留现场：",
+                        "复查报告读取失败，未导出：", "读取复查报告目录失败，未导出：",
+                        "局部复查报告读取失败，未导出：", "课程已打开；复查报告读取失败："]
+        if explicit.contains(where: { line.hasPrefix($0) && line.count > $0.count }) { return true }
+        let generic = ["读取路径失败：", "复查报告读取失败：", "报告保存失败：", "复查报告保存失败："]
+        guard let prefix = generic.first(where: line.hasPrefix) else { return false }
+        let detail = String(line.dropFirst(prefix.count))
+        let fixed = ["超时", "输出超出长度上限", "生成被中断", "本机模型不可用", "输出格式不合格", "笔记未通过校验", "请求失败"]
+        if fixed.contains(detail) { return true }
+        // Legacy diagnostic code plus an optional ASCII path; match the full
+        // payload grammar instead of treating every colon-prefixed sentence as
+        // an error. Free prose with this ambiguous prefix is preserved.
+        return detail.range(of: #"^[A-Z][A-Z0-9]*_[A-Z0-9_]+(?: [A-Za-z0-9_./-]+)?$"#,
+                            options: .regularExpression) != nil
+            || detail.range(of: #"^Error Domain=[A-Za-z0-9.]+ Code=-?[0-9]+(?: .*)?$"#,
+                            options: .regularExpression) != nil
+    }
+
     static func reviewSection(_ markdown: String, target: OutputLanguage = .simplifiedChinese,
                               rendered: RenderedFields? = nil) -> String {
         var output: [String] = []
@@ -729,9 +750,7 @@ enum NotesExportDocument {
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
             let text = String(line)
             let trimmed = text.trimmingCharacters(in: .whitespaces)
-            let failurePrefixes = ["本批复查失败，保留原笔记：", "读取路径失败：", "复查进度读取失败，已保留现场：",
-                                   "复查报告读取失败：", "报告保存失败：", "复查报告保存失败："]
-            if failurePrefixes.contains(where: trimmed.hasPrefix) {
+            if legacyFailureLine(trimmed) {
                 output.append("本批复查未完成，原笔记已保留。")
                 continue
             }

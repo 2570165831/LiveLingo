@@ -29,6 +29,44 @@ def load_script(name):
 
 
 class PrivacyPackageTests(unittest.TestCase):
+    def test_duplicate_json_and_plist_keys_and_private_xml_comments_are_rejected(self):
+        samples = [
+            ("config.json", b'{"path":"/synthetic/private","path":"public"}'),
+            ("config.plist", b'<plist version="1.0"><dict><key>path</key><string>/synthetic/private</string>'
+             b'<key>path</key><string>public</string></dict></plist>'),
+            ("config.plist", b'<plist version="1.0"><!-- built at /synthetic/private -->'
+             b'<dict><key>name</key><string>public</string></dict></plist>'),
+        ]
+        for index, (name, data) in enumerate(samples):
+            with self.subTest(name=name, data=data):
+                source = self.root / f"metadata-{index}"
+                source.mkdir()
+                output = self.root / f"delivery-{index}"
+                path = self.write(name, data, root=source)
+                with self.assertRaises(privacy.PrivacyError):
+                    privacy.copy_distribution_tree(source, output)
+                self.assertFalse(output.exists())
+                self.assertEqual(path.read_bytes(), data)
+                path.unlink()
+
+    def test_normal_typing_path_certificate_and_openstep_resources_are_preserved(self):
+        # Generate a disposable synthetic certificate outside the package.
+        certificate = self.root / "synthetic-public.pem"
+        subprocess.run(["/usr/bin/openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-keyout", str(self.root / "synthetic-test.key"), "-out", str(certificate),
+                        "-days", "1", "-subj", "/CN=Synthetic fixture"], check=True, capture_output=True)
+        resources = {"fixture/py.typed": b"", "fixture.pth": b"relative/package\n",
+                     "public.pem": certificate.read_bytes(),
+                     "en.lproj/InfoPlist.strings": '/* public resource */\n"Name" = "合成资源";\n'.encode()}
+        for index, (name, data) in enumerate(resources.items()):
+            with self.subTest(name=name):
+                source = self.root / f"resource-{index}"
+                source.mkdir()
+                output = self.root / f"resource-delivery-{index}"
+                self.write(name, data, root=source)
+                privacy.copy_distribution_tree(source, output)
+                self.assertEqual((output / name).read_bytes(), data)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="privacy-package-tests-")
         self.root = Path(self.temporary.name).resolve()

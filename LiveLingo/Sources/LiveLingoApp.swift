@@ -125,6 +125,7 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     var cleanupForTesting: (@MainActor @Sendable () async -> Bool)?
     var replyForTesting: (@MainActor @Sendable (Bool) -> Void)?
     var terminationTimeoutForTesting: TimeInterval?
+    var confirmExitWithoutSavingForTesting: (@MainActor @Sendable () -> Bool)?
     #endif
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -144,9 +145,9 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         #endif
         guard terminationTask == nil else { return .terminateLater }
         #if DEBUG
-        let deadline = ExitDeadline(seconds: terminationTimeoutForTesting ?? ExitDeadline.applicationTimeout)
+        let deadline = ExitDeadline(inactivityTimeout: terminationTimeoutForTesting ?? ExitDeadline.applicationTimeout)
         #else
-        let deadline = ExitDeadline()
+        let deadline = ExitDeadline(inactivityTimeout: ExitDeadline.applicationTimeout)
         #endif
         terminationTask = Task { [self] in
             let retireServices: @MainActor @Sendable () async throws -> Void = {
@@ -179,6 +180,18 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
                 catch { shouldExit = false }
             }
             #endif
+            if !shouldExit {
+                #if DEBUG
+                if let confirmExitWithoutSavingForTesting {
+                    shouldExit = confirmExitWithoutSavingForTesting()
+                } else if !AppRuntimeEnvironment.isUnitTesting {
+                    shouldExit = confirmExitWithoutSaving()
+                }
+                #else
+                shouldExit = confirmExitWithoutSaving()
+                #endif
+                if shouldExit { deadline.revoke() }
+            }
             terminationTask = nil
             #if DEBUG
             if let replyForTesting { replyForTesting(shouldExit); return }
@@ -192,6 +205,15 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         guard !AppRuntimeEnvironment.isUnitTesting else { return }
         FullScreenClassModeController.shared.shutdown()
         // Service retirement was awaited before the affirmative AppKit reply.
+    }
+
+    private func confirmExitWithoutSaving() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "退出前的保存或清理未完成"
+        alert.informativeText = "磁盘上现有文件会保留。仍要退出可能丢失尚未写入的进度；临时文件可在下次启动后重试清理。"
+        alert.addButton(withTitle: "留在应用")
+        alert.addButton(withTitle: "仍要退出")
+        return alert.runModal() == .alertSecondButtonReturn
     }
 }
 

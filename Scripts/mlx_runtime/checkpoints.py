@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import ctypes
 import errno
+import io
 import os
 from pathlib import Path
 import re
@@ -13,6 +14,7 @@ _IDENTITY = re.compile(r'[0-9a-f]{64}')
 _RECORD = re.compile(r'[0-9a-f]{64}(?:\.(?:[0-9a-f]{32}\.)?pending)?\.safetensors')
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _ACL_API = None
+_UNSUPPORTED = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL}
 
 
 def _acl_api():
@@ -41,7 +43,7 @@ def _acl_api():
 def _read_extended_acl(fd):
     ctypes.set_errno(0)
     acl = _acl_api().acl_get_fd_np(fd, 0x100)  # ACL_TYPE_EXTENDED.
-    if acl or ctypes.get_errno() == errno.ENOENT:
+    if acl or ctypes.get_errno() in (_UNSUPPORTED | {errno.ENOENT}):
         return acl  # The validated fd exists; ENOENT means no ACL.
     raise OSError(ctypes.get_errno(), 'Private checkpoint ACL read failed')
 
@@ -177,23 +179,28 @@ def _copy_permissions(source, destination):
             expected_acl = _acl_bytes(acl)
         current = os.fstat(destination)
         if (current.st_uid, current.st_gid) != (info.st_uid, info.st_gid):
-            os.fchown(destination, info.st_uid, info.st_gid)
-        os.fchmod(destination, mode)
+            try:
+                os.fchown(destination, info.st_uid, info.st_gid)
+            except OSError:
+                pass  # Preserve ownership where the volume permits it.
+        try:
+            os.fchmod(destination, mode)
+        except OSError:
+            pass
         if api:
             if api.acl_set_fd_np(destination, acl, 0x100) != 0:
-                raise OSError(ctypes.get_errno(), 'Checkpoint ACL copy failed')
-            verified = _read_extended_acl(destination) or api.acl_init(0)
-            if not verified:
-                raise OSError(ctypes.get_errno(), 'Checkpoint ACL verification failed')
-            try:
-                if _acl_bytes(verified) != expected_acl:
-                    raise OSError('Checkpoint ACL verification failed')
-            finally:
-                api.acl_free(verified)
-        current = os.fstat(destination)
-        if (stat.S_IMODE(current.st_mode), current.st_uid, current.st_gid) != (
-                mode, info.st_uid, info.st_gid):
-            raise OSError('Checkpoint permission verification failed')
+                # ACL preservation is best effort, not a prerequisite for
+                # saving on a filesystem which cannot store extended ACLs.
+                pass
+            else:
+                verified = _read_extended_acl(destination) or api.acl_init(0)
+                if not verified:
+                    raise OSError(ctypes.get_errno(), 'Checkpoint ACL verification failed')
+                try:
+                    if _acl_bytes(verified) != expected_acl:
+                        raise OSError('Checkpoint ACL verification failed')
+                finally:
+                    api.acl_free(verified)
         # ACL/mode changes update ctime. Refuse a changing permission snapshot.
         if os.fstat(source).st_ctime_ns != info.st_ctime_ns:
             raise CheckpointSafetyError('Checkpoint file changed')
@@ -232,7 +239,11 @@ def _state_fd(directory, create=True):
                     raise CheckpointSafetyError('Checkpoint directory changed')
                 if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
                     raise CheckpointSafetyError('Invalid checkpoint directory owner or type')
-                os.fchmod(fd, 0o700)
+                try:
+                    os.fchmod(fd, 0o700)
+                except OSError as error:
+                    if error.errno not in _UNSUPPORTED:
+                        raise
                 _strip_extended_acl(fd)
         info = os.fstat(fd)
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
@@ -349,7 +360,13 @@ def checkpoint_records(directory):
         return []
 
 
-def atomic_checkpoint(path, write):
+class _BoundCheckpointFile(io.FileIO):
+    """Native serializers accept file objects; legacy test writers use fd paths."""
+    def __fspath__(self):
+        return f'/dev/fd/{self.fileno()}'
+
+
+def atomic_checkpoint(path, write, *, file_object=False):
     """Keep the previous record on failure; never leave our partial write."""
     path = Path(os.path.abspath(path))
     if not path.name.endswith('.safetensors') or path.name.endswith('.pending.safetensors'):
@@ -363,9 +380,17 @@ def atomic_checkpoint(path, write):
         try:
             os.fchmod(leaf, 0o600)
             _strip_extended_acl(leaf)
-            # Native tensor serializers require a filename. The directory is
-            # descriptor-validated; our pending inode starts at mode 0600.
-            write(str(pending))
+            # MLX accepts a binary file object. Bind production serialization
+            # to our open pending inode instead of resolving its directory again.
+            if file_object:
+                with _BoundCheckpointFile(leaf, 'wb', closefd=False) as stream:
+                    write(stream)
+                    stream.flush()
+            else:
+                # Compatibility for filename-only callers. Their pathname
+                # replacement race remains explicitly documented.
+                write(str(pending))
+            os.fsync(leaf)
             info = os.stat(pending.name, dir_fd=fd, follow_symlinks=False)
             if _token(info) != expected:
                 raise CheckpointSafetyError('Checkpoint writer replaced the pending file')

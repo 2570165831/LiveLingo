@@ -1047,6 +1047,7 @@ final class AppModel: ObservableObject {
     private var finalizationInProgress = false
     private var preparingApplicationExit = false
     private var applicationExitDeadline: ExitDeadline?
+    private let exitStorageProgress = ExitDeadline.StorageProgress()
     private var temporaryCleanupRequested = false
     private var lifecycleRevision = UUID()
     private var sessionStartTask: Task<Void, Never>?
@@ -1710,11 +1711,12 @@ final class AppModel: ObservableObject {
             return false
         }
         #if DEBUG
-        let deadline = suppliedDeadline ?? ExitDeadline(seconds: privacyExitConfiguration?.timeout ?? ExitDeadline.applicationTimeout)
+        let deadline = suppliedDeadline ?? ExitDeadline(inactivityTimeout: privacyExitConfiguration?.timeout ?? ExitDeadline.applicationTimeout)
         #else
-        let deadline = suppliedDeadline ?? ExitDeadline()
+        let deadline = suppliedDeadline ?? ExitDeadline(inactivityTimeout: ExitDeadline.applicationTimeout)
         #endif
         applicationExitDeadline = deadline
+        exitStorageProgress.attach(deadline)
         preparingApplicationExit = true
         defer { preparingApplicationExit = false }
         return await ExitDeadline.$current.withValue(deadline) {
@@ -1761,6 +1763,7 @@ final class AppModel: ObservableObject {
                     try SessionExporter.export(segments: segments, sessionDirectory: directory,
                         summary: lectureSummary, target: outputLanguage)
                     savedDirectory = directory
+                    deadline.recordProgress()
                 }
                 try await waitForLifecycle { try await retireServices() }
                 try deadline.check()
@@ -1777,6 +1780,7 @@ final class AppModel: ObservableObject {
                 try deadline.check()
                 generation += 1
                 applicationExitDeadline = nil
+                exitStorageProgress.attach(nil)
                 return true
             } catch {
                 deadline.revoke()
@@ -1863,7 +1867,15 @@ final class AppModel: ObservableObject {
         #else
         try SessionWorkspace.discardTemporarySession(root)
         #endif
-        if root == temporarySessionDirectory { temporaryCleanupRequested = false }
+        if root == temporarySessionDirectory {
+            temporaryCleanupRequested = false
+            // Publish completed disk cleanup even if a later stage times out.
+            // Synthetic hooks that did not remove the root keep their locator.
+            if !FileManager.default.fileExists(atPath: root.path) {
+                temporarySessionDirectory = nil
+                sessionDirectory = nil
+            }
+        }
     }
 
     private func clearLiveOnlySessionContent() {
@@ -1947,7 +1959,8 @@ final class AppModel: ObservableObject {
             targetLocale: outputLanguage.persistedLocale)
         snapshot.generation = generation
         sessionSnapshot = snapshot
-        let saver = SessionSaveCoordinator(directory: directory, sessionID: sessionID, restored: restored)
+        let saver = SessionSaveCoordinator(directory: directory, sessionID: sessionID, restored: restored,
+                                           storageProgress: exitStorageProgress)
         let boundID = sessionID
         saver.onFailure = { [weak self, weak saver] error in
             guard let self, self.sessionID == boundID, self.sessionSaver === saver else { return }
@@ -1959,6 +1972,7 @@ final class AppModel: ObservableObject {
             guard let self, let saver, self.sessionID == boundID,
                   self.sessionSaver === saver, saved.sessionID == boundID,
                   SessionDirectoryLocation.canonical(saver.directory) == SessionDirectoryLocation.canonical(directory) else { return }
+            self.applicationExitDeadline?.recordProgress()
             self.sessionSnapshot?.storageRevision = saved.storageRevision
             self.sessionSnapshot?.lastJournalSequence = saved.lastJournalSequence
             self.sessionSnapshot?.lastJournalDigest = saved.lastJournalDigest
@@ -2541,8 +2555,9 @@ final class AppModel: ObservableObject {
             guard applicationExitDeadline?.hasPendingOperations != true else { return }
             applicationExitDeadline = nil
         }
-        let deadline = ExitDeadline.current ?? applicationExitDeadline ?? ExitDeadline()
-        await ExitDeadline.$current.withValue(deadline) { await finishSessionStop(failure: failure) }
+        // Ordinary stop/save has no application-exit budget. During an actual
+        // quit, storage progress renews the inherited inactivity lease.
+        await finishSessionStop(failure: failure)
     }
 
     private func finishSessionStop(failure: String?) async {
@@ -2615,10 +2630,13 @@ final class AppModel: ObservableObject {
             try await flushSessionArchive()
             let captions = segments, notes = lectureSummary, target = outputLanguage
             let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
+            let storageProgress = exitStorageProgress
             try await waitForLifecycle {
                 try await Task.detached {
-                    try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target,
-                        summaryIsLegacyRendered: legacy, summaryEvidence: evidence, converter: converter)
+                    try ExitDeadline.$storageProgress.withValue(storageProgress) {
+                        try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target,
+                            summaryIsLegacyRendered: legacy, summaryEvidence: evidence, converter: converter)
+                    }
                 }.value
             }
             try validateLifecycleCompletion(revision)

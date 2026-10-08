@@ -43,7 +43,9 @@ final class PrivacyExitTests: XCTestCase {
         addTeardownBlock {
             let retired = evidence.appendingPathComponent("superseded", isDirectory: true)
             try FileManager.default.createDirectory(at: retired, withIntermediateDirectories: true)
-            try FileManager.default.moveItem(at: directory, to: retired.appendingPathComponent(directory.lastPathComponent))
+            if FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.moveItem(at: directory, to: retired.appendingPathComponent(directory.lastPathComponent))
+            }
         }
         // XCTest runs these blocks in reverse order: settle the synthetic queue,
         // preserve its fixture, then remove this test's isolated preferences.
@@ -104,6 +106,102 @@ final class PrivacyExitTests: XCTestCase {
             XCTAssertFalse(model.segments.isEmpty, stage)
             XCTAssertEqual(model.temporarySessionForPrivacyExitTesting, directory, stage)
         }
+    }
+
+    func testSlowSuccessfulNormalStopHasNoExitBudget() async throws {
+        let (model, directory, initial) = try makeModel()
+        try await model.beginSavedCourseForTesting(directory: directory)
+        var configuration = initial
+        let state = PrivacyExitRetryState()
+        configuration.flush = {
+            state.calls += 1
+            if state.calls == 1 { try await Task.sleep(for: .milliseconds(15_100)) }
+        }
+        model.configurePrivacyExitForTesting(configuration)
+        await model.stopSavedCourseForTesting()
+        XCTAssertEqual(model.phase, .saved(directory))
+        XCTAssertNil(model.archiveError)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("transcript-en.txt").path))
+    }
+
+    func testSlowSaveWithProgressCanFinishWithinOneExitAttempt() async throws {
+        let (model, directory, initial) = try makeModel()
+        try await model.beginSavedCourseForTesting(directory: directory)
+        var configuration = initial
+        configuration.flush = {
+            for _ in 0..<6 {
+                try await Task.sleep(for: .milliseconds(20))
+                try SensitiveFileIO.atomicWrite(Data("synthetic save progress".utf8),
+                    to: directory.appendingPathComponent("progress.txt"))
+            }
+        }
+        model.configurePrivacyExitForTesting(configuration)
+        let allowed = await model.prepareForApplicationExit()
+        XCTAssertTrue(allowed)
+        XCTAssertEqual(model.phase, .saved(directory))
+        XCTAssertNil(model.archiveError)
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent("progress.txt"), encoding: .utf8),
+                       "synthetic save progress")
+    }
+
+    func testPreexistingDetachedWriterRenewsOnlyWithActualStorageProgress() async throws {
+        let (_, directory, _) = try makeModel()
+        let binding = ExitDeadline.StorageProgress(), gate = PrivacyExitGate()
+        let writer = Task.detached {
+            await gate.wait()
+            try ExitDeadline.$storageProgress.withValue(binding) {
+                for index in 0..<6 {
+                    Thread.sleep(forTimeInterval: 0.02)
+                    try SensitiveFileIO.atomicWrite(Data("synthetic chunk \(index)".utf8),
+                        to: directory.appendingPathComponent("background.txt"))
+                }
+            }
+        }
+        while !gate.entered { await Task.yield() }
+        let deadline = ExitDeadline(inactivityTimeout: 0.05)
+        binding.attach(deadline)
+        gate.release()
+        try await deadline.wait { try await writer.value }
+        XCTAssertFalse(deadline.isExpired)
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent("background.txt"), encoding: .utf8),
+                       "synthetic chunk 5")
+    }
+
+    func testCompletedSynchronousDiskCleanupDoesNotLeaveStaleRoot() async throws {
+        let (model, directory, initial) = try makeModel()
+        // Keep the queue journal outside the discarded course, as it is in
+        // production. A queue shutdown must not recreate that course fixture.
+        let course = directory.appendingPathComponent("temporary-course", isDirectory: true)
+        try FileManager.default.createDirectory(at: course, withIntermediateDirectories: false)
+        model.beginLiveOnlyCourseForTesting(directory: course)
+        var configuration = initial
+        configuration.discardTemporarySession = { root in
+            try FileManager.default.removeItem(at: root)
+            Thread.sleep(forTimeInterval: 0.08)
+        }
+        model.configurePrivacyExitForTesting(configuration)
+        let first = await model.prepareForApplicationExit()
+        XCTAssertFalse(first)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: course.path))
+        XCTAssertNil(model.temporarySessionForPrivacyExitTesting)
+        try await Task.sleep(for: .milliseconds(20))
+        let second = await model.prepareForApplicationExit()
+        XCTAssertTrue(second)
+    }
+
+    func testAppKitAllowsExplicitExitAfterHungCleanup() async throws {
+        let delegate = AppLifecycleDelegate(), gate = PrivacyExitGate()
+        delegate.terminationTimeoutForTesting = 0.05
+        delegate.cleanupForTesting = { await gate.wait(); return true }
+        delegate.confirmExitWithoutSavingForTesting = { true }
+        var replies: [Bool] = []
+        delegate.replyForTesting = { replies.append($0) }
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(replies, [true])
+        gate.release()
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(replies, [true])
     }
 
     func testLateCompletionCannotClearAfterTimeout() async throws {

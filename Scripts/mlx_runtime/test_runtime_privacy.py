@@ -246,6 +246,45 @@ def generation_class():
 
 
 class CheckpointPrivacyTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS ACL regression')
+    def test_unsupported_empty_acl_preservation_does_not_block_checkpoint_overwrite(self):
+        import ctypes
+        import errno
+        checkpoints = importlib.import_module('checkpoints')
+        api = checkpoints._acl_api()
+        class UnsupportedACL:
+            def __getattr__(self, name):
+                return getattr(api, name)
+            @staticmethod
+            def acl_set_fd_np(*args):
+                ctypes.set_errno(errno.ENOTSUP)
+                return -1
+        self.path.write_bytes(b'previous')
+        with patch.object(checkpoints, '_ACL_API', UnsupportedACL()):
+            self.generation.save(self.path)
+        self.assertEqual(self.path.read_bytes(), b'synthetic checkpoint')
+        self.assertEqual(list(self.directory.glob('*.pending.safetensors')), [])
+
+    def test_generation_serializer_remains_bound_when_state_directory_is_renamed(self):
+        retained = self.directory.with_name(self.directory.name + '-retained')
+        outside = self.directory.with_name(self.directory.name + '-outside')
+        outside.mkdir()
+        def serialize(file, *args):
+            self.directory.rename(retained)
+            self.directory.symlink_to(outside, target_is_directory=True)
+            self.write(file)
+        self.namespace['mx'].save_safetensors = serialize
+        try:
+            self.generation.save(self.path)
+            self.assertEqual((retained / self.path.name).read_bytes(), b'synthetic checkpoint')
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(list(retained.glob('*.pending.safetensors')), [])
+        finally:
+            if self.directory.is_symlink():
+                self.directory.unlink()
+                retained.rename(self.directory)
+            outside.rename(self.directory / 'retained-redirect-output')
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix='ll-private-checkpoint-')
         self.addCleanup(directory.cleanup)

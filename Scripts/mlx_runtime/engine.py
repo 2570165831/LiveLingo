@@ -293,7 +293,7 @@ class Generation:
                 mx.save_safetensors(temporary, {}, {'livelingo.completed': serialized})
             else:
                 save_prompt_cache(temporary, self.cache, {'generation': serialized})
-        atomic_checkpoint(path, write)
+        atomic_checkpoint(path, write, file_object=True)
 
     @classmethod
     def restore(cls, engine, path, expected_identity):
