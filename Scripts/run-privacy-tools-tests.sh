@@ -17,7 +17,9 @@ mkdir -p "$task_gate_root/tmp" "$task_gate_root/cli-module-cache" "$task_gate_ro
 export TMPDIR="$task_gate_root/tmp/" PYTHONDONTWRITEBYTECODE=1
 export LIVELINGO_TARGET_EVAL_OUTPUT_ROOT="$task_gate_root"
 export LIVELINGO_QUALITY_TEST_DIRECTORY="$task_gate_root/python-quality"
-export LIVELINGO_ASR_TEST_IN_PROCESS=1
+# Socket-free ASR handlers and CPU-only probe precision are explicit gate
+# choices; plain unittest runs keep real loopback HTTP and the GPU pass.
+export LIVELINGO_ASR_TEST_IN_PROCESS=1 LIVELINGO_ASR_TEST_CPU_ONLY=1
 export LIVELINGO_IDLE_TEST_OUTPUT="$task_gate_root/idle-tests"
 export LIVELINGO_CLI_TEST_OUTPUT_ROOT="$task_gate_root"
 export PYTHONPATH="$task_source_root/Scripts:$task_source_root/Scripts/mlx_runtime:/Applications/LiveLingo.app/Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages:/Applications/LiveLingo.app/Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages"
