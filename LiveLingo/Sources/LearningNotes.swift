@@ -3609,7 +3609,6 @@ final class LearningReviewQueue: ObservableObject {
     private var outputTail: Task<Void, Error>?
     private var outputSequence = 0
     private var admissionTask: Task<Void, Error>?
-    private var admissionToken: UUID?
     private var persistenceEpoch = UUID()
     private var persistencePending = 0
     private var reconcileAfterPersistence = false
@@ -4552,16 +4551,12 @@ final class LearningReviewQueue: ObservableObject {
     func enqueueAsync(directory: URL, notebook: LearningNotebook, scope: LearningReviewScope = .wholeLesson,
                       sessionID: UUID? = nil, inputRevision: Int? = nil, targetLocale: String? = nil) async throws {
         guard admissionTask == nil else { throw ReviewIdentityError.conflict("上一项复查仍在入队，请稍后再试") }
-        let token = UUID()
-        admissionToken = token
         let request = Task { @MainActor in
             try await self.enqueueOwned(directory: directory, notebook: notebook, scope: scope,
                 sessionID: sessionID, inputRevision: inputRevision, targetLocale: targetLocale)
         }
         admissionTask = request
-        defer {
-            if admissionToken == token { admissionTask = nil; admissionToken = nil }
-        }
+        defer { admissionTask = nil }
         try await withTaskCancellationHandler {
             try await request.value
         } onCancel: {
@@ -4596,33 +4591,49 @@ final class LearningReviewQueue: ObservableObject {
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        var retirements: [(original: Job, retired: Job)] = []
+        var retirements: [Job] = []
         for original in jobs where plan.supersededIDs.contains(original.id) {
             var old = original
             old.supersededByRevision = plan.candidate.identity?.inputRevision
             old.prefix = ""; old.prefixInputDigest = nil; old.retryPending = nil
             let snapshot = try await validatedSnapshotAsync(old, at: old.directory, allowHistorical: true)
             try await writeOutputsAsync(old, validatedSnapshot: snapshot)
-            retirements.append((original, old))
+            retirements.append(original)
         }
         try Task.checkCancellation()
         // Each await (including onUpdate) may already have retired a task.
         // Validate the complete plan before changing any queue membership.
-        let ownedRetirements = try retirements.filter { entry in
-            if let current = jobs.first(where: { $0.id == entry.original.id }) {
-                guard try encoder.encode(current) == encoder.encode(entry.original),
+        let ownedRetirements = try retirements.compactMap { original -> Job? in
+            if var current = jobs.first(where: { $0.id == original.id }) {
+                // Compare the frozen input and committed report directly;
+                // preserve current lifecycle metadata when retiring the job.
+                guard current.identity == original.identity,
+                      current.inputDigest == original.inputDigest,
+                      current.batches == original.batches,
+                      current.original == original.original,
+                      current.courseInputDigest == original.courseInputDigest,
+                      current.courseBatchDigests == original.courseBatchDigests,
+                      current.scope == original.scope,
+                      current.targetLocale == original.targetLocale,
+                      current.prompt == original.prompt,
+                      current.directory == original.directory,
+                      current.next == original.next,
+                      current.reports == original.reports,
+                      current.supersededByRevision == original.supersededByRevision,
                       !retiredJobs.contains(where: { $0.id == current.id }) else {
                     throw ReviewIdentityError.conflict("复查任务在报告保存期间发生变化，未继续入队")
                 }
-                return true
+                current.supersededByRevision = plan.candidate.identity?.inputRevision
+                current.prefix = ""; current.prefixInputDigest = nil; current.retryPending = nil
+                return current
             }
-            guard retiredJobs.contains(where: { $0.id == entry.original.id }) else {
+            guard retiredJobs.contains(where: { $0.id == original.id }) else {
                 throw ReviewIdentityError.conflict("复查任务在报告保存期间已移除，未继续入队")
             }
-            return false
+            return nil
         }
         let before = jobs, retiredBefore = retiredJobs
-        retiredJobs.append(contentsOf: ownedRetirements.map(\.retired))
+        retiredJobs.append(contentsOf: ownedRetirements)
         jobs.removeAll { plan.supersededIDs.contains($0.id) }
         jobs.append(plan.candidate)
         let submittedJobs = try encoder.encode(jobs)

@@ -459,19 +459,10 @@ enum SessionExporter {
         return target
     }
 
-    private static func replaceLink(_ target: String, at destination: URL, operations: PublicationOperations,
-                                    didPublish: ((stat) -> Void)? = nil) throws {
+    private static func replaceLink(_ target: String, at destination: URL, operations: PublicationOperations) throws {
         let pending = destination.deletingLastPathComponent().appendingPathComponent(".export-link-\(UUID())")
         try operations.createSymbolicLink(target, pending)
-        var identity = stat()
-        if didPublish != nil {
-            guard lstat(pending.path, &identity) == 0, identity.st_mode & S_IFMT == S_IFLNK else {
-                throw SessionStoreError.unsafePath(pending.path)
-            }
-        }
         guard rename(pending.path, destination.path) == 0 else { throw SessionStoreError.io(operation: "publish export pointer", code: errno) }
-        // Record ownership before syncing, which can fail after the rename.
-        didPublish?(identity)
         try SessionArchiveCoding.syncDirectory(destination.deletingLastPathComponent())
     }
 
@@ -588,7 +579,7 @@ enum SessionExporter {
             } else {
                 guard info.st_mode & S_IFMT == S_IFREG else { throw SessionStoreError.unsafePath(destination.path) }
             }
-            let bytes = try Data(contentsOf: destination)
+            let bytes = try rootMemberBytes(at: destination)
             rootFiles[name] = bytes
             if selected != directory, info.st_mode & S_IFMT == S_IFREG,
                (try? Data(contentsOf: selected.appendingPathComponent(name))) != bytes {
@@ -624,53 +615,46 @@ enum SessionExporter {
         if portable {
             try publishPortable(members, staged: staged, previous: previous,
                                 originalFiles: rootFiles, in: directory, operations: operations)
+            try requirePublishedExport(members, generation: staged, in: directory)
             return
         }
         let current = store.appendingPathComponent("current")
         if selected == directory {
             try replaceLink("versions/" + previous.lastPathComponent, at: current, operations: operations)
         }
-        var introducedAliases: [String: stat] = [:]
-        do {
-            for name in members.keys.sorted() {
-                let url = directory.appendingPathComponent(name)
-                try operations.beforeMemberPublication(name)
-                try requireRootMemberUnchanged(at: url, original: rootFiles[name])
-                var info = stat()
-                if lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK { continue }
-                try replaceLink(".exports/current/" + name, at: url, operations: operations) { identity in
-                    if rootFiles[name] == nil { introducedAliases[name] = identity }
-                }
-            }
-            // A legacy writer can replace an already checked alias while later
-            // members publish. Recheck the whole set at the pointer boundary.
-            for name in members.keys.sorted() {
-                let url = directory.appendingPathComponent(name)
-                var info = stat()
-                guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK,
-                      try fm.destinationOfSymbolicLink(atPath: url.path) == ".exports/current/" + name else {
-                    throw SessionStoreError.invalidState("导出期间文件已被另一个写者修改，停止发布并保留原件")
-                }
-            }
-            // All managed aliases share this one atomic commit point. The previous
-            // generation and any foreign root view remain independently readable.
-            try replaceLink("versions/" + staged.lastPathComponent, at: current, operations: operations)
-        } catch {
-            // A first partial export must not leave dangling aliases that block
-            // retry. Retire only absent-before aliases still owned by this call;
-            // replacements by another writer and complete generations stay put.
-            for (name, identity) in introducedAliases {
-                let url = directory.appendingPathComponent(name)
-                var info = stat()
-                if lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK,
-                   info.st_dev == identity.st_dev, info.st_ino == identity.st_ino,
-                   (try? fm.destinationOfSymbolicLink(atPath: url.path)) == ".exports/current/" + name {
-                    _ = unlink(url.path)
-                }
-            }
-            try? SessionArchiveCoding.syncDirectory(directory)
-            throw error
+        // Keep partial aliases on failure. Their missing generation members
+        // identify unfinished publication, so retry can reuse them. Never delete
+        // a public name after checking it: a later writer may have replaced it.
+        for name in members.keys.sorted() {
+            let url = directory.appendingPathComponent(name)
+            try operations.beforeMemberPublication(name)
+            try requireRootMemberUnchanged(at: url, original: rootFiles[name])
+            var info = stat()
+            if lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK { continue }
+            try replaceLink(".exports/current/" + name, at: url, operations: operations)
         }
+        // Catch earlier-member changes before committing the shared pointer.
+        for name in members.keys.sorted() {
+            let url = directory.appendingPathComponent(name)
+            var info = stat()
+            guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK,
+                  try fm.destinationOfSymbolicLink(atPath: url.path) == ".exports/current/" + name else {
+                throw SessionStoreError.invalidState("导出期间文件已被另一个写者修改，需重试；停止发布并保留原件")
+            }
+        }
+        try replaceLink("versions/" + staged.lastPathComponent, at: current, operations: operations)
+        try requirePublishedExport(members, generation: staged, in: directory)
+    }
+
+    private static func requirePublishedExport(_ members: [String: Data], generation: URL, in directory: URL) throws {
+        let conflict = SessionStoreError.invalidState("导出一致性检查失败，需重试；完整版本及并发写入的文件已保留")
+        guard (try? currentExportDirectory(in: directory)) == generation else { throw conflict }
+        for name in members.keys.sorted() {
+            guard (try? rootMemberBytes(at: directory.appendingPathComponent(name))) == members[name] else { throw conflict }
+        }
+        // This is a final observation, not a lock on noncooperating writers.
+        // Another App instance or external writer ignoring .export.lock can
+        // still change a public name after it was read, including before return.
     }
 
     private static func writeExportGeneration(_ files: [String: Data], under parent: URL,
@@ -704,12 +688,21 @@ enum SessionExporter {
             && (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) == ".exports/current/" + url.lastPathComponent) else {
             throw SessionStoreError.unsafePath(url.path)
         }
+        if info.st_mode & S_IFMT == S_IFLNK {
+            var target = stat()
+            if fstatat(AT_FDCWD, url.path, &target, 0) != 0 {
+                guard errno == ENOENT else { throw SessionStoreError.io(operation: "inspect export alias target", code: errno) }
+                // A failed first publication can leave a managed alias whose
+                // member is absent from current. Keep it and let retry finish.
+                return nil
+            }
+        }
         return try Data(contentsOf: url)
     }
 
     private static func requireRootMemberUnchanged(at url: URL, original: Data?) throws {
         guard try rootMemberBytes(at: url) == original else {
-            throw SessionStoreError.invalidState("导出期间文件已被另一个写者修改，停止发布并保留原件")
+            throw SessionStoreError.invalidState("导出期间文件已被另一个写者修改，需重试；停止发布并保留原件")
         }
     }
 

@@ -112,10 +112,18 @@ struct DataSafetyReviewTests {
         let first = try course(root, "first")
         let second = try course(root, "second")
         let journal = root.appendingPathComponent("queue.json")
-        try write([try job(first, notebook("first"))], to: journal)
+        var initial = try job(first, notebook("first"))
+        // An empty prefix has no checkpoint binding. Seed the normalized state
+        // so two startup repairs cannot race before the tested stale write.
+        initial.prefixInputDigest = nil
+        try write([initial], to: journal)
+        let initialBytes = try Data(contentsOf: journal)
         let a = queue(journal), b = queue(journal)
         await a.shutdownForTesting()
         await b.shutdownForTesting()
+        #expect(a.currentFailure == nil)
+        #expect(b.currentFailure == nil)
+        #expect(try Data(contentsOf: journal) == initialBytes)
         try await a.enqueueAsync(directory: second, notebook: notebook("second"))
         let latest = try Data(contentsOf: journal)
         b.togglePause()
@@ -742,6 +750,88 @@ struct DataSafetyReviewTests {
         await restored.shutdownForTesting()
         #expect(restored.currentFailure == nil)
         #expect(restored.items.count == 1)
+        #expect(try Data(contentsOf: journal) == bytes)
+        #expect(calls == 0)
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func n18SupersedingAdmissionPreservesEventsDuringReportSave(_ refresh: Int) async throws {
+        let root = try DataSafetyFixtures.make("N18-enqueue-events")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let book = try notebook("original")
+        let store = SessionStore(directory: directory)
+        let saved = try store.save(SessionSnapshot(segments: book.batches.flatMap(\.evidence),
+            batches: book.batches, notebookRevision: book.revision))
+        let journal = root.appendingPathComponent("queue.json")
+        var calls = 0
+        let q = queue(journal) { _, _, _, _, _ in calls += 1; return Self.response }
+        q.setContext(recording: true, concurrent: false, resourcesAvailable: false)
+        try await q.enqueueAsync(directory: directory, notebook: book,
+            sessionID: saved.sessionID, inputRevision: saved.inputRevision)
+        try await q.waitForPendingStorage()
+        let oldID = try #require(q.items.first?.id)
+        let appended = TranscriptSegment(startTime: 4, endTime: 7,
+            english: "The synthetic append-only evidence is new.", chinese: "合成追加证据是新的。",
+            sessionID: saved.sessionID, inputRevision: saved.inputRevision)
+        _ = try store.append(.upsertSegment(appended))
+        let updated = try store.append(.appendBatch(LearningNoteBatch(id: UUID(), evidence: [appended],
+            note: LearningNote(topic: "合成追加笔记", points: [.init(kind: "核心结论", text: "同一输入追加合成笔记。")]))))
+        let newBook = try LearningNotebook(snapshot: updated)
+        #expect(updated.inputRevision == saved.inputRevision)
+        #expect(newBook.revision == book.revision + 1)
+        var beforeRefresh: LearningReviewQueue.Job?
+        var afterRefresh: LearningReviewQueue.Job?
+        q.onUpdate = { _, _, _ in
+            guard beforeRefresh == nil,
+                  let current = q.journalForTesting.jobs.first(where: { $0.id == oldID }) else { return }
+            beforeRefresh = current
+            switch refresh {
+            case 0: q.setContext(recording: true, concurrent: false, resourcesAvailable: false)
+            case 1: q.setContext(recording: false, concurrent: true, resourcesAvailable: false)
+            default: q.togglePause()
+            }
+            afterRefresh = q.journalForTesting.jobs.first(where: { $0.id == oldID })
+        }
+        var admissionError: Error?
+        do {
+            try await q.enqueueAsync(directory: directory, notebook: newBook,
+                sessionID: saved.sessionID, inputRevision: updated.inputRevision)
+        } catch { admissionError = error }
+        q.onUpdate = nil
+        try await q.waitForPendingStorage()
+        await q.shutdownForTesting()
+        let before = try #require(beforeRefresh)
+        let after = try #require(afterRefresh)
+        #expect(after.events != before.events, "The report callback must append a real lifecycle event")
+        #expect(after.events?.contains { $0.code == "paused" && $0.detail == "management" } == true)
+        var withoutEventsBefore = before, withoutEventsAfter = after
+        withoutEventsBefore.events = nil; withoutEventsAfter.events = nil
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        #expect(try encoder.encode(withoutEventsBefore) == encoder.encode(withoutEventsAfter),
+            "Only events may change in this admission regression")
+        #expect(admissionError == nil, "A lifecycle event must not reject the valid newer notebook")
+        #expect(q.currentFailure == nil)
+        let bytes = try Data(contentsOf: journal)
+        let disk = try read(journal)
+        try disk.validateIntegrity()
+        let all = disk.jobs + (disk.retiredJobs ?? [])
+        #expect(disk.jobs.count == 1)
+        #expect(disk.jobs.first?.id != oldID)
+        #expect(disk.jobs.first?.identity?.notebookRevision == newBook.revision)
+        #expect(disk.jobs.first?.batches == newBook.batches)
+        #expect(disk.retiredJobs?.count == 1)
+        #expect(all.filter { $0.id == oldID }.count == 1)
+        #expect(Set(all.map(\.id)).count == all.count)
+        #expect(disk.retiredJobs?.first(where: { $0.id == oldID })?.events == after.events,
+            "Retirement must retain events appended while the report was being saved")
+        #expect(disk.userPaused == (refresh == 2))
+        let restored = queue(journal) { _, _, _, _, _ in calls += 1; return Self.response }
+        await restored.shutdownForTesting()
+        #expect(restored.currentFailure == nil)
+        #expect(restored.items.map(\.id) == disk.jobs.map(\.id))
+        #expect(restored.journalForTesting.retiredJobs?.first(where: { $0.id == oldID })?.events == after.events)
         #expect(try Data(contentsOf: journal) == bytes)
         #expect(calls == 0)
     }

@@ -340,6 +340,110 @@ final class DataSafetyStorageTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("recording.wav")), recording)
     }
 
+    func testN17FailedExportRetainsUnfinishedAliasAndForeignWriterForRetry() throws {
+        let root = try DataSafetyFixtures.make("N17-retained-alias")
+        defer { DataSafetyFixtures.preserve(root) }
+        let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Synthetic retained source.", chinese: "合成保留原文。")
+        let store = SessionStore(directory: root)
+        let snapshot = try store.save(SessionSnapshot(segments: [segment]))
+        let snapshotBytes = try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName))
+        let recording = Data("SYNTHETIC_N17_RECORDING".utf8)
+        try recording.write(to: root.appendingPathComponent("recording.wav"))
+        let alias = root.appendingPathComponent("bilingual.jsonl")
+        let originalIdentity = StorageTestIdentity()
+        var operations = SessionExporter.PublicationOperations()
+        operations.beforeMemberPublication = { name in
+            if name == "bilingual.srt" {
+                var info = stat()
+                guard lstat(alias.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK else {
+                    throw SessionStoreError.invalidState("Synthetic alias was not published")
+                }
+                originalIdentity.value = info
+                throw SessionStoreError.io(operation: "synthetic N17 failure", code: EIO)
+            }
+        }
+        XCTAssertThrowsError(try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成未完成笔记", createdAt: Date(timeIntervalSince1970: 0), operations: operations)) { error in
+            guard let failure = error as? SessionStoreError, case let .io(_, code) = failure else {
+                return XCTFail("Expected the injected EIO, got \(error)")
+            }
+            XCTAssertEqual(code, EIO)
+        }
+        // A failure must not delete a public name. Retain the unfinished alias;
+        // a retry can reuse it without a check-then-unlink ownership race.
+        var retained = stat()
+        XCTAssertEqual(lstat(alias.path, &retained), 0)
+        XCTAssertEqual(retained.st_mode & S_IFMT, S_IFLNK)
+        XCTAssertEqual(retained.st_dev, originalIdentity.value?.st_dev)
+        XCTAssertEqual(retained.st_ino, originalIdentity.value?.st_ino)
+        XCTAssertNoThrow(try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成重试笔记", createdAt: Date(timeIntervalSince1970: 0)))
+        let foreign = Data("SYNTHETIC_N17_FOREIGN_WRITER\n".utf8)
+        try foreign.write(to: alias, options: .atomic)
+        operations.beforeMemberPublication = { name in
+            if name == "bilingual.srt" { throw SessionStoreError.io(operation: "synthetic next failure", code: EIO) }
+        }
+        XCTAssertThrowsError(try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成再次笔记", createdAt: Date(timeIntervalSince1970: 0), operations: operations))
+        XCTAssertNoThrow(try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成最终笔记", createdAt: Date(timeIntervalSince1970: 0)))
+        let recovered = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent(".exports/recovered"), includingPropertiesForKeys: nil)
+        XCTAssertTrue(recovered.contains { (try? Data(contentsOf: $0.appendingPathComponent("bilingual.jsonl"))) == foreign })
+        let selected = try SessionExporter.currentExportDirectory(in: root)
+        for name in ["bilingual.jsonl", "bilingual.srt", "manifest.json", "summary-zh-Hans.md", "transcript-en.txt", "transcript-zh-Hans.txt"] {
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(name)), try Data(contentsOf: selected.appendingPathComponent(name)), name)
+        }
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), snapshotBytes)
+        XCTAssertEqual(try store.load(), snapshot)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("recording.wav")), recording)
+    }
+
+    func testN15PointerBoundaryConflictRequiresRetryAndPreservesBothVersions() throws {
+        let root = try DataSafetyFixtures.make("N15-pointer-boundary")
+        defer { DataSafetyFixtures.preserve(root) }
+        let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Synthetic boundary source.", chinese: "合成边界原文。")
+        let store = SessionStore(directory: root)
+        let snapshot = try store.save(SessionSnapshot(segments: [segment]))
+        let snapshotBytes = try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName))
+        let recording = Data("SYNTHETIC_N15_RECORDING".utf8)
+        try recording.write(to: root.appendingPathComponent("recording.wav"))
+        try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成边界旧笔记", createdAt: Date(timeIntervalSince1970: 0))
+        let previous = try SessionExporter.currentExportDirectory(in: root)
+        let foreign = Data("SYNTHETIC_N15_AFTER_FINAL_PRECHECK\n".utf8)
+        var operations = SessionExporter.PublicationOperations()
+        operations.createSymbolicLink = { target, pending in
+            guard symlink(target, pending.path) == 0 else {
+                throw SessionStoreError.io(operation: "synthetic pointer link", code: errno)
+            }
+            if target.hasPrefix("versions/") {
+                // The prepublication member check has finished. The next
+                // operation commits current, so this is the reviewed late window.
+                try foreign.write(to: root.appendingPathComponent("summary-zh-Hans.md"), options: .atomic)
+            }
+        }
+        XCTAssertThrowsError(try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成边界新笔记", createdAt: Date(timeIntervalSince1970: 0), operations: operations)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("需重试"), "A published but inconsistent root view requires an explicit retry: \(error)")
+        }
+        let selected = try SessionExporter.currentExportDirectory(in: root)
+        XCTAssertNotEqual(selected, previous)
+        XCTAssertEqual(try Data(contentsOf: selected.appendingPathComponent("summary-zh-Hans.md")), Data("合成边界新笔记\n".utf8))
+        XCTAssertEqual(try Data(contentsOf: previous.appendingPathComponent("summary-zh-Hans.md")), Data("合成边界旧笔记\n".utf8))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("summary-zh-Hans.md")), foreign)
+        XCTAssertNoThrow(try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            summary: "合成边界重试笔记", createdAt: Date(timeIntervalSince1970: 0)))
+        let recovered = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent(".exports/recovered"), includingPropertiesForKeys: nil)
+        XCTAssertTrue(recovered.contains { (try? Data(contentsOf: $0.appendingPathComponent("summary-zh-Hans.md"))) == foreign })
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), snapshotBytes)
+        XCTAssertEqual(try store.load(), snapshot)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("recording.wav")), recording)
+    }
+
+    private final class StorageTestIdentity: @unchecked Sendable {
+        var value: stat?
+    }
+
     private func checkpoint(_ value: SessionSnapshot) -> SessionGenerationCheckpoint {
         let input = "Synthetic frozen input"
         return SessionGenerationCheckpoint(sessionID: value.sessionID, inputRevision: value.inputRevision,
