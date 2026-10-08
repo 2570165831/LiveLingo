@@ -262,9 +262,11 @@ struct PrivacyFollowupStorageTests {
         let root = try fixture(); defer { retain(root) }
         let leaf = root.appendingPathComponent("writable-with-unavailable-acl.json")
         try Data("previous synthetic body".utf8).write(to: leaf)
-        try SensitiveFileIO.$aclReadError.withValue(EACCES) {
+        try SensitiveFileIO.$unsupportedOperations.withValue([.readACL]) {
+        try SensitiveFileIO.$aclReadError.withValue(ENOTSUP) {
             try SensitiveFileIO.atomicWrite(Data("updated synthetic body".utf8), to: leaf)
             #expect(try Data(contentsOf: leaf) == Data("updated synthetic body".utf8))
+        }
         }
     }
 
@@ -283,8 +285,11 @@ struct PrivacyFollowupStorageTests {
         try setACL([ACL_READ_DATA, ACL_WRITE_DATA, ACL_APPEND_DATA, ACL_READ_SECURITY],
                    deny: false, at: root, inherit: true)
         let optional: [SensitiveFileIO.OptionalOperation] = [.setACL, .mode, .owner, .link, .swap, .exclusiveRename]
+        // Model a permission-less volume explicitly. The same syscall errors
+        // on a supported APFS volume are covered by the H1 refusal tests.
         let errors = Dictionary(uniqueKeysWithValues: optional.map { ($0, code) })
         let seen = OperationLog()
+        try SensitiveFileIO.$unsupportedOperations.withValue([.setACL, .mode, .owner]) {
         try SensitiveFileIO.$operationErrors.withValue(errors) {
             try SensitiveFileIO.$operationObserver.withValue({ seen.record($0) }) {
                 let bytes = Data("new synthetic body".utf8), replacement = Data("updated synthetic body".utf8)
@@ -348,6 +353,7 @@ struct PrivacyFollowupStorageTests {
                     !$0.contains(".sensitive-write-") && !$0.contains(".session-write-")
                 })
             }
+        }
         }
     }
 

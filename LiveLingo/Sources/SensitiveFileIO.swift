@@ -2,8 +2,8 @@ import Darwin
 import Foundation
 
 /// Restrict new objects and preserve replacement permissions where supported.
-/// Existing objects are validated without changing their permissions; missing
-/// permission or optional rename capabilities do not prevent ordinary saves.
+/// Missing capabilities permit portable saves; unexpected permission failures
+/// are reported before replacing an existing object or publishing a new file.
 enum SensitiveFileIO {
     enum OptionalOperation: Sendable, Hashable { case readACL, setACL, mode, owner, link, swap, exclusiveRename, directorySync }
     #if DEBUG
@@ -24,6 +24,45 @@ enum SensitiveFileIO {
 
     private static func unsupported(_ code: Int32) -> Bool {
         code == ENOTSUP || code == EOPNOTSUPP || code == ENOSYS || code == EINVAL
+    }
+
+    private static func unsupportedPermission(_ code: Int32) -> Bool {
+        // EINVAL can denote unavailable rename flags, but valid permission
+        // arguments must not turn an unexpected failure into a capability gap.
+        code == ENOTSUP || code == EOPNOTSUPP || code == ENOSYS
+    }
+
+    private static func missingPermissionCapability(_ operation: OptionalOperation, fd: Int32, code: Int32) -> Bool {
+        #if DEBUG
+        // This hook models a volume without the capability, separately from
+        // operationErrors, which models an unexpected syscall failure.
+        if unsupportedOperations.contains(operation) {
+            return unsupportedPermission(code) || code == EPERM || code == EXDEV
+        }
+        #endif
+        var volume = statfs()
+        guard fstatfs(fd, &volume) == 0 else { return false }
+        let type = withUnsafeBytes(of: volume.f_fstypename) {
+            String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self))
+        }
+        // APFS/HFS implement these attributes: even ENOTSUP from an individual
+        // call must not be mistaken for a permission-less volume.
+        if type == "apfs" || type == "hfs" { return false }
+        if type == "msdos" || type == "exfat" {
+            return unsupportedPermission(code) || code == EPERM || code == EXDEV
+        }
+        return unsupportedPermission(code)
+    }
+
+    @discardableResult
+    private static func setPermission(_ operation: OptionalOperation, fd: Int32, description: String,
+                                      _ call: () -> Int32) throws -> Bool {
+        if perform(operation, call) == 0 { return true }
+        let code = errno
+        guard missingPermissionCapability(operation, fd: fd, code: code) else {
+            throw Failure.system(operation: description, code: code)
+        }
+        return false
     }
 
     private static func canUsePlainRename(_ code: Int32) -> Bool {
@@ -309,7 +348,7 @@ enum SensitiveFileIO {
                 originalFD = openat(fd, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
                 guard originalFD >= 0 else { throw pathFailure("write access to existing file") }
                 guard Identity(try status(originalFD)) == Identity(original) else { throw Failure.unsafePath }
-                originalACL = try? readACL(originalFD)
+                originalACL = try readACL(originalFD)
             }
             let temporary = temporaryPrefix + UUID().uuidString + ".tmp"
             try validateName(temporary)
@@ -323,19 +362,34 @@ enum SensitiveFileIO {
             defer { try? handle.close() }
             try writeBytes(data, to: item)
             if let original {
-                // Metadata is best effort: removable/network volumes may lack
-                // Unix ownership, mode bits or ACLs. Effective write access to
-                // the existing inode was still checked by the kernel above.
-                _ = perform(.owner) { fchown(item, original.st_uid, original.st_gid) }
-                _ = perform(.mode) { fchmod(item, original.st_mode & 0o7777) }
-                if let originalACL { _ = perform(.setACL) { acl_set_fd(item, originalACL) } }
+                // Only capability errors allow a fallback. Check the new
+                // inode, not just the original, before committing its bytes.
+                try setPermission(.owner, fd: item, description: "preserve file owner") {
+                    fchown(item, original.st_uid, original.st_gid)
+                }
+                let modeSet = try setPermission(.mode, fd: item, description: "preserve file mode") {
+                    fchmod(item, original.st_mode & 0o7777)
+                }
+                if let originalACL {
+                    try setPermission(.setACL, fd: item, description: "preserve file ACL", { acl_set_fd(item, originalACL) })
+                    let copiedACL = try readACL(item)
+                    defer { if let copiedACL { _ = acl_free(UnsafeMutableRawPointer(copiedACL)) } }
+                    try compareAvailableACLs(copiedACL, originalACL)
+                }
+                let copied = try status(item)
+                guard copied.st_uid == original.st_uid, copied.st_gid == original.st_gid else { throw Failure.unsafePath }
+                if modeSet {
+                    guard copied.st_mode & 0o7777 == original.st_mode & 0o7777 else { throw Failure.unsafePath }
+                } else {
+                    guard copied.st_mode & 0o7777 & ~(original.st_mode & 0o7777) == 0 else { throw Failure.unsafePath }
+                }
             }
             try handle.synchronize()
             try handle.close()
             if let original {
                 guard let current = try entryStatus(name), Identity(current) == Identity(original),
                       current.st_mode == original.st_mode else { throw Failure.unsafePath }
-                let currentACL = try? readACL(originalFD)
+                let currentACL = try readACL(originalFD)
                 defer { if let currentACL { _ = acl_free(UnsafeMutableRawPointer(currentACL)) } }
                 try compareAvailableACLs(currentACL, originalACL)
             } else if try entryStatus(name) != nil { throw Failure.unsafePath }
@@ -365,7 +419,7 @@ enum SensitiveFileIO {
                           replaced.st_mode == original.st_mode, replaced.st_gid == original.st_gid else {
                         throw Failure.unsafePath
                     }
-                    let replacedACL = try? readACL(originalFD)
+                    let replacedACL = try readACL(originalFD)
                     defer { if let replacedACL { _ = acl_free(UnsafeMutableRawPointer(replacedACL)) } }
                     try compareAvailableACLs(replacedACL, originalACL)
                     guard unlinkat(fd, temporary, 0) == 0 else { throw system("retire replaced file") }
@@ -497,21 +551,36 @@ enum SensitiveFileIO {
     private static func readACL(_ fd: Int32) throws -> acl_t? {
         #if DEBUG
         operationObserver?(.readACL)
-        if let code = operationErrors[.readACL] { throw Failure.system(operation: "read existing ACL", code: code) }
-        if let aclReadError { throw Failure.system(operation: "read existing ACL", code: aclReadError) }
+        if let code = operationErrors[.readACL] {
+            if missingPermissionCapability(.readACL, fd: fd, code: code) { return nil }
+            throw Failure.system(operation: "read existing ACL", code: code)
+        }
+        if let aclReadError {
+            if missingPermissionCapability(.readACL, fd: fd, code: aclReadError) { return nil }
+            throw Failure.system(operation: "read existing ACL", code: aclReadError)
+        }
         if unsupportedOperations.contains(.readACL) { return nil }
         #endif
         if let acl = acl_get_fd(fd) { return acl }
-        if unsupported(errno) { return nil }
-        guard errno == ENOENT, let empty = acl_init(0) else { throw system("read existing ACL") }
+        let code = errno
+        if missingPermissionCapability(.readACL, fd: fd, code: code) { return nil }
+        guard code == ENOENT else {
+            throw Failure.system(operation: "read existing ACL", code: code)
+        }
+        guard let empty = acl_init(0) else { throw system("create empty ACL") }
         return empty
     }
 
     private static func compareAvailableACLs(_ lhs: acl_t?, _ rhs: acl_t?) throws {
-        // A readable, changing ACL is still rejected. Inaccessible ACL metadata
-        // must not prevent a save whose effective write access was granted.
-        guard let lhs, let rhs, let left = try? aclText(lhs), let right = try? aclText(rhs) else { return }
-        guard left == right else { throw Failure.unsafePath }
+        // Unsupported metadata cannot discard constraints we already read.
+        guard let rhs else { return }
+        if let lhs {
+            guard try aclText(lhs) == aclText(rhs) else { throw Failure.unsafePath }
+        } else {
+            guard let empty = acl_init(0) else { throw system("compare ACL constraints") }
+            defer { _ = acl_free(UnsafeMutableRawPointer(empty)) }
+            guard try aclText(empty) == aclText(rhs) else { throw Failure.unsafePath }
+        }
     }
 
     private static func validateName(_ name: String) throws {
@@ -566,10 +635,12 @@ enum SensitiveFileIO {
         // Remove group/other and executable-file bits without restoring an
         // owner permission the user deliberately removed (for example 0500).
         let mode: mode_t = info.st_mode & (directory ? 0o700 : 0o600)
-        _ = perform(.mode) { fchmod(fd, mode) }
-        // Only mutate this invocation's new inode; permission support is not
-        // a precondition for saving on FAT/exFAT and network filesystems.
-        try? removeAllowACLs(fd)
+        if try setPermission(.mode, fd: fd, description: "set private mode", { fchmod(fd, mode) }) {
+            guard try status(fd).st_mode & 0o7777 == mode else { throw Failure.unsafePath }
+        }
+        // Creation callers remove their exclusive file if privacy fails.
+        // Volumes without the capability may still use the portable fallback.
+        try removeAllowACLs(fd)
     }
 
     private static func firstAllowEntry(_ acl: acl_t) throws -> acl_entry_t? {
@@ -601,12 +672,9 @@ enum SensitiveFileIO {
             changed = true
         }
         if changed {
-            guard perform(.setACL, { acl_set_fd(fd, acl) }) == 0 else { throw system("set private ACL") }
+            guard try setPermission(.setACL, fd: fd, description: "set private ACL", { acl_set_fd(fd, acl) }) else { return }
         }
-        guard let verified = acl_get_fd(fd) else {
-            if errno == ENOENT { return }
-            throw system("verify private ACL")
-        }
+        guard let verified = try readACL(fd) else { return }
         defer { _ = acl_free(UnsafeMutableRawPointer(verified)) }
         guard try firstAllowEntry(verified) == nil else { throw Failure.unsafePath }
     }
