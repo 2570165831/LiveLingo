@@ -1204,7 +1204,7 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         }
         let suite = "LiveLingo-Test-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock {
             await reviews.shutdownForTesting()
             try preferenceCleanup.remove()

@@ -536,6 +536,9 @@ final class TraditionalSessionExporterTests: XCTestCase {
     }
 
     func testEveryNotesFormatPreservesExecutableChineseKeys() throws {
+        let python = URL(fileURLWithPath: "/usr/bin/python3")
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: python.path),
+                          "Executing the extracted synthetic code requires the system Python interpreter")
         let declaration = #"record = {"头发": 3}"#
         let expression = #"print(record["头发"])"#
         let notes = "说明：头发在这里。\n\n`record[\"头发\"]`\n\n```python\n" + declaration + "\n" + expression + "\n```"
@@ -558,8 +561,9 @@ final class TraditionalSessionExporterTests: XCTestCase {
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .first { $0.hasPrefix("print(record[") })
                 let process = Process(), output = Pipe(), errors = Pipe()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-                process.arguments = ["-B", "-c", declaration + "\n" + extracted]
+                process.executableURL = python
+                process.arguments = ["-I", "-B", "-c", declaration + "\n" + extracted]
+                process.environment = [:]
                 process.standardOutput = output
                 process.standardError = errors
                 try process.run()

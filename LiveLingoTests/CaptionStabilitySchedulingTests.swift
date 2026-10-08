@@ -165,7 +165,7 @@ private final class CaptionSchedulingFixture {
             "LiveLingo-CaptionScheduling-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-CaptionScheduling-\(UUID())"
         preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review-queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Scheduling fixtures must not invoke review models")

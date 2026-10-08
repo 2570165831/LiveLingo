@@ -13,7 +13,7 @@ final class DataSafetyAppTests: XCTestCase {
         try bytes.write(to: index)
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
         let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Synthetic audio." }, enableAudioAnalysis: false)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"), observeSleep: false,
@@ -41,7 +41,7 @@ final class DataSafetyAppTests: XCTestCase {
         }
         func finish(_ text: String) { waiting?.resume(returning: text); waiting = nil }
     }
-    private func fixture(_ root: URL, defaults: UserDefaults, pipeline: SpeechPipeline? = nil,
+    private func fixture(_ root: URL, defaults: TestUserDefaults, pipeline: SpeechPipeline? = nil,
                          notes: LearningGenerationDependencies? = nil,
                          translation: CaptionTranslationDependencies? = nil) -> (AppModel, LearningReviewQueue) {
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
@@ -56,7 +56,7 @@ final class DataSafetyAppTests: XCTestCase {
         let root = try DataSafetyFixtures.make("APP01"); defer { DataSafetyFixtures.preserve(root) }
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
         var translation = CaptionTranslationDependencies.unavailable
         translation.translate = { _, _, _, _, _ in "合成尾段。" }
@@ -90,7 +90,7 @@ final class DataSafetyAppTests: XCTestCase {
         let root = try DataSafetyFixtures.make("APP02"); defer { DataSafetyFixtures.preserve(root) }
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
         let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Synthetic audio." }, enableAudioAnalysis: false)
         let (model, queue) = fixture(root, defaults: defaults, pipeline: pipeline)
@@ -110,7 +110,7 @@ final class DataSafetyAppTests: XCTestCase {
         let root = try DataSafetyFixtures.make("APP03"); defer { DataSafetyFixtures.preserve(root) }
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
         let (model, queue) = fixture(root, defaults: defaults)
         let course = root.appendingPathComponent("course")
@@ -132,7 +132,7 @@ final class DataSafetyAppTests: XCTestCase {
         let root = try DataSafetyFixtures.make("APP04"); defer { DataSafetyFixtures.preserve(root) }
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
         let (model, queue) = fixture(root, defaults: defaults)
         let course = root.appendingPathComponent("actual-course")
@@ -146,7 +146,7 @@ final class DataSafetyAppTests: XCTestCase {
         let root = try DataSafetyFixtures.make("F05"); defer { DataSafetyFixtures.preserve(root) }
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
         let gate = NoteGate()
         let (model, queue) = fixture(root, defaults: defaults, notes: .init(generate: { _, _, _, _, _ in await gate.wait() }))

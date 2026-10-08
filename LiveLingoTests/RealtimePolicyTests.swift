@@ -702,7 +702,7 @@ final class RealtimePolicyTests: XCTestCase {
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _, _ in throw CancellationError() }
         let suite = "LiveLingo-Test-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock {
             await queue.shutdownForTesting()
             try preferenceCleanup.remove()
@@ -782,13 +782,15 @@ final class RealtimePolicyTests: XCTestCase {
         let restored = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in #"{"corrections":[],"reviewVersion":2,"additions":[]}"# }
         addTeardownBlock { await restored.shutdownForTesting() }
         restored.setContext(recording: false, concurrent: false, resourcesAvailable: true)
-        try await Task.sleep(for: .milliseconds(150))
+        let laterCompleted = await waitForReviewState { restored.items.count == 1 && !restored.running }
+        XCTAssertTrue(laterCompleted, "The usable recording must finish before inspecting the failed head")
         XCTAssertEqual(restored.items.count, 1)
         XCTAssertEqual(restored.items.first?.failure, "模拟失败")
         XCTAssertTrue(try String(contentsOf: dirs[1].appendingPathComponent("summary-review.md"), encoding: .utf8).contains("1/1"))
         let id = try XCTUnwrap(restored.items.first?.id)
         restored.removeJob(id)
-        try await Task.sleep(for: .milliseconds(60))
+        let removed = await waitForReviewState { restored.items.isEmpty }
+        XCTAssertTrue(removed, "Queue removal must finish before inspecting preserved files")
         XCTAssertTrue(restored.items.isEmpty)
         XCTAssertEqual(try String(contentsOf: dirs[0].appendingPathComponent("summary-zh-Hans.md"), encoding: .utf8), book.markdown() + "\n")
     }
@@ -850,8 +852,10 @@ final class RealtimePolicyTests: XCTestCase {
         var book = LearningNotebook()
         try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Atoms")], note: .init(topic: "原子", points: [.init(kind: "核心结论", text: "原笔记")]))
         try (book.markdown() + "\n").write(to: savedNotes, atomically: true, encoding: .utf8)
+        var prefixPublished = false
         let queue = LearningReviewQueue(journalURL: journal, observeSleep: false) { _, _, _, _, update in
             await update("Checking atoms ")
+            prefixPublished = true
             try await Task.sleep(for: .seconds(60))
             return #"{"corrections":[],"reviewVersion":2,"additions":[]}"#
         }
@@ -860,10 +864,13 @@ final class RealtimePolicyTests: XCTestCase {
         try queue.enqueue(directory: root, notebook: book)
         XCTAssertFalse(queue.running)
         queue.setContext(recording: true, concurrent: true, resourcesAvailable: true)
-        try await Task.sleep(for: .milliseconds(30))
+        let prefixReady = await waitForReviewState { queue.running && prefixPublished }
+        XCTAssertTrue(prefixReady, "The generator must publish its checkpoint before sleep interrupts it")
         XCTAssertTrue(queue.running)
         queue.setSleeping(true)
-        try await Task.sleep(for: .milliseconds(30))
+        let sleeping = await waitForReviewState { !queue.running }
+        XCTAssertTrue(sleeping, "Sleep must stop the active request")
+        try await queue.waitForPendingStorage()
         XCTAssertFalse(queue.running)
         let saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
         XCTAssertEqual(saved.jobs[0].prefix, "Checking atoms ")
@@ -879,7 +886,8 @@ final class RealtimePolicyTests: XCTestCase {
         addTeardownBlock { await restored.shutdownForTesting() }
         XCTAssertTrue(restored.userPaused)
         restored.togglePause()
-        try await Task.sleep(for: .milliseconds(100))
+        let completed = await waitForReviewState { !restored.hasWork && !restored.running }
+        XCTAssertTrue(completed, "The restored request must commit its report")
         XCTAssertFalse(restored.hasWork)
         XCTAssertEqual(try String(contentsOf: savedNotes, encoding: .utf8), book.markdown() + "\n")
         XCTAssertTrue(try String(contentsOf: root.appendingPathComponent("summary-review.md"), encoding: .utf8).contains("修正后的笔记"))
@@ -900,7 +908,9 @@ final class RealtimePolicyTests: XCTestCase {
         }
         addTeardownBlock { await queue.shutdownForTesting() }
         try queue.enqueue(directory: root, notebook: book)
-        try await Task.sleep(for: .milliseconds(100))
+        let interrupted = await waitForReviewState { queue.items.first?.retryPending != nil && !queue.running }
+        XCTAssertTrue(interrupted, "The interrupted request must reach its retained retry state")
+        try await queue.waitForPendingStorage()
         XCTAssertFalse(queue.running)
         let saved = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
         XCTAssertEqual(saved.jobs.first?.prefix, "Retained thinking ")
@@ -912,7 +922,8 @@ final class RealtimePolicyTests: XCTestCase {
         addTeardownBlock { await restored.shutdownForTesting() }
         restored.togglePause()
         if restored.userPaused { restored.togglePause() }
-        try await Task.sleep(for: .milliseconds(100))
+        let completed = await waitForReviewState { !restored.hasWork && !restored.running }
+        XCTAssertTrue(completed, "The retained prefix must resume and finish its report")
         XCTAssertFalse(restored.hasWork)
         XCTAssertTrue(try String(contentsOf: root.appendingPathComponent("summary-review.md"), encoding: .utf8).contains("没有提出复查建议"))
     }
@@ -1803,7 +1814,7 @@ final class CaptionLifecycleTests: XCTestCase {
                     let suite = "LiveLingo-Race-\(UUID())"
                     let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
                     addTeardownBlock { try preferenceCleanup.remove() }
-                    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+                    let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
                     let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
                                                     observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                         XCTFail("caption tests must not start review")

@@ -116,7 +116,7 @@ final class FloatingSubtitleWindowTests: XCTestCase {
     private func defaults() throws -> (UserDefaults, String) {
         let suite = "FloatingSubtitleDisplay-\(UUID().uuidString)"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock { try cleanup.remove() }
         return (defaults, suite)
     }
@@ -142,7 +142,7 @@ final class FloatingSubtitleWindowTests: XCTestCase {
         let (store, suite) = try defaults()
         let preferences = FloatingSubtitlePreferences(store: store)
         preferences.showsAcrossSpacesBinding.wrappedValue = false
-        let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(UserDefaults(suiteName: suite)))
+        let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(TestUserDefaults(suiteName: suite)))
         XCTAssertFalse(reopened.showsAcrossSpaces)
         XCTAssertEqual(store.persistentDomain(forName: suite)?.keys.sorted(), ["floatingShowsAcrossSpaces"])
         preferences.showsAcrossSpacesBinding.wrappedValue = true
@@ -302,7 +302,7 @@ final class FloatingSubtitleWindowTests: XCTestCase {
         XCTAssertNil(secondLaunch.window)
         XCTAssertTrue(NSDictionary(dictionary: before).isEqual(
             to: try XCTUnwrap(store.persistentDomain(forName: fixture.suite))))
-        let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(UserDefaults(suiteName: fixture.suite)))
+        let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(TestUserDefaults(suiteName: fixture.suite)))
         let panel = secondLaunch.prepareWindow(model: fixture.model)
         defer { secondLaunch.close() }
         try await settle(try XCTUnwrap(panel.contentView))
@@ -707,6 +707,9 @@ final class FloatingSubtitleWindowTests: XCTestCase {
     }
 
     func testCloseSavesPositionInTheInjectedSuiteAndFreshControllerRestoresOnlyPosition() async throws {
+        guard let visible = NSScreen.screens.first?.visibleFrame else {
+            throw XCTSkip("Native frame restoration requires an available display")
+        }
         let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
         let preferences = FloatingSubtitlePreferences(store: fixture.defaults)
         preferences.showsAcrossSpaces = false
@@ -715,7 +718,6 @@ final class FloatingSubtitleWindowTests: XCTestCase {
         let panel = first.prepareWindow(model: fixture.model)
         defer { first.close() }
         try await settle(try XCTUnwrap(panel.contentView))
-        let visible = try XCTUnwrap(NSScreen.screens.first?.visibleFrame)
         panel.setFrameTopLeftPoint(NSPoint(x: visible.minX + 40, y: visible.maxY - 50))
         let savedFrame = panel.frame
         let contentSize = try XCTUnwrap(panel.contentView).bounds.size
@@ -734,7 +736,7 @@ final class FloatingSubtitleWindowTests: XCTestCase {
         XCTAssertEqual(fixture.defaults.persistentDomain(forName: fixture.suite)?.keys.sorted(),
                        ["NSWindow Frame subtitles", "floatingBackgroundOpacity", "floatingShowsAcrossSpaces"])
 
-        let reopened = try XCTUnwrap(UserDefaults(suiteName: fixture.suite))
+        let reopened = try XCTUnwrap(TestUserDefaults(suiteName: fixture.suite))
         let fresh = FloatingSubtitleWindowController(defaults: reopened)
         XCTAssertNil(fresh.window)
         XCTAssertNil(fresh.panel)
@@ -1002,10 +1004,15 @@ final class FloatingSubtitleWindowTests: XCTestCase {
     }
 
     private func saveReferenceFrame(in store: UserDefaults) throws -> NSRect {
+        guard let visible = NSScreen.screens.first?.visibleFrame else {
+            throw XCTSkip("Native frame restoration requires an available display")
+        }
         let reference = window()
         defer { reference.close() }
-        let visible = try XCTUnwrap(NSScreen.screens.first?.visibleFrame)
         reference.setContentSize(NSSize(width: 640, height: 480))
+        try XCTSkipUnless(visible.width >= reference.frame.width + 40
+                          && visible.height >= reference.frame.height + 50,
+                          "The reference window and its margins must fit the available display")
         reference.setFrameTopLeftPoint(NSPoint(x: visible.minX + 40, y: visible.maxY - 50))
         XCTAssertTrue(visible.contains(reference.frame), "Saved test coordinates must fit a real screen")
         store.set(reference.frameDescriptor, forKey: FloatingSubtitleWindowController.frameDefaultsKey)
@@ -1053,11 +1060,7 @@ final class FloatingSubtitleWindowTests: XCTestCase {
 
     private func saveOverlayScreenshot(_ bitmap: NSBitmapImageRep, name: String,
                                        fixture: FloatingSubtitleWindowTestFixture) throws {
-        guard let configured = ProcessInfo.processInfo.environment["LIVELINGO_OVERLAY_SCREENSHOTS"] else { return }
-        let directory = URL(fileURLWithPath: configured, isDirectory: true).resolvingSymlinksInPath()
-        guard directory.path.hasPrefix(fixture.ddOverlay.path + "/") else {
-            throw CocoaError(.fileWriteInvalidFileName)
-        }
+        let directory = fixture.ddOverlay.appendingPathComponent("overlay-screenshots", isDirectory: true)
         let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
         XCTAssertGreaterThan(png.count, 5_000, "A flat/unrendered image is not screenshot evidence")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1076,7 +1079,7 @@ final class FloatingSubtitleWindowTests: XCTestCase {
 }
 
 /// Also used by the one display-opacity regression that needs a real owned
-/// panel. Services are disabled; data uses the supplied test root or temporary directory.
+/// panel. Services are disabled; data stays beside this test invocation's products.
 @MainActor
 struct FloatingSubtitleWindowTestFixture {
     let defaults: UserDefaults
@@ -1086,25 +1089,14 @@ struct FloatingSubtitleWindowTestFixture {
 
     init(testCase: XCTestCase) throws {
         XCTAssertTrue(AppRuntimeEnvironment.isUnitTesting)
-        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
-        let dataRoot: URL
-        if let requested = ProcessInfo.processInfo.environment["LIVELINGO_TEST_WORKSPACE"] {
-            let root = URL(fileURLWithPath: requested, isDirectory: true).resolvingSymlinksInPath()
-            let testHome = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).resolvingSymlinksInPath().path
-            guard temporary.path.hasPrefix(root.path + "/"), testHome.hasPrefix(root.path + "/") else {
-                throw CocoaError(.fileWriteInvalidFileName)
-            }
-            dataRoot = root
-        } else {
-            dataRoot = temporary
-        }
+        let dataRoot = TestFixtureDirectory.root.resolvingSymlinksInPath()
         ddOverlay = dataRoot
         let directory = dataRoot.appendingPathComponent("overlay-window-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let suite = "FloatingSubtitleDisplay-\(UUID().uuidString)"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let store = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let store = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
                                        observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
             XCTFail("Window tests must never invoke a generator")

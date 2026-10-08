@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // Compile alongside QwenRuntime.swift and TranscriptSegment.swift. The mock
 // binds a random loopback port and never contacts the installed model service.
@@ -11,15 +12,42 @@ struct QwenStreamingChecks {
     @MainActor
     final class Updates {
         var values: [String] = []
-        var dates: [Date] = []
+        var partialBeforeFinal = false
+        var acknowledgementFailure: Error?
         func record(_ text: String) {
             values.append(text)
-            dates.append(Date())
         }
     }
 
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw CheckFailure(description: message) }
+    }
+
+    static func startupLine(from handle: FileHandle) throws -> String {
+        let descriptor = handle.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            throw CheckFailure(description: "Cannot observe mock startup")
+        }
+        defer { _ = fcntl(descriptor, F_SETFL, flags) }
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        var line = Data()
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            var descriptorState = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            let ready = Darwin.poll(&descriptorState, 1, Int32(max(1, remaining * 1_000)))
+            if ready < 0, errno == EINTR { continue }
+            guard ready >= 0 else { throw CheckFailure(description: "Mock startup poll failed") }
+            if ready == 0 { continue }
+            var byte: UInt8 = 0
+            let count = Darwin.read(descriptor, &byte, 1)
+            if count < 0, errno == EINTR || errno == EAGAIN { continue }
+            guard count == 1 else { throw CheckFailure(description: "Mock server failed before readiness") }
+            if byte == 10 { return String(decoding: line, as: UTF8.self) }
+            line.append(byte)
+            try require(line.count <= 256, "Invalid mock startup response")
+        }
+        throw CheckFailure(description: "Mock server readiness timed out")
     }
 
     static func event(_ text: String, reason: String? = nil) throws -> String {
@@ -88,6 +116,15 @@ struct QwenStreamingChecks {
     @MainActor
     static func main() async throws {
         try parserChecks()
+        if Array(CommandLine.arguments.dropFirst()) == ["--parser-only"] {
+            print("PASS parser-only: transport was not requested")
+            return
+        }
+        let python = URL(fileURLWithPath: "/usr/bin/python3")
+        guard FileManager.default.isExecutableFile(atPath: python.path) else {
+            print("SKIP qwen_streaming_transport: system Python unavailable; parser checks completed")
+            return
+        }
         let evidenceRoot = CommandLine.arguments.count > 1
             ? URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
             : FileManager.default.temporaryDirectory.appending(path: "qwen-streaming-checks", directoryHint: .isDirectory)
@@ -95,29 +132,39 @@ struct QwenStreamingChecks {
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         let process = Process()
         let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = ["-u", "-c", serverScript, work.path]
+        process.executableURL = python
+        process.arguments = ["-I", "-B", "-u", "-c", serverScript, work.path]
+        process.environment = [:]
         process.standardOutput = output
         process.standardError = FileHandle.standardError
         try process.run()
         defer { if process.isRunning { process.terminate(); process.waitUntilExit() } }
-        var portLine = Data()
-        while true {
-            let byte = output.fileHandleForReading.readData(ofLength: 1)
-            guard !byte.isEmpty else { throw CheckFailure(description: "Mock server failed to start") }
-            if byte.first == 10 { break }
-            portLine.append(byte)
+        let portLine = try startupLine(from: output.fileHandleForReading)
+        if portLine == "SKIP mock-loopback-unavailable" {
+            process.waitUntilExit()
+            try require(process.terminationStatus == 77, "Invalid loopback prerequisite response")
+            print("SKIP qwen_streaming_transport: loopback unavailable before mock startup; parser checks completed")
+            return
         }
-        guard let port = Int(String(decoding: portLine, as: UTF8.self)) else {
+        guard let port = Int(portLine), (1...65_535).contains(port) else {
             throw CheckFailure(description: "Missing mock server port")
         }
         let base = URL(string: "http://127.0.0.1:\(port)")!
         let updates = Updates()
-        let result = try await complete(base.appending(path: "good")) { text in updates.record(text) }
-        let finishedAt = try String(contentsOf: work.appending(path: "good-finished.txt"), encoding: .utf8)
+        let finished = work.appending(path: "good-finished.txt")
+        let partialObserved = work.appending(path: "good-partial-observed.txt")
+        let result = try await complete(base.appending(path: "good")) { text in
+            updates.record(text)
+            if text == "你好" {
+                updates.partialBeforeFinal = !FileManager.default.fileExists(atPath: finished.path)
+                do { try Data("observed".utf8).write(to: partialObserved) }
+                catch { updates.acknowledgementFailure = error }
+            }
+        }
+        if let acknowledgementFailure = updates.acknowledgementFailure { throw acknowledgementFailure }
         try require(result == "你好，世界。", "Transport final result")
         try require(updates.values == ["你好", "你好，世界。"], "Transport cumulative partials")
-        try require(updates.dates[0].timeIntervalSince1970 < Double(finishedAt)!, "Partial arrived only after final")
+        try require(updates.partialBeforeFinal && FileManager.default.fileExists(atPath: finished.path), "Partial arrived only after final")
         print("PASS transport: partial callback before completion, full stop + DONE result")
 
         for path in ["length", "disconnect", "missing-done", "missing-stop", "empty", "error", "http-error", "wrong-type", "bad-json", "control"] {
@@ -132,24 +179,24 @@ struct QwenStreamingChecks {
         let request = Task {
             try await complete(base.appending(path: "stall")) { text in cancelledUpdates.record(text) }
         }
-        let readyDeadline = Date().addingTimeInterval(5)
-        while cancelledUpdates.values.isEmpty, Date() < readyDeadline {
+        let readyDeadline = ProcessInfo.processInfo.systemUptime + 5
+        while cancelledUpdates.values.isEmpty, ProcessInfo.processInfo.systemUptime < readyDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
         try require(cancelledUpdates.values == ["正在生成"], "No headers/body before cancellation test")
-        let cancellationAt = Date()
+        let cancellationAt = ProcessInfo.processInfo.systemUptime
         request.cancel()
         do {
             _ = try await request.value
             throw CheckFailure(description: "Cancelled generation returned success")
         } catch is CancellationError { }
         let closed = work.appending(path: "stall-closed.txt")
-        let closeDeadline = Date().addingTimeInterval(3)
-        while !FileManager.default.fileExists(atPath: closed.path), Date() < closeDeadline {
+        let closeDeadline = ProcessInfo.processInfo.systemUptime + 3
+        while !FileManager.default.fileExists(atPath: closed.path), ProcessInfo.processInfo.systemUptime < closeDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
         try require(FileManager.default.fileExists(atPath: closed.path), "Cancelling after headers left socket open")
-        let cancellationSeconds = Date().timeIntervalSince(cancellationAt)
+        let cancellationSeconds = ProcessInfo.processInfo.systemUptime - cancellationAt
         try require(cancelledUpdates.values == ["正在生成"], "Update after cancellation")
         print("PASS cancellation: request throws CancellationError, server observed socket EOF in \(cancellationSeconds) seconds")
 
@@ -215,8 +262,25 @@ struct QwenStreamingChecks {
     }
 
     static let serverScript = #"""
-import http.server, json, pathlib, socket, sys, time
+import errno, http.server, json, pathlib, socket, sys, time
 root = pathlib.Path(sys.argv[1])
+# This dedicated prerequisite probe runs before the HTTP server or any request.
+# A later server, protocol or transport failure is never converted to a skip.
+probe = None
+try:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(('127.0.0.1', 0))
+    probe.listen(1)
+except OSError as error:
+    if error.errno in (errno.EACCES, errno.EPERM, errno.EAFNOSUPPORT,
+                       errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL,
+                       errno.ENETDOWN, errno.ENETUNREACH):
+        print('SKIP mock-loopback-unavailable', flush=True)
+        sys.exit(77)
+    raise
+finally:
+    if probe is not None:
+        probe.close()
 def event(text='', reason=None):
     return ('data: ' + json.dumps({'choices': [{'index': 0, 'text': text, 'finish_reason': reason}]}, ensure_ascii=False) + '\n\n').encode()
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -264,16 +328,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 while time.monotonic() < deadline:
                     try:
                         if not self.connection.recv(1):
-                            (root / 'stall-closed.txt').write_text(str(time.time()))
+                            (root / 'stall-closed.txt').write_text('closed')
                             return
                     except socket.timeout: pass
                 return
             for byte in event('你好'): send(bytes([byte]))
-            time.sleep(.2)
-            (root / 'good-finished.txt').write_text(str(time.time()))
+            # Wait for the first callback, rather than compare clocks across
+            # processes or assume the client can run during a fixed sleep.
+            deadline = time.monotonic() + 5
+            while not (root / 'good-partial-observed.txt').exists():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Partial callback acknowledgement timed out')
+                time.sleep(.01)
+            (root / 'good-finished.txt').write_text('finished')
             send(event('，世界。', 'stop') + b'data: [DONE]\n\n')
         except (BrokenPipeError, ConnectionResetError):
-            if path == 'stall': (root / 'stall-closed.txt').write_text(str(time.time()))
+            if path == 'stall': (root / 'stall-closed.txt').write_text('closed')
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 print(server.server_address[1], flush=True)
 server.serve_forever()

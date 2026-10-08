@@ -8,7 +8,14 @@ enum MLXRequestContext {
 
 // One owned process per model. No LM Studio server, global ports or foreign PIDs.
 actor MLXRuntime {
+    #if DEBUG
+    private static let productionShared = MLXRuntime()
+    /// Child tasks inherit this test's runtime without changing other callers.
+    @TaskLocal static var testRuntime: MLXRuntime?
+    static var shared: MLXRuntime { testRuntime ?? productionShared }
+    #else
     static let shared = MLXRuntime()
+    #endif
     private static let memoryLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "MLXMemory")
     private struct Event: Decodable, Sendable {
         let event: String
@@ -246,6 +253,7 @@ actor MLXRuntime {
         let script: URL
         let models: URL
         let state: URL
+        var modelDirectories: [String: URL] = [:]
         var controlTimeout: TimeInterval = 1
         var interpreterArguments: [String] = []
         var onCancellationControlResolved: (@Sendable () async -> Void)?
@@ -255,7 +263,7 @@ actor MLXRuntime {
         var onRetirementEvent: (@Sendable (RetirementEventForTesting) -> Void)?
         var beforeReaderJoin: (@Sendable () async -> Void)?
     }
-    private var testConfiguration: TestConfiguration?
+    nonisolated private let testConfiguration: TestConfiguration?
     init(testConfiguration: TestConfiguration? = nil) {
         self.testConfiguration = testConfiguration
         if let testConfiguration { controlTimeout = testConfiguration.controlTimeout }
@@ -281,6 +289,12 @@ actor MLXRuntime {
 
     private static func paths(_ model: String) throws -> (URL, URL, URL, URL) {
         guard let relative = relativeModels[model] else { throw QwenRuntimeError.modelUnavailable(model) }
+        #if DEBUG
+        if let configuration = testRuntime?.testConfiguration {
+            return (configuration.python, configuration.script,
+                    configuration.modelDirectories[model] ?? configuration.models, configuration.state)
+        }
+        #endif
         let resources = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         #if LIVELINGO_PREVIEW
         // Never inherit production CLI paths, including its checkpoint root.
@@ -296,10 +310,14 @@ actor MLXRuntime {
             ?? resources.appendingPathComponent("LanguageRuntime/worker.py")
         let models = env["LIVELINGO_MLX_MODELS"].map { URL(fileURLWithPath: $0) }
             ?? resources.appendingPathComponent("Models")
-        let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                                  appropriateFor: nil, create: true)
-        let state = env["LIVELINGO_MLX_STATE"].map { URL(fileURLWithPath: $0) }
-            ?? support.appendingPathComponent("LiveLingo/LanguageRuntime/Checkpoints")
+        let state: URL
+        if let configuredState = env["LIVELINGO_MLX_STATE"] {
+            state = URL(fileURLWithPath: configuredState)
+        } else {
+            let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                      appropriateFor: nil, create: true)
+            state = support.appendingPathComponent("LiveLingo/LanguageRuntime/Checkpoints")
+        }
         #endif
         return (python, script, models.appendingPathComponent(relative),
                 state.appendingPathComponent(model == "qwen3.5-4b-mlx" ? "4b" : "9b"))
@@ -332,7 +350,8 @@ actor MLXRuntime {
         #if DEBUG
         if let testConfiguration {
             (python, script, directory, state) = (testConfiguration.python, testConfiguration.script,
-                                                 testConfiguration.models, testConfiguration.state)
+                                                 testConfiguration.modelDirectories[model] ?? testConfiguration.models,
+                                                 testConfiguration.state)
         } else {
             try Self.checkModel(model)
             (python, script, directory, state) = try Self.paths(model)

@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class TargetReviewRegressionTests: XCTestCase {
-    private final class ObservedDefaults: UserDefaults, @unchecked Sendable {
+    private final class ObservedDefaults: TestUserDefaults, @unchecked Sendable {
         var outputReads = 0
         override func string(forKey key: String) -> String? {
             if key == "LiveLingo.outputLanguage" { outputReads += 1 }
@@ -40,7 +40,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         var job = LearningReviewQueue.Job(directory: directory, batches: [batch], original: "Frozen notes.",
             prefix: "Frozen unfinished prefix.", prompt: "Frozen original prompt.",
             prefixInputDigest: "original-binding", retryPending: .init(attempts: 1,
-                notBefore: Date().timeIntervalSince1970 + 3_600, code: "requestTimedOut"),
+                notBefore: 3_600, code: "requestTimedOut"),
             awaitingManualStart: true,
             identity: try ReviewIdentity(sessionID: snapshot.sessionID, scope: .wholeLesson, inputRevision: 0),
             inputDigest: try ReviewInputBinding.digest([batch]))

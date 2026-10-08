@@ -2,10 +2,12 @@
 """Synthetic Mach-O checks; never signs or executes a binary."""
 
 import importlib.util
+import os
 from pathlib import Path
 import plistlib
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -64,10 +66,19 @@ class SignatureDetectionTests(unittest.TestCase):
 
 
 class PreviewArgumentSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='preview-argument-')))
+        tools = self.root / 'tools'
+        tools.mkdir()
+        (tools / 'python3').symlink_to(sys.executable)
+        self.environment = {'PATH': str(tools) + ':/usr/bin:/bin:/usr/sbin:/sbin',
+                            'TMPDIR': str(self.root), 'PYTHONDONTWRITEBYTECODE': '1',
+                            'PYTHONNOUSERSITE': '1'}
+
     def rejects(self, *arguments):
         script = Path(__file__).with_name('build-preview-app.sh')
         result = subprocess.run(['/bin/bash', str(script), *arguments],
-                                text=True, capture_output=True, timeout=10)
+                                text=True, capture_output=True, timeout=10, env=self.environment)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('Building unsigned', result.stdout)
         return result.stderr
@@ -82,7 +93,8 @@ class PreviewArgumentSafetyTests(unittest.TestCase):
         self.assertIn('Conflicting signing modes', self.rejects('--unsigned', '--ad-hoc'))
 
     def test_derived_data_cannot_escape_output_root(self):
-        self.assertIn('inside the output root', self.rejects('--derived-data', '/private/tmp/other-cache'))
+        self.assertIn('inside the output root', self.rejects('--output-root', str(self.root / 'output'),
+                                                           '--derived-data', str(self.root / 'other-cache')))
 
     def test_signing_material_cannot_enable_signing(self):
         self.assertIn('explicit --sign', self.rejects('--certificate', '/nonexistent/example.cer'))
@@ -151,7 +163,17 @@ class NestedSigningSafetyTests(unittest.TestCase):
                          'TEST_PREFERENCE_CREATED suite=synthetic\n** TEST SUCCEEDED **\n')
 
 
+@unittest.skipUnless(sys.platform == 'darwin', 'native ad-hoc signing fixture requires macOS')
 class RealAdHocSigningTests(unittest.TestCase):
+    def setUp(self):
+        for tool in ('/usr/bin/clang', '/usr/bin/codesign'):
+            if not Path(tool).is_file() or not os.access(tool, os.X_OK):
+                self.skipTest('native signing fixture requires ' + Path(tool).name)
+        root = self.enterContext(tempfile.TemporaryDirectory(prefix='preview-native-environment-'))
+        environment = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'TMPDIR': root,
+                       'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONNOUSERSITE': '1'}
+        self.enterContext(mock.patch.dict(os.environ, environment, clear=True))
+
     def test_signs_real_nested_code_without_launching_or_using_an_identity(self):
         with tempfile.TemporaryDirectory(prefix='preview-native-signing-') as root:
             root = Path(root)

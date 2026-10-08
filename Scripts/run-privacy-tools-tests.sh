@@ -44,7 +44,7 @@ build_entry target-acceptance-cli -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/targe
 build_entry learning-quality-cli -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/learning-quality-cli.swift
 build_entry learning-quality-cli-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS -D QUALITY_PROBE_TESTS Scripts/learning-quality-cli.swift Scripts/test_learning_quality_cli.swift
 build_entry learning-quality-target-cli-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS -D QUALITY_PROBE_TESTS Scripts/learning-quality-cli.swift Scripts/test_learning_quality_target_cli.swift
-build_entry livelingo-cli-lifecycle-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/test-cli-lifecycle.swift
+build_entry livelingo-cli-lifecycle-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS LiveLingoTests/TestPreferenceCleanup.swift Scripts/test-cli-lifecycle.swift
 build_entry livelingo-cli-multilingual-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/test-cli-multilingual.swift
 build_entry livelingo-cli-target-review-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/test-cli-target-review.swift
 build_entry livelingo-cli-translation-failure-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS LiveLingoTests/TestPreferenceCleanup.swift Scripts/test-cli-translation-failures.swift

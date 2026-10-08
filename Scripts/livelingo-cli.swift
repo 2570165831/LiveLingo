@@ -736,19 +736,23 @@ struct LiveLingoCLI {
 
  /// Only this CLI's own isolated directories may be reopened. Real user data,
  /// installed apps, system locations and bundle contents are refused outright.
- static func validateReopenTarget(_ directory: URL) throws {
+ static let forbiddenReopenRoots = ["/Applications", "/System", "/Library", "/usr", "/bin", "/sbin", "/opt", "/cores",
+                                    "/dev", "/Volumes", "/private/var/db"]
+
+ static func validateReopenTarget(_ directory: URL, homeDirectory: URL? = nil,
+                                  forbiddenRoots: [String]? = nil) throws {
   let root = directory.standardizedFileURL.resolvingSymlinksInPath()
   let path = root.path
   guard root.isFileURL, path != "/" else { throw CLIError.reopenTargetForbidden }
   if (try? FileManager.default.destinationOfSymbolicLink(atPath: directory.standardizedFileURL.path)) != nil {
    throw CLIError.reopenTargetForbidden
   }
-  let forbidden = ["/Applications", "/System", "/Library", "/usr", "/bin", "/sbin", "/opt", "/cores",
-                   "/dev", "/Volumes", "/private/var/db"]
+  let forbidden = forbiddenRoots ?? forbiddenReopenRoots
   for base in forbidden where path == base || path.hasPrefix(base + "/") {
    throw CLIError.reopenTargetForbidden
   }
-  let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.resolvingSymlinksInPath()
+  let home = (homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser)
+   .standardizedFileURL.resolvingSymlinksInPath()
   for userRoot in ["Library/Application Support/LiveLingo", "Library/Containers", "Library/Preferences"] {
    let base = home.appendingPathComponent(userRoot).path
    if path == base || path.hasPrefix(base + "/") { throw CLIError.reopenTargetForbidden }

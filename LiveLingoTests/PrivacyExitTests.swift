@@ -33,7 +33,7 @@ final class PrivacyExitTests: XCTestCase {
             attributes: [.posixPermissions: 0o700])
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock { try cleanup.remove(defaults) }
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _, _ in

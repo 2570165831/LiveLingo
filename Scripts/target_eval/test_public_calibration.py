@@ -1,5 +1,6 @@
 """Synthetic public formats, document isolation and exact confidence bounds."""
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 import gzip
 import io
 import json
@@ -266,13 +267,17 @@ class PublicCalibrationTests(unittest.TestCase):
                 return rows, []
 
             destination = root / "outputs" / "report.json"
+            clock = unittest.mock.Mock(wraps=a.datetime)
+            clock.now.return_value = datetime(2001, 1, 2, tzinfo=timezone.utc)
             with patch.dict(os.environ, {c.OUTPUT_ROOT_ENV: str(root)}), \
+                    patch.object(a, "datetime", clock), \
                     patch.object(a, "judge_cases", side_effect=canned_judge), redirect_stderr(io.StringIO()):
                 report = a.calibrate_public(cli=cli, manifest=manifest, output=destination, minimum_samples=2)
                 before = destination.read_bytes()
                 with self.assertRaises(FileExistsError):
                     a.calibrate_public(cli=cli, manifest=manifest, output=destination)
                 self.assertEqual(before, destination.read_bytes())
+            self.assertEqual(report["created_at_utc"], "2001-01-02T00:00:00+00:00")
             self.assertEqual(len(report["input_files"]), 7)
             self.assertTrue(all(case.kind == "good" for case in phases[0]))
             self.assertTrue(all("maximumLengthRatio" not in case.request for case in phases[1]))

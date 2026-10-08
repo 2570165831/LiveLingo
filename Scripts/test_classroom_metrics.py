@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('classroom_metrics', Path(__file__).with_name('classroom-metrics.py'))
 m = importlib.util.module_from_spec(spec)
@@ -231,33 +232,37 @@ class ClassroomMetricsTests(unittest.TestCase):
         self.assertEqual(rows[10]['executable'], '/synthetic/My Worker')
         self.assertEqual(rows[10]['rss_bytes'], 102400)
 
-    def test_real_watcher_observes_only_its_synthetic_process(self):
-        executable = str(Path(sys.executable).resolve())
-        child = subprocess.Popen([executable, '-B', '-c', 'import time; time.sleep(0.8)'])
-        path = self.fixtures / 'owned-rss.jsonl'
-        observed = m.read_processes()[child.pid]
-        self.assertEqual(observed['ppid'], os.getpid())
-        # macOS's Python launcher execs Python.app; bind the actual process
-        # path this test just spawned, rather than weakening exact matching.
-        try:
-            m.watch_rss(child.pid, observed['executable'], path, duration=3, interval=0.1)
-        finally:
-            self.assertEqual(child.wait(timeout=3), 0)
-        rows = m.read_jsonl(path)
-        self.assertTrue(all(p['pid'] == child.pid for row in rows if row.get('event') == 'rss_sample' for p in row['processes']))
-        result = m.rss_metrics(rows)
-        # ps can lose the executable identity before an exiting process is
-        # reaped. The watcher must report that uncertainty rather than turn a
-        # live final sample into a fabricated exit confirmation.
-        self.assertIn(result['completion_reason'], ['all_observed_owned_exited', 'ownership_changed'])
-        if result['completion_reason'] == 'ownership_changed':
-            self.assertFalse(result['all_observed_owned_exited'])
-            self.assertEqual(rows[-1]['uncertain_pids'], [child.pid])
-            self.assertEqual(rows[-1]['observed_changed_processes'][0]['pid'], child.pid)
-        else:
-            self.assertTrue(result['all_observed_owned_exited'])
-            self.assertEqual(rows[-2]['processes'], [])
-        self.assertGreater(result['peak_owned_process_tree_rss_bytes'], 0)
+    def test_watcher_observes_only_its_synthetic_process(self):
+        root, unrelated = self.row(10, 1), self.row(99, 1)
+        # Exercise both possible exit observations without global ps, a real
+        # child's lifetime, or scheduler-dependent sleeps.
+        for changed in (False, True):
+            with self.subTest(ownership_changed=changed):
+                path = self.fixtures / f'owned-rss-{changed}.jsonl'
+                final = {99: unrelated}
+                if changed:
+                    final[10] = dict(root, executable='/synthetic/exiting-worker')
+                snapshots = [{10: root, 99: unrelated}, {10: root, 99: unrelated}, final]
+                with patch.object(m, 'read_processes', side_effect=snapshots), \
+                     patch.object(m.os, 'getuid', return_value=root['uid']), \
+                     patch.object(m.time, 'monotonic', side_effect=(10.0, 10.1, 10.2)), \
+                     patch.object(m.time, 'sleep') as sleep:
+                    m.watch_rss(10, root['executable'], path, duration=3, interval=0.1)
+                sleep.assert_called_once_with(0.1)
+                rows = m.read_jsonl(path)
+                self.assertTrue(all(p['pid'] == 10 for row in rows if row.get('event') == 'rss_sample'
+                                    for p in row['processes']))
+                result = m.rss_metrics(rows)
+                if changed:
+                    self.assertEqual(result['completion_reason'], 'ownership_changed')
+                    self.assertFalse(result['all_observed_owned_exited'])
+                    self.assertEqual(rows[-1]['uncertain_pids'], [10])
+                    self.assertEqual(rows[-1]['observed_changed_processes'][0]['pid'], 10)
+                else:
+                    self.assertEqual(result['completion_reason'], 'all_observed_owned_exited')
+                    self.assertTrue(result['all_observed_owned_exited'])
+                    self.assertEqual(rows[-2]['processes'], [])
+                self.assertEqual(result['peak_owned_process_tree_rss_bytes'], root['rss_bytes'])
 
 
 if __name__ == '__main__':

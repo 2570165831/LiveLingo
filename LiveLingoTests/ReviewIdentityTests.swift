@@ -22,8 +22,8 @@ enum ReviewIdentityScenarios {
     }
 
     static func until(_ message: String, _ condition: () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(4)
-        while Date() < deadline {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(4))
+        while ContinuousClock.now < deadline {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }

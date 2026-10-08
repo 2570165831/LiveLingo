@@ -64,7 +64,7 @@ final class TargetExportTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let suite = "ClassroomPresentation-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock {
             try cleanup.remove(defaults)
             try FileManager.default.removeItem(at: root)

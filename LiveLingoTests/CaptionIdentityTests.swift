@@ -97,7 +97,7 @@ final class CaptionIdentityTests: XCTestCase {
             .appendingPathComponent("LiveLingo-CaptionIdentity-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-CaptionIdentity-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let preferences = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("字幕生命周期测试不能发起复查")

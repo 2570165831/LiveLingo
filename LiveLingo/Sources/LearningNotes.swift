@@ -3597,6 +3597,7 @@ final class LearningReviewQueue: ObservableObject {
     private var retryTimerBinding: (id: UUID, deadline: TimeInterval)?
     private var retryTimerToken: UUID?
     private let retryDelays: [TimeInterval]
+    private let now: @MainActor () -> Date
     private var recordingBlocked = false
     private var resourceBlocked = false
     private var persistenceFailure: String?
@@ -4155,8 +4156,10 @@ final class LearningReviewQueue: ObservableObject {
 
     init(journalURL: URL? = nil, observeSleep: Bool = true,
          diagnostics: ReviewDiagnosticsPolicy = .standard, generate: Generator? = nil,
+         now: @escaping @MainActor () -> Date = { Date() },
          retryDelays: [TimeInterval] = ReviewRetryPolicy.delays,
          startupSnapshotReader: (URL) throws -> SessionSnapshot? = ReviewInputBinding.snapshot(in:)) {
+        self.now = now
         self.retryDelays = retryDelays.isEmpty ? ReviewRetryPolicy.delays : retryDelays
         #if LIVELINGO_PREVIEW
         let resolvedJournal: URL
@@ -4164,14 +4167,19 @@ final class LearningReviewQueue: ObservableObject {
             resolvedJournal = try PreviewDataIsolation.dataURL("learning-review-queue.json")
         } catch { preconditionFailure("Preview review queue must stay in its own data directory") }
         #else
-        let environmentRoot = ProcessInfo.processInfo.environment["LIVELINGO_DATA_DIRECTORY"]
-        if let environmentRoot {
-            precondition(environmentRoot.hasPrefix("/") && environmentRoot != "/",
-                         "LIVELINGO_DATA_DIRECTORY must name an absolute local data directory")
+        let resolvedJournal: URL
+        if let journalURL {
+            resolvedJournal = journalURL
+        } else {
+            let environmentRoot = ProcessInfo.processInfo.environment["LIVELINGO_DATA_DIRECTORY"]
+            if let environmentRoot {
+                precondition(environmentRoot.hasPrefix("/") && environmentRoot != "/",
+                             "LIVELINGO_DATA_DIRECTORY must name an absolute local data directory")
+            }
+            let configuredRoot = environmentRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/LiveLingo")
+            resolvedJournal = configuredRoot.appendingPathComponent("learning-review-queue.json")
         }
-        let configuredRoot = environmentRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/LiveLingo")
-        let resolvedJournal = journalURL ?? configuredRoot.appendingPathComponent("learning-review-queue.json")
         #endif
         self.journalURL = resolvedJournal
         self.diagnostics = diagnostics.isEnabled
@@ -4240,7 +4248,7 @@ final class LearningReviewQueue: ObservableObject {
                     if legacyJournal, jobs[index].next < jobs[index].batches.count,
                        jobs[index].awaitingManualStart != true {
                         jobs[index].awaitingManualStart = true
-                        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "migrated_manual_start",
+                        recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "migrated_manual_start",
                                                      batch: jobs[index].next, batchCount: jobs[index].batches.count,
                                                      detail: "legacy_journal"), at: index)
                         repaired = true
@@ -4277,7 +4285,7 @@ final class LearningReviewQueue: ObservableObject {
                         jobs[index].prefix = ""
                         jobs[index].prefixInputDigest = nil
                         jobs[index].prompt = expectedPrompt
-                        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "prefix_dropped",
+                        recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "prefix_dropped",
                                                      batch: jobs[index].next, batchCount: jobs[index].batches.count,
                                                      detail: "prompt_changed"), at: index)
                         repaired = true
@@ -4294,7 +4302,7 @@ final class LearningReviewQueue: ObservableObject {
                         ReviewLog.info("review event=prefix_dropped detail=\(detail) prefix_bytes=\(jobs[index].prefix.utf8.count)")
                         jobs[index].prefix = ""
                         jobs[index].prefixInputDigest = nil
-                        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "prefix_dropped",
+                        recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "prefix_dropped",
                                                      batch: jobs[index].next, batchCount: jobs[index].batches.count,
                                                      detail: detail), at: index)
                         repaired = true
@@ -4330,7 +4338,7 @@ final class LearningReviewQueue: ObservableObject {
                 for index in jobs.indices
                 where !deferredTargets.contains(jobs[index].id)
                     && (jobs[index].next > 0 || !jobs[index].prefix.isEmpty || jobs[index].failure != nil) {
-                    recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "resumed",
+                    recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "resumed",
                                                  batch: jobs[index].next, batchCount: jobs[index].batches.count,
                                                  request: jobs[index].lastRequestID,
                                                  detail: "prefix_bytes=\(jobs[index].prefix.utf8.count)"), at: index)
@@ -4549,14 +4557,14 @@ final class LearningReviewQueue: ObservableObject {
         do { try writeOutputs(jobs[jobs.count - 1]) }
         catch {
             jobs[jobs.count - 1].failure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
-            recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "failed",
+            recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "failed",
                                          stage: ReviewFailureStage.output.rawValue, batch: 0,
                                          batchCount: batches.count,
                                          detail: "error_code=\((error as NSError).code)"),
                         at: jobs.count - 1)
             persistOrPause()
         }
-        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "enqueued", batch: 0,
+        recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "enqueued", batch: 0,
                                      batchCount: batches.count, detail: resolvedScope.label), at: jobs.count - 1)
         persistOrPause()
         reconcile()
@@ -4678,7 +4686,7 @@ final class LearningReviewQueue: ObservableObject {
         catch {
             guard let current = jobs.firstIndex(where: { $0.id == plan.candidate.id }) else { throw error }
             jobs[current].failure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
-            recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "failed",
+            recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "failed",
                 stage: ReviewFailureStage.output.rawValue, batch: 0,
                 batchCount: plan.candidate.batches.count,
                 detail: "error_code=\((error as NSError).code)"), at: current)
@@ -4689,7 +4697,7 @@ final class LearningReviewQueue: ObservableObject {
               jobs[current].inputDigest == plan.candidate.inputDigest else {
             throw ReviewIdentityError.conflict("复查任务在报告保存期间已失效，未继续入队")
         }
-        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "enqueued", batch: 0,
+        recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "enqueued", batch: 0,
             batchCount: plan.candidate.batches.count, detail: plan.candidate.resolvedScope.label), at: current)
         try await saveAndWait()
     }
@@ -4870,7 +4878,7 @@ final class LearningReviewQueue: ObservableObject {
         // 升级迁移后的任务等待用户明确开始：整课复查不再默认自动跑。
         if jobs.first?.awaitingManualStart == true { return "manual" }
         if let retry = jobs.first?.retryPending,
-           retry.notBefore > Date().timeIntervalSince1970 { return "retry_wait" }
+           retry.notBefore > now().timeIntervalSince1970 { return "retry_wait" }
         if userPaused { return "user" }
         if sleeping { return "sleep" }
         if recordingBlocked { return "recording" }
@@ -4926,7 +4934,7 @@ final class LearningReviewQueue: ObservableObject {
             // Also flush the most recent token when sleep is announced.
             if !jobs.isEmpty { persistOrPause() }
             if reason != lastBlockReason || hadActiveTask {
-                recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970,
+                recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970,
                                              code: hadActiveTask ? "cancelled" : "paused",
                                              batch: jobs.first?.next, batchCount: jobs.first?.batches.count,
                                              detail: reason), at: 0)
@@ -4943,7 +4951,7 @@ final class LearningReviewQueue: ObservableObject {
         }
         running = true
         refreshStatus()
-        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "started",
+        recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "started",
                                      batch: jobs[0].next, batchCount: jobs[0].batches.count), at: 0)
         task = Task { [weak self] in
             guard let self else { return }
@@ -5145,7 +5153,7 @@ final class LearningReviewQueue: ObservableObject {
                 let displayNumber = job.resolvedScope.batchNumber ?? (job.next + 1)
                 jobs[0].reports.append("## " + ClassroomFixedText.reviewBatchHeading.noteFormat([String(displayNumber), batch.note.topic], target: target)
                     + "\n" + (details.isEmpty ? ClassroomFixedText.reviewNoSuggestions.noteText(target: target) : details))
-                recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "completed",
+                recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "completed",
                                              batch: batchIndex, batchCount: batchCount, request: identity.latest,
                                              detail: "corrections=\(patch.corrections.count) additions=\(patch.additions.count) response_bytes=\(response.utf8.count) generation_ms=\(timings["generation"] ?? -1)"),
                             at: 0)
@@ -5177,8 +5185,8 @@ final class LearningReviewQueue: ObservableObject {
                 var stats = jobs[0].stats ?? JobStats()
                 stats.interruptions += 1
                 jobs[0].stats = stats
-                jobs[0].interruption = Interruption(reason: reason, at: Date().timeIntervalSince1970)
-                recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "cancelled",
+                jobs[0].interruption = Interruption(reason: reason, at: now().timeIntervalSince1970)
+                recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "cancelled",
                                              batch: batchIndex, batchCount: batchCount,
                                              request: identity.latest, detail: reason), at: 0)
                 ReviewLog.info("review event=interrupted reason=\(reason) batch=\(batchIndex)/\(batchCount) interruptions=\(stats.interruptions)")
@@ -5208,12 +5216,12 @@ final class LearningReviewQueue: ObservableObject {
                     let attempt = attempts + 1
                     let delay = retryDelays[max(0, min(attempt - 1, retryDelays.count - 1))]
                     jobs[0].retryPending = RetryState(attempts: attempt,
-                                                      notBefore: Date().timeIntervalSince1970 + delay,
+                                                      notBefore: now().timeIntervalSince1970 + delay,
                                                       code: failure.code)
                     var retryStats = jobs[0].stats ?? JobStats()
                     retryStats.retries += 1
                     jobs[0].stats = retryStats
-                    recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "retry_scheduled",
+                    recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "retry_scheduled",
                                                  stage: failure.stage.rawValue, batch: batchIndex,
                                                  batchCount: batchCount, request: failure.requestID,
                                                  detail: "attempt=\(attempt) delay_s=\(Int(delay)) code=\(failure.code)"), at: 0)
@@ -5237,12 +5245,12 @@ final class LearningReviewQueue: ObservableObject {
                     if snapshotWritten { message += "；已保存本地私有诊断快照" }
                 }
                 jobs[0].failure = message
-                recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "failed",
+                recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "failed",
                                              stage: failure.stage.rawValue, batch: batchIndex, batchCount: batchCount,
                                              field: failure.field, request: failure.requestID,
                                              detail: failure.code), at: 0)
                 if snapshotWritten {
-                    recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "diagnostics",
+                    recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "diagnostics",
                                                  batch: batchIndex, batchCount: batchCount,
                                                  request: failure.requestID, detail: "snapshot_saved"), at: 0)
                 }
@@ -5300,26 +5308,26 @@ final class LearningReviewQueue: ObservableObject {
     private func rebindRetryTimer() {
         guard !testingStopped, !restoreBlocked, persistenceFailure == nil, !userPaused,
               let job = jobs.first, job.awaitingManualStart != true,
-              let retry = job.retryPending, retry.notBefore > Date().timeIntervalSince1970 else {
+              let retry = job.retryPending, retry.notBefore > now().timeIntervalSince1970 else {
             retryTask?.cancel()
             retryTask = nil; retryTimerBinding = nil; retryTimerToken = nil
             return
         }
         if retryTimerBinding?.id == job.id, retryTimerBinding?.deadline == retry.notBefore { return }
-        scheduleRetry(after: max(0, retry.notBefore - Date().timeIntervalSince1970))
+        scheduleRetry(after: max(0, retry.notBefore - now().timeIntervalSince1970))
     }
 
     private func runScheduledRetry() {
         guard let job = jobs.first, let retry = job.retryPending else { return }
         guard !userPaused else { return }          // never fight a manual pause
-        guard retry.notBefore <= Date().timeIntervalSince1970 else {
-            scheduleRetry(after: retry.notBefore - Date().timeIntervalSince1970)
+        guard retry.notBefore <= now().timeIntervalSince1970 else {
+            scheduleRetry(after: retry.notBefore - now().timeIntervalSince1970)
             return
         }
         // Keep the attempt count: it is the bounded-retry budget. Only the
         // backoff window is considered satisfied here.
         jobs[0].retryPending?.notBefore = 0
-        recordEvent(ReviewQueueEvent(at: Date().timeIntervalSince1970, code: "retry_started",
+        recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "retry_started",
                                      batch: jobs[0].next, batchCount: jobs[0].batches.count,
                                      detail: "attempt=\(retry.attempts) code=\(retry.code)"), at: 0)
         do { try save() } catch { persistenceFailure = "复查进度保存失败，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
@@ -5359,7 +5367,7 @@ final class LearningReviewQueue: ObservableObject {
                                          timings: [String: Int], requestCount: Int) async -> Bool {
         guard let diagnostics else { return false }
         let snapshot = ReviewDiagnosticSnapshot(
-            createdAt: ISO8601DateFormatter().string(from: Date()),
+            createdAt: ISO8601DateFormatter().string(from: now()),
             jobID: job.id.uuidString,
             requestID: failure.requestID,
             requestCount: requestCount > 0 ? requestCount : nil,
@@ -5537,7 +5545,7 @@ final class LearningReviewQueue: ObservableObject {
         let progress = Self.reportProgress(next: job.next, total: job.batches.count, scope: job.scope)
         if let failure = persistenceFailure ?? job.failure { status = failure }
         else if let retry = job.retryPending, !running {
-            let remaining = retry.remainingSeconds()
+            let remaining = retry.remainingSeconds(now: now().timeIntervalSince1970)
             status = remaining > 0
                 ? "\(progress) · 第 \(retry.attempts) 次自动重试将在 \(remaining) 秒后开始"
                 : "\(progress) · 第 \(retry.attempts) 次自动重试进行中"

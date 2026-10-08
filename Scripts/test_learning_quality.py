@@ -146,7 +146,10 @@ class QualityScoreTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         location=os.environ.get('LIVELINGO_QUALITY_TEST_DIRECTORY')
-        if not location: raise RuntimeError('Set LIVELINGO_QUALITY_TEST_DIRECTORY to an isolated evidence directory')
+        if not location:
+            temporary = tempfile.TemporaryDirectory(prefix='livelingo-quality-')
+            cls.addClassCleanup(temporary.cleanup)
+            location = temporary.name
         cls.root=Path(location)
         if not cls.root.is_absolute(): raise RuntimeError('Test directory must be absolute')
         cls.root.mkdir(parents=True,exist_ok=True)

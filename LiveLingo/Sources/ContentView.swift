@@ -129,8 +129,11 @@ enum SummaryRenderingDiagnostics {
     static func summaryViewForTesting(text: String) -> some View {
         SummaryMarkdownView(text: text)
     }
-    static func meterViewForTesting(meter: CaptureMeterState, active: Bool) -> some View {
-        RecordingMeterView(meter: meter, active: active)
+    static func meterViewForTesting(meter: CaptureMeterState, active: Bool,
+                                    freshness: WaveformFreshnessState,
+                                    reduceMotion: Bool) -> some View {
+        RecordingMeterView(meter: meter, active: active, freshness: freshness,
+                           reduceMotionOverride: reduceMotion)
     }
 }
 #endif
@@ -1301,6 +1304,7 @@ struct RecordingWaveform: View {
     let samples: [Float]
     let active: Bool
     let receiving: Bool
+    var reduceMotionOverride: Bool? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -1321,7 +1325,7 @@ struct RecordingWaveform: View {
             }
             .frame(maxHeight: .infinity)
         }
-        .animation(reduceMotion ? nil : .linear(duration: SpeechPipeline.waveformUpdateInterval), value: samples)
+        .animation((reduceMotionOverride ?? reduceMotion) ? nil : .linear(duration: SpeechPipeline.waveformUpdateInterval), value: samples)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(!active ? "音量显示已暂停" : receiving ? "正在接收音频" : "等待音频输入")
         .accessibilityAddTraits(.isImage)
@@ -2049,11 +2053,23 @@ private struct RecordingElapsedText: View {
 
 private struct RecordingMeterView: View {
     @ObservedObject var meter: CaptureMeterState
-    @StateObject private var freshness = WaveformFreshnessState()
+    @StateObject private var freshness: WaveformFreshnessState
     let active: Bool
+    private let reduceMotionOverride: Bool?
+
+    init(meter: CaptureMeterState, active: Bool,
+         freshness: WaveformFreshnessState = WaveformFreshnessState(),
+         reduceMotionOverride: Bool? = nil) {
+        self.meter = meter
+        self.active = active
+        self.reduceMotionOverride = reduceMotionOverride
+        _freshness = StateObject(wrappedValue: freshness)
+    }
+
     var body: some View {
         RecordingWaveform(samples: meter.waveformSamples, active: active,
-                          receiving: active && freshness.isReceiving)
+                          receiving: active && freshness.isReceiving,
+                          reduceMotionOverride: reduceMotionOverride)
             .onAppear { freshness.mount(active: active, lastUpdate: meter.lastAudioLevelAt) }
             .onChange(of: active) { _, active in
                 freshness.update(active: active, lastUpdate: meter.lastAudioLevelAt)

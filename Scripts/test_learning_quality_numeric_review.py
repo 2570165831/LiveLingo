@@ -24,8 +24,9 @@ OTHER_TEMPERATURE = ("正文里的“20°C”不在所引原句里；本次原�
 class NumericTargetBindingTests(unittest.TestCase):
     def probe(self, rows, *, target, state, gap=None, fragments=None):
         """Write independent expected binding; never derive it with numeric_report."""
-        directory = Path(tempfile.mkdtemp(
-            prefix="numeric-review-", dir=os.environ.get("LIVELINGO_QUALITY_TEST_DIRECTORY")))
+        temporary = tempfile.TemporaryDirectory(prefix='numeric-review-')
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
 
         def write(name, value):
             data = json.dumps(value, ensure_ascii=False).encode()

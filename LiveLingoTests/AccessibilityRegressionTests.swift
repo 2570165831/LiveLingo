@@ -39,7 +39,7 @@ final class AccessibilityRegressionTests: XCTestCase {
     private func fixture() throws -> (AppModel, UserDefaults) {
         let suite = "LiveLingo-Test-\(UUID().uuidString)"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let store = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let store = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let root = TestFixtureDirectory.root.appendingPathComponent(suite, isDirectory: true)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in

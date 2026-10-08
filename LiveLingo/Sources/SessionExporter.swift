@@ -1178,6 +1178,9 @@ struct NotesExportSnapshot: Equatable, Sendable {
     var notesAreLegacyRendered: Bool = false
     /// Evidence remains available even when the user omits the transcript.
     var scheduleEvidence: [TranscriptSegment] = []
+    /// Nil preserves local-time export; a supplied zone makes a snapshot's
+    /// date and timestamp independent of the machine rendering it.
+    var exportTimeZone: TimeZone? = nil
 
     var classDate: String { NotesExportDocument.classDate(of: self) }
 }
@@ -1303,7 +1306,21 @@ enum NotesExportDocument {
         if let name = snapshot.sessionName, let range = name.range(of: #"\d{4}-\d{2}-\d{2}"#, options: .regularExpression) {
             return String(name[range])
         }
-        return dateFormatter.string(from: snapshot.generatedAt)
+        return formatted(snapshot.generatedAt, with: dateFormatter, timeZone: snapshot.exportTimeZone)
+    }
+
+    static func timestamp(of snapshot: NotesExportSnapshot) -> String {
+        formatted(snapshot.generatedAt, with: timestampFormatter, timeZone: snapshot.exportTimeZone)
+    }
+
+    private static func formatted(_ date: Date, with template: DateFormatter, timeZone: TimeZone?) -> String {
+        guard let timeZone else { return template.string(from: date) }
+        let formatter = DateFormatter()
+        formatter.locale = template.locale
+        formatter.calendar = template.calendar
+        formatter.dateFormat = template.dateFormat
+        formatter.timeZone = timeZone
+        return formatter.string(from: date)
     }
 
     static func defaultFileName(_ snapshot: NotesExportSnapshot, format: NotesExportFormat) -> String {
@@ -1334,7 +1351,7 @@ enum NotesExportDocument {
         if let session = snapshot.sessionName {
             lines.append("- " + fixed(.exportSessionLine, [session], target: snapshot.target, rendered: rendered))
         }
-        lines.append("- " + fixed(.exportTimeLine, [timestampFormatter.string(from: snapshot.generatedAt)], target: snapshot.target, rendered: rendered))
+        lines.append("- " + fixed(.exportTimeLine, [timestamp(of: snapshot)], target: snapshot.target, rendered: rendered))
         lines.append("- " + fixed(.exportExplanationLine, [disclaimer(for: snapshot.target, rendered: rendered)], target: snapshot.target, rendered: rendered))
         lines.append("")
         return lines
@@ -1578,7 +1595,7 @@ enum PDFNotesWriter {
             append(NotesExportDocument.fixed(.exportReviewScope, [], target: snapshot.target, rendered: rendered), style: .meta)
         }
         if let session = snapshot.sessionName { append(NotesExportDocument.fixed(.exportSessionLine, [session], target: snapshot.target, rendered: rendered), style: .meta) }
-        append(NotesExportDocument.fixed(.exportTimeLine, [NotesExportDocument.timestampFormatter.string(from: snapshot.generatedAt)], target: snapshot.target, rendered: rendered), style: .meta)
+        append(NotesExportDocument.fixed(.exportTimeLine, [NotesExportDocument.timestamp(of: snapshot)], target: snapshot.target, rendered: rendered), style: .meta)
         append(NotesExportDocument.disclaimer(for: snapshot.target, rendered: rendered), style: .meta)
 
         append(NotesExportDocument.notesHeading(for: snapshot.target, rendered: rendered), style: .heading)

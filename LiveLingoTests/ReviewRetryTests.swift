@@ -32,8 +32,8 @@ struct ReviewRetryTests {
     }
 
     private func waitFor(_ condition: @escaping () -> Bool, seconds: Double = 8) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
+        while ContinuousClock.now < deadline {
             if condition() { return true }
             try? await Task.sleep(for: .milliseconds(50))
         }
@@ -43,8 +43,8 @@ struct ReviewRetryTests {
     /// 有界地确认某件事**没有**发生（例如"等待明确开始"的任务不得自动开跑）。
     /// 条件一旦成真立刻返回 false；整整 `seconds` 都没成真才返回 true。
     private func waitForNoActivity(_ happened: @escaping () -> Bool, seconds: Double = 0.5) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
+        while ContinuousClock.now < deadline {
             if happened() { return false }
             try? await Task.sleep(for: .milliseconds(25))
         }
@@ -89,8 +89,9 @@ struct ReviewRetryTests {
     /// 队列测试统一用假 generator + 独立目录（绝不碰真实 9B 与真实录音）。
     private func makeQueue(journal: URL, retryDelays: [TimeInterval] = [0.05, 0.05],
                            generate: @escaping LearningReviewQueue.Generator) -> LearningReviewQueue {
-        LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
-                            generate: generate, retryDelays: retryDelays)
+        let clock = TestWallClock()
+        return LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+                            generate: generate, now: clock.now, retryDelays: retryDelays)
     }
 
     // MARK: - 策略本身
@@ -877,8 +878,8 @@ struct ReviewRetryTests {
     /// 等待异步 editQueue 落地（`relocateJob` 通过 editQueue 改队列）。
     @MainActor
     private func waitForRelocation(queue: LearningReviewQueue, expected: URL, timeout: TimeInterval = 5) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+        while ContinuousClock.now < deadline {
             if queue.items.first?.directory.standardizedFileURL == expected.standardizedFileURL,
                queue.managementError == nil {
                 return true
@@ -890,8 +891,8 @@ struct ReviewRetryTests {
 
     @MainActor
     private func waitForRejection(queue: LearningReviewQueue, expected: URL, timeout: TimeInterval = 5) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+        while ContinuousClock.now < deadline {
             if let error = queue.managementError, error.contains("队列未更改"),
                queue.items.first?.directory.standardizedFileURL == expected.standardizedFileURL {
                 return true

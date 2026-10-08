@@ -11,13 +11,15 @@ final class ClassroomPresentationTests: XCTestCase {
     private var presentationDefaults: UserDefaults?
 
     func testWaveformStopsRefreshingWithoutInputAndResumesForSamples() async throws {
-        // SwiftUI exposes this environment value as read-only. Exercise the
-        // actual host setting without changing the user's accessibility setup.
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        do {
+        // Both motion policies use a synthetic calendar clock. The host's
+        // accessibility preference and changes to its date cannot choose a case.
+        for reduceMotion in [false, true] {
             let meter = CaptureMeterState()
+            let clock = TestWallClock()
+            let freshness = WaveformFreshnessState(now: clock.now)
             func root(active: Bool) -> some View {
-                SummaryRenderingDiagnostics.meterViewForTesting(meter: meter, active: active)
+                SummaryRenderingDiagnostics.meterViewForTesting(meter: meter, active: active,
+                    freshness: freshness, reduceMotion: reduceMotion)
                     .frame(width: 300, height: 30)
                     .padding(20)
                     .background(Color.white)
@@ -51,7 +53,7 @@ final class ClassroomPresentationTests: XCTestCase {
 
             // A real event with zero amplitude is still input. Exercise the
             // publisher's willSet ordering, exactly as AppModel consumes it.
-            meter.lastAudioLevelAt = Date()
+            meter.lastAudioLevelAt = clock.now()
             meter.waveformSamples = Array(repeating: 0, count: 24)
             try await settle(view)
             let silentInput = try pixels()
@@ -65,7 +67,7 @@ final class ClassroomPresentationTests: XCTestCase {
 
             SummaryRenderingDiagnostics.reset()
             for index in 1...8 {
-                meter.lastAudioLevelAt = Date()
+                meter.lastAudioLevelAt = clock.now()
                 meter.waveformSamples = Array(repeating: Float(index) / 8, count: 24)
                 try await Task.sleep(for: .milliseconds(80))
             }
@@ -88,7 +90,7 @@ final class ClassroomPresentationTests: XCTestCase {
 
             controller.rootView = root(active: false)
             try await settle(view)
-            meter.lastAudioLevelAt = Date()
+            meter.lastAudioLevelAt = clock.now()
             meter.waveformSamples = Array(repeating: 1, count: 24)
             try await settle(view)
             XCTAssertEqual(try pixels(), empty, "Paused views remain flat even when levels arrive")
@@ -580,7 +582,7 @@ final class ClassroomPresentationTests: XCTestCase {
             .appendingPathComponent("ClassroomPresentation-\(UUID().uuidString)")
         let suite = "ClassroomPresentation-\(UUID().uuidString)"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         presentationDefaults = defaults
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
                                         observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in

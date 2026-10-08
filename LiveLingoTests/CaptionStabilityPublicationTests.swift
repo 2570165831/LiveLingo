@@ -159,7 +159,7 @@ final class CaptionStabilityPublicationTests: XCTestCase {
             .appendingPathComponent("LiveLingo-Publication-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-Publication-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Publication tests must never launch a review")

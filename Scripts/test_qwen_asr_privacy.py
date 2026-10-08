@@ -16,7 +16,8 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 import soundfile as sf
-import qwen_asr_service as service
+with patch.dict(os.environ, {'LIVELINGO_ASR_MODELS': ''}):
+    import qwen_asr_service as service
 
 CANARY = 'SYNTHETIC_PRIVATE_SENTENCE'
 TOKEN = 'synthetic-test-token'
@@ -24,6 +25,7 @@ TOKEN = 'synthetic-test-token'
 
 class ASRPrivacyTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.dict(os.environ, {'LIVELINGO_SCOREBOARD_TIMINGS': ''}))
         directory = tempfile.TemporaryDirectory(prefix='ll-asr-privacy-')
         self.addCleanup(directory.cleanup)
         self.directory = Path(directory.name)

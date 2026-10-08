@@ -3,8 +3,10 @@
 Set LIVELINGO_TEST_TOKENIZER to a local bundled model directory for full-vocab
 tests. These use the real tokenizer's emitted IDs, including split UTF-8 bytes.
 """
+import importlib.util
 import json
 import os
+from pathlib import Path
 import unittest
 
 from outlines_core import Guide, Index
@@ -88,6 +90,10 @@ class ByteVocabularyTests(unittest.TestCase):
 class BundledTokenizerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not Path(os.environ['LIVELINGO_TEST_TOKENIZER']).is_dir():
+            raise unittest.SkipTest('optional local tokenizer directory is unavailable')
+        if importlib.util.find_spec('transformers') is None:
+            raise unittest.SkipTest('optional local tokenizer tests require transformers')
         from transformers import AutoTokenizer
         cls.tokenizer = AutoTokenizer.from_pretrained(
             os.environ['LIVELINGO_TEST_TOKENIZER'], local_files_only=True)

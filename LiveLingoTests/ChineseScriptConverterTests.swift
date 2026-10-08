@@ -181,7 +181,13 @@ final class ChineseScriptConverterTests: XCTestCase, @unchecked Sendable {
         try FileManager.default.createDirectory(at: root.appendingPathComponent("ZhVariants"), withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         try Data("{}".utf8).write(to: root.appendingPathComponent("ZhVariants/SOURCE.json"))
-        let emptyBundle = try XCTUnwrap(Bundle(path: "/System/Library/Frameworks/Foundation.framework"))
+        let bundleURL = root.appendingPathComponent("Empty.bundle", isDirectory: true)
+        let contents = bundleURL.appendingPathComponent("Contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let info = ["CFBundleIdentifier": "test.synthetic.empty", "CFBundlePackageType": "BNDL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        let emptyBundle = try XCTUnwrap(Bundle(url: bundleURL))
         XCTAssertEqual(ChineseScriptConverter.resourceDirectory(bundle: emptyBundle, executable: root.appendingPathComponent("cli")),
                        root.appendingPathComponent("ZhVariants"))
     }

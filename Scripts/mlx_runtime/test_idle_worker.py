@@ -11,7 +11,7 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parent
-WORKER = Path(os.environ.get('LIVELINGO_IDLE_WORKER_SOURCE', ROOT / 'worker.py'))
+WORKER = ROOT / 'worker.py'
 
 BOOT = r'''
 import hashlib,importlib.util,json,os,sys,threading,time,types,weakref
@@ -78,10 +78,14 @@ class Worker:
         self.events = queue.Queue()
         self.pending = []
         self.errors = []
+        environment = dict(os.environ)
+        for name in ('LIVELINGO_MLX_CACHE_LIMIT_MB', 'LIVELINGO_MLX_MEMORY_LOG_SECONDS',
+                     'LIVELINGO_MLX_IDLE_CACHE_RELEASE_SECONDS', 'LIVELINGO_SCOREBOARD_TIMINGS'):
+            environment.pop(name, None)
         self.process = subprocess.Popen(
             [sys.executable, '-B', '-c', BOOT, str(ROOT), str(WORKER),
              str(path / 'state'), str(self.trace_path), json.dumps(args)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
         self.reader = threading.Thread(target=self._read, daemon=True) if read_stdout else None
         if self.reader is not None: self.reader.start()
 
@@ -139,8 +143,8 @@ class IdleWorkerTests(unittest.TestCase):
     def setUp(self):
         output = os.environ.get('LIVELINGO_IDLE_TEST_OUTPUT')
         if output:
-            self.path = Path(output) / self._testMethodName
-            self.path.mkdir(parents=True, exist_ok=False)
+            Path(output).mkdir(parents=True, exist_ok=True)
+            self.path = Path(tempfile.mkdtemp(prefix=self._testMethodName + '.', dir=output))
         else:
             self.temporary = tempfile.TemporaryDirectory(prefix='livelingo-idle-')
             self.addCleanup(self.temporary.cleanup)

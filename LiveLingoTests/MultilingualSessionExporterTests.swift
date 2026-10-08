@@ -174,11 +174,15 @@ final class MultilingualSessionExporterTests: XCTestCase {
     }
 
     private func notesSnapshot(_ segments: [TranscriptSegment]) throws -> NotesExportSnapshot {
-        let date = try XCTUnwrap(Calendar(identifier: .gregorian).date(from:
+        let timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let date = try XCTUnwrap(calendar.date(from:
             DateComponents(year: 2001, month: 1, day: 2, hour: 12, minute: 34)))
         return NotesExportSnapshot(className: "Chemistry", sessionName: "Lesson 2001-01-02", scope: .wholeLesson,
             scopeDetail: "全部片段", coverageLine: "已整理", notesMarkdown: "冰很冷。", reviewMarkdown: nil,
-            transcript: segments, generatedAt: date, includesReviewAdvice: false, includesTranscript: true)
+            transcript: segments, generatedAt: date, includesReviewAdvice: false, includesTranscript: true,
+            exportTimeZone: timeZone)
     }
 
     private func assertNotesSnapshot(_ snapshot: NotesExportSnapshot, captions: String, attributedCaptions: String) throws {

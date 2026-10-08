@@ -56,7 +56,13 @@ final class DefaultTargetGoldenTests: XCTestCase {
 
     private func lesson() async throws -> Golden {
         let directory = try temporaryDirectory()
-        try await installFakeWorker(in: directory)
+        let runtime = try installFakeWorker(in: directory)
+        return try await MLXRuntime.$testRuntime.withValue(runtime) {
+            try await lesson(in: directory)
+        }
+    }
+
+    private func lesson(in directory: URL) async throws -> Golden {
         var captions: [TranscriptSegment] = []
         var englishTraditionalOutputs: [String: String] = [:]
         func append(_ source: String, _ output: String, language: String? = nil) {
@@ -226,13 +232,18 @@ final class DefaultTargetGoldenTests: XCTestCase {
         return String(report.markdown[body.lowerBound...])
     }
 
-    private func installFakeWorker(in directory: URL) async throws {
-        let activeWorkers = await MLXRuntime.shared.resourceStates()
-        XCTAssertTrue(activeWorkers.isEmpty, "The golden must own an isolated worker lifecycle")
+    private func installFakeWorker(in directory: URL) throws -> MLXRuntime {
+        let python = URL(fileURLWithPath: "/usr/bin/python3")
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: python.path),
+                          "The synthetic protocol worker requires the system Python interpreter")
         let script = directory.appendingPathComponent("fake-worker.py")
         try Self.worker.write(to: script, atomically: true, encoding: .utf8)
         let models = directory.appendingPathComponent("models")
-        for relative in ["mlx-community/Qwen3.5-4B-MLX-8bit", "lmstudio-community/Qwen3.5-9B-MLX-4bit"] {
+        let relativeModels = [
+            QwenModelProfile.energySaver.translationModel: "mlx-community/Qwen3.5-4B-MLX-8bit",
+            QwenModelProfile.highQuality.translationModel: "lmstudio-community/Qwen3.5-9B-MLX-4bit"
+        ]
+        for relative in relativeModels.values {
             let model = models.appendingPathComponent(relative)
             try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
             for name in ["config.json", "tokenizer.json"] {
@@ -242,25 +253,16 @@ final class DefaultTargetGoldenTests: XCTestCase {
         try Data(Self.noteResponse.utf8).write(to: directory.appendingPathComponent("note-response.json"))
         try Data(Self.reviewResponse.utf8).write(to: directory.appendingPathComponent("review-response.json"))
         try JSONEncoder().encode(Self.captionResponses).write(to: directory.appendingPathComponent("caption-responses.json"))
-        let environment = [
-            "LIVELINGO_MLX_PYTHON": URL(fileURLWithPath: "/").appendingPathComponent("usr/bin/python3").path,
-            "LIVELINGO_MLX_WORKER": script.path,
-            "LIVELINGO_MLX_MODELS": models.path,
-            "LIVELINGO_MLX_STATE": directory.appendingPathComponent("state").path
-        ]
-        var previous: [String: String?] = [:]
-        for (key, value) in environment {
-            previous[key] = .some(ProcessInfo.processInfo.environment[key])
-            setenv(key, value, 1)
-        }
-        let restoreEnvironment = previous
+        var configuration = MLXRuntime.TestConfiguration(python: python, script: script,
+            models: models, state: directory.appendingPathComponent("state/fixture"))
+        configuration.modelDirectories = relativeModels.mapValues { models.appendingPathComponent($0) }
+        configuration.interpreterArguments = ["-I", "-u"]
+        let runtime = MLXRuntime(testConfiguration: configuration)
         addTeardownBlock {
-            await MLXRuntime.shared.unload(QwenModelProfile.highQuality.translationModel)
-            await MLXRuntime.shared.unload(QwenModelProfile.energySaver.translationModel)
-            for (key, value) in restoreEnvironment {
-                if let value { setenv(key, value, 1) } else { unsetenv(key) }
-            }
+            await runtime.unload(QwenModelProfile.highQuality.translationModel)
+            await runtime.unload(QwenModelProfile.energySaver.translationModel)
         }
+        return runtime
     }
 
     func testSyntheticLessonMatchesFrozenDefaultTarget() async throws {
@@ -297,7 +299,7 @@ final class DefaultTargetGoldenTests: XCTestCase {
         XCTAssertEqual(actual.reviewPrefixDigest, expected.reviewPrefixDigest)
     }
 
-    private final class GoldenDefaults: UserDefaults, @unchecked Sendable {
+    private final class GoldenDefaults: TestUserDefaults, @unchecked Sendable {
         override func string(forKey defaultName: String) -> String? {
             defaultName == "LiveLingo.modelMode" ? "highQuality" : nil
         }
@@ -315,7 +317,14 @@ final class DefaultTargetGoldenTests: XCTestCase {
             try JSONDecoder().decode(TranscriptSegment.self, from: Data($0.utf8))
         }
         let directory = try temporaryDirectory()
-        try await installFakeWorker(in: directory)
+        let runtime = try installFakeWorker(in: directory)
+        try await MLXRuntime.$testRuntime.withValue(runtime) {
+            try await assertAppModelLesson(expected: expected, sources: sources, directory: directory, runtime: runtime)
+        }
+    }
+
+    private func assertAppModelLesson(expected: Golden, sources: [TranscriptSegment], directory: URL,
+                                     runtime: MLXRuntime) async throws {
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
         await queue.shutdownForTesting()
@@ -327,7 +336,11 @@ final class DefaultTargetGoldenTests: XCTestCase {
         // process at the end of that production path is replaced by a double.
         let model = AppModel(reviewQueue: queue, translation: .live, notes: .live,
             backgroundServices: false, scheduledNotes: false, defaults: defaults)
-        addTeardownBlock { await model.resetTranslationSessionForTesting()?.value }
+        addTeardownBlock {
+            await MLXRuntime.$testRuntime.withValue(runtime) {
+                await model.resetTranslationSessionForTesting()?.value
+            }
+        }
         for source in sources {
             let before = try workerRequests(in: directory).count
             model.receiveIdentifiedCaptionForTesting(.init(id: source.id, startTime: source.startTime,

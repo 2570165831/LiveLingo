@@ -96,7 +96,7 @@ struct CLITranslationFailureTests {
         let suite = "LiveLingo-Test-" + UUID().uuidString
         let cleanup = try TestPreferenceCleanup(suite: suite)
         preferenceCleanups.append(cleanup)
-        guard let defaults = UserDefaults(suiteName: suite) else {
+        guard let defaults = TestUserDefaults(suiteName: suite) else {
             throw Failure(check: "isolated_preferences_unavailable")
         }
         defaults.setVolatileDomain(["LiveLingo.modelMode": ModelMode.energySaver.rawValue], forName: UserDefaults.argumentDomain)

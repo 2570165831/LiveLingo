@@ -34,7 +34,7 @@ final class CaptionStabilityDraftTests: XCTestCase {
             .appendingPathComponent("LiveLingo-StabilityDraft-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-StabilityDraft-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Draft acceptance must not invoke review")

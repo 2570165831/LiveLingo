@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import pwd
 import shutil
 import signal
 import struct
@@ -628,7 +629,10 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertFalse((case / "zip-receipt").exists())
 
     def test_protected_and_symlinked_output_locations(self):
-        for output in ("/Applications/LiveLingo.dmg", "/System/tmp/a.dmg", "/Library/a.dmg", "/usr/a.dmg", "/Volumes/a.dmg", str(Path.home() / "a.dmg")):
+        # The release child has no HOME override. Use its account boundary,
+        # rather than the calling shell's potentially unrelated HOME value.
+        account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        for output in ("/Applications/LiveLingo.dmg", "/System/tmp/a.dmg", "/Library/a.dmg", "/usr/a.dmg", "/Volumes/a.dmg", str(account_home / "a.dmg")):
             with self.subTest(output=output):
                 result, events, _ = self.run_case("protected-output", ["--output", output])
                 self.assertNotEqual(result.returncode, 0); self.assertEqual(events, [])

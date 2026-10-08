@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class SpanishFrenchCaptionTests: XCTestCase {
-    private final class TargetDefaults: UserDefaults, @unchecked Sendable {
+    private final class TargetDefaults: TestUserDefaults, @unchecked Sendable {
         var locale = "es"
         override func string(forKey key: String) -> String? {
             key == "LiveLingo.outputLanguage" ? locale : super.string(forKey: key)

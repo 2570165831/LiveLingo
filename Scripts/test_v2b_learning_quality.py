@@ -206,7 +206,11 @@ class V2bProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         location = os.environ.get("LIVELINGO_QUALITY_TEST_DIRECTORY")
-        if not location or not Path(location).is_absolute():
+        if not location:
+            temporary = tempfile.TemporaryDirectory(prefix='livelingo-v2b-')
+            cls.addClassCleanup(temporary.cleanup)
+            location = temporary.name
+        if not Path(location).is_absolute():
             raise RuntimeError("Set LIVELINGO_QUALITY_TEST_DIRECTORY to an absolute isolated evidence directory")
         cls.root = Path(location)
         cls.root.mkdir(parents=True, exist_ok=True)

@@ -908,25 +908,8 @@ final class FullScreenClassModeTests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
 
-        let environment = ProcessInfo.processInfo.environment
-        guard let configured = environment["LIVELINGO_FULLSCREEN_SCREENSHOTS"] else { return }
-        guard let requestedRoot = environment["LIVELINGO_TEST_WORKSPACE"], requestedRoot.hasPrefix("/"),
-              requestedRoot != "/", configured.hasPrefix("/") else {
-            throw CocoaError(.fileWriteInvalidFileName)
-        }
-        let root = URL(fileURLWithPath: requestedRoot, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
-        let directory = URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
-        let expected = root.appendingPathComponent("screenshots", isDirectory: true).standardizedFileURL
-        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
-        let testHome = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).resolvingSymlinksInPath()
-        guard root == fixture.root, directory.path == expected.path,
-              temporary.path.hasPrefix(root.path + "/"), testHome.path.hasPrefix(root.path + "/") else {
-            throw CocoaError(.fileWriteInvalidFileName)
-        }
+        let directory = fixture.root.appendingPathComponent("fullscreen-screenshots", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard directory.resolvingSymlinksInPath().path == expected.path else {
-            throw CocoaError(.fileWriteInvalidFileName)
-        }
         try png.write(to: directory.appendingPathComponent(name + ".png"), options: .atomic)
     }
 }
@@ -1524,7 +1507,7 @@ private final class FSCFixture {
         base.model.preventIdleSleepWhileRecording = false
         let suite = "FullScreenClassMode-\(UUID().uuidString)"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         testCase.addTeardownBlock { try cleanup.remove() }
         if let savedEnabled { defaults.set(savedEnabled, forKey: FullScreenClassModeController.preferenceKey) }
         self.suite = suite

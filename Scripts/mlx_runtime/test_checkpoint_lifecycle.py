@@ -31,6 +31,7 @@ GIB = 1024 ** 3
 CHECKPOINT_BYTES = 3 * GIB
 PRUNE_BUDGET_BYTES = 4 * GIB
 STALE_NAMES = ('1' * 64, '2' * 64)
+CHECKPOINT_MTIME = 1_700_000_000
 
 BOOT = r'''
 import hashlib
@@ -76,6 +77,7 @@ class Generation:
         # Sparse on purpose: nominal size drives the worker's prune budget.
         with open(path, 'ab') as handle:
             handle.truncate(checkpoint_bytes)
+        os.utime(path, (1_700_000_000, 1_700_000_000))
 
     @classmethod
     def restore(cls, engine, path, expected_identity):
@@ -152,6 +154,9 @@ class WorkerSession:
         self._pending = []
         self._events = queue.Queue()
         environment = dict(os.environ, FAKE_CHECKPOINT_BYTES=str(checkpoint_bytes))
+        for name in ('LIVELINGO_MLX_CACHE_LIMIT_MB', 'LIVELINGO_MLX_MEMORY_LOG_SECONDS',
+                     'LIVELINGO_MLX_IDLE_CACHE_RELEASE_SECONDS', 'LIVELINGO_SCOREBOARD_TIMINGS'):
+            environment.pop(name, None)
         self.process = subprocess.Popen(
             [sys.executable, '-B', '-c', boot, str(ROOT), str(self.state)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -316,7 +321,7 @@ class CheckpointLifecycleTests(unittest.TestCase):
         prompt = 'note-keep'
         with self.worker_state() as (directory, worker):
             kept = checkpoint_path(directory, prompt)
-            now = time.time()
+            now = CHECKPOINT_MTIME
             stale = [create_placeholder(directory / (name + '.safetensors'), mtime=now - 3600)
                      for name in STALE_NAMES]
             worker.send(**note_command('a', prompt))
@@ -341,7 +346,7 @@ class CheckpointLifecycleTests(unittest.TestCase):
             worker.send(op='pause', id='slow', controlID='pause-slow')
             self.assertEqual(worker.wait_for('paused', 'slow')['state'], 'saved')
             self.assertTrue(paused_path.is_file())
-            now = time.time()
+            now = CHECKPOINT_MTIME
             os.utime(paused_path, (now - 3600, now - 3600))
             stale = create_placeholder(directory / ('3' * 64 + '.safetensors'), mtime=now - 1800)
             worker.send(**note_command('b', prompt_note))
@@ -368,7 +373,7 @@ class CheckpointLifecycleTests(unittest.TestCase):
             worker.send(op='checkpoint', id='slow', controlID='checkpoint-slow')
             self.assertEqual(worker.wait_for('checkpoint', 'slow')['state'], 'saved')
             self.assertTrue(active_path.is_file())
-            now = time.time()
+            now = CHECKPOINT_MTIME
             os.utime(active_path, (now - 3600, now - 3600))
             stale = create_placeholder(directory / ('4' * 64 + '.safetensors'), mtime=now - 1800)
             worker.send(**note_command('b', prompt_note))

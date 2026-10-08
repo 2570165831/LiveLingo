@@ -536,7 +536,7 @@ final class MultilingualLearningNotesTests: XCTestCase {
         let fixture = try multilingualV2bFixture()
         let suite = "LiveLingo-V2bRecovery-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveLingo-V2bRecovery-\(UUID())", isDirectory: true)
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("review.json"),
