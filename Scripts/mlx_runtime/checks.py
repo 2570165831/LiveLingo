@@ -2,7 +2,9 @@
 No eval, SymPy parse_expr, inferred values, model calls or network access.
 """
 import ast
+import math
 import re
+from decimal import Decimal
 import sympy as sp
 import pint
 from chempy import Substance
@@ -57,6 +59,25 @@ def reaction(expression):
     return totals[0] == totals[1], '仅核对元素与电荷守恒，不判断反应能否发生或条件是否成立'
 
 
+def rounding_step(side, language=None):
+    """Half a unit in the last digit of the side's number as typed. Plain
+    integers and zero are exact. es/fr normalization drops trailing zeros
+    ('1,50' -> '15e-1'), so the written precision comes from the raw literal."""
+    side = side.strip()
+    if language in ('es', 'fr'):
+        from latin_numbers import literals
+        raw, start, _, value = next(literals(side, language), (side, 1, 0, '0e0'))
+        if start: return 0
+        digits = re.sub(r'\D', '', re.split('[eE]', raw)[0])
+        coefficient, power = value.split('e')
+        last = int(power) - (len(digits) - len(digits.rstrip('0')))
+    else:
+        raw = coefficient = QUANTITY.fullmatch(side)[1]
+        last = Decimal(raw).as_tuple().exponent
+    if Decimal(coefficient) == 0 or (last == 0 and not re.search('[eE]', raw)): return 0
+    return float(Decimal(5).scaleb(last - 1))
+
+
 def check(expression, language=None):
     expression = expression.strip()
     result = dict(expression=expression, status='unable', scope='无法核算')
@@ -64,6 +85,7 @@ def check(expression, language=None):
         if '->' in expression or '→' in expression:
             ok, scope = reaction(expression); method='ChemPy'
         else:
+            written = expression
             if language in ('es', 'fr'):
                 from latin_numbers import normalize_expression
                 expression = normalize_expression(expression, language)
@@ -82,8 +104,14 @@ def check(expression, language=None):
                 if a.dimensionality != b.dimensionality:
                     ok=False; scope='等号两侧量纲不一致'
                 else:
-                    value = a.to(b.units).magnitude
-                    ok=abs(value-b.magnitude) <= 1e-9*max(abs(value),abs(b.magnitude),1e-12)
+                    value, expected = a.to(b.units).magnitude, b.magnitude
+                    # Relative at any magnitude, plus the rounding implied by
+                    # the digits written on either side (1 eV = 1.602e-19 J).
+                    # No absolute floor, and opposite signs never agree.
+                    step_a, step_b = (rounding_step(side, language) for side in written.split('='))
+                    slack = max(step_b, abs(UNITS.Quantity(a.magnitude+step_a, a.units).to(b.units).magnitude-value))
+                    ok = math.isclose(value, expected, rel_tol=1e-9, abs_tol=0) or (
+                        value*expected > 0 and abs(value-expected) <= slack)
                     scope='仅核对写出的单位换算；不判断量的归属或题设'
                 method='Pint'
             else:
