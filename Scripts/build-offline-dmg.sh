@@ -183,6 +183,9 @@ if [[ -z "${resume_stage}" ]]; then
     [[ -e "${signed_app}/${relative_path}" ]] || \
       fail "App 不是完整离线候选，缺少：${relative_path}（先用 Scripts/bundle-mlx-app.py 组装）"
   done
+  # Weights, every indexed shard and loader files; reads only JSON and safetensors headers.
+  "${python_bin}" "${project_root}/Scripts/model_files.py" check --app "${signed_app}" || \
+    fail "App 内模型文件不完整（缺权重、分片或分词器等），拒绝打包；先用 Scripts/bundle-mlx-app.py 重新组装"
 
   forbidden_hits="$(/usr/bin/find "${signed_app}" \
     \( -name 'Payload' -o -name '*.command' -o -name '*.xctest' -o -iname '*livelingo-cli*' \

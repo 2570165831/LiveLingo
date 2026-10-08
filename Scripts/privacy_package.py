@@ -414,6 +414,7 @@ def inspect_safetensors(path, size, counts):
             raise PrivacyError("invalid-package-safetensors")
     counts["metadata_files"] += 1
     counts["opaque_binary_files"] += 1
+    return header
 
 
 def inspect_metadata_file(path, counts, public_copy):

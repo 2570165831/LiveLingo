@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from Scripts import privacy_package as privacy
+from Scripts.test_model_files import write_model
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -407,8 +408,7 @@ class PrivacyPackageTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["privacyPackage"], "passed")
 
-    def test_bundle_entry_point_omits_recovery_and_sanitizes_legacy_manifest(self):
-        bundle = load_script("bundle-mlx-app")
+    def bundle_inputs(self, bundle):
         repo = self.root / "repo"
         for path in ("LICENSE", "Packaging/THIRD_PARTY_NOTICES.md", "Scripts/qwen_asr_service.py"):
             self.write(path, "synthetic public file", repo)
@@ -434,20 +434,30 @@ class PrivacyPackageTests(unittest.TestCase):
         self.write(".cli-runtime/run.json", root=runtime)
         models = self.root / "models"
         for relative in [r for r, _ in bundle.LANGUAGE_MODELS] + [r for r, _, _ in bundle.ASR_MODELS]:
-            self.write(relative + "/config.json", '{"model_type":"synthetic"}', models)
+            write_model(models / relative, bundle.REQUIRED_MODEL_FILES[relative],
+                        {"model-00001-of-00002.safetensors": ["a.weight"],
+                         "model-00002-of-00002.safetensors": ["b.weight"]})
             self.write(relative + "/.migration-source-fixture/transcript.txt", root=models)
         asr = self.root / "asr-python"
         self.write("bin/python3", "synthetic interpreter", asr)
         (asr / "lib/python3.13").mkdir(parents=True)
         output = self.root / "candidate/LiveLingo.app"
-        before = original.read_bytes()
         args = ["bundle-mlx-app.py", "--app", str(app), "--runtime", str(runtime), "--models", str(models),
                 "--asr-models", str(models), "--asr-python", str(asr), "--output", str(output),
                 "--asr-service", str(repo / "Scripts/qwen_asr_service.py")]
+        return repo, app, original, models, output, args
+
+    def run_bundle(self, bundle, repo, args):
         with patch.object(bundle, "REPO_ROOT", repo), patch.object(bundle, "is_apfs", return_value=False), \
              patch.object(bundle, "repair_portable_asr_dylib_links"), patch.object(sys, "argv", args), \
              contextlib.redirect_stdout(io.StringIO()):
             bundle.main()
+
+    def test_bundle_entry_point_omits_recovery_and_sanitizes_legacy_manifest(self):
+        bundle = load_script("bundle-mlx-app")
+        repo, app, original, _, output, args = self.bundle_inputs(bundle)
+        before = original.read_bytes()
+        self.run_bundle(bundle, repo, args)
         public = json.loads((output / "Contents/Resources/LanguageRuntime/runtime-manifest.json").read_text())
         self.assertEqual(public["python"], "python")
         self.assertEqual(public["components"][0]["source"], self.manifest()["components"][0]["source"])
@@ -456,6 +466,47 @@ class PrivacyPackageTests(unittest.TestCase):
         self.assertFalse(any(p.name.startswith(".migration-source") for p in output.rglob("*")))
         self.assertFalse((output / "Contents/Resources/LanguageRuntime/.cli-runtime").exists())
         privacy.inspect_tree(output)
+        for relative in bundle.REQUIRED_MODEL_FILES:
+            self.assertTrue((output / "Contents/Resources/Models" / relative / "model-00002-of-00002.safetensors").is_file())
+
+    def test_bundle_entry_point_refuses_models_missing_weights_shards_or_loader_files(self):
+        bundle = load_script("bundle-mlx-app")
+        repo, _, _, models, output, args = self.bundle_inputs(bundle)
+        damage = {"shard": "lmstudio-community/Qwen3.5-9B-MLX-4bit/model-00002-of-00002.safetensors",
+                  "tokenizer": "mlx-community/Qwen3.5-4B-MLX-8bit/tokenizer.json",
+                  "asr-vocabulary": "mlx-community/Qwen3-ASR-1.7B-4bit/merges.txt"}
+        for kind, relative in damage.items():
+            with self.subTest(kind=kind):
+                path = models / relative
+                data = path.read_bytes()
+                path.unlink()
+                with self.assertRaises(SystemExit) as raised:
+                    self.run_bundle(bundle, repo, args)
+                self.assertIn("model source " + str(Path(relative).parent) + " is incomplete", str(raised.exception))
+                self.assertIn(path.name, str(raised.exception))
+                self.assertFalse(output.exists())
+                path.write_bytes(data)
+        # The no-index fallback still needs at least one model*.safetensors file.
+        parakeet = models / "mlx-community/parakeet-tdt-0.6b-v2"
+        for name in ("model.safetensors.index.json", "model-00001-of-00002.safetensors",
+                     "model-00002-of-00002.safetensors"):
+            (parakeet / name).unlink()
+        with self.assertRaises(SystemExit) as raised:
+            self.run_bundle(bundle, repo, args)
+        self.assertIn("no model*.safetensors weights", str(raised.exception))
+        self.assertFalse(output.exists())
+
+    def test_bundle_final_check_rejects_a_candidate_with_a_missing_shard(self):
+        bundle = load_script("bundle-mlx-app")
+        repo, _, _, _, output, args = self.bundle_inputs(bundle)
+        self.run_bundle(bundle, repo, args)
+        bundle.check_required_paths(output)
+        (output / "Contents/Resources/Models/mlx-community/Qwen3-ASR-1.7B-4bit/model-00001-of-00002.safetensors").unlink()
+        with self.assertRaises(SystemExit) as raised:
+            bundle.check_required_paths(output)
+        self.assertIn("mlx-community/Qwen3-ASR-1.7B-4bit: missing weight file: model-00001-of-00002.safetensors",
+                      str(raised.exception))
+        self.assertNotIn(str(self.root), str(raised.exception))
 
     def test_unsigned_release_entry_point_checks_product_before_signing(self):
         source = (ROOT / "Scripts/build-release.sh").read_text()

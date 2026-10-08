@@ -29,6 +29,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+from model_files import REQUIRED_MODEL_FILES, ModelFilesError, check_app_models, check_model_files
 from privacy_package import PrivacyError, copy_distribution_tree, distribution_manifest, inspect_tree
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -204,6 +205,9 @@ def check_required_paths(app_root):
     missing = [relative for relative in required if not (app_root / relative).exists()]
     if missing:
         fail("assembled candidate is incomplete: " + ", ".join(missing))
+    problems = check_app_models(app_root)
+    if problems:
+        fail("assembled candidate has incomplete models:\n  " + "\n  ".join(problems))
 
 
 def validate_asr_python(root):
@@ -277,6 +281,13 @@ def main():
                         for relative, notice in LANGUAGE_MODELS]
     asr_sources = [(relative, resolve_model_source(args.asr_models, relative), license_notice, card_notice)
                    for relative, license_notice, card_notice in ASR_MODELS]
+    # Fail before copying gigabytes when a source lacks weights, a shard or a
+    # tokenizer file; the assembled candidate is checked again at the end.
+    for relative, source in [(r, s) for r, s, _ in language_sources] + [(r, s) for r, s, _, _ in asr_sources]:
+        try:
+            check_model_files(source, REQUIRED_MODEL_FILES[relative])
+        except ModelFilesError as error:
+            fail("model source %s is incomplete: %s" % (relative, error.args[0]))
 
     # The Release build must not ship test artifacts, and the source app must not
     # already carry a runtime, because destinations are never overwritten.
