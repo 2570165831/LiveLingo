@@ -151,6 +151,33 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
+    func testLeChatelierCorrectionRequiresChemicalEquilibriumEvidence() {
+        let chemistry = "Adding more reactant shifts the equilibrium to the right."
+        // Real principle names, comparisons and mechanics wording stay as spoken.
+        for (source, recent) in [
+            ("Compare Lagrange's principle with Le Chatelier's principle when discussing equilibrium and stress.", ""),
+            ("Compare Lagrange's principle with Le Chatelier's principle when discussing equilibrium and stress.", chemistry),
+            ("In static equilibrium, Lagrange's principle of virtual work gives the stress in each member.", ""),
+            ("At equilibrium the stress concentration follows from Lagrange's principle.", ""),
+            ("The Lagrange's principle and stresses in disequilibrium.", ""),
+            ("Schrodinger's principle links equilibrium and stress in this quantum model.", "")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), source, source)
+        }
+        for (source, recent, expected) in [
+            ("Lashari's principle says the equilibrium shifts to relieve the stress.", "",
+             "Le Chatelier's principle says the equilibrium shifts to relieve the stress."),
+            ("Lagrange's principle tells us how the system responds to stress.", chemistry,
+             "Le Chatelier's principle tells us how the system responds to stress."),
+            ("The Lagrange's principle explains the stress on an equilibrium when K c is fixed.", "",
+             "The Le Chatelier's principle explains the stress on an equilibrium when K c is fixed.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), expected, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(expected, recentContext: recent), expected,
+                           "Normalization must be idempotent")
+        }
+    }
+
     func testIncompleteOrUnsupportedSpokenNumbersStayUnchanged() {
         for source in ["Use one hundred fifty parts per million.",
                        "Use twenty and five parts per million.",

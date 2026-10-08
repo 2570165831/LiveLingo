@@ -2882,7 +2882,22 @@ enum AcademicInputNormalizer {
            normalized.range(of: "principle", options: .caseInsensitive) != nil,
            normalized.range(of: "stress", options: .caseInsensitive) != nil {
             normalized = replacing(
-                pattern: #"\b(?:The\s+)?(?:Schrodinger|Lashari|Lagrange|Le\s+Chatelier)'?s\s+principle\b"#,
+                pattern: #"\bLe\s+Chatelier'?s\s+principle\b"#,
+                in: normalized,
+                with: "Le Chatelier's principle"
+            )
+        }
+        // ASR often hears Le Chatelier as these names, but Lagrange's and
+        // Schrodinger's principles are real in mechanics and quantum courses.
+        // Rewrite only with chemical-equilibrium evidence in this segment or
+        // recent context, and never beside Le Chatelier itself (a comparison).
+        let equilibriumContext = recentContext + " " + normalized
+        if normalized.range(of: "Chatelier", options: .caseInsensitive) == nil,
+           contains(#"\bequilibri(?:um|a)\b"#, in: equilibriumContext),
+           contains(#"\bstress(?:es|ed)?\b"#, in: equilibriumContext),
+           contains(chemicalEquilibriumCue, in: equilibriumContext) {
+            normalized = replacing(
+                pattern: #"\b(?:Schrodinger|Lashari|Lagrange)'?s\s+principle\b"#,
                 in: normalized,
                 with: "Le Chatelier's principle"
             )
@@ -2952,6 +2967,14 @@ enum AcademicInputNormalizer {
             in: text, with: "s = ut + ½at²"
         )
         return text
+    }
+
+    // Mechanics also has equilibrium, stress, reactions and stress
+    // concentration, so each cue must be specific to chemical equilibrium.
+    private static let chemicalEquilibriumCue = #"\b(?:reactants?|reagents?|(?<!stress\s)concentrations?|(?:chemical|reversible|forward|reverse)\s+reactions?|equilibrium\s+(?:shifts?|shifted|constant|mixture)|shifts?\s+the\s+equilibrium|products?\s+side|exothermic|endothermic|partial\s+pressures?)\b|(?-i:\bK\s*(?:sub\s+)?[cp]\b)"#
+
+    private static func contains(_ pattern: String, in source: String) -> Bool {
+        source.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     private static func replacing(pattern: String, in source: String, with replacement: String) -> String {
