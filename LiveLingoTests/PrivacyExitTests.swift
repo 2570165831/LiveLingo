@@ -144,6 +144,52 @@ final class PrivacyExitTests: XCTestCase {
                        "synthetic save progress")
     }
 
+    func testUnchangedSaveConfirmationDoesNotRenewExitDeadline() async throws {
+        let (model, directory, initial) = try makeModel()
+        try await model.beginSavedCourseForTesting(directory: directory)
+        var configuration = initial
+        let gate = PrivacyExitGate()
+        configuration.stopCapture = { _ in await gate.wait() }
+        model.configurePrivacyExitForTesting(configuration)
+        let deadline = ExitDeadline(inactivityTimeout: 10)
+        let exit = Task { await model.prepareForApplicationExit(deadline: deadline) }
+        defer { gate.release() }
+        let enteredBy = ContinuousClock.now.advanced(by: .seconds(2))
+        while !gate.entered, ContinuousClock.now < enteredBy { await Task.yield() }
+        XCTAssertTrue(gate.entered)
+
+        // Persist the exit's paused state first. The following submission must
+        // reach the real saver callback without another durable write.
+        try await model.flushSavedCourseForTesting()
+        let snapshotURL = directory.appendingPathComponent(SessionStore.snapshotFileName)
+        let journalURL = directory.appendingPathComponent(SessionStore.journalFileName)
+        let snapshot = try Data(contentsOf: snapshotURL)
+        let journal = try Data(contentsOf: journalURL)
+        let remaining = deadline.remaining
+        try await Task.sleep(for: .milliseconds(50))
+        try await SensitiveFileIO.$operationObserver.withValue({ operation in
+            if operation == .directorySync { XCTFail("An unchanged save must not sync storage") }
+        }) {
+            try await model.flushSavedCourseForTesting()
+        }
+        XCTAssertLessThanOrEqual(deadline.remaining, remaining,
+                                 "Acknowledging unchanged content must not renew the exit lease")
+        XCTAssertEqual(try Data(contentsOf: snapshotURL), snapshot)
+        XCTAssertEqual(try Data(contentsOf: journalURL), journal)
+
+        // A genuine course update still renews the shared storage binding.
+        model.loadPresentationForTesting(phase: .recording, evidence: [
+            .init(startTime: 0, endTime: 1, english: "Synthetic exit storage progress.")
+        ])
+        let beforeWrite = deadline.remaining
+        try await model.flushSavedCourseForTesting()
+        XCTAssertGreaterThan(deadline.remaining, beforeWrite)
+        XCTAssertNotEqual(try Data(contentsOf: snapshotURL), snapshot)
+        gate.release()
+        let allowed = await exit.value
+        XCTAssertTrue(allowed)
+    }
+
     func testPreexistingDetachedWriterRenewsOnlyWithActualStorageProgress() async throws {
         let (_, directory, _) = try makeModel()
         let binding = ExitDeadline.StorageProgress(), gate = PrivacyExitGate()

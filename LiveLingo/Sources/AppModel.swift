@@ -2108,7 +2108,8 @@ final class AppModel: ObservableObject {
             guard let self, let saver, self.sessionID == boundID,
                   self.sessionSaver === saver, saved.sessionID == boundID,
                   SessionDirectoryLocation.canonical(saver.directory) == SessionDirectoryLocation.canonical(directory) else { return }
-            self.applicationExitDeadline?.recordProgress()
+            // Durable writes renew the exit lease through StorageProgress.
+            // An unchanged save still reconciles its acknowledged counters.
             self.sessionSnapshot?.storageRevision = saved.storageRevision
             self.sessionSnapshot?.lastJournalSequence = saved.lastJournalSequence
             self.sessionSnapshot?.lastJournalDigest = saved.lastJournalDigest
