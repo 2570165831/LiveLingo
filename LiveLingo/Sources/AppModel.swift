@@ -931,6 +931,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var isManualTranslating = false
     private var manualTranslationTask: Task<Void, Never>?
     private var manualRequestInFlight = false
+    /// A normal typed request waits only for the caption in flight; precise
+    /// (thinking) requests keep waiting behind the whole caption backlog.
+    private var manualTranslationAwaitingSlot = false
     @Published var outputDirectory: URL?
     @Published private(set) var recoverableRecordings: [SessionWorkspace.RecordingRecovery] = []
     private var recordingRecoveryDirectory: URL?
@@ -3341,10 +3344,12 @@ final class AppModel: ObservableObject {
         let target = captionTarget
         isManualTranslating = true
         manualTranslationOutput = ""
-        manualTranslationStatus = thinking ? "精确翻译：等待当前字幕翻译或摘要完成…" : "等待当前字幕翻译或摘要完成…"
+        manualTranslationStatus = thinking ? "精确翻译：等待字幕翻译队列清空和摘要完成…" : "等待当前字幕翻译或摘要完成…"
+        manualTranslationAwaitingSlot = !thinking
         manualTranslationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
+                self.manualTranslationAwaitingSlot = false
                 self.manualRequestInFlight = false
                 self.isManualTranslating = false
                 self.manualTranslationTask = nil
@@ -3358,6 +3363,7 @@ final class AppModel: ObservableObject {
                     try await Task.sleep(for: .milliseconds(100))
                 }
                 try Task.checkCancellation()
+                self.manualTranslationAwaitingSlot = false
                 self.manualRequestInFlight = true
                 let modelName = self.effectiveProfile.translationModel
                 self.manualTranslationStatus = thinking ? "精确翻译中 · 思考已开启 · \(modelName)" : "翻译中 · \(modelName)"
@@ -3733,9 +3739,15 @@ final class AppModel: ObservableObject {
         return queued
     }
 
+    /// Captions pause after the current one only when the waiting typed
+    /// request can run next; a running summary or stop keeps them flowing.
+    private var captionWorkerShouldYieldToManual: Bool {
+        manualTranslationAwaitingSlot && summaryTask == nil && phase != .stopping
+    }
+
     private func drainTranslationQueue() {
         guard !preparingApplicationExit, applicationExitDeadline?.isExpired != true,
-              !processingPaused, !manualRequestInFlight,
+              !processingPaused, !manualRequestInFlight, !captionWorkerShouldYieldToManual,
               (summaryTask == nil || summaryConcurrencyAllowed),
               translationWorker == nil, hasPendingTranslationWork else { return }
         let currentGeneration = generation
@@ -3753,7 +3765,7 @@ final class AppModel: ObservableObject {
                     self.updateReviewAvailability()
                 }
             }
-            while !Task.isCancelled, !self.processingPaused,
+            while !Task.isCancelled, !self.processingPaused, !self.captionWorkerShouldYieldToManual,
                   currentGeneration == self.generation, currentSession == self.sessionID,
                   self.translationWorkerID == workerID {
                 if !self.hasPendingTranslationWork, !self.requeueRecoveredTransportCaptions() { break }
