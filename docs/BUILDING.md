@@ -24,17 +24,20 @@ xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo \
 
 ```sh
 ./Scripts/build-preview-app.sh
-# 可选：只引用本机正式包的模型，不复制模型或运行库
-./Scripts/build-preview-app.sh --reference-installed-models
+# Release 预览构建与标准 Debug 测试复用同一份缓存
+./Scripts/build-preview-app.sh --output-root /absolute/path/to/work/preview2 \
+  --derived-data /absolute/path/to/work/preview2/dd-test
 ```
 
-脚本离线构建，默认输出到源码目录旁的 `../work/preview/package-<提交>-<随机串>/LiveLingo 预览版.app`，DerivedData 复用该根目录下的 `dd-build-arm64`。默认原生 arm64：destination 与 `ARCHS` 都显式指定 arm64，`ONLY_ACTIVE_ARCH=YES`；打包前用 `lipo -archs` 核对实际架构。仅在明确传入 `--arch x86_64` 时构建 Intel 包。可用 `--output-root /绝对路径` 指定专属目录。不会安装、启动或覆盖已有预览包。Xcode 会自动向 Launch Services 登记构建产物的位置，这是构建副作用，不等于安装；预览包始终使用独立 bundle ID，脚本不改系统偏好或文件关联设置。`receipt.json` 记录实际路径、大小（不跟随模型引用）、架构、Info.plist、完整源提交与是否有未提交改动；构建号含提交短哈希，脏工作区另带 `.dirty`。`codesign-display.log` 保存 `codesign -dv --verbose=4` 的只读结果。
+脚本离线构建，默认输出到源码目录旁的 `../work/preview2/package-<提交>-<随机串>/LiveLingo 预览版.app`，只复用根目录下的一份 `dd-test` DerivedData。默认原生 arm64：destination 与 `ARCHS` 都显式指定 arm64，`ONLY_ACTIVE_ARCH=YES`；打包前用 `lipo -archs` 核对实际架构。仅在明确传入 `--arch x86_64` 时构建 Intel 包。不会安装、启动或覆盖已有预览包。Xcode 可能向 Launch Services 登记构建产物位置，这是构建副作用，不等于安装；预览包始终使用独立 bundle ID，脚本不改系统偏好或文件关联设置。`receipt.json` 记录路径、实测大小、架构、Info.plist、完整源提交、签名及已签入的权限；构建号含提交短哈希，脏工作区另带 `.dirty`。`codesign-display.log` 保存 `codesign -dv --verbose=4` 结果，`signed-entitlements.plist` 是从实际签名读出的权限。构建日志在落盘前过滤进程环境诊断，不保存原始环境转储。
 
 bundle ID 固定为 `com.jianhongli.LiveLingo.preview`，显示名和窗口标题均为“LiveLingo 预览版”。只在这条构建命令中启用 `LIVELINGO_PREVIEW`；正式版的工程设置、bundle ID、模型定位、偏好和数据路径保持原有规则。
 
-**沙盒与数据**：正式版的 `LiveLingo.entitlements` 启用 App Sandbox、用户选择文件读写及 App scope 书签，不含共享 App Group。签名包的生效 entitlements 才构成系统沙盒；`ENABLE_APP_SANDBOX=YES` 或包内声明本身不能使未签名包进入沙盒。正式版容器是否存在也不能证明另一个未签名进程会受沙盒约束。
+**默认临时签名**：`--ad-hoc` 默认开启，`--sign -` 等价。先在关闭 Xcode 签名和链接器自动签名的状态下构建并检查所有 Mach-O，再由 `sign-preview-app.py` 对内部可执行文件、动态库、framework 和嵌套代码包由内向外签名，最后签 App；不使用 `codesign --deep` 代替逐层签名。只使用 `codesign --sign - --timestamp=none`，不访问证书或钥匙串，不公证。App 使用原有沙盒权限，子可执行文件使用沙盒继承权限；逐层严格验证后，还以 `--deep --strict` 复核 App 并要求所有 Mach-O 都为 `Signature=adhoc`、无 TeamIdentifier。Developer ID 路线默认关闭。
 
-| 数据 | 未签名预览版 | 将来授权签名且沙盒生效后 |
+**沙盒与数据**：`LiveLingo.entitlements` 启用 App Sandbox、用户选择文件读写及 App scope 书签，不含共享 App Group。ad-hoc 签名也会嵌入这些权限；单纯的链接器签名或 `ENABLE_APP_SANDBOX=YES` 不能证明已获得沙盒权限。回执读取实际签名，确认 `com.apple.security.app-sandbox=true`；由于脚本不启动 App，运行时权限执行及首次容器创建未验证，不能把静态签名结果说成已观察到的数据落盘。正常启动并初始化沙盒时使用下表路径。
+
+| 数据 | 显式 `--unsigned` | 默认 ad-hoc，沙盒正常初始化时 |
 | --- | --- | --- |
 | 偏好、窗口状态 | 独立 preview 偏好域，通常为 `~/Library/Preferences/com.jianhongli.LiveLingo.preview.plist` | preview 容器内的同名偏好域 |
 | App Support | `~/Library/Application Support/LiveLingoPreview/` | `~/Library/Containers/com.jianhongli.LiveLingo.preview/Data/Library/Application Support/LiveLingoPreview/` |
@@ -43,13 +46,13 @@ bundle ID 固定为 `com.jianhongli.LiveLingo.preview`，显示名和窗口标�
 | 课程、导出、导入媒体 | 根目录的 `Courses/`；拒绝打开、写入或迁移范围外的课程 | 同一限制，且系统额外实施沙盒权限 |
 | 临时录音、ASR 分块、重试音频 | 根目录的 `Temporary/`，会话使用独立 UUID | 同上 |
 
-预览版忽略 `LIVELINGO_PREFERENCES_SUITE`、`LIVELINGO_DATA_DIRECTORY` 与 `LIVELINGO_MLX_*` 的外部覆盖；不会继承正式版保存位置。当前保存目录只保存在 AppModel 内存中，没有单独的偏好书签；复查书签与检查点分别按上表隔离。保存位置按钮在预览版中固定指向自己的 `Courses/`，媒体导入也只接受其中的文件。不要把正式版课程放进去；若需查看合成课程，先放入独立测试副本。路径检查也遍历课程内部的链接，拒绝指向根目录外的内容；拒绝操作不会回退到正式版目录。上述未签名隔离来自应用代码，并非系统级沙盒保证。未签名进程还可能无法创建 App scope 安全书签（系统报 `Failed to retrieve app-scope key`），因此课程迁移、复查定位等依赖此类书签的操作不保证可用。
+预览版忽略 `LIVELINGO_PREFERENCES_SUITE`、`LIVELINGO_DATA_DIRECTORY` 与 `LIVELINGO_MLX_*` 的外部覆盖；不会继承正式版保存位置。当前保存目录只保存在 AppModel 内存中，没有单独的偏好书签；复查书签与检查点分别按上表隔离。保存位置按钮固定指向自己的 `Courses/`，媒体导入也只接受其中的文件。不要使用真实课堂数据；可用合成课程的独立测试副本。路径检查也遍历课程内部的链接，拒绝指向根目录外的内容；拒绝操作不会回退到正式版目录。显式未签名模式的隔离来自应用代码，不构成系统沙盒，安全书签也不保证可用。
 
-**体积与功能**：默认不带 `Models`、`LanguageRuntime` 或 `ASRRuntime`，也不预热 ASR。可验收窗口、布局、设置、浮动字幕和文件面板；录音转写、MLX 翻译、模型摘要、笔记生成与复查不能用。`--reference-installed-models` 检查 `/Applications/LiveLingo.app` 的正式 bundle ID，只在预览资源中建立 `Models` 软链接；正式包只被读取，不修改权限、模型或设置。它不会补齐 Python 运行库，因此引用后仍是界面试用包。软链接**不是只读挂载**：这里只保证本脚本与所打包代码不向模型目录写入，不声称对其他程序施加只读权限。授权沙盒签名与外部模型引用的组合直接报错；沙盒不会因为软链接就自动获准读取正式包资源，脚本不加临时例外、不借用正式版书签。
+**体积与功能**：默认不带 `Models`（包括软链接）、`LanguageRuntime` 或 `ASRRuntime`，也不预热 ASR。可试用窗口、布局、设置、浮动字幕和文件面板；录音转写、MLX 翻译、模型摘要、笔记生成与复查不能用。签名模式直接拒绝 `--reference-installed-models`，不会读取正式版模型。仅显式 `--unsigned --reference-installed-models` 的旧构建证据模式可建立模型引用，不补齐运行库；软链接不是只读挂载，也不会自动授予沙盒访问权限。
 
-**用户手动打开**：默认 arm64 包在严格未签名状态下仅作构建证据，不能直接在 Apple Silicon 上执行；右键“打开”不能补上缺失的代码签名。先取得下面的单独签名授权并生成签名预览包，再在 Finder 中打开回执里的 `.app`，无需放入 `/Applications`。若系统拦截来源不明的应用，先确认构建来源，再用 Finder 右键“打开”；部分系统版本需在“系统设置 → 隐私与安全性”中选择“仍要打开”。提示与入口会随系统版本、隔离属性和组织策略变化，未在本任务中实测；不要全局关闭 Gatekeeper。若系统提示损坏/策略禁止，或仍拒绝打开，停止并检查签名与系统策略，不承诺右键可以解决所有拦截。显式选择的 x86_64 包在 Apple Silicon 上依赖已安装的 Rosetta，脚本不安装它。
+**用户手动打开**：在 Finder 中打开回执里的“LiveLingo 预览版.app”，无需放入 `/Applications`。ad-hoc 不是受信任的 Developer ID 签名，Gatekeeper 评估可能拒绝，这是应记录的结果，不以此自动换证书、公证或修改系统策略。首次被拦时，确认构建来源后右键“打开”；较新的系统可能需在“系统设置 → 隐私与安全性”选择“仍要打开”。具体提示随系统版本、隔离属性及组织策略变化，本任务不实测启动。不要全局关闭 Gatekeeper；若提示损坏或仍打不开，检查签名与系统策略。确认 Finder 名称、菜单栏和窗口标题均有“预览版”，Info.plist 的 ID 为 `com.jianhongli.LiveLingo.preview`，构建号带 `preview` 与提交短哈希。完整中文步骤见 [PREVIEW-OPEN-zh-Hans.txt](PREVIEW-OPEN-zh-Hans.txt)，也随包提供。显式 `--unsigned` 的 arm64 包不能执行，右键不能补签名。
 
-**签名是可选且需另外授权的步骤**：Apple 链接器默认为 arm64 输出添加 ad-hoc 签名，`codesign -dv --verbose=4` 通常显示 `Signature=adhoc` 与 `flags=0x20002(adhoc,linker-signed)`；这种产物已有签名，不能称为完全未签名。`CODE_SIGNING_ALLOWED=NO` 只关闭 Xcode CodeSign 步骤。本预览脚本还以 `-Wl,-no_adhoc_codesign` 关闭链接器自动签名，并逐个检查 Mach-O 的 `LC_CODE_SIGNATURE`。因此默认 arm64 包没有 linker-signed 签名，实际打开前需要另行授权至少 ad-hoc 签名。当前可选步骤使用 Developer ID 与原有沙盒 entitlements，不接受 ad-hoc 身份，默认仍跳过。获准后运行：
+**开发者证书签名仅在另外明确授权后可选**：默认临时签名完全不走此分支。获准后才能显式指定身份、证书和钥匙串：
 
 ```sh
 ./Scripts/build-preview-app.sh --arch arm64 \
@@ -58,9 +61,9 @@ bundle ID 固定为 `com.jianhongli.LiveLingo.preview`，显示名和窗口标�
   --keychain /absolute/path/to/login.keychain-db
 ```
 
-脚本核对证书有效期及匹配的私钥身份，离线签名，不公证、不发布、不导入或解锁钥匙串。签名后的实际启动、容器与权限仍需用户真机复核。
+仅此可选路线核对证书有效期及匹配私钥身份，不公证、不发布、不导入或解锁钥匙串。当前任务只授权 ad-hoc，不能运行此路线。
 
-完整回归使用本页开头的标准 `xcodebuild test`：`-destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO`，DerivedData 和日志放入专属输出根目录，不额外强制 Intel 架构、不关闭链接器自动签名、不启用预览编译条件，也不以直接调用 `xctest` 代替。标准 arm64 测试产物可能带有链接器自动生成的 ad-hoc 签名，须与严格未签名的预览包分开记录；不额外执行签名命令。Xcode 会自动启动 App 测试宿主；scheme 设置 `LIVELINGO_UNIT_TESTING=1`，不创建正式 AppModel、不预热模型，这不等于用户打开 App 的界面验收。对实际完整测试日志执行 `check_build_warnings.py` 和 `check_test_preferences.py`，如实记录失败与未满足项。若回归失败，用相同标准命令在未修改的基线代码上复跑，不能仅凭一次失败断言是环境问题。
+完整回归使用标准 `xcodebuild test`：`-destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO`，DerivedData 复用输出根目录的 `dd-test`，不强制 Intel、不关闭测试链接器自动签名、不启用预览编译条件，也不以直接调用 `xctest` 代替。标准测试产物可能为 linker-signed，与交付预览包分开记录；不额外执行测试签名命令。Xcode 自动启动 App 测试宿主；scheme 的测试模式不创建正式 AppModel、不预热模型，这不等于启动交付预览包或完成 GUI 验收。日志用 `run-preview-tool.py --log /新的日志路径 -- /usr/bin/xcodebuild ...` 在落盘前过滤环境诊断；再执行 `check_build_warnings.py` 和 `check_test_preferences.py`。如实记录失败，不能仅凭一次失败断言是环境问题。
 
 `Scripts/recover-orphan-recordings.py` 检查异常退出后尚未收尾的 WAV。只在头部完整、编码支持且音频边界可确认时恢复；正常音频后的元数据、非零数据长度及结构不明确的文件不会被任意扩展。
 **默认只报告，加 `--export` 才写出新文件，源文件始终只读，也不覆盖已有同名输出**。恢复期间源文件变化时，该次输出不计为成功；参数见其 `--help`。

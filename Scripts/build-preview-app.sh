@@ -1,21 +1,26 @@
 #!/bin/bash
-# A local UI preview. No installation, launch, download or signing by default.
+# A local UI preview. Ad-hoc signing only by default; never installs or launches.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-output_root="${project_root}/../work/preview"
+output_root="${project_root}/../work/preview2"
+derived_data=""
 architecture=arm64
 reference_models=0
 installed_app=/Applications/LiveLingo.app
 identity=""
 certificate=""
 keychain=""
+signing_request=""
 
 usage() {
   cat <<'EOF'
 Usage: Scripts/build-preview-app.sh [options]
-  --output-root PATH          Dedicated output/cache root (default: ../work/preview)
-  --arch arm64|x86_64          Default arm64: native Apple Silicon (signing still skipped)
+  --output-root PATH          Dedicated output/cache root (default: ../work/preview2)
+  --derived-data PATH         Reusable cache inside output root (default: ROOT/dd-test)
+  --arch arm64|x86_64          Default arm64: native Apple Silicon
+  --ad-hoc                    Default: identity-free signing with sandbox entitlements
+  --unsigned                  Build evidence only; unsigned arm64 cannot launch
   --reference-installed-models Reference only the installed app's Models directory
   --installed-app PATH        Model source (default: /Applications/LiveLingo.app)
   --sign IDENTITY             OPTIONAL; requires separate user authorization
@@ -25,20 +30,32 @@ Usage: Scripts/build-preview-app.sh [options]
 
 No models or Python runtimes are copied. A model reference is a symlink used
 only for reads by this UI-only app; it is NOT a filesystem read-only mount.
-Signing is skipped unless --sign is explicit; ad-hoc identities are refused.
+Ad-hoc signing is enabled by default and never accesses a keychain or certificate.
+--sign - is an alias for --ad-hoc. Developer ID signing is opt-in only.
 Signed sandbox builds refuse external model references (no automatic grants).
 Unsigned arm64 cannot run on Apple Silicon until separately authorized signing.
 EOF
 }
 fail() { echo "Error: $*" >&2; exit 1; }
 argument() { [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "Missing value for $1"; }
+request_signing() {
+  [[ -z "$signing_request" || "$signing_request" == "$1" ]] || fail "Conflicting signing modes"
+  signing_request="$1"
+}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-root) argument "$@"; output_root="$2"; shift 2 ;;
+    --derived-data) argument "$@"; derived_data="$2"; shift 2 ;;
     --arch) argument "$@"; architecture="$2"; shift 2 ;;
     --reference-installed-models) reference_models=1; shift ;;
     --installed-app) argument "$@"; installed_app="$2"; shift 2 ;;
-    --sign) argument "$@"; identity="$2"; shift 2 ;;
+    --ad-hoc) request_signing adhoc; shift ;;
+    --unsigned) request_signing unsigned; shift ;;
+    --sign)
+      argument "$@"
+      if [[ "$2" == - ]]; then request_signing adhoc
+      else request_signing developer; identity="$2"; fi
+      shift 2 ;;
     --certificate) argument "$@"; certificate="$2"; shift 2 ;;
     --keychain) argument "$@"; keychain="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
@@ -47,11 +64,13 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$architecture" == x86_64 || "$architecture" == arm64 ]] || fail "Unsupported architecture"
 [[ "$output_root" == /* ]] || fail "--output-root must be an absolute path"
-[[ -z "$identity" || "$identity" != - ]] || fail "Ad-hoc signing is not supported"
-if [[ -z "$identity" ]]; then
+signing_mode="${signing_request:-adhoc}"
+if [[ "$signing_mode" != unsigned ]]; then
+  [[ "$reference_models" == 0 ]] || fail "Sandbox signing cannot grant access through a model symlink; external model references are refused"
+fi
+if [[ "$signing_mode" != developer ]]; then
   [[ -z "$certificate" && -z "$keychain" ]] || fail "Signing material requires explicit --sign"
 else
-  [[ "$reference_models" == 0 ]] || fail "Sandbox signing cannot grant access through a model symlink; external model references are refused"
   [[ -f "$certificate" && -f "$keychain" ]] || fail "--sign needs --certificate and --keychain"
   [[ "$identity" == "Developer ID Application: "* ]] || fail "Use an explicit Developer ID Application identity"
 fi
@@ -77,8 +96,20 @@ if root.exists() and not root.is_dir():
 print(root)
 PY
 )"
-derived_data="${output_root}/dd-build-${architecture}"
-[[ ! -L "$derived_data" && ( ! -e "$derived_data" || -d "$derived_data" ) ]] || fail "DerivedData must be an ordinary directory"
+derived_data="${derived_data:-${output_root}/dd-test}"
+derived_data="$(python3 - "$derived_data" "$output_root" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+root = Path(sys.argv[2])
+if not p.is_absolute() or any(item.is_symlink() for item in (p, *p.parents)):
+    raise SystemExit('DerivedData must be an absolute path without symbolic links')
+p = p.resolve()
+if root not in p.parents or (p.exists() and not p.is_dir()):
+    raise SystemExit('DerivedData must be an ordinary directory inside the output root')
+print(p)
+PY
+)"
 
 models=""
 if [[ "$reference_models" == 1 ]]; then
@@ -102,7 +133,7 @@ PY
 )"
 fi
 
-if [[ -n "$identity" ]]; then
+if [[ "$signing_mode" == developer ]]; then
   # Optional offline signing: validate certificate dates and the exact private
   # key identity. Never import/export/unlock a keychain or auto-select an identity.
   python3 - "$certificate" <<'PY'
@@ -128,7 +159,7 @@ dirty=0
 mkdir -p "$output_root"
 run_directory="$(/usr/bin/mktemp -d "${output_root}/package-${short_commit}-XXXXXX")"
 info_plist="${run_directory}/PreviewInfo.plist"
-python3 - "$project_root/LiveLingo/Resources/Info.plist" "$info_plist" "$commit" "$short_commit" "$dirty" <<'PY'
+python3 - "$project_root/LiveLingo/Resources/Info.plist" "$info_plist" "$commit" "$short_commit" "$dirty" "$signing_mode" <<'PY'
 from pathlib import Path
 import plistlib
 import sys
@@ -141,6 +172,7 @@ info['CFBundleVersion'] += '-preview.' + sys.argv[4] + ('.dirty' if sys.argv[5] 
 info['LiveLingoPreviewCommit'] = sys.argv[3]
 info['LiveLingoPreviewDirty'] = sys.argv[5] == '1'
 info['LiveLingoPreviewMode'] = 'UI-only; no bundled ML runtimes'
+info['LiveLingoPreviewSigningMode'] = sys.argv[6]
 with Path(sys.argv[2]).open('xb') as f:
     plistlib.dump(info, f)
 PY
@@ -148,7 +180,8 @@ PY
 echo "Building unsigned ${architecture} preview; log: ${run_directory}/build.log"
 # CODE_SIGNING_ALLOWED alone does not stop the linker's implicit ad-hoc signing.
 # Do not use build-release.sh: its signing environment is intentionally separate.
-/usr/bin/xcodebuild \
+python3 "${project_root}/Scripts/run-preview-tool.py" --log "${run_directory}/build.log" -- \
+  /usr/bin/xcodebuild -quiet -hideShellScriptEnvironment \
   -project "${project_root}/LiveLingo.xcodeproj" -scheme LiveLingo \
   -configuration Release -destination "platform=macOS,arch=${architecture}" \
   -derivedDataPath "$derived_data" -disableAutomaticPackageResolution -skipPackageUpdates \
@@ -161,7 +194,7 @@ echo "Building unsigned ${architecture} preview; log: ${run_directory}/build.log
   INFOPLIST_FILE="$info_plist" \
   CLANG_MODULE_CACHE_PATH="${derived_data}/ModuleCache.noindex" \
   CLANG_COVERAGE_MAPPING=NO CLANG_ENABLE_CODE_COVERAGE=NO ENABLE_CODE_COVERAGE=NO \
-  build >"${run_directory}/build.log" 2>&1 || {
+  build || {
     tail -50 "${run_directory}/build.log" >&2
     fail "xcodebuild failed; full log retained"
   }
@@ -180,39 +213,34 @@ if [[ -n "$models" ]]; then
   [[ ! -e "${app}/Contents/Resources/Models" && ! -L "${app}/Contents/Resources/Models" ]] || fail "Unexpected bundled models"
   ln -s "$models" "${app}/Contents/Resources/Models"
 fi
-cat >"${app}/Contents/Resources/Preview-README.txt" <<'EOF'
-LiveLingo 预览版：界面与窗口试用包。
-没有内置模型或 Python 运行库；不支持录音转写、MLX 翻译、摘要或复查。
-模型引用只供只读定位，不会补上运行库；软链接不是只读挂载。
-未签名包没有生效的 App Sandbox：偏好使用独立 preview bundle ID，
-数据放在用户 Library/Application Support/LiveLingoPreview。
-所有课程打开、保存、导出及迁移限制在该目录的 Courses 子目录；
-导入媒体也须先放入此目录。不会继承正式版课程书签或 CLI 数据路径。
-默认原生 arm64 包显式关闭了链接器自动 ad-hoc 签名。
-严格未签名的 arm64 包不能直接执行，须另行授权签名后才可试用。
-若明确选择 Intel 包，在 Apple Silicon 上需要已安装的 Rosetta。
-本包不会自行安装、下载、签名或修改系统设置。
-EOF
+cp "${project_root}/docs/PREVIEW-OPEN-zh-Hans.txt" "${app}/Contents/Resources/Preview-README.txt"
+cp "${project_root}/docs/PREVIEW-OPEN-zh-Hans.txt" "${run_directory}/打开预览版.txt"
+printf '\n本包签名模式：%s\n' "$signing_mode" >>"${app}/Contents/Resources/Preview-README.txt"
 
-# Verify *before* any optional signing that not even an ad-hoc signature exists.
+# Start from an unsigned, model-free build; sign all nested code before the app.
 python3 "${project_root}/Scripts/preview-app-metadata.py" "$app" --unsigned >"${run_directory}/unsigned-receipt.json"
-if [[ -n "$identity" ]]; then
-  echo "Signing explicitly requested preview with its sandbox entitlements"
-  /usr/bin/codesign --sign "$identity" --keychain "$keychain" --options runtime \
-    --timestamp=none --generate-entitlement-der \
-    --entitlements "${project_root}/LiveLingo/Resources/LiveLingo.entitlements" "$app"
-  /usr/bin/codesign --verify --strict "$app"
+if [[ "$signing_mode" != unsigned ]]; then
+  signing_arguments=(--identity -)
+  if [[ "$signing_mode" == developer ]]; then signing_arguments=(--identity "$identity" --keychain "$keychain"); fi
+  python3 "${project_root}/Scripts/sign-preview-app.py" "$app" \
+    --entitlements "${project_root}/LiveLingo/Resources/LiveLingo.entitlements" \
+    "${signing_arguments[@]}"
 fi
-python3 "${project_root}/Scripts/preview-app-metadata.py" "$app" >"${run_directory}/receipt.json"
+receipt_arguments=()
+if [[ "$signing_mode" == adhoc ]]; then receipt_arguments=(--adhoc); fi
+python3 "${project_root}/Scripts/preview-app-metadata.py" "$app" "${receipt_arguments[@]}" >"${run_directory}/receipt.json"
 if /usr/bin/codesign -dv --verbose=4 "$app" >"${run_directory}/codesign-display.log" 2>&1; then
-  [[ -n "$identity" ]] || fail "Unexpected signature reported by codesign"
+  [[ "$signing_mode" != unsigned ]] || fail "Unexpected signature reported by codesign"
 else
-  [[ -z "$identity" ]] || fail "codesign could not read the explicitly signed preview"
+  [[ "$signing_mode" == unsigned ]] || fail "codesign could not read the signed preview"
+fi
+if [[ "$signing_mode" != unsigned ]]; then
+  /usr/bin/codesign -d --entitlements :- "$app" >"${run_directory}/signed-entitlements.plist" 2>"${run_directory}/entitlements-display.log"
 fi
 echo "Preview: $app"
 echo "Receipt: ${run_directory}/receipt.json"
 echo "Read-only signature report: ${run_directory}/codesign-display.log"
-[[ -n "$identity" ]] || echo "Signing skipped (including ad-hoc). Sandbox is not active."
-if [[ "$architecture" == arm64 && -z "$identity" ]]; then
+echo "Signing mode: ${signing_mode}; no notarization or launch performed."
+if [[ "$architecture" == arm64 && "$signing_mode" == unsigned ]]; then
   echo "Unsigned arm64 is build evidence only; it needs separately authorized signing to launch."
 fi

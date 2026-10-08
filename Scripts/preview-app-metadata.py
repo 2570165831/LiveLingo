@@ -11,8 +11,8 @@ import struct
 import subprocess
 
 
-def signature_commands(path):
-    """Detect LC_CODE_SIGNATURE in every slice without executing the binary."""
+def macho_info(path):
+    """Read file types and LC_CODE_SIGNATURE in every slice without executing it."""
     with path.open('rb') as stream:
         magic = stream.read(4)
         if magic in (b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf'):
@@ -29,11 +29,13 @@ def signature_commands(path):
         else:
             return None
         signed = 0
+        file_types = []
         for offset in offsets:
             stream.seek(offset)
             magic = stream.read(4)
             endian = '<' if magic in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe') else '>'
             header = struct.unpack(endian + '6I', stream.read(24))
+            file_types.append(header[2])
             if magic in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf'):
                 stream.read(4)
             for _ in range(header[3]):
@@ -42,10 +44,22 @@ def signature_commands(path):
                     raise ValueError('Invalid Mach-O load command')
                 signed += command == 0x1D
                 stream.seek(size - 8, 1)
-        return signed
+        return {'signature_commands': signed, 'file_types': file_types}
 
 
-def inspect(app, unsigned=False):
+def signature_commands(path):
+    result = macho_info(path)
+    return result['signature_commands'] if result is not None else None
+
+
+def signing_info(path):
+    result = subprocess.run(['/usr/bin/codesign', '-dv', '--verbose=4', str(path)],
+                            text=True, capture_output=True, check=True)
+    fields = dict(line.split('=', 1) for line in (result.stdout + result.stderr).splitlines() if '=' in line)
+    return {key: fields.get(key) for key in ('Identifier', 'Signature', 'TeamIdentifier', 'flags')}
+
+
+def inspect(app, unsigned=False, adhoc=False):
     if app.is_symlink():
         raise ValueError('Preview app must be an ordinary directory, not a symbolic link')
     app = app.resolve(strict=True)
@@ -85,18 +99,51 @@ def inspect(app, unsigned=False):
         raise ValueError('Unexpected copied models')
     if any((resources / name).exists() for name in ('LanguageRuntime', 'ASRRuntime')):
         raise ValueError('UI preview must not contain ML runtimes')
+    signing = {}
+    entitlements = {}
+    if any(binaries.values()):
+        for name in binaries:
+            signing[name] = signing_info(app / name)
+        result = subprocess.run(['/usr/bin/codesign', '-d', '--entitlements', ':-', str(app)],
+                                capture_output=True, check=True)
+        if result.stdout:
+            entitlements = plistlib.loads(result.stdout)
+    if adhoc:
+        if not signing or any(item['Signature'] != 'adhoc' or item['TeamIdentifier'] not in (None, 'not set')
+                              for item in signing.values()):
+            raise ValueError('Every preview Mach-O must have an identity-free ad-hoc signature')
+        if signing[str(executable.relative_to(app))]['Identifier'] != 'com.jianhongli.LiveLingo.preview':
+            raise ValueError('Main signing identifier must match the preview bundle')
+        if entitlements.get('com.apple.security.app-sandbox') is not True:
+            raise ValueError('Ad-hoc preview is missing signed App Sandbox entitlements')
+        if entitlements.get('com.apple.security.application-groups'):
+            raise ValueError('Preview must not share an application group')
+        subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(app)],
+                       capture_output=True, check=True)
+    sandbox_signed = entitlements.get('com.apple.security.app-sandbox') is True
+    data_prefix = ('~/Library/Containers/com.jianhongli.LiveLingo.preview/Data/Library/'
+                   if sandbox_signed else '~/Library/')
     return {
         'app': str(app),
         'info': {key: info.get(key) for key in (
             'CFBundleIdentifier', 'CFBundleDisplayName', 'CFBundleName', 'CFBundleExecutable',
             'CFBundleShortVersionString', 'CFBundleVersion', 'LSMinimumSystemVersion',
-            'LiveLingoPreviewCommit', 'LiveLingoPreviewDirty', 'LiveLingoPreviewMode')},
+            'LiveLingoPreviewCommit', 'LiveLingoPreviewDirty', 'LiveLingoPreviewMode',
+            'LiveLingoPreviewSigningMode')},
         'architectures': subprocess.check_output(['/usr/bin/lipo', '-archs', str(executable)], text=True).strip().split(),
         'executable_sha256': hashlib.sha256(executable.read_bytes()).hexdigest(),
         'logical_file_bytes_excluding_model_reference': logical_bytes,
         'allocated_file_bytes_excluding_model_reference': allocated_bytes,
         'code_signature_commands': binaries,
-        'sandbox': 'not enforced without signed entitlements' if not any(binaries.values()) else 'signed; requires entitlement verification',
+        'signing': signing,
+        'signed_entitlements': entitlements,
+        'sandbox': {
+            'signed_app_sandbox': sandbox_signed,
+            'runtime_verified': False,
+            'expected_data_directory': data_prefix + 'Application Support/LiveLingoPreview/',
+            'expected_preferences': data_prefix + 'Preferences/com.jianhongli.LiveLingo.preview.plist',
+            'evidence': 'signed entitlements only; preview app was not launched',
+        },
         'symlinks': links,
         'runtimes_bundled': False,
         'models_copied': False,
@@ -107,5 +154,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('app', type=Path)
     parser.add_argument('--unsigned', action='store_true')
+    parser.add_argument('--adhoc', action='store_true')
     args = parser.parse_args()
-    print(json.dumps(inspect(args.app, args.unsigned), ensure_ascii=False, indent=2))
+    if args.unsigned and args.adhoc:
+        parser.error('--unsigned and --adhoc are mutually exclusive')
+    print(json.dumps(inspect(args.app, args.unsigned, args.adhoc), ensure_ascii=False, indent=2))

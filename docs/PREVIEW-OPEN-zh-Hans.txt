@@ -1,0 +1,37 @@
+LiveLingo 预览版：打开与数据说明
+
+1. 在 Finder 中进入本次交付目录，打开“LiveLingo 预览版.app”。
+   可以直接放在该目录使用，无需安装到“应用程序”。默认是原生 arm64 包。
+2. 本包默认使用临时（ad-hoc）签名，没有开发者证书或公证。
+   首次被系统拦截时，先确认是本次本地构建的文件，再尝试右键 → 打开。
+   如果系统仍拦截，进入“系统设置 → 隐私与安全性”，找到对应提示，
+   选择“仍要打开”，按提示确认。较新的系统可能只提供后一条路径。
+   提示随系统版本、下载隔离属性和组织策略变化，不保证右键一定可用。
+   不要全局关闭 Gatekeeper；若提示损坏或仍打不开，先检查签名与策略。
+   本次只做静态检查，没有启动预览 App；以上打开步骤未实测。
+3. 确认 Finder 名称、菜单栏名称和主窗口标题有“预览版”。
+   包内 Info.plist 的 CFBundleIdentifier 必须为：
+   com.jianhongli.LiveLingo.preview
+   CFBundleDisplayName 为“LiveLingo 预览版”，构建号包含“preview”和提交短哈希。
+   正式版的 bundle ID 为 com.jianhongli.LiveLingo，请勿从其图标启动。
+
+仅供界面与窗口试用：布局、设置、浮动字幕、全屏和文件面板。
+没有内置模型、模型软链接或 Python 运行库；不预热 ASR。
+录音转写、MLX 翻译、模型摘要、学习笔记生成与复查不可用。
+界面可能显示这些入口，点击不能补齐缺失运行库。不要导入真实课堂数据。
+
+默认 ad-hoc 包会把 App Sandbox 权限实际嵌入签名，并逐层验证所有代码。
+权限是否已签入可由交付目录的 signed-entitlements.plist 和 receipt.json 复核；
+代码签名允许验证权限声明，但不能代替首次启动后的运行验证。
+沙盒正常初始化时，数据目录为：
+~/Library/Containers/com.jianhongli.LiveLingo.preview/Data/Library/Application Support/LiveLingoPreview/
+偏好为该容器 Data/Library/Preferences 下的 com.jianhongli.LiveLingo.preview.plist。
+课程、导出和导入媒体仅限数据根目录的 Courses/；临时音频位于 Temporary/；
+复查队列和诊断也在该根目录，模型检查点位于 LanguageRuntime/Checkpoints/。
+没有共享 App Group，不继承正式版偏好、课程书签、模型路径或 CLI 数据路径。
+代码另外检查路径和内部软链接，拒绝访问预览数据目录之外的课程。
+
+仅当构建者显式选择 --unsigned 时，不会有系统沙盒：数据改为
+~/Library/Application Support/LiveLingoPreview/，偏好仍使用独立 preview 域；
+该模式的 arm64 包不能直接执行，右键打开不能补上缺失签名。
+本次未启动预览 App，因此尚未观察到容器创建或实际写入。
