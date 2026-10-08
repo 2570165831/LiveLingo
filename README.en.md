@@ -2,7 +2,7 @@
 
 [中文](README.md) | English
 
-LiveLingo is an on-device caption and note-taking app for English-language classes. While you listen, it shows the English transcript and a Chinese translation, and builds study notes as the class goes on. Everything runs on your Mac: nothing goes online and no recordings are uploaded.
+LiveLingo is an on-device caption and note-taking app for English-language classes. While you listen, it shows the English transcript and a Chinese translation, and builds study notes as the class goes on. Transcription, the full translation and notes run on your Mac with models bundled in the app, and no recordings are uploaded.
 
 For Apple silicon Macs running macOS 14 or later. Open source, GPL-3.0.
 
@@ -15,13 +15,13 @@ The app's interface is currently in Chinese, and translations go from English in
 - **After-class review**: once the recording ends, you can ask the larger 9B model to review the notes. Its comments are listed separately and do not change the original notes.
 - **Save and export**: saves the recording, bilingual transcript and notes, and exports Markdown, plain text, Word and PDF. You can reopen an earlier class later to keep reading or continue processing it.
 - **Formulas and names kept intact**: chemical formulas and names that are meant to stay as written are kept as written wherever possible, and calculations can be checked with tools.
-- **Fully offline**: the speech and translation models are bundled in the app. No Python, no LM Studio, and no further model downloads.
+- **Works offline**: the models for transcription, the full translation and notes are bundled in the app. No Python, no LM Studio, and no further model downloads. The optional instant draft translation and word-by-word English preview use features built into macOS, which may need a connection the first time; see [Known limitations](#known-limitations).
 
 ## Download
 
 **[Download 0.2.0 (GitHub release page)](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0)**: download all 8 split files under Assets and merge them into one `.dmg` of about 14.3 GB, following the instructions on that page. A single split file cannot be installed, and the `Source code` archives at the bottom of the page are source code, not the installer.
 
-**Keep your Mac online the first time you open the app.** This is macOS's own security check (Gatekeeper), not LiveLingo going online. The first time you open an app downloaded from the internet, macOS asks Apple to confirm that it was notarized, meaning it was submitted to Apple and scanned for malware. In 0.2.0 the notarization ticket is attached to the disk image but not to the app you drag into Applications, so macOS has to look it up online once; offline, it reports that the app cannot be verified and refuses to open it. After that first check no connection is needed. LiveLingo itself never uploads any recordings, text or usage data; transcription, translation and notes all run on your Mac.
+**Keep your Mac online the first time you open the app.** This is macOS's own security check (Gatekeeper), not LiveLingo going online. The first time you open an app downloaded from the internet, macOS asks Apple to confirm that it was notarized, meaning it was submitted to Apple and scanned for malware. In 0.2.0 the notarization ticket is attached to the disk image but not to the app you drag into Applications, so macOS has to look it up online once; offline, it reports that the app cannot be verified and refuses to open it. After that first check no connection is needed. LiveLingo itself never uploads any recordings, text or usage data; transcription, the full translation and notes all run on your Mac.
 
 **Requirements**
 
@@ -39,6 +39,7 @@ The app's interface is currently in Chinese, and translations go from English in
 
 - **Translations and notes can be wrong**: the models can skip or mistranslate sentences and get facts wrong in the notes. Check important points against the English transcript.
 - **No instant draft translation on macOS 14**: this feature uses Apple's translation framework, which needs macOS 15 or later. On macOS 14 the Chinese appears once the full translation is done; the translation itself is not affected.
+- **The instant draft translation may need a language download first**: it uses Apple's translation framework. If this Mac has never installed the English-to-Chinese translation languages, macOS may ask to download them the first time, which needs a connection; until then the draft translation is unavailable and the Chinese appears once the full translation is done. The full translation uses the models bundled in the app and is not affected. You can turn the draft translation (“同步初译”) off in Settings.
 - **The word-by-word English preview needs system resources**: it uses the English speech recognition built into macOS. If no preview appears, open System Settings → Keyboard → Dictation, turn on Dictation, add “English (United States)”, and stay online while macOS downloads what it needs. The main transcription is not affected. See [Apple's dictation guide](https://support.apple.com/guide/mac-help/mh40584/mac).
 - **Apple silicon only**: Intel and universal builds have not been made or tested. There is no Windows version; if you would like to help with one, see [issue #1](https://github.com/2570165831/LiveLingo/issues/1).
 - **Large download**: the speech and translation models are inside the package, which is what lets the app work offline right after installation.
@@ -56,7 +57,7 @@ The models run on your Mac through MLX. Output formats are constrained with Outl
 
 ## Data and privacy
 
-Audio, transcripts, translations and notes are all processed on your Mac. Recording mode saves the recording, bilingual text, captions and notes to a location you choose; live mode uses a temporary recording, which you can also save. The code has no cloud inference and no recording uploads.
+Audio, transcripts, the full translation and notes are all processed on your Mac by the app. While the instant draft translation is on, the English it uses is handed to the translation framework built into macOS; that part is handled by the system, and this project has not verified what happens inside it. Recording mode saves the recording, bilingual text, captions and notes to a location you choose; live mode uses a temporary recording, which you can also save. The code has no cloud inference and no recording uploads.
 
 When opening an issue or pull request, please do not attach private recordings, full class transcripts, notes or any credentials.
 
