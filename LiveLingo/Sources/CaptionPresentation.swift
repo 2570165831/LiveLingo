@@ -96,11 +96,12 @@ struct CaptionPresentation: Equatable {
 struct CaptionLanguageLabel: View {
     let name: String
     let subtitleSize: Double
-    var color: Color = .secondary
+    var color: Color = ReadingAccessibility.secondaryText
+    var scale: Double = 1
 
     var body: some View {
         Text(verbatim: name)
-            .font(.system(size: subtitleSize - 3))
+            .font(.system(size: subtitleSize - 3 * scale))
             .foregroundStyle(color)
             .fixedSize()
             .textSelection(.disabled)

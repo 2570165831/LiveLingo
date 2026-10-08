@@ -3798,6 +3798,18 @@ final class LearningReviewQueue: ObservableObject {
 
     var recordingName: String { jobs.first?.directory.lastPathComponent ?? "已保存录音" }
     var canRemoveFailedJob: Bool { !running && jobs.first?.failure != nil }
+
+    struct FailedRemovalTarget: Identifiable, Equatable {
+        let id: UUID
+        let name: String
+        let scopeLabel: String
+    }
+
+    var failedRemovalTarget: FailedRemovalTarget? {
+        guard canRemoveFailedJob, let job = jobs.first else { return nil }
+        return FailedRemovalTarget(id: job.id, name: job.directory.lastPathComponent,
+                                   scopeLabel: job.resolvedScope.label)
+    }
     var currentFailure: String? { persistenceFailure ?? jobs.first?.failure }
 
     func belongsTo(_ directory: URL?, sessionID: UUID? = nil) -> Bool {
@@ -4066,7 +4078,17 @@ final class LearningReviewQueue: ObservableObject {
     // Only an explicit UI action removes a failed queue entry. Recording files
     // and already written notes/reports are never deleted.
     func removeFailedJob() {
-        guard canRemoveFailedJob, managementPending == 0 else { return }
+        guard let target = failedRemovalTarget else { return }
+        removeFailedJob(expected: target)
+    }
+
+    func removeFailedJob(expected target: FailedRemovalTarget) {
+        guard managementPending == 0 else { return }
+        guard failedRemovalTarget == target else {
+            managementError = "确认的复查任务已变化，未移除任何任务；请重新查看队列。"
+            return
+        }
+        managementError = nil
         let removed = jobs.removeFirst()
         managementPending += 1
         do {

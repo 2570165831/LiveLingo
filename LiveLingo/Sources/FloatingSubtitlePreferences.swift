@@ -141,7 +141,7 @@ struct FloatingSubtitlePalette {
 
     init(backgroundOpacity: Double) {
         sourceWhite = backgroundOpacity < 1 ? 0.95 : 0.9
-        languageWhite = backgroundOpacity < 1 ? 0.8 : 0.6
+        languageWhite = backgroundOpacity < 1 ? 0.86 : 0.6
         headerWhite = backgroundOpacity < 1 ? 0.9 : 0.8
     }
 }

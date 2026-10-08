@@ -1764,7 +1764,9 @@ final class AppModel: ObservableObject {
         panel.prompt = "导出"
         let reviewNotice = snapshot.includesReviewAdvice && snapshot.reviewMarkdown == nil
             ? " · 该录音暂无已保存复查意见" : ""
-        panel.message = "所选范围：\(snapshot.scope.title) · 格式：\(format.title)" + reviewNotice
+        panel.message = "\(NotesExportDisclosure.scopeTitle)：\(snapshot.scope.title) · 格式：\(format.title)" + reviewNotice
+            + (snapshot.includesReviewAdvice ? " · " + NotesExportDisclosure.reviewHelp : "")
+            + " · 所选已有导出目标可能被替换。"
         panel.nameFieldStringValue = NotesExportDocument.defaultFileName(snapshot, format: format)
         panel.allowedContentTypes = [format.contentType]
         panel.canCreateDirectories = true

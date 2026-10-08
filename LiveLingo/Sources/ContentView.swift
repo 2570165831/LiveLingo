@@ -139,6 +139,8 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var floatingWindow = FloatingSubtitleWindowController.shared
     @AppStorage("transcriptTextSize") private var transcriptTextSize = 18.0
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private var readingSize: Double { 18 * ReadingTypography.scale(textSize: transcriptTextSize, dynamicType: dynamicTypeSize) }
     @State private var wholeLessonNotes = false
     @State private var showExportOptions = false
     @State private var activeSheet: ClassroomSheet?
@@ -202,6 +204,7 @@ struct ContentView: View {
                     }
                 }
         }
+        .environment(\.classroomReadingScale, readingSize / 18)
         .modifier(ApplePreviewTranslationHost())
         .classroomTint(ClassroomPalette.accent)
     }
@@ -298,14 +301,8 @@ struct ContentView: View {
                 Label(model.isManualTranslating ? "文字翻译中…" : "文字翻译…", systemImage: "character.bubble")
             }
             .accessibilityIdentifier("classroom-typed-translation")
-            Picker(selection: $transcriptTextSize) {
-                Text("标准").tag(18.0)
-                Text("大").tag(21.0)
-                Text("特大").tag(24.0)
-            } label: {
-                Label("字幕字号", systemImage: "textformat.size")
-            }
-            .accessibilityIdentifier("classroom-caption-size")
+            ReadingSizePicker(size: $transcriptTextSize, title: "字幕字号")
+                .accessibilityIdentifier("classroom-caption-size")
             Divider()
             if !model.isLiveOnly {
                 Button("保存位置…") { Task { await model.chooseOutputDirectory() } }
@@ -333,6 +330,7 @@ struct ContentView: View {
             HStack {
                 Text(sheet.title)
                     .font(.title3.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button("关闭") { activeSheet = nil }
                     .keyboardShortcut(.cancelAction)
@@ -347,7 +345,7 @@ struct ContentView: View {
                         TypedTranslationView()
                         if model.isManualTranslating {
                             Text("关闭此窗口后翻译继续，可从“文字翻译中…”重新打开。")
-                                .font(.callout).foregroundStyle(.secondary)
+                                .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                         }
                     }
                     .padding(8)
@@ -382,7 +380,7 @@ struct ContentView: View {
                 .font(.system(size: 17, weight: .medium).monospacedDigit())
             Text(stripDetail)
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(ReadingAccessibility.secondaryText)
                 .lineLimit(1)
             if model.hasActiveSession {
                 RecordingMeterView(meter: model.captureMeter, active: model.isRecording)
@@ -445,7 +443,7 @@ struct ContentView: View {
                 Spacer()
                 Text("\(model.segments.count) 段")
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize()
                 Toggle("跟随最新", isOn: $followLatest)
                     .toggleStyle(.button)
@@ -458,7 +456,7 @@ struct ContentView: View {
 
             Divider()
 
-            ClassroomLivePreview(model: model, stream: model.captionStream, textSize: transcriptTextSize)
+            ClassroomLivePreview(model: model, stream: model.captionStream, textSize: readingSize)
 
             if model.segments.isEmpty {
                 ContentUnavailableView(
@@ -498,7 +496,7 @@ struct ContentView: View {
     }
 
     private func segmentRow(_ segment: TranscriptSegment) -> some View {
-        TranscriptCaptionRow(segment: segment, textSize: transcriptTextSize, stream: model.finalCaptionStream,
+        TranscriptCaptionRow(segment: segment, textSize: readingSize, stream: model.finalCaptionStream,
                              target: model.captionDisplayLanguage, converter: model.chineseScriptConverter)
             .equatable()
     }
@@ -511,7 +509,7 @@ struct ContentView: View {
                         .font(.system(size: 18, weight: .semibold))
                     Text(model.summaryStatus)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                         .lineLimit(1)
                         .help(model.summaryStatus)
                 }
@@ -559,12 +557,12 @@ struct ContentView: View {
                 VStack(spacing: 13) {
                     Image(systemName: "text.alignleft")
                         .font(.system(size: 28))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                     Text("实时总结会在这里出现")
                         .font(.headline)
                     Text("完成两段翻译后开始整理。新的课堂内容会逐步加入笔记。")
                         .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 290)
                 }
@@ -575,10 +573,10 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         Text(wholeLessonNotes ? model.summaryCoverageStatus : model.latestSummaryScope)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(ReadingAccessibility.secondaryText)
                         if !wholeLessonNotes && model.latestSummaryUpdate.isEmpty {
                             Text("这一批没有新增学习要点，先前内容保留在整课笔记中。")
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(ReadingAccessibility.secondaryText)
                         } else {
                             SummaryMarkdownView(text: wholeLessonNotes ? model.lectureSummary : model.latestSummaryUpdate,
                                 language: model.captionDisplayLanguage,
@@ -627,7 +625,7 @@ struct ContentView: View {
                 }
                 Text(model.exportStatus ?? "导出所选笔记；复查范围可另行选择")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                     .lineLimit(1)
                     .frame(height: 18, alignment: .leading)
                     .help(model.exportStatus ?? "核对意见独立保存，笔记正文保留")
@@ -639,51 +637,10 @@ struct ContentView: View {
     }
 
     private var exportOptionsPopover: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("导出课堂笔记").font(.headline)
-
-            Picker("格式", selection: $model.exportFormat) {
-                ForEach(NotesExportFormat.allCases) { format in
-                    Text(format.title).tag(format)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Picker("范围", selection: $model.exportScope) {
-                ForEach(NotesExportScope.allCases) { scope in
-                    Text(scope.title).tag(scope)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Text(model.exportScope == .wholeLesson ? model.summaryCoverageStatus : model.latestSummaryScope)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
-            Toggle(model.outputLanguage == .english ? ClassroomFixedText.exportTranscriptToggle.text(targetCode: "en") : "附带双语字幕与时间戳（按所选范围）", isOn: $model.exportIncludesTranscript)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            Toggle("附带核对意见（独立章节）", isOn: $model.exportIncludesReviewAdvice)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-
-            Text("导出只读取当前笔记与复查记录，不调用模型、不改动录音或已保存文件；默认文件名包含课堂日期与内容范围。")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack {
-                Spacer()
-                Button("选择位置并导出…") {
-                    showExportOptions = false
-                    model.beginNotesExport()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(model.isExporting)
-            }
+        NotesExportOptions(model: model) {
+            showExportOptions = false
+            model.beginNotesExport()
         }
-        .padding(16)
-        .frame(width: 380)
     }
 
     /// One line: the current message or save destination, then details and dismissal.
@@ -751,9 +708,9 @@ struct ContentView: View {
                 Text("识别：\(model.speechStatus)")
                 Text("翻译：\(model.translationStatus)")
                 Text(model.modelModeStatus)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                 Text(model.resourceStatusDescription)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                 if !model.translationReady {
                     Button("重新检查模型") { model.retryRuntimePreparation() }
                 }
@@ -847,11 +804,72 @@ private struct ReviewEntryButton: View {
     }
 }
 
+struct NotesExportOptions: View {
+    @ObservedObject var model: AppModel
+    let onExport: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("导出课堂笔记").font(.headline).accessibilityAddTraits(.isHeader)
+
+            Picker("格式", selection: $model.exportFormat) {
+                ForEach(NotesExportFormat.allCases) { format in
+                    Text(format.title).tag(format)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Picker(NotesExportDisclosure.scopeTitle, selection: $model.exportScope) {
+                ForEach(NotesExportScope.allCases) { scope in
+                    Text(scope.title).tag(scope)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(model.exportScope == .wholeLesson ? model.summaryCoverageStatus : model.latestSummaryScope)
+                .font(.caption2)
+                .foregroundStyle(ReadingAccessibility.secondaryText)
+
+            Toggle(model.outputLanguage == .english ? ClassroomFixedText.exportTranscriptToggle.text(targetCode: "en") : "附带双语字幕与时间戳（按所选范围）", isOn: $model.exportIncludesTranscript)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            Toggle("附带核对意见（独立章节）", isOn: $model.exportIncludesReviewAdvice)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .accessibilityHint(NotesExportDisclosure.reviewHelp)
+                .help(NotesExportDisclosure.reviewHelp)
+                .accessibilityIdentifier("notes-export-review")
+            Text(NotesExportDisclosure.reviewHelp)
+                .font(.caption2)
+                .foregroundStyle(ReadingAccessibility.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(NotesExportDisclosure.fileHelp)
+                .font(.caption2)
+                .foregroundStyle(ReadingAccessibility.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("选择位置并导出…") {
+                    onExport()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.isExporting)
+                .accessibilityIdentifier("notes-export-save")
+            }
+        }
+        .padding(16)
+        .frame(width: 380)
+    }
+}
+
 /// The Settings window (⌘,). Changes apply to the next recording where a
 /// session is running; controls that would disturb it stay disabled.
 struct ClassroomSettingsView: View {
     @EnvironmentObject private var model: AppModel
     private var subtitles = FloatingSubtitlePreferences()
+    @AppStorage("transcriptTextSize") private var readingTextSize = 18.0
     var fullScreenMode: FullScreenClassModeController? = nil
 
     var body: some View {
@@ -868,7 +886,7 @@ struct ClassroomSettingsView: View {
                 }
                 .disabled(model.phase.isBusy)
                 Text("实时暂存会在停止后删除临时录音并清空内容；录音期间可用“转为录音”保留这次课堂。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 if !model.isLiveOnly {
                     if let directory = model.currentCourseDirectory {
@@ -890,7 +908,7 @@ struct ClassroomSettingsView: View {
                     .disabled(model.outputLanguageSelectionDisabled)
                     .accessibilityIdentifier("new-course-output-language")
                     Text("只对新录音和导入生效")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                 }
                 Picker("质量模式", selection: $model.selectedMode) {
                     ForEach(ModelMode.allCases) { mode in
@@ -903,11 +921,11 @@ struct ClassroomSettingsView: View {
                 Text(model.supportsPreviewTranslation
                      ? "初译用于及时阅读；正式译文随后保存在字幕中。"
                      : "同步初译需要 macOS 15 或更新版本；正式翻译仍可使用。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("专注模式", isOn: $model.processingFocusEnabled)
                 Text("优先处理录音与字幕，后台复查等待空闲。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                 Toggle("录音期间防止空闲睡眠", isOn: $model.preventIdleSleepWhileRecording)
                 DisclosureGroup("处理方式与模型详情") {
                     Text(model.modelModeStatus)
@@ -915,6 +933,12 @@ struct ClassroomSettingsView: View {
                     Text("新设置默认防止录音期间的空闲睡眠，停止录音或关闭开关后释放；不能阻止合盖、手动休眠或断电。")
                 }
                 .font(.callout)
+            }
+            Section("阅读字号") {
+                ReadingSizePicker(size: $readingTextSize)
+                Text("同时放大字幕、笔记、时间戳和公式；悬浮字幕在独立字号基础上缩放。")
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("悬浮字幕") {
                 Picker("显示模式", selection: subtitles.displayModeBinding) {
@@ -926,7 +950,7 @@ struct ClassroomSettingsView: View {
                 .accessibilityIdentifier("floating-display-mode")
                 if !model.previewTranslationEnabled || !model.supportsPreviewTranslation {
                     Text("“仅中文译文”在译文可用前显示原文。")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                 }
                 subtitleSlider("原文字号", value: subtitles.sourceTextSizeBinding,
                                range: FloatingSubtitlePreferences.fontSizeRange, step: 1,
@@ -940,14 +964,14 @@ struct ClassroomSettingsView: View {
                 Toggle("在所有桌面显示", isOn: subtitles.showsAcrossSpacesBinding)
                     .accessibilityIdentifier("floating-all-spaces")
                 Text("在所有普通桌面（含切换桌面时）保持显示。全屏网课模式开启时，字幕会强制加入所有桌面；关闭后恢复此开关的设置。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 FullScreenClassModeSettings(controller: fullScreenMode)
                 Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("锁定后点击会穿过字幕窗；可在主窗口或“录音”菜单解锁（⌘⇧L，仅 App 在前台时有效）。全屏网课模式下也可用顶部菜单栏图标解锁。每次启动默认未锁定。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section("笔记整理") {
@@ -957,7 +981,7 @@ struct ClassroomSettingsView: View {
                     Text("较多 · 约 6000 字").tag(6_000)
                 }
                 Text("只影响之后的笔记。内容量较少时单次处理更短，但需要处理的批次更多。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -975,7 +999,7 @@ struct ClassroomSettingsView: View {
                     .accessibilityLabel(title)
                     .accessibilityValue(label)
                     .accessibilityIdentifier("floating-\(title)")
-                Text(label).monospacedDigit().foregroundStyle(.secondary).frame(width: 48, alignment: .trailing)
+                Text(label).monospacedDigit().foregroundStyle(ReadingAccessibility.secondaryText).frame(width: 48, alignment: .trailing)
                     .accessibilityHidden(true)
             }
         }
@@ -1062,10 +1086,10 @@ struct TypedTranslationView: View {
             HStack {
                 Text("英文 → 简体中文").font(.headline)
                 Spacer()
-                Text("质量 · \(model.selectedMode.title)").font(.caption).foregroundStyle(.secondary)
+                Text("质量 · \(model.selectedMode.title)").font(.caption).foregroundStyle(ReadingAccessibility.secondaryText)
             }
             Text("使用当前质量模式 · 不加入录音历史")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(ReadingAccessibility.secondaryText)
             HStack {
                 Text("输入内容")
                 Spacer()
@@ -1091,7 +1115,7 @@ struct TypedTranslationView: View {
             HStack {
                 Text("Enter 翻译 · Shift+Enter 换行")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                 Spacer()
                 Button("快捷键") { showingKeyboardShortcuts.toggle() }
                     .buttonStyle(.borderless)
@@ -1113,7 +1137,7 @@ struct TypedTranslationView: View {
                     }
             }
             HStack {
-                Text(model.manualTranslationStatus).font(.caption).foregroundStyle(.secondary)
+                Text(model.manualTranslationStatus).font(.caption).foregroundStyle(ReadingAccessibility.secondaryText)
                 Spacer()
                 if model.isManualTranslating {
                     ProgressView().controlSize(.small)
@@ -1140,7 +1164,7 @@ struct TypedTranslationView: View {
             if model.manualTranslationOutput.isEmpty {
                 Text("译文会显示在这里")
                     .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
             } else {
                 ViewThatFits(in: .vertical) {
                     translationResultText
@@ -1219,7 +1243,7 @@ private struct TranslationTextEditor: NSViewRepresentable {
     }
 }
 
-private final class TranslationInputTextView: NSTextView {
+final class TranslationInputTextView: NSTextView {
     var onSubmit: ((Bool) -> Void)?
     var onCancel: (() -> Void)?
     var onCancelAndClear: (() -> Void)?
@@ -1244,14 +1268,15 @@ private final class TranslationInputTextView: NSTextView {
     }
 
     private func handleDeleteShortcut(_ event: NSEvent) -> Bool {
-        guard event.keyCode == 51 else { return false }
+        guard event.keyCode == 51, !hasMarkedText() else { return false }
         let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
         if modifiers == [.shift, .command] {
             if !event.isARepeat { onCancelAndClear?() }
             return true
         }
         if modifiers == .command {
-            if !isEditable, !event.isARepeat { onCancel?() }
+            guard !isEditable else { return false }
+            if !event.isARepeat { onCancel?() }
             return true
         }
         if modifiers == .shift {
@@ -1272,7 +1297,7 @@ private final class TranslationInputTextView: NSTextView {
     }
 }
 
-private struct RecordingWaveform: View {
+struct RecordingWaveform: View {
     let samples: [Float]
     let active: Bool
     let receiving: Bool
@@ -1288,7 +1313,7 @@ private struct RecordingWaveform: View {
             let width = max(1, (geometry.size.width - gap * CGFloat(count - 1)) / CGFloat(count))
             HStack(spacing: gap) {
                 ForEach(samples.indices, id: \.self) { index in
-                    let level = receiving ? min(1, max(0, samples[index])) : 0
+                    let level = receiving ? WaveformAccessibility.normalized(samples[index]) : 0
                     Capsule()
                         .fill(receiving ? Color.primary.opacity(0.7) : Color.secondary.opacity(0.45))
                         .frame(width: width, height: 2 + CGFloat(level) * max(0, geometry.size.height - 2))
@@ -1299,15 +1324,17 @@ private struct RecordingWaveform: View {
         .animation(reduceMotion ? nil : .linear(duration: SpeechPipeline.waveformUpdateInterval), value: samples)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(!active ? "音量显示已暂停" : receiving ? "正在接收音频" : "等待音频输入")
+        .accessibilityAddTraits(.isImage)
+        .accessibilityValue(WaveformAccessibility(samples: samples).value(active: active, receiving: receiving))
         .help(!active ? "音量显示已暂停" : receiving ? "实际输入音量：平均强度与短时峰值" : "暂未收到音频输入")
     }
 }
 
-private struct LearningReviewControls: View {
+struct LearningReviewControls: View {
     @ObservedObject var model: AppModel
     @ObservedObject var queue: LearningReviewQueue
     @State private var historyExpanded = false
-    @State private var confirmingRemoval = false
+    @State private var removalTarget: LearningReviewQueue.FailedRemovalTarget?
     @Binding var showingQueueManager: Bool
     @State private var pendingQueueRemoval: UUID?
 
@@ -1339,11 +1366,11 @@ private struct LearningReviewControls: View {
             HStack(spacing: 8) {
                 Text("复查队列")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                 if !queue.status.isEmpty && !queue.belongsTo(currentDirectory) {
                     Text("历史录音")
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Color.secondary.opacity(0.12), in: Capsule())
@@ -1372,7 +1399,7 @@ private struct LearningReviewControls: View {
                         Image(systemName: "chevron.down").imageScale(.small)
                     }
                     .font(.caption.weight(.regular))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                 }
                 // The plain button style draws the label as written, matching
                 // 管理队列…; the borderless menu style ignores label fonts.
@@ -1390,34 +1417,39 @@ private struct LearningReviewControls: View {
                     .buttonStyle(.borderless)
                     .controlSize(.small)
                     .font(.caption.weight(.regular))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                     .help("查看复查任务、重试失败项、调整顺序或重新定位录音文件夹；任何操作都不会删除文件")
             }
 
             if !model.canManuallyReview {
                 Text("课堂保存并生成笔记后，可选择整课或一批内容进行复查。历史任务仍可在“管理队列”中处理。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             if model.canManuallyReview || hasReviewNotice {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("核对意见独立保存，原笔记保持不变。")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     DisclosureGroup("复查方式与耗时") {
                         Text("使用本机模型检查所选内容。耗时随设备和内容变化；状态中的历史耗时仅供参考。局部报告单独保存，整课报告保留。")
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     if let notice = model.reviewQueueNotice, !notice.isEmpty {
                         Text(notice)
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(ReadingAccessibility.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
 
+            if let message = queue.managementError {
+                Text(message).font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("review-removal-notice")
+            }
             if !queue.status.isEmpty {
                 if queue.belongsTo(currentDirectory) {
                     details
@@ -1428,7 +1460,7 @@ private struct LearningReviewControls: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("历史录音复查 · \(queue.recordingName)")
                             Text("\(queue.running ? "后台处理中" : "已暂停或等待处理") · 与当前录音无关")
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(ReadingAccessibility.secondaryText)
                         }
                         .font(.caption)
                     }
@@ -1438,26 +1470,34 @@ private struct LearningReviewControls: View {
         .padding(.horizontal, 16)
         .padding(.bottom, 10)
         .onChange(of: currentDirectory) { _, _ in historyExpanded = false }
-        .confirmationDialog("将这项任务移出复查队列？", isPresented: $confirmingRemoval) {
-            Button("移出复查队列") { queue.removeFailedJob() }
-        } message: {
-            Text("只停止这项复查，不删除录音、原笔记或已保存的核对意见。")
+        .confirmationDialog("将这项任务移出复查队列？", isPresented: removalPrompt,
+                            presenting: removalTarget) { target in
+            Button("移出复查队列") {
+                queue.removeFailedJob(expected: target)
+                removalTarget = nil
+            }
+        } message: { target in
+            Text("只停止“\(target.name)”的\(target.scopeLabel)复查，不删除录音、原笔记或已保存的核对意见。")
         }
-        .protectFullScreenPopup(isPresented: confirmingRemoval)
+        .protectFullScreenPopup(isPresented: removalPrompt.wrappedValue)
+    }
+
+    private var removalPrompt: Binding<Bool> {
+        Binding(get: { removalTarget != nil }, set: { if !$0 { removalTarget = nil } })
     }
 
     private var details: some View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(queue.status)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                 if queue.hasWork {
                   HStack {
                     Button(queue.userPaused ? "开始复查" : queue.actionTitle) { queue.performPrimaryAction() }
                         .buttonStyle(.borderless)
                         .font(.caption)
                     if queue.canRemoveFailedJob {
-                        Button("移出复查队列") { confirmingRemoval = true }
+                        Button("移出复查队列") { removalTarget = queue.failedRemovalTarget }
                             .buttonStyle(.borderless)
                             .font(.caption)
                     }
@@ -1490,7 +1530,7 @@ private struct LearningReviewControls: View {
                         .font(.headline)
                     Text("后台复查任务与当前录音无关；这里只调整复查队列，不会删除录音文件、原笔记或已保存的核对意见。")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 12)
@@ -1506,7 +1546,7 @@ private struct LearningReviewControls: View {
             HStack(spacing: 12) {
                 Text(queue.hasWork ? queue.status : "暂无待复查任务")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 Button(!queue.hasWork || queue.userPaused ? "开始复查" : queue.actionTitle) {
@@ -1526,7 +1566,7 @@ private struct LearningReviewControls: View {
                         .foregroundStyle(ClassroomPalette.failure)
                     Text(managementError)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1541,12 +1581,12 @@ private struct LearningReviewControls: View {
                 VStack(spacing: 12) {
                     Image(systemName: "tray")
                         .font(.system(size: 30, weight: .light))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                     Text("复查队列为空")
                         .font(.callout)
                     Text("保存课堂笔记后，返回上一页，选择整课或一批内容开始复查。")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 320)
                 }
@@ -1580,7 +1620,7 @@ private struct LearningReviewControls: View {
                 Text("“重新定位文件夹…”只在录音文件夹被移动或改名时使用，LiveLingo 会检查原笔记是否一致。")
             }
             .font(.caption2)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ReadingAccessibility.secondaryText)
             .padding(16)
         }
         .frame(minWidth: 520, idealWidth: 560, maxWidth: 640)
@@ -1622,28 +1662,28 @@ private struct LearningReviewControls: View {
                 } else {
                     Text(failure == nil ? "等待处理" : "需要处理")
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                 }
                 Spacer(minLength: 8)
                 if total > 0 {
                     Text("已完成 \(completed)/\(total) 批")
                         .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                 } else {
                     Text("尚未开始")
                         .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                 }
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(scope?.label ?? "整课复查")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                 if awaitingManualStart {
                     Text("等待手动开始（升级后不会自动运行）")
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                 }
             }
 
@@ -1659,7 +1699,7 @@ private struct LearningReviewControls: View {
                         .foregroundStyle(ClassroomPalette.failure)
                     Text(failure.isEmpty ? "复查已中断，等待重试。" : failure)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1671,7 +1711,7 @@ private struct LearningReviewControls: View {
                     .foregroundStyle(available ? Color.secondary : ClassroomPalette.attention)
                 Text(available ? directory.path : "录音文件夹已移动或不可用")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(directory.path)
@@ -1680,23 +1720,27 @@ private struct LearningReviewControls: View {
             HStack(spacing: 10) {
                 if failure != nil {
                     Button("重试") { queue.retryJob(id) }
+                    .accessibilityLabel(ContextualActionName.review("重试", name: name, scope: scope))
                         .buttonStyle(.borderless)
                         .font(.caption)
                         .help("重新处理这项复查；已经完成的批次不会重复。")
                 }
                 Button("移到最后") { queue.moveJobToEnd(id) }
+                    .accessibilityLabel(ContextualActionName.review("移到最后", name: name, scope: scope))
                     .buttonStyle(.borderless)
                     .font(.caption)
                     .disabled(isLast)
                     .help(isLast ? "已经在队列末尾" : "调整复查顺序；正在运行的任务会先安全取消当前批次。")
                 if !available {
                     Button("重新定位文件夹…") { relocateRecording(id: id, from: directory, name: name) }
+                    .accessibilityLabel(ContextualActionName.review("重新定位文件夹", name: name, scope: scope))
                         .buttonStyle(.borderless)
                         .font(.caption)
                         .help("选择录音文件夹的新位置；LiveLingo 会检查原笔记是否一致。")
                 }
                 Spacer(minLength: 8)
                 Button("移出队列…") { pendingQueueRemoval = id }
+                    .accessibilityLabel(ContextualActionName.review("移出队列", name: name, scope: scope))
                     .buttonStyle(.borderless)
                     .font(.caption)
                     .help("只从复查队列移除这项任务，不会删除任何文件。")
@@ -1733,7 +1777,7 @@ private struct ClassroomPreviewStatus: View {
     var body: some View {
         Text(enabled ? stream.previewTranslationStatus : "最新内容在顶部")
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ReadingAccessibility.secondaryText)
             .lineLimit(1)
             .help(stream.previewTranslationStatus)
     }
@@ -1755,17 +1799,17 @@ private struct ClassroomLivePreview: View {
                             .opacity(stream.volatileEnglish.isEmpty ? 0 : 1)
                         Text(stream.volatileEnglish.isEmpty ? "等待下一句" : "正在识别")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(ReadingAccessibility.secondaryText)
                     }
                     // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
                     // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
                     if let caption = model.nonEnglishPreviewPresentation, caption.isSourceOnly {
-                        previewSlotMeasure(size: textSize - 2, weight: .regular)
+                        previewSlotMeasure(size: textSize * 16 / 18, weight: .regular)
                         previewReadingSlot(model.previewChineseDisplay, size: textSize, weight: .regular,
                                            languageName: caption.languageName)
                     } else {
                         previewReadingSlot(model.previewEnglishDisplay,
-                                           size: textSize - 2, weight: .regular,
+                                           size: textSize * 16 / 18, weight: .regular,
                                            languageName: model.nonEnglishPreviewPresentation?.languageName)
                         previewReadingSlot(model.previewChineseDisplay,
                                            size: textSize, weight: .regular)
@@ -1805,7 +1849,7 @@ private struct ClassroomLivePreview: View {
                         VStack(alignment: .leading, spacing: 0) {
                             if let languageName {
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                    CaptionLanguageLabel(name: languageName, subtitleSize: size)
+                                    CaptionLanguageLabel(name: languageName, subtitleSize: size, scale: textSize / 18)
                                     previewText(text, size: size, weight: weight)
                                 }
                                 .accessibilityElement(children: .contain)
@@ -1867,7 +1911,7 @@ private struct PendingCaptionTranslation: View {
                 Text(CaptionPresentation.translationStatus(isTranslating: isTranslating))
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ReadingAccessibility.secondaryText)
             if isTranslating {
                 ActiveCaptionTranslation(stream: stream, segmentID: segmentID, textSize: textSize,
                                          target: target, converter: converter)
@@ -1908,7 +1952,7 @@ private struct ActiveCaptionTranslation: View {
 }
 
 /// Finished captions have no dependency on streaming text or unrelated app state.
-private struct TranscriptCaptionRow: View, Equatable {
+struct TranscriptCaptionRow: View, Equatable {
     let segment: TranscriptSegment
     let textSize: Double
     let stream: FinalCaptionState
@@ -1924,15 +1968,15 @@ private struct TranscriptCaptionRow: View, Equatable {
         let caption = CaptionPresentation(segment, outputLanguage: target, converter: converter)
         HStack(alignment: .top, spacing: 14) {
             Text(Self.clock(segment.startTime))
-                .font(.system(size: 13).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 54, alignment: .leading)
+                .font(.system(size: 13 * textSize / 18).monospacedDigit())
+                .foregroundStyle(ReadingAccessibility.secondaryText)
+                .frame(width: 54 * textSize / 18, alignment: .leading)
                 .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 10) {
                 if let name = caption.languageName {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        CaptionLanguageLabel(name: name, subtitleSize: caption.isSourceOnly ? textSize : textSize - 2)
+                        CaptionLanguageLabel(name: name, subtitleSize: caption.isSourceOnly ? textSize : textSize * 16 / 18, scale: textSize / 18)
                         if caption.isSourceOnly {
                             Text(caption.primaryText)
                                 .font(.system(size: textSize))
@@ -1951,7 +1995,7 @@ private struct TranscriptCaptionRow: View, Equatable {
 
                 if let notice = segment.annotationText(targetCode: target.rawValue),
                    segment.captionAnnotation == .formulaNeedsReview {
-                    Text(target.renderFixedTextForDisplay(notice, converter: converter)).font(.caption).foregroundStyle(.secondary)
+                    Text(target.renderFixedTextForDisplay(notice, converter: converter)).font(.caption).foregroundStyle(ReadingAccessibility.secondaryText)
                 }
                 if caption.isSourceOnly {
                     EmptyView()
@@ -1959,7 +2003,7 @@ private struct TranscriptCaptionRow: View, Equatable {
                     PendingCaptionTranslation(stream: stream, segmentID: segment.id, textSize: textSize,
                                               target: target, converter: converter)
                 } else {
-                    Text(markdown: CaptionPresentation.translationText(segment, outputLanguage: target, converter: converter))
+                    Text(markdown: CaptionPresentation.translationText(segment, outputLanguage: target, converter: converter), bodySize: textSize)
                         .font(.system(size: textSize))
                         .lineSpacing(7)
                         .foregroundStyle(.primary)
@@ -1983,7 +2027,7 @@ private struct TranscriptCaptionRow: View, Equatable {
 
     private func sourceText(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: textSize - 2))
+            .font(.system(size: textSize * 16 / 18))
             .lineSpacing(4)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2022,7 +2066,10 @@ private struct RecordingMeterView: View {
     }
 }
 
-private struct SummaryMarkdownView: View {
+struct SummaryMarkdownView: View {
+    @Environment(\.classroomReadingScale) private var readingScale
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private var scale: Double { max(readingScale, ReadingTypography.dynamicScale(dynamicTypeSize)) }
     let text: String
     var language: OutputLanguage = .simplifiedChinese
     var isLegacyRendered = false
@@ -2050,20 +2097,31 @@ private struct SummaryMarkdownView: View {
                     converter: converter, document: document) {
                 case let .reviewChange(original, proposed):
                     ReviewChangeView(original: original, proposed: proposed)
+                        .environment(\.classroomReadingScale, scale)
                 case .hidden, .blank:
                     EmptyView()
                 case let .heading(text):
                     Text(text)
-                        .font(.system(size: 18, weight: .semibold))
+                        .accessibilityHeading(.h2)
+                        .font(.system(size: 18 * scale, weight: .semibold))
                         .padding(.top, 5)
+                        .accessibilityRepresentation {
+                            // Selectable Text uses AppKitTextInteractionView,
+                            // which exposes AXStaticText despite header traits.
+                            // Keep native selection in the visual view and give
+                            // the AX tree an explicit nonselectable h2 heading.
+                            Text(text).accessibilityHeading(.h2)
+                                .accessibilityAddTraits(.isHeader)
+                                .textSelection(.disabled)
+                        }
                 case let .sourceEvidence(label, text, indentation):
                     DisclosureGroup(label) {
-                        Text(markdown: text)
-                            .font(.system(size: 15))
+                        Text(markdown: text, bodySize: 15 * scale, baseBodySize: 15)
+                            .font(.system(size: 15 * scale))
                             .lineSpacing(5)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .font(.system(size: 14))
+                    .font(.system(size: 14 * scale))
                     .padding(.leading, CGFloat(indentation) * 14)
                 case let .bullet(text, indentation):
                     HStack(alignment: .top, spacing: 9) {
@@ -2071,15 +2129,15 @@ private struct SummaryMarkdownView: View {
                             .fill(Color.secondary)
                             .frame(width: 6, height: 6)
                             .padding(.top, 7)
-                        Text(markdown: text)
-                            .font(.system(size: 16))
+                        Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16)
+                            .font(.system(size: 16 * scale))
                             .lineSpacing(5)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.leading, CGFloat(indentation) * 14)
                 case let .paragraph(text):
-                    Text(markdown: text)
-                        .font(.system(size: 16))
+                    Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16)
+                        .font(.system(size: 16 * scale))
                         .lineSpacing(5)
                         .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2090,7 +2148,8 @@ private struct SummaryMarkdownView: View {
     }
 }
 
-private struct ReviewChangeView: View {
+struct ReviewChangeView: View {
+    @Environment(\.classroomReadingScale) private var scale
     let original: String
     let proposed: String
 
@@ -2122,7 +2181,7 @@ private struct ReviewChangeView: View {
         return characters.enumerated().reduce(Text("")) { result, item in
             let part = Text(verbatim: item.element)
             return result + (changed.contains(item.offset)
-                ? part.bold().foregroundColor(removed ? .red : .teal).strikethrough(removed)
+                ? part.bold().foregroundColor(removed ? .red : ReadingAccessibility.proposedText).strikethrough(removed)
                 : part)
         }
     }
@@ -2131,12 +2190,12 @@ private struct ReviewChangeView: View {
         let originalTokens = Self.tokens(original)
         let proposedTokens = Self.tokens(proposed)
         VStack(alignment: .leading, spacing: 8) {
-            Text("原笔记").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text("原笔记").font(.system(size: 12 * scale, weight: .semibold)).foregroundStyle(ReadingAccessibility.secondaryText)
             marked(original, tokens: originalTokens, against: proposedTokens, removed: true)
-            Text("核对意见 · 待核对").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text("核对意见 · 待核对").font(.system(size: 12 * scale, weight: .semibold)).foregroundStyle(ReadingAccessibility.secondaryText)
             marked(proposed, tokens: proposedTokens, against: originalTokens, removed: false)
         }
-        .font(.system(size: 16))
+        .font(.system(size: 16 * scale))
         .lineSpacing(5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -2146,14 +2205,15 @@ private struct ReviewChangeView: View {
 
 private extension Text {
     @MainActor
-    init(markdown source: String) {
+    init(markdown source: String, bodySize: Double = 18, baseBodySize: Double = 18) {
         #if DEBUG
         SummaryRenderingDiagnostics.record(\.inlineParses)
         #endif
         self = FormulaDisplay.runs(source).reduce(Text("")) { result, run in
             let part: Text
             if run.script != 0 {
-                part = Text(verbatim: run.text).font(.system(size: 10)).baselineOffset(run.script < 0 ? -3 : 5)
+                part = Text(verbatim: run.text).font(.system(size: ReadingTypography.scriptSize(bodySize: bodySize, baseBodySize: baseBodySize)))
+                    .baselineOffset(ReadingTypography.scriptOffset(script: run.script, bodySize: bodySize, baseBodySize: baseBodySize))
             } else if run.math {
                 part = Text(verbatim: run.text)
             } else if let attributed = try? AttributedString(markdown: run.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {

@@ -283,14 +283,14 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             let palette = FloatingSubtitlePalette(backgroundOpacity: opacity)
             for slide in [0.0, 0.5, 1.0] {
                 let background = FloatingSubtitlePalette.backgroundWhite * opacity + slide * (1 - opacity)
-                XCTAssertGreaterThanOrEqual(contrast(palette.languageWhite, background), 3,
+                XCTAssertGreaterThanOrEqual(contrast(palette.languageWhite, background), 4.5,
                                             "Language tag: opacity=\(opacity), underlying white=\(slide)")
                 XCTAssertGreaterThanOrEqual(contrast(palette.sourceWhite, background), 4.5)
                 XCTAssertGreaterThanOrEqual(contrast(1, background), 4.5)
             }
         }
         let worst = 0.08 * 0.7 + 1 * 0.3
-        print("FLOATING_CONTRAST white-slide/70-percent tag=\(contrast(0.8, worst)) source=\(contrast(0.95, worst)) translation=\(contrast(1, worst))")
+        print("FLOATING_CONTRAST white-slide/70-percent tag=\(contrast(FloatingSubtitlePalette(backgroundOpacity: 0.7).languageWhite, worst)) source=\(contrast(0.95, worst)) translation=\(contrast(1, worst))")
     }
 
     func testHostedMissingTranslationShowsOnlyTheTaggedSourceThenOnlyTranslation() async throws {

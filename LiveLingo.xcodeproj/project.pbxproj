@@ -136,6 +136,8 @@
 		A7D951F0B2D483A5B585DC18 /* PrivacyAudioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 166D40F22F74343E38591F02 /* PrivacyAudioTests.swift */; };
 		D8BA39AA5D7459C24D85E6DE /* PrivacyExitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27FB4EB3DC474EAF6C57B7EB /* PrivacyExitTests.swift */; };
 		E80500000000000000000001 /* PrivacyPermissionFailureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E80500000000000000000002 /* PrivacyPermissionFailureTests.swift */; };
+		AA1100000000000000000001 /* ReadingAccessibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1100000000000000000002 /* ReadingAccessibility.swift */; };
+		AA1200000000000000000001 /* AccessibilityRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1200000000000000000002 /* AccessibilityRegressionTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -283,6 +285,8 @@
 		166D40F22F74343E38591F02 /* PrivacyAudioTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyAudioTests.swift; sourceTree = "<group>"; };
 		27FB4EB3DC474EAF6C57B7EB /* PrivacyExitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyExitTests.swift; sourceTree = "<group>"; };
 		E80500000000000000000002 /* PrivacyPermissionFailureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyPermissionFailureTests.swift; sourceTree = "<group>"; };
+		AA1100000000000000000002 /* ReadingAccessibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingAccessibility.swift; sourceTree = "<group>"; };
+		AA1200000000000000000002 /* AccessibilityRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityRegressionTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -312,6 +316,7 @@
 		A70000000000000000000003 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				AA1100000000000000000002 /* ReadingAccessibility.swift */,
 				C70400000000000000000002 /* ChineseScriptConverter.swift */,
 				C70900000000000000000002 /* ClassroomMarkdownRendering.swift */,
 				699C4C9F8EAE75721EC0CB33 /* SecureAudioWriter.swift */,
@@ -369,6 +374,7 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				AA1200000000000000000002 /* AccessibilityRegressionTests.swift */,
 				C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */,
 				C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */,
 				C71000000000000000000002 /* TraditionalSessionExporterTests.swift */,
@@ -514,6 +520,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA1100000000000000000001 /* ReadingAccessibility.swift in Sources */,
 				CEED4CDF0362D0B9AE3DDE16 /* SecureAudioWriter.swift in Sources */,
 				281E57C8E7D68A294B32CF61 /* ExitDeadline.swift in Sources */,
 				910000000000000000000001 /* FloatingSubtitlePreferences.swift in Sources */,
@@ -566,6 +573,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA1200000000000000000001 /* AccessibilityRegressionTests.swift in Sources */,
 				D8BA39AA5D7459C24D85E6DE /* PrivacyExitTests.swift in Sources */,
 				A7D951F0B2D483A5B585DC18 /* PrivacyAudioTests.swift in Sources */,
 				8D49BE0052E8A8509EFF8CB7 /* PrivacyFollowupStorageTests.swift in Sources */,

@@ -8,10 +8,16 @@ import ObjectiveC
 /// TMPDIR. The isolated test host redirects the getter before any fixtures run.
 private enum UnitTestTemporaryDirectory {
     static let directory: URL? = {
-        guard let path = ProcessInfo.processInfo.environment["LIVELINGO_TEST_TMPDIR"],
-              path.hasPrefix("/"),
-              ["/dd-safety/tmp", "/dd-energy/tmp"].contains(where: path.hasSuffix) else { return nil }
-        return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        guard AppRuntimeEnvironment.isUnitTesting else { return nil }
+        var directory = Bundle.main.bundleURL
+        while directory.path != "/" {
+            let parent = directory.deletingLastPathComponent()
+            if directory.lastPathComponent == "Products", parent.lastPathComponent == "Build" {
+                return parent.deletingLastPathComponent().appendingPathComponent("tmp", isDirectory: true)
+            }
+            directory = parent
+        }
+        return nil
     }()
     private static let install: Void = {
         guard AppRuntimeEnvironment.isUnitTesting, directory != nil,

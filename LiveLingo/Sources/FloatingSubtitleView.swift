@@ -15,6 +15,9 @@ private struct FloatingSubtitleContent: View {
     @ObservedObject var windowController: FloatingSubtitleWindowController
 
     private var preferences = FloatingSubtitlePreferences()
+    @AppStorage("transcriptTextSize") private var readingTextSize = 18.0
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private var scale: Double { ReadingTypography.scale(textSize: readingTextSize, dynamicType: dynamicTypeSize) }
 
     var body: some View {
         #if DEBUG
@@ -26,7 +29,7 @@ private struct FloatingSubtitleContent: View {
             HStack {
                 Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
                 Text(model.isRecording ? "实时字幕 · 初译" : model.phaseLabel)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12 * scale, weight: .semibold))
                     .foregroundStyle(Color(white: palette.headerWhite))
                 Spacer()
                 Menu {
@@ -46,11 +49,11 @@ private struct FloatingSubtitleContent: View {
             // Keep both scroll containers mounted across mode switches, including
             // source-only Chinese. Hidden bodies cannot be selected or accessed.
             subtitle(presentation.source?.text ?? "",
-                     size: preferences.sourceTextSize, weight: .regular,
+                     size: preferences.sourceTextSize * scale, weight: .regular,
                      color: Color(white: palette.sourceWhite), height: model.captionTarget == .english && presentation.source == nil ? 0 : 88,
                      languageName: presentation.source?.languageName, languageWhite: palette.languageWhite,
                      visible: presentation.source != nil)
-            subtitle(presentation.translation?.text ?? "", size: preferences.translationTextSize, weight: .medium,
+            subtitle(presentation.translation?.text ?? "", size: preferences.translationTextSize * scale, weight: .medium,
                      color: .white, height: model.captionTarget == .english && presentation.translation == nil ? 0 : 138, languageName: presentation.translation?.languageName,
                      languageWhite: palette.languageWhite, visible: presentation.translation != nil)
         }
@@ -61,7 +64,7 @@ private struct FloatingSubtitleContent: View {
         .overlay(alignment: .topTrailing) {
             if windowController.isLocked {
                 Label("已锁定", systemImage: "lock.fill")
-                    .font(.system(size: 10))
+                    .font(.system(size: 10 * scale))
                     .foregroundStyle(Color(white: palette.headerWhite))
                     .padding(.top, 4).padding(.trailing, 8)
                     .allowsHitTesting(false)
@@ -83,7 +86,7 @@ private struct FloatingSubtitleContent: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if let languageName {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            CaptionLanguageLabel(name: languageName, subtitleSize: size, color: Color(white: languageWhite))
+                            CaptionLanguageLabel(name: languageName, subtitleSize: size, color: Color(white: languageWhite), scale: scale)
                             subtitleText(text, size: size, weight: weight, color: color, selectable: visible)
                         }
                         .accessibilityElement(children: .contain)
