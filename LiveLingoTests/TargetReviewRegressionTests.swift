@@ -12,6 +12,11 @@ final class TargetReviewRegressionTests: XCTestCase {
         }
     }
 
+    /// Startup and status read this fixed clock, so the fixture's retry is a
+    /// pending future retry regardless of the host's date.
+    private static let fixtureEpoch = Date(timeIntervalSince1970: 1_800_000_000)
+    private static func fixtureNow() -> Date { fixtureEpoch }
+
     private func root() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("TargetReview-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -40,7 +45,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         var job = LearningReviewQueue.Job(directory: directory, batches: [batch], original: "Frozen notes.",
             prefix: "Frozen unfinished prefix.", prompt: "Frozen original prompt.",
             prefixInputDigest: "original-binding", retryPending: .init(attempts: 1,
-                notBefore: 3_600, code: "requestTimedOut"),
+                notBefore: Self.fixtureEpoch.timeIntervalSince1970 + 3_600, code: "requestTimedOut"),
             awaitingManualStart: true,
             identity: try ReviewIdentity(sessionID: snapshot.sessionID, scope: .wholeLesson, inputRevision: 0),
             inputDigest: try ReviewInputBinding.digest([batch]))
@@ -78,6 +83,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         var reads = 0
         let queue = LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
             generate: { _, _, _, _, _ in XCTFail("Startup must not generate"); throw CancellationError() },
+            now: Self.fixtureNow,
             startupSnapshotReader: { directory in
                 reads += 1
                 if kind == "permission" { throw POSIXError(.EPERM) }
@@ -114,7 +120,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         let url = root.appendingPathComponent("queue.json")
         let bytes = try encode(journal); try bytes.write(to: url)
         let queue = LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
-            startupSnapshotReader: { _ in XCTFail("An invisible course must not be opened"); throw POSIXError(.EPERM) })
+            now: Self.fixtureNow, startupSnapshotReader: { _ in XCTFail("An invisible course must not be opened"); throw POSIXError(.EPERM) })
         await queue.shutdownForTesting()
         XCTAssertEqual(try encode(queue.journalForTesting), bytes)
         XCTAssertEqual(try Data(contentsOf: url), bytes)
@@ -130,7 +136,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         let url = root.appendingPathComponent("queue.json")
         let bytes = try encode(journal); try bytes.write(to: url)
         let queue = LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
-            startupSnapshotReader: { _ in XCTFail("Stamped, bound jobs must not read a course"); throw POSIXError(.EPERM) })
+            now: Self.fixtureNow, startupSnapshotReader: { _ in XCTFail("Stamped, bound jobs must not read a course"); throw POSIXError(.EPERM) })
         await queue.shutdownForTesting()
         XCTAssertEqual(try Data(contentsOf: url), bytes)
         XCTAssertTrue(queue.userPaused)
@@ -146,7 +152,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         let url = root.appendingPathComponent("queue.json")
         try encode(journal).write(to: url)
         let queue = LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
-            startupSnapshotReader: { _ in throw POSIXError(.EPERM) })
+            now: Self.fixtureNow, startupSnapshotReader: { _ in throw POSIXError(.EPERM) })
         await queue.shutdownForTesting()
         let restored = try XCTUnwrap(queue.journalForTesting.jobs.first)
         XCTAssertEqual(restored.awaitingManualStart, true)
@@ -168,6 +174,7 @@ final class TargetReviewRegressionTests: XCTestCase {
         var calls = 0
         let queue = LearningReviewQueue(journalURL: url, observeSleep: false, diagnostics: .disabled,
             generate: { _, _, _, _, _ in calls += 1; throw CancellationError() },
+            now: Self.fixtureNow,
             startupSnapshotReader: { _ in throw POSIXError(.EPERM) })
         queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
         queue.performPrimaryAction()
