@@ -132,6 +132,60 @@ class ChineseVariantsRenderingTests(unittest.TestCase):
         self.assert_rendered("头发价格 $5，后面是 $6；公式 $3+x_{头发}$ 和 $ x_{头发} $，后面是头发。",
                              "頭髮價格 $5，後面是 $6；公式 $3+x_{头发}$ 和 $ x_{头发} $，後面是頭髮。")
 
+    def test_ordered_list_fence_preserves_keys_and_following_prose(self):
+        code = '1. ```python\n   record["头发"]\n   ```\n\n'
+        self.assert_rendered(code + "头发在这里。", code + "頭髮在這裡。", code + "頭髮在這裏。")
+        for mode in ("s2tw", "s2hk"):
+            expression = self.render(code, mode).splitlines()[1].strip()
+            self.assertEqual(eval(expression, {"__builtins__": {}}, {"record": {"头发": 3}}), 3)
+
+    def test_list_paragraph_indentation_is_relative_to_container(self):
+        source = '- 课程内容：\n\n    头发在这里。\n\n- 后面是结论。'
+        taiwan = '- 課程內容：\n\n    頭髮在這裡。\n\n- 後面是結論。'
+        self.assert_rendered(source, taiwan, taiwan.replace("這裡", "這裏"))
+
+    def test_inline_backticks_cannot_pair_across_blank_paragraphs(self):
+        source = '这里有一个未闭合标记 `record[\n\n头发在这里。\n\n` 后面是正文。'
+        taiwan = '這裡有一個未閉合標記 `record[\n\n頭髮在這裡。\n\n` 後面是正文。'
+        self.assert_rendered(source, taiwan, taiwan.replace("這裡", "這裏"))
+
+    def test_blockquote_fence_ends_with_container(self):
+        self.assert_rendered('这里。\n> ```python\n> record["头发"]\n\n头发在这里。',
+                             '這裡。\n> ```python\n> record["头发"]\n\n頭髮在這裡。',
+                             '這裏。\n> ```python\n> record["头发"]\n\n頭髮在這裏。')
+
+    def test_nested_container_fences_and_relative_indented_code(self):
+        for code in ('12) ~~~python\n    record["头发"]\n    ~~~\n\n',
+                     '> 1. ```python\n>    record["头发"]\n>    ```\n\n',
+                     '- 内容：\n\n      record["头发"]\n\n'):
+            expected_code = code.replace("内容", "內容")
+            self.assert_rendered(code + "头发在这里。", expected_code + "頭髮在這裡。",
+                                 expected_code + "頭髮在這裏。")
+
+    def test_inline_code_block_boundaries_and_soft_line_breaks(self):
+        self.assert_rendered('> 这里 `record[\r\n> "头发"]` 后面。',
+                             '> 這裡 `record[\r\n> "头发"]` 後面。',
+                             '> 這裏 `record[\r\n> "头发"]` 後面。')
+        for source in ('这里 `头发\n# 头发` 后面。', '这里 `头发\n- 头发` 后面。',
+                       '> 这里 `头发\n- 头发` 后面。'):
+            taiwan = source.replace("这里", "這裡").replace("头发", "頭髮").replace("后面", "後面")
+            self.assert_rendered(source, taiwan, taiwan.replace("這裡", "這裏"))
+
+    def test_swift_python_markdown_container_parity(self):
+        executable = os.environ.get("LIVELINGO_ZH_VARIANTS_RENDER_CLI")
+        if not executable:
+            self.skipTest("Build the Foundation-only protected-rendering probe first")
+        cases = ('1. ```python\n   record["头发"]\n   ```\n\n头发在这里。',
+                 '- 课程内容：\n\n    头发在这里。\n\n- 后面是结论。',
+                 '这里有一个未闭合标记 `record[\n\n头发在这里。\n\n` 后面是正文。',
+                 '这里。\n> ```python\n> record["头发"]\n\n头发在这里。')
+        for source in cases:
+            for mode in ("s2tw", "s2hk"):
+                with self.subTest(source=source, mode=mode):
+                    reply = subprocess.run([executable, mode], input=source.encode(), capture_output=True, timeout=30)
+                    self.assertEqual(reply.returncode, 0, reply.stderr.decode())
+                    self.assertEqual(reply.stdout, self.render(source, mode).encode())
+
     def test_swift_python_rendering_parity(self):
         executable = os.environ.get("LIVELINGO_ZH_VARIANTS_RENDER_CLI")
         if not executable:

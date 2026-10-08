@@ -669,8 +669,37 @@ import Foundation
             passed.append("traditional_bound_run_marker_" + target.rawValue)
             try traditionalTechnicalRoundTrip(root, target: target, cli: cli)
             passed.append("traditional_technical_identifiers_binary_" + target.rawValue)
+            try traditionalMarkdownContainerRoundTrip(root, target: target, cli: cli)
+            passed.append("traditional_markdown_containers_binary_" + target.rawValue)
         }
         return passed
+    }
+
+    static func traditionalMarkdownContainerRoundTrip(_ root: URL, target: OutputLanguage, cli: URL) throws {
+        let course = try fixtureDirectory(root, name: "markdown-containers-" + target.rawValue)
+        let code = "1. ```python\n   record[\"头发\"]\n   ```\n\n"
+        let quote = "> ```python\n> record[\"头发\"]\n\n"
+        let draft = code + "- 课程内容：\n\n    头发在这里。\n\n- 后面是结论。\n\n"
+            + "这里有一个未闭合标记 `record[\n\n头发在这里。\n\n` 后面是正文。\n\n"
+            + "这里。\n" + quote + "头发在这里。"
+        let taiwan = code + "- 課程內容：\n\n    頭髮在這裡。\n\n- 後面是結論。\n\n"
+            + "這裡有一個未閉合標記 `record[\n\n頭髮在這裡。\n\n` 後面是正文。\n\n"
+            + "這裡。\n" + quote + "頭髮在這裡。"
+        let expected = target == .traditionalChineseTaiwan ? taiwan : taiwan.replacingOccurrences(of: "這裡", with: "這裏")
+        let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Synthetic Markdown containers.", chinese: draft)
+        try SessionStore(directory: course).save(SessionSnapshot(segments: [segment], targetLocale: target.persistedLocale))
+        try SessionExporter.export(segments: [segment], sessionDirectory: course, summary: draft,
+            createdAt: Date(timeIntervalSince1970: 0), target: target)
+        let saved = try fileBytes(course)
+        try expect(saved[SessionExporter.targetTranscriptFileName(for: target.rawValue)] == Data((expected + "\n").utf8),
+            "markdown_containers_handwritten_transcript")
+        try expect(saved[SessionExporter.targetSummaryFileName(for: target.rawValue)] == Data((expected + "\n").utf8),
+            "markdown_containers_handwritten_summary")
+        let result = try runCLI(cli, directory: course)
+        try expect(result.status == 0 && result.savedReceipt?["segments"] as? Int == 1,
+            "binary_markdown_containers_round_trip")
+        try expectNoCaptionLog(result, segments: [segment])
+        try expect(try fileBytes(course) == saved, "markdown_containers_verify_is_read_only")
     }
 
     static func traditionalTechnicalRoundTrip(_ root: URL, target: OutputLanguage, cli: URL) throws {

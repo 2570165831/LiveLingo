@@ -120,6 +120,34 @@ enum ReviewInputBinding {
         return [available[number - 1]]
     }
 
+    /// Decoding legacy JSONL proves structure, not the source/target boundary.
+    /// Only independently matching transcript exports can corroborate both
+    /// fields. Check every available export, even for byte-identical notes.
+    private static func checkedLegacyEvidence(_ segments: [TranscriptSegment], in directory: URL,
+                                              language: OutputLanguage) throws -> [TranscriptSegment] {
+        guard !segments.isEmpty else { return [] }
+        let sourceURL = directory.appendingPathComponent("transcript-en.txt")
+        let targetURL = directory.appendingPathComponent(SessionExporter.targetTranscriptFileName(for: language.rawValue))
+        try SessionArchiveCoding.requireRegularFileIfPresent(sourceURL)
+        try SessionArchiveCoding.requireRegularFileIfPresent(targetURL)
+        let hasSource = FileManager.default.fileExists(atPath: sourceURL.path)
+        let hasTarget = FileManager.default.fileExists(atPath: targetURL.path)
+        if hasSource {
+            let expected = segments.map(SessionExporter.sourceLine).joined(separator: "\n") + "\n"
+            guard try Data(contentsOf: sourceURL) == Data(expected.utf8) else {
+                throw ReviewIdentityError.conflict("旧字幕归档与已保存的原文导出不一致")
+            }
+        }
+        if hasTarget {
+            let expected = try segments.map { try SessionExporter.renderedTargetLine($0, outputLanguage: language) }
+                .joined(separator: "\n") + "\n"
+            guard try Data(contentsOf: targetURL) == Data(expected.utf8) else {
+                throw ReviewIdentityError.conflict("旧字幕归档与已保存的译文导出不一致")
+            }
+        }
+        return hasSource && hasTarget ? segments : []
+    }
+
     /// A revised directory can still hold historical reports, but cannot resume
     /// generation against the old input. Retained batches prove old provenance.
     static func validate(identity: ReviewIdentity?, scope: LearningReviewScope,
@@ -179,9 +207,6 @@ enum ReviewInputBinding {
         let summary = SessionExporter.savedSummaryURL(in: directory, targetLocale: nil)
         if FileManager.default.fileExists(atPath: summary.path) {
             let saved = try Data(contentsOf: summary)
-            // Old queue input may itself be an already rendered summary. A
-            // byte-identical match needs no dictionary and must not convert twice.
-            if saved == Data((original + "\n").utf8) { return }
             struct Metadata: Decodable { let targetLocale: String? }
             let manifest = directory.appendingPathComponent("manifest.json")
             let locale: String?
@@ -192,18 +217,19 @@ enum ReviewInputBinding {
             }
             // The non-regional code belongs to historical verifier fixtures.
             let language = try OutputLanguage.storedLanguage(locale == "zh-Hant" ? nil : locale)
-            // Old review jobs may not have frozen batches. The checked legacy
-            // JSONL still retains both unrendered fields, so it can prove the
-            // schedule boundary even when either field contains the separator.
-            // Bound jobs have already required their identity snapshot above.
-            let evidence = batches.flatMap(\.evidence) + (archive.snapshot?.segments ?? [])
+            let archivedEvidence = language.profile.renderer == .identity ? []
+                : try checkedLegacyEvidence(archive.snapshot?.segments ?? [], in: directory, language: language)
+            // Already rendered legacy input needs no boundary recovery or
+            // second conversion, but must not hide an observed archive conflict.
+            if saved == Data((original + "\n").utf8) { return }
+            let evidence = batches.flatMap(\.evidence) + archivedEvidence
+            if language.profile.renderer != .identity,
+               ClassroomMarkdownRendering.hasUnresolvedScheduleBoundary(original, evidence: evidence) {
+                throw ReviewIdentityError.unreadable("旧课程缺少可核对的原文与译文边界，请恢复完整字幕归档与原文、译文导出或使用已保存的笔记原文")
+            }
             let rendered = try ClassroomMarkdownRendering.render(original, language: language,
                 scheduleEvidence: evidence)
             guard saved == Data((rendered + "\n").utf8) else {
-                if language.profile.renderer != .identity,
-                   ClassroomMarkdownRendering.hasUnresolvedScheduleBoundary(original, evidence: evidence) {
-                    throw ReviewIdentityError.unreadable("旧课程缺少可核对的原文与译文边界，请恢复完整字幕归档或使用已保存的笔记原文")
-                }
                 throw ReviewIdentityError.conflict("所选目录的笔记与复查原文不同")
             }
         }

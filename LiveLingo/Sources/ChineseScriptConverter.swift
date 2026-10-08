@@ -285,6 +285,7 @@ extension ChineseScriptConverter {
             let bytes: [UInt8]
             var protected: [Bool]
             var blockProtected: [Bool] = []
+            var inlineBlocks: [Int]
             private static let whitespace: Set<UInt8> = [32, 9, 13, 10]
             private static let mathEnvironments: Set<String> = [
                 "math", "displaymath", "equation", "equation*", "align", "align*", "aligned",
@@ -295,6 +296,7 @@ extension ChineseScriptConverter {
             init(bytes: [UInt8]) {
                 self.bytes = bytes
                 protected = Array(repeating: false, count: bytes.count)
+                inlineBlocks = Array(repeating: 0, count: bytes.count)
             }
 
             mutating func mark(_ range: Range<Int>) {
@@ -338,51 +340,148 @@ extension ChineseScriptConverter {
                 return nil
             }
 
+            private enum Container: Equatable {
+                case quote
+                case list(indent: Int)
+            }
+
+            private func indentation(_ start: Int, columns: Int = 0, end: Int) -> (index: Int, columns: Int) {
+                var index = start, columns = columns
+                while index < end, bytes[index] == 32 || bytes[index] == 9 {
+                    columns += bytes[index] == 32 ? 1 : 4 - columns % 4
+                    index += 1
+                }
+                return (index, columns)
+            }
+
+            private func listMarkerEnd(_ index: Int, end: Int) -> Int? {
+                guard index < end else { return nil }
+                var markerEnd = index
+                if [45, 43, 42].contains(bytes[index]) {
+                    markerEnd += 1
+                } else {
+                    while markerEnd < end, (48...57).contains(bytes[markerEnd]), markerEnd - index < 9 { markerEnd += 1 }
+                    guard markerEnd > index, markerEnd < end, [46, 41].contains(bytes[markerEnd]) else { return nil }
+                    markerEnd += 1
+                }
+                return markerEnd == end || [32, 9].contains(bytes[markerEnd]) ? markerEnd : nil
+            }
+
+            private func heading(_ index: Int, end: Int) -> Bool {
+                guard index < end, bytes[index] == 35 else { return false }
+                let last = runEnd(index, byte: 35)
+                return last - index <= 6 && (last == end || [32, 9].contains(bytes[last]))
+            }
+
+            private func rule(_ index: Int, end: Int) -> Bool {
+                guard index < end, [42, 45, 95, 61].contains(bytes[index]) else { return false }
+                let marker = bytes[index]
+                let body = bytes[index..<end].filter { $0 != 32 && $0 != 9 }
+                return body.count >= (marker == 61 ? 1 : 3) && body.allSatisfy { $0 == marker }
+            }
+
+            private func interruptsParagraph(_ index: Int, columns: Int, end: Int) -> Bool {
+                guard columns <= 3, index < end else { return false }
+                return bytes[index] == 62 || heading(index, end: end) || rule(index, end: end)
+                    || listMarkerEnd(index, end: end) != nil
+                    || ([96, 126].contains(bytes[index]) && runEnd(index, byte: bytes[index]) - index >= 3)
+            }
+
             mutating func blocks() {
-                var fence: (byte: UInt8, count: Int)?
-                var indented = false, previousBlank = true, start = 0
+                var containers: [Container] = []
+                var fence: (byte: UInt8, count: Int, containers: [Container])?
+                var indented = false, previousBlank = true, paragraph = false, blockID = 0, start = 0
                 while start < bytes.count {
                     let end = bytes[start...].firstIndex(of: 10).map { $0 + 1 } ?? bytes.count
                     var contentEnd = end
                     while contentEnd > start, bytes[contentEnd - 1] == 13 || bytes[contentEnd - 1] == 10 { contentEnd -= 1 }
-                    var index = start, columns = 0
-                    while index < contentEnd, bytes[index] == 32 || bytes[index] == 9 {
-                        columns += bytes[index] == 32 ? 1 : 4 - columns % 4
-                        index += 1
+                    let leading = indentation(start, end: contentEnd)
+                    var index = leading.index, columns = leading.columns, matched = 0
+                    containerLoop: for container in containers {
+                        switch container {
+                        case .quote:
+                            guard columns <= 3, index < contentEnd, bytes[index] == 62 else { break containerLoop }
+                            index += 1
+                            if index < contentEnd, bytes[index] == 32 || bytes[index] == 9 { index += 1 }
+                            let next = indentation(index, end: contentEnd)
+                            index = next.index
+                            columns = next.columns
+                        case .list(let indent):
+                            guard index == contentEnd || columns >= indent else { break containerLoop }
+                            columns = max(0, columns - indent)
+                        }
+                        matched += 1
                     }
-                    let blank = index == contentEnd
-                    var marker = index
-                    if columns <= 3 {
-                        while marker < contentEnd, bytes[marker] == 62 {
-                            marker += 1
-                            if marker < contentEnd, bytes[marker] == 32 { marker += 1 }
+                    if matched < containers.count {
+                        // Lazy continuation is allowed only for an existing
+                        // paragraph, never for a fence or indented code block.
+                        let lazy = paragraph && !previousBlank && fence == nil && !indented
+                            && index < contentEnd && !interruptsParagraph(index, columns: columns, end: contentEnd)
+                        if !lazy {
+                            containers = Array(containers.prefix(matched))
+                            fence = nil
+                            indented = false
+                            paragraph = false
                         }
                     }
-                    let isList = index + 1 < contentEnd && [45, 43, 42].contains(bytes[index]) && [32, 9].contains(bytes[index + 1])
-                    if fence == nil, isList, columns <= 3 { marker = spaceEnd(index + 1, end: contentEnd) }
-                    let markerEnd = marker < contentEnd && [96, 126].contains(bytes[marker])
-                        ? runEnd(marker, byte: bytes[marker]) : marker
-                    let count = markerEnd - marker
-                    if let active = fence {
+
+                    if let active = fence, containers == active.containers {
                         mark(start..<end)
-                        if columns <= 3, count >= active.count, bytes[marker] == active.byte,
+                        let markerEnd = index < contentEnd ? runEnd(index, byte: active.byte) : index
+                        if columns <= 3, markerEnd - index >= active.count,
                            spaceEnd(markerEnd, end: contentEnd) == contentEnd { fence = nil }
-                        previousBlank = blank
+                        previousBlank = index == contentEnd
+                        paragraph = false
                         start = end
                         continue
                     }
+
+                    var openedContainer = false
+                    while columns <= 3, index < contentEnd {
+                        if bytes[index] == 62 {
+                            containers.append(.quote)
+                            index += 1
+                            if index < contentEnd, bytes[index] == 32 || bytes[index] == 9 { index += 1 }
+                            let next = indentation(index, end: contentEnd)
+                            index = next.index
+                            columns = next.columns
+                        } else if !rule(index, end: contentEnd), let markerEnd = listMarkerEnd(index, end: contentEnd) {
+                            let markerWidth = markerEnd - index
+                            let next = indentation(markerEnd, columns: columns + markerWidth, end: contentEnd)
+                            let padding = next.columns - columns - markerWidth
+                            let spacing = padding > 0 && padding <= 4 ? padding : 1
+                            containers.append(.list(indent: columns + markerWidth + spacing))
+                            index = next.index
+                            columns = max(0, padding - spacing)
+                        } else { break }
+                        openedContainer = true
+                    }
+
+                    let blank = index == contentEnd
+                    let markerEnd = !blank && [96, 126].contains(bytes[index]) ? runEnd(index, byte: bytes[index]) : index
+                    let count = markerEnd - index
                     if columns <= 3, count >= 3,
-                       bytes[marker] == 126 || !bytes[markerEnd..<contentEnd].contains(96) {
-                        fence = (bytes[marker], count)
+                       bytes[index] == 126 || !bytes[markerEnd..<contentEnd].contains(96) {
+                        fence = (bytes[index], count, containers)
                         mark(start..<end)
                         indented = false
+                        paragraph = false
                     } else if indented && blank {
                         mark(start..<end)
-                    } else if columns >= 4 && (indented || previousBlank) && !(isList && !indented) {
+                    } else if columns >= 4 && (indented || previousBlank || openedContainer) {
                         mark(start..<end)
                         indented = true
+                        paragraph = false
                     } else {
                         indented = false
+                        if blank {
+                            paragraph = false
+                        } else {
+                            let separate = columns <= 3 && (heading(index, end: contentEnd) || rule(index, end: contentEnd))
+                            if !paragraph || openedContainer || separate { blockID += 1 }
+                            for position in start..<end { inlineBlocks[position] = blockID }
+                            paragraph = !separate
+                        }
                     }
                     previousBlank = blank
                     start = end
@@ -395,7 +494,7 @@ extension ChineseScriptConverter {
                     guard !protected[index], bytes[index] == 96, !escaped(index) else { index += 1; continue }
                     let openingEnd = runEnd(index, byte: 96)
                     var cursor = openingEnd, closingEnd: Int?
-                    while cursor < bytes.count, !protected[cursor] {
+                    while cursor < bytes.count, !protected[cursor], inlineBlocks[cursor] == inlineBlocks[index] {
                         if bytes[cursor] == 96 {
                             let end = runEnd(cursor, byte: 96)
                             if end - cursor == openingEnd - index { closingEnd = end; break }

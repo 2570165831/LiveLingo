@@ -246,6 +246,66 @@ final class TraditionalMarkdownRenderingTests: XCTestCase {
         }
     }
 
+    private func assertStructuralRendering(_ input: String, taiwan: String,
+                                           file: StaticString = #filePath, line: UInt = #line) throws {
+        for language in [OutputLanguage.traditionalChineseTaiwan, .traditionalChineseHongKong] {
+            let expected = language == .traditionalChineseTaiwan ? taiwan
+                : taiwan.replacingOccurrences(of: "這裡", with: "這裏")
+            XCTAssertEqual(Data(try ClassroomMarkdownRendering.render(input, language: language).utf8),
+                           Data(expected.utf8), file: file, line: line)
+            let lines = input.components(separatedBy: "\n")
+            let expectedLines = expected.components(separatedBy: "\n")
+            for index in lines.indices {
+                XCTAssertEqual(Data(try ClassroomMarkdownRendering.line(lines, at: index, language: language).utf8),
+                               Data(expectedLines[index].utf8), "line \(index)", file: file, line: line)
+                XCTAssertEqual(SummaryMarkdownLine.displayed(lines, at: index, language: language),
+                               SummaryMarkdownLine.classify(expectedLines, at: index), "display line \(index)",
+                               file: file, line: line)
+            }
+        }
+    }
+
+    func testOrderedListFencePreservesKeysAndConvertsFollowingParagraph() throws {
+        let code = "1. ```python\n   record[\"头发\"]\n   ```\n\n"
+        try assertStructuralRendering(code + "头发在这里。", taiwan: code + "頭髮在這裡。")
+    }
+
+    func testListParagraphIndentationIsRelativeToItsContainer() throws {
+        try assertStructuralRendering("- 课程内容：\n\n    头发在这里。\n\n- 后面是结论。",
+            taiwan: "- 課程內容：\n\n    頭髮在這裡。\n\n- 後面是結論。")
+    }
+
+    func testInlineBackticksCannotPairAcrossBlankParagraphs() throws {
+        try assertStructuralRendering("这里有一个未闭合标记 `record[\n\n头发在这里。\n\n` 后面是正文。",
+            taiwan: "這裡有一個未閉合標記 `record[\n\n頭髮在這裡。\n\n` 後面是正文。")
+    }
+
+    func testBlockquoteFenceEndsWhenItsContainerEnds() throws {
+        try assertStructuralRendering("这里。\n> ```python\n> record[\"头发\"]\n\n头发在这里。",
+            taiwan: "這裡。\n> ```python\n> record[\"头发\"]\n\n頭髮在這裡。")
+    }
+
+    func testNestedContainerFencesAndIndentedCodeKeepOriginalBytes() throws {
+        for code in ["12) ~~~python\n    record[\"头发\"]\n    ~~~\n\n",
+                     "> 1. ```python\n>    record[\"头发\"]\n>    ```\n\n",
+                     "- 内容：\n\n      record[\"头发\"]\n\n"] {
+            let expectedCode = code.replacingOccurrences(of: "内容", with: "內容")
+            try assertStructuralRendering(code + "头发在这里。", taiwan: expectedCode + "頭髮在這裡。")
+        }
+    }
+
+    func testInlineCodeUsesMarkdownBlockBoundariesAndKeepsSoftLineBreaks() throws {
+        let code = "> 这里 `record[\r\n> \"头发\"]` 后面。"
+        try assertStructuralRendering(code, taiwan: "> 這裡 `record[\r\n> \"头发\"]` 後面。")
+        for input in ["这里 `头发\n# 头发` 后面。", "这里 `头发\n- 头发` 后面。",
+                      "> 这里 `头发\n- 头发` 后面。"] {
+            try assertStructuralRendering(input,
+                taiwan: input.replacingOccurrences(of: "这里", with: "這裡")
+                    .replacingOccurrences(of: "头发", with: "頭髮")
+                    .replacingOccurrences(of: "后面", with: "後面"))
+        }
+    }
+
     func testPreparedDocumentAndDefaultDisplayedEntrypointsAgree() {
         let lines = ["## 课程安排与待办", "```text", "## 学习笔记", "record[\"头发\"]", "```",
                      "- [00:01] 図書館で登记します。 — 头发在这里。", "## 学习笔记",

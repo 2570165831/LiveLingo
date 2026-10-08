@@ -74,6 +74,7 @@ class RenderText:
     def __init__(self, text: str):
         self.data = text.encode("utf-8")
         self.protected = bytearray(len(self.data))
+        self.inline_blocks = [0] * len(self.data)
         self._blocks()
         self.blocks = self.protected.copy()
         self._inline_code()
@@ -120,8 +121,48 @@ class RenderText:
             index += 1
         return None
 
+    def _indentation(self, index, end, columns=0):
+        while index < end and self.data[index] in b" \t":
+            columns += 1 if self.data[index] == 32 else 4 - columns % 4
+            index += 1
+        return index, columns
+
+    def _list_marker_end(self, index, end):
+        if index == end:
+            return None
+        marker_end = index
+        if self.data[index] in b"-+*":
+            marker_end += 1
+        else:
+            while marker_end < end and 48 <= self.data[marker_end] <= 57 and marker_end - index < 9:
+                marker_end += 1
+            if marker_end == index or marker_end == end or self.data[marker_end] not in b".)":
+                return None
+            marker_end += 1
+        return marker_end if marker_end == end or self.data[marker_end] in b" \t" else None
+
+    def _heading(self, index, end):
+        if index == end or self.data[index] != 35:
+            return False
+        last = self._run_end(index, 35)
+        return last - index <= 6 and (last == end or self.data[last] in b" \t")
+
+    def _rule(self, index, end):
+        if index == end or self.data[index] not in b"*-_=":
+            return False
+        marker = self.data[index]
+        body = self.data[index:end].replace(b" ", b"").replace(b"\t", b"")
+        return len(body) >= (1 if marker == 61 else 3) and all(byte == marker for byte in body)
+
+    def _interrupts_paragraph(self, index, columns, end):
+        return columns <= 3 and index < end and (
+            self.data[index] == 62 or self._heading(index, end) or self._rule(index, end)
+            or self._list_marker_end(index, end) is not None
+            or (self.data[index] in b"`~" and self._run_end(index, self.data[index]) - index >= 3))
+
     def _blocks(self):
-        data, fence, indented, previous_blank = self.data, None, False, True
+        data, containers, fence = self.data, [], None
+        indented, previous_blank, paragraph, block_id = False, True, False, 0
         start = 0
         while start < len(data):
             newline = data.find(b"\n", start)
@@ -129,40 +170,78 @@ class RenderText:
             content_end = end
             while content_end > start and data[content_end - 1] in b"\r\n":
                 content_end -= 1
-            index, columns = start, 0
-            while index < content_end and data[index] in b" \t":
-                columns += 1 if data[index] == 32 else 4 - columns % 4
-                index += 1
-            blank = index == content_end
-            # Fences may also occur inside a blockquote or after a list marker.
-            marker = index
-            if columns <= 3:
-                while marker < content_end and data[marker] == 62:
-                    marker += 1
-                    if marker < content_end and data[marker] == 32:
-                        marker += 1
-            is_list = (index + 1 < content_end and data[index] in b"-+*" and data[index + 1] in b" \t")
-            if fence is None and is_list and columns <= 3:
-                marker = self._space_end(index + 1, content_end)
-            run_end = self._run_end(marker, data[marker]) if marker < content_end and data[marker] in b"`~" else marker
-            count = run_end - marker
-            if fence is not None:
+            index, columns = self._indentation(start, content_end)
+            matched = 0
+            for kind, indent in containers:
+                if kind == "quote":
+                    if columns > 3 or index == content_end or data[index] != 62:
+                        break
+                    index += 1
+                    if index < content_end and data[index] in b" \t":
+                        index += 1
+                    index, columns = self._indentation(index, content_end)
+                else:
+                    if index != content_end and columns < indent:
+                        break
+                    columns = max(0, columns - indent)
+                matched += 1
+            if matched < len(containers):
+                # Lazy continuation applies to paragraphs, never fenced code.
+                lazy = (paragraph and not previous_blank and fence is None and not indented
+                        and index < content_end and not self._interrupts_paragraph(index, columns, content_end))
+                if not lazy:
+                    containers = containers[:matched]
+                    fence, indented, paragraph = None, False, False
+
+            if fence is not None and containers == fence[2]:
                 self._mark(start, end)
-                if columns <= 3 and count >= fence[1] and data[marker] == fence[0] and self._space_end(run_end, content_end) == content_end:
+                marker_end = self._run_end(index, fence[0]) if index < content_end else index
+                if columns <= 3 and marker_end - index >= fence[1] and self._space_end(marker_end, content_end) == content_end:
                     fence = None
-                previous_blank, start = blank, end
+                previous_blank, paragraph, start = index == content_end, False, end
                 continue
-            if columns <= 3 and count >= 3 and (data[marker] == 126 or b"`" not in data[run_end:content_end]):
-                fence = (data[marker], count)
+
+            opened_container = False
+            while columns <= 3 and index < content_end:
+                if data[index] == 62:
+                    containers.append(("quote", 0))
+                    index += 1
+                    if index < content_end and data[index] in b" \t":
+                        index += 1
+                    index, columns = self._indentation(index, content_end)
+                elif not self._rule(index, content_end) and (marker_end := self._list_marker_end(index, content_end)) is not None:
+                    marker_width = marker_end - index
+                    next_index, next_columns = self._indentation(marker_end, content_end, columns + marker_width)
+                    padding = next_columns - columns - marker_width
+                    spacing = padding if 0 < padding <= 4 else 1
+                    containers.append(("list", columns + marker_width + spacing))
+                    index, columns = next_index, max(0, padding - spacing)
+                else:
+                    break
+                opened_container = True
+
+            blank = index == content_end
+            marker_end = self._run_end(index, data[index]) if not blank and data[index] in b"`~" else index
+            count = marker_end - index
+            if columns <= 3 and count >= 3 and (data[index] == 126 or b"`" not in data[marker_end:content_end]):
+                fence = (data[index], count, containers.copy())
                 self._mark(start, end)
-                indented = False
+                indented, paragraph = False, False
             elif indented and blank:
                 self._mark(start, end)
-            elif columns >= 4 and (indented or previous_blank) and not (is_list and not indented):
+            elif columns >= 4 and (indented or previous_blank or opened_container):
                 self._mark(start, end)
-                indented = True
+                indented, paragraph = True, False
             else:
                 indented = False
+                if blank:
+                    paragraph = False
+                else:
+                    separate = columns <= 3 and (self._heading(index, content_end) or self._rule(index, content_end))
+                    if not paragraph or opened_container or separate:
+                        block_id += 1
+                    self.inline_blocks[start:end] = [block_id] * (end - start)
+                    paragraph = not separate
             previous_blank, start = blank, end
 
     def _inline_code(self):
@@ -173,7 +252,7 @@ class RenderText:
                 continue
             opening_end = self._run_end(index, 96)
             cursor, closing_end = opening_end, None
-            while cursor < len(data) and not self.protected[cursor]:
+            while cursor < len(data) and not self.protected[cursor] and self.inline_blocks[cursor] == self.inline_blocks[index]:
                 if data[cursor] == 96:
                     end = self._run_end(cursor, 96)
                     if end - cursor == opening_end - index:
