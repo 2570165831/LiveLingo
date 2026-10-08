@@ -10,7 +10,7 @@ struct PrivacyStorageTests {
         let root: URL
 
         init() throws {
-            root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            root = TestFixtureDirectory.root.resolvingSymlinksInPath()
                 .appendingPathComponent("LiveLingo-PrivacyStorage-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         }

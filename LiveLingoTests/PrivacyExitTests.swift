@@ -25,8 +25,8 @@ final class PrivacyExitTests: XCTestCase {
     private enum Failure: Error { case synthetic }
 
     private func makeModel() throws -> (AppModel, URL, AppModel.PrivacyExitConfiguration) {
-        let evidence = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("work/privacy-followup/lifecycle")
+        let evidence = TestFixtureDirectory.root.resolvingSymlinksInPath()
+            .appendingPathComponent("privacy-followup/lifecycle")
         try FileManager.default.createDirectory(at: evidence, withIntermediateDirectories: true)
         let directory = evidence.appendingPathComponent("synthetic-exit-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,

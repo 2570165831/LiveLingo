@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthetic energy/clock tests; fixture writes stay in work/energy-probe."""
+"""Synthetic energy/clock tests; fixture writes respect the caller's TMPDIR."""
 import copy
 import hashlib
 import json
@@ -296,7 +296,7 @@ class FakeCPU:
 class SamplerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        scratch = Path(__file__).resolve().parents[1] / "work/energy-probe"
+        scratch = Path(tempfile.gettempdir()).resolve() / "livelingo-energy-tests"
         scratch.mkdir(parents=True, exist_ok=True)
         cls.fixtures = Path(tempfile.mkdtemp(prefix="unit-fixtures-", dir=scratch))
         cls.helper = cls.fixtures / "fake-helper.py"
@@ -403,7 +403,7 @@ while True:
         output = {"samples": sampler.snapshot(), "metadata": sampler.metadata,
                   "errors": sampler.errors, "report": sampler.report(1, 2)}
         self.assertNotIn(secret, json.dumps(output))
-        self.assertNotIn("/Users/", json.dumps(sampler.metadata))
+        self.assertNotIn(str(Path("/", "Users")) + "/", json.dumps(sampler.metadata))
         self.assertEqual(sampler.metadata["helper_stderr_bytes"], len(stderr))
         self.assertEqual(sampler.metadata["helper_stderr_sha256"], hashlib.sha256(stderr).hexdigest())
         self.assertEqual(sampler.metadata["invalid_helper_record_count"], 1)

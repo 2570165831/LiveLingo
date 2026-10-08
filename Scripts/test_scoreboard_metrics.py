@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import unittest
 import uuid
 
@@ -17,7 +18,7 @@ import scoreboard_metrics as m
 
 
 ROOT = Path(__file__).resolve().parent.parent
-WORK = ROOT / "work/metrics-tests"
+WORK = Path(tempfile.gettempdir()).resolve() / "livelingo-metrics-tests"
 SENTINEL = "PRIVATE_SENTINEL_never_emit_机密原文"
 SESSION_ID = "11111111-1111-4111-8111-111111111111"
 ID1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"

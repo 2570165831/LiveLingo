@@ -11,8 +11,8 @@ struct PrivacyFollowupStorageTests {
     }
 
     private func fixture() throws -> URL {
-        let base = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("work/privacy-followup/storage", isDirectory: true)
+        let base = TestFixtureDirectory.root.resolvingSymlinksInPath()
+            .appendingPathComponent("privacy-followup/storage", isDirectory: true)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let root = base.appendingPathComponent("LiveLingo-PrivacyFollowup-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
@@ -20,8 +20,7 @@ struct PrivacyFollowupStorageTests {
     }
 
     private func retain(_ root: URL) {
-        let evidence = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("work/privacy-followup/storage/superseded", isDirectory: true)
+        let evidence = root.deletingLastPathComponent().appendingPathComponent("superseded", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: evidence, withIntermediateDirectories: true)
             try FileManager.default.moveItem(at: root, to: evidence.appendingPathComponent(root.lastPathComponent))
@@ -46,7 +45,7 @@ struct PrivacyFollowupStorageTests {
         return String(cString: value)
     }
 
-    private func setACL(_ permissions: [acl_perm_t], deny: Bool, at url: URL) throws {
+    private func setACL(_ permissions: [acl_perm_t], deny: Bool, at url: URL, inherit: Bool = false) throws {
         let group = try #require(getgrnam("everyone"))
         var principal = try #require(UUID(uuidString:
             String(format: "AAAABBBB-CCCC-DDDD-EEEE-FFFF%08X", group.pointee.gr_gid))).uuid
@@ -61,6 +60,13 @@ struct PrivacyFollowupStorageTests {
         try #require(acl_get_permset(entry, &rawPermissions) == 0)
         let values = try #require(rawPermissions)
         for permission in permissions { try #require(acl_add_perm(values, permission) == 0) }
+        if inherit {
+            var rawFlags: acl_flagset_t?
+            try #require(acl_get_flagset_np(UnsafeMutableRawPointer(entry), &rawFlags) == 0)
+            let flags = try #require(rawFlags)
+            try #require(acl_add_flag_np(flags, ACL_ENTRY_FILE_INHERIT) == 0)
+            try #require(acl_add_flag_np(flags, ACL_ENTRY_DIRECTORY_INHERIT) == 0)
+        }
         let value = try #require(acl)
         try #require(acl_set_file(url.path, ACL_TYPE_EXTENDED, value) == 0)
     }
@@ -260,5 +266,107 @@ struct PrivacyFollowupStorageTests {
             try SensitiveFileIO.atomicWrite(Data("updated synthetic body".utf8), to: leaf)
             #expect(try Data(contentsOf: leaf) == Data("updated synthetic body".utf8))
         }
+    }
+
+    private final class OperationLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var operations: Set<SensitiveFileIO.OptionalOperation> = []
+        func record(_ operation: SensitiveFileIO.OptionalOperation) { _ = lock.withLock { operations.insert(operation) } }
+        func contains(_ operation: SensitiveFileIO.OptionalOperation) -> Bool { lock.withLock { operations.contains(operation) } }
+    }
+
+    @Test(arguments: [ENOTSUP, EPERM, EXDEV])
+    @MainActor func R05FilesystemErrorsKeepSaveExportAndCheckpointWorking(code: Int32) throws {
+        let root = try fixture(); defer { retain(root) }
+        // Inheritance makes ACL removal on NEW inodes actually call setACL;
+        // a fault hook that only intercepts replacement metadata misses it.
+        try setACL([ACL_READ_DATA, ACL_WRITE_DATA, ACL_APPEND_DATA, ACL_READ_SECURITY],
+                   deny: false, at: root, inherit: true)
+        let optional: [SensitiveFileIO.OptionalOperation] = [.setACL, .mode, .owner, .link, .swap, .exclusiveRename]
+        let errors = Dictionary(uniqueKeysWithValues: optional.map { ($0, code) })
+        let seen = OperationLog()
+        try SensitiveFileIO.$operationErrors.withValue(errors) {
+            try SensitiveFileIO.$operationObserver.withValue({ seen.record($0) }) {
+                let bytes = Data("new synthetic body".utf8), replacement = Data("updated synthetic body".utf8)
+                let leaf = root.appendingPathComponent("portable.json")
+                try SensitiveFileIO.atomicWrite(bytes, to: leaf)
+                #expect(try Data(contentsOf: leaf) == bytes)
+                try SensitiveFileIO.atomicWrite(replacement, to: leaf)
+                #expect(try Data(contentsOf: leaf) == replacement)
+
+                let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Synthetic lesson", chinese: "合成课堂")
+                let course = root.appendingPathComponent("course", isDirectory: true)
+                let store = SessionStore(directory: course)
+                var saved = try store.save(SessionSnapshot(segments: [segment]))
+                #expect(try store.load()?.segments == [segment])
+                saved.legacyMarkdown = "Updated synthetic notes."
+                saved = try store.save(saved)
+                #expect(try store.load() == saved)
+
+                for summary in ["Synthetic export", "Updated synthetic export"] {
+                    try SessionExporter.export(segments: [segment], sessionDirectory: course, summary: summary)
+                    #expect(try String(contentsOf: course.appendingPathComponent("summary-zh-Hans.md"), encoding: .utf8) == summary + "\n")
+                }
+                let notes = NotesExportSnapshot(className: "Synthetic class", sessionName: nil,
+                    scope: .wholeLesson, scopeDetail: "合成范围", coverageLine: "合成覆盖",
+                    notesMarkdown: "合成笔记。", reviewMarkdown: nil, transcript: [],
+                    generatedAt: Date(timeIntervalSince1970: 0), includesReviewAdvice: false, includesTranscript: false)
+                for format in [NotesExportFormat.markdown, .plainText, .word, .pdf] {
+                    let destination = root.appendingPathComponent("notes." + format.fileExtension)
+                    try NotesExportDocument.write(notes, format: format, to: destination)
+                    let first = try Data(contentsOf: destination)
+                    #expect(!first.isEmpty)
+                    let updated = NotesExportSnapshot(className: notes.className, sessionName: notes.sessionName,
+                        scope: notes.scope, scopeDetail: notes.scopeDetail, coverageLine: notes.coverageLine,
+                        notesMarkdown: "更新后的合成笔记。", reviewMarkdown: notes.reviewMarkdown,
+                        transcript: notes.transcript, generatedAt: notes.generatedAt,
+                        includesReviewAdvice: notes.includesReviewAdvice, includesTranscript: notes.includesTranscript)
+                    try NotesExportDocument.write(updated, format: format, to: destination)
+                    let second = try Data(contentsOf: destination)
+                    #expect(!second.isEmpty)
+                    #expect(first != second)
+                }
+
+                let sessionID = UUID()
+                let session = root.appendingPathComponent("checkpoint-course", isDirectory: true)
+                try FileManager.default.createDirectory(at: session, withIntermediateDirectories: false)
+                let journal = try DurableTranscriptionJournal(sessionDirectory: session, sessionID: sessionID)
+                var record = TranscriptionWorkRecord(id: UUID(), sessionID: sessionID, ordinal: 0,
+                    audioFile: "chunk.wav", startFrame: 0, endFrame: 16_000, sampleRate: 16_000,
+                    start: 0, end: 1, captureStart: nil, captureEnd: nil,
+                    modelKey: "synthetic", fallbackModelKey: nil, appleEvidence: "Synthetic evidence")
+                try journal.put(record)
+                try journal.checkpoint()
+                #expect(try DurableTranscriptionJournal(sessionDirectory: session, sessionID: sessionID).records == [record])
+                record.status = .completed
+                record.candidateText = "Updated synthetic transcript."
+                try journal.put(record)
+                try journal.checkpoint()
+                #expect(try DurableTranscriptionJournal(sessionDirectory: session, sessionID: sessionID).records == [record])
+                for operation in optional { #expect(seen.contains(operation)) }
+                #expect(try FileManager.default.subpathsOfDirectory(atPath: root.path).allSatisfy {
+                    !$0.contains(".sensitive-write-") && !$0.contains(".session-write-")
+                })
+            }
+        }
+    }
+
+    @Test(arguments: [ENOTSUP, EPERM, EXDEV])
+    func R05FallbackErrorsStillRejectReadOnlyAndSymlinkTargets(code: Int32) throws {
+        let root = try fixture(); defer { retain(root) }
+        let leaf = root.appendingPathComponent("read-only.json")
+        let bytes = Data("synthetic retained body".utf8)
+        try bytes.write(to: leaf)
+        try #require(chmod(leaf.path, 0o400) == 0)
+        let linked = root.appendingPathComponent("linked.json")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: leaf)
+        SensitiveFileIO.$operationErrors.withValue([.link: code, .swap: code, .exclusiveRename: code, .setACL: code, .mode: code]) {
+            for destination in [leaf, linked] {
+                #expect(throws: (any Error).self) { try SensitiveFileIO.atomicWrite(Data("replacement".utf8), to: destination) }
+            }
+        }
+        #expect(try Data(contentsOf: leaf) == bytes)
+        #expect(try mode(leaf) == 0o400)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: linked.path) == leaf.path)
     }
 }

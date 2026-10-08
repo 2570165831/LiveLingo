@@ -22,8 +22,8 @@ struct PrivacyAudioTests {
             #if PRIVACY_AUDIO_PROBE
             let base = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
             #else
-            let base = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("work/privacy-followup/audio", isDirectory: true)
+            let base = TestFixtureDirectory.root.resolvingSymlinksInPath()
+                .appendingPathComponent("privacy-followup/audio", isDirectory: true)
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
             #endif
             root = base.appendingPathComponent("synthetic-audio-" + UUID().uuidString, isDirectory: true)

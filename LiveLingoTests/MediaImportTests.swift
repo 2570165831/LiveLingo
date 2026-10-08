@@ -141,7 +141,7 @@ final class MediaImportTests: XCTestCase {
         let pipeline = SpeechPipeline(transcriber: { url, _, _ in
             await gate.holdFirstFile(url)
             return "The lecturer explains the energy of the system."
-        })
+        }, enableAudioAnalysis: false)
         let task = Task {
             try await pipeline.importMediaFile(wav, recordingURL: recording,
                 eventHandler: { collector.append($0) }, onProgress: nil)
@@ -182,7 +182,7 @@ final class MediaImportTests: XCTestCase {
         let collector = ImportEventCollector()
         let failure = ImportWriteFailure()
         let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Recorded material." },
-                                      beforeAudioWrite: { try failure.beforeWrite() })
+                                      beforeAudioWrite: { try failure.beforeWrite() }, enableAudioAnalysis: false)
         do {
             try await pipeline.importMediaFile(wav, recordingURL: recording,
                 eventHandler: { collector.append($0) })
@@ -207,7 +207,7 @@ final class MediaImportTests: XCTestCase {
         let recording = directory.appendingPathComponent("recording.wav")
         let collector = ImportEventCollector()
         let progressBox = ImportRecorder()
-        let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Imported lecture sentence." })
+        let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Imported lecture sentence." }, enableAudioAnalysis: false)
 
         try await pipeline.importMediaFile(
             wav,

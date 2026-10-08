@@ -16,7 +16,7 @@ from unittest.mock import patch
 import installer_token_private as helper
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE = ROOT / "work" / "privacy-followup" / "installer"
+EVIDENCE = Path(tempfile.gettempdir()).resolve() / "livelingo-installer-tests"
 TOKEN = "synthetic_installer_token_for_offline_tests_0000000001"
 BODY = plistlib.dumps({"Label": "synthetic.local.asr", "EnvironmentVariables": {
     "LIVELINGO_ASR_TOKEN": TOKEN}, "SyntheticBody": "Keep the original bytes."})

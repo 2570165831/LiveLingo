@@ -1,6 +1,27 @@
 import Darwin
 import Foundation
 
+private final class TestBundleLocation: NSObject {}
+
+/// XCTest may choose its own system temporary directory despite TMPDIR. Keep
+/// synthetic fixture evidence beside this invocation's build products instead.
+enum TestFixtureDirectory {
+    static let root: URL = {
+        var directory = Bundle(for: TestBundleLocation.self).bundleURL
+        while directory.path != "/" {
+            let parent = directory.deletingLastPathComponent()
+            if directory.lastPathComponent == "Products", parent.lastPathComponent == "Build" {
+                let root = parent.deletingLastPathComponent().appendingPathComponent("tmp", isDirectory: true)
+                do { try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true) }
+                catch { preconditionFailure("Cannot create the test fixture directory") }
+                return root
+            }
+            directory = parent
+        }
+        return FileManager.default.temporaryDirectory
+    }()
+}
+
 /// CFFIXED_USER_HOME does not redirect cfprefsd. Remove only a fresh UUID suite
 /// registered by this test, after flushing its empty persistent domain.
 struct TestPreferenceCleanup: Sendable {

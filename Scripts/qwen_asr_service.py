@@ -392,6 +392,15 @@ def auto_self_check(model, model_key):
     return check
 
 
+def _language_probabilities(logits):
+    """Accumulate the vocabulary's small probabilities without float32 loss."""
+    values = np.asarray(logits, dtype=np.float64)
+    weights = np.exp(values - np.max(values))
+    probabilities = weights / np.sum(weights, dtype=np.float64)
+    import mlx.core as mx
+    return mx.array(probabilities.astype(np.float32))
+
+
 def probe_language(model, probe_input_path, check):
     """Prefill the unmodified English prompt through `language` on raw audio.
 
@@ -413,9 +422,9 @@ def probe_language(model, probe_input_path, check):
     embeddings = inner._build_inputs_embeds(ids, audio_features)
     cache = inner.make_cache()
     logits = inner(ids[:, :-2], input_embeddings=embeddings[:, :-2], cache=cache)[0, -1]
-    # Normalize in float32: bfloat16 rounds the partition function enough to
-    # make the probability mass exceed one and can spuriously cross a gate.
-    probabilities = mx.softmax(logits.astype(mx.float32))
+    # Preserve quantized logits, but sum the full vocabulary in float64.
+    # A float32 softmax can also lose small terms and spuriously cross a gate.
+    probabilities = _language_probabilities(logits.astype(mx.float32))
     mx.eval(probabilities)
     head = []
     for _ in range(4):

@@ -15,6 +15,24 @@ _RECORD = re.compile(r'[0-9a-f]{64}(?:\.(?:[0-9a-f]{32}\.)?pending)?\.safetensor
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _ACL_API = None
 _UNSUPPORTED = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL}
+_OPTIONAL_PERMISSIONS = _UNSUPPORTED | {errno.EPERM}
+
+
+def _private_mode(fd, mode):
+    """Respect mode-less volumes without accepting an unexpected mode change."""
+    before = stat.S_IMODE(os.fstat(fd).st_mode)
+    try:
+        os.fchmod(fd, mode)
+    except OSError as error:
+        after = stat.S_IMODE(os.fstat(fd).st_mode)
+        if error.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS} and after == before:
+            # These volumes can report synthetic 0777 permissions even when
+            # create requested 0600/0700. The unavailable chmod must not have
+            # changed the observed inode's permissions.
+            return
+        if (error.errno not in _OPTIONAL_PERMISSIONS
+                or after != mode):
+            raise
 
 
 def _acl_api():
@@ -185,22 +203,29 @@ def _copy_permissions(source, destination):
                 pass  # Preserve ownership where the volume permits it.
         try:
             os.fchmod(destination, mode)
-        except OSError:
-            pass
+        except OSError as error:
+            # A volume can refuse metadata updates while still allowing saves.
+            # Retain the new private mode only when it adds no permission bits.
+            if (error.errno not in _OPTIONAL_PERMISSIONS
+                    or stat.S_IMODE(os.fstat(destination).st_mode) & ~mode):
+                raise
         if api:
+            ctypes.set_errno(0)
             if api.acl_set_fd_np(destination, acl, 0x100) != 0:
-                # ACL preservation is best effort, not a prerequisite for
-                # saving on a filesystem which cannot store extended ACLs.
-                pass
-            else:
-                verified = _read_extended_acl(destination) or api.acl_init(0)
-                if not verified:
-                    raise OSError(ctypes.get_errno(), 'Checkpoint ACL verification failed')
-                try:
-                    if _acl_bytes(verified) != expected_acl:
-                        raise OSError('Checkpoint ACL verification failed')
-                finally:
-                    api.acl_free(verified)
+                error = ctypes.get_errno()
+                if error not in _OPTIONAL_PERMISSIONS:
+                    raise OSError(error, 'Checkpoint ACL copy failed')
+            # Even a failed metadata update must leave the intended ACL in
+            # place. Empty ACLs on non-ACL volumes satisfy this without making
+            # a failed attempt to preserve existing restrictions look safe.
+            verified = _read_extended_acl(destination) or api.acl_init(0)
+            if not verified:
+                raise OSError(ctypes.get_errno(), 'Checkpoint ACL verification failed')
+            try:
+                if _acl_bytes(verified) != expected_acl:
+                    raise OSError('Checkpoint ACL verification failed')
+            finally:
+                api.acl_free(verified)
         # ACL/mode changes update ctime. Refuse a changing permission snapshot.
         if os.fstat(source).st_ctime_ns != info.st_ctime_ns:
             raise CheckpointSafetyError('Checkpoint file changed')
@@ -239,11 +264,7 @@ def _state_fd(directory, create=True):
                     raise CheckpointSafetyError('Checkpoint directory changed')
                 if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
                     raise CheckpointSafetyError('Invalid checkpoint directory owner or type')
-                try:
-                    os.fchmod(fd, 0o700)
-                except OSError as error:
-                    if error.errno not in _UNSUPPORTED:
-                        raise
+                _private_mode(fd, 0o700)
                 _strip_extended_acl(fd)
         info = os.fstat(fd)
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
@@ -378,7 +399,7 @@ def atomic_checkpoint(path, write, *, file_object=False):
                        0o600, dir_fd=fd)
         expected = _token(os.fstat(leaf))
         try:
-            os.fchmod(leaf, 0o600)
+            _private_mode(leaf, 0o600)
             _strip_extended_acl(leaf)
             # MLX accepts a binary file object. Bind production serialization
             # to our open pending inode instead of resolving its directory again.
@@ -397,7 +418,7 @@ def atomic_checkpoint(path, write, *, file_object=False):
             info = _record_info(fd, pending.name)
             if info is None or _token(info) != expected:
                 raise CheckpointSafetyError('Checkpoint writer did not produce a file')
-            os.fchmod(leaf, 0o600)
+            _private_mode(leaf, 0o600)
             _strip_extended_acl(leaf)
             # Re-open after serialization so a newly denied write is respected.
             with _record_fd(fd, path.name, writable=True) as target:

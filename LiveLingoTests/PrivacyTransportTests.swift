@@ -457,8 +457,7 @@ final class PrivacyTransportTests: XCTestCase {
     }
 
     private func syntheticRoot() throws -> URL {
-        let temporary = repository.deletingLastPathComponent()
-            .appendingPathComponent("work/dd-priv-app/tmp", isDirectory: true)
+        let temporary = TestFixtureDirectory.root.resolvingSymlinksInPath()
         let root = temporary.appendingPathComponent("LiveLingo-Test-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
                                                attributes: [.posixPermissions: 0o700])
