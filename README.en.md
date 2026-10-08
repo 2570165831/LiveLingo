@@ -11,6 +11,7 @@ The app's interface is currently in Chinese, and translations go from English in
 ## What it does
 
 - **Live bilingual captions**: takes English from the microphone or from system audio (useful for online classes and videos) and shows the English transcript with a Chinese translation. Captions can float above other windows, and you can pause and resume at any time.
+- **Experimental full-screen class mode**: only in this development branch; the current download (0.2.0) does not include it. It tries to show subtitles over another app's native full-screen window. When enabled, the Dock icon disappears and you use the menu-bar icon instead. Off by default, and its behaviour still needs checking on real Macs; see the [guide](docs/GUIDE.en.md#full-screen-class-mode) and the [checklist](docs/FULLSCREEN_CLASS_MODE.md) (in Chinese).
 - **Notes while you listen**: builds study notes during the class, showing the latest updates and the whole class separately.
 - **After-class review**: once the recording ends, you can ask the larger 9B model to review the notes. Its comments are listed separately and do not change the original notes.
 - **Save and export**: saves the recording, bilingual transcript and notes, and exports Markdown, plain text, Word and PDF. You can reopen an earlier class later to keep reading or continue processing it.
@@ -34,6 +35,8 @@ The app's interface is currently in Chinese, and translations go from English in
 1. Open the downloaded `.dmg` and drag **LiveLingo** into Applications.
 2. Open LiveLingo from Applications and allow microphone, speech recognition and system audio recording when macOS asks.
 3. Choose the audio source (microphone or system audio) and click “开始记录” (Start recording). Captions and notes will appear.
+
+For details, see the [0.3.0 English user guide](docs/GUIDE.en.md): save locations, audio permissions, floating subtitles, full-screen class mode, note review, export and troubleshooting.
 
 ## Known limitations
 
