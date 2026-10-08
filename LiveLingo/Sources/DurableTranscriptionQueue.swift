@@ -621,6 +621,15 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     guard context?.generation == owner.generation else { return }
                     var record = owner.journal.record(id: claimed.id) ?? claimed
                     defer { if !record.needsWork { owner.attempts.remove(id: record.id) } }
+                    if activeWasPreempted && claimed.attempt == .manual {
+                        // The user's request still stands after yielding to fresh
+                        // captions: queue it again as manual, refunding this
+                        // unfinished pass and leaving the automatic budget alone.
+                        record.status = .manualPending
+                        if record.manualRetryCount > 0 { record.manualRetryCount -= 1 }
+                        try owner.journal.put(record)
+                        return
+                    }
                     if activeWasPreempted || task.isCancelled {
                         if record.interruptedRetryStaysOtherLanguage { record.status = .otherLanguage }
                         else {
