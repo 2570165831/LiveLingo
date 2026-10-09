@@ -5272,8 +5272,15 @@ final class LearningReviewQueue: ObservableObject {
                 }
                 jobs[0].stats = stats
                 let details = (patch.corrections.map {
-                    "- " + ClassroomFixedText.reviewOriginalPoint.noteFormat([String($0.index + 1), $0.original], target: target)
+                    // applying(to:) has validated the index. The category line goes after the
+                    // suggestion so the original/suggestion pair stays adjacent for the UI diff.
+                    let originalKind = batch.note.points[$0.index].kind
+                    let kindChange = originalKind == $0.kind ? "" : "\n- " + ClassroomFixedText.reviewKindChange.noteFormat(
+                        [ClassroomFixedText.kindLabel(originalKind, target: target),
+                         ClassroomFixedText.kindLabel($0.kind, target: target)], target: target)
+                    return "- " + ClassroomFixedText.reviewOriginalPoint.noteFormat([String($0.index + 1), $0.original], target: target)
                     + "\n- " + ClassroomFixedText.reviewSuggestion.noteFormat([$0.text], target: target)
+                    + kindChange
                     + "\n- " + ClassroomFixedText.reviewReason.noteFormat([$0.reason], target: target)
                 } + patch.additions.map {
                     "- " + ClassroomFixedText.reviewAddition.noteFormat([ClassroomFixedText.kindLabel($0.kind, target: target), $0.text], target: target)

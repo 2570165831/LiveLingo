@@ -697,6 +697,47 @@ final class RealtimePolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testReviewReportShowsSuggestedCategoryOnlyWhenItChanges() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingoLearningTests-\(UUID())")
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var book = LearningNotebook()
+        try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Oxygen is the terminal electron acceptor.")],
+                        note: .init(topic: "氧化磷酸化", points: [.init(kind: "待确认", text: "合成要点甲。"),
+                                                              .init(kind: "核心结论", text: "合成要点乙。")]))
+        let file = root.appendingPathComponent("summary-zh-Hans.md")
+        let original = book.markdown() + "\n"
+        try original.write(to: file, atomically: true, encoding: .utf8)
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _, _ in
+            #"{"reviewVersion":2,"corrections":[{"index":0,"original":"合成要点甲。","kind":"补充理解","text":"合成要点甲。","reason":"合成理由甲。"},{"index":1,"original":"合成要点乙。","kind":"核心结论","text":"合成要点乙。","reason":"合成理由乙。"}],"additions":[]}"#
+        }
+        addTeardownBlock { await queue.shutdownForTesting() }
+        try queue.enqueue(directory: root, notebook: book)
+        for _ in 0..<100 where queue.hasWork { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(queue.hasWork)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), original)
+        let report = try String(contentsOf: root.appendingPathComponent("summary-review.md"), encoding: .utf8)
+        let lines = report.components(separatedBy: "\n")
+        let first = try XCTUnwrap(lines.firstIndex(of: "- **原笔记 · 要点 1**：合成要点甲。"), report)
+        XCTAssertEqual(Array(lines[first...].prefix(4)), [
+            "- **原笔记 · 要点 1**：合成要点甲。",
+            "- **9B 建议（待核对）**：合成要点甲。",
+            "- **建议类别**：待确认 → 补充理解",
+            "- **建议理由**：合成理由甲。"
+        ], report)
+        XCTAssertEqual(SummaryMarkdownLine.classify(lines, at: first), .reviewChange(original: "合成要点甲。", proposed: "合成要点甲。"))
+        XCTAssertEqual(SummaryMarkdownLine.classify(lines, at: first + 1), .hidden)
+        XCTAssertEqual(SummaryMarkdownLine.classify(lines, at: first + 2), .bullet(text: "**建议类别**：待确认 → 补充理解", indentation: 0))
+        let second = try XCTUnwrap(lines.firstIndex(of: "- **原笔记 · 要点 2**：合成要点乙。"), report)
+        XCTAssertEqual(Array(lines[second...].prefix(3)), [
+            "- **原笔记 · 要点 2**：合成要点乙。",
+            "- **9B 建议（待核对）**：合成要点乙。",
+            "- **建议理由**：合成理由乙。"
+        ], report)
+        XCTAssertEqual(report.components(separatedBy: "建议类别").count, 2, report)
+    }
+
+    @MainActor
     func testReviewAdviceIsConnectedOnStartupAndDoesNotReplaceNotes() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingoLearningTests-\(UUID())")
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }

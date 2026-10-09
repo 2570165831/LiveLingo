@@ -244,7 +244,7 @@ enum ClassroomFixedText: String, CaseIterable {
     case numericGapSuffix, logisticsHeading, reviewWholeScope, reviewBatchScope, reviewPartialScope
     case reviewDisclaimer, reviewInputRevision, reviewNotebookRevision, reviewSuperseded, reviewPartialExplanation
     case reviewInterrupted, reviewGenericInterruption, reviewProgress, reviewScopedProgress, reviewOriginalPoint
-    case reviewSuggestion, reviewReason, reviewAddition, reviewEvidence, reviewBatchHeading
+    case reviewSuggestion, reviewKindChange, reviewReason, reviewAddition, reviewEvidence, reviewBatchHeading
     case reviewNoSuggestions, interruptionUser, interruptionSleep, interruptionResources, interruptionRecording
     case interruptionManagement, interruptionOther, interruptionBecause, statsCompleted, statsInterruptions
     case statsFailures, statsRetries, statsAverage, statsHeading, unknownReviewPrompt
@@ -356,6 +356,7 @@ enum ClassroomFixedText: String, CaseIterable {
         .reviewScopedProgress: ["zh": "9B 思考复查 · {0} {1}/{2} 批（约 5 分钟/批）", "en": "9B reasoning review · {0} {1}/{2} batches (about 5 minutes per batch)"],
         .reviewOriginalPoint: ["zh": "**原笔记 · 要点 {0}**：{1}", "en": "**Original note · point {0}:** {1}"],
         .reviewSuggestion: ["zh": "**9B 建议（待核对）**：{0}", "en": "**9B suggestion (needs checking):** {0}"],
+        .reviewKindChange: ["zh": "**建议类别**：{0} → {1}", "en": "**Suggested category:** {0} → {1}"],
         .reviewReason: ["zh": "**建议理由**：{0}", "en": "**Reason:** {0}"],
         .reviewAddition: ["zh": "**遗漏补充建议（待核对） · {0}**：{1}", "en": "**Suggested missing point (needs checking) · {0}:** {1}"],
         .reviewEvidence: ["zh": "**依据 · 片段 {0}**：{1}", "en": "**Evidence · fragment {0}:** {1}"],

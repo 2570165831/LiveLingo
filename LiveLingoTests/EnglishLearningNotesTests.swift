@@ -175,6 +175,35 @@ final class EnglishLearningNotesTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("summary-review.md").path))
     }
 
+    func testEnglishReviewReportShowsLocalizedSuggestedCategory() async throws {
+        let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("EnglishReviewCategory-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var book = LearningNotebook(target: .english)
+        try book.append(evidence: [foreign()], note: note())
+        var snapshot = SessionSnapshot(segments: book.batches.flatMap(\.evidence), targetLocale: "en")
+        book.writeState(to: &snapshot)
+        try SessionStore(directory: root).save(snapshot)
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"), observeSleep: false,
+                                        diagnostics: .disabled) { _, _, _, _, _ in
+            #"{"reviewVersion":2,"corrections":[{"index":0,"original":"Water flows.","kind":"补充理解","text":"Water flows.","reason":"Synthetic reason."}],"additions":[]}"#
+        }
+        addTeardownBlock { await queue.shutdownForTesting(); try FileManager.default.removeItem(at: root) }
+        queue.allowUnreleasedTargetsForTesting()
+        try queue.enqueue(directory: root, notebook: book, targetLocale: "en")
+        for _ in 0..<100 where queue.hasWork { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(queue.hasWork, queue.status)
+        let report = try String(contentsOf: root.appendingPathComponent("summary-review.md"), encoding: .utf8)
+        let lines = report.components(separatedBy: "\n")
+        let first = try XCTUnwrap(lines.firstIndex(of: "- **原笔记 · 要点 1**：Water flows."), report)
+        XCTAssertEqual(Array(lines[first...].prefix(4)), [
+            "- **原笔记 · 要点 1**：Water flows.",
+            "- **9B 建议（待核对）**：Water flows.",
+            "- **建议类别**：Key finding → Background",
+            "- **建议理由**：Synthetic reason."
+        ], report)
+    }
+
     private func foreign(_ caption: String = "Water flows.", at time: Double = 0) -> TranscriptSegment {
         TranscriptSegment(startTime: time, endTime: time + 1,
             english: "水会流动。", chinese: caption, sourceLanguage: "zh")
