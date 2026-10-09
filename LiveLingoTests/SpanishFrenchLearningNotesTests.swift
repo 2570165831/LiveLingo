@@ -323,6 +323,29 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
             XCTAssertTrue(book.markdown().contains(LearningFollowUp.State.supplemented.label(target: target)))
         }
     }
+    /// issue #34: the latest-update view marks this batch's answer to an earlier question.
+    func testRecentUpdateMarksFollowUpAboutEarlierQuestion() throws {
+        for target in targets {
+            for state in [LearningFollowUp.State.supplemented, .conflict] {
+                var book = LearningNotebook(target: target)
+                var first = note(target); first.points[0].kind = "待确认"; first.points[0].needsContext = "?"
+                try book.append(evidence: [foreign(target)], note: first)
+                let pending = try XCTUnwrap(book.pendingPoints.first)
+                var next = note(target)
+                next.followUps = [.init(alias: "q0", target: pending.id, state: state, sourceIDs: [target.rawValue + "0s0"], detail: "Δ")]
+                try book.append(evidence: [foreign(target, at: 3)], note: next)
+                XCTAssertEqual(book.batches[1].followUps?.first?.state, state)
+                let latest = book.markdown(covering: book.batches[1].ids)
+                XCTAssertTrue(latest.contains("**\(state.label(target: target))（[00:03–00:04]）:**"), "\(target): \(latest)")
+                if state == .supplemented {
+                    XCTAssertTrue(latest.contains(ClassroomFixedText.followUpTargetLine.noteFormat(["?"], target: target)), latest)
+                    XCTAssertTrue(latest.contains(ClassroomFixedText.retiredExplanation.noteText(target: target)), latest)
+                } else {
+                    XCTAssertTrue(latest.contains("Δ"), latest)
+                }
+            }
+        }
+    }
     func testActualReviewQueueForwardsPromptInputAndPrefix() async throws {
         for target in targets {
             let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("SpanishFrenchReview-\(UUID())")

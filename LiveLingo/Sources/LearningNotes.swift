@@ -1482,6 +1482,11 @@ struct LearningNotebook: Sendable {
         /// "后文补充"撤下旧缺口 ✓；"前后冲突／关系不明"保留缺口并给出时间和说明 ✓。
         func followUpAnnotation(_ reference: String, indentation: String) -> String {
             guard let entry = followUpRecords[reference] else { return "" }
+            return followUpLines(entry, indentation: indentation)
+        }
+        /// `supplementText` 只给"最近更新"用：补充要点本身已经是正文那一行，这里改成指向旧问题 ✓（issue #34）。
+        func followUpLines(_ entry: (record: LearningFollowUp, batch: LearningNoteBatch), indentation: String,
+                           supplementText: String? = nil) -> String {
             let range = LearningTimeLabel.label(evidence: entry.batch.evidence)
             let head = range.map { "（[\($0)]）" } ?? ""
             func stateLine(_ text: String) -> String {
@@ -1490,7 +1495,7 @@ struct LearningNotebook: Sendable {
             switch entry.record.state {
             case .supplemented:
                 guard let index = entry.record.pointIndex, entry.batch.note.points.indices.contains(index) else { return "" }
-                let text = entry.batch.note.points[index].text
+                let text = supplementText ?? entry.batch.note.points[index].text
                 let line = self.target != .simplifiedChinese ? stateLine(text)
                     : "\n\(indentation)- " + ClassroomFixedText.followUpSupplementLine.noteFormat([head, text], target: self.target)
                 return line
@@ -1509,6 +1514,30 @@ struct LearningNotebook: Sendable {
                 return ""
             }
         }
+        /// issue #34：「最近更新」只渲染本批要点，跟进记录却挂在**更早**批次的旧要点上 ✗。
+        /// 这里直接取本批自己提交的记录（不用 `latestFollowUps`，各批显示自己当时的判断 ✓），
+        /// 旧要点不在可见范围时才补；"缺信息"照旧不显示 ✓。整课笔记（ids == nil）不受影响 ✓。
+        let earlierFollowUps: [(record: LearningFollowUp, batch: LearningNoteBatch)] = ids == nil ? [] : visible.flatMap { batch in
+            (batch.followUps ?? []).compactMap { record in
+                guard let target = record.target, record.state != .missing, !visibleIDs.contains(target) else { return nil }
+                return (record: record, batch: batch)
+            }
+        }
+        func earlierQuestion(_ original: LearningPoint) -> String {
+            let question = (original.needsContext ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return question.isEmpty ? original.text : question
+        }
+        /// "后文补充"：在本批那条支撑要点下面加一行指向旧问题，再说明原问题由此撤下 ✓。
+        func supplementAnnotation(_ reference: String, indentation: String) -> String {
+            earlierFollowUps.filter { entry in
+                entry.record.state == .supplemented && entry.record.pointIndex.map { Self.reference(entry.batch, $0) } == reference
+            }.map { entry in
+                let text = entry.record.target.flatMap { originals[$0] }.map {
+                    ClassroomFixedText.followUpTargetLine.noteFormat([earlierQuestion($0)], target: self.target)
+                }
+                return followUpLines(entry, indentation: indentation, supplementText: text)
+            }.joined()
+        }
         func appendRecord(_ line: String, topic: String, point: LearningPoint, reference: String) {
             if containsQuestion(point, reference) {
                 if !replayRecords.contains(line) { replayRecords.append(line) }
@@ -1526,6 +1555,7 @@ struct LearningNotebook: Sendable {
                 for source in candidate.point.sources ?? [] {
                     text += "\n\(indentation)  - " + ClassroomFixedText.sourceLine.noteFormat([source.quote.replacingOccurrences(of: "\n", with: " ")], target: self.target)
                 }
+                text += supplementAnnotation(candidate.id, indentation: indentation + "  ")
                 text += related(candidate.id, indentation: indentation + "  ")
             }
             return text
@@ -1547,6 +1577,7 @@ struct LearningNotebook: Sendable {
                     line += related(reference, indentation: "    ")
                 }
                 line += followUpAnnotation(reference, indentation: "  ")
+                line += supplementAnnotation(reference, indentation: "  ")
                 appendRecord(line, topic: topic, point: point, reference: reference)
             }
         }
@@ -1566,8 +1597,26 @@ struct LearningNotebook: Sendable {
                     line += related(reference, indentation: "    ")
                 }
                 line += followUpAnnotation(reference, indentation: "  ")
+                line += supplementAnnotation(reference, indentation: "  ")
                 appendRecord(line, topic: topic, point: point, reference: reference)
             }
+        }
+        // "前后冲突／关系不明"让旧问题重新待核对：放进本视图的 `## 需要回听`，带旧问题的时间、旧要点和本批说明 ✓。
+        // 旧批次已被来源修订撤掉时，只保留本批的说明，不隐藏记录 ✓。
+        for entry in earlierFollowUps where entry.record.state == .conflict || entry.record.state == .unclear {
+            let annotation = followUpLines(entry, indentation: "  ")
+            var line = String(followUpLines(entry, indentation: "").dropFirst())
+            if let target = entry.record.target, let original = originals[target],
+               let owner = batches.first(where: { batch in batch.note.points.indices.contains { Self.reference(batch, $0) == target } }) {
+                let range = LearningTimeLabel.label(sources: original.sources, evidence: owner.evidence)
+                    ?? LearningTimeLabel.label(evidence: owner.evidence)
+                let question = (original.needsContext ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                line = "- " + (range.map { "[\($0)] " } ?? "")
+                    + (question.isEmpty ? ClassroomFixedText.replayFallback.noteText(target: self.target) : question)
+                    + "\n  - " + ClassroomFixedText.earlierRecordLine.noteFormat([original.text], target: self.target)
+                    + annotation
+            }
+            if !replayRecords.contains(line) { replayRecords.append(line) }
         }
         let body = order.map { "## \($0)\n" + (grouped[$0] ?? []).joined(separator: "\n") }.joined(separator: "\n\n")
         // 2026-09-20：把"真正的缺口"和"来源校验风险"从正文里拆出来 ✓。

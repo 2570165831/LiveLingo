@@ -310,6 +310,99 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertNil(notebook.batches[1].note.followUps, "跟进记录只保存在新批次上")
     }
 
+    // MARK: - ①c "最近更新"要显示本批对旧问题给出的跟进（issue #34）
+
+    func testRecentUpdateShowsConflictAboutEarlierQuestion() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        let (notebook, _) = try flaggedNotebook(.conflict, detail: detail)
+        let whole = notebook.markdown()
+        let latest = notebook.markdown(covering: notebook.batches[1].ids)
+        XCTAssertTrue(latest.contains("讲述者此时说18千帕是在阀打开之后测得的。"), latest)
+        let replay = try XCTUnwrap(section(latest, LearningNotebook.replayHeading), latest)
+        // 旧问题带它自己的时间范围、旧要点原文，再接本批的冲突说明。
+        XCTAssertTrue(replay.contains("- [00:00–00:10] 这项压强读数属于哪个储罐？"), replay)
+        XCTAssertTrue(replay.contains("18千帕的压强归属尚未说明。"), replay)
+        XCTAssertTrue(replay.contains("后文（[00:12–00:22]）与此前记录冲突：\(detail)"), replay)
+        XCTAssertEqual(latest.components(separatedBy: detail).count - 1, 1, latest)
+        // 整课笔记不受影响：说明仍只挂在旧要点下面一次。
+        XCTAssertEqual(whole.components(separatedBy: detail).count - 1, 1, whole)
+        XCTAssertTrue(whole.contains("后文（[00:12–00:22]）与此前记录冲突"), whole)
+    }
+
+    func testRecentUpdateShowsUnclearAboutEarlierQuestion() throws {
+        let detail = "无法确定后文的读数是否就是先前那一项。"
+        let (notebook, _) = try flaggedNotebook(.unclear, detail: detail)
+        let latest = notebook.markdown(covering: notebook.batches[1].ids)
+        let replay = try XCTUnwrap(section(latest, LearningNotebook.replayHeading), latest)
+        XCTAssertTrue(replay.contains("属于哪个储罐"), replay)
+        XCTAssertTrue(replay.contains("后文（[00:12–00:22]）关系仍不明：\(detail)"), replay)
+    }
+
+    func testRecentUpdateMarksSupplementAndRetiredQuestion() throws {
+        let (book, target, _, _) = try uncertainNotebook()
+        var notebook = book
+        let later = segment("The earlier 18 kilopascal reading belongs to Aurora and was measured before its inlet valve opened.",
+                            "先前18千帕的压强属于Aurora罐，测量发生在该罐入口阀打开前。", at: 12)
+        let text = "先前18千帕的压强属于Aurora罐，测量发生在该罐入口阀打开前。"
+        let note = supplementNote(text: text, sourceIDs: ["en0s0", "zh0s0"],
+                                  followUp: LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0", "zh0s0"],
+                                                             detail: "后文明确说明了同一压强读数的储罐归属。"))
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+        let latest = notebook.markdown(covering: notebook.batches[1].ids)
+        XCTAssertEqual(latest.components(separatedBy: text).count - 1, 1, latest)
+        XCTAssertTrue(latest.contains("**后文补充（[00:12–00:22]）：**回应先前问题：这项压强读数属于哪个储罐？"), latest)
+        XCTAssertTrue(latest.contains("原问题由此撤下"), latest)
+        XCTAssertNil(section(latest, LearningNotebook.replayHeading), latest)
+        // 整课笔记照旧：补充挂在旧要点下面，不出现新的"回应先前问题"行。
+        XCTAssertFalse(notebook.markdown().contains("回应先前问题"))
+    }
+
+    /// 只有"缺信息"的批次不多出任何说明；之后的"缺信息"批次也不重复早先的冲突。
+    func testRecentUpdateIgnoresMissingFollowUps() throws {
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: "先前说打开前测得，后文说打开后测得。")
+        var plain = notebook
+        try appendUnrelated(&notebook, target: target, at: 30)
+        let unrelated = segment("The ideal gas equation is PV = nRT.", "理想气体状态方程是PV=nRT。", at: 30)
+        try plain.append(evidence: [unrelated], note: LearningNote(topic: "理想气体", points: [
+            LearningPoint(kind: "核心结论", text: "理想气体状态方程是PV=nRT。", sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false))
+        XCTAssertNil(plain.batches[2].followUps)
+        let latest = notebook.markdown(covering: notebook.batches[2].ids)
+        XCTAssertEqual(latest, plain.markdown(covering: plain.batches[2].ids))
+        XCTAssertFalse(latest.contains("与此前记录冲突"), latest)
+    }
+
+    /// 本批只给出冲突判断、没有新要点时，"最近更新"不能是空的（否则界面显示"没有新增学习要点"）。
+    func testRecentUpdateOfNoNewKnowledgeBatchShowsConflict() throws {
+        let (book, target, _, _) = try uncertainNotebook()
+        var notebook = book
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        let later = segment("The lecturer now says the 18 kilopascal reading was taken after the valve opened.",
+                            "讲述者此时说18千帕是在阀打开之后测得的。", at: 12)
+        let note = LearningNote(topic: "无新增学习知识", points: [], sourceVersion: 2, noNewKnowledge: true,
+                                followUps: [LearningFollowUp(alias: "q0", state: .conflict, sourceIDs: ["en0s0"], detail: detail)])
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(notebook.batches[1].followUps?.first?.state, .conflict)
+        let latest = notebook.markdown(covering: notebook.batches[1].ids)
+        XCTAssertFalse(latest.isEmpty)
+        XCTAssertTrue(latest.contains(detail), latest)
+        XCTAssertTrue(latest.contains("属于哪个储罐"), latest)
+    }
+
+    /// 旧批次因来源修订被撤掉后，本批的冲突说明照样显示，只是不再有旧原文。
+    func testRecentUpdateKeepsConflictWhenEarlierBatchWasInvalidated() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        var (notebook, _) = try flaggedNotebook(.conflict, detail: detail)
+        let firstSource = try XCTUnwrap(notebook.batches[0].evidence.first?.id)
+        XCTAssertFalse(notebook.invalidate(firstSource).isEmpty)
+        XCTAssertEqual(notebook.batches.count, 1)
+        let latest = notebook.markdown(covering: notebook.batches[0].ids)
+        XCTAssertTrue(latest.contains("后文（[00:12–00:22]）与此前记录冲突：\(detail)"), latest)
+        XCTAssertFalse(latest.contains("18千帕的压强归属尚未说明"), latest)
+        XCTAssertFalse(latest.contains("属于哪个储罐"), latest)
+    }
+
     // MARK: - ①b "待确认"但没写具体问题的要点（issue #16）
 
     /// `kind == "待确认"`、`needsContext` 为空的要点：`hasOpenQuestion` 为真、进 `## 需要回听`，

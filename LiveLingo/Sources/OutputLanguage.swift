@@ -239,7 +239,7 @@ enum ClassroomFixedText: String, CaseIterable {
     case neutralQuestion, priorEvidenceRule, pendingQuestion, missingFollowUp, supplementedDetail
     case invalidSupplementDetail, conflictDetail, unclearDetail, missingDetail, retiredExplanation
     case conflictFallback, unclearFallback, followUpSupplementLine, followUpConflictLine, followUpUnclearLine
-    case earlierRecordLine, sourceLine, earlierSourceLine, candidateLine, replayFallback
+    case earlierRecordLine, sourceLine, earlierSourceLine, candidateLine, replayFallback, followUpTargetLine
     case pronounSuffix, sourceUnlinked, sourceNumericDifference, sourceLegacyPending, sourceCheckLine
     case numericGapSuffix, logisticsHeading, reviewWholeScope, reviewBatchScope, reviewPartialScope
     case reviewDisclaimer, reviewInputRevision, reviewNotebookRevision, reviewSuperseded, reviewPartialExplanation
@@ -329,6 +329,7 @@ enum ClassroomFixedText: String, CaseIterable {
         .followUpConflictLine: ["zh": "后文{0}与此前记录冲突：{1}", "en": "Later source{0} conflicts with the earlier record: {1}"],
         .followUpUnclearLine: ["zh": "后文{0}关系仍不明：{1}", "en": "The relationship of later source{0} remains unclear: {1}"],
         .earlierRecordLine: ["zh": "对应先前记录（仍待核对）：{0}", "en": "Related earlier record (still needs checking): {0}"],
+        .followUpTargetLine: ["zh": "回应先前问题：{0}", "en": "Answers an earlier question: {0}"],
         .sourceLine: ["zh": "原文：{0}", "en": "Source: {0}"],
         .earlierSourceLine: ["zh": "先前原文：{0}", "en": "Earlier source: {0}"],
         .candidateLine: ["zh": "**后文补充候选，原问题仍待核对：**", "en": "**Candidate clarification; the original question still needs checking:**"],

@@ -290,6 +290,32 @@ final class EnglishLearningNotesTests: XCTestCase {
         }
     }
 
+    /// issue #34: the latest-update view shows this batch's follow-up about an earlier question.
+    func testEnglishRecentUpdateShowsFollowUpAboutEarlierQuestion() throws {
+        for state in [LearningFollowUp.State.supplemented, .conflict, .unclear] {
+            var book = LearningNotebook(target: .english)
+            try book.append(evidence: [foreign("A pressure reading was taken.")],
+                note: note("A pressure reading has no identified owner.", kind: "待确认", question: "Which tank?"))
+            let target = try XCTUnwrap(book.pendingPoints.first?.id)
+            var later = note("The earlier reading belongs to Aurora.")
+            later.followUps = [.init(target: target, state: state, sourceIDs: ["en0s0"],
+                pointIndex: state == .supplemented ? 0 : nil,
+                detail: "The later source identifies the tank.")]
+            try book.append(evidence: [foreign("The earlier reading belongs to Aurora.", at: 3)], note: later)
+            XCTAssertEqual(book.batches[1].followUps?.first?.state, state)
+            let latest = book.markdown(covering: book.batches[1].ids)
+            XCTAssertTrue(latest.contains("**\(state.label(target: .english))（[00:03–00:04]）:**"), "\(state.rawValue): \(latest)")
+            XCTAssertTrue(latest.contains("Which tank?"), "\(state.rawValue): \(latest)")
+            if state == .supplemented {
+                XCTAssertTrue(latest.contains(ClassroomFixedText.followUpTargetLine.noteFormat(["Which tank?"], target: .english)), latest)
+                XCTAssertTrue(latest.contains(ClassroomFixedText.retiredExplanation.noteText(target: .english)), latest)
+            } else {
+                XCTAssertTrue(latest.contains("The later source identifies the tank."), latest)
+                XCTAssertTrue(latest.contains("A pressure reading has no identified owner."), latest)
+            }
+        }
+    }
+
     func testNotebookAppendCommitsEnglishFollowUpAndRetainsOldBytes() throws {
         var book = LearningNotebook(target: .english)
         let first = foreign("A pressure reading was taken.")
