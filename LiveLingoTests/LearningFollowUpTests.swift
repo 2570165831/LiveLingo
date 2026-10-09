@@ -101,6 +101,96 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertEqual(notebook.retiredQuestionReferences, [target])
     }
 
+    // MARK: - issue #26：课后复查读取跟进记录
+
+    private func reviewContext(_ prior: LearningNoteBatch, _ later: [LearningNoteBatch]) throws -> (context: [[String: Any]], root: [String: Any]) {
+        let data = Data(try LearningPrompts.reviewInput(prior, laterBatches: later).json.utf8)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return (try XCTUnwrap(root["laterContext"] as? [[String: Any]]), root)
+    }
+
+    /// 指代式补充（和前文没有共同检索词）：笔记已撤下旧问题，复查输入也必须带上这条补充 ✓。
+    func testReviewReceivesCommittedSupplementWithoutSharedTerms() throws {
+        var book = LearningNotebook()
+        let earlier = segment("Its speed is 5 m/s.", "它的速度是5米每秒。")
+        try book.append(evidence: [earlier], note: LearningNote(topic: "小车", points: [
+            LearningPoint(kind: "待确认", text: "速度为5米每秒，对象尚未说明。",
+                          needsContext: "这个速度属于哪辆车？", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false))
+        let prior = book.batches[0]
+        let target = try XCTUnwrap(book.pendingPoints.first?.id)
+        let later = segment("I was referring to cart B.", "我指的是B车。", at: 12)
+        let note = LearningNote(topic: "小车", points: [
+            LearningPoint(kind: "核心结论", text: "前面说的速度属于B车。", sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false, followUps: [
+            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0", "zh0s0"], detail: "后文说明速度属于B车。")
+        ])
+        try book.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(book.retiredQuestionReferences, [target])
+        XCTAssertNil(book.batches[1].note.points[0].clarifies)
+
+        let (context, root) = try reviewContext(prior, [book.batches[1]])
+        XCTAssertEqual((root["laterEvidence"] as? [Any])?.count, 0, "两批原文没有共同检索词，兜底检索找不到")
+        XCTAssertEqual(context.count, 1)
+        XCTAssertEqual(context.first?["pointIndex"] as? Int, 0)
+        XCTAssertEqual(context.first?["text"] as? String, "前面说的速度属于B车。")
+        XCTAssertEqual(context.first?["sources"] as? [String], [later.english, later.chinese])
+        XCTAssertEqual(context.first?["state"] as? String, "后文补充")
+        XCTAssertEqual(root["omittedEarlierCandidates"] as? Int, 0)
+        XCTAssertEqual(book.batches[0], prior, "构造复查输入不改旧批次")
+    }
+
+    /// "前后冲突""关系不明"也交给复查（按时间顺序、带状态）✓；"缺信息"没有线索，不给 ✗。
+    func testReviewReceivesConflictAndUnclearRecordsInOrderButNotMissing() throws {
+        let (book, target, original, _) = try uncertainNotebook()
+        var notebook = book
+        let conflict = segment("Aurora read 22 kilopascals before the valve opened.", "阀打开前Aurora罐读数为22千帕。", at: 12)
+        try notebook.append(evidence: [conflict], note: LearningPrompts.resolvingFollowUps(
+            supplementNote(text: "阀打开前Aurora罐读数为22千帕。", sourceIDs: ["en0s0"],
+                           followUp: LearningFollowUp(alias: "q0", state: .conflict, sourceIDs: ["en0s0"],
+                                                      detail: "后文给出的同一时刻读数与先前不同。")), targets: [target]))
+        let quiet = segment("Boreal had a pressure of 31 kilopascals.", "Boreal罐压强31千帕。", at: 24)
+        try notebook.append(evidence: [quiet], note: LearningPrompts.resolvingFollowUps(
+            supplementNote(text: "Boreal罐压强31千帕。", sourceIDs: ["en0s0"], followUp: nil), targets: [target]))
+        let vague = segment("That reading may have been the other tank.", "那个读数可能是另一个罐的。", at: 36)
+        try notebook.append(evidence: [vague], note: LearningPrompts.resolvingFollowUps(
+            supplementNote(text: "那个读数可能属于另一个罐。", sourceIDs: ["en0s0"],
+                           followUp: LearningFollowUp(alias: "q0", state: .unclear, detail: "后文没有说明是哪一个罐。")),
+            targets: [target]))
+        XCTAssertEqual(notebook.batches.compactMap { $0.followUps?.first?.state }, [.conflict, .missing, .unclear])
+
+        let (context, _) = try reviewContext(original, Array(notebook.batches.dropFirst()))
+        XCTAssertEqual(context.map { $0["state"] as? String }, ["前后冲突", "关系不明"])
+        XCTAssertEqual(context.map { $0["pointIndex"] as? Int }, [0, 0])
+        XCTAssertEqual(context.map { $0["text"] as? String }, ["后文给出的同一时刻读数与先前不同。", "后文没有说明是哪一个罐。"])
+        XCTAssertEqual(context.map { $0["sources"] as? [String] }, [[conflict.english], []])
+    }
+
+    /// 记录必须指向本批旧要点 ✓；坏数据（越界支撑点、来源对不上、也没有说明）不产生条目 ✓；
+    /// 同一对（旧要点，支撑要点）旧版 `clarifies` 已经给过时不重复 ✓。
+    func testReviewFollowUpRecordsStayBoundToThisBatch() throws {
+        let earlier = segment("Its speed is 5 m/s.")
+        let prior = LearningNoteBatch(id: UUID(), evidence: [earlier], note: LearningNote(topic: "小车", points: [
+            LearningPoint(kind: "待确认", text: "速度对象未说明。", sources: [.init(index: 0, quote: earlier.english)],
+                          needsContext: "属于哪辆车？")
+        ]))
+        let reference = LearningNotebook.reference(prior, 0)
+        let later = segment("I was referring to cart B.", at: 12)
+        let support = LearningPoint(kind: "核心结论", text: "速度属于B车。", sources: [.init(index: 0, quote: later.english)],
+                                    clarifies: reference)
+        let elsewhere = LearningNotebook.reference(LearningNoteBatch(id: UUID(), evidence: [], note: LearningNote(topic: "", points: [])), 0)
+        let batch = LearningNoteBatch(id: UUID(), evidence: [later], note: LearningNote(topic: "小车", points: [support]), followUps: [
+            LearningFollowUp(target: elsewhere, state: .conflict, sourceIDs: ["en0s0"], detail: "别处的问题。"),
+            LearningFollowUp(target: reference, state: .supplemented, sourceIDs: ["en9s9"], pointIndex: 7),
+            LearningFollowUp(target: reference, state: .supplemented, sourceIDs: ["en0s0"], pointIndex: 0)
+        ])
+        let (context, _) = try reviewContext(prior, [batch])
+        XCTAssertEqual(context.count, 1)
+        XCTAssertEqual(context.first?["text"] as? String, "速度属于B车。")
+        XCTAssertEqual(context.first?["sources"] as? [String], [later.english])
+        XCTAssertNil(context.first?["state"], "旧版 clarifies 条目保持原格式")
+    }
+
     // MARK: - issue #20：同一句原文拆出多条要点
 
     /// 旧问题“速度属于哪辆车”，后文一句话同时拆出“质量”和“速度”两条要点，都引用这句原文。

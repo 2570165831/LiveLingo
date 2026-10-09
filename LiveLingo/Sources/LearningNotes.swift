@@ -3227,7 +3227,8 @@ enum LearningPrompts {
         struct Point: Encodable { let index: Int; let kind: String; let text: String; let sources: [LearningPoint.Source]?; let referenceState: LearningPoint.ReferenceState?; let needsContext: String?; let sourceHasPronoun: Bool? }
         struct Note: Encodable { let topic: String; let points: [Point] }
         struct Evidence: Encodable { let index: Int; let quotes: [PreparedReviewInput.WireQuote]; let chineseWarning: String? }
-        struct FollowUp: Encodable { let pointIndex: Int; let text: String; let sources: [String] }
+        /// `state` 只出现在由跟进记录构造的条目上（内部中文状态码，不翻译 ✓）；旧 `clarifies` 条目不带它，JSON 保持原样 ✓。
+        struct FollowUp: Encodable { let pointIndex: Int; let text: String; let sources: [String]; var state: String? = nil }
         struct LaterEvidence: Encodable { let batchOffset: Int; let source: LearningSourceUnit }
         struct Input: Encodable { let reviewVersion: Int; let evidence: [Evidence]; let note: Note; let laterContext: [FollowUp]; let omittedEarlierCandidates: Int; let laterEvidence: [LaterEvidence]; let laterEvidenceOmittedCount: Int }
         let encoder = JSONEncoder()
@@ -3249,12 +3250,39 @@ enum LearningPrompts {
                                 sourceLanguage: item.sourceLanguage, target: target))
         }
         var later: [FollowUp] = []
+        func targetIndex(_ reference: String?) -> Int? {
+            reference.flatMap { reference in batch.note.points.indices.first { LearningNotebook.reference(batch, $0) == reference } }
+        }
         for subsequent in laterBatches {
-            for point in subsequent.note.points {
-                guard let reference = point.clarifies, let index = batch.note.points.indices.first(where: { LearningNotebook.reference(batch, $0) == reference }) else { continue }
-                later.append(FollowUp(pointIndex: index, text: point.text, sources: (point.sources ?? []).filter { source in
+            func quotes(_ point: LearningPoint) -> [String] {
+                (point.sources ?? []).filter { source in
                     target == .simplifiedChinese || (subsequent.evidence.indices.contains(source.index) && LearningSourceUnit.bindingTexts(for: subsequent.evidence[source.index], target: target).contains { $0.contains(source.quote) })
-                }.map(\.quote)))
+                }.map(\.quote)
+            }
+            var linked = Set<[Int]>()
+            for (offset, point) in subsequent.note.points.enumerated() {
+                guard let index = targetIndex(point.clarifies) else { continue }
+                linked.insert([index, offset])
+                later.append(FollowUp(pointIndex: index, text: point.text, sources: quotes(point)))
+            }
+            // issue #26：当前版本把"后文补充／前后冲突／关系不明"存在批次的 `followUps` 里 ✓，
+            // 要点上不再有 `clarifies` ✗。这些记录同样交给复查，并带上状态 ✓；"缺信息"没有线索，不给 ✗。
+            // 记录只是待复查的线索，不是已核实结论 ✓（复查提示词本来就说明 laterContext 未经核实）。
+            let units = Dictionary(LearningSourceUnit.make(subsequent.evidence, target: target).map { ($0.id, $0.text) },
+                                   uniquingKeysWith: { first, _ in first })
+            for record in subsequent.followUps ?? [] where record.state != .missing {
+                guard let index = targetIndex(record.target) else { continue }
+                if record.state == .supplemented, let support = record.pointIndex, subsequent.note.points.indices.contains(support) {
+                    // 同一条旧版 `clarifies` 已经给过同一对（旧要点，支撑要点）时不重复 ✓。
+                    guard linked.insert([index, support]).inserted else { continue }
+                    later.append(FollowUp(pointIndex: index, text: subsequent.note.points[support].text,
+                                          sources: quotes(subsequent.note.points[support]), state: record.state.rawValue))
+                    continue
+                }
+                let text = record.detail ?? ""
+                let sources = (record.sourceIDs ?? []).compactMap { units[$0] }
+                guard !text.isEmpty || !sources.isEmpty else { continue }
+                later.append(FollowUp(pointIndex: index, text: text, sources: sources, state: record.state.rawValue))
             }
         }
         let terms = LearningNotebook.terms(batch.evidence.map {

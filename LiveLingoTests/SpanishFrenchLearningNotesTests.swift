@@ -323,6 +323,27 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
             XCTAssertTrue(book.markdown().contains(LearningFollowUp.State.supplemented.label(target: target)))
         }
     }
+    /// issue #26: post-lecture review receives committed follow-up records, bound to the target-language text.
+    func testReviewReceivesTargetBoundFollowUpRecords() throws {
+        for target in targets {
+            for state in [LearningFollowUp.State.supplemented, .conflict] {
+                var book = LearningNotebook(target: target)
+                var first = note(target); first.points[0].kind = "待确认"; first.points[0].needsContext = "?"
+                try book.append(evidence: [foreign(target)], note: first)
+                let pending = try XCTUnwrap(book.pendingPoints.first)
+                var next = note(target)
+                next.followUps = [.init(alias: "q0", target: pending.id, state: state, sourceIDs: [target.rawValue + "0s0"], detail: "Δ")]
+                try book.append(evidence: [foreign(target, at: 3)], note: next)
+                let json = try LearningPrompts.reviewInput(book.batches[0], laterBatches: [book.batches[1]], target: target).json
+                let context = try XCTUnwrap(try object(json)["laterContext"] as? [[String: Any]])
+                XCTAssertEqual(context.count, 1, "\(target) \(state)")
+                XCTAssertEqual(context.first?["state"] as? String, state.rawValue)
+                XCTAssertEqual(context.first?["sources"] as? [String], [text(target)])
+                XCTAssertEqual(context.first?["text"] as? String, state == .supplemented ? text(target) : "Δ")
+                XCTAssertFalse(json.contains("质量为"), "source-language text stays out of a \(target) review")
+            }
+        }
+    }
     /// issue #34: the latest-update view marks this batch's answer to an earlier question.
     func testRecentUpdateMarksFollowUpAboutEarlierQuestion() throws {
         for target in targets {

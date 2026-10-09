@@ -644,6 +644,7 @@ final class RealtimePolicyTests: XCTestCase {
         let followUp = try XCTUnwrap((input["laterContext"] as? [[String: Any]])?.first)
         XCTAssertEqual(followUp["pointIndex"] as? Int, 0)
         XCTAssertEqual(followUp["sources"] as? [String], [later.english])
+        XCTAssertNil(followUp["state"], "legacy clarifies entries keep their original shape (issue #26)")
         _ = book.invalidate(later.id)
         XCTAssertEqual(book.pendingPoints.first?.id, target)
         XCTAssertEqual(book.batches[0], prior)
