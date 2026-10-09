@@ -845,6 +845,23 @@ enum LearningNumericProvenance {
         return (prefixLength + length, power == 1 ? family : family + superscriptPower(power))
     }
 
+    /// `m/s/s`, `meters per second per second`, `米每秒每秒`: a denominator that
+    /// repeats the previous one is one powered denominator (`m/s²`), so the spoken
+    /// form of an acceleration matches the written `m/s²`.
+    private static func appendingDenominator(_ term: String, to family: String) -> String {
+        func split(_ unit: Substring) -> (base: Substring, power: Int) {
+            let count = unit.reversed().prefix { superscriptCharacters[$0] != nil }.count
+            guard count > 0 else { return (unit, 1) }
+            return (unit.dropLast(count), Int(String(unit.suffix(count).compactMap { superscriptCharacters[$0] })) ?? 0)
+        }
+        guard let slash = family.lastIndex(of: "/") else { return family + "/" + term }
+        let last = family[family.index(after: slash)...]
+        let previous = split(last), next = split(Substring(term))
+        guard !last.contains("·"), !last.hasSuffix("…"), !previous.base.isEmpty, previous.base == next.base,
+              previous.power > 0, next.power > 0 else { return family + "/" + term }
+        return String(family[..<slash]) + "/" + String(previous.base) + superscriptPower(previous.power + next.power)
+    }
+
     /// The complete unit after a number, including powers and denominators.
     /// An unreadable continuation after `/` or `^` keeps its own family (`kg/…`).
     static func provenanceUnit(after text: String) -> (token: String, family: String)? {
@@ -861,7 +878,7 @@ enum LearningNumericProvenance {
             else { break }
             let operand = rest.dropFirst(operatorLength)
             if let term = unitTerm(operand, leading: false) {
-                family += separator + term.family
+                family = separator == "/" ? appendingDenominator(term.family, to: family) : family + separator + term.family
                 length += operatorLength + term.length
                 continue
             }

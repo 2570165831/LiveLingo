@@ -827,7 +827,9 @@ final class LearningFollowUpTests: XCTestCase {
             ("速度为10 m/s。", "The speed is 3 × 10⁶ m/s."),
             ("加速度为9.8 m/s。", "The acceleration is 9.8 meters per second squared."),
             ("密度为2 kg。", "The density is 2 kilograms per cubic meter."),
-            ("密度为2 kg。", "The density is 2 kg/ft³.")
+            ("密度为2 kg。", "The density is 2 kg/ft³."),
+            ("加速度为9.8 m/s。", "The acceleration is 9.8 meters per second per second."),
+            ("加速度为9.8 m/s。", "The acceleration is 9.8 m/s/s.")
         ] {
             let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [], batchTexts: [source])
             XCTAssertTrue(report.isDecidable, source)
@@ -864,12 +866,24 @@ final class LearningFollowUpTests: XCTestCase {
             ("频率为10⁶ Hz。", "The frequency is 10^6 Hz."),
             ("长度为1.5×10⁻³ m。", "The length is 1.5e-3 m."),
             ("压强为18 kPa。", "The pressure is 18 kPa."),
-            ("速度为5 m/s。", "The speed is 5 m/s.")
+            ("速度为5 m/s。", "The speed is 5 m/s."),
+            // "per second per second" is the spoken form of s²; a repeated denominator folds into its power.
+            ("加速度为9.8 m/s²。", "The acceleration is 9.8 meters per second per second."),
+            ("加速度为9.8 m/s²。", "The acceleration is 9.8 m/s/s."),
+            ("加速度为9.8米每秒每秒。", "The acceleration is 9.8 m/s²."),
+            ("加速度为9.8 m/s^2。", "The acceleration is 9.8 metres per second per second.")
         ] {
             let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [], batchTexts: [source])
             XCTAssertFalse(report.isDecidable, "\(claim) / \(source)")
             XCTAssertTrue(report.gaps.isEmpty, "\(claim) / \(source): \(report.gaps)")
         }
+        // A literal Chinese caption of the spoken form supports the same claim.
+        let english = "Gravity accelerates objects at 9.8 meters per second per second."
+        let chinese = "重力使物体以9.8米每秒每秒的加速度加速。"
+        let gravity = LearningNumericProvenance.report(claim: "重力加速度为 9.8 m/s²。", cited: [english, chinese],
+                                                       segmentTexts: [], batchTexts: [english, chinese])
+        XCTAssertFalse(gravity.isDecidable, "\(gravity.gaps)")
+        XCTAssertTrue(gravity.gaps.isEmpty, "\(gravity.gaps)")
     }
 
     func testExponentDigitsNeverBecomeSeparateCountsOrScalars() {
