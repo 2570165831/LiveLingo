@@ -1757,11 +1757,25 @@ struct LearningNotebook: Sendable {
     ///    "mark it as absent" 误收 ✗ → 改成短语或去掉 ✓；
     /// ③ 2026-09-19：裸 `close/closes` 也去掉 ✗ —— 科学语境里的 "close to zero"、
     ///    "closes the gap" 不是课程安排 ✗；报名/预订窗口关闭改由**同句**规则收 ✓。
+    /// ④ 2026-10-09（issue #25）：`assignment`/`submit` 在编程课里也指"赋值""提交给线程池" ✗，
+    ///    改放进 `logisticsAmbiguousPatterns`，先剔除明显的代码写法再判 ✓。
     private static let logisticsPatterns = [
         #"\bdeadlines?\b"#, #"\bquiz(?:zes)?\b"#, #"\bexams?\b"#,
-        #"\bassignments?\b"#, #"\bsubmissions?\b"#, #"\bsubmit\b"#,
+        #"\bsubmissions?\b"#,
         #"\bmoodle\b"#, #"\bdue (?:date|by|on|in|at)\b"#, #"\b(?:is|are) due\b"#,
         #"\bhand (?:it|them) in\b"#,
+    ]
+
+    /// 有歧义的词：只有剔除代码写法后仍出现才算安排 ✓（不要求同句有截止日期，
+    /// 以免漏掉 "Please submit your lab report" 这类真实通知 ✓）。
+    private static let logisticsAmbiguousPatterns = [#"\bassignments?\b"#, #"\bsubmit\b"#]
+
+    /// 编程语境的写法（含 ASR 常见的 "dot submit"）✓；同句另有强安排词时不影响保留 ✓。
+    private static let logisticsCodeFormPatterns = [
+        #"(?:\.|\bdot )\s*submit\b(?:\s*\([^)]*\))?"#,
+        #"\bsubmit\s*\("#,
+        #"\b(?:variable|value|attribute|tuple|multiple|chained|augmented|compound|destructuring|parallel|pointer|reference|array|list|object|default)\s+assignments?\b"#,
+        #"\bassignments?\s+(?:operators?|statements?|expressions?)\b"#,
     ]
 
     /// 报名/预订类词 —— 单独出现不算安排 ✓，必须与 `closing` 同句 ✓。
@@ -1773,6 +1787,12 @@ struct LearningNotebook: Sendable {
     static func isScheduleStatement(_ english: String) -> Bool {
         let lowered = english.lowercased()
         if Self.logisticsPatterns.contains(where: { lowered.range(of: $0, options: .regularExpression) != nil }) {
+            return true
+        }
+        let withoutCode = Self.logisticsCodeFormPatterns.reduce(lowered) {
+            $0.replacingOccurrences(of: $1, with: " ", options: .regularExpression)
+        }
+        if Self.logisticsAmbiguousPatterns.contains(where: { withoutCode.range(of: $0, options: .regularExpression) != nil }) {
             return true
         }
         return lowered.range(of: Self.logisticsRegistrationPattern, options: .regularExpression) != nil
