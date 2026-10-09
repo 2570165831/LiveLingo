@@ -1359,6 +1359,7 @@ struct LearningNotebook: Sendable {
     ///   · 目标必须仍是当前等待跟进的旧问题 ✓（旧输入、已撤下的问题不能再被"消除" ✓）；
     ///   · "后文补充"必须绑定到本批次、同一次响应里的有效要点 ✓（`sourceIDs` 优先，
     ///     `pointIndex` 兜底 ✓），并且那条要点自己已经有原文依据、没有未解决的问题 ✓；
+    ///     来源同时对上多条要点、响应又没点名是哪一条时，不挑第一条 ✗（issue #20）；
     ///   · 对不上就降级成"关系不明" ✓ —— 宁可让旧问题继续挂着 ✗，也不能凭空撤下 ✗。
     ///   · 相同数字、词面重合、位置相邻都不参与判断 ✗。
     static func commit(followUps: [LearningFollowUp], evidence: [TranscriptSegment], note: LearningNote,
@@ -1377,15 +1378,18 @@ struct LearningNotebook: Sendable {
             if record.detail?.isEmpty == true { record.detail = nil }
             switch record.state {
             case .supplemented:
-                if let index = supportingPointIndex(for: record, note: note, units: units) {
+                let support = supportingPoint(for: record, note: note, units: units)
+                if case .point(let index) = support {
                     record.pointIndex = index
                     record.sourceIDs = note.points[index].sourceIDs ?? record.sourceIDs
                     if record.detail == nil { record.detail = ClassroomFixedText.supplementedDetail.noteText(target: outputTarget) }
                 } else {
+                    let ambiguous = support == .ambiguous
                     record.state = .unclear
                     record.sourceIDs = nil
                     record.pointIndex = nil
-                    record.detail = ClassroomFixedText.invalidSupplementDetail.noteText(target: outputTarget)
+                    record.detail = (ambiguous ? ClassroomFixedText.ambiguousSupplementDetail
+                                               : ClassroomFixedText.invalidSupplementDetail).noteText(target: outputTarget)
                 }
             case .conflict:
                 if record.detail == nil { record.detail = ClassroomFixedText.conflictDetail.noteText(target: outputTarget) }
@@ -1399,14 +1403,21 @@ struct LearningNotebook: Sendable {
         return records
     }
 
+    private enum SupportingPoint: Equatable { case none, ambiguous, point(Int) }
+
     /// "后文补充"绑定到本批次里**同一次响应**的有效要点 ✓。
-    private static func supportingPointIndex(for record: LearningFollowUp, note: LearningNote,
-                                             units: [String: LearningSourceUnit]) -> Int? {
+    ///
+    /// issue #20：同一句原文可以拆出好几条要点，它们引用的来源完全相同 ✓。
+    /// 响应用 `pointIndex` 点名其中一条时才采用（且必须落在来源匹配的候选里 ✓）；
+    /// 没点名又有多条匹配时不再自动挑第一条 ✗，返回 `.ambiguous`，旧问题继续挂着 ✓。
+    private static func supportingPoint(for record: LearningFollowUp, note: LearningNote,
+                                        units: [String: LearningSourceUnit]) -> SupportingPoint {
         let declared = record.sourceIDs ?? []
         if !declared.isEmpty {
             let named = declared.compactMap { units[$0] }
             // 明确给了来源 id 却对不上本次输入：不能撤下旧问题 ✗。
-            guard named.count == declared.count else { return nil }
+            guard named.count == declared.count else { return .none }
+            var candidates: [Int] = []
             for (index, point) in note.points.enumerated() where isEvidenceBacked(point) {
                 let sources = point.sources ?? []
                 func exact(_ unit: LearningSourceUnit) -> Bool {
@@ -1421,13 +1432,18 @@ struct LearningNotebook: Sendable {
                 // sentence cannot retire the old question.
                 if !matched.isEmpty && named.allSatisfy({ unit in
                     exact(unit) || matched.contains { $0.index == unit.index && $0.language != unit.language }
-                }) { return index }
+                }) { candidates.append(index) }
             }
-            return nil
+            if let chosen = record.pointIndex { return candidates.contains(chosen) ? .point(chosen) : .none }
+            switch candidates.count {
+            case 0: return .none
+            case 1: return .point(candidates[0])
+            default: return .ambiguous
+            }
         }
         guard let index = record.pointIndex, note.points.indices.contains(index),
-              isEvidenceBacked(note.points[index]) else { return nil }
-        return index
+              isEvidenceBacked(note.points[index]) else { return .none }
+        return .point(index)
     }
 
     /// 这条要点自己有原文依据、也没有未解决的问题 ✓（"后文补充"的支撑点必须满足 ✓）。

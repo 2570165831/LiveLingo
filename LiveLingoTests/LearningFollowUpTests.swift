@@ -101,6 +101,75 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertEqual(notebook.retiredQuestionReferences, [target])
     }
 
+    // MARK: - issue #20：同一句原文拆出多条要点
+
+    /// 旧问题“速度属于哪辆车”，后文一句话同时拆出“质量”和“速度”两条要点，都引用这句原文。
+    private func sharedSentenceCase(pointIndex: Int?) throws -> (notebook: LearningNotebook, target: String) {
+        var notebook = LearningNotebook()
+        try notebook.append(evidence: [segment("One cart moved at 4 meters per second.",
+                                               "有一辆车速度为4米每秒，尚未说明是哪辆车。")],
+                            note: LearningNote(topic: "速度", points: [
+                                LearningPoint(kind: "待确认", text: "4米每秒的速度归属尚未说明。",
+                                              needsContext: "速度4米每秒属于哪辆车？", sourceIDs: ["zh0s0"])
+                            ], sourceVersion: 2, noNewKnowledge: false))
+        let target = try XCTUnwrap(notebook.pendingPoints.first?.id)
+        let later = segment("Cart A has a mass of 8 kg and a speed of 4 m/s. Cart B is at rest.",
+                            "A车质量为8千克，速度为4米每秒。B车静止。", at: 12)
+        let note = LearningNote(topic: "小车", points: [
+            LearningPoint(kind: "核心结论", text: "A车质量为8千克。", sourceIDs: ["en0s0", "zh0s0"]),
+            LearningPoint(kind: "核心结论", text: "A车速度为4米每秒。", sourceIDs: ["en0s0", "zh0s0"]),
+            LearningPoint(kind: "核心结论", text: "B车静止。", sourceIDs: ["en0s1", "zh0s1"])
+        ], sourceVersion: 2, noNewKnowledge: false, followUps: [
+            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0"], pointIndex: pointIndex,
+                             detail: "后文说明4米每秒是A车的速度。")
+        ])
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        return (notebook, target)
+    }
+
+    /// 只取"后文补充"标签行（撤下说明那一行也含这四个字，不算）。
+    private func supplementLines(_ markdown: String) -> [String] {
+        markdown.split(separator: "\n").map(String.init).filter { $0.contains("**后文补充") }
+    }
+
+    func testSupplementMatchingSeveralPointsFromOneSentenceKeepsTheQuestionOpen() throws {
+        let (notebook, target) = try sharedSentenceCase(pointIndex: nil)
+        let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+        XCTAssertEqual(committed.state, .unclear)
+        XCTAssertNil(committed.pointIndex)
+        XCTAssertEqual(committed.detail, ClassroomFixedText.ambiguousSupplementDetail.noteText(target: .simplifiedChinese))
+        XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+        XCTAssertEqual(notebook.pendingPoints.map(\.id), [target])
+        let rendered = notebook.markdown()
+        XCTAssertEqual(supplementLines(rendered), [], rendered)
+        let replay = try XCTUnwrap(section(rendered, LearningNotebook.replayHeading), rendered)
+        XCTAssertTrue(replay.contains("属于哪辆车"), replay)
+        XCTAssertTrue(rendered.contains("关系仍不明"), rendered)
+        XCTAssertTrue(rendered.contains("多条要点引用了同一句原文"), rendered)
+    }
+
+    func testSupplementNamingOneOfSeveralMatchingPointsUsesThatPoint() throws {
+        let (notebook, target) = try sharedSentenceCase(pointIndex: 1)
+        let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+        XCTAssertEqual(committed.state, .supplemented)
+        XCTAssertEqual(committed.pointIndex, 1)
+        XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+        let lines = supplementLines(notebook.markdown())
+        XCTAssertEqual(lines.count, 1, lines.joined(separator: "\n"))
+        XCTAssertTrue(lines[0].contains("A车速度为4米每秒。"), lines[0])
+        XCTAssertFalse(lines[0].contains("A车质量为8千克。"), lines[0])
+    }
+
+    func testSupplementNamingAPointOutsideTheCitedSentenceIsRejected() throws {
+        let (notebook, target) = try sharedSentenceCase(pointIndex: 2)
+        let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+        XCTAssertEqual(committed.state, .unclear)
+        XCTAssertNil(committed.pointIndex)
+        XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+        XCTAssertEqual(notebook.pendingPoints.map(\.id), [target])
+        XCTAssertEqual(supplementLines(notebook.markdown()), [])
+    }
+
     /// 真 4B 在旧协议下的实际响应（`clarifies` 全空、也没有 followUps）不能消除旧问题。
     func testMissingFollowUpCannotRetireTheOldQuestion() throws {
         let (book, target, _, _) = try uncertainNotebook()

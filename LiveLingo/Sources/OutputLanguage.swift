@@ -237,7 +237,7 @@ enum ClassroomFixedText: String, CaseIterable {
     case kindCore, kindRelationship, kindExample, kindPitfall, kindBackground
     case kindPending, stateMissing, stateSupplemented, stateConflict, stateUnclear
     case neutralQuestion, priorEvidenceRule, pendingQuestion, missingFollowUp, supplementedDetail
-    case invalidSupplementDetail, conflictDetail, unclearDetail, missingDetail, retiredExplanation
+    case invalidSupplementDetail, ambiguousSupplementDetail, conflictDetail, unclearDetail, missingDetail, retiredExplanation
     case conflictFallback, unclearFallback, followUpSupplementLine, followUpConflictLine, followUpUnclearLine
     case earlierRecordLine, sourceLine, earlierSourceLine, candidateLine, replayFallback, followUpTargetLine
     case pronounSuffix, sourceUnlinked, sourceNumericDifference, sourceLegacyPending, sourceCheckLine
@@ -319,6 +319,7 @@ enum ClassroomFixedText: String, CaseIterable {
         .missingFollowUp: ["zh": "本次响应没有给出这条跟进判断，旧问题仍然保留。", "en": "This response supplied no follow-up decision for this question; the original question remains open."],
         .supplementedDetail: ["zh": "后文明确补充了同一对象、同一属性的信息。", "en": "Later source text explicitly adds information about the same object and property."],
         .invalidSupplementDetail: ["zh": "本次响应标注为后文补充，但同一次来源没有指向本批中已有原文依据的要点，旧问题保留。", "en": "The claimed clarification is not bound to an evidence-backed point from this same response; the original question remains open."],
+        .ambiguousSupplementDetail: ["zh": "本次响应标注为后文补充，但本批有多条要点引用了同一句原文，无法确定哪一条回答了旧问题，旧问题保留。", "en": "The claimed clarification matches several points that cite the same source sentence, so it cannot be determined which one answers the question; the original question remains open."],
         .conflictDetail: ["zh": "后文与此前记录存在冲突，需要人工核对具体冲突点。", "en": "Later source text conflicts with the earlier record; check the specific conflict manually."],
         .unclearDetail: ["zh": "后文与此前记录的关系仍不明确，需要人工核对。", "en": "The relationship to the earlier record remains unclear and needs manual checking."],
         .missingDetail: ["zh": "本次响应没有给出这条线索的补充，旧问题保留。", "en": "This response supplied no additional evidence for this lead; the original question remains open."],
