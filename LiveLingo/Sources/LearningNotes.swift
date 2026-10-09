@@ -721,20 +721,186 @@ enum LearningNumericProvenance {
         numericMentions(in: text, preservingCountScalars: preservingCountScalars, indexes: codeIndexes(in: text))
     }
 
+    // MARK: Full units and scientific notation (numeric provenance only)
+    //
+    // The shared alias table and `unitToken(after:)` also serve translation
+    // acceptance, so they stay unchanged. Notes provenance continues past the
+    // matched alias: `m/s²`, `kg/m³` and `meters per second squared` must not
+    // be accepted as the shorter `m/s`, `kg` or `m/s`.
+
+    private static let superscriptCharacters: [Character: Character] = [
+        "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁻": "-", "⁺": "+"]
+    private static let powerPrefixes: [(String, Int)] = [("square ", 2), ("cubic ", 3), ("平方", 2), ("立方", 3), ("二次方", 2), ("三次方", 3)]
+    private static let powerSuffixes: [(String, Int)] = [(" squared", 2), (" cubed", 3)]
+    /// Table spellings that already carry a power use the same family as the parsed forms.
+    private static let poweredFamilies = ["kg/m3": "kg/m³", "g/cm3": "g/cm³"]
+    /// `m2`, `cm3`, `s2`: an ASCII power digit is accepted only after these symbols.
+    private static let digitPowerFamilies: Set<String> = ["m", "cm", "mm", "km", "s"]
+    private static let unitTerminators = Set(".,;:!?，。；：！？、)）]】」』\"'“”‘’")
+    private static let provenanceUnitLookahead = 64
+
+    private static func superscriptPower(_ power: Int) -> String {
+        let digits = Array("⁰¹²³⁴⁵⁶⁷⁸⁹")
+        return (power < 0 ? "⁻" : "") + String(String(abs(power)).compactMap { $0.wholeNumberValue.map { digits[$0] } })
+    }
+
+    private enum UnitPower { case none, value(Int, length: Int), unreadable(length: Int) }
+
+    private static func unitPower(at text: Substring) -> UnitPower {
+        if let first = text.first, superscriptCharacters[first] != nil {
+            let run = text.prefix { superscriptCharacters[$0] != nil }
+            guard let power = Int(String(run.compactMap { superscriptCharacters[$0] })), power != 0 else {
+                return .unreadable(length: run.count)
+            }
+            return .value(power, length: run.count)
+        }
+        if text.first == "^" {
+            var rest = text.dropFirst()
+            var sign = ""
+            if let mark = rest.first, "+-−".contains(mark) { sign = mark == "+" ? "" : "-"; rest = rest.dropFirst() }
+            let digits = rest.prefix { $0.isASCII && $0.isNumber }
+            guard digits.count <= 2, let power = Int(sign + digits), power != 0 else { return .unreadable(length: 1) }
+            return .value(power, length: text.count - rest.count + digits.count)
+        }
+        for (word, power) in powerSuffixes where text.prefix(word.count).lowercased() == word {
+            if let next = text.dropFirst(word.count).first, next.isASCII, next.isLetter { continue }
+            return .value(power, length: word.count)
+        }
+        return .none
+    }
+
+    /// `m2`, `cm3`, `s2`: an ASCII power digit directly after a short symbol.
+    private static func digitPowerUnit(_ text: Substring) -> (length: Int, family: String)? {
+        for (alias, family) in unitAliases where digitPowerFamilies.contains(family)
+            && alias.allSatisfy({ $0.isASCII && $0.isLetter }) && text.hasPrefix(alias) {
+            let rest = text.dropFirst(alias.count)
+            guard let digit = rest.first, digit == "2" || digit == "3" else { continue }
+            if let next = rest.dropFirst().first, next.isASCII, next.isLetter || next.isNumber { continue }
+            return (alias.count + 1, family + superscriptPower(digit == "2" ? 2 : 3))
+        }
+        return nil
+    }
+
+    /// One unit with an optional power: `m`, `m²`, `s^-2`, `m2`, `square meters`, `平方米`.
+    /// Only the leading term may be a compound table spelling such as `m/s`.
+    private static func unitTerm(_ text: Substring, leading: Bool) -> (length: Int, family: String)? {
+        var prefixPower = 1, body = text
+        for (word, power) in powerPrefixes where text.prefix(word.count).lowercased() == word {
+            prefixPower = power; body = text.dropFirst(word.count); break
+        }
+        guard body.first.map({ $0 != " " }) == true else { return nil }
+        let prefixLength = text.count - body.count
+        guard let unit = unitToken(after: String(body)), leading || !unit.family.contains("/") else {
+            guard prefixPower == 1, let digit = digitPowerUnit(body) else { return nil }
+            return digit
+        }
+        if prefixPower != 1, unit.family.contains("/") { return nil }
+        let family = poweredFamilies[unit.family] ?? unit.family
+        var length = unit.token.count, power = prefixPower
+        switch unitPower(at: body.dropFirst(length)) {
+        case .none: break
+        case .value(let suffix, let suffixLength):
+            power *= suffix; length += suffixLength
+        case .unreadable(let suffixLength):
+            // Never accept the unit before an unreadable power as the same unit.
+            return (prefixLength + length + suffixLength, family + "…")
+        }
+        return (prefixLength + length, power == 1 ? family : family + superscriptPower(power))
+    }
+
+    /// The complete unit after a number, including powers and denominators.
+    /// An unreadable continuation after `/` or `^` keeps its own family (`kg/…`).
+    static func provenanceUnit(after text: String) -> (token: String, family: String)? {
+        let body = text.drop { $0 == " " }
+        guard let leading = unitTerm(body, leading: true) else { return nil }
+        var family = leading.family, length = leading.length
+        for _ in 0..<3 where !family.hasSuffix("…") {
+            let rest = body.dropFirst(length)
+            let separator: String, operatorLength: Int, explicit: Bool
+            if rest.first == "/" { separator = "/"; operatorLength = 1; explicit = true }
+            else if rest.first == "·" || rest.first == "⋅" { separator = "·"; operatorLength = 1; explicit = true }
+            else if rest.prefix(5).lowercased() == " per " { separator = "/"; operatorLength = 5; explicit = false }
+            else if rest.first == "每" { separator = "/"; operatorLength = 1; explicit = false }
+            else { break }
+            let operand = rest.dropFirst(operatorLength)
+            if let term = unitTerm(operand, leading: false) {
+                family += separator + term.family
+                length += operatorLength + term.length
+                continue
+            }
+            // `kg/ft³`: an unknown denominator is not the bare numerator unit.
+            // A digit (`5 m/2`) or prose after `per`/`每` is left as before.
+            guard explicit, operand.first?.isLetter == true else { break }
+            family += separator + "…"
+            length += operatorLength + operand.prefix { !$0.isWhitespace && !unitTerminators.contains($0) }.count
+        }
+        return (String(body.prefix(length)), family)
+    }
+
+    /// `3e2`, `3 × 10⁶`, `10^6`: one value whose exponent digits are never
+    /// separate mentions. Another base (`2^10`) stays one raw, unconverted value.
+    private static let scientificExpression = try! NSRegularExpression(pattern:
+        #"(?<![A-Za-z0-9_.])([0-9]+(?:\.[0-9]+)?)(?:[eE]([+\-−]?[0-9]+)(?![A-Za-z0-9_])"#
+        + #"|[ \t]*[×xX*·⋅][ \t]*10[ \t]*(?:\^[ \t]*([+\-−]?[0-9]+)|([⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+))"#
+        + #"|[ \t]*\^[ \t]*([+\-−]?[0-9]+)|([⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+))"#)
+
+    /// Each entry's range covers the expression and its parsed unit.
+    private static func scientificMentions(in text: String, excluding: [NSRange]) -> [(NSRange, Mention)] {
+        let ns = text as NSString
+        return scientificExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+            guard !excluding.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { return nil }
+            func group(_ index: Int) -> String? {
+                let range = match.range(at: index)
+                return range.location == NSNotFound ? nil : ns.substring(with: range)
+            }
+            func plain(_ exponent: String) -> String {
+                String(exponent.map { superscriptCharacters[$0] ?? ($0 == "−" ? "-" : $0) })
+            }
+            let raw = ns.substring(with: match.range)
+            let base = group(1) ?? ""
+            var mantissa = base, exponent = (group(2) ?? group(3) ?? group(4)).map(plain)
+            if exponent == nil, base == "10" { mantissa = "1"; exponent = (group(5) ?? group(6)).map(plain) }
+            let value: String
+            if let exponent, let power = Int(exponent), abs(power) <= 30,
+               let significand = Decimal(string: mantissa, locale: Locale(identifier: "en_US_POSIX")) {
+                value = NSDecimalNumber(decimal: Decimal(sign: .plus, exponent: power, significand: significand)).stringValue
+            } else {
+                value = raw.filter { !$0.isWhitespace }
+            }
+            let start = match.range.location, end = NSMaxRange(match.range)
+            let beforeStart = max(0, start - 8)
+            let before = ns.substring(with: NSRange(location: beforeStart, length: start - beforeStart))
+            var afterStart = end
+            while afterStart < ns.length, ns.character(at: afterStart) == 0x20 { afterStart += 1 }
+            let after = ns.substring(with: NSRange(location: afterStart, length: min(provenanceUnitLookahead, ns.length - afterStart)))
+            let unit = provenanceUnit(after: after)
+            let hasAttribute = attributeMarkers.contains(where: { before.hasSuffix($0) })
+            let role: Mention.Role = unit != nil || hasAttribute ? .measurement : .ambiguous
+            let excerpt = unit.map { "\(raw)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(raw)" : raw)
+            let covered = unit.map { afterStart + $0.token.utf16.count - start } ?? match.range.length
+            return (NSRange(location: start, length: covered), Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt))
+        }
+    }
+
     private static func numericMentions(in text: String, preservingCountScalars: Bool,
                                         indexes: [CodeIndex]) -> [Mention] {
+        let scientific = scientificMentions(in: text, excluding: indexes.map(\.range))
         let counts = counts(in: text).filter { count in
             !indexes.contains { NSIntersectionRange($0.range, count.0).length > 0 }
+                && !scientific.contains { NSIntersectionRange($0.0, count.0).length > 0 }
         }
-        // Both regex result sets are ordered and non-overlapping. Advance once
-        // through exclusions instead of searching every count for every scalar.
+        // Both regex result sets are ordered. Advance once through exclusions
+        // instead of searching every count for every scalar.
         let scalarExclusions = (counts.compactMap { entry -> NSRange? in
             !preservingCountScalars || entry.1.role == .distributive ? entry.0 : nil
-        } + indexes.map(\.range)
+        } + indexes.map(\.range) + scientific.map(\.0)
             + (preservingCountScalars ? [] : numberLiterals(in: text).map(\.range))).sorted { $0.location < $1.location }
         var exclusionIndex = 0
+        // Digits inside a parsed unit (`kg/m3`, `m^2`) are not separate numbers.
+        var unitEnd = 0
         let ns = text as NSString
-        let other: [Mention] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+        let other: [(Int, Mention)] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+            guard match.range.location >= unitEnd else { return nil }
             while exclusionIndex < scalarExclusions.count,
                   NSMaxRange(scalarExclusions[exclusionIndex]) <= match.range.location { exclusionIndex += 1 }
             if exclusionIndex < scalarExclusions.count,
@@ -749,18 +915,21 @@ enum LearningNumericProvenance {
             // ten characters would truncate units such as "millilitres".
             let after = ns.substring(with: NSRange(location: afterStart, length: min(unitLookahead, ns.length - afterStart)))
             if isDesignator(value: value, before: before, after: after) {
-                return Mention(value: value, unit: nil, role: .designator, excerpt: "编号\(value)")
+                return (start, Mention(value: value, unit: nil, role: .designator, excerpt: "编号\(value)"))
             }
-            let unit = unitToken(after: after)
+            let unitText = ns.substring(with: NSRange(location: afterStart, length: min(provenanceUnitLookahead, ns.length - afterStart)))
+            let unit = provenanceUnit(after: unitText)
+            if let unit { unitEnd = afterStart + unit.token.utf16.count }
             let hasAttribute = attributeMarkers.contains(where: { before.hasSuffix($0) })
             let role: Mention.Role = unit != nil || hasAttribute ? .measurement : .ambiguous
             let excerpt = unit.map { "\(value)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(value)" : value)
-            return Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt)
+            return (start, Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt))
         }
         // A grammatical quantifier neither raises a numeric warning nor
         // supplies a count/scalar for another claim. Other numbers in the
         // sentence are still checked independently.
-        return other + counts.compactMap { $0.1.role == .distributive ? nil : $0.1 }
+        let scalars = (other + scientific.map { ($0.0.location, $0.1) }).sorted { $0.0 < $1.0 }.map(\.1)
+        return scalars + counts.compactMap { $0.1.role == .distributive ? nil : $0.1 }
     }
 
     /// Source-mode parses live only for one synchronous binding (or standalone report).

@@ -815,6 +815,77 @@ final class LearningFollowUpTests: XCTestCase {
         }
     }
 
+    // Issue #29: a power or denominator after a unit is part of the unit, and
+    // the exponent of scientific notation is never a separate measurement.
+    func testPoweredAndCompoundUnitsAreNotTruncatedToAPrefix() {
+        for (claim, source) in [
+            ("加速度为9.8 m/s。", "The acceleration is 9.8 m/s²."),
+            ("面积为5 m。", "The area is 5 m²."),
+            ("密度为2 kg。", "The density is 2 kg/m³."),
+            ("频率为6 Hz。", "The frequency is 10^6 Hz."),
+            ("速度为2 m/s。", "The speed is 3e2 m/s."),
+            ("速度为10 m/s。", "The speed is 3 × 10⁶ m/s."),
+            ("加速度为9.8 m/s。", "The acceleration is 9.8 meters per second squared."),
+            ("密度为2 kg。", "The density is 2 kilograms per cubic meter."),
+            ("密度为2 kg。", "The density is 2 kg/ft³.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [], batchTexts: [source])
+            XCTAssertTrue(report.isDecidable, source)
+            XCTAssertFalse(report.gaps.isEmpty, source)
+        }
+        let unit = LearningNumericProvenance.report(claim: "面积为5 m。", cited: ["The area is 5 m²."], segmentTexts: [])
+        XCTAssertTrue(unit.gaps.joined().contains("单位不同"), "\(unit.gaps)")
+    }
+
+    func testBoundPointFlagsAnAccelerationWrittenAsASpeed() throws {
+        let source = segment("The acceleration is 9.8 m/s².", "加速度为9.8 m/s²。")
+        let point = try XCTUnwrap(boundPoint("加速度为9.8 m/s。", evidence: [source], ids: ["en0s0", "zh0s0"]))
+        XCTAssertEqual(point.referenceState, .numericDifference)
+        XCTAssertTrue(try XCTUnwrap(point.numericGap).contains("单位不同"))
+    }
+
+    func testEquivalentSpellingsOfPoweredUnitsAndScientificNotationStillMatch() {
+        for (claim, source) in [
+            ("加速度为9.8 m/s²。", "The acceleration is 9.8 m/s²."),
+            ("加速度为9.8 m/s^2。", "The acceleration is 9.8 m/s²."),
+            ("加速度为9.8 m/s2。", "The acceleration is 9.8 m/s²."),
+            ("加速度为9.8米每二次方秒。", "The acceleration is 9.8 meters per second squared."),
+            ("加速度为9.8 m/s²。", "The acceleration is 9.8 metres per second squared."),
+            ("密度为2 kg/m3。", "The density is 2 kg/m³."),
+            ("密度为2千克每立方米。", "The density is 2 kilograms per cubic meter."),
+            ("密度为2 kg/m³。", "The density is 2 kilograms per cubic metre."),
+            ("密度为1.5 g/cm³。", "The density is 1.5 grams per cubic centimeter."),
+            ("面积为5平方米。", "The area is 5 square meters."),
+            ("面积为5 m²。", "The area is 5 square metres."),
+            ("面积为5 m2。", "The area is 5 m^2."),
+            ("速度为3 × 10^6 m/s。", "The speed is 3 × 10⁶ m/s."),
+            ("速度为3e6 m/s。", "The speed is 3 × 10⁶ m/s."),
+            ("速度为3000000 m/s。", "The speed is 3e6 m/s."),
+            ("频率为10⁶ Hz。", "The frequency is 10^6 Hz."),
+            ("长度为1.5×10⁻³ m。", "The length is 1.5e-3 m."),
+            ("压强为18 kPa。", "The pressure is 18 kPa."),
+            ("速度为5 m/s。", "The speed is 5 m/s.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [], batchTexts: [source])
+            XCTAssertFalse(report.isDecidable, "\(claim) / \(source)")
+            XCTAssertTrue(report.gaps.isEmpty, "\(claim) / \(source): \(report.gaps)")
+        }
+    }
+
+    func testExponentDigitsNeverBecomeSeparateCountsOrScalars() {
+        XCTAssertFalse(LearningNumericProvenance.mentions(in: "We took 10^3 samples.", preservingCountScalars: true)
+            .contains { $0.value == "3" })
+        XCTAssertFalse(LearningNumericProvenance.mentions(in: "The density is 2 kg/m3.")
+            .contains { $0.value == "3" })
+        let count = LearningNumericProvenance.report(claim: "共有3个样品。", cited: ["We took 10^3 samples."], segmentTexts: [], batchTexts: [])
+        XCTAssertTrue(count.gaps.joined().contains("计数“3个”"), "\(count.gaps)")
+        // A power that is not a base-10 exponent stays one unverifiable value.
+        let power = LearningNumericProvenance.report(claim: "结果为10。", cited: ["The cache holds 2^10 entries."], segmentTexts: [], batchTexts: [])
+        XCTAssertFalse(power.gaps.isEmpty, "\(power.gaps)")
+        let same = LearningNumericProvenance.report(claim: "结果为2^10。", cited: ["The cache holds 2^10 entries."], segmentTexts: [], batchTexts: [])
+        XCTAssertTrue(same.gaps.isEmpty, "\(same.gaps)")
+    }
+
     func testCountSupportRecognizesWholeNumberWordsWithoutInventingCounts() {
         for (claim, source) in [
             ("共有50个储物柜。", "There are fifty lockers."),
