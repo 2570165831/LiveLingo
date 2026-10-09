@@ -374,6 +374,9 @@ enum LearningNumericProvenance {
         let role: Role
         /// 出现在缺口说明里的短摘录（例如“293 开尔文”）✓。
         let excerpt: String
+        /// "-" for a stated negative sign (`-5`, `−5`, `零下5`, `minus 5`), otherwise "".
+        /// Only measurements with a unit compare it; other roles still compare magnitude.
+        var sign = ""
     }
 
     struct Report: Equatable, Sendable {
@@ -393,6 +396,40 @@ enum LearningNumericProvenance {
     static let designatorPrefixes = ["第", "编号", "序号", "图", "表", "式", "步骤", "阶段", "级别", "等级", "题号", "版本"]
 
     private static let numberExpression = try! NSRegularExpression(pattern: #"[0-9]+(?:\.[0-9]+)?"#)
+
+    private static let minusMarks: Set<Character> = ["-", "−", "－", "﹣"]
+    private static let signOpeners: Set<Character> = Set("([{（【=＝:：,，;；、。！？~～≈<>≤≥\"'“‘")
+    private static let signWord = try! NSRegularExpression(pattern: #"(?i)(?<![A-Za-z])(minus|negative)[ \t]+$"#)
+
+    /// The stated negative sign directly before the digits at `start`, as written
+    /// (`-`, `−`, `零下`, `minus `), or "" when there is none. A hyphen joined to a
+    /// preceding Latin letter, digit or closing bracket (`3-5`, `K-5`, `CO-2`, `x-5`), a
+    /// spaced operator (`20 - 25`), `±`/`正负`/`plus or minus`, and `minus` after a
+    /// number or unit (`10 minus 5`) are ranges, designators or arithmetic, not signs.
+    private static func negativeSign(in ns: NSString, before start: Int) -> String {
+        let lookback = min(start, 32)
+        let window = ns.substring(with: NSRange(location: start - lookback, length: lookback))
+        if let mark = window.last, minusMarks.contains(mark) {
+            guard let prior = window.dropLast().last else { return String(mark) }
+            let isHan = prior.unicodeScalars.first.map { (0x3400...0x9FFF).contains($0.value) } ?? false
+            return prior.isWhitespace || signOpeners.contains(prior) || isHan ? String(mark) : ""
+        }
+        let spoken = window.replacingOccurrences(of: #"[ \t]+$"#, with: "", options: .regularExpression)
+        if spoken.hasSuffix("零下") { return String(window.suffix(window.count - spoken.count + 2)) }
+        if spoken.hasSuffix("负"), !spoken.dropLast().hasSuffix("正") {
+            return String(window.suffix(window.count - spoken.count + 1))
+        }
+        let wns = window as NSString
+        guard let word = signWord.firstMatch(in: window, range: NSRange(location: 0, length: wns.length)) else { return "" }
+        let head = wns.substring(to: word.range.location)
+        if head.range(of: #"(?i)\bplus[ \t]+or[ \t]+$"#, options: .regularExpression) != nil { return "" }
+        let token = head.trimmingCharacters(in: .whitespaces).split(whereSeparator: \.isWhitespace).last.map(String.init) ?? ""
+        if token.contains(where: { $0.isNumber })
+            || unitAliases.contains(where: { $0.0 == token || ($0.0.count > 1 && $0.0.lowercased() == token.lowercased()) }) {
+            return ""
+        }
+        return wns.substring(from: word.range.location)
+    }
 
     /// A rooted subscript is a reference, not a measurement or a count. Matching
     /// it only establishes that the reference occurs, not its type or RHS value.
@@ -876,9 +913,11 @@ enum LearningNumericProvenance {
             let unit = provenanceUnit(after: after)
             let hasAttribute = attributeMarkers.contains(where: { before.hasSuffix($0) })
             let role: Mention.Role = unit != nil || hasAttribute ? .measurement : .ambiguous
-            let excerpt = unit.map { "\(raw)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(raw)" : raw)
+            let sign = negativeSign(in: ns, before: start)
+            let excerpt = unit.map { "\(sign)\(raw)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(raw)" : sign + raw)
             let covered = unit.map { afterStart + $0.token.utf16.count - start } ?? match.range.length
-            return (NSRange(location: start, length: covered), Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt))
+            return (NSRange(location: start, length: covered), Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt,
+                                                                       sign: sign.isEmpty ? "" : "-"))
         }
     }
 
@@ -922,8 +961,9 @@ enum LearningNumericProvenance {
             if let unit { unitEnd = afterStart + unit.token.utf16.count }
             let hasAttribute = attributeMarkers.contains(where: { before.hasSuffix($0) })
             let role: Mention.Role = unit != nil || hasAttribute ? .measurement : .ambiguous
-            let excerpt = unit.map { "\(value)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(value)" : value)
-            return (start, Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt))
+            let sign = negativeSign(in: ns, before: start)
+            let excerpt = unit.map { "\(sign)\(value)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(value)" : sign + value)
+            return (start, Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt, sign: sign.isEmpty ? "" : "-"))
         }
         // A grammatical quantifier neither raises a numeric warning nor
         // supplies a count/scalar for another claim. Other numbers in the
@@ -1085,16 +1125,29 @@ enum LearningNumericProvenance {
             let inBatch = batch.filter { $0.value == mention.value && $0.role != .designator && $0.role != .count }
             let isMeasurement = mention.role == .measurement
             if isMeasurement, let unit = mention.unit {
-                if inOwn.contains(where: { $0.unit == unit }) { continue }
+                if inOwn.contains(where: { $0.unit == unit && $0.sign == mention.sign }) { continue }
+                // Same value and unit with only the opposite sign: decidable, like a unit conflict.
+                let ownSigned = inOwn.filter { $0.unit == unit }
+                if !ownSigned.isEmpty {
+                    report.isDecidable = true
+                    push(signConflict(mention, others: ownSigned, target: target), into: &report.gaps, seen: &seen)
+                    continue
+                }
                 if !inOwn.isEmpty {
                     report.isDecidable = true
                     push(unitConflict(mention, others: inOwn, target: target), into: &report.gaps, seen: &seen)
                     continue
                 }
-                if inBatch.contains(where: { $0.unit == unit }) {
+                if inBatch.contains(where: { $0.unit == unit && $0.sign == mention.sign }) {
                     // 数字出现在本次原文的其他句子：不判“数值不同” ✗，只指出具体缺口 ✓。
                     push(ClassroomFixedText.numericElsewhere.noteFormat([mention.excerpt], target: target),
                          into: &report.gaps, seen: &seen)
+                    continue
+                }
+                let batchSigned = inBatch.filter { $0.unit == unit }
+                if !batchSigned.isEmpty {
+                    report.isDecidable = true
+                    push(signConflict(mention, others: batchSigned, target: target), into: &report.gaps, seen: &seen)
                     continue
                 }
                 if !inBatch.isEmpty {
@@ -1133,6 +1186,11 @@ enum LearningNumericProvenance {
     private static func unitConflict(_ mention: Mention, others: [Mention], target: CaptionTranslationTarget) -> String {
         let units = Set(others.compactMap(\.unit)).sorted().joined(separator: "、")
         return ClassroomFixedText.numericUnitConflict.noteFormat([mention.excerpt, units.isEmpty ? ClassroomFixedText.noUnit.noteText(target: target) : units], target: target)
+    }
+
+    /// 同一数字、同一单位族，只差正负号：明确可判 ✓（与单位冲突同级）。
+    private static func signConflict(_ mention: Mention, others: [Mention], target: CaptionTranslationTarget) -> String {
+        ClassroomFixedText.numericSignConflict.noteFormat([mention.excerpt, Set(others.map(\.excerpt)).sorted().joined(separator: "、")], target: target)
     }
 
     private static func push(_ line: String, into gaps: inout [String], seen: inout Set<String>) {

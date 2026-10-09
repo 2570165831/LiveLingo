@@ -253,7 +253,7 @@ enum ClassroomFixedText: String, CaseIterable {
     case numericIndexElsewhere, numericIndexMissing, numericIndexGap, numericFieldConflict
     case numericLiteralElsewhere, numericFieldElsewhere, numericLiteralMissing, numericFieldScope, numericLiteralGap
     case numericCountElsewhere, numericCountMissing, numericCountGap, numericElsewhere, numericMissing
-    case numericValueMissing, numericAmbiguous, numericUnitConflict, noUnit
+    case numericValueMissing, numericAmbiguous, numericUnitConflict, numericSignConflict, noUnit
     case noCompletedBatch, latestCompletedRange, captionCoverage, liveClass
 
     static let usesTargetLanguage = false
@@ -293,6 +293,7 @@ enum ClassroomFixedText: String, CaseIterable {
         .numericValueMissing: ["zh": "正文里的“{0}”在本次原文里找不到同值；请人工确认它对应的对象、条件和来源。", "en": "No matching value for '{0}' was found in this input; manually check its object, conditions and source."],
         .numericAmbiguous: ["zh": "正文里的“{0}”没有单位或属性说明，也没有出现在本次原文中；请人工确认它是编号还是测量值，并补上单位或来源。", "en": "'{0}' has no stated unit or property and was not found in this input. Check whether it is an identifier or measurement, and add the unit or source."],
         .numericUnitConflict: ["zh": "正文里的“{0}”与原文中同一数字的单位不同（原文为 {1}）；请人工确认是换算、推导还是引用错位。", "en": "'{0}' has a different unit from the matching source number ({1}); manually check whether this is conversion, derivation or a misplaced citation."],
+        .numericSignConflict: ["zh": "正文里的“{0}”与原文中对应数值的正负号不同（原文为 {1}）；请人工确认。", "en": "'{0}' has a different sign from the matching source number ({1}); check it manually."],
         .noUnit: ["zh": "无单位", "en": "no unit"],
         .noCompletedBatch: ["zh": "尚无已完成批次", "en": "No completed batches yet"],
         .latestCompletedRange: ["zh": "最近完成：{0}–{1}", "en": "Latest completed: {0}–{1}"],
