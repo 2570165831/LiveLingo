@@ -1183,12 +1183,14 @@ struct LearningNotebook: Sendable {
     }
     static func reference(_ batch: LearningNoteBatch, _ index: Int) -> String { "\(batch.id.uuidString):\(index)" }
 
-    /// 每个旧要点最近一次的跟进记录（按批次顺序）✓：冲突/关系不明要给出具体时间和说明 ✓。
+    /// 每个旧要点最近一次**有信息**的跟进记录（按批次顺序）✓：冲突/关系不明要给出具体时间和说明 ✓。
+    /// "缺信息"只表示那一批没有新线索，不能覆盖仍然有效的冲突／关系不明说明（issue #33）✓；
+    /// 从来只有"缺信息"的问题没有条目，渲染时照旧不附说明 ✓。
     static func latestFollowUps(in batches: [LearningNoteBatch]) -> [String: (record: LearningFollowUp, batch: LearningNoteBatch)] {
         var result: [String: (record: LearningFollowUp, batch: LearningNoteBatch)] = [:]
         for batch in batches {
             for record in batch.followUps ?? [] {
-                guard let target = record.target else { continue }
+                guard let target = record.target, record.state != .missing else { continue }
                 result[target] = (record, batch)
             }
         }

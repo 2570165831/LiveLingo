@@ -267,6 +267,29 @@ final class EnglishLearningNotesTests: XCTestCase {
         }
     }
 
+    /// issue #33: a later "missing" record must not hide an earlier conflict/unclear label (localized path).
+    func testEnglishConflictAndUnclearLabelsSurviveALaterMissingFollowUp() throws {
+        for state in [LearningFollowUp.State.conflict, .unclear] {
+            var book = LearningNotebook(target: .english)
+            try book.append(evidence: [foreign("A pressure reading was taken.")],
+                note: note("A pressure reading has no identified owner.", kind: "待确认", question: "Which tank?"))
+            let target = try XCTUnwrap(book.pendingPoints.first?.id)
+            var flagged = note("The reading was taken after the valve opened.")
+            flagged.followUps = [.init(target: target, state: state, sourceIDs: ["en0s0"],
+                detail: "Before versus after the valve opened.")]
+            try book.append(evidence: [foreign("The reading was taken after the valve opened.", at: 3)], note: flagged)
+            var unrelated = note("The ideal gas equation is PV = nRT.")
+            unrelated.followUps = [.init(target: target, state: .missing)]
+            try book.append(evidence: [foreign("The ideal gas equation is PV = nRT.", at: 6)], note: unrelated)
+            XCTAssertEqual(book.batches[2].followUps?.first?.state, .missing, state.rawValue)
+            XCTAssertEqual(book.pendingPoints.map(\.id), [target])
+            let rendered = book.markdown()
+            XCTAssertTrue(rendered.contains(state.label(target: .english)), "\(state.rawValue): \(rendered)")
+            XCTAssertTrue(rendered.contains("Before versus after the valve opened."), rendered)
+            XCTAssertFalse(rendered.contains(LearningFollowUp.State.missing.label(target: .english)), rendered)
+        }
+    }
+
     func testNotebookAppendCommitsEnglishFollowUpAndRetainsOldBytes() throws {
         var book = LearningNotebook(target: .english)
         let first = foreign("A pressure reading was taken.")

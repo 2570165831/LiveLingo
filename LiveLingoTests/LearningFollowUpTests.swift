@@ -116,6 +116,13 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(notebook.markdown().contains("属于哪个储罐"))
         XCTAssertEqual(notebook.batches[1].followUps?.first?.state, .missing)
         XCTAssertTrue(notebook.selectPendingPoints(for: [later]).map(\.id).contains(target))
+        // 从来只有"缺信息"的问题仍然不附任何跟进说明（issue #33 修复不改变这一点）。
+        let rendered = notebook.markdown()
+        let missingDetail = try XCTUnwrap(notebook.batches[1].followUps?.first?.detail)
+        XCTAssertFalse(rendered.contains(missingDetail), rendered)
+        for label in ["后文补充", "与此前记录冲突", "关系仍不明", "缺信息"] {
+            XCTAssertFalse(rendered.contains(label), "\(label): \(rendered)")
+        }
     }
 
     func testUnknownAliasAndStaleTargetAreNeverApplied() throws {
@@ -182,6 +189,100 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(rendered.contains("与此前记录冲突"))
         XCTAssertTrue(rendered.contains("先前说打开前测得，后文说打开后测得。"))
         XCTAssertTrue(rendered.contains("后文（[00:12–00:22]）"))
+    }
+
+    // MARK: - ①a 之后的"缺信息"不能抹掉仍有效的冲突／关系不明说明（issue #33）
+
+    /// 旧问题 → 某批给出 `state`（冲突或关系不明）→ 返回这时的笔记本与目标引用。
+    private func flaggedNotebook(_ state: LearningFollowUp.State, detail: String) throws -> (notebook: LearningNotebook, target: String) {
+        let (book, target, _, _) = try uncertainNotebook()
+        var notebook = book
+        let later = segment("The lecturer now says the 18 kilopascal reading was taken after the valve opened.",
+                            "讲述者此时说18千帕是在阀打开之后测得的。", at: 12)
+        let note = supplementNote(text: "讲述者此时说18千帕是在阀打开之后测得的。", sourceIDs: ["en0s0", "zh0s0"],
+                                  followUp: LearningFollowUp(alias: "q0", state: state, sourceIDs: ["en0s0"], detail: detail))
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(notebook.batches[1].followUps?.first?.state, state)
+        return (notebook, target)
+    }
+
+    /// 一段无关原文：旧问题仍被提供给这一批，`modelFollowUp` 为 nil 时由程序补"缺信息"。
+    private func appendUnrelated(_ notebook: inout LearningNotebook, target: String, at time: Double,
+                                 modelFollowUp: LearningFollowUp? = nil) throws {
+        let unrelated = segment("The ideal gas equation is PV = nRT.", "理想气体状态方程是PV=nRT。", at: time)
+        let offered = notebook.selectPendingPoints(for: [unrelated]).map(\.id)
+        XCTAssertEqual(offered, [target], "唯一的旧问题应被提供给这一批")
+        let note = LearningNote(topic: "理想气体", points: [
+            LearningPoint(kind: "核心结论", text: "理想气体状态方程是PV=nRT。", sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false, followUps: modelFollowUp.map { [$0] })
+        try notebook.append(evidence: [unrelated], note: LearningPrompts.resolvingFollowUps(note, targets: offered))
+        XCTAssertEqual(notebook.batches.last?.followUps?.first?.state, .missing)
+    }
+
+    func testLaterMissingFollowUpDoesNotHideConflict() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: detail)
+        try appendUnrelated(&notebook, target: target, at: 30)
+        XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+        let rendered = notebook.markdown()
+        XCTAssertTrue(try XCTUnwrap(section(rendered, LearningNotebook.replayHeading)).contains("属于哪个储罐"))
+        XCTAssertTrue(rendered.contains("与此前记录冲突"), rendered)
+        XCTAssertTrue(rendered.contains(detail))
+        // 时间指向发现冲突的那一批（00:12），不是之后的无关批次（00:30）。
+        XCTAssertTrue(rendered.contains("后文（[00:12–00:22]）"), rendered)
+        XCTAssertFalse(rendered.contains("[00:30"), rendered)
+    }
+
+    func testLaterMissingFollowUpDoesNotHideUnclear() throws {
+        let detail = "无法确定后文的读数是否就是先前那一项。"
+        var (notebook, target) = try flaggedNotebook(.unclear, detail: detail)
+        try appendUnrelated(&notebook, target: target, at: 30)
+        XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+        let rendered = notebook.markdown()
+        XCTAssertTrue(rendered.contains("关系仍不明"), rendered)
+        XCTAssertTrue(rendered.contains(detail))
+        XCTAssertTrue(rendered.contains("后文（[00:12–00:22]）"), rendered)
+    }
+
+    /// 模型自己明确回答"缺信息"（提示词要求的常见路径），同样不能覆盖冲突说明。
+    func testExplicitModelMissingAfterConflictKeepsTheConflictLine() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: detail)
+        try appendUnrelated(&notebook, target: target, at: 30,
+                            modelFollowUp: LearningFollowUp(alias: "q0", state: .missing, sourceIDs: [],
+                                                            detail: "本段原文没有涉及这项读数。"))
+        let rendered = notebook.markdown()
+        XCTAssertTrue(rendered.contains("与此前记录冲突"), rendered)
+        XCTAssertTrue(rendered.contains(detail))
+        XCTAssertFalse(rendered.contains("本段原文没有涉及这项读数。"))
+    }
+
+    func testRepeatedMissingAfterConflictShowsTheConflictOnce() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: detail)
+        try appendUnrelated(&notebook, target: target, at: 30)
+        try appendUnrelated(&notebook, target: target, at: 48)
+        let rendered = notebook.markdown()
+        XCTAssertEqual(rendered.components(separatedBy: detail).count - 1, 1, rendered)
+        XCTAssertEqual(rendered.components(separatedBy: "与此前记录冲突").count - 1, 1, rendered)
+    }
+
+    /// 最新的有效判断仍然优先：冲突之后给出"后文补充"照常撤下问题。
+    func testSupplementAfterConflictAndMissingStillRetiresTheQuestion() throws {
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: "先前说打开前测得，后文说打开后测得。")
+        try appendUnrelated(&notebook, target: target, at: 30)
+        let later = segment("The earlier 18 kilopascal reading belongs to Aurora and was measured before its inlet valve opened.",
+                            "先前18千帕的压强属于Aurora罐，测量发生在该罐入口阀打开前。", at: 48)
+        let note = supplementNote(text: "先前18千帕的压强属于Aurora罐，测量发生在该罐入口阀打开前。",
+                                  sourceIDs: ["en0s0", "zh0s0"],
+                                  followUp: LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0", "zh0s0"],
+                                                             detail: "后文明确说明了同一压强读数的储罐归属。"))
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+        let rendered = notebook.markdown()
+        XCTAssertNil(section(rendered, LearningNotebook.replayHeading))
+        XCTAssertTrue(rendered.contains("后文补充"))
+        XCTAssertFalse(rendered.contains("与此前记录冲突"), rendered)
     }
 
     func testFollowUpJudgementNeedsNoExtraModelRequestAndFreezesAliases() throws {
