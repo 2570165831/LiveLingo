@@ -862,9 +862,15 @@ struct ASRRecoveryTests {
             "Your first assignment will be released next week.",
             "Submit assignment three by Friday, it uses executor.submit().",
             "Unit registration closes on Friday",
+            // A sentence break before a sentence-initial "Submit" is not a method call.
+            "The lab is posted. Submit your report by next Monday.",
+            "Okay. Submit it before class on Friday.",
+            "There will be multiple assignments this term.",
         ] {
             #expect(LearningNotebook.isScheduleStatement(notice), "real notice must stay: \(notice)")
         }
+        // Member access still counts as code when it directly joins an identifier.
+        #expect(!LearningNotebook.isScheduleStatement("Then call pool.submit(job) and wait."))
     }
 
     @Test func logisticsSectionDropsProgrammingAssignmentForBothTargets() {

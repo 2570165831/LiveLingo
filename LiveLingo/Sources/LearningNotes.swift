@@ -1998,10 +1998,14 @@ struct LearningNotebook: Sendable {
     private static let logisticsAmbiguousPatterns = [#"\bassignments?\b"#, #"\bsubmit\b"#]
 
     /// 编程语境的写法（含 ASR 常见的 "dot submit"）✓；同句另有强安排词时不影响保留 ✓。
+    /// 句点只有**直接连着标识符**（`executor.submit`）才算成员访问 ✓；
+    /// "The lab is posted. Submit your report…" 里的句号是断句，不是代码 ✗。
+    /// "multiple assignments" 在课程通知里很常见（"There will be multiple assignments"），不算编程搭配 ✗。
     private static let logisticsCodeFormPatterns = [
-        #"(?:\.|\bdot )\s*submit\b(?:\s*\([^)]*\))?"#,
+        #"(?<=[a-z0-9_)\]])\.submit\b(?:\s*\([^)]*\))?"#,
+        #"\bdot\s+submit\b(?:\s*\([^)]*\))?"#,
         #"\bsubmit\s*\("#,
-        #"\b(?:variable|value|attribute|tuple|multiple|chained|augmented|compound|destructuring|parallel|pointer|reference|array|list|object|default)\s+assignments?\b"#,
+        #"\b(?:variable|value|attribute|tuple|chained|augmented|compound|destructuring|parallel|pointer|reference|array|list|object|default)\s+assignments?\b"#,
         #"\bassignments?\s+(?:operators?|statements?|expressions?)\b"#,
     ]
 
