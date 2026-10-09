@@ -209,6 +209,67 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertNil(notebook.batches[1].note.followUps, "跟进记录只保存在新批次上")
     }
 
+    // MARK: - ①b "待确认"但没写具体问题的要点（issue #16）
+
+    /// `kind == "待确认"`、`needsContext` 为空的要点：`hasOpenQuestion` 为真、进 `## 需要回听`，
+    /// 后续跟进也必须能看到它（用兜底问题）✓。
+    private func kindOnlyPendingNotebook(_ english: String = "A mass value is mentioned for one object.",
+                                         target: CaptionTranslationTarget = .simplifiedChinese,
+                                         evidence: TranscriptSegment? = nil) throws -> (notebook: LearningNotebook, target: String) {
+        var book = LearningNotebook(target: target)
+        try book.append(evidence: [evidence ?? segment(english)], note: LearningNote(topic: "质量", points: [
+            LearningPoint(kind: "待确认", text: "这个质量值的归属待确认。", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false))
+        let point = book.batches[0].note.points[0]
+        XCTAssertNil(point.needsContext)
+        XCTAssertEqual(point.referenceState, .linked)
+        XCTAssertTrue(point.hasOpenQuestion)
+        XCTAssertNotNil(section(book.markdown(), LearningNotebook.replayHeading))
+        return (book, LearningNotebook.reference(book.batches[0], 0))
+    }
+
+    func testKindPendingWithoutQuestionEntersPendingPoints() throws {
+        var (book, target) = try kindOnlyPendingNotebook()
+        let pending = book.pendingPoints
+        XCTAssertEqual(pending.map(\.id), [target])
+        XCTAssertEqual(pending.first?.referenceCheck, false)
+        XCTAssertEqual(pending.first?.question, ClassroomFixedText.pendingQuestion.noteText(target: .simplifiedChinese))
+        let later = segment("The mass value belongs to the cart.", at: 12)
+        XCTAssertEqual(book.selectPendingPoints(for: [later]).map(\.id), [target])
+    }
+
+    func testKindPendingWithoutQuestionAndPronounSourceIsASemanticQuestion() throws {
+        let (book, target) = try kindOnlyPendingNotebook("Its mass value is mentioned.")
+        XCTAssertEqual(book.batches[0].note.points[0].sourceHasPronoun, true)
+        XCTAssertEqual(book.pendingPoints.map(\.id), [target])
+        XCTAssertEqual(book.pendingPoints.first?.referenceCheck, false)
+    }
+
+    func testKindPendingWithoutQuestionCanBeRetiredByALaterSupplement() throws {
+        var (book, target) = try kindOnlyPendingNotebook()
+        let later = segment("The earlier mass value belongs to the cart.", "先前的质量值属于小车。", at: 12)
+        XCTAssertEqual(book.selectPendingPoints(for: [later]).map(\.id), [target])
+        let note = LearningNote(topic: "质量归属", points: [
+            LearningPoint(kind: "核心结论", text: "先前的质量值属于小车。", sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false, followUps: [
+            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0", "zh0s0"],
+                             detail: "后文说明了这项质量的归属。")
+        ])
+        try book.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(book.batches[1].followUps?.first?.state, .supplemented)
+        XCTAssertEqual(book.retiredQuestionReferences, [target])
+        XCTAssertNil(section(book.markdown(), LearningNotebook.replayHeading))
+        XCTAssertTrue(book.pendingPoints.isEmpty)
+    }
+
+    func testKindPendingWithoutQuestionEntersPendingPointsForEnglishTarget() throws {
+        let source = TranscriptSegment(startTime: 0, endTime: 1, english: "提到了一个质量值。",
+                                       chinese: "A mass value is mentioned for one object.", sourceLanguage: "zh")
+        let (book, target) = try kindOnlyPendingNotebook(target: .english, evidence: source)
+        XCTAssertEqual(book.pendingPoints.map(\.id), [target])
+        XCTAssertEqual(book.pendingPoints.first?.question, ClassroomFixedText.pendingQuestion.noteText(target: .english))
+    }
+
     // MARK: - ② 数值来源核查
 
     private func boundPoint(_ text: String, evidence: [TranscriptSegment], ids: [String]) -> LearningPoint? {

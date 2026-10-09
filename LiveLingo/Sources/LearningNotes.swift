@@ -1243,6 +1243,8 @@ struct LearningNotebook: Sendable {
                 let id = Self.reference(batch, index)
                 let semanticQuestion = point.referenceState == .pending || point.referenceState == .awaitingContext
                     || point.referenceState == .numericDifference || !(point.needsContext ?? "").isEmpty
+                    // Match hasOpenQuestion: a 待确认 point without question text is still open.
+                    || point.kind == "待确认"
                 let referenceCheck = !semanticQuestion && point.sourceHasPronoun == true && point.referenceState == .linked
                 guard semanticQuestion || referenceCheck else { return nil }
                 let sources = (point.sources ?? []).filter { source in
