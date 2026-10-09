@@ -1,7 +1,12 @@
 import Darwin
 import Foundation
+// The standalone CLI gates (Scripts/run-privacy-tools-tests.sh) compile this
+// file together with the app sources and need only the in-memory preference
+// fixtures; the Xcode test bundle also gets the XCTest/Swift Testing helpers.
+#if !LIVELINGO_CLI
 import XCTest
 @testable import LiveLingo
+#endif
 
 /// A synthetic calendar clock that advances only with monotonic elapsed time.
 /// Timer integration still runs, but changing the host's date cannot move it.
@@ -18,6 +23,7 @@ final class TestWallClock {
     }
 }
 
+#if !LIVELINGO_CLI
 /// Both frameworks share the host's unique worker directory. All synthetic
 /// fixtures and screenshots remain under this invocation's DerivedData/tmp.
 enum TestFixtureDirectory {
@@ -28,6 +34,7 @@ enum TestFixtureDirectory {
         return root
     }()
 }
+#endif
 
 /// Preferences stay in memory, including reopening a suite and inspecting its
 /// persistent domain. Neither reads nor teardown touch the user's preferences.
@@ -191,9 +198,11 @@ struct TestPreferenceCleanup: Sendable {
 
     fileprivate static func emit(_ event: String, suite: String) throws {
         let bytes = Array("TEST_PREFERENCE_\(event) suite=\(suite)\n".utf8)
+        #if !LIVELINGO_CLI
         // Parallel Xcode activity logs can omit output after the final case.
         // Keep an independent, UUID-only event stream in this worker's scratch
         // directory so every suite's cleanup is still externally verifiable.
+        // (A standalone CLI gate has no worker directory; its stdout is the log.)
         let events = TestFixtureDirectory.root.appendingPathComponent("test-preferences.events")
         let descriptor = Darwin.open(events.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
         guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
@@ -202,6 +211,7 @@ struct TestPreferenceCleanup: Sendable {
             Darwin.write(descriptor, buffer.baseAddress, buffer.count)
         }
         guard recorded == bytes.count else { throw CocoaError(.fileWriteUnknown) }
+        #endif
         let written = bytes.withUnsafeBytes { buffer in
             Darwin.write(STDOUT_FILENO, buffer.baseAddress, buffer.count)
         }
@@ -231,6 +241,7 @@ struct TestPreferenceCleanup: Sendable {
     }
 }
 
+#if !LIVELINGO_CLI
 /// An unstructured completion observer permits the deadline to report failure
 /// even when the observed task ignores cancellation. Callers then preserve the
 /// fixture instead of deleting files while an owned writer can still run.
@@ -523,3 +534,4 @@ private actor IsolatedStorageGate {
         waiter.continuation.resume(throwing: CancellationError())
     }
 }
+#endif
