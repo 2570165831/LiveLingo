@@ -587,11 +587,11 @@ final class ClassroomPresentationTests: XCTestCase {
             XCTFail("Presentation tests must never invoke a generator")
             throw CancellationError()
         }
+        let model = AppModel(reviewQueue: queue, translation: translation, backgroundServices: false, defaults: defaults)
         addTeardownBlock {
-            await queue.shutdownForTesting()
+            try await TestTaskLifetime.stop(model, queue: queue)
             try preferenceCleanup.remove()
         }
-        let model = AppModel(reviewQueue: queue, translation: translation, backgroundServices: false, defaults: defaults)
         let evidence = (0..<8).map { index in
             TranscriptSegment(startTime: Double(index * 10), endTime: Double(index * 10 + 9),
                 english: "Synthetic classroom \(index + 1): compare the quantities and keep the stated conditions with the formula.",

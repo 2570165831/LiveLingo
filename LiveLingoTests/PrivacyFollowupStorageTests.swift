@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import LiveLingo
 
+@Suite(.isolatedStorage)
 struct PrivacyFollowupStorageTests {
     private final class TemporaryFileManager: FileManager, @unchecked Sendable {
         let root: URL

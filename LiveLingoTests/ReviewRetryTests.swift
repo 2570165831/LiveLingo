@@ -14,6 +14,7 @@ private actor C06ReviewGate {
 
 /// 第 1–3 项：有界自动重试、中断与失败分开、每场统计。
 @MainActor
+@Suite(.isolatedStorage)
 struct ReviewRetryTests {
     private func makeNotebook(batches: Int = 1, label: String = "") -> LearningNotebook {
         var book = LearningNotebook()

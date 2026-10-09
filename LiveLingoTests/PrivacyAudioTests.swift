@@ -8,6 +8,9 @@ import Testing
 
 /// Hardware-free WAV cases. Every path and byte belongs to a fresh synthetic
 /// fixture; fixtures are retained under superseded for the parent to inspect.
+#if !PRIVACY_AUDIO_PROBE
+@Suite(.isolatedStorage)
+#endif
 struct PrivacyAudioTests {
     private struct AssertionFailure: Error { let message: String }
 

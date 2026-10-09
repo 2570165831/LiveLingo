@@ -33,7 +33,7 @@ final class AccessibilityRegressionTests: XCTestCase {
     }
 
     private var screenshots: URL {
-        TestFixtureDirectory.root.deletingLastPathComponent().appendingPathComponent("screenshots", isDirectory: true)
+        TestFixtureDirectory.root.appendingPathComponent("screenshots", isDirectory: true)
     }
 
     private func fixture() throws -> (AppModel, UserDefaults) {
@@ -201,9 +201,32 @@ final class AccessibilityRegressionTests: XCTestCase {
     }
 
     func testTemporaryDirectoryIsInsideThisInvocationsBuildRoot() throws {
+        // Derive the expected scratch base from where this test bundle was
+        // loaded, independently of the host's LIVELINGO_TEST_TMPDIR override:
+        // <DerivedData>/Build/Products/... -> <DerivedData>/tmp.
+        var directory = Bundle(for: AccessibilityRegressionTests.self).bundleURL.standardizedFileURL
+        var buildScratch: URL?
+        while directory.path != "/" {
+            let parent = directory.deletingLastPathComponent()
+            if directory.lastPathComponent == "Products", parent.lastPathComponent == "Build" {
+                buildScratch = parent.deletingLastPathComponent().appendingPathComponent("tmp", isDirectory: true)
+                break
+            }
+            directory = parent
+        }
+        let expectedBase = SessionDirectoryLocation.canonical(
+            try XCTUnwrap(buildScratch, "The test bundle must be loaded from this invocation's Build/Products"))
+        let root = SessionDirectoryLocation.canonical(TestFixtureDirectory.root)
+        XCTAssertEqual(root.deletingLastPathComponent(), expectedBase,
+                       "Test scratch space must be a direct child of this invocation's DerivedData/tmp")
+        let worker = root.lastPathComponent
+        let prefix = "worker-\(ProcessInfo.processInfo.processIdentifier)-"
+        XCTAssertTrue(worker.hasPrefix(prefix), "Unexpected worker directory \(worker)")
+        XCTAssertNotNil(UUID(uuidString: String(worker.dropFirst(prefix.count))), "Unexpected worker directory \(worker)")
+        XCTAssertTrue(SessionDirectoryLocation.canonical(screenshots).path.hasPrefix(root.path + "/"))
         XCTAssertEqual(SessionDirectoryLocation.canonical(FileManager.default.temporaryDirectory),
                        SessionDirectoryLocation.canonical(TestFixtureDirectory.root))
-        XCTAssertEqual(screenshots.deletingLastPathComponent(), TestFixtureDirectory.root.deletingLastPathComponent())
+        XCTAssertEqual(screenshots.deletingLastPathComponent(), TestFixtureDirectory.root)
         let fixture = try DataSafetyFixtures.make("a11y-path-boundary")
         XCTAssertEqual(fixture.deletingLastPathComponent(), TestFixtureDirectory.root)
         DataSafetyFixtures.preserve(fixture)

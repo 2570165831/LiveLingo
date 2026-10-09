@@ -5,6 +5,7 @@ import Testing
 
 /// Every payload and path is generated here. The runner owns TMPDIR; no app
 /// container, saved lesson, preference suite, recording, or model is opened.
+@Suite(.isolatedStorage)
 struct PrivacyStorageTests {
     private struct Fixture {
         let root: URL

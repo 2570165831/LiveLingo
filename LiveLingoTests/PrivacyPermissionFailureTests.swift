@@ -6,6 +6,9 @@ import Testing
 #endif
 
 /// Real synthetic APFS objects; only permission syscall results are injected.
+#if !PRIVACY_PERMISSION_PROBE
+@Suite(.isolatedStorage)
+#endif
 struct PrivacyPermissionFailureTests {
     private struct AssertionFailure: Error { let message: String }
 

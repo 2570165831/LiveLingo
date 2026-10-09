@@ -3,6 +3,7 @@ import Testing
 @testable import LiveLingo
 
 @MainActor
+@Suite(.isolatedStorage)
 struct TargetPersistenceTests {
     // Generated from dd-tl567/baseline-code/SessionArchive.swift's original
     // declarations and encoder, not from the new SessionSnapshot encoder.

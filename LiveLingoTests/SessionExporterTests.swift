@@ -4,6 +4,7 @@ import Foundation
 import Testing
 @testable import LiveLingo
 
+@Suite(.isolatedStorage)
 struct SessionExporterTests {
     @Test func automaticModelSelectionUsesMemoryWithoutOverridingExplicitQuality() {
         let gib: UInt64 = 1_024 * 1_024 * 1_024
@@ -592,6 +593,7 @@ private final class ASREventCollector: @unchecked Sendable {
     var events: [SpeechPipeline.Event] { lock.withLock { values } }
 }
 
+@Suite(.isolatedStorage)
 struct ASRRecoveryTests {
     @Test func numericAndShortRepeatedCaptionsSurviveButRunawayDoesNot() {
         for text in ["123", "2 + 2 = 4", "No, no, no, that's wrong.", "Vector equation vector, vector, vector."] {
