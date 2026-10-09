@@ -5000,9 +5000,11 @@ final class LearningReviewQueue: ObservableObject {
         if jobs.first?.failure != nil { return "failure" }
         // 升级迁移后的任务等待用户明确开始：整课复查不再默认自动跑。
         if jobs.first?.awaitingManualStart == true { return "manual" }
+        // A manual pause outranks a backoff window, so pausing mid-countdown
+        // is recorded as a user pause.
+        if userPaused { return "user" }
         if let retry = jobs.first?.retryPending,
            retry.notBefore > now().timeIntervalSince1970 { return "retry_wait" }
-        if userPaused { return "user" }
         if sleeping { return "sleep" }
         if recordingBlocked { return "recording" }
         if resourceBlocked { return "resources" }
@@ -5691,13 +5693,15 @@ final class LearningReviewQueue: ObservableObject {
         // 实测（2026-09-18，本机）：9B 思考复查约 306 秒/批（255 秒素材 2 批的平均）。
         let progress = Self.reportProgress(next: job.next, total: job.batches.count, scope: job.scope)
         if let failure = persistenceFailure ?? job.failure { status = failure }
+        // A manual pause blocks the retry, so it must not read as "retrying";
+        // resuming clears the backoff and retries at once.
+        else if userPaused { status = "\(progress) · 已手动暂停" }
         else if let retry = job.retryPending, !running {
             let remaining = retry.remainingSeconds(now: now().timeIntervalSince1970)
             status = remaining > 0
                 ? "\(progress) · 第 \(retry.attempts) 次自动重试将在 \(remaining) 秒后开始"
                 : "\(progress) · 第 \(retry.attempts) 次自动重试进行中"
         }
-        else if userPaused { status = "\(progress) · 已手动暂停" }
         // 升级迁移后的旧任务：进度保留，但不再自动跑；用户点"开始复查"才继续。
         else if job.awaitingManualStart == true { status = "\(progress) · 已排队，等待开始（不会自动运行）" }
         else if sleeping { status = "\(progress) · 睡眠暂停" }
