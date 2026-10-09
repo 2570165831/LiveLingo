@@ -98,9 +98,11 @@ struct ReviewRetryTests {
     }
 
     /// 队列测试统一用假 generator + 独立目录（绝不碰真实 9B 与真实录音）。
-    private func makeQueue(journal: URL, retryDelays: [TimeInterval] = [0.05, 0.05],
+    /// Fixtures that set retry deadlines must read them from the same clock
+    /// the queue uses, so pass that clock in rather than the host date.
+    private func makeQueue(journal: URL, clock: TestWallClock = TestWallClock(),
+                           retryDelays: [TimeInterval] = [0.05, 0.05],
                            generate: @escaping LearningReviewQueue.Generator) -> LearningReviewQueue {
-        let clock = TestWallClock()
         return LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
                             generate: generate, now: clock.now, retryDelays: retryDelays)
     }
@@ -125,15 +127,16 @@ struct ReviewRetryTests {
     }
 
     @Test func c06BackoffHeadDoesNotBlockRunnableCoursesOrRunEarly() async throws {
+        let clock = TestWallClock()
         let root = try c06Directory(), journal = root.appendingPathComponent("queue.json")
         let retry = LearningReviewQueue.RetryState(attempts: 1,
-            notBefore: Date().timeIntervalSince1970 + 60, code: "request_failed")
+            notBefore: clock.now().timeIntervalSince1970 + 60, code: "request_failed")
         let waiting = try c06Job(in: root, label: "C06-A", retry: retry)
         let second = try c06Job(in: root, label: "C06-B")
         let third = try c06Job(in: root, label: "C06-C")
         try writeQueueJournal([waiting, second, third], version: LearningReviewQueue.journalVersion, to: journal)
         var calls: [String] = []
-        let queue = makeQueue(journal: journal) { input, _, _, _, _ in
+        let queue = makeQueue(journal: journal, clock: clock) { input, _, _, _, _ in
             let label = ["C06-A", "C06-B", "C06-C"].first { input.contains($0) } ?? "unknown"
             calls.append(label)
             return Self.emptyV2Response
@@ -158,19 +161,20 @@ struct ReviewRetryTests {
     }
 
     @Test func c06EarlierRetryDeadlineWakesBehindLaterHead() async throws {
+        let clock = TestWallClock()
         let root = try c06Directory(), journal = root.appendingPathComponent("queue.json")
         let laterRetry = LearningReviewQueue.RetryState(attempts: 1,
-            notBefore: Date().timeIntervalSince1970 + 60, code: "request_failed")
+            notBefore: clock.now().timeIntervalSince1970 + 60, code: "request_failed")
         let earlierRetry = LearningReviewQueue.RetryState(attempts: 1,
-            notBefore: Date().timeIntervalSince1970 + 0.25, code: "request_failed")
+            notBefore: clock.now().timeIntervalSince1970 + 0.25, code: "request_failed")
         let later = try c06Job(in: root, label: "C06-A", retry: laterRetry)
         let earlier = try c06Job(in: root, label: "C06-B", retry: earlierRetry)
         try writeQueueJournal([later, earlier], version: LearningReviewQueue.journalVersion, to: journal)
         var calls: [String] = []
         var earlierStartedAt: TimeInterval?
-        let queue = makeQueue(journal: journal) { input, _, _, _, _ in
+        let queue = makeQueue(journal: journal, clock: clock) { input, _, _, _, _ in
             calls.append(input.contains("C06-B") ? "C06-B" : "C06-A")
-            earlierStartedAt = Date().timeIntervalSince1970
+            earlierStartedAt = clock.now().timeIntervalSince1970
             return Self.emptyV2Response
         }
         queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
@@ -184,9 +188,10 @@ struct ReviewRetryTests {
     }
 
     @Test func c06DueRetryBehindActiveCourseWaitsForOwnerAndKeepsItsBudget() async throws {
+        let clock = TestWallClock()
         let root = try c06Directory(), journal = root.appendingPathComponent("queue.json")
         let retry = LearningReviewQueue.RetryState(attempts: 1,
-            notBefore: Date().timeIntervalSince1970 + 2, code: "request_failed")
+            notBefore: clock.now().timeIntervalSince1970 + 2, code: "request_failed")
         let waiting = try c06Job(in: root, label: "C06-A", retry: retry)
         let runnable = try c06Job(in: root, label: "C06-B")
         try writeQueueJournal([waiting, runnable], version: LearningReviewQueue.journalVersion, to: journal)
@@ -194,14 +199,14 @@ struct ReviewRetryTests {
         var calls: [String] = []
         var activeWasCancelled = false
         var retryStartedAt: TimeInterval?
-        let queue = makeQueue(journal: journal) { input, _, _, _, _ in
+        let queue = makeQueue(journal: journal, clock: clock) { input, _, _, _, _ in
             if input.contains("C06-B") {
                 calls.append("C06-B")
                 await gate.wait()
                 activeWasCancelled = Task.isCancelled
             } else {
                 calls.append("C06-A")
-                retryStartedAt = Date().timeIntervalSince1970
+                retryStartedAt = clock.now().timeIntervalSince1970
             }
             return Self.emptyV2Response
         }
@@ -209,7 +214,7 @@ struct ReviewRetryTests {
         #expect(await waitFor({ calls == ["C06-B"] }, seconds: 1),
             "可运行课程要在队首退避到期之前取得 owner")
         #expect(queue.items.first(where: { $0.id == runnable.id })?.active == true)
-        #expect(await waitFor({ Date().timeIntervalSince1970 >= retry.notBefore }, seconds: 3))
+        #expect(await waitFor({ clock.now().timeIntervalSince1970 >= retry.notBefore }, seconds: 3))
         queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
         #expect(calls == ["C06-B"], "到期的 retry 不能越过仍未返回的 owner")
         #expect(queue.items.first(where: { $0.id == runnable.id })?.active == true)
@@ -234,6 +239,7 @@ struct ReviewRetryTests {
     }
 
     @Test func consecutiveBackoffYieldsKeepTrueEnqueueOrder() async throws {
+        let clock = TestWallClock()
         let root = try fifoRoot(); defer { try? FileManager.default.removeItem(at: root) }
         let journal = root.appendingPathComponent("queue.json")
         let a = try c06Job(in: root, label: "FIFO-A"), b = try c06Job(in: root, label: "FIFO-B")
@@ -241,7 +247,7 @@ struct ReviewRetryTests {
         try writeQueueJournal([a, b, c], version: LearningReviewQueue.journalVersion, to: journal)
         let gate = C06ReviewGate()
         var calls: [String] = []
-        let queue = makeQueue(journal: journal, retryDelays: [1.0, 1.0]) { input, _, _, _, _ in
+        let queue = makeQueue(journal: journal, clock: clock, retryDelays: [1.0, 1.0]) { input, _, _, _, _ in
             let label = Self.fifoLabel(input)
             calls.append(label)
             if calls.count <= 2 { throw QwenRuntimeError.requestFailed("模拟本机模型协议错误") }
@@ -253,7 +259,7 @@ struct ReviewRetryTests {
             "两次退避让位后，后面的课程应当先跑")
         let deadlines = queue.items.compactMap(\.retryPending?.notBefore)
         #expect(deadlines.count == 2)
-        #expect(await waitFor({ Date().timeIntervalSince1970 > (deadlines.max() ?? 0) + 0.05 }, seconds: 4))
+        #expect(await waitFor({ clock.now().timeIntervalSince1970 > (deadlines.max() ?? 0) + 0.05 }, seconds: 4))
         #expect(calls.count == 3, "到期的重试不得打断正在运行的课程")
         await gate.release()
         #expect(await waitFor { queue.items.isEmpty && !queue.running })
@@ -263,13 +269,14 @@ struct ReviewRetryTests {
     }
 
     @Test func enqueueOrderSurvivesSaveAndReloadAfterBackoffYields() async throws {
+        let clock = TestWallClock()
         let root = try fifoRoot(); defer { try? FileManager.default.removeItem(at: root) }
         let journal = root.appendingPathComponent("queue.json")
         let a = try c06Job(in: root, label: "FIFO-A"), b = try c06Job(in: root, label: "FIFO-B")
         let c = try c06Job(in: root, label: "FIFO-C")
         try writeQueueJournal([a, b, c], version: LearningReviewQueue.journalVersion, to: journal)
         var calls: [String] = []
-        let first = makeQueue(journal: journal, retryDelays: [60, 60]) { input, _, _, _, _ in
+        let first = makeQueue(journal: journal, clock: clock, retryDelays: [60, 60]) { input, _, _, _, _ in
             calls.append(Self.fifoLabel(input))
             if calls.count <= 2 { throw QwenRuntimeError.requestFailed("模拟本机模型协议错误") }
             return Self.emptyV2Response
@@ -286,12 +293,12 @@ struct ReviewRetryTests {
         #expect(Set(saved.jobs.map(\.id)) == [a.id, b.id])
         for index in saved.jobs.indices {
             #expect(saved.jobs[index].retryPending?.attempts == 1)
-            saved.jobs[index].retryPending?.notBefore = Date().timeIntervalSince1970 - 1
+            saved.jobs[index].retryPending?.notBefore = clock.now().timeIntervalSince1970 - 1
         }
         try JSONEncoder().encode(saved).write(to: journal, options: .atomic)
 
         var resumed: [String] = []
-        let second = makeQueue(journal: journal) { input, _, _, _, _ in
+        let second = makeQueue(journal: journal, clock: clock) { input, _, _, _, _ in
             resumed.append(Self.fifoLabel(input))
             return Self.emptyV2Response
         }
