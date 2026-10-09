@@ -1178,6 +1178,7 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
                            sessionID: session), handler: { _ in })
         await queue.finish()
         try assertVerdictStands("preempted")
+        XCTAssertEqual(started.value, 1, "a preempted retry of a standing verdict is not queued again")
         XCTAssertEqual(queue.records.last?.status, .completed)
         // Parking saved processing (pause, confirming a candidate, opening another course).
         try await startManualRetry(2)
