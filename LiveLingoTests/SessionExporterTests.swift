@@ -20,7 +20,7 @@ struct SessionExporterTests {
         for choice: Bool? in [nil, false, true] {
             let suite = "LiveLingoMeterTest-\(UUID().uuidString)"
             let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-            let defaults = try #require(UserDefaults(suiteName: suite))
+            let defaults = try #require(TestUserDefaults(suiteName: suite))
             defer {
                 do { try preferenceCleanup.remove(defaults) }
                 catch { Issue.record(error) }
@@ -37,7 +37,7 @@ struct SessionExporterTests {
             let parent = model.objectWillChange.sink { classroomChanges += 1 }
             let meter = model.captureMeter.objectWillChange.sink { meterChanges += 1 }
             model.captureMeter.elapsedSeconds = 42
-            model.captureMeter.lastAudioLevelAt = Date()
+            model.captureMeter.lastAudioLevelAt = Date(timeIntervalSince1970: 42)
             model.captureMeter.waveformSamples.append(0.5)
             #expect(classroomChanges == 0)
             #expect(meterChanges == 3)
@@ -52,7 +52,7 @@ struct SessionExporterTests {
         for choice: Bool? in [nil, false, true] {
             let suite = "LiveLingo-Test-\(UUID().uuidString)"
             let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-            let defaults = try #require(UserDefaults(suiteName: suite))
+            let defaults = try #require(TestUserDefaults(suiteName: suite))
             defer {
                 do { try preferenceCleanup.remove(defaults) }
                 catch { Issue.record(error) }

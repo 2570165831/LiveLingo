@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import sys
 import tempfile
 import time
 import unittest
@@ -294,13 +295,16 @@ class FakeCPU:
 
 
 class SamplerTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(e, "_gpu_utilization", return_value=None))
+
     @classmethod
     def setUpClass(cls):
         scratch = Path(tempfile.gettempdir()).resolve() / "livelingo-energy-tests"
         scratch.mkdir(parents=True, exist_ok=True)
         cls.fixtures = Path(tempfile.mkdtemp(prefix="unit-fixtures-", dir=scratch))
         cls.helper = cls.fixtures / "fake-helper.py"
-        cls.helper.write_text('''#!/usr/bin/env python3
+        cls.helper.write_text('#!' + sys.executable + '\n' + '''
 import json,signal,threading,time,sys
 event=threading.Event()
 signal.signal(signal.SIGTERM,lambda *args:event.set())
@@ -318,7 +322,7 @@ while True:
 ''')
         cls.helper.chmod(0o755)
         cls.unavailable = cls.fixtures / "unavailable-helper.py"
-        cls.unavailable.write_text("#!/usr/bin/env python3\nprint('{\"type\":\"unavailable\",\"reason\":\"subscription_unavailable\"}',flush=True)\nraise SystemExit(2)\n")
+        cls.unavailable.write_text('#!' + sys.executable + "\nprint('{\"type\":\"unavailable\",\"reason\":\"subscription_unavailable\"}',flush=True)\nraise SystemExit(2)\n")
         cls.unavailable.chmod(0o755)
 
     def test_one_session_start_stop_clock_and_final_flush(self):
@@ -371,7 +375,7 @@ while True:
         helper = self.fixtures / "no-newline-helper.py"
         row = {"type": "sample", "start_mono": 1, "end_mono": 2, "is_delta": True,
                "raw_channels": [channel("CPU Energy", 1000), channel("GPU Energy", 2000), channel("ANE", 0)]}
-        helper.write_text("#!/usr/bin/env python3\nimport sys\n"
+        helper.write_text('#!' + sys.executable + "\nimport sys\n"
                           "print('{\"type\":\"ready\",\"source\":\"synthetic_ioreport\"}',flush=True)\n"
                           "sys.stdout.write(" + repr(json.dumps(row)) + ")\nsys.stdout.flush()\n")
         helper.chmod(0o755)
@@ -391,7 +395,7 @@ while True:
                     "raw_channels": [descriptor], "private_text": secret, "source": secret},
                    {"type": "sample", "start_mono": secret, "end_mono": 2, "is_delta": True}]
         stderr = secret.encode() + b"\xff"
-        helper.write_text("#!/usr/bin/env python3\nimport json,os\n"
+        helper.write_text('#!' + sys.executable + "\nimport json,os\n"
                           "records=" + repr(records) + "\n"
                           "for record in records:print(json.dumps(record),flush=True)\n"
                           "os.write(2," + repr(stderr) + ")\nraise SystemExit(2)\n")

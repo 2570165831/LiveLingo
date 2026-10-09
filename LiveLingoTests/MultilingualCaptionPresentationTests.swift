@@ -158,7 +158,7 @@ final class MultilingualPreviewPresentationTests: XCTestCase {
         artifactDirectory = directory
         let suite = "MultilingualPreview-\(UUID().uuidString)"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         // Avoid changing any persistent app or system preference.
         defaults.setVolatileDomain(["transcriptTextSize": 18.0, "floatingTextSize": 24.0], forName: suite)
         presentationDefaults = defaults

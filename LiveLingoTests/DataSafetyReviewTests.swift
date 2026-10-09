@@ -33,10 +33,12 @@ struct DataSafetyReviewTests {
     }
 
     private func queue(_ journal: URL,
+                       clock: TestWallClock? = nil,
                        generate: @escaping LearningReviewQueue.Generator = { _, _, _, _, _ in Self.response })
         -> LearningReviewQueue {
-        LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
-            generate: generate, retryDelays: [0.05, 0.05], startupSnapshotReader: { _ in nil })
+        let clock = clock ?? TestWallClock()
+        return LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+            generate: generate, now: clock.now, retryDelays: [0.05, 0.05], startupSnapshotReader: { _ in nil })
     }
 
     private func write(_ jobs: [LearningReviewQueue.Job], to journal: URL, paused: Bool = true) throws {
@@ -279,13 +281,14 @@ struct DataSafetyReviewTests {
         defer { DataSafetyFixtures.preserve(root) }
         var early = try job(course(root, "early"), notebook("early"))
         var late = try job(course(root, "late"), notebook("late"))
-        let now = Date().timeIntervalSince1970
+        let clock = TestWallClock()
+        let now = clock.now().timeIntervalSince1970
         early.retryPending = .init(attempts: 1, notBefore: now + 0.2, code: "synthetic")
         late.retryPending = .init(attempts: 1, notBefore: now + 3, code: "synthetic")
         let journal = root.appendingPathComponent("queue.json")
         try write([late, early], to: journal, paused: false)
         var calls = 0
-        let q = queue(journal) { _, _, _, _, _ in calls += 1; return Self.response }
+        let q = queue(journal, clock: clock) { _, _, _, _, _ in calls += 1; return Self.response }
         q.setContext(recording: false, concurrent: true, resourcesAvailable: true)
         if remove { q.removeJob(late.id) } else { q.moveJobToEnd(late.id) }
         #expect(await waitFor({ calls > 0 }, seconds: 1))

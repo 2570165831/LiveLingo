@@ -20,91 +20,95 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
             .appendingPathComponent("DefaultSpanishFrenchReview-\(target.rawValue)-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try FileManager.default.removeItem(at: root) }
-        try await installDefaultReviewWorker(in: root)
-        var book = LearningNotebook(target: target)
-        try book.append(evidence: [foreign(target)], note: note(target))
-        let course = root.appendingPathComponent("course")
-        var snapshot = SessionSnapshot(segments: book.batches.flatMap(\.evidence), targetLocale: target.rawValue)
-        book.writeState(to: &snapshot)
-        try SessionStore(directory: course).save(snapshot)
-        let journal = root.appendingPathComponent("queue.json")
-        // Exercise the default Qwen client and streaming adapter. Only the
-        // final subprocess is replaced; no Generator is injected into the queue.
-        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled)
-        addTeardownBlock { await queue.shutdownForTesting() }
-        queue.allowUnreleasedTargetsForTesting()
-        try queue.enqueue(directory: course, notebook: book, targetLocale: target.rawValue)
-        let prefix = "Checking the frozen mass evidence: masa / masse, 3,14.\n"
-        for _ in 0..<200 where queue.journalForTesting.jobs.first?.prefix != prefix {
-            try await Task.sleep(for: .milliseconds(10))
+        let runtime = try installDefaultReviewWorker(in: root)
+        try await MLXRuntime.$testRuntime.withValue(runtime) {
+            var book = LearningNotebook(target: target)
+            try book.append(evidence: [foreign(target)], note: note(target))
+            let course = root.appendingPathComponent("course")
+            var snapshot = SessionSnapshot(segments: book.batches.flatMap(\.evidence), targetLocale: target.rawValue)
+            book.writeState(to: &snapshot)
+            try SessionStore(directory: course).save(snapshot)
+            let journal = root.appendingPathComponent("queue.json")
+            // Exercise the default Qwen client and streaming adapter. Only the
+            // final subprocess is replaced; no Generator is injected into the queue.
+            let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled)
+            addTeardownBlock {
+                await MLXRuntime.$testRuntime.withValue(runtime) { await queue.shutdownForTesting() }
+            }
+            queue.allowUnreleasedTargetsForTesting()
+            try queue.enqueue(directory: course, notebook: book, targetLocale: target.rawValue)
+            let prefix = "Checking the frozen mass evidence: masa / masse, 3,14.\n"
+            for _ in 0..<200 where queue.journalForTesting.jobs.first?.prefix != prefix {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(queue.journalForTesting.jobs.first?.prefix, prefix)
+            XCTAssertTrue(queue.running)
+            await queue.pauseAndWait()
+            XCTAssertFalse(queue.running)
+            XCTAssertTrue(queue.hasWork, "Pausing must retain the unfinished batch")
+            let paused = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
+            let job = try XCTUnwrap(paused.jobs.first)
+            XCTAssertTrue(paused.userPaused)
+            XCTAssertEqual(job.targetLocale, target.rawValue)
+            XCTAssertEqual(job.prefix, prefix)
+            XCTAssertEqual(job.next, 0)
+            XCTAssertTrue(job.reports.isEmpty)
+            XCTAssertEqual(job.prompt, target.learningReviewPrompt)
+            XCTAssertEqual(try XCTUnwrap(job.prefixInputDigest), LearningReviewQueue.prefixDigest(for: job))
+            let prepared = try LearningReviewQueue.prepareInput(job, allowUnreleased: true)
+            XCTAssertEqual(prepared.prompt, target.learningReviewPrompt)
+            XCTAssertEqual(prepared.input.catalog.keys.sorted(), ["e0." + target.rawValue + ".0"])
+            XCTAssertEqual(prepared.input.catalog["e0." + target.rawValue + ".0"]?.text, text(target))
+            XCTAssertFalse(prepared.input.json.contains("质量为"))
+            let pausedCommands = try reviewWorkerCommands(in: root)
+            let initialRequests = pausedCommands.filter { $0["op"] as? String == "generate" }
+            XCTAssertEqual(initialRequests.count, 1, "No resumed request may run while paused")
+            let initialID = try XCTUnwrap(initialRequests.first?["id"] as? String)
+            let pauses = pausedCommands.filter { $0["op"] as? String == "pause" }
+            XCTAssertEqual(pauses.count, 1, "Observe the real subprocess pause control")
+            XCTAssertEqual(pauses.first?["id"] as? String, initialID)
+            XCTAssertFalse(try XCTUnwrap(pauses.first?["controlID"] as? String).isEmpty)
+            queue.startAwaitingJob()
+            XCTAssertFalse(queue.userPaused)
+            for _ in 0..<200 where queue.hasWork { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertFalse(queue.hasWork, queue.status)
+            let commands = try reviewWorkerCommands(in: root)
+            let requests = commands.filter { $0["op"] as? String == "generate" }
+            XCTAssertEqual(requests.count, 2, "Observe an initial request and a real resumed request")
+            for request in requests {
+                XCTAssertEqual(request["system"] as? String, target.learningReviewPrompt)
+                XCTAssertEqual(request["input"] as? String, prepared.input.json)
+                XCTAssertEqual(request["purpose"] as? String, "review")
+                XCTAssertEqual(request["thinking"] as? Bool, true)
+                XCTAssertEqual(request["thinkingBudget"] as? Int, 16_384)
+                XCTAssertEqual(request["finalBudget"] as? Int, 4_096)
+                XCTAssertEqual(request["prompt"] as? String,
+                    "<|im_start|>system\n" + target.learningReviewPrompt + "<|im_end|>\n"
+                    + "<|im_start|>user\n" + prepared.input.json + "<|im_end|>\n<|im_start|>assistant\n<think>\n")
+            }
+            XCTAssertEqual(requests.first?["prefix"] as? String, "")
+            XCTAssertEqual(requests.last?["prefix"] as? String, prefix)
+            XCTAssertEqual(requests.first?["id"] as? String, initialID)
+            let resumedID = try XCTUnwrap(requests.last?["id"] as? String)
+            XCTAssertNotEqual(initialID, resumedID)
+            let acknowledgements = commands.filter { $0["op"] as? String == "ack" }
+            XCTAssertEqual(acknowledgements.count, 1)
+            XCTAssertEqual(acknowledgements.first?["id"] as? String, resumedID)
+            let completed = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
+            XCTAssertTrue(completed.jobs.isEmpty)
+            XCTAssertFalse(completed.userPaused)
+            let reports = try ReviewReportCollection.read(in: course)
+            XCTAssertEqual(reports.count, 1)
+            let report = try XCTUnwrap(reports.first)
+            XCTAssertEqual(report.jobID, job.id)
+            XCTAssertEqual(report.identity, job.identity)
+            XCTAssertEqual(report.completed, 1)
+            XCTAssertEqual(report.total, 1)
+            XCTAssertTrue(report.isComplete)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: course.appendingPathComponent("summary-review.md").path))
+            XCTAssertFalse(try XCTUnwrap(OutputLanguage(rawValue: target.rawValue)).isReleased)
+            XCTAssertNil(LearningReviewQueue.reviewPrompt(for: target.rawValue))
         }
-        XCTAssertEqual(queue.journalForTesting.jobs.first?.prefix, prefix)
-        XCTAssertTrue(queue.running)
-        await queue.pauseAndWait()
-        XCTAssertFalse(queue.running)
-        XCTAssertTrue(queue.hasWork, "Pausing must retain the unfinished batch")
-        let paused = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
-        let job = try XCTUnwrap(paused.jobs.first)
-        XCTAssertTrue(paused.userPaused)
-        XCTAssertEqual(job.targetLocale, target.rawValue)
-        XCTAssertEqual(job.prefix, prefix)
-        XCTAssertEqual(job.next, 0)
-        XCTAssertTrue(job.reports.isEmpty)
-        XCTAssertEqual(job.prompt, target.learningReviewPrompt)
-        XCTAssertEqual(try XCTUnwrap(job.prefixInputDigest), LearningReviewQueue.prefixDigest(for: job))
-        let prepared = try LearningReviewQueue.prepareInput(job, allowUnreleased: true)
-        XCTAssertEqual(prepared.prompt, target.learningReviewPrompt)
-        XCTAssertEqual(prepared.input.catalog.keys.sorted(), ["e0." + target.rawValue + ".0"])
-        XCTAssertEqual(prepared.input.catalog["e0." + target.rawValue + ".0"]?.text, text(target))
-        XCTAssertFalse(prepared.input.json.contains("质量为"))
-        let pausedCommands = try reviewWorkerCommands(in: root)
-        let initialRequests = pausedCommands.filter { $0["op"] as? String == "generate" }
-        XCTAssertEqual(initialRequests.count, 1, "No resumed request may run while paused")
-        let initialID = try XCTUnwrap(initialRequests.first?["id"] as? String)
-        let pauses = pausedCommands.filter { $0["op"] as? String == "pause" }
-        XCTAssertEqual(pauses.count, 1, "Observe the real subprocess pause control")
-        XCTAssertEqual(pauses.first?["id"] as? String, initialID)
-        XCTAssertFalse(try XCTUnwrap(pauses.first?["controlID"] as? String).isEmpty)
-        queue.startAwaitingJob()
-        XCTAssertFalse(queue.userPaused)
-        for _ in 0..<200 where queue.hasWork { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertFalse(queue.hasWork, queue.status)
-        let commands = try reviewWorkerCommands(in: root)
-        let requests = commands.filter { $0["op"] as? String == "generate" }
-        XCTAssertEqual(requests.count, 2, "Observe an initial request and a real resumed request")
-        for request in requests {
-            XCTAssertEqual(request["system"] as? String, target.learningReviewPrompt)
-            XCTAssertEqual(request["input"] as? String, prepared.input.json)
-            XCTAssertEqual(request["purpose"] as? String, "review")
-            XCTAssertEqual(request["thinking"] as? Bool, true)
-            XCTAssertEqual(request["thinkingBudget"] as? Int, 16_384)
-            XCTAssertEqual(request["finalBudget"] as? Int, 4_096)
-            XCTAssertEqual(request["prompt"] as? String,
-                "<|im_start|>system\n" + target.learningReviewPrompt + "<|im_end|>\n"
-                + "<|im_start|>user\n" + prepared.input.json + "<|im_end|>\n<|im_start|>assistant\n<think>\n")
-        }
-        XCTAssertEqual(requests.first?["prefix"] as? String, "")
-        XCTAssertEqual(requests.last?["prefix"] as? String, prefix)
-        XCTAssertEqual(requests.first?["id"] as? String, initialID)
-        let resumedID = try XCTUnwrap(requests.last?["id"] as? String)
-        XCTAssertNotEqual(initialID, resumedID)
-        let acknowledgements = commands.filter { $0["op"] as? String == "ack" }
-        XCTAssertEqual(acknowledgements.count, 1)
-        XCTAssertEqual(acknowledgements.first?["id"] as? String, resumedID)
-        let completed = try JSONDecoder().decode(LearningReviewQueue.Journal.self, from: Data(contentsOf: journal))
-        XCTAssertTrue(completed.jobs.isEmpty)
-        XCTAssertFalse(completed.userPaused)
-        let reports = try ReviewReportCollection.read(in: course)
-        XCTAssertEqual(reports.count, 1)
-        let report = try XCTUnwrap(reports.first)
-        XCTAssertEqual(report.jobID, job.id)
-        XCTAssertEqual(report.identity, job.identity)
-        XCTAssertEqual(report.completed, 1)
-        XCTAssertEqual(report.total, 1)
-        XCTAssertTrue(report.isComplete)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: course.appendingPathComponent("summary-review.md").path))
-        XCTAssertFalse(try XCTUnwrap(OutputLanguage(rawValue: target.rawValue)).isReleased)
-        XCTAssertNil(LearningReviewQueue.reviewPrompt(for: target.rawValue))
     }
 
     private func reviewWorkerCommands(in root: URL) throws -> [[String: Any]] {
@@ -112,11 +116,10 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
             .split(separator: "\n").map { try object(String($0)) }
     }
 
-    private func installDefaultReviewWorker(in root: URL) async throws {
-        guard await MLXRuntime.shared.resourceStates().isEmpty else {
-            XCTFail("The test must own an isolated worker lifecycle")
-            throw CancellationError()
-        }
+    private func installDefaultReviewWorker(in root: URL) throws -> MLXRuntime {
+        let python = URL(fileURLWithPath: "/usr/bin/python3")
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: python.path),
+                          "The synthetic protocol worker requires the system Python interpreter")
         let script = root.appendingPathComponent("worker.py")
         try Self.defaultReviewWorker.write(to: script, atomically: true, encoding: .utf8)
         let models = root.appendingPathComponent("models")
@@ -124,24 +127,14 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
         try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
         for name in ["config.json", "tokenizer.json"] { try Data("{}".utf8).write(to: model.appendingPathComponent(name)) }
         try Data().write(to: model.appendingPathComponent("model.safetensors"))
-        let overrides = [
-            "LIVELINGO_MLX_PYTHON": "/usr/bin/python3",
-            "LIVELINGO_MLX_WORKER": script.path,
-            "LIVELINGO_MLX_MODELS": models.path,
-            "LIVELINGO_MLX_STATE": root.appendingPathComponent("state").path
-        ]
-        // Retain only these four overrides for teardown; never dump or persist
-        // the process environment. No preference domain is created by this test.
-        let previous = overrides.keys.map { key in (key, getenv(key).map { String(cString: $0) }) }
+        var configuration = MLXRuntime.TestConfiguration(python: python, script: script,
+            models: model, state: root.appendingPathComponent("state"))
+        configuration.interpreterArguments = ["-I", "-u"]
+        let runtime = MLXRuntime(testConfiguration: configuration)
         addTeardownBlock {
-            await MLXRuntime.shared.unload(QwenModelProfile.highQuality.translationModel)
-            for (key, value) in previous {
-                if let value { setenv(key, value, 1) } else { unsetenv(key) }
-            }
+            await runtime.unload(QwenModelProfile.highQuality.translationModel)
         }
-        for (key, value) in overrides {
-            guard setenv(key, value, 1) == 0 else { throw CocoaError(.fileWriteUnknown) }
-        }
+        return runtime
     }
 
     // Standard-library-only protocol double: no MLX import, weights, GPU or HTTP.

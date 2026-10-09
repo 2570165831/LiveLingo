@@ -114,6 +114,7 @@ enum SummaryRenderingDiagnostics {
         var streamingRows: [String: Int] = [:]
         var floatingBodies = 0
         var waveformBodies = 0
+        var reducedMotionWaveformBodies = 0
     }
     static var counts = Counts()
     static func record(_ key: WritableKeyPath<Counts, Int>) {
@@ -129,8 +130,9 @@ enum SummaryRenderingDiagnostics {
     static func summaryViewForTesting(text: String) -> some View {
         SummaryMarkdownView(text: text)
     }
-    static func meterViewForTesting(meter: CaptureMeterState, active: Bool) -> some View {
-        RecordingMeterView(meter: meter, active: active)
+    static func meterViewForTesting(meter: CaptureMeterState, active: Bool,
+                                    freshness: WaveformFreshnessState) -> some View {
+        RecordingMeterView(meter: meter, active: active, freshness: freshness)
     }
 }
 #endif
@@ -1306,6 +1308,7 @@ struct RecordingWaveform: View {
     var body: some View {
         #if DEBUG
         let _ = SummaryRenderingDiagnostics.record(\.waveformBodies)
+        let _ = reduceMotion ? SummaryRenderingDiagnostics.record(\.reducedMotionWaveformBodies) : ()
         #endif
         GeometryReader { geometry in
             let gap: CGFloat = 1
@@ -2049,8 +2052,19 @@ private struct RecordingElapsedText: View {
 
 private struct RecordingMeterView: View {
     @ObservedObject var meter: CaptureMeterState
-    @StateObject private var freshness = WaveformFreshnessState()
+    @StateObject private var freshness: WaveformFreshnessState
     let active: Bool
+
+    /// The autoclosure keeps @StateObject's lazy, once-per-identity creation:
+    /// parent re-renders rebuild this view without allocating a discarded
+    /// state object. Tests may still inject a clock-controlled instance.
+    init(meter: CaptureMeterState, active: Bool,
+         freshness: @autoclosure @escaping @MainActor () -> WaveformFreshnessState = WaveformFreshnessState()) {
+        self.meter = meter
+        self.active = active
+        _freshness = StateObject(wrappedValue: freshness())
+    }
+
     var body: some View {
         RecordingWaveform(samples: meter.waveformSamples, active: active,
                           receiving: active && freshness.isReceiving)

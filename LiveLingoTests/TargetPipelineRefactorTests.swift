@@ -89,12 +89,13 @@ final class TargetPipelineRefactorTests: XCTestCase {
     }
 
     func testNonDefaultNoteAndReviewPromptsKeepTheirWorkerPurposes() async throws {
+        let python = URL(fileURLWithPath: "/usr/bin/python3")
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: python.path),
+                          "The synthetic protocol worker requires the system Python interpreter")
         let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
             .appendingPathComponent("TargetPipeline-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try FileManager.default.removeItem(at: root) }
-        let workers = await MLXRuntime.shared.resourceStates()
-        XCTAssertTrue(workers.isEmpty)
         let script = root.appendingPathComponent("fake-worker.py")
         try Self.worker.write(to: script, atomically: true, encoding: .utf8)
         let models = root.appendingPathComponent("models")
@@ -104,27 +105,26 @@ final class TargetPipelineRefactorTests: XCTestCase {
             for name in ["config.json", "tokenizer.json"] { try Data("{}".utf8).write(to: model.appendingPathComponent(name)) }
             try Data().write(to: model.appendingPathComponent("model.safetensors"))
         }
-        let environment = ["LIVELINGO_MLX_PYTHON": "/usr/bin/python3", "LIVELINGO_MLX_WORKER": script.path,
-                           "LIVELINGO_MLX_MODELS": models.path, "LIVELINGO_MLX_STATE": root.appendingPathComponent("state").path]
-        let previous = environment.keys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
-        for (key, value) in environment { setenv(key, value, 1) }
+        var configuration = MLXRuntime.TestConfiguration(python: python, script: script,
+            models: models, state: root.appendingPathComponent("state"))
+        configuration.interpreterArguments = ["-I", "-u"]
+        let runtime = MLXRuntime(testConfiguration: configuration)
         addTeardownBlock {
-            await MLXRuntime.shared.unload(QwenModelProfile.energySaver.translationModel)
-            await MLXRuntime.shared.unload(QwenModelProfile.highQuality.translationModel)
-            for (key, value) in previous {
-                if let value { setenv(key, value, 1) } else { unsetenv(key) }
-            }
+            await runtime.unload(QwenModelProfile.energySaver.translationModel)
+            await runtime.unload(QwenModelProfile.highQuality.translationModel)
         }
-        let notePrompt = "Synthetic custom note prompt."
-        let reviewPrompt = "Synthetic custom review prompt."
-        _ = try await QwenTranslationClient.learningNote(input: "synthetic note input",
-            modelName: QwenModelProfile.energySaver.translationModel, prefix: "", systemPrompt: notePrompt, onUpdate: { _ in })
-        _ = try await QwenTranslationClient.reviewLearningNote("synthetic review input", systemPrompt: reviewPrompt)
-        let requests = try String(contentsOf: root.appendingPathComponent("requests.jsonl"), encoding: .utf8)
-            .split(separator: "\n").map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
-        XCTAssertEqual(requests.compactMap { $0["purpose"] as? String }, ["note", "review"])
-        XCTAssertTrue((requests[0]["prompt"] as? String)?.contains(notePrompt) == true)
-        XCTAssertTrue((requests[1]["prompt"] as? String)?.contains(reviewPrompt) == true)
+        try await MLXRuntime.$testRuntime.withValue(runtime) {
+            let notePrompt = "Synthetic custom note prompt."
+            let reviewPrompt = "Synthetic custom review prompt."
+            _ = try await QwenTranslationClient.learningNote(input: "synthetic note input",
+                modelName: QwenModelProfile.energySaver.translationModel, prefix: "", systemPrompt: notePrompt, onUpdate: { _ in })
+            _ = try await QwenTranslationClient.reviewLearningNote("synthetic review input", systemPrompt: reviewPrompt)
+            let requests = try String(contentsOf: root.appendingPathComponent("requests.jsonl"), encoding: .utf8)
+                .split(separator: "\n").map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+            XCTAssertEqual(requests.compactMap { $0["purpose"] as? String }, ["note", "review"])
+            XCTAssertTrue((requests[0]["prompt"] as? String)?.contains(notePrompt) == true)
+            XCTAssertTrue((requests[1]["prompt"] as? String)?.contains(reviewPrompt) == true)
+        }
     }
 
     private static let worker = #"""

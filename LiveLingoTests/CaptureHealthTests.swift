@@ -613,7 +613,7 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         let directory = try directory()
         let suite = "LiveLingo-Test-\(UUID().uuidString)"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("review.json"), observeSleep: false,
             diagnostics: .disabled) { _, _, _, _, _ in throw CancellationError() }
         let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,

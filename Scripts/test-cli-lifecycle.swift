@@ -64,7 +64,7 @@ import Darwin
 
         let suite = "LiveLingo-Test-" + UUID().uuidString
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        guard let defaults = UserDefaults(suiteName: suite) else {
+        guard let defaults = TestUserDefaults(suiteName: suite) else {
             try cleanup.remove()
             throw Failure(name: prefix + "_isolated_preferences_unavailable")
         }
@@ -120,11 +120,63 @@ import Darwin
         try cleanup.remove(defaults)
     }
 
+    static func writeSyntheticManifest(in root: URL) throws {
+    // The process tests may update these courses. Prove they belong to
+    // this synthetic fixture run before that separate entry reads them.
+        let fixtureNames = ["zero-captions", "bad-srt", "restart-course", "unbound-course", "legacy-course"]
+        var fixtureHashes: [String: String] = [:]
+        var fixtureLinks: [String: String] = [:]
+    for name in fixtureNames {
+        let directory = root.appendingPathComponent(name, isDirectory: true)
+        guard let files = FileManager.default.enumerator(at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else {
+            throw Failure(name: "synthetic_fixture_enumeration")
+        }
+            for case let file as URL in files {
+                let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                let relative = String(file.path.dropFirst(root.path.count + 1))
+                let resolved = file.resolvingSymlinksInPath()
+                try expect(resolved.path.hasPrefix(directory.path + "/"), "synthetic_fixture_link_escaped_course")
+                if values.isSymbolicLink == true {
+                    fixtureLinks[relative] = String(resolved.path.dropFirst(root.path.count + 1))
+                }
+                if try resolved.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                    fixtureHashes[relative] = SHA256.hash(data: try Data(contentsOf: resolved))
+                    .map { String(format: "%02x", $0) }.joined()
+            }
+        }
+    }
+        let fixtureManifest: [String: Any] = ["schema": "livelingo.synthetic-cli-fixtures/1",
+            "realModelsInvoked": false, "fixtureRoots": fixtureNames, "files": fixtureHashes,
+            "links": fixtureLinks]
+    try JSONSerialization.data(withJSONObject: fixtureManifest, options: [.sortedKeys])
+        .write(to: root.appendingPathComponent("synthetic-fixtures.json"), options: .atomic)
+    }
+
     @MainActor static func main() async {
         var passed: [String] = []
         do {
-            guard CommandLine.arguments.count == 2 else { throw Failure(name: "requires_new_evidence_directory") }
-            let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+            // Run the same test executable in a synthetic environment. Only the
+            // harness-controlled temporary directory crosses this boundary.
+            if CommandLine.arguments.count == 2 {
+                let child = Process()
+                child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+                child.arguments = ["--synthetic-environment", CommandLine.arguments[1]]
+                child.environment = ["TMPDIR": FileManager.default.temporaryDirectory.path,
+                    "LIVELINGO_UNIT_TESTING": "1", "PYTHONNOUSERSITE": "1",
+                    "PYTHONDONTWRITEBYTECODE": "1"]
+                child.standardInput = FileHandle.nullDevice
+                child.standardOutput = FileHandle.standardOutput
+                child.standardError = FileHandle.standardError
+                try child.run()
+                child.waitUntilExit()
+                Darwin.exit(child.terminationReason == .exit ? child.terminationStatus : 128 + child.terminationStatus)
+            }
+            guard CommandLine.arguments.count == 3,
+                  CommandLine.arguments[1] == "--synthetic-environment" else {
+                throw Failure(name: "requires_new_evidence_directory")
+            }
+            let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
             guard !FileManager.default.fileExists(atPath: root.path) else { throw Failure(name: "evidence_exists") }
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let textCommand = try LiveLingoCLI.parse(["--translate-file", "private-input.txt", "--translation-output", "private-output.jsonl"])
@@ -241,12 +293,12 @@ import Darwin
                 passed.append("production_release_cli_reopen_" + language.rawValue)
             }
 
-            // Save/restore only these keys; never log the process environment.
+            // These keys belong only to the synthetic child; no host values are
+            // saved, restored or logged.
             let keys = ["LIVELINGO_ASR_ENDPOINT", "LIVELINGO_ASR_TOKEN", "LIVELINGO_PREFERENCES_SUITE",
                 "LIVELINGO_DATA_DIRECTORY", "LIVELINGO_MLX_STATE", "LIVELINGO_MLX_PYTHON",
                 "LIVELINGO_MLX_WORKER", "LIVELINGO_MLX_MODELS"]
-            let old = ProcessInfo.processInfo.environment.filter { keys.contains($0.key) }
-            defer { for key in keys { if let value = old[key] { setenv(key, value, 1) } else { unsetenv(key) } } }
+            defer { for key in keys { unsetenv(key) } }
             for key in keys { unsetenv(key) }
             let rejected = root.appendingPathComponent("foreign-endpoint")
             setenv("LIVELINGO_ASR_ENDPOINT", "http://127.0.0.1:18765", 1)
@@ -264,14 +316,16 @@ import Darwin
             try expect(!FileManager.default.fileExists(atPath: target.path), "symlink_target_not_created")
             passed.append("symlink_output_preserved")
             let isolated = try LiveLingoCLI.configureIsolation(output: root.appendingPathComponent("isolated-run"))
-            let current = ProcessInfo.processInfo.environment
-            try expect(current["LIVELINGO_PREFERENCES_SUITE"]?.hasPrefix("com.jianhongli.LiveLingo.CLI.") == true, "unique_preferences")
-            try expect(current["LIVELINGO_DATA_DIRECTORY"] == isolated.appendingPathComponent(".cli-runtime/data").path, "isolated_data")
-            try expect(current["LIVELINGO_MLX_STATE"] == isolated.appendingPathComponent(".cli-runtime/checkpoints").path, "isolated_checkpoints")
+            func syntheticValue(_ key: String) -> String? { getenv(key).map { String(cString: $0) } }
+            try expect(syntheticValue("LIVELINGO_PREFERENCES_SUITE")?.hasPrefix("com.jianhongli.LiveLingo.CLI.") == true, "unique_preferences")
+            try expect(syntheticValue("LIVELINGO_DATA_DIRECTORY") == isolated.appendingPathComponent(".cli-runtime/data").path, "isolated_data")
+            try expect(syntheticValue("LIVELINGO_MLX_STATE") == isolated.appendingPathComponent(".cli-runtime/checkpoints").path, "isolated_checkpoints")
             passed.append("independent_runtime_paths")
 
             // A fake worker exercises actual pipes, request ACKs and child exit.
             // It imports no inference package and receives no real model files.
+            let python = URL(fileURLWithPath: "/usr/bin/python3")
+            if FileManager.default.isExecutableFile(atPath: python.path) {
             let fake = root.appendingPathComponent("fake-worker.py")
             try fakeWorker.write(to: fake, atomically: true, encoding: .utf8)
             let models = root.appendingPathComponent("fake-models")
@@ -279,7 +333,13 @@ import Darwin
             try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
             for name in ["config.json", "tokenizer.json"] { try Data("{}".utf8).write(to: model.appendingPathComponent(name)) }
             try Data().write(to: model.appendingPathComponent("model.safetensors"))
-            setenv("LIVELINGO_MLX_PYTHON", "/opt/homebrew/bin/python3", 1)
+            // The production launch path accepts an executable, so this shim
+            // preserves its pipe protocol while isolating standard-library Python.
+            let interpreter = root.appendingPathComponent("fake-worker-python.sh")
+            try "#!/bin/sh\nexec /usr/bin/env -i /usr/bin/python3 -I -B \"$@\"\n"
+                .write(to: interpreter, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: interpreter.path)
+            setenv("LIVELINGO_MLX_PYTHON", interpreter.path, 1)
             setenv("LIVELINGO_MLX_WORKER", fake.path, 1)
             setenv("LIVELINGO_MLX_MODELS", models.path, 1)
             let result = try await MLXRuntime.shared.generate(model: "qwen3.5-4b-mlx", prompt: "synthetic",
@@ -313,6 +373,11 @@ import Darwin
             try expect(await LiveLingoCLI.cleanupOwnedRuntimes(), "cancelled_run_cleanup")
             try expect(FileManager.default.fileExists(atPath: isolated.appendingPathComponent(".cli-runtime/checkpoints/4b/synthetic-checkpoint.json").path), "cancelled_progress_retained")
             passed.append("actual_fake_worker_cancel_cleanup")
+            } else {
+                LiveLingoCLI.writeEvent(["event": "tests_skipped", "reason": "system_python_unavailable",
+                    "cases": ["actual_fake_worker_success_cleanup", "actual_fake_worker_failure_cleanup",
+                              "actual_fake_worker_cancel_cleanup"]])
+            }
             // Internal acceptance entries. All of this is synthetic: no AppModel,
             // no model runtime, no audio device and no classroom text.
             var stepName = "argument_grammar"
@@ -375,9 +440,24 @@ import Darwin
             catch LiveLingoCLI.CLIError.legacyMarkerUnsupported { }
             try LiveLingoCLI.writeMarker(marker, directory: course)
             let markerBytes = try Data(contentsOf: markerURL)
-            try rejects("foreign_app_target_rejected") { try LiveLingoCLI.validateReopenTarget(URL(fileURLWithPath: "/Applications/LiveLingo.app", isDirectory: true)) }
-            try rejects("system_target_rejected") { try LiveLingoCLI.validateReopenTarget(URL(fileURLWithPath: "/System/Library", isDirectory: true)) }
-            try rejects("user_support_target_rejected") { try LiveLingoCLI.validateReopenTarget(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/LiveLingo", isDirectory: true)) }
+            let forbiddenFixtures = root.appendingPathComponent("forbidden-target-fixtures", isDirectory: true)
+            let foreignApp = forbiddenFixtures.appendingPathComponent("Applications/LiveLingo.app", isDirectory: true)
+            try FileManager.default.createDirectory(at: foreignApp, withIntermediateDirectories: true)
+            // Freeze the production policy's roots without inspecting them.
+            try expect(LiveLingoCLI.forbiddenReopenRoots == ["/Applications", "/System", "/Library", "/usr",
+                "/bin", "/sbin", "/opt", "/cores", "/dev", "/Volumes", "/private/var/db"],
+                "production_reopen_roots_unchanged")
+            let syntheticHome = forbiddenFixtures.appendingPathComponent("Home")
+            let syntheticRoots = ["Applications", "System"].map { forbiddenFixtures.appendingPathComponent($0).path }
+            for (label, target) in [("foreign_app_target_rejected", foreignApp),
+                ("system_target_rejected", forbiddenFixtures.appendingPathComponent("System/Library")),
+                ("user_support_target_rejected", syntheticHome.appendingPathComponent("Library/Application Support/LiveLingo"))] {
+                do {
+                    try LiveLingoCLI.validateReopenTarget(target, homeDirectory: syntheticHome,
+                                                        forbiddenRoots: syntheticRoots)
+                    throw Failure(name: label)
+                } catch LiveLingoCLI.CLIError.reopenTargetForbidden { }
+            }
             let bundleCourse = root.appendingPathComponent("SyntheticBundle.app/Session")
             try FileManager.default.createDirectory(at: bundleCourse, withIntermediateDirectories: true)
             try rejects("bundle_target_rejected") { try LiveLingoCLI.validateReopenTarget(bundleCourse) }
@@ -558,6 +638,7 @@ import Darwin
             passed.append("restart_fixtures")
             } catch let failure as Failure { throw failure
             } catch { throw Failure(name: stepName + ":" + String(describing: error)) }
+            try writeSyntheticManifest(in: root)
             LiveLingoCLI.writeEvent(["event": "tests_passed", "count": passed.count, "cases": passed])
         } catch {
             _ = await LiveLingoCLI.cleanupOwnedRuntimes()

@@ -752,20 +752,84 @@ final class ProcessingFocusTests: XCTestCase {
     /// 31，只有 .utility(20) 与 .background(4) 更低。因此“提高进程优先级”没有可做的空间，
     /// 专注模式只负责让后台复查为实时任务让路。
     func testSchedulingClassCeilingIsAlreadyReached() throws {
-        func priority(of qos: QualityOfService) throws -> Int32 {
+        func waitForReady(_ handle: FileHandle) throws {
+            let descriptor = handle.fileDescriptor
+            let originalFlags = fcntl(descriptor, F_GETFL)
+            guard originalFlags >= 0, fcntl(descriptor, F_SETFL, originalFlags | O_NONBLOCK) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            defer { _ = fcntl(descriptor, F_SETFL, originalFlags) }
+            let expected = Data("ready\n".utf8)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            var received = Data()
+            while received.count < expected.count {
+                guard ContinuousClock.now < deadline else {
+                    XCTFail("The synthetic QoS child did not become ready before its deadline")
+                    throw CocoaError(.fileReadUnknown)
+                }
+                let remaining = ContinuousClock.now.duration(to: deadline).components
+                let milliseconds = remaining.seconds * 1_000 + remaining.attoseconds / 1_000_000_000_000_000
+                var descriptorState = pollfd(fd: descriptor, events: Int16(POLLIN | POLLHUP), revents: 0)
+                let available = poll(&descriptorState, 1, Int32(max(1, min(10_000, milliseconds))))
+                if available < 0 {
+                    if errno == EINTR { continue }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                if available == 0 { continue }
+                var buffer = [UInt8](repeating: 0, count: 64)
+                let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
+                if count < 0 {
+                    if errno == EAGAIN || errno == EINTR { continue }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                guard count > 0 else {
+                    XCTFail("The synthetic QoS child exited before its ready handshake")
+                    throw CocoaError(.fileReadUnknown)
+                }
+                received.append(contentsOf: buffer.prefix(count))
+            }
+            XCTAssertEqual(received, expected, "The synthetic child must complete its exact ready handshake")
+            guard received == expected else { throw CocoaError(.fileReadUnknown) }
+        }
+        func launch(_ qos: QualityOfService) throws -> (process: Process, input: FileHandle) {
             let process = Process()
+            let input = Pipe(), output = Pipe()
             process.executableURL = URL(fileURLWithPath: "/bin/sh")
-            process.arguments = ["-c", "sleep 5"]
+            // Both commands are shell builtins. Stdin owns the child's lifetime.
+            process.arguments = ["-c", "printf 'ready\\n'; IFS= read -r livelingo_test_input"]
+            process.environment = [:]
             process.qualityOfService = qos
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
             try process.run()
-            defer { process.terminate() }
-            Thread.sleep(forTimeInterval: 0.4)
+            do {
+                try waitForReady(output.fileHandleForReading)
+                return (process, input.fileHandleForWriting)
+            } catch {
+                try? input.fileHandleForWriting.close()
+                if process.isRunning { process.terminate() }
+                process.waitUntilExit()
+                throw error
+            }
+        }
+        // Probe access before measuring the policy. A later inspection failure
+        // is a failure, rather than a skip that could hide a real regression.
+        let probe = try launch(.default)
+        defer { try? probe.input.close(); probe.process.waitUntilExit() }
+        var probeInfo = proc_taskinfo()
+        let probeSize = Int32(MemoryLayout<proc_taskinfo>.size)
+        let probeResult = proc_pidinfo(probe.process.processIdentifier, PROC_PIDTASKINFO, 0, &probeInfo, probeSize)
+        try XCTSkipUnless(probeResult == probeSize,
+                          "The host must permit task-info inspection of this test's own child process")
+        func priority(of qos: QualityOfService) throws -> Int32 {
+            let child = try launch(qos)
+            defer { try? child.input.close(); child.process.waitUntilExit() }
             var info = proc_taskinfo()
             let size = Int32(MemoryLayout<proc_taskinfo>.size)
-            let result = proc_pidinfo(process.processIdentifier, PROC_PIDTASKINFO, 0, &info, size)
-            guard result == size else {
-                throw XCTSkip("当前宿主不允许读取子进程优先级（proc_pidinfo 返回 \(result)）")
-            }
+            let result = proc_pidinfo(child.process.processIdentifier, PROC_PIDTASKINFO, 0, &info, size)
+            XCTAssertEqual(result, size, "Task-info access failed after its prerequisite probe succeeded")
+            guard result == size else { throw CocoaError(.fileReadUnknown) }
             return info.pti_priority
         }
 

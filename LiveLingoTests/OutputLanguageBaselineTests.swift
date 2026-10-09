@@ -6,7 +6,7 @@ import XCTest
 /// dependencies. No Apple translation session or background service starts.
 @MainActor
 final class OutputLanguageBaselineTests: XCTestCase {
-    private final class ReadOnlyDefaults: UserDefaults, @unchecked Sendable {
+    private final class ReadOnlyDefaults: TestUserDefaults, @unchecked Sendable {
         override func string(forKey defaultName: String) -> String? { nil }
         override func object(forKey defaultName: String) -> Any? { nil }
         override func bool(forKey defaultName: String) -> Bool { false }

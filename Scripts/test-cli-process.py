@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Exercise CLI exit paths with synthetic files and a fake pipe worker only.
 
-Usage: test-cli-process.py CLI NEW_EVIDENCE_DIRECTORY SYNTHETIC_FIXTURES
+Usage: test-cli-process.py CLI NEW_EVIDENCE_DIRECTORY SYNTHETIC_FIXTURES [--check-fixtures]
+--check-fixtures validates provenance without creating output or starting transport.
+The owned-ASR case needs loopback. Without it the script fails, unless
+LIVELINGO_ALLOW_LOOPBACK_SKIP=1 explicitly records a process_tests_skipped event.
 The fixtures directory comes from test-cli-lifecycle.swift. Evidence is retained.
 """
 import base64
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -91,11 +96,89 @@ server.server_close()
 '''
 
 
+def loopback_prerequisite() -> str | None:
+    # Probe this integration capability before starting the owned ASR service.
+    # Once admitted, real startup, HTTP, ownership and cleanup errors still fail.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(('127.0.0.1', 0))
+            probe.listen(1)
+    except OSError as error:
+        if error.errno in (errno.EACCES, errno.EPERM, errno.EAFNOSUPPORT,
+                           errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL,
+                           errno.ENETDOWN, errno.ENETUNREACH):
+            return 'loopback unavailable before owned ASR startup'
+        raise
+    return None
+
+
 def main() -> None:
-    if len(sys.argv) != 4:
+    arguments = sys.argv[1:]
+    check_only = len(arguments) == 4 and arguments[-1] == '--check-fixtures'
+    if check_only:
+        arguments = arguments[:-1]
+    if len(arguments) != 3:
         raise SystemExit(__doc__)
-    binary, root, fixtures = map(lambda p: Path(p).resolve(), sys.argv[1:])
+    binary, root, fixtures = map(Path, arguments)
+    if any(not path.is_absolute() or path.is_symlink() for path in (binary, root, fixtures)):
+        raise ValueError('process tests require absolute ordinary paths')
+    binary, root, fixtures = (path.resolve() for path in (binary, root, fixtures))
+    if not binary.is_file() or not os.access(binary, os.X_OK) or not fixtures.is_dir():
+        raise ValueError('process tests require an executable CLI and synthetic fixtures')
+    manifest_path = fixtures / 'synthetic-fixtures.json'
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ValueError('run the synthetic lifecycle fixture producer first')
+    manifest = json.loads(manifest_path.read_text())
+    expected_roots = ['zero-captions', 'bad-srt', 'restart-course', 'unbound-course', 'legacy-course']
+    if (manifest.get('schema') != 'livelingo.synthetic-cli-fixtures/1'
+            or manifest.get('realModelsInvoked') is not False
+            or manifest.get('fixtureRoots') != expected_roots
+            or not isinstance(manifest.get('files'), dict)
+            or not isinstance(manifest.get('links'), dict)):
+        raise ValueError('fixture provenance is not the synthetic lifecycle protocol')
+    for name in expected_roots:
+        if not (fixtures / name).is_dir() or (fixtures / name).is_symlink():
+            raise ValueError('required synthetic course is missing')
+    for relative, target in manifest['links'].items():
+        link, resolved = fixtures / relative, fixtures / target
+        if (Path(relative).is_absolute() or Path(target).is_absolute()
+                or '..' in Path(relative).parts or '..' in Path(target).parts
+                or not Path(relative).parts or Path(relative).parts[0] not in expected_roots
+                or not link.is_symlink() or link.resolve() != resolved
+                or not resolved.is_relative_to(fixtures / Path(relative).parts[0])):
+            raise ValueError('synthetic publication link escaped its course or changed')
+    for relative, expected in manifest['files'].items():
+        path = Path(relative)
+        if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0] not in expected_roots:
+            raise ValueError('invalid synthetic fixture member')
+        member = fixtures / path
+        resolved = member.resolve()
+        if (member.is_symlink() and relative not in manifest['links']) or not resolved.is_relative_to(fixtures / path.parts[0]) or not resolved.is_file():
+            raise ValueError('synthetic fixture member must be an ordinary contained file')
+        if hashlib.sha256(resolved.read_bytes()).hexdigest() != expected:
+            raise ValueError('synthetic fixture bytes changed before the process test')
+    for required in ['zero-captions/recording.wav', 'bad-srt/bilingual.srt',
+                     'restart-course/.cli-runtime/run.json']:
+        if required not in manifest['files']:
+            raise ValueError('required synthetic fixture is not bound to provenance')
+    if check_only:
+        print(json.dumps({'event': 'synthetic_fixtures_verified',
+                          'members': len(manifest['files']), 'transport_started': False}))
+        return
+    # Decide before creating evidence: missing loopback is a failure, never a
+    # silent pass. Only the explicit opt-out records a visible skip instead.
+    loopback_reason = loopback_prerequisite()
+    if loopback_reason is not None and os.environ.get('LIVELINGO_ALLOW_LOOPBACK_SKIP') != '1':
+        raise SystemExit('FAIL process tests: ' + loopback_reason + '; owned-asr-health-failure cannot run. '
+                         'Set LIVELINGO_ALLOW_LOOPBACK_SKIP=1 only to skip it explicitly.')
     root.mkdir(exist_ok=False)
+    # A caller may supply an installed CLI. This private copy deliberately has
+    # no ASRRuntime/Models resources, so missing-ASR never starts a real runtime.
+    isolated_binary = root / 'isolated-cli' / 'livelingo-cli'
+    isolated_binary.parent.mkdir()
+    shutil.copyfile(binary, isolated_binary)
+    isolated_binary.chmod(0o700)
+    binary = isolated_binary
     worker = root / 'fake-worker.py'
     worker.write_text(FAKE_WORKER)
     models = root / 'fake-models'
@@ -111,11 +194,11 @@ def main() -> None:
     canary.write_text('SYNTHETIC_UNRELATED_QUEUE')
     original = canary.read_bytes()
     passed = []
+    skipped = []
 
     def environment(case: Path, mode: str = 'success') -> dict:
-        env = os.environ.copy()
-        for key in ('LIVELINGO_ASR_ENDPOINT', 'LIVELINGO_ASR_TOKEN', 'LIVELINGO_UNIT_TESTING', 'XCTestConfigurationFilePath'):
-            env.pop(key, None)
+        env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'PYTHONDONTWRITEBYTECODE': '1',
+               'PYTHONNOUSERSITE': '1', 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1'}
         temporary = case / 'tmp'
         temporary.mkdir()
         env.update(TMPDIR=str(temporary) + '/', LIVELINGO_MLX_PYTHON=sys.executable,
@@ -232,36 +315,40 @@ def main() -> None:
         passed.append(name)
     # Exercise ASRRuntime's exact child ownership without any inference package
     # or audio device. A health failure ends before Speech authorization starts.
-    case = root / 'owned-asr-health-failure'
-    case.mkdir()
-    bundle = case / 'bundle'
-    runtime = bundle / 'ASRRuntime'
-    interpreter = runtime / 'python/bin/python3'
-    interpreter.parent.mkdir(parents=True)
-    interpreter.symlink_to(Path(sys.executable).resolve())
-    (runtime / 'qwen_asr_service.py').write_text(FAKE_ASR)
-    (bundle / 'Models').mkdir()
-    isolated_cli = bundle / 'livelingo-cli'
-    shutil.copyfile(binary, isolated_cli)
-    isolated_cli.chmod(0o700)
-    result = subprocess.run([str(isolated_cli), '--replay', str(fixtures / 'zero-captions/recording.wav'),
-                             '--output', str(case / 'run')], env=environment(case),
-                            capture_output=True, text=True, timeout=40)
-    record(case, result.returncode, result.stdout, result.stderr)
-    assert result.returncode == 1 and 'model_runtime' in result.stderr
-    assert not (case / 'worker-pid.txt').exists()
-    child = json.loads((case / 'asr-child.json').read_text())
-    assert child['port'] > 0 and child['port'] != 18765
-    assert json.loads((case / 'asr-health.json').read_text())['authorized']
-    assert (case / 'asr-stdin-closed').is_file()
-    try:
-        os.kill(child['pid'], 0)
-    except ProcessLookupError:
-        pass
+    if loopback_reason is not None:
+        skipped.append({'case': 'owned-asr-health-failure', 'reason': loopback_reason,
+                        'optOut': 'LIVELINGO_ALLOW_LOOPBACK_SKIP=1'})
     else:
-        raise AssertionError('owned ASR survived CLI failure')
-    assert 'asr_owned' in result.stdout
-    passed.append('owned-asr-health-failure')
+        case = root / 'owned-asr-health-failure'
+        case.mkdir()
+        bundle = case / 'bundle'
+        runtime = bundle / 'ASRRuntime'
+        interpreter = runtime / 'python/bin/python3'
+        interpreter.parent.mkdir(parents=True)
+        interpreter.symlink_to(Path(sys.executable).resolve())
+        (runtime / 'qwen_asr_service.py').write_text(FAKE_ASR)
+        (bundle / 'Models').mkdir()
+        isolated_cli = bundle / 'livelingo-cli'
+        shutil.copyfile(binary, isolated_cli)
+        isolated_cli.chmod(0o700)
+        result = subprocess.run([str(isolated_cli), '--replay', str(fixtures / 'zero-captions/recording.wav'),
+                                 '--output', str(case / 'run')], env=environment(case),
+                                capture_output=True, text=True, timeout=40)
+        record(case, result.returncode, result.stdout, result.stderr)
+        assert result.returncode == 1 and 'model_runtime' in result.stderr
+        assert not (case / 'worker-pid.txt').exists()
+        child = json.loads((case / 'asr-child.json').read_text())
+        assert child['port'] > 0 and child['port'] != 18765
+        assert json.loads((case / 'asr-health.json').read_text())['authorized']
+        assert (case / 'asr-stdin-closed').is_file()
+        try:
+            os.kill(child['pid'], 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError('owned ASR survived CLI failure')
+        assert 'asr_owned' in result.stdout
+        passed.append('owned-asr-health-failure')
 
     # ---------------------------------------------------------------------
     # Internal reopen / restart acceptance entries.
@@ -500,7 +587,10 @@ def main() -> None:
     receipt = [row for row in cli_events(result.stdout) if row.get('event') == 'saved_verified'][-1]
     assert receipt['scope'] == 'export_integrity' and receipt['wholeRunVerified'] is False
     passed.append('verify-saved-is-not-whole-run')
-    print(json.dumps({'event': 'process_tests_passed', 'count': len(passed), 'cases': passed}))
+    if skipped:
+        print(json.dumps({'event': 'process_tests_skipped', 'count': len(skipped), 'cases': skipped}))
+    print(json.dumps({'event': 'process_tests_passed', 'count': len(passed), 'skipped': len(skipped),
+                      'cases': passed}))
 
 
 if __name__ == '__main__':

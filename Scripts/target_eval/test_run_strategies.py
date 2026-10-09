@@ -121,7 +121,11 @@ class RunnerTests(unittest.TestCase):
         self.scratch = tempfile.TemporaryDirectory(prefix="strategy-synthetic-")
         self.addCleanup(self.scratch.cleanup)
         self.root = Path(self.scratch.name).resolve()
-        self.enterContext(patch.dict(os.environ, {c.OUTPUT_ROOT_ENV: str(self.root)}))
+        self.enterContext(patch.dict(os.environ, {
+            c.OUTPUT_ROOT_ENV: str(self.root),
+            'LIVELINGO_MLX_WORKER': str(Path(a.__file__).resolve().parents[1] / 'mlx_runtime/worker.py'),
+            'LIVELINGO_MLX_PYTHON': '', 'LIVELINGO_MLX_MODELS': '',
+        }))
         # Exercise the original scoreboard lock/path checker in an authorized
         # synthetic root, without contending with another task's real lock.
         self.enterContext(patch.object(a.scoreboard, "WORK", self.root))

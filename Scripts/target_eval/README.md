@@ -498,6 +498,11 @@ and `LIVELINGO_QUALITY_TEST_DIRECTORY` pointing to an isolated directory under
 `work/dd-latin`. Set `TMPDIR` to an existing authorized temporary directory
 under `work/target-eval` for fixture output, and
 `LIVELINGO_ASR_TEST_IN_PROCESS=1` to run the ASR handlers without sockets.
+Without it, the ASR service tests use real loopback HTTP and a real service
+child; if loopback cannot bind they fail, unless
+`LIVELINGO_ALLOW_LOOPBACK_SKIP=1` explicitly turns that into a reported skip.
+ASR probe precision runs on CPU and GPU unless
+`LIVELINGO_ASR_TEST_CPU_ONLY=1` restricts it to CPU.
 If the selected Python lacks runtime dependencies, add existing tested Python
 3.13 site-packages directories to `PYTHONPATH`. Include `$PWD/Scripts` and
 `$PWD/Scripts/mlx_runtime` there for the in-process ASR child probe. This reuses

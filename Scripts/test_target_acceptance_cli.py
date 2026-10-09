@@ -18,6 +18,8 @@ SOURCE = Path(__file__).resolve().parents[1]
 class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not os.environ.get(c.OUTPUT_ROOT_ENV):
+            raise unittest.SkipTest('optional target CLI integration requires an external output root')
         cls.output = c.output_root()
         default_cli = cls.output / "latin-cli-delivery" / "target-acceptance-cli"
         cls.cli = Path(os.environ.get("LIVELINGO_TARGET_ACCEPTANCE_CLI", str(default_cli)))

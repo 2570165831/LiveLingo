@@ -6,12 +6,7 @@ import XCTest
 enum DataSafetyFixtures {
     static func make(_ label: String) throws -> URL {
         let designated = TestFixtureDirectory.root
-        guard SessionDirectoryLocation.canonical(FileManager.default.temporaryDirectory)
-            == SessionDirectoryLocation.canonical(designated) else {
-            throw NSError(domain: "DataSafetyFixture", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Tests require the designated temporary directory"])
-        }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Safety-\(label)-\(UUID())", isDirectory: true)
+        let url = designated.appendingPathComponent("Safety-\(label)-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }

@@ -364,9 +364,11 @@ while (my $line = <STDIN>) {
 }
 
 /// Readiness only checks that files exist; it never parses weight headers.
+/// Paths come from a task-scoped test runtime, never the process environment.
 final class MLXModelReadinessTests: XCTestCase {
     private var root: URL!
     private var model: URL!
+    private var runtime: MLXRuntime!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("mlx-readiness-\(UUID())")
@@ -375,21 +377,17 @@ final class MLXModelReadinessTests: XCTestCase {
         for name in ["config.json", "tokenizer.json"] { try write("{}", to: name) }
         let worker = root.appendingPathComponent("worker.py")
         try Data().write(to: worker)
-        let environment = ["LIVELINGO_MLX_PYTHON": "/usr/bin/python3", "LIVELINGO_MLX_WORKER": worker.path,
-                           "LIVELINGO_MLX_MODELS": root.appendingPathComponent("models").path,
-                           "LIVELINGO_MLX_STATE": root.appendingPathComponent("state").path]
-        var previous: [String: String?] = [:]
-        for (key, value) in environment {
-            previous[key] = .some(ProcessInfo.processInfo.environment[key])
-            setenv(key, value, 1)
-        }
-        let restore = previous, directory = root!
+        runtime = MLXRuntime(testConfiguration: MLXRuntime.TestConfiguration(
+            python: URL(fileURLWithPath: "/usr/bin/python3"), script: worker,
+            models: model, state: root.appendingPathComponent("state")))
+        let directory = root!
         addTeardownBlock {
-            for (key, value) in restore {
-                if let value { setenv(key, value, 1) } else { unsetenv(key) }
-            }
             try? FileManager.default.removeItem(at: directory)
         }
+    }
+
+    private func checkModel() throws {
+        try MLXRuntime.$testRuntime.withValue(runtime) { try MLXRuntime.checkModel("qwen3.5-4b-mlx") }
     }
 
     private func write(_ text: String, to name: String) throws {
@@ -397,7 +395,7 @@ final class MLXModelReadinessTests: XCTestCase {
     }
 
     private func assertIncomplete(_ message: String, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertThrowsError(try MLXRuntime.checkModel("qwen3.5-4b-mlx"), message, file: file, line: line) { error in
+        XCTAssertThrowsError(try checkModel(), message, file: file, line: line) { error in
             guard case QwenRuntimeError.modelUnavailable = error else {
                 return XCTFail("Expected modelUnavailable, got \(error)", file: file, line: line)
             }
@@ -413,7 +411,7 @@ final class MLXModelReadinessTests: XCTestCase {
 
     func testSingleWeightFileIsReady() throws {
         try write("", to: "model.safetensors")
-        XCTAssertNoThrow(try MLXRuntime.checkModel("qwen3.5-4b-mlx"))
+        XCTAssertNoThrow(try checkModel())
     }
 
     func testIndexRequiresEveryReferencedShard() throws {
@@ -422,7 +420,7 @@ final class MLXModelReadinessTests: XCTestCase {
         try write("", to: "model-00001-of-00002.safetensors")
         assertIncomplete("A missing shard listed in the index must not pass readiness")
         try write("", to: "model-00002-of-00002.safetensors")
-        XCTAssertNoThrow(try MLXRuntime.checkModel("qwen3.5-4b-mlx"))
+        XCTAssertNoThrow(try checkModel())
     }
 
     func testUnusableIndexIsNotReadyEvenWithAWeightFile() throws {

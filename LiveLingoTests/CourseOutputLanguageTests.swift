@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class CourseOutputLanguageTests: XCTestCase {
-    private final class ObservedDefaults: UserDefaults, @unchecked Sendable {
+    private final class ObservedDefaults: TestUserDefaults, @unchecked Sendable {
         var outputReads = 0
         override func string(forKey key: String) -> String? {
             if key == "LiveLingo.outputLanguage" {

@@ -215,11 +215,14 @@ PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/python3.13 Scripts/test-release-flow
 
 打桩自测使用 `/private/tmp` 中的最小 App 和非钥匙串文本夹具，显式提供绝对路径的假 notarytool、stapler、codesign、hdiutil、spctl、ditto，以及结构校验替身。假镜像保存**创建当时的内容快照**，挂载检查不会偷读后来改变的暂存 App。测试核对 timestamp、签名身份/钥匙串、profile、严格签名、镜像验证、装订目标和步骤顺序；覆盖两阶段查询失败/拒绝、装订退避、续跑、未知上传、信号中断、部分 attach、忙碌 detach 及正式输出保护。关键参数删除和顺序破坏另有变异测试。超时使用可控逻辑时钟、模拟进程/管道，不依赖 Python 启动必须赶在 0.2 秒内；信号测试等到回执/挂载事件后才发信号。真实 App 签名命令构造通过工具调用拦截检查 hardened runtime 和 timestamp，绝不真实签名。测试结束删除本次临时夹具，不访问真实发布产物或凭据。
 
-本地大文件镜像实验可单独运行：
+本地大文件镜像实验可单独运行，必须显式加 `--run-experiment`，并让 `--temporary-directory` 与当前 `TMPDIR` 一致（实验夹具只建在这里，结束后删除）：
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/python3.13 Scripts/test-large-app-dmg.py
+PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/python3.13 Scripts/test-large-app-dmg.py \
+    --run-experiment --temporary-directory "${TMPDIR:-/tmp}"
 ```
+
+不带参数运行会以非零状态退出并提示上述参数，什么也不验证；`--check-prerequisites` 只检查 ditto/hdiutil 等工具是否可用，不建夹具也不做实验，不能当作实验通过。工具缺失时两种模式都返回失败。
 
 2026-10-07 本机实测：稀疏文件逻辑大小 **5,136,696,107 字节**，源与 ditto 副本各实际分配 **53,248 字节**；显式镜像容量 **6,432,549,428 字节**。只含 App 的 UDZO 为 **406,172 字节**（零数据易压缩，不代表真实权重包大小）；镜像校验、只读挂载后读回大小及整文件 SHA-256 均通过，SHA-256 为 `6cdad844203ac789e7762c1354bc6b0bbff0169021eb731ec2f62bd953901707`。按设备号卸载后临时目录已删除。自动容量版本曾返回“设备上无剩余空间”，显式容量版本通过；实验没有签名或连接苹果服务。
 

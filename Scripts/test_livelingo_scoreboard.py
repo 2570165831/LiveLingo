@@ -433,16 +433,41 @@ class ScoreboardOrchestrationTests(unittest.TestCase):
     def path(self, suffix):
         return self.root / (self.id().split(".")[-1] + "-" + suffix)
 
+    def setUp(self):
+        # Track only the inert CLI children this test actually creates. Their
+        # process-table fields are synthetic; unrelated host workloads never
+        # enter a preflight, RSS sample or ownership/signalling decision.
+        self.children = {}
+        clock_origin = m.time.monotonic()
+        self.enterContext(patch.object(m.time, "time", side_effect=lambda:
+            1_000 + m.time.monotonic() - clock_origin))
+        popen = subprocess.Popen
+
+        def spawn(arguments, *positional, **keywords):
+            process = popen(arguments, *positional, **keywords)
+            if str(arguments[0]) == str(self.cli):
+                self.children[process.pid] = process, dict(
+                    pid=process.pid, ppid=os.getpid(), uid=os.getuid(),
+                    started=f"synthetic-{len(self.children)}", state="S",
+                    executable=str(self.cli.resolve()), rss_bytes=0)
+            return process
+
+        self.enterContext(patch.object(m.subprocess, "Popen", side_effect=spawn))
+        self.addCleanup(self.stop_children)
+
+    def stop_children(self):
+        for process, _ in self.children.values():
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+
     def args(self, out):
         return m.parser().parse_args(["run", "--fixtures", str(self.fixtures), "--build", str(self.build),
                                       "--tier", "smoke", "--no-energy", "--out", str(out)])
 
-    @staticmethod
-    def provider():
-        # Unit tests inject only Python identities. An unrelated real CLI/GPU
-        # regression is excluded from this synthetic provider, never altered.
-        return {pid: row for pid, row in m.read_processes().items()
-                if Path(row["executable"]).name in {Path(sys.executable).name, "Python", "python3", "python3.11"}}
+    def provider(self):
+        return {pid: dict(row) for pid, (process, row) in self.children.items()
+                if process.poll() is None}
 
     @staticmethod
     def oslog(execution, directory):
@@ -522,6 +547,13 @@ class ScoreboardOrchestrationTests(unittest.TestCase):
             m.run(self.args(out), provider=provider)
         self.assertEqual(failure.exception.reason, "another_livelingo_run_active")
         self.assertFalse(out.exists())
+
+    def test_orchestration_never_reads_the_host_process_table(self):
+        out = self.path("isolated-process-table")
+        with patch.object(m, "read_processes", side_effect=AssertionError("host process table read")), \
+                patch.object(m.classroom, "read_processes", side_effect=AssertionError("host process table read")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.run(self.args(out), provider=self.provider, log_collector=self.oslog), 0)
 
     def test_lock_blocks_a_second_writer_and_is_reusable(self):
         path = self.path("lock")
@@ -694,6 +726,7 @@ class ScoreboardOrchestrationTests(unittest.TestCase):
         self.assertEqual(m.busy_processes(rows), [43, 44])
         self.assertEqual(m.busy_processes(rows, owned_pids=(43,)), [44])
 
+    @unittest.skipUnless(Path("/bin/ps").is_file(), "owned inert worker requires the ps executable")
     def test_independent_worker_process_is_detected_without_loading_a_model(self):
         worker = self.path("independent-worker") / "mlx_runtime" / "worker.py"
         worker.parent.mkdir(parents=True)
@@ -707,7 +740,16 @@ class ScoreboardOrchestrationTests(unittest.TestCase):
             ready, _, _ = select.select([process.stdout], [], [], 5)
             self.assertTrue(ready, "inert worker did not signal readiness")
             self.assertEqual(process.stdout.readline(), b"ready\n")
-            rows = m.read_processes()
+            # Exercise the real ps parser against our own inert child only.
+            # A global snapshot would introduce unrelated workload/race input.
+            check_output = subprocess.check_output
+
+            def owned_ps(arguments, **keywords):
+                self.assertEqual(arguments[:3], ["/bin/ps", "-ww", "-axo"])
+                return check_output(["/bin/ps", "-ww", "-p", str(process.pid), "-o", arguments[3]], **keywords)
+
+            with patch.object(m.subprocess, "check_output", side_effect=owned_ps):
+                rows = m.read_processes()
             self.assertIn(process.pid, rows)
             self.assertEqual(m.busy_processes({process.pid: rows[process.pid]}), [process.pid])
             with self.assertRaises(m.Rejected):

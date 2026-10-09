@@ -52,7 +52,7 @@ final class TypedTranslationSchedulingTests: XCTestCase {
             .appendingPathComponent("LiveLingo-TypedScheduling-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-Test-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let preferences = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("Typed scheduling tests must not invoke review models")

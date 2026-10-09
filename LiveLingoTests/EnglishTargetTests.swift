@@ -62,7 +62,7 @@ final class EnglishTargetTests: XCTestCase {
             }
             let suite = "LiveLingo-Test-\(UUID())"
             let cleanup = try TestPreferenceCleanup(suite: suite)
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
             let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
                 backgroundServices: false, scheduledNotes: false, defaults: defaults)
             // Isolate legacy notebook recovery after release; production GUI
@@ -140,7 +140,7 @@ final class EnglishTargetTests: XCTestCase {
         XCTAssertEqual(segment.chinese, "")
         XCTAssertEqual(SessionExporter.targetLine(segment, outputLanguage: .english), "（本段暂无译文）")
     }
-    private final class EnglishDefaults: UserDefaults, @unchecked Sendable {
+    private final class EnglishDefaults: TestUserDefaults, @unchecked Sendable {
         override func string(forKey key: String) -> String? {
             key == "LiveLingo.outputLanguage" ? "en" : super.string(forKey: key)
         }
@@ -211,7 +211,7 @@ final class EnglishTargetTests: XCTestCase {
         let (model, _) = try await englishModel()
         let suite = "EnglishTargetPanel-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock { try cleanup.remove() }
         let preferences = FloatingSubtitlePreferences(store: defaults)
         model.receiveLivePreviewForTesting("A variable stores a value.")

@@ -16,7 +16,7 @@ final class PrivacyRuntimeTests: XCTestCase {
         let directory = try root()
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock { try cleanup.remove(defaults) }
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
@@ -134,7 +134,7 @@ final class PrivacyRuntimeTests: XCTestCase {
         let queueRoot = try root()
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock { try cleanup.remove(defaults) }
         let queue = LearningReviewQueue(journalURL: queueRoot.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
@@ -182,7 +182,7 @@ final class PrivacyRuntimeTests: XCTestCase {
         let queueRoot = try root()
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock { try cleanup.remove(defaults) }
         let queue = LearningReviewQueue(journalURL: queueRoot.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })

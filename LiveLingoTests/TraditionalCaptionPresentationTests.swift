@@ -55,7 +55,7 @@ final class TraditionalCaptionPresentationTests: XCTestCase {
         let directory = try temporaryDirectory()
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         defaults.setVolatileDomain(["LiveLingo.outputLanguage": language.rawValue,
                                    "LiveLingo.modelMode": "highQuality"], forName: suite)
         if persistCreationPreference { defaults.set(language.rawValue, forKey: "LiveLingo.outputLanguage") }

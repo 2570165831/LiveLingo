@@ -212,6 +212,7 @@ struct PrivacyAudioTests {
         let working = try fixture.directory("working")
         let acl = Process()
         acl.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        acl.environment = [:]
         acl.arguments = ["+a", "everyone allow read,readattr,readextattr,readsecurity,file_inherit", working.path]
         try acl.run(); acl.waitUntilExit()
         try require(acl.terminationStatus == 0, "Synthetic inherited ACL setup failed")

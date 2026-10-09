@@ -3,6 +3,21 @@ import Foundation
 import XCTest
 @testable import LiveLingo
 
+/// A synthetic calendar clock that advances only with monotonic elapsed time.
+/// Timer integration still runs, but changing the host's date cannot move it.
+@MainActor
+final class TestWallClock {
+    private let origin = ContinuousClock.now
+    private let epoch: Date
+
+    init(epoch: Date = Date(timeIntervalSince1970: 0)) { self.epoch = epoch }
+
+    func now() -> Date {
+        let elapsed = origin.duration(to: .now).components
+        return epoch.addingTimeInterval(Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18)
+    }
+}
+
 /// Both frameworks share the host's unique worker directory. All synthetic
 /// fixtures and screenshots remain under this invocation's DerivedData/tmp.
 enum TestFixtureDirectory {
@@ -14,11 +29,125 @@ enum TestFixtureDirectory {
     }()
 }
 
-/// CFFIXED_USER_HOME does not redirect cfprefsd. Remove only a fresh UUID suite
-/// registered by this test, after flushing its empty persistent domain.
+/// Preferences stay in memory, including reopening a suite and inspecting its
+/// persistent domain. Neither reads nor teardown touch the user's preferences.
+/// Sendability is inherited from UserDefaults; restating it can become an
+/// unavailable-conformance warning depending on which files share a compile job.
+class TestUserDefaults: UserDefaults {
+    private final class Domain: @unchecked Sendable {
+        let lock = NSRecursiveLock()
+        var values: [String: Any] = [:]
+        var volatile: [String: [String: Any]] = [:]
+        var registered: [String: Any] = [:]
+    }
+    private final class Suites: @unchecked Sendable {
+        let lock = NSLock()
+        var domains: [String: Domain] = [:]
+    }
+    private static let suites = Suites()
+    private let suite: String
+    private let domain: Domain
+
+    override init?(suiteName: String?) {
+        guard let suiteName else { return nil }
+        suite = suiteName
+        domain = Self.suites.lock.withLock {
+            if let existing = Self.suites.domains[suiteName] { return existing }
+            let created = Domain()
+            Self.suites.domains[suiteName] = created
+            return created
+        }
+        super.init(suiteName: suiteName)
+    }
+
+    override func object(forKey key: String) -> Any? {
+        domain.lock.withLock {
+            domain.volatile[UserDefaults.argumentDomain]?[key]
+                ?? domain.volatile[suite]?[key]
+                ?? domain.values[key]
+                ?? domain.registered[key]
+        }
+    }
+    override func string(forKey key: String) -> String? {
+        let value = object(forKey: key)
+        return value as? String ?? (value as? NSNumber)?.stringValue
+    }
+    override func bool(forKey key: String) -> Bool {
+        let value = object(forKey: key)
+        return (value as? NSNumber)?.boolValue ?? (value as? NSString)?.boolValue ?? false
+    }
+    override func integer(forKey key: String) -> Int {
+        let value = object(forKey: key)
+        return (value as? NSNumber)?.intValue ?? (value as? NSString)?.integerValue ?? 0
+    }
+    override func double(forKey key: String) -> Double {
+        let value = object(forKey: key)
+        return (value as? NSNumber)?.doubleValue ?? (value as? NSString)?.doubleValue ?? 0
+    }
+    override func float(forKey key: String) -> Float { Float(double(forKey: key)) }
+    override func data(forKey key: String) -> Data? { object(forKey: key) as? Data }
+    override func array(forKey key: String) -> [Any]? { object(forKey: key) as? [Any] }
+    override func dictionary(forKey key: String) -> [String: Any]? { object(forKey: key) as? [String: Any] }
+    override func stringArray(forKey key: String) -> [String]? { object(forKey: key) as? [String] }
+    override func url(forKey key: String) -> URL? {
+        let value = object(forKey: key)
+        return value as? URL ?? (value as? String).flatMap(URL.init(string:))
+    }
+
+    override func set(_ value: Any?, forKey key: String) {
+        willChangeValue(forKey: key)
+        domain.lock.withLock { domain.values[key] = value }
+        didChangeValue(forKey: key)
+        NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: self)
+    }
+    override func set(_ value: Bool, forKey key: String) { set(value as Any, forKey: key) }
+    override func set(_ value: Int, forKey key: String) { set(value as Any, forKey: key) }
+    override func set(_ value: Double, forKey key: String) { set(value as Any, forKey: key) }
+    override func set(_ value: Float, forKey key: String) { set(value as Any, forKey: key) }
+    override func set(_ value: URL?, forKey key: String) { set(value as Any?, forKey: key) }
+    override func removeObject(forKey key: String) { set(nil as Any?, forKey: key) }
+    override func register(defaults: [String: Any]) {
+        domain.lock.withLock { domain.registered.merge(defaults) { _, new in new } }
+    }
+    override func persistentDomain(forName name: String) -> [String: Any]? {
+        guard name == suite else { return nil }
+        return domain.lock.withLock { domain.values.isEmpty ? nil : domain.values }
+    }
+    override func setPersistentDomain(_ values: [String: Any], forName name: String) {
+        precondition(name == suite)
+        domain.lock.withLock { domain.values = values }
+    }
+    override func removePersistentDomain(forName name: String) {
+        precondition(name == suite)
+        domain.lock.withLock { domain.values = [:] }
+    }
+    override func volatileDomain(forName name: String) -> [String: Any] {
+        domain.lock.withLock { domain.volatile[name] ?? [:] }
+    }
+    override func setVolatileDomain(_ values: [String: Any], forName name: String) {
+        domain.lock.withLock { domain.volatile[name] = values }
+    }
+    override func removeVolatileDomain(forName name: String) {
+        domain.lock.withLock { domain.volatile[name] = nil }
+    }
+    override func synchronize() -> Bool { true }
+    override func dictionaryRepresentation() -> [String: Any] {
+        domain.lock.withLock {
+            var values = domain.registered
+            values.merge(domain.values) { _, new in new }
+            values.merge(domain.volatile[suite] ?? [:]) { _, new in new }
+            values.merge(domain.volatile[UserDefaults.argumentDomain] ?? [:]) { _, new in new }
+            return values
+        }
+    }
+    fileprivate static func release(suite: String) {
+        suites.lock.withLock { _ = suites.domains.removeValue(forKey: suite) }
+    }
+}
+
+/// Existing fixture registrations now release only their synthetic suite.
 struct TestPreferenceCleanup: Sendable {
     private let suite: String
-    private let plist: URL
 
     init(suite: String) throws {
         let prefixes = [
@@ -45,64 +174,26 @@ struct TestPreferenceCleanup: Sendable {
             "LiveLingo-Item7-",
         ]
         guard let prefix = prefixes.first(where: suite.hasPrefix),
-              UUID(uuidString: String(suite.dropFirst(prefix.count))) != nil,
-              let directory = getpwuid(getuid())?.pointee.pw_dir else {
+              UUID(uuidString: String(suite.dropFirst(prefix.count))) != nil else {
             throw CocoaError(.fileReadInvalidFileName)
         }
         self.suite = suite
-        plist = URL(fileURLWithPath: String(cString: directory), isDirectory: true)
-            .appendingPathComponent("Library/Preferences", isDirectory: true)
-            .appendingPathComponent(suite + ".plist")
-        guard try Self.fileStatus(at: plist) == nil else {
-            throw CocoaError(.fileWriteFileExists)
-        }
-        _ = PendingTestPreferences.shared
         try Self.emit("CREATED", suite: suite)
     }
 
+    /// Only the in-memory test store is accepted, so a fixture can never fall
+    /// back to the user's real preference domain (cfprefsd, ~/Library/Preferences).
     func remove(_ defaults: UserDefaults) throws {
-        let hadValues = defaults.persistentDomain(forName: suite)?.isEmpty == false
-        let removedAt = Date()
-        if hadValues {
-            defaults.removePersistentDomain(forName: suite)
-            guard defaults.synchronize() else { throw CocoaError(.fileWriteUnknown) }
-        }
-        // The logical domain is cleared before teardown returns. Wait for all
-        // cfprefsd writes together at the bundle/normal-process exit boundary.
-        // UUID suites remain independent; CLEANED is emitted only after unlink.
-        try PendingTestPreferences.shared.enqueue(self, removedAt: hadValues ? removedAt : nil)
+        guard defaults is TestUserDefaults else { throw CocoaError(.fileWriteInvalidFileName) }
+        defaults.removePersistentDomain(forName: suite)
+        try remove()
     }
-
-    fileprivate func finish(removedAt: Date?) throws -> Bool {
-        // A late fixture task must fail cleanup rather than have its new values
-        // silently erased. Owners must stop their tasks before registering removal.
-        guard let defaults = UserDefaults(suiteName: suite),
-              defaults.persistentDomain(forName: suite)?.isEmpty != false else { return false }
-        if let removedAt {
-            guard let attributes = try? FileManager.default.attributesOfItem(atPath: plist.path),
-                  let modified = attributes[.modificationDate] as? Date, modified >= removedAt,
-                  let data = try? Data(contentsOf: plist),
-                  let domain = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-                  domain.isEmpty else { return false }
-        }
-        if let status = try Self.fileStatus(at: plist) {
-            guard status.st_uid == getuid(), status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
-                throw CocoaError(.fileWriteInvalidFileName)
-            }
-            try FileManager.default.removeItem(at: plist)
-        }
-        guard try Self.fileStatus(at: plist) == nil else { throw CocoaError(.fileWriteUnknown) }
-        try Self.emit("CLEANED", suite: suite)
-        return true
-    }
-
-    fileprivate var name: String { suite }
 
     fileprivate static func emit(_ event: String, suite: String) throws {
         let bytes = Array("TEST_PREFERENCE_\(event) suite=\(suite)\n".utf8)
         // Parallel Xcode activity logs can omit output after the final case.
         // Keep an independent, UUID-only event stream in this worker's scratch
-        // directory so bundle/exit cleanup is still externally verifiable.
+        // directory so every suite's cleanup is still externally verifiable.
         let events = TestFixtureDirectory.root.appendingPathComponent("test-preferences.events")
         let descriptor = Darwin.open(events.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
         guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
@@ -117,84 +208,26 @@ struct TestPreferenceCleanup: Sendable {
         guard written == bytes.count else { throw CocoaError(.fileWriteUnknown) }
     }
 
-    static func finishPending() throws { try PendingTestPreferences.shared.finish() }
-    var isPendingForTesting: Bool { PendingTestPreferences.shared.contains(suite) }
-    var hasPlistForTesting: Bool { get throws { try Self.fileStatus(at: plist) != nil } }
+    /// Read-only check that the account's real preference directory never
+    /// received this synthetic suite (the external guard checks the same path).
+    var hasPlistForTesting: Bool {
+        get throws {
+            guard let directory = getpwuid(getuid())?.pointee.pw_dir else { throw CocoaError(.fileReadUnknown) }
+            let plist = URL(fileURLWithPath: String(cString: directory), isDirectory: true)
+                .appendingPathComponent("Library/Preferences", isDirectory: true)
+                .appendingPathComponent(suite + ".plist")
+            var status = stat()
+            if lstat(plist.path, &status) == 0 { return true }
+            guard errno == ENOENT else { throw CocoaError(.fileReadUnknown) }
+            return false
+        }
+    }
 
+    /// Storage is in memory, so cleanup completes before teardown returns;
+    /// CLEANED is recorded only after the synthetic suite has been released.
     func remove() throws {
-        guard let defaults = UserDefaults(suiteName: suite) else { throw CocoaError(.fileWriteUnknown) }
-        try remove(defaults)
-    }
-
-    private static func fileStatus(at url: URL) throws -> stat? {
-        var status = stat()
-        if lstat(url.path, &status) == 0 { return status }
-        guard errno == ENOENT else { throw CocoaError(.fileReadUnknown) }
-        return nil
-    }
-}
-
-/// XCTest ends before Swift Testing on this host. The observation boundary
-/// drains XCTest's batch; a normal-exit hook also drains Swift Testing's batch.
-/// A killed/crashed host still fails the external preference log guard.
-private final class PendingTestPreferences: NSObject, XCTestObservation, @unchecked Sendable {
-    static let shared = PendingTestPreferences()
-    private struct Pending: Sendable {
-        let cleanup: TestPreferenceCleanup
-        let removedAt: Date?
-    }
-    private let lock = NSLock()
-    private let finishLock = NSLock()
-    private var pending: [String: Pending] = [:]
-
-    private override init() {
-        super.init()
-        XCTestObservationCenter.shared.addTestObserver(self)
-        atexit {
-            do { try PendingTestPreferences.shared.finish() }
-            catch { PendingTestPreferences.failExit() }
-        }
-    }
-
-    func enqueue(_ cleanup: TestPreferenceCleanup, removedAt: Date?) throws {
-        try lock.withLock {
-            guard pending[cleanup.name] == nil else { throw CocoaError(.fileWriteFileExists) }
-            pending[cleanup.name] = Pending(cleanup: cleanup, removedAt: removedAt)
-        }
-    }
-
-    func contains(_ suite: String) -> Bool { lock.withLock { pending[suite] != nil } }
-
-    func finish() throws {
-        finishLock.lock()
-        defer { finishLock.unlock() }
-        var remaining = lock.withLock { Array(pending.values) }
-        guard !remaining.isEmpty else { return }
-        let deadline = ProcessInfo.processInfo.systemUptime + 15
-        repeat {
-            var waiting: [Pending] = []
-            for request in remaining {
-                if try request.cleanup.finish(removedAt: request.removedAt) {
-                    _ = lock.withLock { pending.removeValue(forKey: request.cleanup.name) }
-                } else {
-                    waiting.append(request)
-                }
-            }
-            remaining = waiting
-            if !remaining.isEmpty { Thread.sleep(forTimeInterval: 0.05) }
-        } while !remaining.isEmpty && ProcessInfo.processInfo.systemUptime < deadline
-        guard remaining.isEmpty else { throw CocoaError(.fileWriteUnknown) }
-    }
-
-    func testBundleDidFinish(_ testBundle: Bundle) {
-        do { try finish() }
-        catch { Self.failExit() }
-    }
-
-    private static func failExit() -> Never {
-        fputs("TEST_PREFERENCE_BATCH_FAILED: synthetic suite cleanup or evidence logging failed\n", stderr)
-        fflush(nil)
-        _exit(EXIT_FAILURE)
+        TestUserDefaults.release(suite: suite)
+        try Self.emit("CLEANED", suite: suite)
     }
 }
 
@@ -255,34 +288,49 @@ enum TestTaskLifetime {
 
 @MainActor
 final class TestInfrastructureTests: XCTestCase {
-    func testLogicalCleanupPrecedesOneBatchDiskFlush() throws {
-        var cleanups: [TestPreferenceCleanup] = []
+    private func auditEvents(for suite: String) throws -> [String] {
+        let events = TestFixtureDirectory.root.appendingPathComponent("test-preferences.events")
+        return try String(contentsOf: events, encoding: .utf8)
+            .split(separator: "\n").map(String.init).filter { $0.hasSuffix(" suite=\(suite)") }
+    }
+
+    func testInMemoryCleanupReleasesSuitesAndRecordsAuditEvents() throws {
         for _ in 0..<2 {
             let suite = "LiveLingo-Test-\(UUID().uuidString)"
             let cleanup = try TestPreferenceCleanup(suite: suite)
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
             defaults.set("synthetic preference", forKey: "value")
-            let reopened = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let reopened = try XCTUnwrap(TestUserDefaults(suiteName: suite))
             XCTAssertEqual(reopened.string(forKey: "value"), "synthetic preference")
+            XCTAssertEqual(try auditEvents(for: suite), ["TEST_PREFERENCE_CREATED suite=\(suite)"])
             try cleanup.remove(defaults)
             XCTAssertTrue(defaults.persistentDomain(forName: suite)?.isEmpty != false)
-            XCTAssertTrue(cleanup.isPendingForTesting)
-            cleanups.append(cleanup)
-        }
-        try TestPreferenceCleanup.finishPending()
-        for cleanup in cleanups {
-            XCTAssertFalse(cleanup.isPendingForTesting)
+            // Cleanup is complete before teardown returns: a new handle starts empty.
+            let fresh = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+            XCTAssertNil(fresh.object(forKey: "value"))
+            XCTAssertEqual(try auditEvents(for: suite), ["TEST_PREFERENCE_CREATED suite=\(suite)",
+                                                         "TEST_PREFERENCE_CLEANED suite=\(suite)"])
             XCTAssertFalse(try cleanup.hasPlistForTesting)
+            TestUserDefaults.release(suite: suite)
         }
     }
 
     func testReadOnlyDomainCleanupDoesNotManufactureAPlist() throws {
         let suite = "LiveLingo-Test-\(UUID().uuidString)"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         XCTAssertNil(defaults.object(forKey: "absent"))
         try cleanup.remove(defaults)
-        try TestPreferenceCleanup.finishPending()
+        XCTAssertFalse(try cleanup.hasPlistForTesting)
+    }
+
+    func testCleanupRejectsTheRealPreferenceStore() throws {
+        let suite = "LiveLingo-Test-\(UUID().uuidString)"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        // Only the in-memory store is accepted; a cfprefsd-backed handle is
+        // refused before any domain is touched. Nothing is written to it.
+        XCTAssertThrowsError(try cleanup.remove(UserDefaults.standard))
+        try cleanup.remove()
         XCTAssertFalse(try cleanup.hasPlistForTesting)
     }
 

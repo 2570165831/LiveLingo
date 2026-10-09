@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import importlib.util
 import os
 import sys
 import tempfile
@@ -20,8 +21,33 @@ import numpy as np
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from qwen_asr_service import PEAK_CEILING_DBFS, speech_band_enhance
-import qwen_asr_service as service
+with patch.dict(os.environ, {'LIVELINGO_ASR_MODELS': ''}):
+    from qwen_asr_service import PEAK_CEILING_DBFS, speech_band_enhance
+    import qwen_asr_service as service
+
+
+def in_process_mode() -> bool:
+    """The standard offline gate opts into socket-free handlers explicitly."""
+    return os.environ.get('LIVELINGO_ASR_TEST_IN_PROCESS') == '1'
+
+
+def require_loopback(test: unittest.TestCase) -> None:
+    """Real-transport tests need loopback. Missing loopback is a failure.
+
+    Only LIVELINGO_ALLOW_LOOPBACK_SKIP=1 turns it into a visible skip; use
+    LIVELINGO_ASR_TEST_IN_PROCESS=1 for the socket-free offline gate instead.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(('127.0.0.1', 0))
+            probe.listen(1)
+    except OSError as error:
+        reason = f'loopback HTTP unavailable ({type(error).__name__}: {error})'
+        if os.environ.get('LIVELINGO_ALLOW_LOOPBACK_SKIP') == '1':
+            test.skipTest(reason + '; skipped because LIVELINGO_ALLOW_LOOPBACK_SKIP=1')
+        test.fail(reason + '. Real-socket ASR coverage did not run. Set '
+                  'LIVELINGO_ASR_TEST_IN_PROCESS=1 for the socket-free gate or '
+                  'LIVELINGO_ALLOW_LOOPBACK_SKIP=1 to skip explicitly.')
 
 
 class AutoLanguageTests(unittest.TestCase):
@@ -77,6 +103,7 @@ class AutoLanguageTests(unittest.TestCase):
 
     def setUp(self):
         self.enterContext(patch.object(service, 'AUTO_SELF_CHECKS', {}))
+        self.enterContext(patch.dict(os.environ, {'LIVELINGO_SCOREBOARD_TIMINGS': ''}))
         self.enterContext(patch.object(service, 'version', side_effect=lambda name: {'mlx-audio': '0.3.1', 'mlx-lm': '0.30.5'}[name]))
         def softmax(logits):
             weights = np.exp(logits - np.max(logits))
@@ -233,6 +260,15 @@ class ProbePrecisionTests(unittest.TestCase):
     cases = ((16.0, 12.5, -8.0), (1000.0, 992.0, 968.0), (-1000.0, -1008.0, -1024.0))
 
     def setUp(self):
+        if importlib.util.find_spec('mlx') is None:
+            self.skipTest('precision tests require optional dependency mlx')
+        import mlx.core as mx
+        if self.cpu_only():
+            # Restricted runs keep every precision assertion but dispatch no GPU
+            # work. Restore the caller's device so other suites are unaffected.
+            self.addCleanup(mx.set_default_device, mx.default_device())
+            mx.set_default_device(mx.cpu)
+        self.enterContext(patch.dict(os.environ, {'LIVELINGO_SCOREBOARD_TIMINGS': ''}))
         self.tokenizer = AutoLanguageTests.Tokenizer()
         self.chinese = self.tokenizer.encode(' Chinese')[0]
         self.english = self.tokenizer.encode(' English')[0]
@@ -241,11 +277,15 @@ class ProbePrecisionTests(unittest.TestCase):
                       'heads': {tokens[0]: [label] for label, tokens in self.tokenizer.heads.items()}}
 
     @staticmethod
-    def devices(mx):
-        # The offline gate's in-process mode is CPU-only. Preserve explicit
-        # backend coverage for ordinary invocations without dispatching GPU work
-        # from the synthetic offline acceptance environment.
-        if os.environ.get('LIVELINGO_ASR_TEST_IN_PROCESS') == '1':
+    def cpu_only() -> bool:
+        return os.environ.get('LIVELINGO_ASR_TEST_CPU_ONLY') == '1'
+
+    @classmethod
+    def devices(cls, mx):
+        # Production probes run on the GPU, and docs/ASR-PROBE-PRECISION.md
+        # records CPU/GPU differences, so ordinary runs cover both backends.
+        # Only an explicit LIVELINGO_ASR_TEST_CPU_ONLY=1 drops the GPU pass.
+        if cls.cpu_only():
             return (mx.cpu,)
         return (mx.cpu, mx.gpu)
 
@@ -329,8 +369,10 @@ class ProbePrecisionTests(unittest.TestCase):
 class ServiceResponsivenessTests(unittest.TestCase):
     def setUp(self):
         # Every service here owns synthetic state and a test-only executor.
+        self.enterContext(patch.dict(os.environ, {'LIVELINGO_SCOREBOARD_TIMINGS': ''}))
         for name, value in {
             'MODELS': {}, 'MODEL_LAST_USED': {}, 'UNLOADING_MODELS': set(),
+            'MODEL_ROOT': Path('synthetic-models'), 'MODEL_PATHS': {},
             'REQUEST_STATES': {}, 'COMPLETED_REQUESTS': {}, 'AUTH_TOKEN': 'synthetic-service-test-token',
             'INFERENCE_SLOTS': threading.BoundedSemaphore(service.MAX_INFERENCE_REQUESTS),
         }.items():
@@ -342,14 +384,16 @@ class ServiceResponsivenessTests(unittest.TestCase):
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='asr-test')
         self.enterContext(patch.object(service, 'INFERENCE_WORKER', self.executor))
         self.addCleanup(self.executor.shutdown, wait=True)
-        if os.environ.get('LIVELINGO_ASR_TEST_IN_PROCESS') == '1':
+        if in_process_mode():
             self.use_inprocess_requests()
+        else:
+            require_loopback(self)
 
     def use_inprocess_requests(self):
         """Exercise the handlers and worker without binding any sockets.
 
-        Opt in for offline validation; the default still tests real HTTP.
-        This fixture does not prove HTTP transport behavior.
+        Opt in with LIVELINGO_ASR_TEST_IN_PROCESS=1; the default tests real
+        loopback HTTP. This fixture does not prove HTTP transport behavior.
         """
         from email.message import Message
         from urllib.parse import urlparse
@@ -590,7 +634,7 @@ class ServiceResponsivenessTests(unittest.TestCase):
             return SimpleNamespace(text='finished after disconnect')
         server, base = self.start_server()
         with patch.object(service, 'model_for', return_value=SimpleNamespace(generate=generate)):
-            if os.environ.get('LIVELINGO_ASR_TEST_IN_PROCESS') == '1':
+            if in_process_mode():
                 handler = self.synthetic_handler('model=parakeet')
                 handler.headers['X-LiveLingo-Request-ID'] = 'disconnected'
                 handler.send_json = service.Handler.send_json.__get__(handler)
@@ -609,27 +653,24 @@ class ServiceResponsivenessTests(unittest.TestCase):
                         release.set()
                     job.result(timeout=5)
                 handler.send_response.assert_called_once_with(200)
-                completed = service.resource_snapshot()
-                self.assertNotIn('disconnected', completed['requests'])
-                self.assertEqual(completed['completed_requests']['disconnected'],
-                                 {'model': 'parakeet', 'state': 'finished'})
-                return
-            client = socket.create_connection(('127.0.0.1', server.server_port), timeout=3)
-            try:
-                client.sendall(('POST /transcribe?model=parakeet HTTP/1.0\r\n'
-                                f'Host: 127.0.0.1:{server.server_port}\r\n'
-                                f'{service.TOKEN_HEADER}: {service.AUTH_TOKEN}\r\n'
-                                'Content-Length: 4\r\nX-LiveLingo-Request-ID: disconnected\r\n\r\ntest').encode())
-                self.assertTrue(entered.wait(2))
-                client.close()
-                with urlopen(Request(base + '/health', headers={service.TOKEN_HEADER: service.AUTH_TOKEN}), timeout=2) as response:
-                    during = json.load(response)
-                self.assertEqual(during['requests']['disconnected']['state'], 'running')
-                self.assertNotIn('disconnected', during['completed_requests'])
-            finally:
-                client.close()
-                release.set()
-            self.wait_for(lambda: 'disconnected' in service.resource_snapshot()['completed_requests'])
+            else:
+                # Default: a real client socket closes mid-request.
+                client = socket.create_connection(('127.0.0.1', server.server_port), timeout=3)
+                try:
+                    client.sendall(('POST /transcribe?model=parakeet HTTP/1.0\r\n'
+                                    f'Host: 127.0.0.1:{server.server_port}\r\n'
+                                    f'{service.TOKEN_HEADER}: {service.AUTH_TOKEN}\r\n'
+                                    'Content-Length: 4\r\nX-LiveLingo-Request-ID: disconnected\r\n\r\ntest').encode())
+                    self.assertTrue(entered.wait(2))
+                    client.close()
+                    with urlopen(Request(base + '/health', headers={service.TOKEN_HEADER: service.AUTH_TOKEN}), timeout=2) as response:
+                        during = json.load(response)
+                    self.assertEqual(during['requests']['disconnected']['state'], 'running')
+                    self.assertNotIn('disconnected', during['completed_requests'])
+                finally:
+                    client.close()
+                    release.set()
+                self.wait_for(lambda: 'disconnected' in service.resource_snapshot()['completed_requests'])
         completed = service.resource_snapshot()
         self.assertNotIn('disconnected', completed['requests'])
         self.assertEqual(completed['completed_requests']['disconnected'],
@@ -757,6 +798,9 @@ class ModelAvailabilityTests(unittest.TestCase):
 class SpeechBandEnhancementTests(unittest.TestCase):
     sample_rate = 44_100
 
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {'LIVELINGO_SCOREBOARD_TIMINGS': ''}))
+
     def write_audio(self, audio: np.ndarray) -> str:
         handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         handle.close()
@@ -835,9 +879,13 @@ class OwnedServiceProtocolTests(unittest.TestCase):
         import time
         from urllib.error import HTTPError
         token = secrets.token_hex(32)
+        in_process = in_process_mode()
+        if not in_process:
+            require_loopback(self)
         with tempfile.TemporaryDirectory() as models:
+            # Default: the real service file binds a real loopback port, and
+            # token auth is checked over HTTP against that child process.
             command = [sys.executable, '-u', service.__file__]
-            in_process = os.environ.get('LIVELINGO_ASR_TEST_IN_PROCESS') == '1'
             if in_process:
                 # Run the real CLI/watchdog in a child with an unbound server.
                 # Closing its parent pipe must still terminate that process.
@@ -853,7 +901,8 @@ sys.exit(service.main(sys.argv[1:]))
 ''']
             child = subprocess.Popen(
                 command + ["--supervised", "--port", "0", "--models-dir", models],
-                env=dict(os.environ, LIVELINGO_ASR_TOKEN=token, PYTHONDONTWRITEBYTECODE="1"),
+                env=dict(os.environ, LIVELINGO_ASR_TOKEN=token, LIVELINGO_ASR_MODELS=models,
+                         LIVELINGO_SCOREBOARD_TIMINGS='', PYTHONDONTWRITEBYTECODE="1"),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             try:
                 ready = None
@@ -893,6 +942,11 @@ sys.exit(service.main(sys.argv[1:]))
                 for endpoint, body in [("/health", None), ("/transcribe", b"invalid audio")]:
                     with self.assertRaises(HTTPError) as caught:
                         urlopen(Request(base + endpoint, data=body), timeout=3)
+                    self.assertEqual(caught.exception.code, 401)
+                    # A different token is rejected too, not only a missing one.
+                    with self.assertRaises(HTTPError) as caught:
+                        urlopen(Request(base + endpoint, data=body,
+                                        headers={service.TOKEN_HEADER: secrets.token_hex(32)}), timeout=3)
                     self.assertEqual(caught.exception.code, 401)
                 with urlopen(Request(base + "/health", headers={service.TOKEN_HEADER: token}), timeout=3) as response:
                     health = json.load(response)

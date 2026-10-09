@@ -13,7 +13,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
     private func defaults() throws -> (UserDefaults, String) {
         let suite = "FloatingSubtitleDisplay-\(UUID().uuidString)"
         let cleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         addTeardownBlock { try cleanup.remove() }
         return (defaults, suite)
     }
@@ -49,7 +49,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         preferences.sourceTextSize = 18
         XCTAssertEqual(preferences.translationTextSize, 28)
         preferences.translationTextSize = 36
-        let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(UserDefaults(suiteName: suite)))
+        let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(TestUserDefaults(suiteName: suite)))
         XCTAssertEqual(reopened.sourceTextSize, 18)
         XCTAssertEqual(reopened.translationTextSize, 36)
         XCTAssertEqual(store.double(forKey: "floatingTextSize"), 28,
@@ -66,7 +66,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             preferences.translationTextSize = 40
             XCTAssertNil(preferences.sizePresetBinding.wrappedValue)
             preferences.sizePresetBinding.wrappedValue = preset
-            let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(UserDefaults(suiteName: suite)))
+            let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(TestUserDefaults(suiteName: suite)))
             XCTAssertEqual(reopened.sizePreset, preset)
             XCTAssertEqual(reopened.sourceTextSize, sourceSize)
             XCTAssertEqual(reopened.translationTextSize, preset)
@@ -79,7 +79,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         for mode in FloatingSubtitleDisplayMode.allCases {
             preferences.displayMode = mode
             preferences.backgroundOpacity = 0.75
-            let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(UserDefaults(suiteName: suite)))
+            let reopened = FloatingSubtitlePreferences(store: try XCTUnwrap(TestUserDefaults(suiteName: suite)))
             XCTAssertEqual(reopened.displayMode, mode)
             XCTAssertEqual(reopened.backgroundOpacity, 0.75)
             XCTAssertEqual(store.string(forKey: "floatingDisplayMode"), mode.rawValue)
@@ -847,16 +847,8 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
 
     private func fixture() throws -> (AppModel, UserDefaults) {
         XCTAssertTrue(AppRuntimeEnvironment.isUnitTesting)
-        if let root = ProcessInfo.processInfo.environment["LIVELINGO_TEST_WORKSPACE"] {
-            let temporary = FileManager.default.temporaryDirectory.path
-            guard temporary.hasPrefix(root + "/"), NSHomeDirectory().hasPrefix(root + "/") else {
-                throw NSError(domain: "FloatingSubtitleDisplayTests.PathIsolation", code: 1,
-                              userInfo: [NSLocalizedDescriptionKey: "Test paths escaped the requested workspace: \(temporary)"])
-            }
-            print("FLOATING_TEST_PATH_ISOLATION temporary=\(temporary) home=\(NSHomeDirectory())")
-        }
         let (store, _) = try defaults()
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FloatingSubtitleDisplay-\(UUID().uuidString)",
+        let directory = TestFixtureDirectory.root.appendingPathComponent("FloatingSubtitleDisplay-\(UUID().uuidString)",
                                                                                      isDirectory: true)
         let queue = LearningReviewQueue(journalURL: directory.appendingPathComponent("queue.json"),
                                        observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
@@ -964,7 +956,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         NotificationCenter.default.addObserver(inspection, selector: #selector(MenuInspection.menuBegan(_:)),
                                                name: NSMenu.didBeginTrackingNotification, object: nil)
         defer { NotificationCenter.default.removeObserver(inspection) }
-        let deadline = Date().addingTimeInterval(3)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         let timer = Timer(timeInterval: 0.05, repeats: true) { _ in
             MainActor.assumeIsolated {
                 func sizeMenu(_ menu: NSMenu) -> NSMenu? {
@@ -987,7 +979,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                         }
                     }
                     root.cancelTracking()
-                } else if Date() >= deadline {
+                } else if ContinuousClock.now >= deadline {
                     inspection.timedOut = true
                     inspection.menu?.cancelTracking()
                     if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],

@@ -17,7 +17,9 @@ mkdir -p "$task_gate_root/tmp" "$task_gate_root/cli-module-cache" "$task_gate_ro
 export TMPDIR="$task_gate_root/tmp/" PYTHONDONTWRITEBYTECODE=1
 export LIVELINGO_TARGET_EVAL_OUTPUT_ROOT="$task_gate_root"
 export LIVELINGO_QUALITY_TEST_DIRECTORY="$task_gate_root/python-quality"
-export LIVELINGO_ASR_TEST_IN_PROCESS=1
+# Socket-free ASR handlers and CPU-only probe precision are explicit gate
+# choices; plain unittest runs keep real loopback HTTP and the GPU pass.
+export LIVELINGO_ASR_TEST_IN_PROCESS=1 LIVELINGO_ASR_TEST_CPU_ONLY=1
 export LIVELINGO_IDLE_TEST_OUTPUT="$task_gate_root/idle-tests"
 export LIVELINGO_CLI_TEST_OUTPUT_ROOT="$task_gate_root"
 export PYTHONPATH="$task_source_root/Scripts:$task_source_root/Scripts/mlx_runtime:/Applications/LiveLingo.app/Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages:/Applications/LiveLingo.app/Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages"
@@ -44,7 +46,7 @@ build_entry target-acceptance-cli -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/targe
 build_entry learning-quality-cli -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/learning-quality-cli.swift
 build_entry learning-quality-cli-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS -D QUALITY_PROBE_TESTS Scripts/learning-quality-cli.swift Scripts/test_learning_quality_cli.swift
 build_entry learning-quality-target-cli-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS -D QUALITY_PROBE_TESTS Scripts/learning-quality-cli.swift Scripts/test_learning_quality_target_cli.swift
-build_entry livelingo-cli-lifecycle-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/test-cli-lifecycle.swift
+build_entry livelingo-cli-lifecycle-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS LiveLingoTests/TestPreferenceCleanup.swift Scripts/test-cli-lifecycle.swift
 build_entry livelingo-cli-multilingual-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/test-cli-multilingual.swift
 build_entry livelingo-cli-target-review-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/test-cli-target-review.swift
 build_entry livelingo-cli-translation-failure-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS LiveLingoTests/TestPreferenceCleanup.swift Scripts/test-cli-translation-failures.swift
@@ -54,7 +56,18 @@ build_entry livelingo-cli-translation-failure-tests -D LIVELINGO_CLI_LIFECYCLE_T
 "$task_gate_root/offline-clis/livelingo-cli-multilingual-tests" "$task_gate_root/offline-clis/livelingo-cli" "$task_gate_root/cli-multilingual-tests"
 "$task_gate_root/offline-clis/livelingo-cli-target-review-tests" "$task_gate_root/cli-target-review-tests"
 "$task_gate_root/offline-clis/livelingo-cli-translation-failure-tests" "$task_gate_root/cli-translation-failure-tests"
-/opt/homebrew/bin/python3.13 -B Scripts/test-cli-process.py "$task_gate_root/offline-clis/livelingo-cli" "$task_gate_root/cli-process-tests" "$task_gate_root/cli-lifecycle-tests"
+/opt/homebrew/bin/python3.13 -B Scripts/test-cli-process.py "$task_gate_root/offline-clis/livelingo-cli" "$task_gate_root/cli-process-tests" "$task_gate_root/cli-lifecycle-tests" \
+    | tee "$task_gate_root/cli-process-tests.log"
+grep -q '"event": "process_tests_passed"' "$task_gate_root/cli-process-tests.log" \
+    || { printf 'Process tests did not report completion.\n' >&2; exit 1; }
+task_gate_skips=""
+if grep -q '"event": "process_tests_skipped"' "$task_gate_root/cli-process-tests.log"; then
+    if [[ "${LIVELINGO_ALLOW_LOOPBACK_SKIP:-}" != 1 ]]; then
+        printf 'Process tests skipped a required case; see %s.\n' "$task_gate_root/cli-process-tests.log" >&2
+        exit 1
+    fi
+    task_gate_skips="owned-asr-health-failure (LIVELINGO_ALLOW_LOOPBACK_SKIP=1)"
+fi
 "$task_gate_root/offline-clis/livelingo-cli" --help > "$task_gate_root/cli-help.txt"
 "$task_gate_root/offline-clis/learning-quality-cli" --input Scripts/Fixtures/learning-quality-v1/constant-acceleration.json --output "$task_gate_root/quality-cli-dry-run" --dry-run
 # Match run-python-gates.sh's full discovery environment and skipped optional
@@ -64,4 +77,8 @@ unset LIVELINGO_TARGET_ACCEPTANCE_CLI
 LIVELINGO_TARGET_ACCEPTANCE_CLI="$task_gate_root/offline-clis/target-acceptance-cli" \
     /opt/homebrew/bin/python3.13 -B -m unittest Scripts.test_target_acceptance_cli
 /opt/homebrew/bin/python3.13 -B Scripts/test-release-flow.py
-printf 'Privacy tool gates passed.\n'
+if [[ -n "$task_gate_skips" ]]; then
+    printf 'Privacy tool gates passed with explicit skips: %s. Not full verification.\n' "$task_gate_skips"
+else
+    printf 'Privacy tool gates passed.\n'
+fi

@@ -74,14 +74,16 @@ class WorkerStatsTests(unittest.TestCase):
     def setUp(self):
         output = os.environ.get('LIVELINGO_WORKER_STATS_OUTPUT')
         if output:
-            self.path = Path(output) / self._testMethodName
-            self.path.mkdir(parents=True, exist_ok=False)
+            Path(output).mkdir(parents=True, exist_ok=True)
+            self.path = Path(tempfile.mkdtemp(prefix=self._testMethodName + '.', dir=output))
         else:
             temporary = tempfile.TemporaryDirectory(prefix='livelingo-worker-stats-')
             self.addCleanup(temporary.cleanup)
             self.path = Path(temporary.name)
         environment = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
-        environment.pop('LIVELINGO_SCOREBOARD_TIMINGS', None)
+        for name in ('LIVELINGO_MLX_CACHE_LIMIT_MB', 'LIVELINGO_MLX_MEMORY_LOG_SECONDS',
+                     'LIVELINGO_MLX_IDLE_CACHE_RELEASE_SECONDS', 'LIVELINGO_SCOREBOARD_TIMINGS'):
+            environment.pop(name, None)
         self.process = subprocess.Popen(
             [sys.executable, '-B', '-c', BOOT, str(ROOT), str(self.path / 'state')],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

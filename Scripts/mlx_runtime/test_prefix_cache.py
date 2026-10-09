@@ -2,6 +2,7 @@
 
 No weights are loaded. The separate benchmark compares real-model output tokens.
 """
+import importlib.util
 import types
 import json
 import tempfile
@@ -9,7 +10,14 @@ from pathlib import Path
 import unittest
 from unittest.mock import Mock
 
+# Check optional packages before any runtime import. Installed-but-broken APIs
+# must still fail, and every synthetic tensor must run on the CPU.
+for dependency in ('mlx', 'mlx_lm', 'outlines_core', 'safetensors'):
+    if importlib.util.find_spec(dependency) is None:
+        raise unittest.SkipTest(f'CPU tensor tests require optional dependency {dependency}')
+
 import mlx.core as mx
+mx.set_default_device(mx.cpu)
 from mlx_lm.models.cache import ArraysCache, KVCache
 
 from engine import Generation, PromptPrefixCache, prefix_cache_for_model

@@ -184,7 +184,7 @@ final class CaptionStabilityLifecycleTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let suite = "LiveLingo-StabilityLifecycle-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let probe = StabilityNoteProbe(captionCount: captionCount, failFirst: failFirst, gate: gate)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review-queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in

@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import queue
 import subprocess
@@ -10,12 +11,14 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).parent
 saved_stdout = sys.stdout
 spec = importlib.util.spec_from_file_location('worker_under_test', ROOT/'worker.py')
 worker = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(worker)
+with patch.dict(os.environ):
+    spec.loader.exec_module(worker)
 sys.stdout = saved_stdout
 
 class Backend:
@@ -84,8 +87,12 @@ worker.main()
 class WorkerLifecycleTests(unittest.TestCase):
     def test_pause_interleave_cancel_and_release(self):
         with tempfile.TemporaryDirectory() as directory:
+            environment = dict(os.environ)
+            for name in ('LIVELINGO_MLX_CACHE_LIMIT_MB', 'LIVELINGO_MLX_MEMORY_LOG_SECONDS',
+                         'LIVELINGO_MLX_IDLE_CACHE_RELEASE_SECONDS', 'LIVELINGO_SCOREBOARD_TIMINGS'):
+                environment.pop(name, None)
             process=subprocess.Popen([sys.executable,'-B','-c',BOOT,str(ROOT),directory],
-                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=environment)
             events=queue.Queue()
             def read():
                 for line in process.stdout: events.put(json.loads(line))
