@@ -50,6 +50,9 @@ build_entry livelingo-cli-lifecycle-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS LiveL
 build_entry livelingo-cli-multilingual-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/test-cli-multilingual.swift
 build_entry livelingo-cli-target-review-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS Scripts/test-cli-target-review.swift
 build_entry livelingo-cli-translation-failure-tests -D LIVELINGO_CLI_LIFECYCLE_TESTS LiveLingoTests/TestPreferenceCleanup.swift Scripts/test-cli-translation-failures.swift
+# Same adjacent converter data layout as build-cli.sh; the Traditional
+# Chinese export checks fail with resourcesMissing without it.
+/usr/bin/ditto "$task_source_root/LiveLingo/Resources/ZhVariants" "$task_gate_root/offline-clis/ZhVariants"
 "$task_gate_root/offline-clis/learning-quality-cli-tests" "$task_gate_root/quality-cli-tests" Scripts/Fixtures/learning-quality-v1
 "$task_gate_root/offline-clis/learning-quality-target-cli-tests" "$task_gate_root/quality-target-cli-tests"
 "$task_gate_root/offline-clis/livelingo-cli-lifecycle-tests" "$task_gate_root/cli-lifecycle-tests"
