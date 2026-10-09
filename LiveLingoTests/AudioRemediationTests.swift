@@ -708,8 +708,108 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         await gate.release(); await queue.finish()
         XCTAssertEqual(calls.value, 3)
         XCTAssertEqual(queue.records.first { $0.id == chunk }?.text, "The old interval now has a valid result.")
-        XCTAssertEqual(queue.records.first { $0.id == chunk }?.automaticRetryCount, 2)
+        // The preempted attempt never finished, so only the completed retry is charged.
+        XCTAssertEqual(queue.records.first { $0.id == chunk }?.automaticRetryCount, 1)
         XCTAssertTrue(queue.records.allSatisfy { $0.status == .completed })
+    }
+
+    func testFreshCaptionPreemptsAutomaticRetryWithoutSpendingItsBudget() async throws {
+        let root = try directory(), session = UUID(), chunk = UUID()
+        let old = try audio(root, name: "old.wav"), next = try audio(root, name: "new.wav")
+        let gate = AudioTestGate(), entered = AudioTestBox(false)
+        let calls = AudioTestBox<[String]>([])
+        let owner = AudioTestBox<DurableTranscriptionQueue?>(nil)
+        let atFreshCall = AudioTestBox<(status: TranscriptionWorkRecord.Status, budget: Int)?>(nil)
+        let queue = DurableTranscriptionQueue { url, _, enhanced in
+            calls.update { $0.append("\(url.lastPathComponent):\(enhanced)") }
+            if url.lastPathComponent == "new.wav" {
+                if let record = owner.value?.records.first(where: { $0.id == chunk }) {
+                    atFreshCall.update { $0 = (record.status, record.automaticRetryCount) }
+                }
+                return "The newly captured caption has priority."
+            }
+            let attempt = calls.value.filter { $0.hasPrefix("old.wav") }.count
+            if attempt == 2 { entered.update { $0 = true }; await gate.wait() }
+            return attempt >= 3 ? "The repaired interval finished after the caption." : ""
+        }
+        owner.update { $0 = queue }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: old, modelKey: "primary", fallbackModelKey: nil, start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, id: chunk, sessionID: session), handler: { _ in })
+        try await waitUntil { entered.value }
+        XCTAssertEqual(queue.records.first { $0.id == chunk }?.automaticRetryCount, 1, "claiming debits before ASR")
+        queue.submit(.init(audioURL: next, modelKey: "primary", fallbackModelKey: nil, start: 1, end: 2,
+                           appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await gate.release(); await queue.finish()
+        XCTAssertEqual(calls.value, ["old.wav:false", "old.wav:true", "new.wav:false", "old.wav:true"],
+                       "the fresh caption runs before the preempted repair is claimed again")
+        XCTAssertEqual(atFreshCall.value?.status, .retryWaiting)
+        XCTAssertEqual(atFreshCall.value?.budget, 0, "yielding to captions must not spend the retry budget")
+        let repaired = try XCTUnwrap(queue.records.first { $0.id == chunk })
+        XCTAssertEqual(repaired.status, .completed)
+        XCTAssertEqual(repaired.automaticRetryCount, 1)
+        owner.update { $0 = nil }
+        let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        XCTAssertEqual(reopened.record(id: chunk)?.automaticRetryCount, 1, "the refund is durable")
+    }
+
+    /// Runs a manual retry of `chunk`, preempts it with a fresh caption, and
+    /// returns the transcriber call log after both have finished.
+    private func preemptManualRetry(initialAttemptsSucceed: Bool) async throws
+        -> (calls: [String], record: TranscriptionWorkRecord, budgetBeforeManual: Int, root: URL, session: UUID) {
+        let root = try directory(), session = UUID(), chunk = UUID()
+        let old = try audio(root, name: "old.wav"), next = try audio(root, name: "new.wav")
+        let gate = AudioTestGate(), entered = AudioTestBox(false), manual = AudioTestBox(false)
+        let calls = AudioTestBox<[String]>([])
+        let queue = DurableTranscriptionQueue { url, _, enhanced in
+            calls.update { $0.append("\(url.lastPathComponent):\(enhanced)") }
+            if url.lastPathComponent == "new.wav" { return "The newly captured caption has priority." }
+            guard manual.value else { return initialAttemptsSucceed ? "The first pass heard this sentence." : "" }
+            // The log is cleared before the manual retry, so this counts manual passes only.
+            let manualCalls = calls.value.filter { $0.hasPrefix("old.wav") }.count
+            if manualCalls == 1 { entered.update { $0 = true }; await gate.wait(); return "" }
+            return "The manual repair finished after the caption."
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: old, modelKey: "primary", fallbackModelKey: nil, start: 0, end: 1,
+                           appleEvidence: "", recordingURL: nil, id: chunk, sessionID: session), handler: { _ in })
+        await queue.finish()
+        let before = try XCTUnwrap(queue.records.first { $0.id == chunk })
+        calls.update { $0.removeAll() }
+        manual.update { $0 = true }
+        try queue.retry(id: chunk)
+        try await waitUntil { entered.value }
+        queue.submit(.init(audioURL: next, modelKey: "primary", fallbackModelKey: nil, start: 1, end: 2,
+                           appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await gate.release(); await queue.finish()
+        return (calls.value, try XCTUnwrap(queue.records.first { $0.id == chunk }), before.automaticRetryCount, root, session)
+    }
+
+    func testFreshCaptionPreemptingManualRetryWithExhaustedBudgetKeepsTheManualRequest() async throws {
+        let run = try await preemptManualRetry(initialAttemptsSucceed: false)
+        XCTAssertEqual(run.budgetBeforeManual, DurableTranscriptionJournal.maximumAutomaticRetries)
+        XCTAssertEqual(run.calls.first, "old.wav:true", "the manual pass started before the caption arrived")
+        XCTAssertEqual(Array(run.calls.dropFirst()).first, "new.wav:false", "the fresh caption runs next")
+        XCTAssertEqual(run.calls.last, "old.wav:true", "the preempted manual pass runs again")
+        XCTAssertEqual(run.record.status, .completed, "a preempted manual request must not be dropped to failed")
+        XCTAssertEqual(run.record.text, "The manual repair finished after the caption.")
+        XCTAssertEqual(run.record.automaticRetryCount, DurableTranscriptionJournal.maximumAutomaticRetries)
+        XCTAssertEqual(run.record.manualRetryCount, 1, "only the finished manual pass is counted")
+        let reopened = try DurableTranscriptionJournal(sessionDirectory: run.root, sessionID: run.session)
+        XCTAssertEqual(reopened.record(id: run.record.id)?.status, .completed)
+        XCTAssertEqual(reopened.record(id: run.record.id)?.manualRetryCount, 1)
+    }
+
+    func testFreshCaptionPreemptingManualRetryDoesNotSpendAutomaticBudget() async throws {
+        let run = try await preemptManualRetry(initialAttemptsSucceed: true)
+        XCTAssertEqual(run.budgetBeforeManual, 0)
+        XCTAssertEqual(run.calls.first, "old.wav:true")
+        XCTAssertEqual(Array(run.calls.dropFirst()).first, "new.wav:false")
+        XCTAssertEqual(run.record.status, .completed)
+        XCTAssertEqual(run.record.automaticRetryCount, 0,
+                       "a preempted manual pass must not come back as an automatic retry")
+        XCTAssertEqual(run.record.manualRetryCount, 1)
+        XCTAssertEqual(run.record.attempt, .manual)
     }
 
     func testAutomaticASRReuseIsDiscardedWhenTheSessionChanges() async throws {

@@ -564,12 +564,14 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     func claimNext() throws -> TranscriptionWorkRecord? {
         try lock.withLock {
             guard !state.paused else { return nil }
-            // FIFO among runnable records: new first/manual passes cannot
-            // indefinitely overtake an older retry that still has a budget.
-            let candidate = state.records.first {
-                [.pending, .manualPending].contains($0.status)
-                    || ($0.status == .retryWaiting && $0.automaticRetryCount < Self.maximumAutomaticRetries)
-            }
+            // Fresh captions keep priority over every repair, in arrival order.
+            // Repairs are FIFO among themselves: a newer manual pass cannot
+            // indefinitely overtake an older automatic retry with budget left.
+            let candidate = state.records.first { $0.status == .pending }
+                ?? state.records.first {
+                    $0.status == .manualPending
+                        || ($0.status == .retryWaiting && $0.automaticRetryCount < Self.maximumAutomaticRetries)
+                }
             guard var record = candidate else { return nil }
             if record.status == .retryWaiting { record.attempt = .automaticRetry; record.automaticRetryCount += 1 }
             else if record.status == .manualPending { record.attempt = .manual; record.manualRetryCount += 1 }

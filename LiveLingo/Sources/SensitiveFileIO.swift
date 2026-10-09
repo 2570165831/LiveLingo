@@ -13,6 +13,8 @@ enum SensitiveFileIO {
     @TaskLocal static var operationObserver: (@Sendable (OptionalOperation) -> Void)?
     @TaskLocal static var aclReadError: Int32?
     @TaskLocal static var beforeTemporaryCommit: (@Sendable (URL) throws -> Void)?
+    /// Runs between creating a write temporary and taking its writer lease.
+    @TaskLocal static var beforeTemporaryLease: (@Sendable (URL) throws -> Void)?
     @TaskLocal static var temporaryTrackingParentUnavailable = false
     #endif
 
@@ -154,8 +156,17 @@ enum SensitiveFileIO {
         } catch Failure.system(_, let code) where code == ENOENT {
             return
         }
-        guard try parent.requireRegularFileIfPresent(named: url.lastPathComponent) else { return }
-        try parent.tightenIfPresent(named: url.lastPathComponent)
+        let name = url.lastPathComponent
+        do {
+            guard try parent.requireRegularFileIfPresent(named: name) else { return }
+        } catch Failure.unsafePath {
+            // A committed file still carrying its interrupted writer's second
+            // name can be repaired only by that writer's receipt. Anything
+            // else stays rejected.
+            guard try parent.retireCommittedTemporaryAliases(of: name),
+                  try parent.requireRegularFileIfPresent(named: name) else { throw Failure.unsafePath }
+        }
+        try parent.tightenIfPresent(named: name)
     }
 
     final class Directory: @unchecked Sendable {
@@ -424,9 +435,18 @@ enum SensitiveFileIO {
             let lease = dup(item)
             guard lease >= 0 else { _ = Darwin.close(item); throw system("lease private temporary file") }
             defer { _ = Darwin.close(lease) }
-            guard flock(lease, LOCK_EX | LOCK_NB) == 0 else {
-                _ = Darwin.close(item)
-                throw system("lock private temporary file")
+            #if DEBUG
+            do { try beforeTemporaryLease?(url.appendingPathComponent(temporary)) }
+            catch { _ = Darwin.close(item); throw error }
+            #endif
+            // This invocation created the file exclusively, so only a recovery
+            // scan can hold its lock, and only briefly (it never blocks while
+            // holding it). Wait for it instead of failing an ordinary save.
+            while flock(lease, LOCK_EX) != 0 {
+                guard errno == EINTR else {
+                    _ = Darwin.close(item)
+                    throw system("lock private temporary file")
+                }
             }
             recordTemporary(item: lease, kind: "write", destination: name,
                             digest: SessionArchiveCoding.digest(data), replacement: nil)
@@ -648,11 +668,36 @@ enum SensitiveFileIO {
             return results
         }
 
+        /// Retires only receipt-proven second names of `destination` left by an
+        /// interrupted first write. Returns whether one was removed.
+        func retireCommittedTemporaryAliases(of destination: String) throws -> Bool {
+            guard let target = try entryStatus(destination), target.st_mode & S_IFMT == S_IFREG,
+                  target.st_nlink == 2 else { return false }
+            try assertStillAtOriginalPath()
+            let allNames = try names().sorted()
+            var removed = false
+            for name in allNames where [".session-write-", ".sensitive-write-"].contains(where: { prefix in
+                name.hasPrefix(prefix) && name.hasSuffix(".tmp") &&
+                    UUID(uuidString: String(name.dropFirst(prefix.count).dropLast(4))) != nil
+            }) {
+                guard let info = try entryStatus(name), Identity(info) == Identity(target) else { continue }
+                let reason: String
+                do { reason = try recoverTemporaryItem(name, allNames: allNames, write: true) }
+                catch { reason = "inspection_failed" }
+                let fingerprint = SessionArchiveCoding.digest(Data(name.utf8))
+                recoveryLog.notice("temporary_recovery id=\(fingerprint, privacy: .public) reason=\(reason, privacy: .public)")
+                if reason == "removed_alias" { removed = true }
+            }
+            return removed
+        }
+
         private func recoverTemporaryItem(_ name: String, allNames: [String], write: Bool) throws -> String {
             guard let before = try entryStatus(name) else { return "already_absent" }
             try requireOwner(before)
             let kind = before.st_mode & S_IFMT
-            guard (write && kind == S_IFREG && before.st_nlink == 1) || (!write && kind == S_IFDIR) else {
+            // Two links may be the committed destination plus this name, left by
+            // a kill between linkat and unlinkat; the receipt must prove that.
+            guard (write && kind == S_IFREG && (1...2).contains(before.st_nlink)) || (!write && kind == S_IFDIR) else {
                 return "unknown_identity"
             }
             let item = openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | (write ? 0 : O_DIRECTORY))
@@ -684,7 +729,25 @@ enum SensitiveFileIO {
             }
             let reason: String
             var destinationIdentity: TemporaryIdentity?
-            if write {
+            if write, before.st_nlink == 2 {
+                // Only the exact committed inode named by the receipt, with no
+                // third link anywhere, is a removable second name.
+                guard receipt.destination != name, let destination = try entryStatus(receipt.destination),
+                      destination.st_mode & S_IFMT == S_IFREG, destination.st_uid == getuid(),
+                      TemporaryIdentity(destination) == receipt.item,
+                      try status(item).st_nlink == 2 else { return "unknown_identity" }
+                try assertStillAtOriginalPath()
+                guard let current = try entryStatus(name), TemporaryIdentity(current) == receipt.item,
+                      current.st_nlink == 2,
+                      let latest = try entryStatus(receipt.destination), TemporaryIdentity(latest) == receipt.item else {
+                    return "identity_changed"
+                }
+                guard unlinkat(fd, name, 0) == 0 else { throw system("retire committed temporary alias") }
+                // Only after the alias is gone: the receipt no longer has a use.
+                _ = fremovexattr(item, temporaryAttribute, 0)
+                try synchronize()
+                return "removed_alias"
+            } else if write {
                 let current = try status(item)
                 guard current.st_nlink == 1 else { return "referenced" }
                 if current.st_size == 0 { reason = "removed_empty" }

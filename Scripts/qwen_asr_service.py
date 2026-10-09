@@ -882,12 +882,17 @@ class Handler(BaseHTTPRequestHandler):
                       f"p={text['language_probability']} p_en={text['english_probability']} "
                       f"decode={text['decode']}")
             self.send_json(200, payload)
-        except TimeoutError as error:
-            self.send_json(408 if receiving_audio else 500,
-                           {"error": safe_exception_code(error), "request_id": request_id, "model": model_key})
         except Exception as error:
-            self.send_json(500, {"error": safe_exception_code(error),
-                                 "request_id": request_id, "model": model_key})
+            if duplicate:
+                # Never answer with the owner's identity: a matched request_id
+                # and model would release the client's lease for the owner.
+                self.send_json(409, {"error": "Request ID is already in use"})
+            elif isinstance(error, TimeoutError):
+                self.send_json(408 if receiving_audio else 500,
+                               {"error": safe_exception_code(error), "request_id": request_id, "model": model_key})
+            else:
+                self.send_json(500, {"error": safe_exception_code(error),
+                                     "request_id": request_id, "model": model_key})
         finally:
             if duplicate:
                 # This handler never owns the original request or its input.

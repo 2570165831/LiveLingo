@@ -171,19 +171,14 @@ struct ReviewRetryTests {
             earlierStartedAt = Date().timeIntervalSince1970
             return Self.emptyV2Response
         }
-        do {
-            queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
-            #expect(await waitFor({ queue.items.count == 1 && !queue.running }, seconds: 1),
-                "所有课程均在退避时，后排较早到期的任务也应按期唤醒")
-            #expect(calls == ["C06-B"])
-            #expect((earlierStartedAt ?? 0) >= earlierRetry.notBefore)
-            #expect(queue.items.first?.id == later.id)
-            #expect(queue.items.first?.retryPending == laterRetry)
-            await queue.shutdownForTesting()
-        } catch {
-            await queue.shutdownForTesting()
-            throw error
-        }
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor({ queue.items.count == 1 && !queue.running }, seconds: 1),
+            "所有课程均在退避时，后排较早到期的任务也应按期唤醒")
+        #expect(calls == ["C06-B"])
+        #expect((earlierStartedAt ?? 0) >= earlierRetry.notBefore)
+        #expect(queue.items.first?.id == later.id)
+        #expect(queue.items.first?.retryPending == laterRetry)
+        await queue.shutdownForTesting()
     }
 
     @Test func c06DueRetryBehindActiveCourseWaitsForOwnerAndKeepsItsBudget() async throws {
@@ -208,27 +203,126 @@ struct ReviewRetryTests {
             }
             return Self.emptyV2Response
         }
-        do {
-            queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
-            #expect(await waitFor({ calls == ["C06-B"] }, seconds: 1),
-                "可运行课程要在队首退避到期之前取得 owner")
-            #expect(queue.items.first(where: { $0.id == runnable.id })?.active == true)
-            #expect(await waitFor({ Date().timeIntervalSince1970 >= retry.notBefore }, seconds: 3))
-            queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
-            #expect(calls == ["C06-B"], "到期的 retry 不能越过仍未返回的 owner")
-            #expect(queue.items.first(where: { $0.id == runnable.id })?.active == true)
-            #expect(queue.items.first(where: { $0.id == waiting.id })?.retryPending?.attempts == 1)
-            await gate.release()
-            #expect(await waitFor { queue.items.isEmpty && !queue.running })
-            #expect(calls == ["C06-B", "C06-A"])
-            #expect(!activeWasCancelled, "retry 到期不能取消正在运行的其他课程")
-            #expect((retryStartedAt ?? 0) >= retry.notBefore)
-            await queue.shutdownForTesting()
-        } catch {
-            await gate.release()
-            await queue.shutdownForTesting()
-            throw error
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor({ calls == ["C06-B"] }, seconds: 1),
+            "可运行课程要在队首退避到期之前取得 owner")
+        #expect(queue.items.first(where: { $0.id == runnable.id })?.active == true)
+        #expect(await waitFor({ Date().timeIntervalSince1970 >= retry.notBefore }, seconds: 3))
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(calls == ["C06-B"], "到期的 retry 不能越过仍未返回的 owner")
+        #expect(queue.items.first(where: { $0.id == runnable.id })?.active == true)
+        #expect(queue.items.first(where: { $0.id == waiting.id })?.retryPending?.attempts == 1)
+        await gate.release()
+        #expect(await waitFor { queue.items.isEmpty && !queue.running })
+        #expect(calls == ["C06-B", "C06-A"])
+        #expect(!activeWasCancelled, "retry 到期不能取消正在运行的其他课程")
+        #expect((retryStartedAt ?? 0) >= retry.notBefore)
+        await queue.shutdownForTesting()
+    }
+
+    private func fifoRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveLingoFIFO-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private static func fifoLabel(_ input: String) -> String {
+        ["FIFO-A", "FIFO-B", "FIFO-C"].first { input.contains($0) } ?? "unknown"
+    }
+
+    @Test func consecutiveBackoffYieldsKeepTrueEnqueueOrder() async throws {
+        let root = try fifoRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let journal = root.appendingPathComponent("queue.json")
+        let a = try c06Job(in: root, label: "FIFO-A"), b = try c06Job(in: root, label: "FIFO-B")
+        let c = try c06Job(in: root, label: "FIFO-C")
+        try writeQueueJournal([a, b, c], version: LearningReviewQueue.journalVersion, to: journal)
+        let gate = C06ReviewGate()
+        var calls: [String] = []
+        let queue = makeQueue(journal: journal, retryDelays: [1.0, 1.0]) { input, _, _, _, _ in
+            let label = Self.fifoLabel(input)
+            calls.append(label)
+            if calls.count <= 2 { throw QwenRuntimeError.requestFailed("模拟本机模型协议错误") }
+            if label == "FIFO-C" { await gate.wait() }
+            return Self.emptyV2Response
         }
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor({ calls == ["FIFO-A", "FIFO-B", "FIFO-C"] }, seconds: 3),
+            "两次退避让位后，后面的课程应当先跑")
+        let deadlines = queue.items.compactMap(\.retryPending?.notBefore)
+        #expect(deadlines.count == 2)
+        #expect(await waitFor({ Date().timeIntervalSince1970 > (deadlines.max() ?? 0) + 0.05 }, seconds: 4))
+        #expect(calls.count == 3, "到期的重试不得打断正在运行的课程")
+        await gate.release()
+        #expect(await waitFor { queue.items.isEmpty && !queue.running })
+        #expect(calls == ["FIFO-A", "FIFO-B", "FIFO-C", "FIFO-A", "FIFO-B"],
+            "两个都已到期时，先入队的 A 必须先于 B 重试")
+        await queue.shutdownForTesting()
+    }
+
+    @Test func enqueueOrderSurvivesSaveAndReloadAfterBackoffYields() async throws {
+        let root = try fifoRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let journal = root.appendingPathComponent("queue.json")
+        let a = try c06Job(in: root, label: "FIFO-A"), b = try c06Job(in: root, label: "FIFO-B")
+        let c = try c06Job(in: root, label: "FIFO-C")
+        try writeQueueJournal([a, b, c], version: LearningReviewQueue.journalVersion, to: journal)
+        var calls: [String] = []
+        let first = makeQueue(journal: journal, retryDelays: [60, 60]) { input, _, _, _, _ in
+            calls.append(Self.fifoLabel(input))
+            if calls.count <= 2 { throw QwenRuntimeError.requestFailed("模拟本机模型协议错误") }
+            return Self.emptyV2Response
+        }
+        first.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor({ first.items.count == 2 && !first.running }, seconds: 3))
+        #expect(calls == ["FIFO-A", "FIFO-B", "FIFO-C"])
+        try await first.waitForPendingStorage()
+        await first.shutdownForTesting()
+
+        // Both backoff windows elapse while the app is closed. Keep each
+        // retry budget; only the deadlines move into the past.
+        var saved = try persistedJournal(journal)
+        #expect(Set(saved.jobs.map(\.id)) == [a.id, b.id])
+        for index in saved.jobs.indices {
+            #expect(saved.jobs[index].retryPending?.attempts == 1)
+            saved.jobs[index].retryPending?.notBefore = Date().timeIntervalSince1970 - 1
+        }
+        try JSONEncoder().encode(saved).write(to: journal, options: .atomic)
+
+        var resumed: [String] = []
+        let second = makeQueue(journal: journal) { input, _, _, _, _ in
+            resumed.append(Self.fifoLabel(input))
+            return Self.emptyV2Response
+        }
+        second.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor { second.items.isEmpty && !second.running })
+        #expect(resumed == ["FIFO-A", "FIFO-B"], "重新打开后仍按真实入队顺序：A 先于 B")
+        await second.shutdownForTesting()
+    }
+
+    @Test func failedHeadDoesNotHideACourseAwaitingManualStart() async throws {
+        let root = try fifoRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let journal = root.appendingPathComponent("queue.json")
+        var failed = try c06Job(in: root, label: "FIFO-A")
+        failed.failure = "录音目录找不到或无法写入。请恢复目录后重试，或将此任务移出复查队列。"
+        var manual = try c06Job(in: root, label: "FIFO-B")
+        manual.awaitingManualStart = true
+        try writeQueueJournal([failed, manual], version: LearningReviewQueue.journalVersion, to: journal)
+        var calls: [String] = []
+        let queue = makeQueue(journal: journal) { input, _, _, _, _ in
+            calls.append(Self.fifoLabel(input))
+            return Self.emptyV2Response
+        }
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitForNoActivity({ !calls.isEmpty }), "等待手动开始的课程不得自动运行")
+        #expect(queue.items.map(\.id) == [manual.id, failed.id], "失败的队首不得挡住等待开始的课程")
+        #expect(queue.frontJobAwaitingManualStart)
+        #expect(queue.actionTitle == "开始复查")
+        queue.performPrimaryAction()
+        #expect(await waitFor { queue.items.count == 1 && !queue.running })
+        #expect(calls == ["FIFO-B"], "主按钮应开始等待中的课程，而不是重试失败的课程")
+        #expect(queue.items.first?.id == failed.id)
+        #expect(queue.items.first?.failure == failed.failure)
+        await queue.shutdownForTesting()
     }
 
     // MARK: - 策略本身

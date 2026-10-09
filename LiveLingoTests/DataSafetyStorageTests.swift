@@ -111,6 +111,74 @@ final class DataSafetyStorageTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destination), Data("synthetic committed body".utf8))
     }
 
+    func testDU05WriterWaitsForRecoveryScanHoldingItsNewTemporary() throws {
+        let root = try DataSafetyFixtures.make("DU05-lease")
+        defer { DataSafetyFixtures.preserve(root) }
+        let destination = root.appendingPathComponent("snapshot.json")
+        let bytes = Data("synthetic committed body".utf8)
+        try SensitiveFileIO.$beforeTemporaryLease.withValue({ pending in
+            // A recovery scan that reached the brand-new file first sees no
+            // receipt, keeps it, and still holds its lock when the writer asks.
+            let directory = try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false)
+            XCTAssertEqual(try directory.recoverTemporaryItems().first(where: { $0.name == pending.lastPathComponent })?.reason,
+                           "unregistered")
+            let scanner = Darwin.open(pending.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            guard scanner >= 0 else { throw SessionStoreError.io(operation: "open synthetic scanner", code: errno) }
+            guard flock(scanner, LOCK_EX | LOCK_NB) == 0 else {
+                _ = Darwin.close(scanner)
+                throw SessionStoreError.io(operation: "lock synthetic scanner", code: errno)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                _ = flock(scanner, LOCK_UN)
+                _ = Darwin.close(scanner)
+            }
+        }) { try SessionArchiveCoding.atomicWrite(bytes, destination) }
+        XCTAssertEqual(try Data(contentsOf: destination), bytes, "A brief scan lock must not fail an ordinary save")
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasSuffix(".tmp") }
+        XCTAssertEqual(leftovers, [])
+    }
+
+    func testDU05KillBetweenLinkAndUnlinkLeavesAnOpenableCourse() throws {
+        let root = try DataSafetyFixtures.make("DU05-alias")
+        defer { DataSafetyFixtures.preserve(root) }
+        let stored = try SessionStore(directory: root).save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        let bytes = try Data(contentsOf: destination)
+        // Re-create the first-write state: no destination yet, then the new
+        // name is linked and the process dies before the temporary is unlinked.
+        try FileManager.default.removeItem(at: destination)
+        let orphan = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try interruptedWrite(bytes, to: destination, orphan: orphan)
+        XCTAssertEqual(link(orphan.path, destination.path), 0)
+        var info = stat()
+        XCTAssertEqual(lstat(destination.path, &info), 0)
+        XCTAssertEqual(info.st_nlink, 2, "Precondition: the committed file still has its temporary name")
+
+        XCTAssertEqual(try SessionStore(directory: root).load(), stored)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path), "The receipt-proven second name is retired")
+        XCTAssertEqual(lstat(destination.path, &info), 0)
+        XCTAssertEqual(info.st_nlink, 1)
+        XCTAssertEqual(getxattr(destination.path, "com.jianhongli.LiveLingo.temporary-v1", nil, 0, 0, XATTR_NOFOLLOW), -1,
+                       "The committed file no longer carries the writer's receipt")
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertNoThrow(try SessionStore(directory: root).save(stored))
+    }
+
+    func testDU05UnprovenSecondNameOfCommittedFileStaysRejected() throws {
+        let root = try DataSafetyFixtures.make("DU05-unproven-alias")
+        defer { DataSafetyFixtures.preserve(root) }
+        _ = try SessionStore(directory: root).save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        // A familiar temporary name without this inode's receipt proves nothing.
+        let alias = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        XCTAssertEqual(link(destination.path, alias.path), 0)
+        XCTAssertThrowsError(try SessionStore(directory: root).load())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: alias.path))
+        var info = stat()
+        XCTAssertEqual(lstat(destination.path, &info), 0)
+        XCTAssertEqual(info.st_nlink, 2)
+    }
+
     func testDU05RecoveryPreservesReferencesAndReplacedInodes() throws {
         let root = try DataSafetyFixtures.make("DU05-references")
         defer { DataSafetyFixtures.preserve(root) }

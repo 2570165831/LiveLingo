@@ -3359,6 +3359,12 @@ final class LearningReviewQueue: ObservableObject {
         var courseInputDigest: String? = nil
         var courseBatchDigests: [String: String]? = nil
         var supersededByRevision: Int? = nil
+        /// Position in true enqueue order. Moving a runnable course to the
+        /// front never changes it, so backoff yields cannot scramble FIFO.
+        /// Nil in journals written before it existed: such jobs keep their
+        /// saved array order and are numbered, in that order, before the first
+        /// reorder or save. New jobs are numbered after every existing one.
+        var enqueueSequence: Int? = nil
 
         var resolvedScope: LearningReviewScope { scope ?? .wholeLesson }
     }
@@ -3691,7 +3697,23 @@ final class LearningReviewQueue: ObservableObject {
     func moveJobToEnd(_ id: UUID) {
         editQueue { [self] in
             guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
-            jobs.append(jobs.remove(at: index))
+            assignMissingEnqueueSequences()
+            var moved = jobs.remove(at: index)
+            // An explicit move to the end is a new place in enqueue order.
+            moved.enqueueSequence = (jobs.compactMap(\.enqueueSequence).max() ?? 0) + 1
+            jobs.append(moved)
+        }
+    }
+
+    /// Jobs from older journals or new submissions get the next sequence, in
+    /// array order. Run before any reorder, so a rotation is never baked in;
+    /// a loaded queue stays byte-identical until something is saved.
+    private func assignMissingEnqueueSequences() {
+        guard jobs.contains(where: { $0.enqueueSequence == nil }) else { return }
+        var next = (jobs.compactMap(\.enqueueSequence).max() ?? 0) + 1
+        for index in jobs.indices where jobs[index].enqueueSequence == nil {
+            jobs[index].enqueueSequence = next
+            next += 1
         }
     }
 
@@ -4538,6 +4560,7 @@ final class LearningReviewQueue: ObservableObject {
         let replacedIDs = Set(superseded.map(\.id))
         jobs.removeAll { replacedIDs.contains($0.id) }
         jobs.append(candidate)
+        assignMissingEnqueueSequences()
         do { try save() }
         catch {
             jobs = before
@@ -4658,6 +4681,7 @@ final class LearningReviewQueue: ObservableObject {
         retiredJobs.append(contentsOf: ownedRetirements)
         jobs.removeAll { plan.supersededIDs.contains($0.id) }
         jobs.append(plan.candidate)
+        assignMissingEnqueueSequences()
         let submittedJobs = try encoder.encode(jobs)
         let submittedRetiredJobs = try encoder.encode(retiredJobs)
         do { try await saveAndWait() }
@@ -4897,16 +4921,29 @@ final class LearningReviewQueue: ObservableObject {
     private func reconcile() {
         // 测试收尾后不再自动起任务（仅测试置位）。
         guard !testingStopped else { refreshStatus(); return }
-        // Keep blocked jobs visible, and preserve FIFO among runnable courses.
-        // A retry waiting out its deadline yields without losing its budget.
-        // Reorder only after the previous request has fully stopped.
+        // Keep blocked jobs visible, and run courses in true enqueue order.
+        // A retry waiting out its deadline yields without losing its budget
+        // or its place. Reorder only after the previous request has stopped.
         let now = Date().timeIntervalSince1970
-        if task == nil, managementPending == 0, persistenceFailure == nil,
-           let index = jobs.firstIndex(where: {
-               $0.failure == nil && $0.awaitingManualStart != true
-                   && ($0.retryPending?.notBefore ?? 0) <= now
-           }), index > 0 {
+        func earliestEnqueued(where include: (Job) -> Bool) -> Int? {
+            jobs.indices.filter { include(jobs[$0]) }.min {
+                (jobs[$0].enqueueSequence ?? .max, $0) < (jobs[$1].enqueueSequence ?? .max, $1)
+            }
+        }
+        var selected: Int?
+        if task == nil, managementPending == 0, persistenceFailure == nil, !jobs.isEmpty {
+            selected = earliestEnqueued {
+                $0.failure == nil && $0.awaitingManualStart != true && ($0.retryPending?.notBefore ?? 0) <= now
+            }
+            // Failed jobs remain visible, but never hide a course that waits
+            // for its manual start or its backoff deadline (2026-09-20 rule).
+            if selected == nil, jobs[0].failure != nil {
+                selected = earliestEnqueued { $0.failure == nil }
+            }
+        }
+        if let index = selected, index > 0 {
             let before = jobs
+            assignMissingEnqueueSequences()
             jobs.insert(jobs.remove(at: index), at: 0)
             do { try save() }
             catch { jobs = before; persistenceFailure = "复查队列保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
@@ -5461,6 +5498,7 @@ final class LearningReviewQueue: ObservableObject {
         guard !restoreBlocked else {
             throw ReviewIdentityError.unreadable("复查日志尚未通过读取校验，禁止写回")
         }
+        assignMissingEnqueueSequences()
         let frozen = Journal(jobs: jobs, userPaused: userPaused,
             version: Self.journalVersion, retiredJobs: retiredJobs.isEmpty ? nil : retiredJobs)
         try frozen.validateJobIDs()
