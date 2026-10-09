@@ -191,6 +191,59 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertNil(context.first?["state"], "旧版 clarifies 条目保持原格式")
     }
 
+    /// issue #26 复核：只给跟进判断、没有新要点的批次（noNewKnowledge）不在复查批次里，
+    /// 它的"前后冲突"仍须进入整课复查的 laterContext，并与后续批次的记录按时间顺序排列 ✓；
+    /// 这类批次只提供跟进记录，后文检索（laterEvidence）保持原样 ✓。同步和异步入队都覆盖。
+    @MainActor
+    func testWholeLessonReviewReceivesFollowUpsFromBatchesWithoutPoints() async throws {
+        let (book, target, original, _) = try uncertainNotebook()
+        var notebook = book
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        let conflict = segment("The lecturer now says the 18 kilopascal reading was taken after the valve opened.",
+                               "讲述者此时说18千帕是在阀打开之后测得的。", at: 12)
+        try notebook.append(evidence: [conflict], note: LearningPrompts.resolvingFollowUps(
+            LearningNote(topic: "无新增学习知识", points: [], sourceVersion: 2, noNewKnowledge: true,
+                         followUps: [LearningFollowUp(alias: "q0", state: .conflict, sourceIDs: ["en0s0"], detail: detail)]),
+            targets: [target]))
+        let vague = segment("That reading may have been the other tank.", "那个读数可能是另一个罐的。", at: 24)
+        try notebook.append(evidence: [vague], note: LearningPrompts.resolvingFollowUps(
+            supplementNote(text: "那个读数可能属于另一个罐。", sourceIDs: ["en0s0"],
+                           followUp: LearningFollowUp(alias: "q0", state: .unclear, detail: "后文没有说明是哪一个罐。")),
+            targets: [target]))
+        XCTAssertTrue(notebook.batches[1].note.points.isEmpty)
+        XCTAssertEqual(notebook.batches.compactMap { $0.followUps?.first?.state }, [.conflict, .unclear])
+        let expected = try reviewContext(original, [notebook.batches[2]]).root
+
+        for asynchronous in [false, true] {
+            let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+                .appendingPathComponent("FollowUpOnlyReview-\(UUID())")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            var inputs: [String] = []
+            let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"), observeSleep: false,
+                                            diagnostics: .disabled) { input, _, _, _, _ in
+                inputs.append(input)
+                return #"{"reviewVersion":2,"corrections":[],"additions":[]}"#
+            }
+            addTeardownBlock { await queue.shutdownForTesting(); try FileManager.default.removeItem(at: root) }
+            if asynchronous {
+                try await queue.enqueueAsync(directory: root, notebook: notebook)
+            } else {
+                try queue.enqueue(directory: root, notebook: notebook)
+            }
+            for _ in 0..<200 where queue.hasWork { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertFalse(queue.hasWork, queue.status)
+            XCTAssertEqual(inputs.count, 2, "只复查有要点的两批")
+            let first = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(inputs.first).utf8)) as? [String: Any])
+            let context = try XCTUnwrap(first["laterContext"] as? [[String: Any]])
+            XCTAssertEqual(context.map { $0["state"] as? String }, ["前后冲突", "关系不明"], "async=\(asynchronous)")
+            XCTAssertEqual(context.map { $0["pointIndex"] as? Int }, [0, 0])
+            XCTAssertEqual(context.map { $0["text"] as? String }, [detail, "后文没有说明是哪一个罐。"])
+            XCTAssertEqual(context.map { $0["sources"] as? [String] }, [[conflict.english], []])
+            XCTAssertEqual(first["laterEvidence"] as? NSArray, expected["laterEvidence"] as? NSArray)
+            XCTAssertEqual(first["laterEvidenceOmittedCount"] as? Int, expected["laterEvidenceOmittedCount"] as? Int)
+        }
+    }
+
     // MARK: - issue #20：同一句原文拆出多条要点
 
     /// 旧问题“速度属于哪辆车”，后文一句话同时拆出“质量”和“速度”两条要点，都引用这句原文。

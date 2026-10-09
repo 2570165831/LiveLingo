@@ -3490,7 +3490,10 @@ enum LearningPrompts {
 
     /// 构造 v2 复查输入：`json`（根含 reviewVersion）+ 同次冻结的引用目录。
     /// 主证据只保留**原文片段**（不重复整段全文 ✓），中文警告走独立字段 ✓。
+    /// `followUpOnlyBatches`：排在 `laterBatches` 之间、自身没有要点的批次（`after` = 它前面有几个
+    /// `laterBatches`）。它们只给 laterContext 提供跟进记录 ✓，不进后文检索 laterEvidence ✓。
     static func reviewInput(_ batch: LearningNoteBatch, laterBatches: [LearningNoteBatch] = [],
+                            followUpOnlyBatches: [(after: Int, batch: LearningNoteBatch)] = [],
                             target: CaptionTranslationTarget = .simplifiedChinese) throws -> PreparedReviewInput {
         struct Point: Encodable { let index: Int; let kind: String; let text: String; let sources: [LearningPoint.Source]?; let referenceState: LearningPoint.ReferenceState?; let needsContext: String?; let sourceHasPronoun: Bool? }
         struct Note: Encodable { let topic: String; let points: [Point] }
@@ -3521,7 +3524,13 @@ enum LearningPrompts {
         func targetIndex(_ reference: String?) -> Int? {
             reference.flatMap { reference in batch.note.points.indices.first { LearningNotebook.reference(batch, $0) == reference } }
         }
-        for subsequent in laterBatches {
+        // 跟进记录按时间顺序读取：没有要点的批次插回它在笔记里的位置 ✓（issue #26 复核）。
+        var ordered: [LearningNoteBatch] = []
+        for offset in 0...laterBatches.count {
+            ordered += followUpOnlyBatches.filter { min($0.after, laterBatches.count) == offset }.map(\.batch)
+            if offset < laterBatches.count { ordered.append(laterBatches[offset]) }
+        }
+        for subsequent in ordered {
             func quotes(_ point: LearningPoint) -> [String] {
                 (point.sources ?? []).filter { source in
                     target == .simplifiedChinese || (subsequent.evidence.indices.contains(source.index) && LearningSourceUnit.bindingTexts(for: subsequent.evidence[source.index], target: target).contains { $0.contains(source.quote) })
@@ -3730,8 +3739,46 @@ final class LearningReviewQueue: ObservableObject {
         /// saved array order and are numbered, in that order, before the first
         /// reorder or save. New jobs are numbered after every existing one.
         var enqueueSequence: Int? = nil
+        /// issue #26 复核：整课复查时，夹在复查批次之间、自身没有要点（例如"无新增学习知识"）
+        /// 却带有指向复查批次的跟进记录的批次 ✓。只用于构造 laterContext ✓：不进 `batches`、
+        /// 不参与输入指纹与复查身份 ✓。旧 journal 没有这个字段 → nil → 输入与以前完全相同 ✓。
+        var followUpOnlyBatches: [FollowUpOnlyBatch]? = nil
 
         var resolvedScope: LearningReviewScope { scope ?? .wholeLesson }
+
+        /// `job.batches[index]` 之后的复查批次，以及插在它们之间的只含跟进记录的批次。
+        func laterInputs(after index: Int) -> (batches: [LearningNoteBatch], followUpOnly: [(after: Int, batch: LearningNoteBatch)]) {
+            (Array(batches.dropFirst(index + 1)),
+             (followUpOnlyBatches ?? []).filter { $0.after >= index }.map { (after: $0.after - index, batch: $0.batch) })
+        }
+    }
+
+    struct FollowUpOnlyBatch: Codable, Equatable, Sendable {
+        /// Index in `Job.batches` of the nearest reviewed batch before this one.
+        let after: Int
+        let batch: LearningNoteBatch
+    }
+
+    /// Batches without points that carry a non-missing follow-up about a point
+    /// of an earlier reviewed batch. Only a whole-lesson review reads them; a
+    /// single-batch review has no later batches. Nil when there are none.
+    nonisolated static func followUpOnlyContext(in all: [LearningNoteBatch], reviewed: [LearningNoteBatch],
+                                                scope: LearningReviewScope) -> [FollowUpOnlyBatch]? {
+        guard scope.isWholeLesson else { return nil }
+        let positions = Dictionary(reviewed.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        var references = Set<String>(), latest: Int?, result: [FollowUpOnlyBatch] = []
+        for batch in all {
+            if let position = positions[batch.id] {
+                latest = position
+                references.formUnion(batch.note.points.indices.map { LearningNotebook.reference(batch, $0) })
+                continue
+            }
+            guard let latest, batch.note.points.isEmpty, (batch.followUps ?? []).contains(where: { record in
+                record.state != .missing && record.target.map(references.contains) == true
+            }) else { continue }
+            result.append(.init(after: latest, batch: batch))
+        }
+        return result.isEmpty ? nil : result
     }
 
     /// Unreleased locales may be stored, but cannot borrow another target's
@@ -3759,12 +3806,14 @@ final class LearningReviewQueue: ObservableObject {
     // Preparation has no I/O and does not enqueue or release an output language.
     // The real worker uses this same entry, with the default release gate.
     static func prepareInput(_ batch: LearningNoteBatch, laterBatches: [LearningNoteBatch] = [],
+                             followUpOnlyBatches: [(after: Int, batch: LearningNoteBatch)] = [],
                              targetLocale: String? = nil, allowUnreleased: Bool = false) throws -> PreparedRequest {
         guard let prompt = reviewPrompt(for: targetLocale, allowUnreleased: allowUnreleased),
               let target = (try? OutputLanguage.storedLanguage(targetLocale))?.generationTarget else {
             throw ReviewFailure(stage: .input, code: "unsupported_target", detail: "当前输出语言尚无可用的复查提示词")
         }
-        let input = try LearningPrompts.reviewInput(batch, laterBatches: laterBatches, target: target)
+        let input = try LearningPrompts.reviewInput(batch, laterBatches: laterBatches,
+                                                    followUpOnlyBatches: followUpOnlyBatches, target: target)
         return .init(input: input, prompt: prompt,
                      prefixInputDigest: prefixDigest(json: input.json, prompt: prompt, targetLocale: targetLocale))
     }
@@ -3773,8 +3822,9 @@ final class LearningReviewQueue: ObservableObject {
         guard job.batches.indices.contains(job.next) else {
             throw ReviewFailure(stage: .input, code: "no_pending_batch", detail: "没有可准备的复查批次")
         }
+        let later = job.laterInputs(after: job.next)
         let request = try prepareInput(job.batches[job.next],
-            laterBatches: Array(job.batches.dropFirst(job.next + 1)),
+            laterBatches: later.batches, followUpOnlyBatches: later.followUpOnly,
             targetLocale: job.targetLocale, allowUnreleased: allowUnreleased)
         if let saved = job.prompt, saved != request.prompt {
             throw ReviewFailure(stage: .promptBinding, code: "unrecognized_saved_prompt",
@@ -4260,10 +4310,11 @@ final class LearningReviewQueue: ObservableObject {
 
     /// 任务"当前这一批"实际会用到的输入指纹；没有待跑批次时返回 nil。
     static func prefixDigest(for job: Job) -> String? {
+        let later = job.laterInputs(after: job.next)
         guard job.next < job.batches.count,
               let target = (try? OutputLanguage.storedLanguage(job.targetLocale))?.generationTarget,
               let prepared = try? LearningPrompts.reviewInput(job.batches[job.next],
-                  laterBatches: Array(job.batches.dropFirst(job.next + 1)), target: target)
+                  laterBatches: later.batches, followUpOnlyBatches: later.followUpOnly, target: target)
         else { return nil }
         let digest = prefixDigest(json: prepared.json, prompt: job.prompt, targetLocale: job.targetLocale)
         guard let identity = job.identity else { return digest }
@@ -4869,7 +4920,8 @@ final class LearningReviewQueue: ObservableObject {
             inputDigest: digest, courseInputDigest: courseDigest,
             courseBatchDigests: try Dictionary(uniqueKeysWithValues: reviewable.map {
                 ($0.id.uuidString, try ReviewInputBinding.digest([$0]))
-            }))
+            }),
+            followUpOnlyBatches: Self.followUpOnlyContext(in: notebook.batches, reviewed: batches, scope: resolvedScope))
         try validateLocation(candidate, at: directory, allowHistorical: false)
         // Validate saved reports before touching the queue. Reusing a UUID for
         // different content is an error even after the former job has finished.
@@ -5137,7 +5189,8 @@ final class LearningReviewQueue: ObservableObject {
             identity: identity, inputDigest: digest, courseInputDigest: courseDigest,
             courseBatchDigests: try Dictionary(uniqueKeysWithValues: reviewable.map {
                 ($0.id.uuidString, try ReviewInputBinding.digest([$0]))
-            }))
+            }),
+            followUpOnlyBatches: followUpOnlyContext(in: notebook.batches, reviewed: batches, scope: resolvedScope))
         let validated = try validatedSnapshot(candidate, at: directory, allowHistorical: false)
         _ = try ReviewReportCollection.render(try ReviewReportCollection.read(in: directory) + [reportEntry(for: candidate)])
         let target = SessionDirectoryLocation.canonical(directory)
