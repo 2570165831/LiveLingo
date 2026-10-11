@@ -41,6 +41,9 @@ xcodebuild -project LiveLingo.xcodeproj -scheme LiveLingo -configuration Debug \
 - 每个测试宿主在 `DerivedData/tmp` 下使用独立的 `worker-<pid>-<UUID>` 目录，截图和保留的夹具都在里面。全部守护通过后，脚本删除本轮已审计、属于已观察宿主的这些目录（只删 `DerivedData/tmp` 内的目录，不跟随软链接），回执记录删除了哪些；失败时全部保留作证据。需要保留截图时加 `--keep-workers`。旧运行遗留的目录脚本不处理。
 - 会访问进程级保存锁的 Swift Testing 套件标注 `@Suite(.isolatedStorage)`；异步门闩覆盖每个参数化用例的整个执行期，不占住主线程。测试内部需要验证的并发仍保留；新增使用共享单例、静态锁的套件须检查是否也需要该隔离。先停止并限时等待自己的后台任务，再清理文件；等待期限统一用 `TestTaskLifetime.defaultTimeout`（30 秒，低于单测试 120 秒额度），超时仍报错并保留现场。
 - 未签名 Release 构建：`./Scripts/build-release.sh`。
+- 发版前必须运行真实沙盒存储探针：`python3 -B Scripts/run-sandbox-probe.py --output-root /absolute/private/sandbox-probe --name storage-1`（输出参数须为绝对路径，且在源码目录外）。隐私工具门禁已包含此步骤。探针只 ad-hoc 签名自己构建的小 App，随机使用独立 bundle ID，继承正式 App 的沙盒及文件权限；不启动正式 App，不访问它的容器。退出码 0 且 `result.json` 中 `passed` 为 true 才通过；编译、签名、沙盒身份、任何检查或容器归档失败都判失败。
+- 探针在自身容器 tmp 和 Application Support 内测试目录打开/创建、逐层符号链接拒绝、私有权限、原子写/替换/读回、身份比对、移动/移除、真实中断写入后的恢复扫描，以及 SessionWorkspace 创建/清理/待清理重试/恢复索引。它编译完整 SensitiveFileIO 和 ExitDeadline，并从源码原样选取 SessionWorkspace、SessionStoreError、SessionArchiveCoding 声明（只排除两个迁移入口，不替换实现）；源码摘要写入回执。结束后把自身容器同卷移到输出根目录的 `superseded/`，保留合成夹具，可恢复；这不是正式 App、文件选择器授权或模型运行的验收。
+- 路径打开使用 `O_NOFOLLOW_ANY`，不与 `O_NOFOLLOW` 同时叠加；[Apple 的 macOS 11.0.1 发布清单](https://github.com/apple-oss-distributions/distribution-macOS/blob/macos-1101/release.json)所对应的 [XNU 头文件](https://github.com/apple-oss-distributions/xnu/blob/xnu-7195.50.7.100.1/bsd/sys/fcntl.h)及 [内核实现](https://github.com/apple-oss-distributions/xnu/blob/xnu-7195.50.7.100.1/bsd/vfs/vfs_vnops.c)已具备此标志和逐组件拒绝逻辑。因此本项目最低 macOS 14 可用；精确最早补丁版本不作超出这些源码的断言。沙盒内的可选父目录恢复追踪遇到 EPERM/EACCES 时保留残留物，不再阻断目录本身获准的操作；其他错误和身份异常仍拒绝。
 - 签名、DMG 与离线候选组装都需要显式传入路径和签名身份。身份缺失时脚本必须报错；不要添加自动挑选本机身份或降级为 ad-hoc 签名的回退逻辑。
 - 新增或修改脚本请先做语法检查（`zsh -n`、`bash -n`、`python3 -m py_compile`），并在本地实际跑一遍对应流程。
 
