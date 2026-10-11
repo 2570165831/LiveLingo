@@ -797,6 +797,74 @@ final class NotesExportTests: XCTestCase {
                        ReadingTypography.scriptOffset(script: 1, bodySize: 36))
     }
 
+    /// Issue #31：字幕是纯文本，Markdown 导出要把其中的 Markdown/HTML 语法转义，
+    /// 预览里照原样显示；英文行和译文行之间用硬换行（行尾两个空格）真正分行。
+    private func markdownTranscriptFixture() -> NotesExportSnapshot {
+        snapshot(review: nil, transcript: [
+            segment(0, 5, "The tags are <em> and </em>.", "1. 首先 *args 和 `True`"),
+            segment(5, 9, "Write <code>x</code> in C:\\temp & keep &amp; [a](b) $5 ~~c~~ a|b __d__",
+                    "- 列表\n# 标题\n> 引用\n+ 加号\n2) 二\n===")
+        ])
+    }
+
+    private func transcriptSection(_ markdown: String) throws -> String {
+        let heading = "## " + NotesExportDocument.transcriptHeading(for: .simplifiedChinese) + "\n\n"
+        let range = try XCTUnwrap(markdown.range(of: heading))
+        return String(markdown[range.upperBound...])
+    }
+
+    func testMarkdownTranscriptEscapesCaptionSyntaxSoPreviewsShowItLiterally() throws {
+        let fixture = markdownTranscriptFixture()
+        let literal = [
+            "The tags are <em> and </em>.", "1. 首先 *args 和 `True`",
+            "Write <code>x</code> in C:\\temp & keep &amp; [a](b) $5 ~~c~~ a|b __d__",
+            "- 列表", "# 标题", "> 引用", "+ 加号", "2) 二", "==="
+        ]
+        for markdown in [NotesExportDocument.markdown(fixture),
+                         String(decoding: try NotesExportDocument.data(fixture, format: .markdown), as: UTF8.self)] {
+            let section = try transcriptSection(markdown)
+            XCTAssertTrue(section.hasPrefix(
+                "[00:00–00:05] The tags are \\<em\\> and \\</em\\>.  \n1\\. 首先 \\*args 和 \\`True\\`\n\n"), section)
+            XCTAssertTrue(section.contains("C:\\\\temp & keep \\&amp; \\[a\\](b) \\$5 \\~\\~c\\~\\~ a\\|b \\_\\_d\\_\\_  \n"), section)
+            XCTAssertTrue(section.hasSuffix("\\- 列表\n\\# 标题\n\\> 引用\n\\+ 加号\n2\\) 二\n\\===\n"), section)
+
+            let parsed = try AttributedString(markdown: section, options: .init(interpretedSyntax: .full))
+            let characters = String(parsed.characters)
+            for text in literal {
+                XCTAssertTrue(characters.contains(text), text)
+            }
+            for run in parsed.runs {
+                let kinds = run.presentationIntent?.components.map(\.kind) ?? []
+                XCTAssertTrue(kinds.allSatisfy { $0 == .paragraph }, "caption must stay a plain paragraph: \(kinds)")
+                let inline = run.inlinePresentationIntent ?? []
+                XCTAssertTrue(inline.subtracting([.lineBreak, .softBreak]).isEmpty,
+                              "caption must not render as emphasis, code, strike or HTML: \(inline.rawValue)")
+                XCTAssertNil(run.link)
+            }
+            let breaks = parsed.runs.filter { $0.inlinePresentationIntent == .lineBreak }
+            XCTAssertEqual(breaks.count, 2, "English and translation lines need a hard break each")
+        }
+    }
+
+    func testMarkdownCaptionEscapingLeavesNotesAndOtherFormatsUntouched() throws {
+        let fixture = markdownTranscriptFixture()
+        let markdown = NotesExportDocument.markdown(fixture)
+        XCTAssertTrue(markdown.contains("- **核心结论**：电子位置不确定"), "notes body stays Markdown")
+        XCTAssertTrue(markdown.contains("$v = \\frac{d}{t}$"), "notes formulas stay unescaped")
+        let notes = try AttributedString(markdown: markdown, options: .init(interpretedSyntax: .full))
+        XCTAssertTrue(notes.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true },
+                      "notes bold still renders")
+        let plain = try plainText(of: fixture, format: .plainText)
+        XCTAssertTrue(plain.contains("[00:00–00:05] The tags are <em> and </em>.\n1. 首先 *args 和 `True`\n"), plain)
+        XCTAssertTrue(plain.contains("C:\\temp & keep &amp; [a](b) $5 ~~c~~ a|b __d__\n- 列表\n# 标题"), plain)
+        for format in [NotesExportFormat.word, .pdf] {
+            let text = try plainText(of: fixture, format: format)
+            XCTAssertTrue(text.contains("The tags are <em> and </em>."), "\(format)")
+            XCTAssertFalse(text.contains("\\<em"), "\(format)")
+            XCTAssertFalse(text.contains("\\*args"), "\(format)")
+        }
+    }
+
     func testPDFIncludesReviewSectionOnlyWhenRequested() throws {
         let withReview = try NotesExportDocument.data(snapshot(withReview: true), format: .pdf)
         let withoutReview = try NotesExportDocument.data(snapshot(withReview: false), format: .pdf)

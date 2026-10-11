@@ -185,14 +185,15 @@ final class MultilingualSessionExporterTests: XCTestCase {
             exportTimeZone: timeZone)
     }
 
-    private func assertNotesSnapshot(_ snapshot: NotesExportSnapshot, captions: String, attributedCaptions: String) throws {
+    private func assertNotesSnapshot(_ snapshot: NotesExportSnapshot, captions: String, markdownCaptions: String,
+                                     attributedCaptions: String) throws {
         // Frozen document text, including the pre-step-7 spacing and headers.
         // Expectations never call a production renderer to derive their bytes.
         let markdown = "# Chemistry · 整课笔记 · 2001-01-02\n\n"
             + "- 内容范围：整课笔记（全部片段）\n- 整理进度：已整理\n- 来源录音：Lesson 2001-01-02\n"
             + "- 导出时间：2001-01-02 12:34\n"
             + "- 说明：本文件由本机模型生成，未经人工逐句核对；正文按主题整理，“需要回听”和“来源检查”两节列出的内容仍需自行核对。\n\n\n"
-            + "## 学习笔记\n\n冰很冷。\n\n## 双语字幕（含时间戳）\n\n" + captions + "\n"
+            + "## 学习笔记\n\n冰很冷。\n\n## 双语字幕（含时间戳）\n\n" + markdownCaptions + "\n"
         let plain = "# Chemistry · 整课笔记 · 2001-01-02\n\n"
             + "  内容范围：整课笔记（全部片段）\n  整理进度：已整理\n  来源录音：Lesson 2001-01-02\n"
             + "  导出时间：2001-01-02 12:34\n"
@@ -224,6 +225,9 @@ final class MultilingualSessionExporterTests: XCTestCase {
         try assertNotesSnapshot(snapshot,
             captions: "[00:00–00:01] Ice is cold.\n冰很冷。\n\n[00:01–00:02] Water flows.\n（本段暂无译文）\n\n"
                 + "[00:02–00:03] Heat moves.\n（本段翻译未完成，可对照英文）",
+            // Issue #31: Markdown ends the source line with two spaces (a hard break).
+            markdownCaptions: "[00:00–00:01] Ice is cold.  \n冰很冷。\n\n[00:01–00:02] Water flows.  \n（本段暂无译文）\n\n"
+                + "[00:02–00:03] Heat moves.  \n（本段翻译未完成，可对照英文）",
             attributedCaptions: "[00:00–00:01] Ice is cold.\n冰很冷。\n[00:01–00:02] Water flows.\n（本段暂无译文）\n"
                 + "[00:02–00:03] Heat moves.\n（本段翻译未完成，可对照英文）\n")
     }
@@ -238,6 +242,8 @@ final class MultilingualSessionExporterTests: XCTestCase {
         try assertNotesSnapshot(snapshot,
             captions: "[00:00–00:01] Ice is cold.\n冰很冷。\n\n[00:01–00:02] 这片叶子长大了。\n\n"
                 + "[00:02–00:03] El agua fluye.\n（本段翻译未完成，可对照原文）\n\n[00:03–00:04] 水會流㗎。\n水会流动。",
+            markdownCaptions: "[00:00–00:01] Ice is cold.  \n冰很冷。\n\n[00:01–00:02] 这片叶子长大了。\n\n"
+                + "[00:02–00:03] El agua fluye.  \n（本段翻译未完成，可对照原文）\n\n[00:03–00:04] 水會流㗎。  \n水会流动。",
             attributedCaptions: "[00:00–00:01] Ice is cold.\n冰很冷。\n[00:01–00:02] 这片叶子长大了。\n"
                 + "[00:02–00:03] El agua fluye.\n（本段翻译未完成，可对照原文）\n[00:03–00:04] 水會流㗎。\n水会流动。\n")
         let rendered = PDFNotesWriter.attributedDocument(snapshot).string

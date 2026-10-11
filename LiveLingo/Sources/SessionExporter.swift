@@ -1447,6 +1447,71 @@ enum NotesExportDocument {
         return markdown ? "## \(heading)\n\n" + body : heading + "\n\n" + strippingMarkdown(body)
     }
 
+    /// Captions are plain text, not Markdown. Backslash-escape everything a
+    /// CommonMark/GFM preview could read as inline syntax or HTML, plus block
+    /// markers at the start of a physical line, so the caption shows literally.
+    /// `atLineStart` is false for text that follows the `[stamp] ` prefix.
+    static func markdownLiteral(_ text: String, atLineStart: Bool) -> String {
+        let characters = Array(text)
+        var output = ""
+        var lineStart = atLineStart
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            index += 1
+            if character.isNewline {
+                output.append(character)
+                lineStart = true
+                continue
+            }
+            if lineStart, character == " " || character == "\t" {
+                output.append(character)
+                continue
+            }
+            let blockStart = lineStart
+            lineStart = false
+            if blockStart, "#>-+=".contains(character) {
+                output += "\\" + String(character)
+                continue
+            }
+            if blockStart, character.isASCII, character.isNumber {
+                // `1.` / `1)` list markers: up to nine digits, then `.` or `)`.
+                var end = index
+                while end < characters.count, end - index < 8,
+                      characters[end].isASCII, characters[end].isNumber { end += 1 }
+                output += String(characters[(index - 1)..<end])
+                index = end
+                if index < characters.count, characters[index] == "." || characters[index] == ")" {
+                    output += "\\" + String(characters[index])
+                    index += 1
+                }
+                continue
+            }
+            if "\\`*_[]<>~|$".contains(character) {
+                output += "\\" + String(character)
+            } else if character == "&", isEntityReference(characters, from: index) {
+                output += "\\&"
+            } else {
+                output.append(character)
+            }
+        }
+        return output
+    }
+
+    /// `&name;`, `&#123;` or `&#x1F;` after the `&` at `start - 1`.
+    private static func isEntityReference(_ characters: [Character], from start: Int) -> Bool {
+        var index = start
+        while index < characters.count, index - start <= 32 {
+            let character = characters[index]
+            if character == ";" { return index > start }
+            guard character.isASCII, character.isLetter || character.isNumber || (character == "#" && index == start) else {
+                return false
+            }
+            index += 1
+        }
+        return false
+    }
+
     static func markdown(_ snapshot: NotesExportSnapshot, rendered: RenderedFields? = nil) -> String {
         var sections: [String] = [header(snapshot, markdown: true, rendered: rendered).joined(separator: "\n")]
         let notes = (rendered?.notesMarkdown ?? snapshot.notesMarkdown).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1458,7 +1523,11 @@ enum NotesExportDocument {
             let lines = snapshot.transcript.enumerated().map { index, segment -> String in
                 let stamp = "\(timestamp(segment.startTime))–\(timestamp(segment.endTime))"
                 let captions = rendered?.captionLines[index] ?? SessionExporter.captionLines(segment, outputLanguage: snapshot.target)
-                return "[\(stamp)] " + captions.joined(separator: "\n")
+                // Two trailing spaces make a hard break, so the source and the
+                // translation stay on separate lines in Markdown previews.
+                return "[\(stamp)] " + captions.enumerated()
+                    .map { markdownLiteral($1, atLineStart: $0 > 0) }
+                    .joined(separator: "  \n")
             }
             sections.append("## \(rendered?.transcriptHeading ?? transcriptHeading(for: snapshot.target))\n\n" + lines.joined(separator: "\n\n"))
         }
