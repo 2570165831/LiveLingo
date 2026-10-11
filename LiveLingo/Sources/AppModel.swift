@@ -5890,6 +5890,13 @@ extension AppModel {
                 guard sessionID == identity, generation == epoch else {
                     throw QwenRuntimeError.requestFailed("CLI resume changed the session identity")
                 }
+                if let state = transcriptionProcessing, state.failedCount + state.candidateCount > 0 {
+                    // Counts only. A segment can be both failed and awaiting a
+                    // candidate; the overlap says how many are in both counts.
+                    report("transcription_unresolved", ["sessionID": identity.uuidString,
+                        "failed": state.failedCount, "candidates": state.candidateCount,
+                        "failedWithCandidate": state.failedWithCandidateCount])
+                }
                 // Same bounded, admission-gated notes completion as a live run,
                 // plus an explicit stall guard: a blocked admission must fail the
                 // run instead of quietly waiting out the whole deadline.
@@ -6022,9 +6029,9 @@ extension AppModel {
     private var cliSavedWorkPending: Bool {
         processingTask != nil || translationWorker != nil || summaryTask != nil
             || hasPendingTranslationWork
-            || (transcriptionProcessing?.pendingCount ?? 0) > 0
-            || (transcriptionProcessing?.activeCount ?? 0) > 0
-            || (transcriptionProcessing?.unresolvedCount ?? 0) > 0
+            // Failed segments and unconfirmed candidates wait for a person, so
+            // the resume must not sit out its deadline on them.
+            || transcriptionProcessing?.hasAutomaticWork == true
     }
 }
 #endif

@@ -333,6 +333,22 @@ allowlisted; routine pauses, parks, restarts and actual worker cancellation do
 not write them as new translation failures. The CLI regression checks worker
 cancellation; saved-course pause/reopen coverage belongs to the app tests.
 
+`--resume-saved` waits only for work that can still move on its own: active or
+claimable transcription, translation and notes. Failed segments (including
+automatic retries that ran out) and candidates awaiting confirmation need a
+person, so the resume no longer waits out its 90-minute deadline on them. When
+any remain, it emits one count-only event and continues to the bounded notes,
+export and verification stages, where the run still fails as
+`processingIncomplete`:
+
+```json
+{"candidates":1,"elapsedSeconds":12.5,"event":"transcription_unresolved","failed":2,"failedWithCandidate":1,"sessionID":"…"}
+```
+
+A segment that is both failed and carries a candidate is counted in `failed`
+and in `candidates`; `failedWithCandidate` is that overlap. The three counts
+accept only nonnegative native Swift integers.
+
 For cleanup, first ensure the CLI has exited, keep the result/required logs,
 and move only its explicit test output/build paths to Trash. Never remove
 real session directories or the installed app as part of a CLI test.

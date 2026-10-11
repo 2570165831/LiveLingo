@@ -215,6 +215,78 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(manual.manualRetryCount, 1)
     }
 
+    func testFailedSegmentsAndCandidatesLeaveNoAutomaticWork() throws {
+        let root = try directory(), id = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+        var failed = work(id, ordinal: 0, status: .failed)
+        failed.attempt = .automaticRetry; failed.automaticRetryCount = DurableTranscriptionJournal.maximumAutomaticRetries
+        var withCandidate = work(id, ordinal: 1, status: .completed)
+        withCandidate.text = "body"; withCandidate.candidateText = "candidate"
+        var waiting = work(id, ordinal: 2, status: .retryWaiting)
+        waiting.automaticRetryCount = 1
+        let otherLanguage = work(id, ordinal: 3, status: .otherLanguage, fallback: "fallback")
+        for record in [failed, withCandidate, waiting, otherLanguage] { try journal.put(record) }
+        var state = journal.processingState
+        XCTAssertEqual(state.claimableCount, 1)
+        XCTAssertEqual(state.failedCount, 1)
+        XCTAssertEqual(state.candidateCount, 1)
+        XCTAssertEqual(state.failedWithCandidateCount, 0)
+        XCTAssertEqual(state.unresolvedCount, 3)
+        XCTAssertEqual(state.pendingCount, 1)
+        XCTAssertTrue(state.hasAutomaticWork)
+
+        var claimed = try XCTUnwrap(journal.claimNext())
+        XCTAssertEqual(claimed.id, waiting.id)
+        state = journal.processingState
+        XCTAssertEqual(state.activeCount, 1)
+        XCTAssertEqual(state.claimableCount, 0)
+        XCTAssertTrue(state.hasAutomaticWork)
+
+        // The last automatic retry fails: only a person can move these records now.
+        claimed.status = .failed
+        try journal.put(claimed)
+        XCTAssertNil(try journal.claimNext())
+        state = journal.processingState
+        XCTAssertEqual(state.claimableCount, 0)
+        XCTAssertEqual(state.failedCount, 2)
+        XCTAssertEqual(state.candidateCount, 1)
+        XCTAssertEqual(state.unresolvedCount, 3)
+        XCTAssertEqual(state.pendingCount, 0)
+        XCTAssertFalse(state.hasAutomaticWork)
+
+        // A failed segment that also carries a candidate is counted in both.
+        var failedWithCandidate = try XCTUnwrap(journal.record(id: failed.id))
+        failedWithCandidate.candidateText = "candidate"
+        try journal.put(failedWithCandidate)
+        state = journal.processingState
+        XCTAssertEqual(state.failedCount, 2)
+        XCTAssertEqual(state.candidateCount, 2)
+        XCTAssertEqual(state.failedWithCandidateCount, 1)
+        XCTAssertFalse(state.hasAutomaticWork)
+
+        // A manual retry is automatic work again, but not while the queue is parked.
+        try journal.retry(id: failed.id)
+        XCTAssertEqual(journal.processingState.claimableCount, 1)
+        XCTAssertTrue(journal.processingState.hasAutomaticWork)
+        try journal.setPaused(true)
+        XCTAssertFalse(journal.processingState.hasAutomaticWork)
+    }
+
+    func testExhaustedRetryWaitingRecordCountsAsFailedNotClaimable() throws {
+        let root = try directory(), id = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+        // Current code never writes this, but a legacy or edited journal can hold it.
+        var exhausted = work(id, ordinal: 0, status: .retryWaiting)
+        exhausted.automaticRetryCount = DurableTranscriptionJournal.maximumAutomaticRetries
+        try journal.put(exhausted)
+        XCTAssertNil(try journal.claimNext())
+        let state = journal.processingState
+        XCTAssertEqual(state.claimableCount, 0)
+        XCTAssertEqual(state.failedCount, 1)
+        XCTAssertEqual(state.pendingCount, 1)
+        XCTAssertFalse(state.hasAutomaticWork)
+    }
+
     func testTruncatedTailIsPreservedAndMiddleDamageStopsRecovery() throws {
         let root = try directory(), id = UUID()
         let j = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)

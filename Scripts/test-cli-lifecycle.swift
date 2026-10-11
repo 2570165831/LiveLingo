@@ -209,6 +209,7 @@ import Darwin
             try expect(panelResponses == [.cancel] && !panel.isVisible, "headless_panel_cancels_once_without_window")
             passed.append("headless_panel_cancellation")
             let secret = "PRIVATE_CLASSROOM_TEXT_不要写入常规日志"
+            let identityProbe = UUID()
             let safe = LiveLingoCLI.safeEvent("state", fields: ["summaryStatus": secret, "message": secret,
                 "phase": secret, "file": secret, "name": secret, "error": secret, "reason": secret,
                 "sessionID": secret, "kind": secret, "format": secret, "segments": 7,
@@ -220,6 +221,16 @@ import Darwin
                 && safe["otherLanguageTranscription"] as? Int == 3, "event_keeps_counts")
             try expect(safe["sessionID"] == nil && safe["kind"] == nil, "event_validates_identifiers")
             try expect(LiveLingoCLI.safeEvent("finished", fields: [:], elapsed: 0)["event"] as? String == "processing_finished", "finish_is_not_verification")
+            let unresolved = LiveLingoCLI.safeEvent("transcription_unresolved", fields: ["failed": 2, "candidates": 1,
+                "failedWithCandidate": 1, "candidateText": secret, "sessionID": identityProbe.uuidString], elapsed: 3)
+            try expect(unresolved["event"] as? String == "transcription_unresolved"
+                && unresolved["failed"] as? Int == 2 && unresolved["candidates"] as? Int == 1
+                && unresolved["failedWithCandidate"] as? Int == 1
+                && unresolved["sessionID"] as? String == identityProbe.uuidString, "unresolved_event_keeps_counts")
+            let unresolvedText = String(decoding: try JSONSerialization.data(withJSONObject: unresolved), as: UTF8.self)
+            try expect(!unresolvedText.contains(secret), "unresolved_event_redacts_text")
+            try expect(LiveLingoCLI.safeEvent("transcription_unresolved", fields: ["failed": true, "candidates": 1.5],
+                elapsed: 0)["failed"] == nil, "unresolved_event_rejects_bridged_counts")
             passed.append("event_allowlist")
             let failure = LiveLingoCLI.safeFailure(QwenRuntimeError.requestFailed(secret))
             let failureText = String(decoding: try JSONSerialization.data(withJSONObject: failure), as: UTF8.self)
