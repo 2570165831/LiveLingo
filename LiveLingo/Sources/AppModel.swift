@@ -1377,8 +1377,24 @@ final class AppModel: ObservableObject {
         startRuntimeReadinessMonitor()
     }
 
+    /// Shown when the notes refresh is requested while saved processing is
+    /// parked; scheduling refuses that request, so the click must say why.
+    static let notesPausedStatus = "译文与笔记处理已暂停 · 继续处理后可更新笔记"
+    /// A legacy course cannot resume until its notes are explicitly rebuilt.
+    static let notesLegacyStatus = "旧课程笔记缺少来源批次 · 在“录音处理”中重建后可更新"
+
     func requestSummaryRefresh() {
         guard !segments.isEmpty else { return }
+        // Checked before the translation-worker branch: during a park the
+        // worker can still be set, and no refresh may be queued past a pause.
+        if case .saved = phase, legacyProvenanceUnavailable {
+            summaryStatus = Self.notesLegacyStatus
+            return
+        }
+        if processingPaused {
+            summaryStatus = Self.notesPausedStatus
+            return
+        }
         summaryRetryNotBefore = nil
         if translationWorker != nil && !summaryConcurrencyAllowed {
             summaryRefreshRequested = true
@@ -2997,6 +3013,10 @@ final class AppModel: ObservableObject {
                     resetCaptionRecoveryRound()
                 }
                 processingPaused = false
+                if summaryStatus == Self.notesPausedStatus || summaryStatus == Self.notesLegacyStatus {
+                    summaryStatus = lastSummarizedSegmentCount > 0
+                        ? "已整理 \(lastSummarizedSegmentCount) 段 · 本机生成" : "等待课堂内容"
+                }
                 restorePendingCaptionWork()
                 drainTranslationQueue()
                 startSavedDrain()

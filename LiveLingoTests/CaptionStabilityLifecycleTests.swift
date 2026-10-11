@@ -177,7 +177,7 @@ final class CaptionStabilityLifecycleTests: XCTestCase {
     }
 
     private func makeArchive(captionCount: Int, captureError: String? = nil,
-                             failFirst: Bool = false, gate: StabilityNoteGate? = nil)
+                             failFirst: Bool = false, gate: StabilityNoteGate? = nil, legacy: Bool = false)
         throws -> (model: AppModel, root: URL, snapshot: SessionSnapshot, probe: StabilityNoteProbe, clock: CaptionLifecycleClock) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveLingo-StabilityLifecycle-\(UUID())", isDirectory: true)
@@ -216,7 +216,14 @@ final class CaptionStabilityLifecycleTests: XCTestCase {
         snapshot.processing.paused = true
         snapshot.processing.phase = .paused
         if let captureError { snapshot.processing.recordFailure(captureError, source: .capture) }
-        _ = try SessionStore(directory: root).save(snapshot)
+        if legacy {
+            // Pre-provenance layout: captions and Markdown notes, no snapshot.
+            try SessionArchiveCoding.encode(snapshot.segments[0])
+                .write(to: root.appendingPathComponent("bilingual.jsonl"))
+            try Data("## 旧笔记\n".utf8).write(to: root.appendingPathComponent("summary-zh-Hans.md"))
+        } else {
+            _ = try SessionStore(directory: root).save(snapshot)
+        }
         XCTAssertTrue(snapshot.segments.allSatisfy(\.hasUsableTranslation))
         XCTAssertTrue(snapshot.audioFiles.isEmpty)
         XCTAssertTrue(snapshot.audioRanges.isEmpty)
@@ -330,6 +337,57 @@ final class CaptionStabilityLifecycleTests: XCTestCase {
         XCTAssertEqual(fixture.probe.translationRequests, 0)
         XCTAssertTrue(model.lectureSummary.contains("B 车的速度为每秒两米。"))
         XCTAssertNil(model.archiveError)
+    }
+
+    func testNotesRefreshWhilePausedExplainsPauseAndQueuesNothing() async throws {
+        let fixture = try makeArchive(captionCount: 1)
+        let model = fixture.model
+        // The default open path: a course persisted paused reopens paused.
+        try await model.openSavedSession(fixture.root)
+        XCTAssertTrue(model.savedProcessingIsPaused)
+        model.requestSummaryRefresh()
+        XCTAssertEqual(model.summaryStatus, AppModel.notesPausedStatus)
+        XCTAssertNil(model.summaryTaskForTesting)
+        XCTAssertNil(model.summaryWakeTaskForTesting)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(fixture.probe.inputs.count, 0, "A paused course must not start a note request")
+        XCTAssertNil(model.summaryTaskForTesting)
+
+        model.resumeSavedProcessing()
+        try await eventually { !model.savedProcessingIsPaused }
+        XCTAssertNotEqual(model.summaryStatus, AppModel.notesPausedStatus,
+                          "Resuming must not leave the pause explanation behind")
+        try await eventually { fixture.probe.inputs.count == 1 }
+        await model.savedProcessingTaskForTesting?.value
+        try await eventually {
+            (try? SessionStore(directory: fixture.root).load())?.batches.count == 1
+        }
+        await model.summaryTaskForTesting?.value
+
+        // An explicit pause of a finished course behaves the same way.
+        try await park(model)
+        XCTAssertTrue(model.savedProcessingIsPaused)
+        model.requestSummaryRefresh()
+        XCTAssertEqual(model.summaryStatus, AppModel.notesPausedStatus)
+        XCTAssertNil(model.summaryTaskForTesting)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(fixture.probe.inputs.count, 1, "The paused click must not queue an extra note round")
+        assertExactCoverage(try XCTUnwrap(SessionStore(directory: fixture.root).load()), original: fixture.snapshot)
+        XCTAssertEqual(fixture.probe.translationRequests, 0)
+    }
+
+    func testNotesRefreshOnLegacyCourseExplainsRebuild() async throws {
+        let fixture = try makeArchive(captionCount: 1, legacy: true)
+        let model = fixture.model
+        try await model.openSavedSession(fixture.root)
+        XCTAssertTrue(model.legacyProvenanceUnavailable)
+        XCTAssertFalse(model.segments.isEmpty)
+        model.requestSummaryRefresh()
+        XCTAssertEqual(model.summaryStatus, AppModel.notesLegacyStatus)
+        XCTAssertNil(model.summaryTaskForTesting)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(fixture.probe.inputs.count, 0)
+        XCTAssertEqual(fixture.probe.translationRequests, 0)
     }
 
     func testArchivedCaptureFailureSurvivesFinalDrainAndAutomaticNoteRetry() async throws {
