@@ -2042,11 +2042,15 @@ struct TranscriptCaptionRow: View, Equatable {
     }
 }
 
-private struct RecordingElapsedText: View {
+struct RecordingElapsedText: View {
     @ObservedObject var meter: CaptureMeterState
     var body: some View {
-        let seconds = max(0, Int(meter.elapsedSeconds))
-        Text(String(format: "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60))
+        Text(Self.label(meter.elapsedSeconds))
+    }
+
+    nonisolated static func label(_ elapsed: TimeInterval) -> String {
+        let seconds = TimestampClock.truncatedSeconds(elapsed)
+        return String(format: "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
     }
 }
 

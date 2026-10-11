@@ -252,6 +252,30 @@ struct SessionStoreTests {
         }
     }
 
+    /// Opening a course shows `lastCapturedTime` on the recording clock, so a
+    /// rewritten snapshot must not carry a capture time past the caption bound.
+    @Test func snapshotValidationRejectsImplausibleCaptureTimes() throws {
+        let bound = TranscriptSegment.maximumTimestamp
+        let invalidProgress = SessionStoreError.invalidState("待处理任务或采集进度无效")
+        for time in [1e20, bound.nextUp] {
+            var snapshot = SessionSnapshot(segments: [segment()])
+            snapshot.processing.lastCapturedTime = time
+            #expect(throws: invalidProgress) { try snapshot.validate() }
+        }
+        var edge = SessionSnapshot(segments: [segment()])
+        edge.processing.lastCapturedTime = bound
+        try edge.validate()
+
+        let invalidRange = SessionStoreError.invalidState("音频帧范围或采集时间无效")
+        func range(start: TimeInterval, end: TimeInterval) -> SessionAudioRange {
+            SessionAudioRange(segmentID: UUID(), filePath: "recording.wav", startFrame: 0, frameCount: 0,
+                              captureStart: start, captureEnd: end)
+        }
+        try range(start: 1, end: bound).validate()
+        #expect(throws: invalidRange) { try range(start: 1, end: 1e20).validate() }
+        #expect(throws: invalidRange) { try range(start: 1, end: bound.nextUp).validate() }
+    }
+
     @Test func fullSnapshotRestoresIdentityNotesProgressAudioAndCheckpoints() throws {
         let fixture = try Fixture(); defer { fixture.clean() }
         let id = UUID()

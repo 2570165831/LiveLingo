@@ -901,7 +901,7 @@ final class AppModel: ObservableObject {
             return ClassroomFixedText.noCompletedBatch.text(targetCode: targetCode)
         }
         func stamp(_ value: TimeInterval) -> String {
-            let seconds = max(0, Int(value))
+            let seconds = TimestampClock.truncatedSeconds(value)
             return String(format: "%02d:%02d", seconds / 60, seconds % 60)
         }
         return ClassroomFixedText.latestCompletedRange.format(args: [stamp(start), stamp(end)], targetCode: targetCode)

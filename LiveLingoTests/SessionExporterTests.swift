@@ -312,6 +312,17 @@ struct SessionExporterTests {
                                                           evidence: [huge])?.prefix == "- [16666666:40] Synthetic source. — ")
     }
 
+    /// The recording strip shows a restored course's last capture time; a
+    /// corrupt value must clamp instead of trapping in `Int(_:)`.
+    @Test func recordingClockClampsImplausibleTimes() {
+        #expect(RecordingElapsedText.label(1e20) == "277777:46:40")
+        #expect(RecordingElapsedText.label(.infinity) == "277777:46:40")
+        for time: TimeInterval in [-.infinity, .nan, -1] {
+            #expect(RecordingElapsedText.label(time) == "00:00:00")
+        }
+        #expect(RecordingElapsedText.label(3_661.9) == "01:01:01")
+    }
+
     @Test func exportWritesAllTextFormats() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

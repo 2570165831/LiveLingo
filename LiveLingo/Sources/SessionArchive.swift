@@ -347,7 +347,7 @@ struct SessionProcessingState: Codable, Equatable, Sendable {
               Set(pendingBatchIDs).count == pendingBatchIDs.count,
               Set((pendingCaptionRepairs ?? []).map { $0.current.id }).count == (pendingCaptionRepairs ?? []).count,
               lastErrorSource == nil || lastError != nil,
-              lastCapturedTime.map({ $0.isFinite && $0 >= 0 }) ?? true else {
+              lastCapturedTime.map({ $0.isFinite && $0 >= 0 && $0 <= TranscriptSegment.maximumTimestamp }) ?? true else {
             throw SessionStoreError.invalidState("待处理任务或采集进度无效")
         }
     }
@@ -462,7 +462,9 @@ struct SessionAudioRange: Codable, Equatable, Sendable {
     func validate() throws {
         try SessionArchiveCoding.validateRelativePath(filePath)
         guard startFrame >= 0, frameCount >= 0, startFrame <= Int64.max - frameCount,
-              captureStart.isFinite, captureEnd.isFinite, captureStart >= 0, captureEnd >= captureStart else {
+              captureStart.isFinite, captureEnd.isFinite, captureStart >= 0, captureEnd >= captureStart,
+              // Session-relative or system-uptime seconds; both stay far below the caption bound.
+              captureEnd <= TranscriptSegment.maximumTimestamp else {
             throw SessionStoreError.invalidState("音频帧范围或采集时间无效")
         }
     }
