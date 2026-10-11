@@ -84,16 +84,47 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
     var candidateOrigin: String?
     var failure: String?
     var failureReason: FailureReason?
+    /// Immutable evidence from the first claim, including an explicitly empty
+    /// predecessor. Retries never borrow evidence from a later live ordinal.
+    var sourceTriggerPredecessor: SourceLanguagePolicy.TriggerState?
+    /// The initial head decision and its causal progress survive reopening,
+    /// including when body generation or a later repair has not finished.
+    var sourceTriggerDecision: SourceLanguagePolicy.Decision?
+    var sourceTriggerAfter: SourceLanguagePolicy.TriggerState?
+    /// A failed initial formal pass waits for older heads before repairs start.
+    var sourceTriggerPendingBoundary: Bool?
+    /// First-pass confidence only. Pending heads/bodies survive a pause or crash.
+    var sourceProbeInput: SourceLanguagePolicy.ProbeInput?
+    var sourceProbeFinished: Bool?
+    /// Explicit edits revoke automatic replacement, even an edit back to the same text.
+    var sourceRevisionAllowed: Bool?
+    /// Proof that this initial pass wrote the provisional English itself.
+    /// A digest avoids retaining another copy of the caption body.
+    var sourceInitialEnglishDigest: String?
+    var hasProvisionalInitialEnglish: Bool {
+        guard attempt == .initial, sourceRevisionAllowed == true, textLanguage == nil,
+              let text, !text.isEmpty, let sourceInitialEnglishDigest else { return false }
+        return Self.englishDigest(text) == sourceInitialEnglishDigest
+    }
+    static func englishDigest(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
     var duration: TimeInterval { max(0, end - start) }
     var needsWork: Bool { [.pending, .active, .retryWaiting, .manualPending].contains(status) }
     /// Exactly what `claimNext()` may take. A `.retryWaiting` record with an
     /// exhausted budget (only from a legacy or edited journal) is never taken.
     var isClaimable: Bool {
-        status == .pending || status == .manualPending
+        if status == .pending { return true }
+        guard sourceTriggerPendingBoundary != true,
+              sourceProbeInput == nil || sourceProbeFinished == true else { return false }
+        return status == .manualPending
             || (status == .retryWaiting && automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries)
     }
     /// Failed for good unless someone retries it by hand.
-    var isStuckFailed: Bool { status == .failed || (status == .retryWaiting && !isClaimable) }
+    var isStuckFailed: Bool {
+        status == .failed || (status == .retryWaiting
+            && automaticRetryCount >= DurableTranscriptionJournal.maximumAutomaticRetries)
+    }
     /// An unfinished manual retry of non-English speech heard nothing new, so
     /// that terminal verdict stands. With a fallback model, this reason otherwise
     /// only remains on a chunk awaiting its first automatic retry, which offers
@@ -112,6 +143,9 @@ extension TranscriptionWorkRecord {
         case captureStart, captureEnd, modelKey, fallbackModelKey, appleEvidence, recordingFile, audioRetired
         case status, extendedStatus, attempt, automaticRetryCount, manualRetryCount
         case text, textLanguage, candidateText, candidateLanguage, candidateOrigin, failure, failureReason
+        case sourceTriggerPredecessor, sourceTriggerDecision, sourceTriggerAfter
+        case sourceTriggerPendingBoundary
+        case sourceProbeInput, sourceProbeFinished, sourceRevisionAllowed, sourceInitialEnglishDigest
     }
 
     init(from decoder: Decoder) throws {
@@ -143,6 +177,14 @@ extension TranscriptionWorkRecord {
         candidateOrigin = try c.decodeIfPresent(String.self, forKey: .candidateOrigin)
         failure = try c.decodeIfPresent(String.self, forKey: .failure)
         failureReason = try c.decodeIfPresent(String.self, forKey: .failureReason).flatMap(FailureReason.init(rawValue:))
+        sourceTriggerPredecessor = try c.decodeIfPresent(SourceLanguagePolicy.TriggerState.self, forKey: .sourceTriggerPredecessor)
+        sourceTriggerDecision = try c.decodeIfPresent(SourceLanguagePolicy.Decision.self, forKey: .sourceTriggerDecision)
+        sourceTriggerAfter = try c.decodeIfPresent(SourceLanguagePolicy.TriggerState.self, forKey: .sourceTriggerAfter)
+        sourceTriggerPendingBoundary = try c.decodeIfPresent(Bool.self, forKey: .sourceTriggerPendingBoundary)
+        sourceProbeInput = try c.decodeIfPresent(SourceLanguagePolicy.ProbeInput.self, forKey: .sourceProbeInput)
+        sourceProbeFinished = try c.decodeIfPresent(Bool.self, forKey: .sourceProbeFinished)
+        sourceRevisionAllowed = try c.decodeIfPresent(Bool.self, forKey: .sourceRevisionAllowed)
+        sourceInitialEnglishDigest = try c.decodeIfPresent(String.self, forKey: .sourceInitialEnglishDigest)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -164,6 +206,14 @@ extension TranscriptionWorkRecord {
         try c.encodeIfPresent(SpokenLanguage.nonEnglishCode(candidateLanguage), forKey: .candidateLanguage)
         try c.encodeIfPresent(candidateOrigin, forKey: .candidateOrigin); try c.encodeIfPresent(failure, forKey: .failure)
         try c.encodeIfPresent(failureReason?.rawValue, forKey: .failureReason)
+        try c.encodeIfPresent(sourceTriggerPredecessor, forKey: .sourceTriggerPredecessor)
+        try c.encodeIfPresent(sourceTriggerDecision, forKey: .sourceTriggerDecision)
+        try c.encodeIfPresent(sourceTriggerAfter, forKey: .sourceTriggerAfter)
+        try c.encodeIfPresent(sourceTriggerPendingBoundary, forKey: .sourceTriggerPendingBoundary)
+        try c.encodeIfPresent(sourceProbeInput, forKey: .sourceProbeInput)
+        try c.encodeIfPresent(sourceProbeFinished, forKey: .sourceProbeFinished)
+        try c.encodeIfPresent(sourceRevisionAllowed, forKey: .sourceRevisionAllowed)
+        try c.encodeIfPresent(sourceInitialEnglishDigest, forKey: .sourceInitialEnglishDigest)
     }
 }
 
@@ -356,6 +406,11 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
         // Recording always requires a deliberate new start after reopening.
         if state.capturing { try setCapturing(false) }
         for var record in state.records where record.status == .active {
+            if record.sourceProbeInput != nil, record.sourceProbeFinished != true { continue }
+            if record.hasProvisionalInitialEnglish, record.sourceProbeInput == nil {
+                record.status = .pending; record.failure = nil; record.failureReason = nil
+                try put(record); continue
+            }
             if record.interruptedRetryStaysOtherLanguage { record.status = .otherLanguage; try put(record); continue }
             record.status = record.attempt == .automaticRetry
                 ? (record.automaticRetryCount < Self.maximumAutomaticRetries ? .retryWaiting : .failed)
@@ -601,6 +656,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     func requeueActive() throws {
         try lock.withLock {
             for var record in state.records where record.status == .active {
+                if record.sourceProbeInput != nil, record.sourceProbeFinished != true { continue }
                 if record.interruptedRetryStaysOtherLanguage { record.status = .otherLanguage }
                 else if record.attempt == .initial { record.status = .pending }
                 else {
@@ -621,7 +677,8 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     }
     var processingState: TranscriptionProcessingState {
         lock.withLock {
-            let pending = state.records.filter(\.needsWork)
+            let pending = state.records.filter { $0.needsWork
+                || ($0.sourceProbeInput != nil && $0.sourceProbeFinished != true) }
             return TranscriptionProcessingState(sessionID: sessionID, isCapturing: state.capturing,
                 isPaused: state.paused, activeCount: pending.filter { $0.status == .active }.count,
                 pendingCount: pending.count, backlogSeconds: pending.reduce(0) { $0 + $1.duration },

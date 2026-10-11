@@ -46,7 +46,7 @@ class ASRRequestIdentityTests(unittest.TestCase):
         self.service.transcribe_audio = Mock(side_effect=self.transcribe)
         self.service.speech_band_enhance = Mock(side_effect=lambda path:
             (path, {'applied': False, 'reason': 'synthetic'}))
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='py05-synthetic')
+        executor = self.service.PriorityInferenceExecutor()
         self.addCleanup(executor.shutdown, wait=True)
         self.service.INFERENCE_WORKER = executor
 
@@ -56,7 +56,7 @@ class ASRRequestIdentityTests(unittest.TestCase):
         Path(path).rename(destination / Path(path).name)
 
     @staticmethod
-    def transcribe(path, model, language=None, probe_input_path=None):
+    def transcribe(path, model, language=None, probe_input_path=None, confirmed_language=None):
         if language == 'auto':
             return dict(text=CANARY, detected_label='English', language_probability=.99,
                         english_probability=.99, decode='forced')
@@ -213,9 +213,9 @@ class ASRRequestIdentityTests(unittest.TestCase):
         self.assert_duplicate(self.post())
         self.assert_finished_once()
 
-    def test_upload_in_progress_rejects_unbound_duplicate_without_releasing_owner(self):
+    def uploading_duplicate(self, query, replay_query, expected_reason):
         entered, release = threading.Event(), threading.Event()
-        owner_handler = self.handler()
+        owner_handler = self.handler(query=query)
         read_audio = owner_handler.read_audio_body
         def read(size):
             entered.set()
@@ -227,16 +227,35 @@ class ASRRequestIdentityTests(unittest.TestCase):
             owner = callers.submit(owner_handler.do_POST)
             try:
                 self.assertTrue(entered.wait(2))
-                status, payload = self.post(audio=OTHER_AUDIO)
+                status, payload = self.post(query=replay_query, audio=OTHER_AUDIO)
                 self.assertEqual(status, 409)
                 self.assertEqual(payload, {'error': 'Request ID is already in use',
-                                           'reason': 'input_identity_pending'})
+                                           'reason': expected_reason})
                 self.assertEqual(self.service.resource_snapshot()['requests']['same-id'],
                                  {'model': '1.7b', 'state': 'waiting'})
                 self.service.transcribe_audio.assert_not_called()
             finally:
                 release.set()
             owner.result(timeout=2)
+        self.assert_finished_once()
+
+    def test_upload_in_progress_rejects_unbound_duplicate_without_releasing_owner(self):
+        self.uploading_duplicate('model=1.7b', 'model=1.7b', 'input_identity_pending')
+
+    def test_confirmed_upload_replay_reports_pending_identity(self):
+        query = 'model=1.7b&language=auto&confirmed_language=es'
+        self.uploading_duplicate(query, query, 'input_identity_pending')
+
+    def test_changed_confirmed_language_during_upload_reports_parameter_mismatch(self):
+        self.uploading_duplicate('model=1.7b&language=auto&confirmed_language=es',
+            'model=1.7b&language=auto&confirmed_language=fr', 'parameters_mismatch')
+
+    def test_completed_confirmed_identity_binds_language_and_enhancement(self):
+        query = 'model=1.7b&language=auto&confirmed_language=es&enhance=speech'
+        self.assertEqual(self.post(query=query)[0], 200)
+        self.assert_duplicate(self.post(query=query))
+        self.assert_conflict(self.post(query=query.replace('=es', '=fr')), 'parameters_mismatch')
+        self.assert_conflict(self.post(query=query.replace('=speech', '=off')), 'parameters_mismatch')
         self.assert_finished_once()
 
     def test_identity_is_private_and_evicted_with_its_bounded_receipt(self):

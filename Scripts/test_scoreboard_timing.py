@@ -325,7 +325,8 @@ class ASRTests(TimingCase):
     def test_parakeet_and_auto_paths_keep_arguments_and_results(self):
         path = self.log_file()
         self.enable(path)
-        self.assertEqual(self.service.transcribe_audio(PRIVATE, "parakeet"), PRIVATE)
+        self.assertEqual(self.service.transcribe_audio(PRIVATE, "parakeet"),
+                         {"text": PRIVATE, "pk_mean_probability": None, "pk_min_probability": None})
         self.model.generate.assert_called_once_with(PRIVATE, verbose=False)
         expected = {"text": PRIVATE, "language": "en"}
         def auto(*args):

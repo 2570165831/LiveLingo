@@ -76,6 +76,126 @@ private final class CaptionIdentityGate<Value: Sendable> {
     }
 }
 
+private enum InitialSourceRevisionEvent: Sendable {
+    case pipeline(SpeechPipeline.Event)
+    case barrier(CheckedContinuation<Void, Never>)
+}
+
+private actor InitialSourceReopenProbe {
+    private(set) var modes: [ASRLanguageMode] = []
+    private let source: String
+
+    init(source: String) { self.source = source }
+
+    func transcribe(_ mode: ASRLanguageMode) -> ASRTranscription {
+        modes.append(mode)
+        if mode == .probe {
+            return ASRTranscription(text: "", languageMode: .probe,
+                detectedLabel: SpokenLanguage.find("ja")?.qwenLabel,
+                languageProbability: 0.99, englishProbability: 0.001, policy: 1)
+        }
+        XCTAssertEqual(mode, .auto, "Reopening pending source work must not repeat formal English ASR")
+        return ASRTranscription(text: source, languageMode: .auto,
+            language: "ja", decode: .detected, detectedLabel: SpokenLanguage.find("ja")?.qwenLabel,
+            languageProbability: 0.99, englishProbability: 0.001, generatedTokens: 12, policy: 1)
+    }
+}
+
+private actor InitialFormalFallbackProbe {
+    private(set) var requests: [String] = []
+    private var heldFormalFallback = false
+    private let fallbackGate: CaptionIdentityGate<ASRTranscription>?
+    private let sourceGate: CaptionIdentityGate<ASRTranscription>
+
+    init(fallbackGate: CaptionIdentityGate<ASRTranscription>? = nil,
+         sourceGate: CaptionIdentityGate<ASRTranscription>) {
+        self.fallbackGate = fallbackGate; self.sourceGate = sourceGate
+    }
+
+    func transcribe(model: String, mode: ASRLanguageMode) async throws -> ASRTranscription {
+        requests.append("\(model):\(mode.rawValue)")
+        if model == "primary" {
+            XCTAssertEqual(mode, .english)
+            var result = ASRTranscription(text: InitialSourceRevisionFixture.shortEnglish)
+            result.parakeetMeanProbability = 0.8
+            return result
+        }
+        XCTAssertEqual(model, "fallback")
+        if mode == .english {
+            if let fallbackGate, !heldFormalFallback {
+                heldFormalFallback = true
+                return try await fallbackGate.wait()
+            }
+            return ASRTranscription(text: InitialSourceRevisionFixture.shortEnglish)
+        }
+        if mode == .probe {
+            return ASRTranscription(text: "", languageMode: .probe,
+                detectedLabel: SpokenLanguage.find("es")?.qwenLabel,
+                languageProbability: 0.99, englishProbability: 0.001, policy: 1)
+        }
+        XCTAssertEqual(mode, .auto)
+        return try await sourceGate.wait()
+    }
+}
+
+@MainActor
+private final class InitialSourceRevisionFixture {
+    nonisolated static let english = "The blue cart stops beside the metal gate."
+    nonisolated static let source = "青い車は門のそばに止まっています。"
+    nonisolated static let translated = "蓝色小车停在金属门旁边。"
+    nonisolated static let shortEnglish = "Okay."
+    nonisolated static let spanish = "El carrito azul se detiene junto a la puerta de metal."
+    let model: AppModel
+    let pipeline: SpeechPipeline
+    let root: URL
+    let id: UUID
+    let sourceGate: CaptionIdentityGate<ASRTranscription>
+    let fallbackGate: CaptionIdentityGate<ASRTranscription>?
+    let formalProbe: InitialFormalFallbackProbe?
+    let events: AsyncStream<InitialSourceRevisionEvent>.Continuation
+    var consumer: Task<Void, Never>?
+    var commits: [TranscriptionCommit] = []
+
+    init(model: AppModel, pipeline: SpeechPipeline, root: URL, id: UUID,
+         sourceGate: CaptionIdentityGate<ASRTranscription>,
+         fallbackGate: CaptionIdentityGate<ASRTranscription>? = nil,
+         formalProbe: InitialFormalFallbackProbe? = nil,
+         events: AsyncStream<InitialSourceRevisionEvent>.Continuation) {
+        self.model = model; self.pipeline = pipeline; self.root = root; self.id = id
+        self.sourceGate = sourceGate; self.events = events
+        self.fallbackGate = fallbackGate; self.formalProbe = formalProbe
+    }
+
+    func receive(_ event: InitialSourceRevisionEvent) {
+        switch event {
+        case .pipeline(let value):
+            if case .identifiedFinal(let commit) = value { commits.append(commit) }
+            model.receiveTranscriptionNoticeForTesting(value)
+        case .barrier(let continuation): continuation.resume()
+        }
+    }
+
+    func flushEvents() async {
+        await withCheckedContinuation { events.yield(.barrier($0)) }
+    }
+
+    func finishSource() {
+        let language = formalProbe == nil ? "ja" : "es"
+        sourceGate.finish(.success(ASRTranscription(text: formalProbe == nil ? Self.source : Self.spanish,
+            languageMode: .auto, language: language, decode: .detected,
+            detectedLabel: SpokenLanguage.find(language)?.qwenLabel,
+            languageProbability: 0.99, englishProbability: 0.001, generatedTokens: 12, policy: 1)))
+    }
+
+    func settle() async throws {
+        await pipeline.drainTranscription(sessionID: model.captureHealthSessionIDForTesting)
+        await flushEvents()
+        await model.translationTaskForTesting?.value
+        try await model.flushSavedCourseForTesting()
+        await flushEvents()
+    }
+}
+
 @MainActor
 final class CaptionIdentityTests: XCTestCase {
     private func eventually(within timeout: Duration = .seconds(5),
@@ -92,18 +212,21 @@ final class CaptionIdentityTests: XCTestCase {
 
     private func makeModel(_ translation: CaptionTranslationDependencies,
                            notes: LearningGenerationDependencies? = nil,
-                           scheduledNotes: Bool? = nil) throws -> AppModel {
+                           scheduledNotes: Bool? = nil,
+                           pipeline: SpeechPipeline = SpeechPipeline(),
+                           mode: ModelMode? = nil) throws -> AppModel {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LiveLingo-CaptionIdentity-\(UUID())", isDirectory: true)
         let suite = "LiveLingo-CaptionIdentity-\(UUID())"
         let preferenceCleanup = try TestPreferenceCleanup(suite: suite)
         let preferences = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        if let mode { preferences.set(mode.rawValue, forKey: "LiveLingo.modelMode") }
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
             observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
                 XCTFail("字幕生命周期测试不能发起复查")
                 throw CancellationError()
             }
-        let model = AppModel(reviewQueue: queue, translation: translation,
+        let model = AppModel(reviewQueue: queue, pipeline: pipeline, translation: translation,
                              notes: notes, backgroundServices: false,
                              scheduledNotes: scheduledNotes, defaults: preferences)
         model.resetTranslationSessionForTesting()
@@ -115,6 +238,754 @@ final class CaptionIdentityTests: XCTestCase {
             }
         }
         return model
+    }
+
+    /// A real disk-backed queue feeds the existing AppModel event consumer.
+    /// All PCM and text are synthetic; no capture, ASR service or model starts.
+    private func initialSourceRevisionFixture(_ translation: CaptionTranslationDependencies,
+                                              completed: Bool = false,
+                                              holdProbe: Bool = false,
+                                              holdFormalFallback: Bool = false,
+                                              mode: ModelMode? = nil) async throws -> InitialSourceRevisionFixture {
+        let sourceGate = CaptionIdentityGate<ASRTranscription>()
+        let fallbackGate = holdFormalFallback ? CaptionIdentityGate<ASRTranscription>() : nil
+        let formalProbe = fallbackGate.map { InitialFormalFallbackProbe(fallbackGate: $0, sourceGate: sourceGate) }
+        let initialEnglish = InitialSourceRevisionFixture.english
+        let pipeline = SpeechPipeline(transcriber: { _, model, _, mode in
+            if let formalProbe { return try await formalProbe.transcribe(model: model, mode: mode) }
+            if model == "primary" {
+                var result = ASRTranscription(text: initialEnglish)
+                result.parakeetMeanProbability = 0.8
+                return result
+            }
+            if mode == .probe {
+                if holdProbe { return try await sourceGate.wait() }
+                return ASRTranscription(text: "", languageMode: .probe,
+                    detectedLabel: SpokenLanguage.find("ja")?.qwenLabel,
+                    languageProbability: 0.99, englishProbability: 0.001, policy: 1)
+            }
+            XCTAssertEqual(mode, .auto)
+            return try await sourceGate.wait()
+        }, enableAudioAnalysis: false)
+        let model = try makeModel(translation,
+            notes: .init(generate: { _, _, _, _, _ in throw CancellationError() }),
+            scheduledNotes: false, pipeline: pipeline, mode: mode)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveLingo-InitialSourceRevision-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        try await model.beginSavedCourseForTesting(directory: root)
+        let session = model.captureHealthSessionIDForTesting
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        var record = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: holdFormalFallback ? 1 : 0,
+            audioFile: "synthetic.wav", startFrame: 0, endFrame: 160_000, sampleRate: 16_000,
+            start: 0, end: 10, captureStart: nil, captureEnd: nil,
+            modelKey: "primary", fallbackModelKey: "fallback", appleEvidence: "")
+        if holdFormalFallback {
+            // Spanish needs two causal heads. Isolate the first confirmed App
+            // caption with the preceding head's persisted evidence, rather
+            // than bypassing Latin consensus or adding another visible caption.
+            let plan = SourceLanguagePolicy.ProbePlan(baseEligible: true, followup: false, prior: nil)
+            let preceding = SourceLanguagePolicy.decide(plan, language: "es", probability: 0.99,
+                englishProbability: 0.001)
+            XCTAssertEqual(preceding.reason, "pending_consensus")
+            var predecessor = SourceLanguagePolicy.TriggerState()
+            predecessor.advance(index: 0, decision: preceding)
+            record.sourceTriggerPredecessor = predecessor
+        }
+        if completed { record.status = .completed; record.text = InitialSourceRevisionFixture.english }
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let pcm = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160_000))
+        pcm.frameLength = pcm.frameCapacity
+        pcm.floatChannelData![0].initialize(repeating: 0.05, count: Int(pcm.frameLength))
+        let audioURL = journal.directory.appendingPathComponent(record.audioFile)
+        var audio: AVAudioFile? = try AVAudioFile(forWriting: audioURL, settings: format.settings)
+        try audio!.write(from: pcm)
+        audio = nil // Finalize the WAV header before any queue reader can open it.
+        let layout = try WAVContextClip.readLayout(at: audioURL)
+        XCTAssertEqual(layout.frameCount, Int(record.endFrame - record.startFrame))
+        try journal.put(record)
+        let (stream, continuation) = AsyncStream.makeStream(of: InitialSourceRevisionEvent.self)
+        let fixture = InitialSourceRevisionFixture(model: model, pipeline: pipeline, root: root,
+            id: record.id, sourceGate: sourceGate, fallbackGate: fallbackGate,
+            formalProbe: formalProbe, events: continuation)
+        fixture.consumer = Task { for await event in stream { fixture.receive(event) } }
+        addTeardownBlock {
+            await sourceGate.finish(.failure(CancellationError()))
+            await fallbackGate?.finish(.failure(CancellationError()))
+            await pipeline.stopCapture(continueTranscribing: false)
+            await pipeline.drainTranscription(sessionID: session)
+            continuation.finish()
+            await fixture.consumer?.value
+            try await model.flushSavedCourseForTesting()
+            if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
+        }
+        try await pipeline.restoreTranscription(directory: root, sessionID: session, startPaused: true) {
+            continuation.yield(.pipeline($0))
+        }
+        XCTAssertEqual(pipeline.transcriptionWork().map(\.id), [record.id])
+        try pipeline.resumeTranscription()
+        await fixture.flushEvents()
+        return fixture
+    }
+
+    func testInitialSourceRevisionFromDurableQueueRetranslatesStableCaption() async throws {
+        var sourceCalls: [(String, String)] = []
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, _ in "临时英文对应的旧译文。" },
+            adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() },
+            translateSource: { text, _, language, _, _ in
+                sourceCalls.append((text, language)); return InitialSourceRevisionFixture.translated
+            }))
+        try await eventually { fixture.sourceGate.entered && fixture.model.segments.count == 1 }
+        await fixture.model.translationTaskForTesting?.value
+        let initial = try XCTUnwrap(fixture.model.segments.first)
+        XCTAssertEqual(initial.english, InitialSourceRevisionFixture.english)
+        XCTAssertNil(initial.sourceLanguage)
+        XCTAssertTrue(initial.hasUsableTranslation)
+        fixture.finishSource()
+        try await fixture.settle()
+        XCTAssertEqual(fixture.commits.map(\.replacingInitialText), [nil, InitialSourceRevisionFixture.english])
+        XCTAssertEqual(fixture.commits.map(\.id), [fixture.id, fixture.id])
+        XCTAssertTrue(fixture.commits.allSatisfy { !$0.isRepair })
+        XCTAssertEqual(fixture.model.segments.count, 1)
+        let revised = try XCTUnwrap(fixture.model.segments.first)
+        XCTAssertEqual(revised.id, initial.id)
+        XCTAssertEqual(revised.sessionID, initial.sessionID)
+        XCTAssertEqual(revised.startTime, initial.startTime)
+        XCTAssertEqual(revised.endTime, initial.endTime)
+        XCTAssertEqual(revised.english, InitialSourceRevisionFixture.source)
+        XCTAssertEqual(revised.sourceLanguage, "ja")
+        XCTAssertEqual(revised.inputRevision, initial.inputRevision + 1)
+        XCTAssertEqual(revised.chinese, InitialSourceRevisionFixture.translated)
+        XCTAssertEqual(revised.translationState, .completed)
+        XCTAssertEqual(sourceCalls.map { $0.0 }, [InitialSourceRevisionFixture.source])
+        XCTAssertEqual(sourceCalls.map { $0.1 }, ["ja"])
+        XCTAssertTrue(fixture.model.transcriptionCandidates.isEmpty)
+        let snapshot = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        XCTAssertEqual(snapshot.segments, [revised])
+        XCTAssertEqual(snapshot.inputRevision, revised.inputRevision)
+        XCTAssertEqual(snapshot.revisionHistory.count, 1)
+        XCTAssertEqual(snapshot.revisionHistory.first?.previousSegment.english, initial.english)
+        XCTAssertEqual(snapshot.revisionHistory.first?.replacementSegment.english, revised.english)
+        XCTAssertNil(snapshot.revisionHistory.first?.transcriptionCandidateText,
+                     "An initial automatic source revision is not user candidate consent")
+        let journal = try DurableTranscriptionJournal(sessionDirectory: fixture.root, sessionID: snapshot.sessionID)
+        XCTAssertEqual(journal.record(id: fixture.id)?.text, revised.english)
+        XCTAssertEqual(journal.record(id: fixture.id)?.textLanguage, revised.sourceLanguage)
+        XCTAssertNil(journal.record(id: fixture.id)?.candidateText)
+    }
+
+    func testInitialSourceRevisionRejectsLateTranslationOfTemporaryEnglish() async throws {
+        let oldGate = CaptionIdentityGate<String>()
+        addTeardownBlock { await oldGate.finish(.failure(CancellationError())) }
+        var oldUpdate: CaptionTranslationDependencies.Update?
+        var sourceCalls = 0
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, update in
+                oldUpdate = update
+                await update?("临时英文的流式译文。")
+                return try await oldGate.wait()
+            }, adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() },
+            translateSource: { _, _, _, _, _ in sourceCalls += 1; return InitialSourceRevisionFixture.translated }))
+        try await eventually { oldGate.entered && fixture.sourceGate.entered }
+        fixture.finishSource()
+        await fixture.pipeline.drainTranscription(sessionID: fixture.model.captureHealthSessionIDForTesting)
+        await fixture.flushEvents()
+        XCTAssertEqual(fixture.model.segments.first?.english, InitialSourceRevisionFixture.source)
+        XCTAssertEqual(fixture.model.segments.first?.sourceLanguage, "ja")
+        await oldUpdate?("已失效的英文请求晚到流式译文。")
+        XCTAssertEqual(fixture.model.streamingChinese, "")
+        XCTAssertFalse(fixture.model.segments.first?.hasUsableTranslation ?? true)
+        oldGate.finish(.success("已失效的英文请求晚到完成译文。"))
+        try await fixture.settle()
+        XCTAssertEqual(sourceCalls, 1)
+        XCTAssertEqual(fixture.model.segments.first?.chinese, InitialSourceRevisionFixture.translated)
+        XCTAssertEqual(fixture.model.segments.first?.inputRevision, 1)
+        XCTAssertEqual(fixture.model.segments.first?.translationState, .completed)
+        XCTAssertEqual(fixture.model.segments.map(\.id), [fixture.id])
+        XCTAssertTrue(fixture.model.transcriptionCandidates.isEmpty)
+    }
+
+    func testInitialSourceRevisionKeepsNextLivePreviewInEnergySaverMode() async throws {
+        let oldGate = CaptionIdentityGate<String>()
+        defer { oldGate.finish(.failure(CancellationError())) }
+        var oldUpdate: CaptionTranslationDependencies.Update?
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, update in
+                oldUpdate = update
+                return try await oldGate.wait()
+            }, adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() },
+            translateSource: { _, _, _, _, _ in InitialSourceRevisionFixture.translated }),
+            mode: .energySaver)
+        try await eventually { oldGate.entered && fixture.sourceGate.entered }
+        XCTAssertEqual(fixture.model.selectedMode, .energySaver)
+        let preview = "The next live segment is still being spoken."
+        fixture.model.receiveLivePreviewForTesting(preview)
+        XCTAssertEqual(fixture.model.volatileEnglish, preview)
+        fixture.finishSource()
+        await fixture.pipeline.drainTranscription(sessionID: fixture.model.captureHealthSessionIDForTesting)
+        await fixture.flushEvents()
+        XCTAssertEqual(fixture.model.segments.first?.sourceLanguage, "ja")
+        XCTAssertEqual(fixture.model.volatileEnglish, preview,
+                       "A delayed source revision of an old segment must retain the current live preview")
+        await oldUpdate?("已经失效的英文流式译文。")
+        XCTAssertEqual(fixture.model.streamingChinese, "")
+        oldGate.finish(.success("已经失效的英文完成译文。"))
+        try await fixture.settle()
+        XCTAssertEqual(fixture.model.segments.first?.chinese, InitialSourceRevisionFixture.translated)
+        XCTAssertEqual(fixture.model.volatileEnglish, preview)
+    }
+
+    func testInitialSourceRevisionFormalFallbackPauseResumePublishesConfirmedSpanishOnly() async throws {
+        let oldGate = CaptionIdentityGate<String>()
+        defer { oldGate.finish(.failure(CancellationError())) }
+        var oldUpdate: CaptionTranslationDependencies.Update?
+        var sourceCalls: [(String, String)] = []
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, update in
+                oldUpdate = update
+                return try await oldGate.wait()
+            }, adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() },
+            translateSource: { text, _, language, _, _ in
+                sourceCalls.append((text, language)); return InitialSourceRevisionFixture.translated
+            }), holdFormalFallback: true, mode: .energySaver)
+        let fallback = try XCTUnwrap(fixture.fallbackGate)
+        let probe = try XCTUnwrap(fixture.formalProbe)
+        try await eventually { fallback.entered && oldGate.entered && fixture.model.segments.count == 1 }
+        let original = try XCTUnwrap(fixture.model.segments.first)
+        XCTAssertEqual(original.english, InitialSourceRevisionFixture.shortEnglish)
+        XCTAssertNil(original.sourceLanguage)
+        XCTAssertFalse(original.hasUsableTranslation)
+        XCTAssertNil(fixture.pipeline.transcriptionWork().first?.sourceProbeInput,
+                     "Pause before formal fallback returns, not during the later optional source pass")
+        let callsBeforePause = await probe.requests
+        XCTAssertEqual(callsBeforePause, ["primary:english", "fallback:english"])
+        try fixture.pipeline.requestPauseTranscription()
+        fallback.finish(.failure(CancellationError()))
+        try await fixture.pipeline.pauseTranscription()
+        await fixture.flushEvents()
+        try await fixture.model.flushSavedCourseForTesting()
+        let parked = try XCTUnwrap(fixture.pipeline.transcriptionWork().first)
+        XCTAssertEqual(parked.status, .pending)
+        XCTAssertEqual(parked.attempt, .initial)
+        XCTAssertEqual(parked.automaticRetryCount, 0)
+        XCTAssertEqual(parked.manualRetryCount, 0)
+        XCTAssertEqual(parked.text, original.english)
+        XCTAssertEqual(parked.sourceRevisionAllowed, true)
+        XCTAssertNil(parked.sourceProbeInput)
+        try fixture.pipeline.resumeTranscription()
+        try await eventually { fixture.sourceGate.entered }
+        let preview = "The next live segment continues while Spanish is confirmed."
+        fixture.model.receiveLivePreviewForTesting(preview)
+        fixture.finishSource()
+        await fixture.pipeline.drainTranscription(sessionID: original.sessionID)
+        await fixture.flushEvents()
+        XCTAssertEqual(fixture.model.segments.first?.english, InitialSourceRevisionFixture.spanish)
+        XCTAssertEqual(fixture.model.segments.first?.sourceLanguage, "es")
+        XCTAssertFalse(fixture.model.segments.first?.hasUsableTranslation ?? true)
+        XCTAssertEqual(fixture.model.streamingChinese, "")
+        XCTAssertEqual(fixture.model.volatileEnglish, preview)
+        await oldUpdate?("临时英文晚到的流式译文。")
+        XCTAssertEqual(fixture.model.streamingChinese, "")
+        oldGate.finish(.success("临时英文晚到的完成译文。"))
+        try await fixture.settle()
+        let revised = try XCTUnwrap(fixture.model.segments.first)
+        XCTAssertEqual(fixture.model.segments.map(\.id), [fixture.id])
+        XCTAssertEqual(revised.id, original.id)
+        XCTAssertEqual(revised.sessionID, original.sessionID)
+        XCTAssertEqual(revised.startTime, original.startTime)
+        XCTAssertEqual(revised.endTime, original.endTime)
+        XCTAssertEqual(revised.inputRevision, original.inputRevision + 1)
+        XCTAssertEqual(revised.sourceLanguage, "es")
+        XCTAssertEqual(revised.chinese, InitialSourceRevisionFixture.translated)
+        XCTAssertEqual(revised.translationState, .completed)
+        XCTAssertEqual(fixture.model.liveChinese, InitialSourceRevisionFixture.translated)
+        XCTAssertEqual(fixture.model.volatileEnglish, preview)
+        XCTAssertEqual(sourceCalls.map { $0.0 }, [InitialSourceRevisionFixture.spanish])
+        XCTAssertEqual(sourceCalls.map { $0.1 }, ["es"])
+        XCTAssertEqual(fixture.commits.map(\.replacingInitialText), [nil, original.english])
+        XCTAssertTrue(fixture.commits.allSatisfy { !$0.isRepair })
+        XCTAssertTrue(fixture.model.transcriptionCandidates.isEmpty)
+        let calls = await probe.requests
+        XCTAssertEqual(calls, ["primary:english", "fallback:english", "primary:english",
+                               "fallback:english", "fallback:probe", "fallback:auto"])
+        let snapshot = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        XCTAssertEqual(snapshot.segments, [revised])
+        XCTAssertEqual(snapshot.revisionHistory.count, 1)
+        XCTAssertEqual(snapshot.revisionHistory.first?.previousSegment.english, original.english)
+        XCTAssertEqual(snapshot.revisionHistory.first?.replacementSegment.sourceLanguage, "es")
+        XCTAssertNil(snapshot.revisionHistory.first?.transcriptionCandidateText)
+        let journalSessionID = try XCTUnwrap(fixture.model.captureHealthSessionIDForTesting)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: fixture.root, sessionID: journalSessionID)
+        XCTAssertEqual(journal.record(id: fixture.id)?.text, revised.english)
+        XCTAssertEqual(journal.record(id: fixture.id)?.textLanguage, "es")
+        XCTAssertNil(journal.record(id: fixture.id)?.candidateText)
+    }
+
+    func testInitialSourceRevisionReopensDuringFormalFallbackAndPublishesConfirmedSpanishOnly() async throws {
+        let oldGate = CaptionIdentityGate<String>()
+        defer { oldGate.finish(.failure(CancellationError())) }
+        var oldUpdate: CaptionTranslationDependencies.Update?
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, update in
+                oldUpdate = update
+                return try await oldGate.wait()
+            }, adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() }),
+            holdFormalFallback: true, mode: .energySaver)
+        let fallback = try XCTUnwrap(fixture.fallbackGate)
+        try await eventually { fallback.entered && oldGate.entered && fixture.model.segments.count == 1 }
+        let original = try XCTUnwrap(fixture.model.segments.first)
+        XCTAssertEqual(original.english, InitialSourceRevisionFixture.shortEnglish)
+        XCTAssertNil(fixture.pipeline.transcriptionWork().first?.sourceProbeInput)
+        try fixture.pipeline.requestPauseTranscription()
+        fallback.finish(.failure(CancellationError()))
+        try await fixture.pipeline.pauseTranscription()
+        await fixture.flushEvents()
+        try await fixture.model.flushSavedCourseForTesting()
+        let parked = try XCTUnwrap(fixture.pipeline.transcriptionWork().first)
+        XCTAssertEqual(parked.status, .pending)
+        XCTAssertEqual(parked.attempt, .initial)
+        XCTAssertEqual(parked.sourceRevisionAllowed, true)
+        XCTAssertNil(parked.sourceProbeInput)
+        let archived = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        XCTAssertEqual(archived.segments, [original])
+        XCTAssertTrue(archived.revisionHistory.isEmpty)
+        let oldWorker = fixture.model.resetTranslationSessionForTesting()
+        await oldUpdate?("旧 App 请求晚到的流式译文。")
+        oldGate.finish(.success("旧 App 请求晚到的完成译文。"))
+        await oldWorker?.value
+
+        let reopenedSource = CaptionIdentityGate<ASRTranscription>()
+        let reopenedEnglish = CaptionIdentityGate<String>()
+        defer {
+            reopenedSource.finish(.failure(CancellationError()))
+            reopenedEnglish.finish(.failure(CancellationError()))
+        }
+        let probe = InitialFormalFallbackProbe(sourceGate: reopenedSource)
+        let pipeline = SpeechPipeline(transcriber: { _, model, _, mode in
+            try await probe.transcribe(model: model, mode: mode)
+        }, enableAudioAnalysis: false)
+        var lateUpdate: CaptionTranslationDependencies.Update?
+        var sourceCalls: [(String, String)] = []
+        let reopened = try makeModel(.init(
+            translate: { _, _, _, _, update in
+                lateUpdate = update
+                return try await reopenedEnglish.wait()
+            }, adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() },
+            translateSource: { text, _, language, _, _ in
+                sourceCalls.append((text, language)); return InitialSourceRevisionFixture.translated
+            }), notes: .init(generate: { _, _, _, _, _ in throw CancellationError() }),
+            scheduledNotes: false, pipeline: pipeline, mode: .energySaver)
+        addTeardownBlock { await pipeline.stopCapture(continueTranscribing: false) }
+        reopened.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await reopened.openSavedSession(fixture.root, allowAutomaticProcessing: false)
+        XCTAssertEqual(pipeline.transcriptionWork().map(\.id), [fixture.id])
+        XCTAssertEqual(reopened.segments.first?.english, original.english)
+        XCTAssertNil(reopened.segments.first?.sourceLanguage)
+        XCTAssertFalse(reopened.segments.first?.hasUsableTranslation ?? true)
+        let beforeResume = await probe.requests
+        XCTAssertTrue(beforeResume.isEmpty, "Opening a parked course must not start ASR")
+        reopened.resumeSavedProcessing()
+        try await eventually { reopenedSource.entered && reopenedEnglish.entered }
+        let preview = "The next live segment survives the reopened source revision."
+        reopened.receiveLivePreviewForTesting(preview)
+        reopenedSource.finish(.success(ASRTranscription(text: InitialSourceRevisionFixture.spanish,
+            languageMode: .auto, language: "es", decode: .detected,
+            detectedLabel: SpokenLanguage.find("es")?.qwenLabel,
+            languageProbability: 0.99, englishProbability: 0.001, generatedTokens: 12, policy: 1)))
+        await pipeline.drainTranscription(sessionID: original.sessionID)
+        try await eventually {
+            reopened.segments.first?.sourceLanguage == "es" || !reopened.transcriptionCandidates.isEmpty
+        }
+        XCTAssertEqual(reopened.segments.first?.english, InitialSourceRevisionFixture.spanish)
+        XCTAssertEqual(reopened.segments.first?.sourceLanguage, "es")
+        XCTAssertFalse(reopened.segments.first?.hasUsableTranslation ?? true)
+        XCTAssertEqual(reopened.volatileEnglish, preview)
+        XCTAssertEqual(reopened.streamingChinese, "")
+        await lateUpdate?("重开后临时英文晚到的流式译文。")
+        XCTAssertEqual(reopened.streamingChinese, "")
+        reopenedEnglish.finish(.success("重开后临时英文晚到的完成译文。"))
+        await reopened.translationTaskForTesting?.value
+        await reopened.savedProcessingTaskForTesting?.value
+        try await reopened.flushSavedCourseForTesting()
+        let revised = try XCTUnwrap(reopened.segments.first)
+        XCTAssertEqual(reopened.segments.map(\.id), [fixture.id])
+        XCTAssertEqual(revised.id, original.id)
+        XCTAssertEqual(revised.sessionID, original.sessionID)
+        XCTAssertEqual(revised.startTime, original.startTime)
+        XCTAssertEqual(revised.endTime, original.endTime)
+        XCTAssertEqual(revised.inputRevision, original.inputRevision + 1)
+        XCTAssertEqual(revised.sourceLanguage, "es")
+        XCTAssertEqual(revised.chinese, InitialSourceRevisionFixture.translated)
+        XCTAssertEqual(revised.translationState, .completed)
+        XCTAssertEqual(reopened.liveChinese, InitialSourceRevisionFixture.translated)
+        XCTAssertEqual(reopened.volatileEnglish, preview)
+        XCTAssertEqual(sourceCalls.map { $0.0 }, [InitialSourceRevisionFixture.spanish])
+        XCTAssertEqual(sourceCalls.map { $0.1 }, ["es"])
+        XCTAssertTrue(reopened.transcriptionCandidates.isEmpty)
+        XCTAssertNil(reopened.archiveError)
+        let calls = await probe.requests
+        XCTAssertEqual(calls, ["primary:english", "fallback:english", "fallback:probe", "fallback:auto"])
+        let snapshot = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        XCTAssertEqual(snapshot.segments, [revised])
+        XCTAssertEqual(snapshot.revisionHistory.count, 1)
+        XCTAssertEqual(snapshot.revisionHistory.first?.previousSegment.english, original.english)
+        XCTAssertEqual(snapshot.revisionHistory.first?.replacementSegment.sourceLanguage, "es")
+        XCTAssertNil(snapshot.revisionHistory.first?.transcriptionCandidateText)
+        let journalSessionID = try XCTUnwrap(reopened.captureHealthSessionIDForTesting)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: fixture.root, sessionID: journalSessionID)
+        XCTAssertEqual(journal.record(id: fixture.id)?.text, revised.english)
+        XCTAssertEqual(journal.record(id: fixture.id)?.textLanguage, "es")
+        XCTAssertNil(journal.record(id: fixture.id)?.candidateText)
+    }
+
+    func testInitialSourceRevisionSurvivesAdjacentTranslationRepair() async throws {
+        var sourceCalls = 0
+        var adjacentCalls = 0
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, _ in "蓝色小车停在门边。" },
+            adjacent: { previous, _, _, _, _, repair, _, _, _ in
+                adjacentCalls += 1
+                XCTAssertEqual(previous, InitialSourceRevisionFixture.english)
+                XCTAssertTrue(repair, "The real queue must request a repair for the ten-second previous caption")
+                return .init(previous: "蓝色小车停在金属门边。", current: "红色小车继续向前行驶。",
+                             previousRejection: nil, currentRejection: nil)
+            }, translateSource: { _, _, _, _, _ in
+                sourceCalls += 1; return InitialSourceRevisionFixture.translated
+            }))
+        try await eventually { fixture.sourceGate.entered && fixture.model.segments.count == 1 }
+        await fixture.model.translationTaskForTesting?.value
+        let initial = try XCTUnwrap(fixture.model.segments.first)
+        fixture.model.receiveIdentifiedCaptionForTesting(.init(startTime: 10, endTime: 18,
+            english: "The red cart keeps moving forwards.", sessionID: initial.sessionID))
+        await fixture.model.translationTaskForTesting?.value
+        let repaired = try XCTUnwrap(fixture.model.segments.first(where: { $0.id == fixture.id }))
+        XCTAssertEqual(adjacentCalls, 1)
+        XCTAssertEqual(repaired.english, initial.english)
+        XCTAssertEqual(repaired.sourceLanguage, initial.sourceLanguage)
+        XCTAssertEqual(repaired.chinese, "蓝色小车停在金属门边。")
+        XCTAssertEqual(repaired.inputRevision, initial.inputRevision + 1)
+        fixture.finishSource()
+        try await fixture.settle()
+        let revised = try XCTUnwrap(fixture.model.segments.first(where: { $0.id == fixture.id }))
+        XCTAssertEqual(revised.english, InitialSourceRevisionFixture.source)
+        XCTAssertEqual(revised.sourceLanguage, "ja")
+        XCTAssertEqual(revised.chinese, InitialSourceRevisionFixture.translated)
+        XCTAssertEqual(revised.inputRevision, repaired.inputRevision + 1)
+        XCTAssertEqual(revised.id, initial.id)
+        XCTAssertEqual(sourceCalls, 1)
+        XCTAssertTrue(fixture.model.transcriptionCandidates.isEmpty)
+        XCTAssertEqual(fixture.model.segments.count, 2)
+    }
+
+    func testInitialSourceRevisionCoalescedBodyEditsRetainFinalJournalText() async throws {
+        var sourceCalls = 0
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, _ in "用户当前正文对应的译文。" },
+            adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() },
+            translateSource: { _, _, _, _, _ in
+                sourceCalls += 1; return InitialSourceRevisionFixture.translated
+            }))
+        try await eventually { fixture.sourceGate.entered && fixture.model.segments.count == 1 }
+        await fixture.model.translationTaskForTesting?.value
+        await fixture.flushEvents()
+        try await fixture.model.flushSavedCourseForTesting()
+        let initial = try XCTUnwrap(fixture.model.segments.first)
+        XCTAssertEqual(fixture.pipeline.transcriptionWork().first?.sourceRevisionAllowed, true)
+        let intermediate = "The user keeps the blue cart beside a different gate."
+        let final = "The user moves the blue cart beyond the wooden gate."
+        // No suspension between edits: only the final snapshot is submitted to
+        // the serial saver, while its history still contains both source edits.
+        fixture.model.reviseCaptionForTesting(id: fixture.id, english: intermediate)
+        fixture.model.reviseCaptionForTesting(id: fixture.id, english: final)
+        try await fixture.model.flushSavedCourseForTesting()
+        let saved = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        let changes = saved.revisionHistory.filter { $0.previousSegment.id == fixture.id }
+        XCTAssertEqual(changes.map(\.replacementSegment.english), [intermediate, final])
+        let edited = try XCTUnwrap(saved.segments.first(where: { $0.id == fixture.id }))
+        XCTAssertEqual(edited.english, final)
+        XCTAssertEqual(edited.inputRevision, initial.inputRevision + 2)
+        XCTAssertNil(edited.sourceLanguage)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: fixture.root, sessionID: saved.sessionID)
+        let retained = try XCTUnwrap(journal.record(id: fixture.id))
+        XCTAssertEqual(retained.text, final, "All acknowledged edits must update the journal comparison body")
+        XCTAssertEqual(retained.sourceRevisionAllowed, false, "Coalesced edits must revoke first-source replacement")
+        XCTAssertNil(retained.textLanguage)
+        XCTAssertNotNil(retained.sourceProbeInput)
+        XCTAssertNotEqual(retained.sourceProbeFinished, true)
+        // Check persistence before this completion can repair a stale journal
+        // indirectly through AppModel's conflicting-result candidate branch.
+        fixture.finishSource()
+        try await fixture.settle()
+        XCTAssertEqual(fixture.model.segments.first?.english, final)
+        XCTAssertNil(fixture.model.segments.first?.sourceLanguage)
+        XCTAssertEqual(sourceCalls, 0)
+        let candidate = try XCTUnwrap(fixture.model.transcriptionCandidates.first)
+        XCTAssertEqual(candidate.id, fixture.id)
+        XCTAssertEqual(candidate.text, InitialSourceRevisionFixture.source)
+        XCTAssertEqual(candidate.language, "ja")
+    }
+
+    func testInitialSourceRevisionBodyEditThenTranslationRepairRevokesJournalPermission() async throws {
+        var sourceCalls = 0
+        var adjacentCalls = 0
+        let editedEnglish = "The user keeps the blue cart beside a different gate."
+        let repairedChinese = "用户把蓝色小车停在另一扇门旁边。"
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, _ in "用户当前正文对应的旧译文。" },
+            adjacent: { previous, _, _, _, _, repair, _, _, _ in
+                adjacentCalls += 1
+                XCTAssertEqual(previous, editedEnglish)
+                XCTAssertTrue(repair)
+                return .init(previous: repairedChinese, current: "红色小车继续向前行驶。",
+                             previousRejection: nil, currentRejection: nil)
+            }, translateSource: { _, _, _, _, _ in
+                sourceCalls += 1; return InitialSourceRevisionFixture.translated
+            }))
+        try await eventually { fixture.sourceGate.entered && fixture.model.segments.count == 1 }
+        await fixture.model.translationTaskForTesting?.value
+        await fixture.flushEvents()
+        // Start the source edit with a drained saver, so the immediate mocked
+        // translation repair joins its ordinary coalescing window.
+        try await fixture.model.flushSavedCourseForTesting()
+        let initial = try XCTUnwrap(fixture.model.segments.first)
+        XCTAssertEqual(fixture.pipeline.transcriptionWork().first?.sourceRevisionAllowed, true)
+        fixture.model.reviseCaptionForTesting(id: fixture.id, english: editedEnglish)
+        fixture.model.receiveIdentifiedCaptionForTesting(.init(startTime: 10, endTime: 18,
+            english: "The red cart keeps moving forwards.", sessionID: initial.sessionID))
+        await fixture.model.translationTaskForTesting?.value
+        let repaired = try XCTUnwrap(fixture.model.segments.first(where: { $0.id == fixture.id }))
+        XCTAssertEqual(adjacentCalls, 1)
+        XCTAssertEqual(repaired.english, editedEnglish)
+        XCTAssertNil(repaired.sourceLanguage)
+        XCTAssertEqual(repaired.chinese, repairedChinese)
+        XCTAssertEqual(repaired.inputRevision, initial.inputRevision + 2)
+        try await fixture.model.flushSavedCourseForTesting()
+        let saved = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        let changes = saved.revisionHistory.filter { $0.previousSegment.id == fixture.id }
+        XCTAssertEqual(changes.count, 2)
+        let latest = try XCTUnwrap(changes.last)
+        XCTAssertEqual(latest.previousSegment.english, editedEnglish)
+        XCTAssertEqual(latest.replacementSegment.english, editedEnglish)
+        XCTAssertEqual(latest.previousSegment.sourceLanguage, latest.replacementSegment.sourceLanguage)
+        XCTAssertNotEqual(latest.previousSegment.chinese, latest.replacementSegment.chinese)
+        XCTAssertEqual(latest.toRevision, repaired.inputRevision)
+        XCTAssertEqual(saved.segments.first(where: { $0.id == fixture.id }), repaired)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: fixture.root, sessionID: saved.sessionID)
+        let retained = try XCTUnwrap(journal.record(id: fixture.id))
+        XCTAssertEqual(retained.text, editedEnglish, "A later translation-only revision must not hide the source edit")
+        XCTAssertEqual(retained.sourceRevisionAllowed, false, "Translation repair must preserve the user's source revocation")
+        XCTAssertNil(retained.textLanguage)
+        XCTAssertNotNil(retained.sourceProbeInput)
+        XCTAssertNotEqual(retained.sourceProbeFinished, true)
+        fixture.finishSource()
+        try await fixture.settle()
+        XCTAssertEqual(fixture.model.segments.first(where: { $0.id == fixture.id }), repaired)
+        XCTAssertEqual(sourceCalls, 0)
+        let candidate = try XCTUnwrap(fixture.model.transcriptionCandidates.first)
+        XCTAssertEqual(candidate.id, fixture.id)
+        XCTAssertEqual(candidate.text, InitialSourceRevisionFixture.source)
+        XCTAssertEqual(candidate.language, "ja")
+    }
+
+    func testInitialSourceRevisionBodyEditThenCandidateAcceptanceClearsJournalCandidate() async throws {
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, _ in "当前正文对应的译文。" },
+            adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() }))
+        try await eventually { fixture.sourceGate.entered && fixture.model.segments.count == 1 }
+        await fixture.model.translationTaskForTesting?.value
+        let edited = "The user keeps the blue cart beside a different gate."
+        fixture.model.reviseCaptionForTesting(id: fixture.id, english: edited)
+        try await fixture.model.flushSavedCourseForTesting()
+        try fixture.pipeline.requestPauseTranscription()
+        fixture.sourceGate.finish(.failure(CancellationError()))
+        try await fixture.pipeline.pauseTranscription()
+        await fixture.flushEvents()
+        fixture.model.loadPresentationForTesting(phase: .saved(fixture.root), evidence: fixture.model.segments)
+        fixture.model.pauseSavedProcessing()
+        try await eventually { fixture.model.savedProcessingIsPaused }
+        try await fixture.model.flushSavedCourseForTesting()
+        let candidate = "The user moves the blue cart beyond the wooden gate."
+        try fixture.pipeline.preserveConflictingTranscript(id: fixture.id,
+            sessionID: fixture.model.captureHealthSessionIDForTesting,
+            originalText: edited, candidateText: candidate)
+        await fixture.flushEvents()
+        XCTAssertEqual(fixture.model.transcriptionCandidates.first?.text, candidate)
+        fixture.model.acceptTranscriptionCandidate(fixture.id, editedText: candidate,
+            expectedOriginal: edited, expectedCandidate: candidate)
+        try await eventually { !fixture.model.candidateConfirmationInFlight }
+        try await fixture.model.flushSavedCourseForTesting()
+        XCTAssertEqual(fixture.model.segments.first?.english, candidate)
+        XCTAssertTrue(fixture.model.transcriptionCandidates.isEmpty)
+        XCTAssertNil(fixture.model.archiveError)
+        let saved = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        XCTAssertEqual(saved.revisionHistory.last?.transcriptionCandidateText, candidate)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: fixture.root, sessionID: saved.sessionID)
+        let retained = try XCTUnwrap(journal.record(id: fixture.id))
+        XCTAssertEqual(retained.text, candidate)
+        XCTAssertNil(retained.candidateText, "Candidate consent must use its dedicated reconciliation path")
+        XCTAssertNil(retained.candidateLanguage)
+        XCTAssertEqual(retained.sourceRevisionAllowed, false)
+    }
+
+    private func assertInitialSourceRevisionKeepsEdit(editBack: Bool) async throws {
+        var sourceCalls = 0
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, _ in "用户当前正文对应的译文。" },
+            adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() },
+            translateSource: { _, _, _, _, _ in sourceCalls += 1; return InitialSourceRevisionFixture.translated }))
+        try await eventually { fixture.sourceGate.entered && fixture.model.segments.count == 1 }
+        await fixture.model.translationTaskForTesting?.value
+        fixture.model.reviseCaptionForTesting(id: fixture.id, english: "The user keeps a different sentence here.")
+        if editBack { fixture.model.reviseCaptionForTesting(id: fixture.id, english: InitialSourceRevisionFixture.english) }
+        await fixture.model.translationTaskForTesting?.value
+        let edited = try XCTUnwrap(fixture.model.segments.first)
+        fixture.finishSource()
+        try await fixture.settle()
+        XCTAssertEqual(fixture.model.segments, [edited])
+        XCTAssertEqual(sourceCalls, 0)
+        let candidate = try XCTUnwrap(fixture.model.transcriptionCandidates.first)
+        XCTAssertEqual(candidate.id, fixture.id)
+        XCTAssertEqual(candidate.sessionID, edited.sessionID)
+        XCTAssertEqual(candidate.text, InitialSourceRevisionFixture.source)
+        XCTAssertEqual(candidate.language, "ja")
+        XCTAssertEqual(candidate.origin, "sameRangeRevision")
+        let saved = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        XCTAssertEqual(saved.segments, [edited])
+        let journal = try DurableTranscriptionJournal(sessionDirectory: fixture.root, sessionID: saved.sessionID)
+        XCTAssertEqual(journal.record(id: fixture.id)?.text, edited.english)
+        XCTAssertNil(journal.record(id: fixture.id)?.textLanguage)
+        XCTAssertEqual(journal.record(id: fixture.id)?.candidateText, candidate.text)
+        XCTAssertEqual(journal.record(id: fixture.id)?.candidateLanguage, "ja")
+    }
+
+    func testInitialSourceRevisionPreservesUserEditedCaptionAsCandidate() async throws {
+        try await assertInitialSourceRevisionKeepsEdit(editBack: false)
+    }
+
+    func testInitialSourceRevisionPreservesEditBackToTemporaryEnglishAsCandidate() async throws {
+        try await assertInitialSourceRevisionKeepsEdit(editBack: true)
+    }
+
+    func testRepairSourceLanguageRemainsManualCandidate() async throws {
+        var sourceCalls = 0
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, _ in "原有正式正文的译文。" },
+            adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() },
+            translateSource: { _, _, _, _, _ in sourceCalls += 1; return InitialSourceRevisionFixture.translated }),
+            completed: true)
+        try await eventually { fixture.model.segments.count == 1 }
+        await fixture.model.translationTaskForTesting?.value
+        let original = try XCTUnwrap(fixture.model.segments.first)
+        try fixture.pipeline.retryTranscription(id: fixture.id)
+        try await eventually { fixture.sourceGate.entered }
+        fixture.finishSource()
+        try await fixture.settle()
+        XCTAssertEqual(fixture.model.segments, [original])
+        XCTAssertEqual(sourceCalls, 0)
+        XCTAssertTrue(fixture.commits.allSatisfy { $0.replacingInitialText == nil })
+        let candidate = try XCTUnwrap(fixture.model.transcriptionCandidates.first)
+        XCTAssertEqual(candidate.text, InitialSourceRevisionFixture.source)
+        XCTAssertEqual(candidate.language, "ja")
+        XCTAssertEqual(candidate.id, original.id)
+        XCTAssertEqual(fixture.pipeline.transcriptionWork().first?.text, original.english)
+        XCTAssertEqual(fixture.pipeline.transcriptionWork().first?.candidateText, candidate.text)
+    }
+
+    private func assertInitialSourceRevisionReopensPendingWork(holdProbe: Bool) async throws {
+        let fixture = try await initialSourceRevisionFixture(.init(
+            translate: { _, _, _, _, _ in "临时英文对应的旧译文。" },
+            adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() }), holdProbe: holdProbe)
+        try await eventually { fixture.sourceGate.entered && fixture.model.segments.count == 1 }
+        await fixture.model.translationTaskForTesting?.value
+        let original = try XCTUnwrap(fixture.model.segments.first)
+        // Cancel and join the old owner before another AppModel opens its disk
+        // state. Pending heads/bodies survive this real queue pause unchanged.
+        try fixture.pipeline.requestPauseTranscription()
+        fixture.sourceGate.finish(.failure(CancellationError()))
+        try await fixture.pipeline.pauseTranscription()
+        await fixture.flushEvents()
+        try await fixture.model.flushSavedCourseForTesting()
+        let before = try XCTUnwrap(fixture.pipeline.transcriptionWork().first)
+        XCTAssertEqual(fixture.pipeline.transcriptionWork().map(\.id), [fixture.id],
+                       "Pausing must retain one original record, without a recovered tail")
+        XCTAssertNotNil(before.sourceProbeInput)
+        XCTAssertNotEqual(before.sourceProbeFinished, true)
+        XCTAssertEqual(before.sourceRevisionAllowed, true)
+        XCTAssertEqual(before.text, original.english)
+        XCTAssertNil(before.textLanguage)
+        XCTAssertEqual(before.sourceTriggerDecision?.language, holdProbe ? nil : "ja")
+        let paused = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        XCTAssertEqual(paused.segments, [original])
+        XCTAssertTrue(paused.revisionHistory.isEmpty)
+        let old = fixture.model.resetTranslationSessionForTesting()
+        await old?.value
+
+        let probe = InitialSourceReopenProbe(source: InitialSourceRevisionFixture.source)
+        let pipeline = SpeechPipeline(transcriber: { _, _, _, mode in await probe.transcribe(mode) },
+                                      enableAudioAnalysis: false)
+        var sourceCalls = 0
+        let reopened = try makeModel(.init(
+            translate: { _, _, _, _, _ in
+                XCTFail("The archived temporary English already has a completed translation")
+                return "临时英文对应的旧译文。"
+            }, adjacent: { _, _, _, _, _, _, _, _, _ in throw CancellationError() },
+            translateSource: { text, _, language, _, _ in
+                sourceCalls += 1
+                XCTAssertEqual(text, InitialSourceRevisionFixture.source)
+                XCTAssertEqual(language, "ja")
+                return InitialSourceRevisionFixture.translated
+            }), notes: .init(generate: { _, _, _, _, _ in throw CancellationError() }),
+            scheduledNotes: false, pipeline: pipeline)
+        addTeardownBlock { await pipeline.stopCapture(continueTranscribing: false) }
+        reopened.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await reopened.openSavedSession(fixture.root, allowAutomaticProcessing: false)
+        XCTAssertEqual(pipeline.transcriptionWork().map(\.id), [fixture.id],
+                       "Opening pending source work must not create or replay a fresh audio tail")
+        XCTAssertEqual(reopened.segments, [original], "Opening keeps the saved body until source work resumes")
+        let modesBeforeResume = await probe.modes
+        XCTAssertTrue(modesBeforeResume.isEmpty, "Opening a parked course must not invoke ASR")
+        reopened.resumeSavedProcessing()
+        try await eventually {
+            pipeline.transcriptionWork().first?.sourceProbeFinished == true
+                && (reopened.segments.first?.sourceLanguage == "ja" || !reopened.transcriptionCandidates.isEmpty)
+        }
+        await pipeline.drainTranscription(sessionID: original.sessionID)
+        await reopened.translationTaskForTesting?.value
+        await reopened.savedProcessingTaskForTesting?.value
+        try await reopened.flushSavedCourseForTesting()
+        let modes = await probe.modes
+        XCTAssertEqual(pipeline.transcriptionWork().map(\.id), [fixture.id])
+        XCTAssertEqual(modes, holdProbe ? [.probe, .auto] : [.auto])
+        XCTAssertEqual(reopened.segments.count, 1)
+        let revised = try XCTUnwrap(reopened.segments.first)
+        XCTAssertEqual(revised.id, original.id)
+        XCTAssertEqual(revised.sessionID, original.sessionID)
+        XCTAssertEqual(revised.startTime, original.startTime)
+        XCTAssertEqual(revised.endTime, original.endTime)
+        XCTAssertEqual(revised.english, InitialSourceRevisionFixture.source)
+        XCTAssertEqual(revised.sourceLanguage, "ja")
+        XCTAssertEqual(revised.inputRevision, original.inputRevision + 1)
+        XCTAssertEqual(revised.chinese, InitialSourceRevisionFixture.translated)
+        XCTAssertEqual(revised.translationState, .completed)
+        XCTAssertEqual(sourceCalls, 1)
+        XCTAssertTrue(reopened.transcriptionCandidates.isEmpty)
+        let snapshot = try XCTUnwrap(SessionStore(directory: fixture.root).load())
+        XCTAssertEqual(snapshot.segments, [revised])
+        XCTAssertEqual(snapshot.revisionHistory.count, 1)
+        XCTAssertNil(snapshot.revisionHistory.first?.transcriptionCandidateText)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: fixture.root, sessionID: snapshot.sessionID)
+        XCTAssertEqual(journal.record(id: revised.id)?.text, revised.english)
+        XCTAssertEqual(journal.record(id: revised.id)?.textLanguage, revised.sourceLanguage)
+        XCTAssertNil(journal.record(id: revised.id)?.candidateText)
+    }
+
+    func testInitialSourceRevisionReopensPendingProbeAndUpdatesAppCaption() async throws {
+        try await assertInitialSourceRevisionReopensPendingWork(holdProbe: true)
+    }
+
+    func testInitialSourceRevisionReopensPendingBodyAndUpdatesAppCaption() async throws {
+        try await assertInitialSourceRevisionReopensPendingWork(holdProbe: false)
     }
 
     func testCaptionQueueFormatsSpokenQuantitiesWithoutChangingOriginalEnglish() async throws {

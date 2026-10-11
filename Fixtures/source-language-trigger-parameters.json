@@ -1,0 +1,18 @@
+{
+  "policy": "few",
+  "latin_threshold": 0.55,
+  "latin_english_max": 0.01,
+  "nonlatin_threshold": 0.9,
+  "nonlatin_english_max": 0.05,
+  "few_mean_threshold": 0.9,
+  "few_min_threshold": 0.05,
+  "latin_consensus": true,
+  "nonlatin_consensus": false,
+  "latin_languages": [
+    "af", "bs", "ca", "cs", "cy", "da", "de", "en", "es", "et", "eu",
+    "fi", "fr", "ga", "gl", "hr", "hu", "id", "is", "it", "la", "lt",
+    "lv", "ms", "mt", "nb", "nl", "nn", "no", "pl", "pt", "ro", "sk",
+    "sl", "sq", "sv", "sw", "tr", "vi", "zu"
+  ],
+  "failure_metadata_limit": 100
+}

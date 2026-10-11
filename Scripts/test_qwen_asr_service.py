@@ -10,6 +10,7 @@ import time
 import weakref
 import socket
 import io
+import math
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
@@ -149,7 +150,7 @@ class AutoLanguageTests(unittest.TestCase):
 
     def test_english_none_and_low_confidence_force_legacy_english(self):
         for label, p, p_en in [('English', .95, .95), ('None', .95, .02), ('Chinese', .8999, .02),
-                               ('Chinese', .95, .0501), ('Spanish', .969, .01)]:
+                               ('Chinese', .95, .0501), ('Spanish', .549, .01)]:
             with self.subTest(label=label, p=p, p_en=p_en):
                 model = self.model(label, p, p_en)
                 self.assert_forced(model, self.auto(model))
@@ -157,8 +158,9 @@ class AutoLanguageTests(unittest.TestCase):
     def test_switch_probability_boundaries(self):
         for label, p, p_en, expected in [
             ('Chinese', .8999, .05, False), ('Chinese', .90, .05, True),
-            ('Chinese', .90, .0501, False), ('Spanish', .969, .01, False),
-            ('Spanish', .97, .01, True), ('Spanish', .97, .0101, False),
+            ('Chinese', .90, .0501, False), ('Spanish', .549, .01, False),
+            ('Spanish', .55, .01, True), ('Spanish', .55, .0101, False),
+            ('Filipino', .55, .01, False), ('Filipino', .90, .05, True),
             ('English', 1, 0, False), ('None', 1, 0, False),
         ]:
             with self.subTest(label=label, p=p, p_en=p_en):
@@ -303,6 +305,60 @@ class AutoLanguageTests(unittest.TestCase):
         self.assertEqual(result['generated_tokens'], 256)
         self.assertTrue(result['truncated'])
 
+    def test_body_generation_failure_keeps_successful_probe_for_confirmation(self):
+        model = self.model('Spanish', .99, .001)
+        self.generate_step.side_effect = RuntimeError('synthetic body failure')
+        result = self.auto(model)
+        self.generate_step.assert_called_once()
+        self.assert_forced(model, result)
+        self.assertEqual(result['detected_label'], 'Spanish')
+        self.assertGreaterEqual(result['language_probability'], .55)
+        self.assertLessEqual(result['english_probability'], .01)
+        self.assertEqual(result['generated_tokens'], 1)  # The English fallback ran.
+
+    def test_probe_request_returns_only_head_metadata_without_any_body_generation(self):
+        for label, p, p_en in [('Spanish', .99, .001), ('English', .99, .99),
+                               ('Chinese', .89, .02)]:
+            with self.subTest(label=label):
+                model = self.model(label, p, p_en)
+                with patch.object(service, 'model_for', return_value=model):
+                    result = service.transcribe_audio('raw.wav', '1.7b', 'probe', 'raw.wav')
+                model.generate.assert_not_called()
+                self.generate_step.assert_not_called()
+                self.assertEqual(set(result), {'language_mode', 'detected_label',
+                    'language_probability', 'english_probability', 'policy'})
+                self.assertEqual(result['language_mode'], 'probe')
+                self.assertEqual(result['detected_label'], label)
+
+    def test_failed_lightweight_probe_never_falls_back_to_body_generation(self):
+        model = self.model()
+        model._model._preprocess_audio = Mock(side_effect=RuntimeError('synthetic'))
+        with patch.object(service, 'model_for', return_value=model):
+            result = service.transcribe_audio('raw.wav', '1.7b', 'probe', 'raw.wav')
+        model.generate.assert_not_called()
+        self.generate_step.assert_not_called()
+        self.assertIsNone(result['detected_label'])
+
+    def test_confirmed_source_request_rechecks_label_without_speculative_body(self):
+        for label, expected in [('French', 'es'), ('English', 'es')]:
+            with self.subTest(label=label):
+                model = self.model(label, .99, .001 if label != 'English' else .99)
+                result = service.transcribe_auto(model, 'enhanced.wav', 'raw.wav', '1.7b', expected)
+                self.assertEqual(result['text'], '')
+                model.generate.assert_not_called()
+                self.generate_step.assert_not_called()
+
+    def test_confirmed_source_body_failure_retains_head_without_english_regeneration(self):
+        model = self.model('Spanish', .99, .001)
+        self.generate_step.side_effect = RuntimeError('synthetic body failure')
+        result = service.transcribe_auto(model, 'enhanced.wav', 'raw.wav', '1.7b', 'es')
+        self.generate_step.assert_called_once()
+        model.generate.assert_not_called()
+        self.assertEqual(result['detected_label'], 'Spanish')
+        self.assertEqual(result['text'], '')
+        self.assertEqual(result['decode'], 'forced')
+        self.assertEqual(result['generated_tokens'], 0)
+
     def test_swift_probability_constants_and_language_table_match_server(self):
         source = Path(__file__).resolve().parents[1] / 'LiveLingo' / 'Sources'
         policy = (source / 'SourceLanguagePolicy.swift').read_text()
@@ -318,8 +374,97 @@ class AutoLanguageTests(unittest.TestCase):
         table = (source / 'SpokenLanguage.swift').read_text()
         matches = service.re.findall(r'code: "([a-z]+)", qwenLabel: "([A-Za-z]+)", writingSystem: \.([a-z]+)', table)
         self.assertEqual({label: code for code, label, _ in matches}, service.LANGUAGE_CODES)
-        self.assertEqual({code for code, _, script in matches if script == 'latin' and code != 'en'},
-                         service.LATIN_LANGUAGE_CODES)
+        fixture = Path(__file__).resolve().parents[1] / 'Fixtures/source-language-trigger-parameters.json'
+        frozen = json.loads(fixture.read_text())
+        self.assertEqual(set(frozen['latin_languages']), service.LATIN_LANGUAGE_CODES)
+        self.assertEqual({code for code, _, script in matches if script == 'latin' and code != 'fil'},
+                         service.LATIN_LANGUAGE_CODES & set(service.LANGUAGE_CODES.values()))
+
+
+class ParakeetConfidenceTests(unittest.TestCase):
+    """CPU/numpy-only joint fixtures; no model files or decoder invocation."""
+    def setUp(self):
+        self.mx = SimpleNamespace(float32=np.float32, argmax=np.argmax,
+            logsumexp=lambda values: np.logaddexp.reduce(values))
+
+    def logits(self, values):
+        return np.asarray(values, dtype=np.float32).reshape(1, 1, 1, -1)
+
+    def test_arithmetic_mean_min_excludes_blank_and_preserves_logits(self):
+        original = Mock()
+        recorder = service.ParakeetConfidenceRecorder(original, 2, self.mx)
+        expected = []
+        for values in ([2., 0., -1., 17.], [0., 0., 3., 17.], [0., 1., 0., 17.]):
+            logits = self.logits(values)
+            original.return_value = logits
+            self.assertIs(recorder(), logits)
+            token_logits = np.asarray(values[:3], dtype=np.float32)
+            if np.argmax(token_logits) != 2:
+                expected.append(float(np.exp(np.max(token_logits) - np.logaddexp.reduce(token_logits))))
+        stats = recorder.statistics(2)
+        self.assertAlmostEqual(stats['pk_mean_probability'], sum(expected) / 2, places=7)
+        self.assertAlmostEqual(stats['pk_min_probability'], min(expected), places=7)
+        self.assertIs(stats.get('pk_confidence_valid'), True)
+        self.assertNotAlmostEqual(stats['pk_mean_probability'], math.sqrt(expected[0] * expected[1]), places=5)
+        self.assertEqual(original.call_count, 3)
+        self.assertEqual(recorder.statistics(3), {'pk_mean_probability': None,
+            'pk_min_probability': None, 'pk_confidence_valid': False})
+
+    def test_observer_failure_and_empty_stream_return_unknown_without_changing_logits(self):
+        for values, valid in (([float('nan'), 0., 0.], False), ([0., 0., 4.], True)):
+            logits = self.logits(values)
+            recorder = service.ParakeetConfidenceRecorder(lambda: logits, 2, self.mx)
+            self.assertIs(recorder(), logits)
+            self.assertEqual(recorder.statistics(0), {'pk_mean_probability': None,
+                'pk_min_probability': None, 'pk_confidence_valid': valid})
+
+    def test_joint_observation_exception_is_explicitly_invalid(self):
+        logits = object()  # Synthetic changed joint output API.
+        recorder = service.ParakeetConfidenceRecorder(lambda: logits, 2, self.mx)
+        self.assertIs(recorder(), logits)
+        self.assertEqual(recorder.statistics(0), {'pk_mean_probability': None,
+            'pk_min_probability': None, 'pk_confidence_valid': False})
+
+    def test_bad_statistics_retain_text_and_restore_joint_but_are_not_accepted(self):
+        for values, sentences in (([float('nan'), 0., 0.], [SimpleNamespace(tokens=[1])]),
+                                  ([2., 0., -1.], [SimpleNamespace(tokens=[1, 2])]),
+                                  ([2., 0., -1.], None)):
+            with self.subTest(values=values, sentences=sentences):
+                original = Mock(return_value=self.logits(values))
+                model = SimpleNamespace(joint=original, vocabulary=['a', 'b'])
+                def generate(*args, **kwargs):
+                    model.joint()
+                    return SimpleNamespace(text=' synthetic English ', sentences=sentences)
+                model.generate = generate
+                with patch.dict(sys.modules, {'mlx': SimpleNamespace(core=self.mx), 'mlx.core': self.mx}):
+                    result = service.transcribe_parakeet(model, 'synthetic.wav')
+                self.assertEqual(result, {'text': 'synthetic English', 'pk_mean_probability': None,
+                    'pk_min_probability': None, 'pk_confidence_valid': False})
+                self.assertIs(model.joint, original)
+
+    def test_joint_is_restored_on_success_and_generation_exception(self):
+        original = Mock(return_value=self.logits([2., 0., -1., 8.]))
+        model = SimpleNamespace(joint=original, vocabulary=['a', 'b'])
+        def generate(path, verbose):
+            self.assertEqual((path, verbose), ('synthetic.wav', False))
+            model.joint()
+            return SimpleNamespace(text=' x ', sentences=[SimpleNamespace(tokens=[object()])])
+        model.generate = generate
+        with patch.dict(sys.modules, {'mlx': SimpleNamespace(core=self.mx), 'mlx.core': self.mx}):
+            result = service.transcribe_parakeet(model, 'synthetic.wav')
+            self.assertEqual(result['text'], 'x')
+            self.assertIsNotNone(result['pk_mean_probability'])
+            self.assertIs(result.get('pk_confidence_valid'), True)
+            self.assertIs(model.joint, original)
+            model.generate = Mock(side_effect=RuntimeError('synthetic'))
+            with self.assertRaises(RuntimeError): service.transcribe_parakeet(model, 'synthetic.wav')
+            self.assertIs(model.joint, original)
+
+    def test_unavailable_confidence_api_keeps_english_text(self):
+        model = SimpleNamespace(generate=Mock(return_value=SimpleNamespace(text=' x ')))
+        self.assertEqual(service.transcribe_parakeet(model, 'synthetic.wav'),
+            {'text': 'x', 'pk_mean_probability': None, 'pk_min_probability': None})
+        model.generate.assert_called_once_with('synthetic.wav', verbose=False)
 
 
 class ProbePrecisionTests(unittest.TestCase):
@@ -588,6 +733,195 @@ class ServiceResponsivenessTests(unittest.TestCase):
         handler.rfile = io.BytesIO(b'x')
         handler.send_json = Mock()
         return handler
+
+    def test_probe_http_uses_raw_audio_priority_queue_and_no_body_field(self):
+        executor = service.PriorityInferenceExecutor()
+        self.addCleanup(executor.shutdown, wait=True)
+        handler = self.synthetic_handler('model=1.7b&enhance=speech&language=probe')
+        head = {'language_mode': 'probe', 'detected_label': 'Spanish',
+                'language_probability': .99, 'english_probability': .001, 'policy': 1}
+        with patch.object(service, 'INFERENCE_WORKER', executor), \
+             patch.object(service, 'speech_band_enhance') as enhance, \
+             patch.object(service, 'transcribe_audio', return_value=head) as transcribe, \
+             patch.object(executor, 'submit_probe', wraps=executor.submit_probe) as submit:
+            handler.do_POST()
+        status, payload = handler.send_json.call_args.args
+        self.assertEqual(status, 200)
+        self.assertNotIn('text', payload)
+        self.assertNotIn('cache', payload)
+        enhance.assert_not_called(); submit.assert_called_once()
+        args = transcribe.call_args.args
+        self.assertEqual(args[0], args[3])
+        self.assertEqual(args[2], 'probe')
+
+    def test_confirmed_body_skips_unused_enhancement_and_reports_not_used(self):
+        executor = service.PriorityInferenceExecutor()
+        self.addCleanup(executor.shutdown, wait=True)
+        handler = self.synthetic_handler('model=1.7b&enhance=speech&language=auto&confirmed_language=es')
+        result = {'text': 'synthetic source body', 'language_mode': 'auto', 'language': 'es',
+                  'decode': 'detected', 'detected_label': 'Spanish',
+                  'language_probability': .99, 'english_probability': .001}
+        with patch.object(service, 'INFERENCE_WORKER', executor), \
+             patch.object(service, 'speech_band_enhance', return_value=('enhanced.wav', {'applied': True})) as enhance, \
+             patch.object(service, 'temporary_audio', wraps=service.temporary_audio) as temporary, \
+             patch.object(service, 'transcribe_audio', return_value=result) as transcribe:
+            handler.do_POST()
+        status, payload = handler.send_json.call_args.args
+        self.assertEqual(status, 200)
+        enhance.assert_not_called()
+        temporary.assert_called_once_with('.wav')
+        self.assertEqual(payload['audio_enhancement'], {'applied': False, 'reason': 'not_used'})
+        args = transcribe.call_args.args
+        self.assertEqual(args[0], args[3])
+        self.assertEqual(args[4], 'es')
+
+    def test_queued_probe_expires_with_matching_receipt_and_never_runs(self):
+        executor = service.PriorityInferenceExecutor()
+        self.addCleanup(executor.shutdown, wait=True, cancel_futures=True)
+        entered, release = threading.Event(), threading.Event()
+        executor.submit(lambda: (entered.set(), release.wait(2)))
+        self.assertTrue(entered.wait(1))
+        handler = self.synthetic_handler('model=1.7b&language=probe')
+        with patch.object(service, 'INFERENCE_WORKER', executor), \
+             patch.object(service, 'PROBE_QUEUE_TIMEOUT_SECONDS', .03, create=True), \
+             patch.object(service, 'transcribe_audio') as transcribe, \
+             patch.object(service, 'request_shutdown') as shutdown:
+            with ThreadPoolExecutor(max_workers=1) as requests:
+                try:
+                    requests.submit(handler.do_POST).result(timeout=.5)
+                    self.assertEqual(handler.send_json.call_args.args, (504, {
+                        'error': 'ASR queue deadline exceeded', 'request_id': 'synthetic',
+                        'model': '1.7b', 'retryable': True}))
+                    self.assertEqual(service.COMPLETED_REQUESTS['synthetic'],
+                                     {'model': '1.7b', 'state': 'finished'})
+                    self.assertNotIn('synthetic', service.REQUEST_STATES)
+                    for _ in range(service.MAX_INFERENCE_REQUESTS):
+                        self.assertTrue(service.INFERENCE_SLOTS.acquire(blocking=False))
+                    for _ in range(service.MAX_INFERENCE_REQUESTS):
+                        service.INFERENCE_SLOTS.release()
+                finally:
+                    release.set()
+            executor.submit(lambda: None).result(timeout=1)
+            transcribe.assert_not_called()
+            shutdown.assert_not_called()
+
+    def test_probe_claim_deadline_race_returns_504_without_inference_or_shutdown(self):
+        from concurrent.futures import Future
+        handler = self.synthetic_handler('model=1.7b&language=probe')
+        def submit(function, *args, **kwargs):
+            future = Future()
+            future.set_running_or_notify_cancel()
+            kwargs['queue_deadline'] = time.monotonic() - 1
+            try:
+                future.set_result(function(*args, **kwargs))
+            except Exception as error:
+                future.set_exception(error)
+            return future
+        with patch.object(service, 'INFERENCE_WORKER', SimpleNamespace(submit_probe=submit)), \
+             patch.object(service, 'PROBE_QUEUE_TIMEOUT_SECONDS', .01), \
+             patch.object(service, 'transcribe_audio') as transcribe, \
+             patch.object(service, 'request_shutdown') as shutdown:
+            handler.do_POST()
+        self.assertEqual(handler.send_json.call_args.args, (504, {
+            'error': 'ASR queue deadline exceeded', 'request_id': 'synthetic',
+            'model': '1.7b', 'retryable': True}))
+        transcribe.assert_not_called()
+        shutdown.assert_not_called()
+        self.assertNotIn('synthetic', service.REQUEST_STATES)
+        self.assertEqual(service.COMPLETED_REQUESTS['synthetic']['state'], 'finished')
+
+    def test_running_probe_gets_full_budget_and_keeps_ownership_until_completion(self):
+        from concurrent.futures import Future
+        handler = self.synthetic_handler('model=1.7b&language=probe')
+        class RunningFuture(Future):
+            def result(self, timeout=None):
+                self.observed_timeout = timeout
+                raise TimeoutError('synthetic running timeout')
+        future = RunningFuture()
+        future.set_running_or_notify_cancel()
+        def submit(function, *args, **kwargs):
+            service.REQUEST_STATES['synthetic']['state'] = 'running'
+            kwargs['inference_started'].set()
+            return future
+        with patch.object(service, 'INFERENCE_WORKER', SimpleNamespace(submit_probe=submit)), \
+             patch.object(service, 'request_shutdown') as shutdown:
+            handler.do_POST()
+        self.assertEqual(future.observed_timeout, 120.0)
+        shutdown.assert_called_once()
+        handler.send_json.assert_not_called()
+        self.assertEqual(service.REQUEST_STATES['synthetic']['state'], 'running')
+        self.assertNotIn('synthetic', service.COMPLETED_REQUESTS)
+        self.assertFalse(future.cancelled())
+        future.set_result({'detected_label': 'Spanish'})
+        self.assertNotIn('synthetic', service.REQUEST_STATES)
+        self.assertEqual(service.COMPLETED_REQUESTS['synthetic']['state'], 'finished')
+        for _ in range(service.MAX_INFERENCE_REQUESTS):
+            self.assertTrue(service.INFERENCE_SLOTS.acquire(blocking=False))
+        for _ in range(service.MAX_INFERENCE_REQUESTS):
+            service.INFERENCE_SLOTS.release()
+
+    def test_confirmed_source_body_http_yields_to_new_formal_transcription(self):
+        executor = service.PriorityInferenceExecutor()
+        self.addCleanup(executor.shutdown, wait=True, cancel_futures=True)
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        queued = {'confirmed-body': threading.Event(), 'new-formal': threading.Event()}
+        routes, order = {}, []
+        body = self.synthetic_handler('model=1.7b&language=auto&confirmed_language=es')
+        body.headers['X-LiveLingo-Request-ID'] = 'confirmed-body'
+        formal = self.synthetic_handler('model=parakeet')
+        formal.headers['X-LiveLingo-Request-ID'] = 'new-formal'
+
+        def blocker():
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('synthetic inference blocker was not released')
+
+        def track(submit, priority):
+            def enqueue(function, *args, **kwargs):
+                future = submit(function, *args, **kwargs)
+                if function is service.run_registered_transcription:
+                    routes[args[0]] = priority
+                    queued[args[0]].set()
+                return future
+            return enqueue
+
+        def transcribe(path, model, language_mode=None, raw_path=None, confirmed=None):
+            if confirmed is not None:
+                self.assertEqual((model, language_mode, confirmed), ('1.7b', 'auto', 'es'))
+                order.append('confirmed-body')
+                return {'text': 'synthetic source body', 'language_mode': 'auto',
+                        'language': 'es', 'decode': 'detected', 'detected_label': 'Spanish',
+                        'language_probability': .99, 'english_probability': .001,
+                        'generated_tokens': 1, 'truncated': False, 'policy': 1}
+            self.assertEqual((model, language_mode), ('parakeet', None))
+            order.append('new-formal')
+            return 'synthetic formal body'
+
+        with patch.object(service, 'INFERENCE_WORKER', executor), \
+             patch.object(service, 'transcribe_audio', side_effect=transcribe), \
+             patch.object(executor, 'submit', side_effect=track(executor.submit, 'formal')), \
+             patch.object(executor, 'submit_probe', side_effect=track(executor.submit_probe, 'optional')):
+            active = executor.submit(blocker)
+            self.assertTrue(entered.wait(1))
+            with ThreadPoolExecutor(max_workers=2) as requests:
+                try:
+                    body_request = requests.submit(body.do_POST)
+                    self.assertTrue(queued['confirmed-body'].wait(2), 'body was not admitted')
+                    with service.MODEL_STATE_LOCK:
+                        self.assertEqual(service.REQUEST_STATES['confirmed-body']['state'], 'waiting')
+                    formal_request = requests.submit(formal.do_POST)
+                    self.assertTrue(queued['new-formal'].wait(2), 'formal was not admitted')
+                finally:
+                    release.set()
+                active.result(timeout=2)
+                body_request.result(timeout=2)
+                formal_request.result(timeout=2)
+        self.assertEqual(order, ['new-formal', 'confirmed-body'])
+        self.assertEqual(routes, {'confirmed-body': 'optional', 'new-formal': 'formal'})
+        for handler in (body, formal):
+            self.assertEqual(handler.send_json.call_args.args[0], 200)
+        self.assertEqual(body.send_json.call_args.args[1]['language'], 'es')
 
     def test_idle_unload_keeps_active_and_waiting_model_owners(self):
         class FakeModel: pass

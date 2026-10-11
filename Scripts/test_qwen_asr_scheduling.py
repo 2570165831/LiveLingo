@@ -108,9 +108,62 @@ class UnboundHTTPBase:
 
 
 class SchedulingTests(unittest.TestCase):
+    def test_probe_queue_and_execution_deadlines_are_separate(self):
+        self.assertEqual(getattr(self.service, 'PROBE_QUEUE_TIMEOUT_SECONDS', None), 8.0)
+        self.assertEqual(self.service.INFERENCE_TIMEOUT_SECONDS, 120.0)
+
+    def test_probe_signals_execution_start_before_model_work(self):
+        service = self.service
+        started = threading.Event()
+        def transcribe(*args):
+            self.assertTrue(started.is_set())
+            self.assertEqual(service.REQUEST_STATES['probe']['state'], 'running')
+            return {'detected_label': 'Spanish'}
+        service.transcribe_audio = transcribe
+        self.assertEqual(service.run_registered_transcription('probe', 'raw.wav', '1.7b',
+            'probe', 'raw.wav', inference_started=started), {'detected_label': 'Spanish'})
+        self.assertEqual(service.REQUEST_STATES['probe']['state'], 'finished')
+
+    def test_expired_probe_claim_never_starts_model_work(self):
+        service = self.service
+        service.time = SimpleNamespace(monotonic=lambda: 8.0)
+        service.REQUEST_STATES['probe'] = {'model': '1.7b', 'state': 'waiting'}
+        service.transcribe_audio = Mock()
+        started = threading.Event()
+        with self.assertRaises(service.ProbeQueueDeadlineExceeded):
+            service.run_registered_transcription('probe', 'raw.wav', '1.7b', 'probe',
+                'raw.wav', inference_started=started, queue_deadline=8.0)
+        service.transcribe_audio.assert_not_called()
+        self.assertFalse(started.is_set())
+        self.assertEqual(service.REQUEST_STATES['probe']['state'], 'waiting')
+
+    def test_formal_transcription_overtakes_queued_probe_on_one_inference_thread(self):
+        executor_type = getattr(self.service, 'PriorityInferenceExecutor', None)
+        self.assertIsNotNone(executor_type, 'Formal ASR needs a priority inference queue')
+        executor = executor_type()
+        blocked, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        order, threads = [], []
+        def first():
+            blocked.set()
+            release.wait(2)
+        def record(label):
+            order.append(label); threads.append(threading.get_ident())
+        executor.submit(first)
+        self.assertTrue(blocked.wait(1))
+        probe = executor.submit_probe(record, 'probe')
+        formal = executor.submit(record, 'formal')
+        release.set()
+        formal.result(timeout=2); probe.result(timeout=2)
+        executor.shutdown(wait=True)
+        self.assertEqual(order, ['formal', 'probe'])
+        self.assertEqual(len(set(threads)), 1)
+
     def setUp(self):
         self.service = load_subject()
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='asr-scheduling-fake')
+        executor_type = getattr(self.service, 'PriorityInferenceExecutor', None)
+        self.executor = executor_type() if executor_type else ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='asr-scheduling-fake')
         self.addCleanup(self.executor.shutdown, wait=True)
         self.service.INFERENCE_WORKER = self.executor
         fake_core = SimpleNamespace(clear_cache=Mock())

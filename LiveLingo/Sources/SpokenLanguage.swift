@@ -1,6 +1,6 @@
 import Foundation
 
-enum ASRLanguageMode: String, Sendable { case english, auto }
+enum ASRLanguageMode: String, Sendable { case english, auto, probe }
 
 struct SpokenLanguage: Equatable, Sendable {
     enum WritingSystem: Hashable, Sendable {
@@ -96,6 +96,17 @@ struct ASRTranscription: Equatable, Sendable {
     var generatedTokens = 0
     var truncated = false
     var policy: Int?
+    var parakeetMeanProbability: Double?
+    var parakeetMinProbability: Double?
+    /// Missing in old services; explicit false makes an invalid observation
+    /// follow the collector's rejected-Parakeet probe path.
+    var parakeetConfidenceValid: Bool?
+
+    private struct ConfidenceResponse: Decodable {
+        let pk_mean_probability: Double?
+        let pk_min_probability: Double?
+        let pk_confidence_valid: Bool?
+    }
 
     private struct AutoResponse: Decodable {
         let language_mode: String
@@ -109,9 +120,46 @@ struct ASRTranscription: Equatable, Sendable {
         let policy: Int
     }
 
+    private struct ProbeResponse: Decodable {
+        let language_mode: String
+        let detected_label: String?
+        let language_probability: Double?
+        let english_probability: Double?
+        let policy: Int
+    }
+
     static func validated(text: String, data: Data, requestedLanguage: ASRLanguageMode) throws -> Self {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard requestedLanguage == .auto else { return Self(text: trimmed) }
+        if requestedLanguage == .probe {
+            guard trimmed.isEmpty,
+                  let response = try? JSONDecoder().decode(ProbeResponse.self, from: data),
+                  response.language_mode == "probe", response.policy == 1 else {
+                throw QwenRuntimeError.invalidResponse
+            }
+            let probabilities = [response.language_probability, response.english_probability]
+            guard probabilities.allSatisfy({ $0.map { $0.isFinite && (0...1).contains($0) } ?? true }),
+                  response.detected_label.map({ label in
+                      (label == "None" || SpokenLanguage.all.contains { $0.qwenLabel == label })
+                          && probabilities.allSatisfy { $0 != nil }
+                  }) ?? probabilities.allSatisfy({ $0 == nil }) else {
+                throw QwenRuntimeError.invalidResponse
+            }
+            return Self(text: "", languageMode: .probe, detectedLabel: response.detected_label,
+                languageProbability: response.language_probability, englishProbability: response.english_probability,
+                policy: response.policy)
+        }
+        guard requestedLanguage == .auto else {
+            var result = Self(text: trimmed)
+            if let confidence = try? JSONDecoder().decode(ConfidenceResponse.self, from: data),
+               [confidence.pk_mean_probability, confidence.pk_min_probability].allSatisfy({
+                   $0.map { $0.isFinite && (0...1).contains($0) } ?? true
+               }) {
+                result.parakeetMeanProbability = confidence.pk_mean_probability
+                result.parakeetMinProbability = confidence.pk_min_probability
+                result.parakeetConfidenceValid = confidence.pk_confidence_valid
+            }
+            return result
+        }
         guard let response = try? JSONDecoder().decode(AutoResponse.self, from: data),
               response.language_mode == "auto", response.policy == 1,
               (0...256).contains(response.generated_tokens) else { throw QwenRuntimeError.invalidResponse }

@@ -287,6 +287,36 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(state.hasAutomaticWork)
     }
 
+    func testDeferredSourceRepairsAreNotClaimableOrTerminalFailures() throws {
+        for status in [TranscriptionWorkRecord.Status.retryWaiting, .manualPending] {
+            for waitsForProbe in [false, true] {
+                let root = try directory(), id = UUID()
+                let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+                var deferred = work(id, ordinal: 0, status: status)
+                deferred.automaticRetryCount = 1
+                if waitsForProbe {
+                    deferred.sourceProbeInput = .init(parakeetAccepted: false, mean: nil, minimum: nil)
+                    deferred.sourceProbeFinished = false
+                } else {
+                    deferred.sourceTriggerPendingBoundary = true
+                }
+                try journal.put(deferred)
+                XCTAssertNil(try journal.claimNext())
+                XCTAssertEqual(journal.processingState.claimableCount, 0)
+                XCTAssertEqual(journal.processingState.failedCount, 0)
+                XCTAssertEqual(journal.processingState.pendingCount, 1)
+                deferred.sourceTriggerPendingBoundary = false
+                deferred.sourceProbeFinished = true
+                try journal.put(deferred)
+                XCTAssertEqual(journal.processingState.claimableCount, 1)
+                let claimed = try XCTUnwrap(journal.claimNext())
+                XCTAssertEqual(claimed.id, deferred.id)
+                XCTAssertEqual(claimed.automaticRetryCount, status == .retryWaiting ? 2 : 1)
+                XCTAssertEqual(claimed.manualRetryCount, status == .manualPending ? 1 : 0)
+            }
+        }
+    }
+
     func testTruncatedTailIsPreservedAndMiddleDamageStopsRecovery() throws {
         let root = try directory(), id = UUID()
         let j = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
@@ -1404,10 +1434,878 @@ private struct MultilingualASRCall: Sendable {
 }
 
 extension AudioRemediationTests {
+    private func assertInitialEnglishFailureIsImmediate(fallback: String?, throwsError: Bool) async throws {
+        let root = try directory(), session = UUID(), gate = AudioTestGate()
+        let entered = AudioTestBox(false), events = AudioTestBox<[SpeechPipeline.Event]>([])
+        let calls = AudioTestBox<[MultilingualASRCall]>([])
+        let message = throwsError
+            ? "本机转写失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: URLError(.timedOut))))；音频已保留。"
+            : "此处尚未得到可靠的英文转写，音频已保留。"
+        let recording = try audio(root, name: "recording.wav", seconds: 20)
+        let queue = DurableTranscriptionQueue { url, model, enhanced, mode in
+            calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
+            if url.lastPathComponent == "next.wav" {
+                entered.update { $0 = true }; await gate.wait()
+                return ASRTranscription(text: "The blue cart stops beside the metal gate.")
+            }
+            if mode == .probe {
+                return ASRTranscription(text: "", languageMode: .probe, detectedLabel: "English",
+                    languageProbability: 0.99, englishProbability: 0.99, policy: 1)
+            }
+            if throwsError { throw URLError(.timedOut) }
+            return ASRTranscription(text: "")
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+            startPaused: true) { event in events.update { $0.append(event) } }
+        queue.submit(.init(audioURL: try audio(root, name: "first.wav", seconds: 10), modelKey: "primary",
+            fallbackModelKey: fallback, start: 0, end: 10, appleEvidence: "", recordingURL: recording,
+            sessionID: session), handler: { _ in })
+        queue.submit(.init(audioURL: try audio(root, name: "next.wav", seconds: 10), modelKey: "primary",
+            fallbackModelKey: fallback, start: 10, end: 20, appleEvidence: "", recordingURL: recording,
+            sessionID: session), handler: { _ in })
+        try queue.resume(); try await waitUntil { entered.value }
+        let record = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(record.status, .retryWaiting, "A later formal request cannot delay the initial failure")
+        XCTAssertEqual(record.failure, message)
+        XCTAssertEqual(record.failureReason, throwsError ? .error : .emptyOutput)
+        XCTAssertNil(record.sourceProbeInput, "English failures must be ready for the original repair schedule")
+        XCTAssertEqual(events.value.compactMap { event -> String? in
+            if case .transcriptionIssue(let start, _, let text) = event, start == 0 { return text }
+            return nil
+        }, [message])
+        let diagnosticsURL = root.appendingPathComponent("transcription-issues.jsonl")
+        let diagnostics = (try? Data(contentsOf: diagnosticsURL)) ?? Data()
+        let rows = try diagnostics.split(separator: 0x0a).map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+        }
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?["event"] as? String, "transcription_missing")
+        XCTAssertEqual(rows.first?["detailBytes"] as? Int, message.utf8.count)
+        XCTAssertEqual(rows.first?["reason"] as? String, throwsError ? "error" : "emptyOutput")
+        if throwsError { XCTAssertFalse(calls.value.contains { $0.mode == .probe }, "Do not probe an errored service") }
+        try queue.requestPause(); await gate.release(); try await queue.pause()
+    }
+
+    func testInitialEnglishErrorsWithoutFallbackAreImmediate() async throws {
+        try await assertInitialEnglishFailureIsImmediate(fallback: nil, throwsError: true)
+    }
+
+    func testInitialEnglishErrorsWithFallbackAreImmediate() async throws {
+        try await assertInitialEnglishFailureIsImmediate(fallback: "fallback", throwsError: true)
+    }
+
+    func testInitialEnglishRejectionWithoutFallbackKeepsMessageAndRepairTiming() async throws {
+        try await assertInitialEnglishFailureIsImmediate(fallback: nil, throwsError: false)
+    }
+
+    func testInitialEnglishRejectionWithFallbackKeepsMessageAndRepairTiming() async throws {
+        try await assertInitialEnglishFailureIsImmediate(fallback: "fallback", throwsError: false)
+    }
+
+    func testLowConfidenceEnglishDoesNotProbeAnErroredFallback() async throws {
+        let calls = AudioTestBox<[ASRLanguageMode]>([])
+        let queue = DurableTranscriptionQueue { _, model, _, mode in
+            calls.update { $0.append(mode) }
+            if model == "fallback" { throw URLError(.timedOut) }
+            var result = ASRTranscription(text: "Okay.")
+            result.parakeetMeanProbability = 0.8
+            return result
+        }
+        let (record, events) = try await runSourceFixture(queue, record: work(UUID(), ordinal: 0, fallback: "fallback"))
+        XCTAssertEqual(calls.value, [.english, .english])
+        XCTAssertEqual(record.status, .completed); XCTAssertEqual(record.text, "Okay.")
+        XCTAssertNil(record.failure); XCTAssertNil(record.sourceProbeInput)
+        XCTAssertFalse(events.contains { if case .transcriptionIssue = $0 { return true }; return false })
+    }
+
+    func testHighConfidenceEnglishWithoutFollowupDoesNotDeferSource() async throws {
+        let calls = AudioTestBox<[ASRLanguageMode]>([])
+        let queue = DurableTranscriptionQueue { _, _, _, mode in
+            calls.update { $0.append(mode) }
+            var result = ASRTranscription(text: "The blue cart stops beside the metal gate.")
+            result.parakeetMeanProbability = 0.99; result.parakeetMinProbability = 0.2
+            return result
+        }
+        let (record, _) = try await runSourceFixture(queue, record: work(UUID(), ordinal: 0, fallback: "fallback"))
+        XCTAssertEqual(calls.value, [.english])
+        XCTAssertEqual(record.status, .completed); XCTAssertNil(record.sourceProbeInput)
+        XCTAssertEqual(record.sourceTriggerDecision?.reason, "not_selected")
+    }
+
+    private func assertTemporaryEnglishFormalRetryFinishes(reopen: Bool, throwsError: Bool) async throws {
+        let root = try directory(), session = UUID(), id = UUID(), gate = AudioTestGate()
+        let entered = AudioTestBox(false), resumed = AudioTestBox(false), manual = AudioTestBox(false)
+        let events = AudioTestBox<[SpeechPipeline.Event]>([]), calls = AudioTestBox<[ASRLanguageMode]>([])
+        let transcriber: DurableTranscriptionQueue.Transcriber = { _, model, _, mode in
+            calls.update { $0.append(mode) }
+            if manual.value { return ASRTranscription(text: "The blue cart stops beside the metal gate.") }
+            if mode == .probe {
+                return ASRTranscription(text: "", languageMode: .probe, detectedLabel: "English",
+                    languageProbability: 0.99, englishProbability: 0.99, policy: 1)
+            }
+            if resumed.value {
+                if throwsError { throw URLError(.timedOut) }
+                return ASRTranscription(text: "")
+            }
+            if model == "primary" {
+                var result = ASRTranscription(text: "Okay.")
+                result.parakeetMeanProbability = 0.8
+                return result
+            }
+            entered.update { $0 = true }; await gate.wait()
+            return ASRTranscription(text: "Okay.")
+        }
+        let handler: @Sendable (SpeechPipeline.Event) -> Void = { event in events.update { $0.append(event) } }
+        let queue = DurableTranscriptionQueue(transcriber: transcriber)
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: handler)
+        queue.submit(.init(audioURL: try audio(root, seconds: 10), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 10, appleEvidence: "", recordingURL: nil, id: id, sessionID: session), handler: handler)
+        try await waitUntil { entered.value }
+        XCTAssertEqual(queue.records.first?.text, "Okay.")
+        try queue.requestPause(); await gate.release(); try await queue.pause()
+        let current: DurableTranscriptionQueue
+        if reopen {
+            let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+            var record = try XCTUnwrap(journal.record(id: id)); record.status = .active
+            try journal.put(record)
+            current = DurableTranscriptionQueue(transcriber: transcriber)
+            try await current.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                restoring: true, startPaused: true, handler: handler)
+        } else { current = queue }
+        resumed.update { $0 = true }; calls.update { $0.removeAll() }; events.update { $0.removeAll() }
+        try current.resume(); await current.finish()
+        let completed = try XCTUnwrap(current.records.first)
+        XCTAssertEqual(completed.status, .completed)
+        XCTAssertEqual(completed.text, "Okay.")
+        XCTAssertNil(completed.textLanguage)
+        XCTAssertNil(completed.failure); XCTAssertNil(completed.failureReason)
+        XCTAssertEqual(completed.automaticRetryCount, 0)
+        XCTAssertEqual(current.state?.pendingCount, 0); XCTAssertEqual(current.state?.activeCount, 0)
+        XCTAssertFalse(events.value.contains { if case .identifiedFinal = $0 { return true }; return false },
+            "Finishing a failed resumed pass cannot redeliver the persisted English")
+        XCTAssertFalse(events.value.contains { if case .transcriptionIssue = $0 { return true }; return false })
+        XCTAssertEqual(calls.value, throwsError ? [.english, .english] : [.english, .english, .probe])
+        manual.update { $0 = true }; try current.retry(id: id); await current.finish()
+        XCTAssertEqual(current.records.first?.manualRetryCount, 1, "The retry button must make a new attempt")
+        XCTAssertEqual(current.records.first?.status, .completed)
+        XCTAssertEqual(current.records.first?.text, "Okay.")
+        XCTAssertEqual(current.records.first?.candidateText, "The blue cart stops beside the metal gate.")
+        try await current.pause()
+    }
+
+    func testTemporaryEnglishFormalErrorsAfterPauseCompleteAndAllowRetry() async throws {
+        try await assertTemporaryEnglishFormalRetryFinishes(reopen: false, throwsError: true)
+    }
+
+    func testTemporaryEnglishFormalErrorsAfterCrashCompleteAndAllowRetry() async throws {
+        try await assertTemporaryEnglishFormalRetryFinishes(reopen: true, throwsError: true)
+    }
+
+    func testTemporaryEnglishRejectionAfterPauseCompletesAndAllowsRetry() async throws {
+        try await assertTemporaryEnglishFormalRetryFinishes(reopen: false, throwsError: false)
+    }
+
+    func testTemporaryEnglishRejectionAfterCrashCompletesAndAllowsRetry() async throws {
+        try await assertTemporaryEnglishFormalRetryFinishes(reopen: true, throwsError: false)
+    }
+
+    private func assertRestoredActiveEnglishSourceCloses(failingStage: ASRLanguageMode?) async throws {
+        let root = try directory(), session = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        var record = work(session, ordinal: 0, status: .active, fallback: "fallback")
+        record.text = "Okay."; record.sourceRevisionAllowed = true
+        record.sourceInitialEnglishDigest = TranscriptionWorkRecord.englishDigest("Okay.")
+        record.sourceProbeInput = .init(parakeetAccepted: false, mean: nil, minimum: nil)
+        record.sourceProbeFinished = false; record.sourceTriggerPredecessor = .init()
+        _ = try audio(journal.directory, name: record.audioFile, seconds: record.duration)
+        try journal.put(record)
+        let calls = AudioTestBox<[ASRLanguageMode]>([])
+        let queue = DurableTranscriptionQueue { _, _, _, mode in
+            calls.update { $0.append(mode) }
+            if mode == failingStage { throw URLError(.timedOut) }
+            if failingStage == .auto { return self.sourceFixture(self.detectedSource(), mode: mode) }
+            return ASRTranscription(text: "", languageMode: .probe, detectedLabel: "English",
+                languageProbability: 0.99, englishProbability: 0.99, policy: 1)
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+            restoring: true, startPaused: true, handler: { _ in })
+        try queue.resume(); await queue.finish()
+        XCTAssertEqual(queue.records.first?.status, .completed)
+        XCTAssertEqual(queue.records.first?.text, "Okay.")
+        XCTAssertNil(queue.records.first?.failure); XCTAssertNil(queue.records.first?.failureReason)
+        XCTAssertEqual(queue.state?.pendingCount, 0); XCTAssertEqual(queue.state?.activeCount, 0)
+        XCTAssertEqual(calls.value, failingStage == .auto ? [.probe, .auto] : [.probe])
+        try await queue.pause(); try queue.retry(id: record.id)
+        XCTAssertEqual(queue.records.first?.status, .manualPending)
+    }
+
+    func testRestoredActiveEnglishClosesAfterEnglishProbe() async throws {
+        try await assertRestoredActiveEnglishSourceCloses(failingStage: nil)
+    }
+
+    func testRestoredActiveEnglishClosesAfterFailedProbe() async throws {
+        try await assertRestoredActiveEnglishSourceCloses(failingStage: .probe)
+    }
+
+    func testRestoredActiveEnglishClosesAfterFailedSourceBody() async throws {
+        try await assertRestoredActiveEnglishSourceCloses(failingStage: .auto)
+    }
+
+    private func assertNextFormalOvertakesBlockedOptional(body: Bool) async throws {
+        let root = try directory(), session = UUID(), gate = AudioTestGate()
+        let entered = AudioTestBox(false), commits = AudioTestBox<[TranscriptionCommit]>([])
+        let requests = AudioTestBox<[String]>([])
+        let times = AudioTestBox((nextCaption: 0.0, optionalRelease: 0.0))
+        let queue = DurableTranscriptionQueue { url, model, _, mode in
+            requests.update { $0.append("\(url.lastPathComponent):\(mode.rawValue)") }
+            if model == "primary" {
+                var result = ASRTranscription(text: "The blue cart stops beside the metal gate.")
+                result.parakeetMeanProbability = 0.8
+                return result
+            }
+            if mode == (body ? .auto : .probe), !entered.value {
+                entered.update { $0 = true }; await gate.wait()
+            }
+            return self.sourceFixture(self.detectedSource(), mode: mode)
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true) { event in
+            if case .identifiedFinal(let commit) = event {
+                commits.update { $0.append(commit) }
+                if commit.start == 1 { times.update { $0.nextCaption = ProcessInfo.processInfo.systemUptime } }
+            }
+        }
+        queue.submit(.init(audioURL: try audio(root, name: "first.wav"), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 1, appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        try await waitUntil { entered.value }
+        queue.submit(.init(audioURL: try audio(root, name: "next.wav"), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 1, end: 2, appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        for _ in 0..<100 {
+            if times.value.nextCaption > 0 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let beforeRelease = times.value.nextCaption
+        times.update { $0.optionalRelease = ProcessInfo.processInfo.systemUptime }
+        await gate.release(); await queue.finish()
+        XCTAssertGreaterThan(beforeRelease, 0, "Next formal caption must arrive while the previous optional request is held")
+        if beforeRelease > 0 { XCTAssertLessThan(beforeRelease, times.value.optionalRelease) }
+        XCTAssertEqual(Set(commits.value.map(\.id)).count, 2)
+        XCTAssertEqual(queue.records.map(\.textLanguage), ["zh", "zh"], "Yielding optional work must preserve ordered decisions")
+        XCTAssertEqual(requests.value.filter { $0 == "first.wav:probe" }.count, 1,
+                       "An already submitted head must finish once, without throwing away its result")
+        XCTAssertEqual(requests.value.filter { $0 == "first.wav:auto" }.count, 1,
+                       "An already submitted body must finish once, without throwing away its result")
+    }
+
+    func testNextFormalCaptionOvertakesBlockedLanguageProbe() async throws {
+        try await assertNextFormalOvertakesBlockedOptional(body: false)
+    }
+
+    func testNextFormalCaptionOvertakesBlockedSourceBody() async throws {
+        try await assertNextFormalOvertakesBlockedOptional(body: true)
+    }
+
+    private func assertTemporaryEnglishSurvivesFallbackInterruption(reopen: Bool) async throws {
+        let root = try directory(), session = UUID(), second = UUID(), gate = AudioTestGate()
+        let blocked = AudioTestBox(false), commits = AudioTestBox<[TranscriptionCommit]>([])
+        let transcriber: DurableTranscriptionQueue.Transcriber = { url, model, _, mode in
+            let isSecond = url.lastPathComponent == "second.wav"
+            if model == "primary" {
+                var result = ASRTranscription(text: isSecond ? "Okay." : "The blue cart stops beside the metal gate.")
+                result.parakeetMeanProbability = 0.8
+                return result
+            }
+            if mode == .english {
+                if !blocked.value { blocked.update { $0 = true }; await gate.wait() }
+                return ASRTranscription(text: "The blue cart stops beside the metal gate.")
+            }
+            return self.sourceFixture(self.detectedSource("El carro azul espera junto a la puerta.", language: "es"), mode: mode)
+        }
+        let handler: @Sendable (SpeechPipeline.Event) -> Void = { event in
+            if case .identifiedFinal(let commit) = event { commits.update { $0.append(commit) } }
+        }
+        let queue = DurableTranscriptionQueue(transcriber: transcriber)
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: handler)
+        queue.submit(.init(audioURL: try audio(root, name: "first.wav", seconds: 10), modelKey: "primary",
+            fallbackModelKey: "fallback", start: 0, end: 10, appleEvidence: "", recordingURL: nil,
+            sessionID: session), handler: handler)
+        await queue.finish()
+        queue.submit(.init(audioURL: try audio(root, name: "second.wav", seconds: 10), modelKey: "primary",
+            fallbackModelKey: "fallback", start: 10, end: 20, appleEvidence: "", recordingURL: nil,
+            id: second, sessionID: session), handler: handler)
+        try await waitUntil { blocked.value }
+        XCTAssertEqual(queue.records.last?.text, "Okay.")
+        XCTAssertNil(queue.records.last?.sourceProbeInput)
+        try queue.requestPause(); await gate.release(); try await queue.pause()
+        let current: DurableTranscriptionQueue
+        if reopen {
+            // Simulate the crash window after its durable early commit. No old
+            // worker remains; only the active journal state is restored.
+            let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+            var interrupted = try XCTUnwrap(journal.record(id: second))
+            interrupted.status = .active
+            try journal.put(interrupted)
+            current = DurableTranscriptionQueue(transcriber: transcriber)
+            try await current.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                restoring: true, startPaused: true, handler: handler)
+            XCTAssertEqual(current.records.last?.status, .pending)
+            XCTAssertNil(current.records.last?.failureReason)
+        } else { current = queue }
+        try current.resume(); await current.finish()
+        let revised = try XCTUnwrap(current.records.last)
+        XCTAssertEqual(revised.attempt, .initial)
+        XCTAssertEqual(revised.automaticRetryCount, 0)
+        XCTAssertEqual(revised.textLanguage, "es")
+        XCTAssertEqual(revised.text, "El carro azul espera junto a la puerta.")
+        XCTAssertNil(revised.candidateText)
+        XCTAssertEqual(commits.value.last?.replacingInitialText, "Okay.")
+        XCTAssertEqual(commits.value.last?.language, "es")
+        try await current.pause()
+    }
+
+    func testTemporaryEnglishFallbackPausePreservesInitialSourcePermission() async throws {
+        try await assertTemporaryEnglishSurvivesFallbackInterruption(reopen: false)
+    }
+
+    func testTemporaryEnglishFallbackCrashReopensAsInitialWork() async throws {
+        try await assertTemporaryEnglishSurvivesFallbackInterruption(reopen: true)
+    }
+
+    func testConfirmedForcedEmptyDoesNotPoisonEnglishCacheAndAutomaticRetryDecodesAgain() async throws {
+        let root = try directory(), wav = try audio(root, seconds: 10)
+        var record = work(UUID(), ordinal: 0, fallback: "fallback")
+        let cache = TranscriptionAttemptCache(), calls = AudioTestBox<[ASRLanguageMode]>([])
+        let bodies = AudioTestBox(0), rejectedEnglish = "这段保留音频。"
+        let transcriber: DurableTranscriptionQueue.Transcriber = { _, model, _, mode in
+            if model == "primary" { return ASRTranscription(text: "") }
+            calls.update { $0.append(mode) }
+            if mode == .english { return ASRTranscription(text: rejectedEnglish) }
+            if mode == .probe { return self.sourceFixture(self.detectedSource(), mode: mode) }
+            bodies.update { $0 += 1 }
+            if bodies.value == 1 {
+                return ASRTranscription(text: "", languageMode: .auto, detectedLabel: "Chinese",
+                    languageProbability: 0.99, englishProbability: 0.001, policy: 1)
+            }
+            return self.detectedSource()
+        }
+        _ = try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
+            formulaContext: "", attempts: cache, transcriber: transcriber)
+        let fingerprint = try TranscriptionAttemptCache.fingerprint(wav)
+        XCTAssertEqual(cache.result(for: .init(id: record.id, model: "fallback", enhanced: true,
+            mode: .english, audio: fingerprint))?.text, rejectedEnglish)
+        XCTAssertNil(cache.result(for: .init(id: record.id, model: "fallback", enhanced: true,
+            mode: .auto, audio: fingerprint)), "A failed confirmed body cannot be reused")
+        record.attempt = .automaticRetry; record.automaticRetryCount = 1
+        let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
+            formulaContext: "", attempts: cache, transcriber: transcriber)
+        XCTAssertEqual(outcome.language, "zh")
+        XCTAssertEqual(bodies.value, 2)
+        XCTAssertEqual(calls.value.filter { $0 == .english }.count, 1)
+
+        bodies.update { $0 = 0 }; calls.update { $0.removeAll() }
+        let queue = DurableTranscriptionQueue(transcriber: transcriber)
+        try await queue.configure(directory: root, sessionID: record.sessionID, persistent: true, identified: true,
+            handler: { _ in })
+        queue.submit(.init(audioURL: wav, modelKey: "primary", fallbackModelKey: "fallback", start: 0, end: 10,
+            appleEvidence: "", recordingURL: nil, sessionID: record.sessionID), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(queue.records.first?.status, .completed)
+        XCTAssertEqual(queue.records.first?.textLanguage, "zh")
+        XCTAssertEqual(queue.records.first?.automaticRetryCount, 1)
+        XCTAssertEqual(bodies.value, 2)
+        XCTAssertEqual(calls.value.filter { $0 == .english }.count, 1)
+    }
+
+    func testInvalidParakeetObservationProbesWithoutDiscardingUsableEnglish() async throws {
+        let root = try directory(), session = UUID(), calls = AudioTestBox<[ASRLanguageMode]>([])
+        let english = "The blue cart stops beside the metal gate."
+        let queue = DurableTranscriptionQueue { _, model, _, mode in
+            calls.update { $0.append(mode) }
+            if model == "primary" {
+                return try ASRTranscription.validated(text: english,
+                    data: JSONSerialization.data(withJSONObject: ["pk_mean_probability": NSNull(),
+                        "pk_min_probability": NSNull(), "pk_confidence_valid": false]), requestedLanguage: .english)
+            }
+            return ASRTranscription(text: "", languageMode: .probe, detectedLabel: "English",
+                languageProbability: 0.99, englishProbability: 0.99, policy: 1)
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+            handler: { _ in })
+        queue.submit(.init(audioURL: try audio(root), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 1, appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await queue.finish()
+        XCTAssertEqual(calls.value, [.english, .probe])
+        XCTAssertEqual(queue.records.first?.text, english)
+        XCTAssertEqual(queue.records.first?.sourceProbeInput?.parakeetAccepted, false)
+        XCTAssertEqual(queue.records.first?.sourceTriggerDecision?.reason, "probe_english")
+    }
+
+    func testCompletedHeadIsReusedAndBodyWaitsForNewFormalFallback() async throws {
+        let root = try directory(), session = UUID(), headGate = AudioTestGate(), formalGate = AudioTestGate()
+        let entered = AudioTestBox((head: false, formal: false)), requests = AudioTestBox<[String]>([])
+        let queue = DurableTranscriptionQueue { url, model, _, mode in
+            let first = url.lastPathComponent == "first.wav"
+            requests.update { $0.append("\(first ? 0 : 1):\(mode.rawValue)") }
+            if model == "primary" {
+                var result = ASRTranscription(text: first ? "The blue cart stops beside the metal gate." : "Okay.")
+                result.parakeetMeanProbability = first ? 0.8 : 0.99
+                return result
+            }
+            if first, mode == .probe {
+                entered.update { $0.head = true }; await headGate.wait()
+            }
+            if !first, mode == .english {
+                entered.update { $0.formal = true }; await formalGate.wait()
+                return ASRTranscription(text: "The blue cart stops beside the metal gate.")
+            }
+            return self.sourceFixture(self.detectedSource(), mode: mode)
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+            handler: { _ in })
+        queue.submit(.init(audioURL: try audio(root, name: "first.wav"), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 1, appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        try await waitUntil { entered.value.head }
+        queue.submit(.init(audioURL: try audio(root, name: "next.wav", seconds: 10), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 1, end: 11, appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        try await waitUntil { entered.value.formal }
+        await headGate.release()
+        try await waitUntil { queue.records.first?.sourceTriggerDecision?.language == "zh" }
+        XCTAssertFalse(requests.value.contains("0:auto"), "A finished head cannot start a body ahead of formal fallback")
+        XCTAssertEqual(queue.records.first?.sourceProbeFinished, false)
+        await formalGate.release(); await queue.finish()
+        XCTAssertEqual(requests.value.filter { $0 == "0:probe" }.count, 1)
+        XCTAssertEqual(requests.value.filter { $0 == "0:auto" }.count, 1)
+        XCTAssertEqual(queue.records.first?.textLanguage, "zh")
+    }
+
+    func testEditingTemporaryEnglishDuringFormalFallbackRevokesAutomaticSourceRevision() async throws {
+        let root = try directory(), session = UUID(), chunk = UUID(), gate = AudioTestGate()
+        let entered = AudioTestBox(false), commits = AudioTestBox<[TranscriptionCommit]>([])
+        let queue = DurableTranscriptionQueue { _, model, _, mode in
+            if model == "primary" {
+                var result = ASRTranscription(text: "Okay.")
+                result.parakeetMeanProbability = 0.8
+                return result
+            }
+            if mode == .english {
+                entered.update { $0 = true }; await gate.wait()
+                return ASRTranscription(text: "The blue cart stops beside the metal gate.")
+            }
+            return self.sourceFixture(self.detectedSource(), mode: mode)
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true) { event in
+            if case .identifiedFinal(let commit) = event { commits.update { $0.append(commit) } }
+        }
+        queue.submit(.init(audioURL: try audio(root, seconds: 10), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 10, appleEvidence: "", recordingURL: nil, id: chunk, sessionID: session), handler: { _ in })
+        try await waitUntil { entered.value }
+        XCTAssertEqual(commits.value.first?.text, "Okay.")
+        let edited = "The user keeps a different sentence here."
+        try queue.retainExistingText(id: chunk, text: edited)
+        await gate.release(); await queue.finish()
+        let record = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(record.text, edited)
+        XCTAssertNil(record.textLanguage)
+        XCTAssertEqual(record.sourceRevisionAllowed, false)
+        XCTAssertEqual(record.candidateText, self.detectedSource().text)
+        XCTAssertEqual(record.candidateLanguage, "zh")
+        XCTAssertTrue(commits.value.allSatisfy { $0.replacingInitialText == nil })
+    }
+
+    private func assertReopenDuringOptionalPass(body: Bool) async throws {
+        let root = try directory(), session = UUID(), gate = AudioTestGate()
+        let entered = AudioTestBox(false), calls = AudioTestBox<[String]>([])
+        let transcriber: DurableTranscriptionQueue.Transcriber = { url, model, _, mode in
+            let index = url.lastPathComponent.contains("second") ? 1 : 0
+            calls.update { $0.append("\(index):\(mode.rawValue)") }
+            if model == "primary" {
+                var result = ASRTranscription(text: "The blue cart stops beside the metal gate.")
+                result.parakeetMeanProbability = index == 0 ? 0.8 : 0.99
+                return result
+            }
+            if index == 1, mode == (body ? .auto : .probe), !entered.value {
+                entered.update { $0 = true }; await gate.wait()
+            }
+            return self.sourceFixture(self.detectedSource("a b c d", language: "es"), mode: mode)
+        }
+        let queue = DurableTranscriptionQueue(transcriber: transcriber)
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: try audio(root, name: "first.wav"), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 1, appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await queue.finish()
+        queue.submit(.init(audioURL: try audio(root, name: "second.wav"), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 1, end: 2, appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        try await waitUntil { entered.value }
+        try queue.requestPause(); await gate.release(); try await queue.pause()
+        let before = try XCTUnwrap(queue.records.last)
+        XCTAssertNotNil(before.sourceProbeInput)
+        XCTAssertEqual(before.sourceProbeFinished, false)
+        XCTAssertEqual(before.sourceTriggerDecision?.language, body ? "es" : nil)
+        let restored = DurableTranscriptionQueue(transcriber: transcriber)
+        try await restored.configure(directory: root, sessionID: session, persistent: true, identified: true,
+            restoring: true, startPaused: true, handler: { _ in })
+        XCTAssertEqual(restored.records.last?.sourceTriggerPredecessor, before.sourceTriggerPredecessor)
+        try restored.resume(); await restored.finish()
+        XCTAssertEqual(restored.records.last?.textLanguage, "es")
+        XCTAssertEqual(restored.records.last?.text, "a b c d")
+        XCTAssertEqual(restored.records.last?.sourceProbeFinished, true)
+        XCTAssertEqual(calls.value.filter { $0 == "1:english" }.count, 1, "A restored optional pass must not replay formal ASR")
+        XCTAssertEqual(calls.value.filter { $0 == "1:probe" }.count, body ? 1 : 2,
+                       "A persisted successful head resumes body-only work")
+        try await restored.pause()
+    }
+
+    func testReopenDuringLanguageProbeRestoresOrderedPendingWork() async throws {
+        try await assertReopenDuringOptionalPass(body: false)
+    }
+
+    func testReopenDuringConfirmedBodyRestoresHeadWithoutRepeatingFormalASR() async throws {
+        try await assertReopenDuringOptionalPass(body: true)
+    }
+
+    func testTriggerEnglishCommitPrecedesBlockedExtraProbeAndUnconfirmedBodyIsNeverRequested() async throws {
+        let root = try directory(), session = UUID(), gate = AudioTestGate()
+        let entered = AudioTestBox(false), commits = AudioTestBox<[TranscriptionCommit]>([])
+        let calls = AudioTestBox<[String]>([])
+        let queue = DurableTranscriptionQueue { _, model, _, mode in
+            calls.update { $0.append(mode.rawValue) }
+            if model == "primary" {
+                var result = ASRTranscription(text: "The blue cart stops beside the metal gate.")
+                result.parakeetMeanProbability = 0.8
+                return result
+            }
+            entered.update { $0 = true }; await gate.wait()
+            var result = self.detectedSource("a b c d", language: "es")
+            if mode.rawValue == "probe" { result.languageMode = mode }
+            return result
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true) { event in
+            if case .identifiedFinal(let commit) = event { commits.update { $0.append(commit) } }
+        }
+        queue.submit(.init(audioURL: try audio(root), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 1, appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        try await waitUntil { entered.value }
+        XCTAssertEqual(commits.value.count, 1, "English must be durably delivered while the probe is blocked")
+        XCTAssertEqual(queue.records.first?.text, commits.value.first?.text)
+        await gate.release(); await queue.finish()
+        XCTAssertEqual(calls.value, ["english", "probe"], "An unconfirmed Latin head must not decode a body")
+    }
+
+    private func triggerRetryOrReopen(reopen: Bool) async throws {
+        let root = try directory(), session = UUID(), calls = AudioTestBox<[String]>([])
+        let transcriber: DurableTranscriptionQueue.Transcriber = { url, model, _, mode in
+            let index = url.lastPathComponent.contains("second") ? 1 : 0
+            calls.update { $0.append("\(index):\(mode.rawValue)") }
+            if model == "primary" {
+                var result = ASRTranscription(text: "The blue cart stops beside the metal gate.")
+                result.parakeetMeanProbability = index == 0 ? 0.8 : 0.99
+                return result
+            }
+            var result = self.detectedSource("a b c d", language: "es")
+            if mode.rawValue == "probe" { result.languageMode = mode }
+            return result
+        }
+        let queue = DurableTranscriptionQueue(transcriber: transcriber)
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        queue.submit(.init(audioURL: try audio(root, name: "first.wav"), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 1, appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+        await queue.finish(); try await queue.pause()
+        let current: DurableTranscriptionQueue
+        if reopen {
+            current = DurableTranscriptionQueue(transcriber: transcriber)
+            try await current.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                restoring: true, handler: { _ in })
+            try current.resume()
+        } else { current = queue; try current.resume() }
+        let second = UUID()
+        current.submit(.init(audioURL: try audio(root, name: "second.wav"), modelKey: "primary", fallbackModelKey: "fallback",
+            start: 1, end: 2, appleEvidence: "", recordingURL: nil, id: second, sessionID: session), handler: { _ in })
+        await current.finish()
+        if !reopen {
+            let progress = DurableTranscriptionQueue.restoredSourceTrigger(current.records)
+            calls.update { $0.removeAll() }
+            try current.retry(id: second); await current.finish()
+            XCTAssertEqual(DurableTranscriptionQueue.restoredSourceTrigger(current.records), progress,
+                           "A repair must not advance or clear the live confirmation chain")
+        }
+        XCTAssertTrue(calls.value.contains("1:auto"), "The original adjacent predecessor must still confirm Spanish")
+        let record = try XCTUnwrap(current.records.first { $0.id == second })
+        XCTAssertEqual(record.textLanguage, "es", "Initial confirmation must change the official source language")
+        try await current.pause()
+    }
+
+    func testTriggerRepairReusesFirstPredecessorSnapshot() async throws {
+        try await triggerRetryOrReopen(reopen: false)
+    }
+
+    func testTriggerReopenRestoresPendingLatinConfirmation() async throws {
+        try await triggerRetryOrReopen(reopen: true)
+    }
+
+    func testTriggerLegacyArchiveWithNoProbeFieldsStartsWithEmptyChain() throws {
+        var record = work(UUID(), ordinal: 0, status: .completed)
+        record.text = "a b c d"; record.textLanguage = "es"
+        let decoded = try JSONDecoder().decode(TranscriptionWorkRecord.self, from: sortedBytes(record))
+        XCTAssertNil(decoded.sourceTriggerPredecessor); XCTAssertNil(decoded.sourceTriggerAfter)
+        XCTAssertNil(decoded.sourceProbeInput); XCTAssertNil(decoded.sourceProbeFinished)
+        XCTAssertNil(decoded.sourceRevisionAllowed)
+        XCTAssertNil(decoded.sourceInitialEnglishDigest)
+        XCTAssertNil(decoded.sourceTriggerPendingBoundary)
+        let state = DurableTranscriptionQueue.restoredSourceTrigger([decoded])
+        XCTAssertFalse(state.plan(index: 1, parakeetAccepted: true, mean: 0.99, minimum: 0.2).selected)
+    }
+
+    func testPublicUNTriggerLatencyWithOwnedService() async throws {
+        // Only the guarded measurement driver supplies this private fixture.
+        // Ordinary CPU/mock gates never resolve or start an installed service.
+        let fixture = FileManager.default.temporaryDirectory.deletingLastPathComponent()
+            .appendingPathComponent("public-trigger-latency.json")
+        guard FileManager.default.fileExists(atPath: fixture.path) else {
+            throw XCTSkip("Guarded public UN latency fixture was not supplied")
+        }
+        struct Configuration: Decodable {
+            let endpoint: URL
+            let token: String
+            let pid: Int32
+            let clips: [URL]
+            let output: URL
+        }
+        struct Timing: Codable {
+            let withProbe: Bool
+            let captionSeconds: Double
+            let formalSeconds: Double
+            let deliveryAfterFormalSeconds: Double
+            let probeSeconds: Double?
+            let captionBeforeProbe: Bool?
+        }
+        let configuration = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: fixture))
+        XCTAssertEqual(configuration.endpoint.host, "127.0.0.1")
+        let endpoint = ASRRuntime.Endpoint(baseURL: configuration.endpoint, token: configuration.token,
+                                           processIdentifier: configuration.pid)
+        let coordinator = ASRRequestCoordinator()
+        var measurements: [Timing] = []
+        for (index, clip) in configuration.clips.enumerated() {
+            // Alternate paired order to expose, rather than hide, timing drift.
+            for withProbe in index.isMultiple(of: 2) ? [false, true] : [true, false] {
+                let times = AudioTestBox((formalStart: 0.0, formalEnd: 0.0, caption: 0.0, probeStart: 0.0, probeEnd: 0.0))
+                let queue = DurableTranscriptionQueue { url, model, enhanced, mode in
+                    let start = ProcessInfo.processInfo.systemUptime
+                    var result = try await coordinator.transcribe(endpoint: endpoint, audioURL: url,
+                        modelKey: model, enhanceSpeech: enhanced, language: mode,
+                        requestID: ASRRequestContext.requestID)
+                    let end = ProcessInfo.processInfo.systemUptime
+                    if model == "parakeet" {
+                        times.update { $0.formalStart = start; $0.formalEnd = end }
+                        // Force a controlled optional probe; keep the real body.
+                        result.parakeetMeanProbability = withProbe ? 0.8 : 1
+                        result.parakeetMinProbability = 1
+                    } else if mode == .probe { times.update { $0.probeStart = start; $0.probeEnd = end } }
+                    return result
+                }
+                let root = try directory(), session = UUID()
+                try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true) { event in
+                    if case .identifiedFinal = event { times.update { if $0.caption == 0 { $0.caption = ProcessInfo.processInfo.systemUptime } } }
+                }
+                let layout = try WAVContextClip.readLayout(at: clip)
+                let start = ProcessInfo.processInfo.systemUptime
+                queue.submit(.init(audioURL: clip, modelKey: "parakeet", fallbackModelKey: "1.7b", start: 0,
+                    end: Double(layout.frameCount) / layout.sampleRate, appleEvidence: "", recordingURL: nil,
+                    sessionID: session), handler: { _ in })
+                await queue.finish()
+                let value = times.value
+                XCTAssertGreaterThan(value.caption, 0, "The public English clip must deliver a formal caption")
+                if withProbe { XCTAssertGreaterThan(value.probeStart, value.caption) }
+                measurements.append(Timing(withProbe: withProbe, captionSeconds: value.caption - start,
+                    formalSeconds: value.formalEnd - value.formalStart,
+                    deliveryAfterFormalSeconds: value.caption - value.formalEnd,
+                    probeSeconds: withProbe ? value.probeEnd - value.probeStart : nil,
+                    captionBeforeProbe: withProbe ? value.caption < value.probeStart : nil))
+            }
+        }
+        // Timing numbers only; no transcript, language head, token or audio.
+        try JSONEncoder().encode(measurements).write(to: configuration.output, options: .withoutOverwriting)
+    }
+
+    func testPublicUNBacklogCaptionsPrecedeOptionalProbesWithOwnedService() async throws {
+        let fixture = FileManager.default.temporaryDirectory.deletingLastPathComponent()
+            .appendingPathComponent("public-trigger-latency.json")
+        guard FileManager.default.fileExists(atPath: fixture.path) else {
+            throw XCTSkip("Guarded public UN latency fixture was not supplied")
+        }
+        struct Configuration: Decodable {
+            let endpoint: URL, token: String, pid: Int32, clips: [URL], output: URL
+        }
+        struct Timing: Codable {
+            let pair: Int, withProbe: Bool
+            let captionSeconds: [Double]
+            let formalStartSeconds: [Double]
+            let firstProbeSeconds: Double?
+        }
+        let config = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: fixture))
+        XCTAssertEqual(config.endpoint.host, "127.0.0.1")
+        let endpoint = ASRRuntime.Endpoint(baseURL: config.endpoint, token: config.token, processIdentifier: config.pid)
+        let coordinator = ASRRequestCoordinator()
+        var timings: [Timing] = []
+        // Four paired two-chunk backlogs use real HTTP/model inference. Only
+        // confidence is controlled to isolate the optional probe's effect.
+        for pair in 0..<min(4, config.clips.count / 2) {
+            for withProbe in pair.isMultiple(of: 2) ? [false, true] : [true, false] {
+                let root = try directory(), session = UUID()
+                let observed = AudioTestBox((captions: [Double](), formal: [Double](), probe: 0.0))
+                let queue = DurableTranscriptionQueue { url, model, enhance, mode in
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if model == "parakeet" { observed.update { $0.formal.append(now) } }
+                    if mode == .probe { observed.update { if $0.probe == 0 { $0.probe = now } } }
+                    var result = try await coordinator.transcribe(endpoint: endpoint, audioURL: url,
+                        modelKey: model, enhanceSpeech: enhance, language: mode, requestID: ASRRequestContext.requestID)
+                    if model == "parakeet" {
+                        result.parakeetMeanProbability = withProbe ? 0.8 : 1
+                        result.parakeetMinProbability = 1
+                    }
+                    return result
+                }
+                try await queue.configure(directory: root, sessionID: session, persistent: true,
+                    identified: true, startPaused: true) { event in
+                    if case .identifiedFinal = event {
+                        observed.update { $0.captions.append(ProcessInfo.processInfo.systemUptime) }
+                    }
+                }
+                let began = ProcessInfo.processInfo.systemUptime
+                var offset = 0.0
+                for clip in config.clips[(pair * 2)..<(pair * 2 + 2)] {
+                    let layout = try WAVContextClip.readLayout(at: clip)
+                    let duration = Double(layout.frameCount) / layout.sampleRate
+                    queue.submit(.init(audioURL: clip, modelKey: "parakeet", fallbackModelKey: "1.7b",
+                        start: offset, end: offset + duration, appleEvidence: "", recordingURL: nil,
+                        sessionID: session), handler: { _ in })
+                    offset += duration
+                }
+                try queue.resume(); await queue.finish()
+                let value = observed.value
+                XCTAssertEqual(value.formal.count, 2)
+                XCTAssertEqual(value.captions.count, 2)
+                if withProbe {
+                    XCTAssertGreaterThan(value.probe, value.formal.max() ?? 0)
+                    XCTAssertGreaterThan(value.probe, value.captions.max() ?? 0)
+                }
+                timings.append(Timing(pair: pair, withProbe: withProbe,
+                    captionSeconds: value.captions.map { $0 - began },
+                    formalStartSeconds: value.formal.map { $0 - began },
+                    firstProbeSeconds: withProbe ? value.probe - began : nil))
+            }
+        }
+        let output = config.output.deletingLastPathComponent().appendingPathComponent("swift-backlog-timings.json")
+        try JSONEncoder().encode(timings).write(to: output, options: .withoutOverwriting)
+    }
+
+    func testTriggerFailedConfirmedBodyRetainsOriginalHeadAndRepairEvidence() async throws {
+        let root = try directory(), session = UUID(), failBody = AudioTestBox(true)
+        let calls = AudioTestBox<[String]>([])
+        let queue = DurableTranscriptionQueue { url, model, _, mode in
+            let index = url.lastPathComponent.contains("second") ? 1 : 0
+            calls.update { $0.append("\(index):\(mode.rawValue)") }
+            if model == "primary" {
+                var result = ASRTranscription(text: index == 0 ? "The blue cart stops beside the metal gate." : "")
+                result.parakeetMeanProbability = 0.8
+                return result
+            }
+            if mode == .english { return ASRTranscription(text: "") }
+            if mode == .auto, failBody.value { throw URLError(.timedOut) }
+            return self.sourceFixture(self.detectedSource("a b c d", language: "es"), mode: mode)
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        for index in 0...1 {
+            queue.submit(.init(audioURL: try audio(root, name: index == 0 ? "first.wav" : "second.wav"),
+                modelKey: "primary", fallbackModelKey: "fallback", start: Double(index), end: Double(index + 1),
+                appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+            await queue.finish()
+        }
+        let failed = try XCTUnwrap(queue.records.last)
+        XCTAssertEqual(failed.status, .failed)
+        XCTAssertEqual(failed.sourceTriggerDecision?.language, "es")
+        let progress = DurableTranscriptionQueue.restoredSourceTrigger(queue.records)
+        failBody.update { $0 = false }; calls.update { $0.removeAll() }
+        try queue.retry(id: failed.id); await queue.finish()
+        XCTAssertEqual(queue.records.last?.textLanguage, "es")
+        XCTAssertTrue(calls.value.contains("1:auto"))
+        XCTAssertEqual(DurableTranscriptionQueue.restoredSourceTrigger(queue.records), progress)
+        XCTAssertEqual(queue.records.last?.sourceTriggerPredecessor, failed.sourceTriggerPredecessor)
+    }
+
+    private func runFewSequence(means: [Double?], failingProbe: Int? = nil, pauseAfterFirst: Bool = false) async throws
+        -> ([TranscriptionWorkRecord], [ASRLanguageMode]) {
+        let root = try directory(), session = UUID(), calls = AudioTestBox<[ASRLanguageMode]>([])
+        var source = detectedSource("a b c d", language: "es")
+        source.languageProbability = 0.55; source.englishProbability = 0.01
+        let detected = source
+        let queue = DurableTranscriptionQueue { url, model, _, mode in
+            calls.update { $0.append(mode) }
+            let index = Int(url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "chunk", with: ""))!
+            if model == "primary" {
+                var primary = ASRTranscription(text: "The blue cart stops beside the metal gate.")
+                primary.parakeetMeanProbability = means[index]; primary.parakeetMinProbability = 0.2
+                return primary
+            }
+            if mode == .probe, index == failingProbe { throw URLError(.timedOut) }
+            return self.sourceFixture(detected, mode: mode)
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                  startPaused: true, handler: { _ in })
+        for index in means.indices {
+            queue.submit(.init(audioURL: try audio(root, name: "chunk\(index).wav"), modelKey: "primary",
+                fallbackModelKey: "fallback", start: Double(index), end: Double(index + 1),
+                appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+            if pauseAfterFirst && index == 0 {
+                try queue.resume(); await queue.finish()
+                try await queue.pause()
+            }
+        }
+        try queue.resume(); await queue.finish()
+        XCTAssertEqual(queue.records.map(\.status), Array(repeating: .completed, count: means.count))
+        return (queue.records, calls.value)
+    }
+
+    func testFewAcceptedEnglishLowConfidenceProbesAndLatinConfirmsOnlyCurrentSegment() async throws {
+        let (records, calls) = try await runFewSequence(means: [0.8, 0.99, 0.99])
+        XCTAssertEqual(calls, [.english, .english, .english, .probe, .probe, .auto, .probe, .auto])
+        XCTAssertEqual(records.map(\.textLanguage), [nil, "es", "es"])
+        XCTAssertEqual(records.first?.text, "The blue cart stops beside the metal gate.")
+        XCTAssertEqual(records.dropFirst().map(\.text), ["a b c d", "a b c d"])
+        XCTAssertTrue(records.allSatisfy { $0.candidateText == nil })
+    }
+
+    func testFewProbeFailureKeepsEnglishAndBreaksNextHighConfidenceFollowup() async throws {
+        let (records, calls) = try await runFewSequence(means: [0.8, 0.99, 0.99, 0.8, 0.99], failingProbe: 1)
+        XCTAssertEqual(calls.filter { $0 == .probe }.count, 4)
+        XCTAssertEqual(records.map(\.textLanguage), [nil, nil, nil, nil, "es"])
+        XCTAssertTrue(records.allSatisfy { $0.failure == nil && $0.candidateText == nil })
+    }
+
+    func testFewPauseResumePreservesAdjacentCandidateInTheSameSession() async throws {
+        let (records, calls) = try await runFewSequence(means: [0.8, 0.99], pauseAfterFirst: true)
+        XCTAssertEqual(calls, [.english, .probe, .english, .probe, .auto])
+        XCTAssertEqual(records.map(\.textLanguage), [nil, "es"])
+    }
+
+    func testFewHighConfidenceAndLegacyMissingConfidenceKeepEnglishWithoutProbe() async throws {
+        let (records, calls) = try await runFewSequence(means: [0.90, 0.99, nil])
+        XCTAssertEqual(calls, [.english, .english, .english])
+        XCTAssertEqual(records.map(\.textLanguage), [nil, nil, nil])
+        XCTAssertTrue(records.allSatisfy { $0.text == "The blue cart stops beside the metal gate." && $0.candidateText == nil })
+    }
+
     private func detectedSource(_ text: String = "蓝色小车停在门边。", language: String = "zh") -> ASRTranscription {
         ASRTranscription(text: text, languageMode: .auto, language: language, decode: .detected,
             detectedLabel: SpokenLanguage.find(language)?.qwenLabel, languageProbability: 0.99,
             englishProbability: 0.001, generatedTokens: 12, policy: 1)
+    }
+
+    private func sourceFixture(_ source: ASRTranscription, mode: ASRLanguageMode) -> ASRTranscription {
+        if mode == .probe {
+            return ASRTranscription(text: "", languageMode: .probe, detectedLabel: source.detectedLabel,
+                languageProbability: source.languageProbability, englishProbability: source.englishProbability,
+                policy: source.policy)
+        }
+        return mode == .english ? ASRTranscription(text: source.text) : source
     }
 
     private func asrCall(_ model: String, _ enhanced: Bool, _ mode: ASRLanguageMode) -> MultilingualASRCall {
@@ -1417,6 +2315,13 @@ extension AudioRemediationTests {
     private func sortedBytes<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(value)
+    }
+
+    private func captionPayloadBytes(_ record: TranscriptionWorkRecord) throws -> Data {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: sortedBytes(record)) as? [String: Any])
+        for key in ["sourceTriggerPredecessor", "sourceTriggerDecision", "sourceTriggerAfter",
+                    "sourceProbeInput", "sourceProbeFinished", "sourceRevisionAllowed"] { object.removeValue(forKey: key) }
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 
     private func commitEventBytes(_ events: [SpeechPipeline.Event]) throws -> Data {
@@ -1482,7 +2387,7 @@ extension AudioRemediationTests {
         let modern: DurableTranscriptionQueue.Transcriber = { _, model, enhanced, mode in
             calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
             if model == "primary" { return ASRTranscription(text: primary) }
-            if mode == .auto { return autoResult ?? ASRTranscription(text: secondary, languageMode: .auto) }
+            if mode != .english { return self.sourceFixture(autoResult ?? ASRTranscription(text: secondary, languageMode: .auto), mode: mode) }
             return ASRTranscription(text: secondary)
         }
         let legacy: DurableTranscriptionQueue.LegacyTranscriber = { _, model, enhanced in
@@ -1498,7 +2403,7 @@ extension AudioRemediationTests {
         XCTAssertTrue(try sortedBytes(outcome) == sortedBytes(oldOutcome), "Outcome bytes changed", file: file, line: line)
         XCTAssertNil(outcome.language, file: file, line: line)
         let frozenCalls = legacyCalls.value.map(\.legacyRequestSignature)
-        XCTAssertEqual(calls.value.filter { $0.stage != "fallbackEn" }.map(\.legacyRequestSignature),
+        XCTAssertEqual(calls.value.filter { $0.mode == .english }.map(\.legacyRequestSignature),
                        frozenCalls, "Requests differ from frozen recognition", file: file, line: line)
         calls.update { $0.removeAll() }; legacyCalls.update { $0.removeAll() }
         let newQueue = DurableTranscriptionQueue(transcriber: modern)
@@ -1507,7 +2412,7 @@ extension AudioRemediationTests {
         let (adaptedRecord, adaptedEvents) = try await runSourceFixture(adaptedQueue, record: record, identified: identified, evidence: evidence)
         // This checks the legacy adapter; frozen recognition above is the
         // independent reference for outcomes and actual request sequences.
-        XCTAssertTrue(try sortedBytes(newRecord) == sortedBytes(adaptedRecord), "Legacy adapter journal bytes changed", file: file, line: line)
+        XCTAssertTrue(try captionPayloadBytes(newRecord) == captionPayloadBytes(adaptedRecord), "Legacy adapter journal bytes changed", file: file, line: line)
         XCTAssertTrue(try commitEventBytes(newEvents) == commitEventBytes(adaptedEvents), "Legacy adapter caption events changed", file: file, line: line)
         XCTAssertEqual(newRecord.text, oldOutcome.text, file: file, line: line)
         XCTAssertEqual(newRecord.candidateText, oldOutcome.candidate, file: file, line: line)
@@ -1529,7 +2434,7 @@ extension AudioRemediationTests {
         XCTAssertEqual(commits, 1, file: file, line: line)
         XCTAssertEqual(calls.value.map(\.mode), expectedModes, file: file, line: line)
         XCTAssertEqual(calls.value.map(\.stage), expectedStages, file: file, line: line)
-        XCTAssertEqual(calls.value.filter { $0.stage != "fallbackEn" }.map(\.legacyRequestSignature),
+        XCTAssertEqual(calls.value.filter { $0.mode == .english }.map(\.legacyRequestSignature),
                        frozenCalls, file: file, line: line)
         XCTAssertEqual(legacyCalls.value.map(\.legacyRequestSignature), frozenCalls, file: file, line: line)
         XCTAssertEqual(Set(calls.value.map(\.requestID)).count, calls.value.count, file: file, line: line)
@@ -1570,12 +2475,12 @@ extension AudioRemediationTests {
             let calls = AudioTestBox<[MultilingualASRCall]>([])
             let queue = DurableTranscriptionQueue { _, model, enhanced, mode in
                 calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
-                return model == "primary" ? ASRTranscription(text: "") : source
+                return model == "primary" ? ASRTranscription(text: "") : self.sourceFixture(source, mode: mode)
             }
             let input = work(UUID(), ordinal: 0, fallback: "fallback")
             let (record, events) = try await runSourceFixture(queue, record: input, identified: identified, evidence: evidence)
-            XCTAssertEqual(calls.value.map(\.mode), [.english, .auto])
-            XCTAssertEqual(calls.value.filter { $0.model == "fallback" }.count, 1)
+            XCTAssertEqual(calls.value.map(\.mode), [.english, .english, .probe, .auto])
+            XCTAssertEqual(calls.value.filter { $0.model == "fallback" }.count, 3)
             XCTAssertEqual(record.status, .completed)
             XCTAssertEqual(record.text, source.text)
             XCTAssertEqual(record.textLanguage, "zh")
@@ -1602,7 +2507,7 @@ extension AudioRemediationTests {
         let root = try directory(), record = work(UUID(), ordinal: 0, fallback: "fallback"), source = detectedSource()
         let transcriber: DurableTranscriptionQueue.Transcriber = { _, model, _, mode in
             if model == "primary" { throw URLError(.timedOut) }
-            XCTAssertEqual(mode, .auto); return source
+            return self.sourceFixture(source, mode: mode)
         }
         let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: audio(root, seconds: 10), recordingURL: nil,
             formulaContext: "", attempts: TranscriptionAttemptCache(), transcriber: transcriber)
@@ -1619,10 +2524,10 @@ extension AudioRemediationTests {
         let source = detectedSource("架蓝色车停喺门口。", language: "yue"), calls = AudioTestBox<[ASRLanguageMode]>([])
         let queue = DurableTranscriptionQueue { _, model, _, mode in
             calls.update { $0.append(mode) }
-            return model == "primary" ? ASRTranscription(text: "") : source
+            return model == "primary" ? ASRTranscription(text: "") : self.sourceFixture(source, mode: mode)
         }
         let (record, events) = try await runSourceFixture(queue, record: work(UUID(), ordinal: 0, fallback: "fallback"))
-        XCTAssertEqual(calls.value, [.english, .auto])
+        XCTAssertEqual(calls.value, [.english, .english, .probe, .auto])
         XCTAssertEqual(record.status, .completed)
         XCTAssertEqual(record.textLanguage, "yue")
         XCTAssertEqual(events.compactMap { if case .identifiedFinal(let c) = $0 { return c.language }; return nil }, ["yue"])
@@ -1634,31 +2539,27 @@ extension AudioRemediationTests {
         let rejected = detectedSource("The lab door is open.")
         XCTAssertFalse(SourceLanguagePolicy.accepts(rejected, audioDuration: 10))
         try await assertEnglishBytes(primary: "", autoResult: rejected,
-            expectedModes: [.english, .auto, .english], expectedStages: ["primary", "fallback", "fallbackEn"])
+            expectedModes: [.english, .english, .probe, .auto], expectedStages: ["primary", "fallback", "languageProbe", "confirmedSource"])
     }
 
     func testMultilingualForcedResultMatchesLegacyEnglishBytes() async throws {
-        try await assertEnglishBytes(primary: "", expectedModes: [.english, .auto], expectedStages: ["primary", "fallback"])
+        try await assertEnglishBytes(primary: "", expectedModes: [.english, .english, .probe], expectedStages: ["primary", "fallback", "languageProbe"])
     }
 
-    func testMultilingualForcedAutoCacheMatchesLegacyAcrossAutomaticRetry() async throws {
+    func testMultilingualEnglishAndProbeCachesMatchLegacyAcrossAutomaticRetry() async throws {
         let root = try directory(), wav = try audio(root, seconds: 10)
         var record = work(UUID(), ordinal: 0, fallback: "fallback")
         let rejected = "这段保留音频。"
-        XCTAssertTrue(SpeechPipeline.preferredTranscript(primary: nil, fallback: rejected, audioDuration: 10).isEmpty)
-        XCTAssertEqual(ASRQualityGate.fallbackReason(for: "Okay.", audioDuration: 10), .implausiblyShort)
-        let forced = ASRTranscription(text: rejected, languageMode: .auto, detectedLabel: "English",
-            languageProbability: 0.95, englishProbability: 0.95, generatedTokens: 48, policy: 1)
+        let head = ASRTranscription(text: "", languageMode: .probe, detectedLabel: "English",
+            languageProbability: 0.95, englishProbability: 0.95, policy: 1)
         let calls = AudioTestBox<[MultilingualASRCall]>([]), legacyCalls = AudioTestBox<[MultilingualASRCall]>([])
         let cache = TranscriptionAttemptCache(), legacyCache = Step5LegacyAttemptCache()
         let modern: DurableTranscriptionQueue.Transcriber = { _, model, enhanced, mode in
             calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
             if model == "primary" { return ASRTranscription(text: enhanced ? "Okay." : "") }
-            guard mode == .auto else {
-                XCTFail("Automatic retry must reuse the equivalent forced English result")
-                throw URLError(.timedOut)
-            }
-            return forced
+            if mode == .probe { return head }
+            XCTAssertEqual(mode, .english, "An English head must not request a source body")
+            return ASRTranscription(text: rejected)
         }
         let legacy: DurableTranscriptionQueue.LegacyTranscriber = { _, model, enhanced in
             legacyCalls.update { $0.append(self.asrCall(model, enhanced, .english)) }
@@ -1671,18 +2572,16 @@ extension AudioRemediationTests {
             let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
                 formulaContext: "", attempts: cache, transcriber: modern)
             XCTAssertEqual(try sortedBytes(outcome), try sortedBytes(oldOutcome))
-            XCTAssertEqual(calls.value.map(\.legacyRequestSignature), legacyCalls.value.map(\.legacyRequestSignature))
+            XCTAssertEqual(calls.value.filter { $0.mode == .english }.map(\.legacyRequestSignature),
+                           legacyCalls.value.map(\.legacyRequestSignature))
             let fingerprint = try TranscriptionAttemptCache.fingerprint(wav)
-            let englishKey = TranscriptionAttemptCache.Key(id: record.id, model: "fallback", enhanced: true,
-                                                           mode: .english, audio: fingerprint)
-            let autoKey = TranscriptionAttemptCache.Key(id: record.id, model: "fallback", enhanced: true,
-                                                        mode: .auto, audio: fingerprint)
-            XCTAssertEqual(cache.result(for: englishKey), ASRTranscription(text: rejected),
-                           "The reused reply must match every English reply field")
-            XCTAssertEqual(cache.result(for: autoKey), forced)
+            XCTAssertEqual(cache.result(for: .init(id: record.id, model: "fallback", enhanced: true,
+                mode: .english, audio: fingerprint)), ASRTranscription(text: rejected))
+            XCTAssertEqual(cache.result(for: .init(id: record.id, model: "fallback", enhanced: false,
+                mode: .probe, audio: fingerprint)), head)
         }
-        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "primary"])
-        XCTAssertEqual(calls.value.map(\.mode), [.english, .auto, .english])
+        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "languageProbe", "primary"])
+        XCTAssertEqual(calls.value.map(\.mode), [.english, .english, .probe, .english])
     }
 
     func testMultilingualRetryCacheSeparatesModesAndKeepsContextEnglish() async throws {
@@ -1691,7 +2590,7 @@ extension AudioRemediationTests {
         let calls = AudioTestBox<[MultilingualASRCall]>([]), rejected = detectedSource("The gate stays closed.")
         let queue = DurableTranscriptionQueue { url, model, enhanced, mode in
             calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
-            if mode == .auto { return rejected }
+            if mode != .english { return self.sourceFixture(rejected, mode: mode) }
             if try AVAudioFile(forReading: url).length > 160_000 { return ASRTranscription(text: "A nearby sentence needs confirmation.") }
             return ASRTranscription(text: "")
         }
@@ -1702,8 +2601,8 @@ extension AudioRemediationTests {
         queue.submit(.init(audioURL: wav, modelKey: "1.7b", fallbackModelKey: "1.7b", start: 0, end: 10,
             appleEvidence: "", recordingURL: recording, sessionID: session), handler: { _ in })
         await queue.finish()
-        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "fallbackEn", "context"])
-        XCTAssertEqual(calls.value.map(\.mode), [.english, .auto, .english, .english])
+        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "languageProbe", "confirmedSource", "context"])
+        XCTAssertEqual(calls.value.map(\.mode), [.english, .english, .probe, .auto, .english])
         XCTAssertEqual(calls.value.filter { $0.mode == .auto }.count, 1)
         let record = try XCTUnwrap(queue.records.first)
         XCTAssertEqual(record.automaticRetryCount, 2)
@@ -1730,13 +2629,13 @@ extension AudioRemediationTests {
         let queue = DurableTranscriptionQueue { _, model, enhanced, mode in
             calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
             if model == "primary" { return ASRTranscription(text: "") }
-            return mode == .auto ? rejected : ASRTranscription(text: "这段保留音频。")
+            return mode == .english ? ASRTranscription(text: "这段保留音频。") : self.sourceFixture(rejected, mode: mode)
         }
         let (record, _) = try await runSourceFixture(queue, record: work(UUID(), ordinal: 0, fallback: "fallback"))
         XCTAssertEqual(record.status, .otherLanguage)
         XCTAssertEqual(record.failureReason, .englishGateHanDominant)
         XCTAssertEqual(record.automaticRetryCount, 1)
-        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "fallbackEn", "primary"])
+        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "languageProbe", "confirmedSource", "primary"])
         XCTAssertEqual(calls.value.filter { $0.mode == .auto }.count, 1)
         XCTAssertNil(record.textLanguage)
         try assertOldBuildReads(queue)
@@ -1749,7 +2648,7 @@ extension AudioRemediationTests {
         let queue = DurableTranscriptionQueue { _, model, enhanced, mode in
             calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
             if model == "primary" { return ASRTranscription(text: manual.value ? "" : english) }
-            return source
+            return self.sourceFixture(source, mode: mode)
         }
         try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
                                   handler: { e in events.update { $0.append(e) } })
@@ -1758,7 +2657,7 @@ extension AudioRemediationTests {
         await queue.finish()
         manual.update { $0 = true }; try queue.retry(id: chunk); await queue.finish()
         let record = try XCTUnwrap(queue.records.first)
-        XCTAssertEqual(calls.value.map(\.mode), [.english, .english, .auto])
+        XCTAssertEqual(calls.value.map(\.mode), [.english, .english, .english, .probe, .auto])
         XCTAssertEqual(record.text, english)
         XCTAssertNil(record.textLanguage)
         XCTAssertEqual(record.candidateText, source.text)
@@ -1777,8 +2676,7 @@ extension AudioRemediationTests {
         let events = AudioTestBox<[SpeechPipeline.Event]>([])
         let queue = DurableTranscriptionQueue { _, model, _, mode in
             if model == "primary" { return ASRTranscription(text: "") }
-            XCTAssertEqual(mode, .auto)
-            return self.detectedSource(language: manual.value ? "yue" : "zh")
+            return self.sourceFixture(self.detectedSource(language: manual.value ? "yue" : "zh"), mode: mode)
         }
         try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
                                   handler: { e in events.update { $0.append(e) } })
@@ -1805,7 +2703,7 @@ extension AudioRemediationTests {
         XCTAssertTrue(FormulaASRReview.needsReview(original))
         let queue = DurableTranscriptionQueue { _, model, _, mode in
             if model == "primary" { return ASRTranscription(text: attempt.value == 1 ? "" : original) }
-            if attempt.value == 1 { XCTAssertEqual(mode, .auto); return source }
+            if attempt.value == 1 { return self.sourceFixture(source, mode: mode) }
             XCTAssertEqual(mode, .english)
             return ASRTranscription(text: attempt.value == 0 ? original : alternate)
         }
@@ -1840,20 +2738,22 @@ extension AudioRemediationTests {
         let queue = DurableTranscriptionQueue { _, model, _, mode in
             calls.update { $0.append(mode) }
             if model == "primary" { return ASRTranscription(text: "") }
-            return manual.value ? source : ASRTranscription(text: "", languageMode: .auto)
+            return manual.value ? self.sourceFixture(source, mode: mode) : ASRTranscription(text: "", languageMode: mode)
         }
         let input = work(UUID(), ordinal: 0, fallback: "fallback")
         _ = try await runSourceFixture(queue, record: input)
         XCTAssertEqual(queue.records.first?.status, .failed)
-        XCTAssertEqual(calls.value.filter { $0 == .auto }.count, 1)
+        XCTAssertEqual(calls.value.filter { $0 == .probe }.count, 1)
+        XCTAssertEqual(calls.value.filter { $0 == .auto }.count, 0)
         manual.update { $0 = true }; try queue.retry(id: input.id); await queue.finish()
         XCTAssertEqual(queue.records.first?.status, .completed)
         XCTAssertEqual(queue.records.first?.textLanguage, "zh")
-        XCTAssertEqual(calls.value.filter { $0 == .auto }.count, 2)
+        XCTAssertEqual(calls.value.filter { $0 == .probe }.count, 2)
+        XCTAssertEqual(calls.value.filter { $0 == .auto }.count, 1)
     }
 
     func testMultilingualCancellationPropagatesThroughEveryStage() async throws {
-        for stage in ["primary", "fallback", "fallbackEn", "context"] {
+        for stage in ["primary", "fallback", "languageProbe", "confirmedSource", "context"] {
             let root = try directory(), wav = try audio(root, seconds: 10)
             let recording = try audio(root, name: "recording.wav", seconds: 12)
             var record = work(UUID(), ordinal: 0, fallback: "fallback")
@@ -1864,7 +2764,9 @@ extension AudioRemediationTests {
                     formulaContext: "", attempts: TranscriptionAttemptCache()) { _, model, enhanced, mode in
                         let call = self.asrCall(model, enhanced, mode); calls.update { $0.append(call.stage) }
                         if call.stage == stage { throw CancellationError() }
-                        if mode == .auto, stage == "fallbackEn" { return self.detectedSource("The gate stays closed.") }
+                        if mode == .probe, stage == "confirmedSource" {
+                            return self.sourceFixture(self.detectedSource(), mode: mode)
+                        }
                         return ASRTranscription(text: "", languageMode: mode)
                     }
                 XCTFail("Cancellation must escape the \(stage) stage")
@@ -1873,8 +2775,9 @@ extension AudioRemediationTests {
             switch stage {
             case "primary": expected = ["primary"]
             case "fallback": expected = ["primary", "fallback"]
-            case "fallbackEn": expected = ["primary", "fallback", "fallbackEn"]
-            default: expected = ["primary", "fallback", "context"]
+            case "languageProbe": expected = ["primary", "fallback", "languageProbe"]
+            case "confirmedSource": expected = ["primary", "fallback", "languageProbe", "confirmedSource"]
+            default: expected = ["primary", "fallback", "languageProbe", "context"]
             }
             XCTAssertEqual(calls.value, expected, "No later stage may run after cancellation")
         }
@@ -1884,11 +2787,14 @@ extension AudioRemediationTests {
         let root = try directory(), wav = try audio(root, seconds: 10), record = work(UUID(), ordinal: 0, fallback: "fallback")
         let cache = TranscriptionAttemptCache(), gate = AudioTestGate(), entered = AudioTestBox(false), autoCalls = AudioTestBox(0)
         let source = detectedSource()
-        let transcriber: DurableTranscriptionQueue.Transcriber = { _, model, _, _ in
+        let transcriber: DurableTranscriptionQueue.Transcriber = { _, model, _, mode in
             if model == "primary" { return ASRTranscription(text: "") }
-            autoCalls.update { $0 += 1 }
-            if autoCalls.value == 1 { entered.update { $0 = true }; await gate.wait() }
-            return source
+            if mode == .english { return ASRTranscription(text: "") }
+            if mode == .auto {
+                autoCalls.update { $0 += 1 }
+                if autoCalls.value == 1 { entered.update { $0 = true }; await gate.wait() }
+            }
+            return self.sourceFixture(source, mode: mode)
         }
         let task = Task {
             try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
@@ -1912,7 +2818,7 @@ extension AudioRemediationTests {
         let transcriber: DurableTranscriptionQueue.Transcriber = { _, model, enhanced, mode in
             calls.update { $0.append(self.asrCall(model, enhanced, mode)) }
             if model == "primary" { return ASRTranscription(text: "") }
-            if mode == .auto { return rejected }
+            if mode != .english { return self.sourceFixture(rejected, mode: mode) }
             englishCalls.update { $0 += 1 }
             if englishCalls.value == 1 { entered.update { $0 = true }; await gate.wait() }
             return ASRTranscription(text: english)
@@ -1930,7 +2836,7 @@ extension AudioRemediationTests {
         let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: wav, recordingURL: nil,
             formulaContext: "", attempts: cache, transcriber: transcriber)
         XCTAssertEqual(englishCalls.value, 2)
-        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "fallbackEn", "primary", "fallbackEn"])
+        XCTAssertEqual(calls.value.map(\.stage), ["primary", "fallback", "primary", "fallback", "languageProbe", "confirmedSource"])
         XCTAssertEqual(outcome.text, english)
         XCTAssertNil(outcome.language)
     }
@@ -1941,7 +2847,7 @@ extension AudioRemediationTests {
         XCTAssertTrue(SourceLanguagePolicy.accepts(source, audioDuration: 10))
         let queue = DurableTranscriptionQueue { url, model, _, mode in
             calls.update { $0.append("\(url.lastPathComponent):\(model):\(mode.rawValue)") }
-            if url.lastPathComponent == "han.wav" { return model == "primary" ? ASRTranscription(text: "") : source }
+            if url.lastPathComponent == "han.wav" { return model == "primary" ? ASRTranscription(text: "") : self.sourceFixture(source, mode: mode) }
             if url.lastPathComponent == "seed.wav" { return ASRTranscription(text: "The derivative points along the slope in this example.") }
             return ASRTranscription(text: "The factorial notation fits this small example.")
         }
@@ -1955,6 +2861,8 @@ extension AudioRemediationTests {
         }
         try queue.resume(); await queue.finish()
         XCTAssertEqual(queue.records.map(\.status), Array(repeating: .completed, count: names.count))
+        // Every qualified candidate, including non-Latin, requests a followup.
+        // Formula repair stays English; the adjacent head cannot decode an unconfirmed body.
         XCTAssertEqual(calls.value.filter { $0 == "tail.wav:fallback:english" }.count, priorEnglish ? 1 : 0)
         XCTAssertEqual(calls.value.filter { $0.hasSuffix(":auto") }, ["han.wav:fallback:auto"])
     }
@@ -2083,13 +2991,13 @@ extension AudioRemediationTests {
         let events = AudioTestBox<[SpeechPipeline.Event]>([]), source = detectedSource()
         let pipeline = SpeechPipeline(transcriber: { _, _, _, mode in
             calls.update { $0.append(mode) }
-            return mode == .auto ? source : ASRTranscription(text: "")
+            return mode == .english ? ASRTranscription(text: "") : self.sourceFixture(source, mode: mode)
         }, enableAudioAnalysis: false)
         let input = try await pipeline.startSyntheticCapture(format: format(), recordingURL: root.appendingPathComponent("recording.wav"),
             sessionID: session, eventHandler: { e in events.update { $0.append(e) } })
         input.submit(buffer(16_000)); await input.drain()
         await pipeline.stopCapture(); await pipeline.drainTranscription(sessionID: session)
-        XCTAssertEqual(calls.value, [.english, .auto])
+        XCTAssertEqual(calls.value, [.english, .english, .probe, .auto])
         XCTAssertEqual(pipeline.transcriptionWork().first?.textLanguage, "zh")
         XCTAssertEqual(events.value.compactMap { if case .identifiedFinal(let c) = $0 { return c.language }; return nil }, ["zh"])
     }

@@ -96,6 +96,7 @@ enum LoopbackHTTPTransport {
 
 enum ASRRequestContext {
     @TaskLocal static var requestID: String?
+    @TaskLocal static var confirmedSourceLanguage: String?
 
     static func identifier(sessionID: UUID, chunkID: UUID, automatic: Int, manual: Int,
                            stage: String, nonce: UUID) -> String {
@@ -221,18 +222,25 @@ actor ASRRequestCoordinator {
         var components = URLComponents(url: baseURL.appending(path: "transcribe"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "model", value: modelKey),
                                  URLQueryItem(name: "enhance", value: enhanceSpeech ? "speech" : "off")]
-        if language == .auto { components?.queryItems?.append(URLQueryItem(name: "language", value: "auto")) }
+        if language != .english { components?.queryItems?.append(URLQueryItem(name: "language", value: language.rawValue)) }
+        if language == .auto, let confirmed = ASRRequestContext.confirmedSourceLanguage {
+            components?.queryItems?.append(URLQueryItem(name: "confirmed_language", value: confirmed))
+        }
         guard let url = components?.url else { throw QwenRuntimeError.invalidResponse }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 120
+        // The service drops heads that wait eight seconds before starting.
+        // Once started, a cold load may still need its 120-second server
+        // deadline. Wait for that matching receipt instead of detaching early
+        // and leaving an unknown lease that rejects foreground captions.
+        request.timeoutInterval = language == .probe ? 130 : 120
         request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
         request.setValue(requestID, forHTTPHeaderField: "X-LiveLingo-Request-ID")
         Self.authorize(&request, endpoint)
         request.httpBody = try Data(contentsOf: audioURL, options: .mappedIfSafe)
         try Task.checkCancellation()
         leases[key] = Lease(model: modelKey, language: language)
-        if language == .auto { languageProbeCount += 1 }
+        if language != .english { languageProbeCount += 1 }
         let transport = self.transport
         let started = ProcessInfo.processInfo.systemUptime
         Self.log.notice("asr event=acquired id=\(requestID, privacy: .public) model=\(modelKey, privacy: .public)")
@@ -279,7 +287,15 @@ actor ASRRequestCoordinator {
             guard response.status == 200 else {
                 throw QwenRuntimeError.requestFailed(payload?["error"] as? String ?? "本机转写请求失败")
             }
-            guard matched, let text = payload?["text"] as? String else { throw QwenRuntimeError.invalidResponse }
+            guard matched else { throw QwenRuntimeError.invalidResponse }
+            let text: String
+            if lease.language == .probe {
+                guard payload?["text"] == nil else { throw QwenRuntimeError.invalidResponse }
+                text = ""
+            } else {
+                guard let body = payload?["text"] as? String else { throw QwenRuntimeError.invalidResponse }
+                text = body
+            }
             return try ASRTranscription.validated(text: text, data: response.data, requestedLanguage: lease.language)
         case .failure(let error):
             leases[key]?.unknown = true
