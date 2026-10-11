@@ -2226,8 +2226,8 @@ private extension Text {
         self = FormulaDisplay.runs(source).reduce(Text("")) { result, run in
             let part: Text
             if run.script != 0 {
-                part = Text(verbatim: run.text).font(.system(size: ReadingTypography.scriptSize(bodySize: bodySize, baseBodySize: baseBodySize)))
-                    .baselineOffset(ReadingTypography.scriptOffset(script: run.script, bodySize: bodySize, baseBodySize: baseBodySize))
+                part = Text(verbatim: run.text).font(.system(size: ReadingTypography.scriptSize(bodySize: bodySize, baseBodySize: baseBodySize, nested: run.nested)))
+                    .baselineOffset(ReadingTypography.scriptOffset(script: run.script, nested: run.nested, bodySize: bodySize, baseBodySize: baseBodySize))
             } else if run.math {
                 part = Text(verbatim: run.text)
             } else if let attributed = try? AttributedString(markdown: run.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {

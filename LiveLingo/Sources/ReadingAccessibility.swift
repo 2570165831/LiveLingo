@@ -51,6 +51,17 @@ enum ReadingTypography {
     static func scriptOffset(script: Int, bodySize: Double, baseBodySize: Double = 18) -> Double {
         bodySize * (script < 0 ? -3 : 5) / baseBodySize
     }
+    /// A script inside a script (`FormulaDisplayRun.nested`) is drawn at this
+    /// fraction of its parent script, shifted from the parent's baseline by the
+    /// same fraction of the usual offset. The notes export uses the same rule.
+    static let nestedScriptScale = 0.8
+    static func scriptSize(bodySize: Double, baseBodySize: Double = 18, nested: Int) -> Double {
+        scriptSize(bodySize: bodySize, baseBodySize: baseBodySize) * (nested == 0 ? 1 : nestedScriptScale)
+    }
+    static func scriptOffset(script: Int, nested: Int, bodySize: Double, baseBodySize: Double = 18) -> Double {
+        scriptOffset(script: script, bodySize: bodySize, baseBodySize: baseBodySize)
+            + (nested == 0 ? 0 : nestedScriptScale * scriptOffset(script: nested, bodySize: bodySize, baseBodySize: baseBodySize))
+    }
 }
 
 /// The legacy key and all three existing presets remain readable by old apps.

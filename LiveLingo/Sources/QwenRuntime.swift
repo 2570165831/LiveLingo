@@ -3433,6 +3433,8 @@ struct FormulaDisplayRun: Equatable {
     let text: String
     let script: Int // -1 subscript, +1 superscript, 0 baseline
     let math: Bool
+    /// A script inside `script` (the `a` in `e^{-E_{a}}`): -1 subscript, +1 superscript, 0 none.
+    var nested = 0
 }
 enum FormulaDisplay {
     static func runs(_ source: String) -> [FormulaDisplayRun] {
@@ -3460,18 +3462,33 @@ enum FormulaDisplay {
             let ns = text as NSString, command = ns.substring(with: match.range(at:1))
             if let symbol = symbols[command] { text = ns.replacingCharacters(in: match.range, with: symbol) }
         }
-        let characters = Array(text); var index = 0; var plain = ""; var result: [FormulaDisplayRun] = []
-        func flush() { if !plain.isEmpty { result.append(.init(text:plain,script:0,math:true));plain="" } }
+        return scriptRuns(Array(text), levels: [])
+    }
+    /// `levels` holds the directions of the enclosing script groups. A group
+    /// ends at its matching `}` (escaped `\{` `\}` are literal). Only two
+    /// levels can be drawn, so `^`/`_` deeper than that stay as raw text.
+    private static func scriptRuns(_ characters: [Character], levels: [Int]) -> [FormulaDisplayRun] {
+        var index = 0; var plain = ""; var result: [FormulaDisplayRun] = []
+        func flush() {
+            if !plain.isEmpty { result.append(.init(text: plain, script: levels.first ?? 0, math: true, nested: levels.count > 1 ? levels[1] : 0)); plain = "" }
+        }
         while index < characters.count {
             let c = characters[index]
-            if (c == "_" || c == "^"), index+1 < characters.count {
-                flush(); index += 1; var value = ""
+            if (c == "_" || c == "^"), index+1 < characters.count, levels.count < 2 {
+                flush(); index += 1; var value: [Character] = []
                 if characters[index] == "{" {
-                    index += 1
-                    while index < characters.count && characters[index] != "}" { value.append(characters[index]);index += 1 }
+                    index += 1; var depth = 1
+                    while index < characters.count {
+                        let next = characters[index]
+                        if next == "\\", index+1 < characters.count, characters[index+1] == "{" || characters[index+1] == "}" {
+                            value += characters[index...index+1]; index += 2; continue
+                        }
+                        if next == "{" { depth += 1 } else if next == "}" { depth -= 1; if depth == 0 { break } }
+                        value.append(next); index += 1
+                    }
                     if index < characters.count { index += 1 }
                 } else { value.append(characters[index]);index += 1 }
-                result.append(.init(text:value,script:c == "_" ? -1 : 1,math:true))
+                result += scriptRuns(value, levels: levels + [c == "_" ? -1 : 1])
             } else { plain.append(c);index += 1 }
         }
         flush(); return result

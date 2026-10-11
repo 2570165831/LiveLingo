@@ -1733,11 +1733,13 @@ enum PDFNotesWriter {
         func appendPlain(_ piece: String, strong: Bool) {
             guard !piece.isEmpty else { return }
             for run in FormulaDisplay.runs(piece) {
-                let fontSize = run.script == 0 ? size : size * 0.72
+                let nestedScale = run.nested == 0 ? 1 : CGFloat(ReadingTypography.nestedScriptScale)
+                let fontSize = run.script == 0 ? size : size * 0.72 * nestedScale
                 let font = font(size: fontSize, bold: strong || (run.math && !run.text.isEmpty))
                 var attributes: [NSAttributedString.Key: Any] = [.font: font]
                 if run.script != 0 {
-                    attributes[.baselineOffset] = run.script > 0 ? size * 0.34 : -size * 0.16
+                    func offset(_ script: Int) -> CGFloat { script > 0 ? size * 0.34 : -size * 0.16 }
+                    attributes[.baselineOffset] = offset(run.script) + (run.nested == 0 ? 0 : nestedScale * offset(run.nested))
                 }
                 if run.math {
                     attributes[.foregroundColor] = NSColor.labelColor

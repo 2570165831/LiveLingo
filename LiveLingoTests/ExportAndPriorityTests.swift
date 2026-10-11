@@ -666,6 +666,73 @@ final class NotesExportTests: XCTestCase {
         XCTAssertTrue(text.contains("a") && text.contains("n"), "下标字符必须留在文字层")
     }
 
+    /// Issue #14：`^{…}` / `_{…}` 要读到配对的 `}` 才结束；里面的一层上下标
+    /// 按嵌套上下标显示，再深的层级保留原文，不能有字符掉回基线。
+    func testNestedFormulaScriptsMatchTheirClosingBrace() {
+        XCTAssertEqual(FormulaDisplay.runs("$k = A e^{-E_{a}/RT}$"), [
+            .init(text: "k = A e", script: 0, math: true),
+            .init(text: "-E", script: 1, math: true),
+            .init(text: "a", script: 1, math: true, nested: -1),
+            .init(text: "/RT", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("$x^{n_{i}+1}$"), [
+            .init(text: "x", script: 0, math: true),
+            .init(text: "n", script: 1, math: true),
+            .init(text: "i", script: 1, math: true, nested: -1),
+            .init(text: "+1", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs(#"$10^{\mathrm{th}}$"#), [
+            .init(text: "10", script: 0, math: true), .init(text: #"\mathrm{th}"#, script: 1, math: true),
+        ])
+        let triple = FormulaDisplay.runs("$a^{b^{c^{d}}}$")
+        XCTAssertEqual(triple.first, .init(text: "a", script: 0, math: true))
+        XCTAssertEqual(triple.dropFirst().filter { $0.script == 0 }, [], "嵌套上标里的字符不能掉回基线")
+        XCTAssertEqual(triple.map(\.text).joined(), "abc^{d}", "第三层保留原文，不丢字符")
+        XCTAssertEqual(FormulaDisplay.runs(#"$x^{\{a\}}$"#), [
+            .init(text: "x", script: 0, math: true), .init(text: #"\{a\}"#, script: 1, math: true),
+        ], "转义的花括号不参与配对")
+        // 回归：未闭合的分组仍把余下内容作为上标；单层写法不变。
+        XCTAssertEqual(FormulaDisplay.runs("$x^{ab$"), [
+            .init(text: "x", script: 0, math: true), .init(text: "ab", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("$x^{2222}$"), [
+            .init(text: "x", script: 0, math: true), .init(text: "2222", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("$a_{i}^{2}$"), [
+            .init(text: "a", script: 0, math: true), .init(text: "i", script: -1, math: true),
+            .init(text: "2", script: 1, math: true),
+        ])
+        for source in ["$k = A e^{-E_{a}/RT}$", "$x^{n_{i}+1}$", #"$10^{\mathrm{th}}$"#, "$a^{b^{c^{d}}}$"] {
+            XCTAssertFalse(FormulaDisplay.runs(source).contains { $0.script == 0 && $0.text.contains("}") }, source)
+        }
+    }
+
+    /// 导出（PDF/Word 共用）里嵌套下标比外层上标更小、位置仍在基线之上。
+    func testExportDrawsNestedScriptsSmallerInsideTheirParentScript() throws {
+        let size = PDFNotesWriter.bodySize
+        let runs = PDFNotesWriter.inlineRuns("$k = A e^{-E_{a}/RT}$", size: size, bold: false)
+        XCTAssertEqual(runs.map(\.string), ["k = A e", "-E", "a", "/RT"])
+        guard runs.count == 4 else { return }
+        func fontSize(_ index: Int) throws -> CGFloat {
+            try XCTUnwrap(runs[index].attribute(.font, at: 0, effectiveRange: nil) as? NSFont).pointSize
+        }
+        func offset(_ index: Int) -> CGFloat {
+            (runs[index].attribute(.baselineOffset, at: 0, effectiveRange: nil) as? CGFloat) ?? 0
+        }
+        XCTAssertLessThan(try fontSize(2), try fontSize(1))
+        XCTAssertEqual(try fontSize(3), try fontSize(1))
+        XCTAssertGreaterThan(offset(3), 0)
+        XCTAssertEqual(offset(3), offset(1))
+        XCTAssertGreaterThan(offset(2), 0, "上标里的下标仍在正文基线之上")
+        XCTAssertLessThan(offset(2), offset(1), "嵌套下标低于外层上标")
+        XCTAssertLessThan(ReadingTypography.scriptSize(bodySize: 18, nested: -1), ReadingTypography.scriptSize(bodySize: 18))
+        let nestedOffset = ReadingTypography.scriptOffset(script: 1, nested: -1, bodySize: 18)
+        XCTAssertGreaterThan(nestedOffset, 0)
+        XCTAssertLessThan(nestedOffset, ReadingTypography.scriptOffset(script: 1, bodySize: 18))
+        XCTAssertEqual(ReadingTypography.scriptOffset(script: 1, nested: 0, bodySize: 36),
+                       ReadingTypography.scriptOffset(script: 1, bodySize: 36))
+    }
+
     func testPDFIncludesReviewSectionOnlyWhenRequested() throws {
         let withReview = try NotesExportDocument.data(snapshot(withReview: true), format: .pdf)
         let withoutReview = try NotesExportDocument.data(snapshot(withReview: false), format: .pdf)
