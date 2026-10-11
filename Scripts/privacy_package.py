@@ -62,6 +62,7 @@ TEXT_NAMES = frozenset({"license", "licence", "copying", "notice", "copyright", 
 APP_RESOURCES = frozenset({
     "LanguageRuntime", "ASRRuntime", "Models", "LICENSE", "THIRD_PARTY_NOTICES.md",
     "Assets.car", "AppIcon.icns", "AppIcon.icon", "InfoPlist.strings",
+    "ZhVariants",  # OpenCC tables and reviewed phrases for Traditional Chinese output
 })
 # URL provenance is allowed. Local absolute paths (including file URLs and
 # Windows paths) in structured metadata are not distribution provenance.

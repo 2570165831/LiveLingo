@@ -253,6 +253,22 @@ class PrivacyPackageTests(unittest.TestCase):
             privacy.copy_distribution_tree(self.source, self.output)
         self.assertFalse(self.output.exists())
 
+    def test_bundled_chinese_variant_data_is_an_allowed_resource(self):
+        info = self.write("Contents/Info.plist", "")
+        info.write_bytes(plistlib.dumps({"CFBundleIdentifier": "fixture.app"}))
+        self.write("Contents/Resources/ZhVariants/STPhrases.txt", "\u53d1\u5c55\t\u767c\u5c55\n")
+        self.write("Contents/Resources/ZhVariants/s2tw.json", json.dumps({"name": "s2tw"}))
+        privacy.copy_distribution_tree(self.source, self.output)
+        self.assertTrue((self.output / "Contents/Resources/ZhVariants/s2tw.json").is_file())
+
+    def test_bundled_chinese_variant_data_is_still_scanned(self):
+        info = self.write("Contents/Info.plist", "")
+        info.write_bytes(plistlib.dumps({"CFBundleIdentifier": "fixture.app"}))
+        self.write("Contents/Resources/ZhVariants/SOURCE.json", json.dumps({"path": "/synthetic/private"}))
+        with self.assertRaises(privacy.PrivacyError):
+            privacy.copy_distribution_tree(self.source, self.output)
+        self.assertFalse(self.output.exists())
+
     def test_model_config_cannot_hide_body_json(self):
         self.write("Contents/Resources/Models/fixture/config.json", json.dumps({"rawText": CANARY}))
         with self.assertRaises(privacy.PrivacyError):
