@@ -702,6 +702,7 @@ struct ContentView: View {
                     .font(.headline)
                 if let error = model.errorMessage {
                     Text(error)
+                    if let notice = model.sessionNotice, notice != error { Text(notice) }
                     Divider()
                 }
                 if let notice = model.chineseDisplayNotice { Text(notice) }

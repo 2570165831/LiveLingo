@@ -1353,7 +1353,18 @@ final class AppModel: ObservableObject {
 
     var errorMessage: String? {
         if case .failed(let message) = phase { return message }
-        return (isRecording ? captureHealthNotice : nil) ?? sessionNotice ?? archiveError ?? setupError
+        return (isRecording ? captureHealthNotice : nil) ?? unresolvedSaveError ?? sessionNotice ?? archiveError ?? setupError
+    }
+
+    /// A save failure that is still unresolved outranks an informational notice,
+    /// so an earlier "saved" notice cannot hide it. Other archive errors keep
+    /// their lower rank; each of these clears itself on the next successful save.
+    private var unresolvedSaveError: String? {
+        guard let archiveError else { return nil }
+        if archiveError == archiveWriteError { return archiveError }
+        if let processing = sessionSnapshot?.processing, processing.lastErrorSource == .storage,
+           processing.lastError == archiveError { return archiveError }
+        return nil
     }
 
     func dismissSessionNotice() {
@@ -3586,6 +3597,11 @@ final class AppModel: ObservableObject {
     func receiveTranscriptionNoticeForTesting(_ event: SpeechPipeline.Event) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         consume(event)
+    }
+    /// Runs the bound saver's real failure callback, as a failed autosave would.
+    func failBoundAutosaveForTesting(_ error: Error) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        sessionSaver?.onFailure?(error)
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
     var translationQueueForTesting: [UUID] { translationQueue }
