@@ -587,6 +587,8 @@ final class AppModel: ObservableObject {
         set {
             let oldValue = captionStream.volatileEnglish
             captionStream.volatileEnglish = newValue
+            // Only a timed preview event knows its range; it sets it right after.
+            volatileRangeEnd = nil
             // Preserve source identity, stale-result clearing and wake-up semantics.
             if newValue != oldValue { markPreviewSourceChanged() }
             if oldValue.isEmpty || newValue.isEmpty || !newValue.hasPrefix(oldValue) {
@@ -594,6 +596,14 @@ final class AppModel: ObservableObject {
             }
             previewWake?.signal()
         }
+    }
+    /// End of the shown preview on the session-audio timeline; nil when unknown.
+    private var volatileRangeEnd: TimeInterval?
+    /// A final that ends well before the shown preview belongs to an earlier
+    /// chunk; it must not clear speech the preview has already moved on to.
+    private func previewOutlivesFinal(endingAt finalEnd: TimeInterval) -> Bool {
+        guard let previewEnd = volatileRangeEnd, finalEnd > 0 else { return false }
+        return previewEnd > finalEnd + 0.25
     }
     /// On by default for new preferences. An explicit prior choice is retained.
     @Published var previewTranslationEnabled: Bool {
@@ -3274,9 +3284,10 @@ final class AppModel: ObservableObject {
             lastAudioLevelAt = Date()
             waveformSamples.removeFirst()
             waveformSamples.append(level)
-        case let .volatile(text, _, _, observedAt):
+        case let .volatile(text, start, end, observedAt):
             tracePreviewReceiveHop(ProcessInfo.processInfo.systemUptime - observedAt)
             volatileEnglish = text
+            if !text.isEmpty, end > start, end > 0 { volatileRangeEnd = end }
             // Preview updates do not use the translation model. Let a summary
             // finish unless caption backlog or memory pressure requires yielding.
         case let .final(text, start, end, hints, language):
@@ -3378,7 +3389,7 @@ final class AppModel: ObservableObject {
             segment.updateCaptionAnnotation(targetCode: target.rawValue,
                 formulaUncertain: (segment.sourceLanguage == nil || segment.sourceLanguage == "en") && FormulaASRReview.uncertain(segment.english))
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
-            volatileEnglish = ""
+            if !previewOutlivesFinal(endingAt: segment.endTime) { volatileEnglish = "" }
             markCaptionActivity()
             segments.append(segment)
             segments.sort { $0.startTime == $1.startTime ? $0.id.uuidString < $1.id.uuidString : $0.startTime < $1.startTime }
@@ -3588,8 +3599,11 @@ final class AppModel: ObservableObject {
         consume(.final(text: text, start: start, end: end, hints: []))
     }
     func receiveLivePreviewForTesting(_ text: String, chinese: String? = nil) {
+        receiveLivePreviewForTesting(text, start: 0, end: 0, chinese: chinese)
+    }
+    func receiveLivePreviewForTesting(_ text: String, start: TimeInterval, end: TimeInterval, chinese: String? = nil) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
-        consume(.volatile(text: text, start: 0, end: 0,
+        consume(.volatile(text: text, start: start, end: end,
                           observedAt: ProcessInfo.processInfo.systemUptime))
         if let chinese { previewChinese = chinese }
     }
