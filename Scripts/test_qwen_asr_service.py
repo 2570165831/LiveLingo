@@ -240,13 +240,55 @@ class AutoLanguageTests(unittest.TestCase):
         self.assertTrue(result['truncated'])
 
     def test_body_generation_failure_keeps_successful_probe_for_confirmation(self):
-        model = self.model('Spanish', .95, .001)
+        model = self.model('Spanish', .99, .001)
         self.generate_step.side_effect = RuntimeError('synthetic body failure')
         result = self.auto(model)
+        self.generate_step.assert_called_once()
         self.assert_forced(model, result)
         self.assertEqual(result['detected_label'], 'Spanish')
         self.assertGreaterEqual(result['language_probability'], .55)
         self.assertLessEqual(result['english_probability'], .01)
+
+    def test_probe_request_returns_only_head_metadata_without_any_body_generation(self):
+        for label, p, p_en in [('Spanish', .99, .001), ('English', .99, .99),
+                               ('Chinese', .89, .02)]:
+            with self.subTest(label=label):
+                model = self.model(label, p, p_en)
+                with patch.object(service, 'model_for', return_value=model):
+                    result = service.transcribe_audio('raw.wav', '1.7b', 'probe', 'raw.wav')
+                model.generate.assert_not_called()
+                self.generate_step.assert_not_called()
+                self.assertEqual(set(result), {'language_mode', 'detected_label',
+                    'language_probability', 'english_probability', 'policy'})
+                self.assertEqual(result['language_mode'], 'probe')
+                self.assertEqual(result['detected_label'], label)
+
+    def test_failed_lightweight_probe_never_falls_back_to_body_generation(self):
+        model = self.model()
+        model._model._preprocess_audio = Mock(side_effect=RuntimeError('synthetic'))
+        with patch.object(service, 'model_for', return_value=model):
+            result = service.transcribe_audio('raw.wav', '1.7b', 'probe', 'raw.wav')
+        model.generate.assert_not_called()
+        self.generate_step.assert_not_called()
+        self.assertIsNone(result['detected_label'])
+
+    def test_confirmed_source_request_rechecks_label_without_speculative_body(self):
+        for label, expected in [('French', 'es'), ('English', 'es')]:
+            with self.subTest(label=label):
+                model = self.model(label, .99, .001 if label != 'English' else .99)
+                result = service.transcribe_auto(model, 'enhanced.wav', 'raw.wav', '1.7b', expected)
+                self.assertEqual(result['text'], '')
+                model.generate.assert_not_called()
+                self.generate_step.assert_not_called()
+
+    def test_confirmed_source_body_failure_retains_head_without_english_regeneration(self):
+        model = self.model('Spanish', .99, .001)
+        self.generate_step.side_effect = RuntimeError('synthetic body failure')
+        result = service.transcribe_auto(model, 'enhanced.wav', 'raw.wav', '1.7b', 'es')
+        self.generate_step.assert_called_once()
+        model.generate.assert_not_called()
+        self.assertEqual(result['detected_label'], 'Spanish')
+        self.assertEqual(result['text'], '')
 
     def test_swift_probability_constants_and_language_table_match_server(self):
         source = Path(__file__).resolve().parents[1] / 'LiveLingo' / 'Sources'
@@ -594,6 +636,26 @@ class ServiceResponsivenessTests(unittest.TestCase):
         handler.rfile = io.BytesIO(b'x')
         handler.send_json = Mock()
         return handler
+
+    def test_probe_http_uses_raw_audio_priority_queue_and_no_body_field(self):
+        executor = service.PriorityInferenceExecutor()
+        self.addCleanup(executor.shutdown, wait=True)
+        handler = self.synthetic_handler('model=1.7b&enhance=speech&language=probe')
+        head = {'language_mode': 'probe', 'detected_label': 'Spanish',
+                'language_probability': .99, 'english_probability': .001, 'policy': 1}
+        with patch.object(service, 'INFERENCE_WORKER', executor), \
+             patch.object(service, 'speech_band_enhance') as enhance, \
+             patch.object(service, 'transcribe_audio', return_value=head) as transcribe, \
+             patch.object(executor, 'submit_probe', wraps=executor.submit_probe) as submit:
+            handler.do_POST()
+        status, payload = handler.send_json.call_args.args
+        self.assertEqual(status, 200)
+        self.assertNotIn('text', payload)
+        self.assertNotIn('cache', payload)
+        enhance.assert_not_called(); submit.assert_called_once()
+        args = transcribe.call_args.args
+        self.assertEqual(args[0], args[3])
+        self.assertEqual(args[2], 'probe')
 
     def test_idle_unload_keeps_active_and_waiting_model_owners(self):
         class FakeModel: pass

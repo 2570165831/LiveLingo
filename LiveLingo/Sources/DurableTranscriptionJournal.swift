@@ -84,6 +84,13 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
     var candidateOrigin: String?
     var failure: String?
     var failureReason: FailureReason?
+    /// Immutable evidence from the first claim, including an explicitly empty
+    /// predecessor. Retries never borrow evidence from a later live ordinal.
+    var sourceTriggerPredecessor: SourceLanguagePolicy.TriggerState?
+    /// The initial head decision and its causal progress survive reopening,
+    /// including when body generation or a later repair has not finished.
+    var sourceTriggerDecision: SourceLanguagePolicy.Decision?
+    var sourceTriggerAfter: SourceLanguagePolicy.TriggerState?
     var duration: TimeInterval { max(0, end - start) }
     var needsWork: Bool { [.pending, .active, .retryWaiting, .manualPending].contains(status) }
     /// An unfinished manual retry of non-English speech heard nothing new, so
@@ -104,6 +111,7 @@ extension TranscriptionWorkRecord {
         case captureStart, captureEnd, modelKey, fallbackModelKey, appleEvidence, recordingFile, audioRetired
         case status, extendedStatus, attempt, automaticRetryCount, manualRetryCount
         case text, textLanguage, candidateText, candidateLanguage, candidateOrigin, failure, failureReason
+        case sourceTriggerPredecessor, sourceTriggerDecision, sourceTriggerAfter
     }
 
     init(from decoder: Decoder) throws {
@@ -135,6 +143,9 @@ extension TranscriptionWorkRecord {
         candidateOrigin = try c.decodeIfPresent(String.self, forKey: .candidateOrigin)
         failure = try c.decodeIfPresent(String.self, forKey: .failure)
         failureReason = try c.decodeIfPresent(String.self, forKey: .failureReason).flatMap(FailureReason.init(rawValue:))
+        sourceTriggerPredecessor = try c.decodeIfPresent(SourceLanguagePolicy.TriggerState.self, forKey: .sourceTriggerPredecessor)
+        sourceTriggerDecision = try c.decodeIfPresent(SourceLanguagePolicy.Decision.self, forKey: .sourceTriggerDecision)
+        sourceTriggerAfter = try c.decodeIfPresent(SourceLanguagePolicy.TriggerState.self, forKey: .sourceTriggerAfter)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -156,6 +167,9 @@ extension TranscriptionWorkRecord {
         try c.encodeIfPresent(SpokenLanguage.nonEnglishCode(candidateLanguage), forKey: .candidateLanguage)
         try c.encodeIfPresent(candidateOrigin, forKey: .candidateOrigin); try c.encodeIfPresent(failure, forKey: .failure)
         try c.encodeIfPresent(failureReason?.rawValue, forKey: .failureReason)
+        try c.encodeIfPresent(sourceTriggerPredecessor, forKey: .sourceTriggerPredecessor)
+        try c.encodeIfPresent(sourceTriggerDecision, forKey: .sourceTriggerDecision)
+        try c.encodeIfPresent(sourceTriggerAfter, forKey: .sourceTriggerAfter)
     }
 }
 

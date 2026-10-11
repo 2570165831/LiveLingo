@@ -108,9 +108,33 @@ class UnboundHTTPBase:
 
 
 class SchedulingTests(unittest.TestCase):
+    def test_formal_transcription_overtakes_queued_probe_on_one_inference_thread(self):
+        executor_type = getattr(self.service, 'PriorityInferenceExecutor', None)
+        self.assertIsNotNone(executor_type, 'Formal ASR needs a priority inference queue')
+        executor = executor_type()
+        blocked, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        order, threads = [], []
+        def first():
+            blocked.set()
+            release.wait(2)
+        def record(label):
+            order.append(label); threads.append(threading.get_ident())
+        executor.submit(first)
+        self.assertTrue(blocked.wait(1))
+        probe = executor.submit_probe(record, 'probe')
+        formal = executor.submit(record, 'formal')
+        release.set()
+        formal.result(timeout=2); probe.result(timeout=2)
+        executor.shutdown(wait=True)
+        self.assertEqual(order, ['formal', 'probe'])
+        self.assertEqual(len(set(threads)), 1)
+
     def setUp(self):
         self.service = load_subject()
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='asr-scheduling-fake')
+        executor_type = getattr(self.service, 'PriorityInferenceExecutor', None)
+        self.executor = executor_type() if executor_type else ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='asr-scheduling-fake')
         self.addCleanup(self.executor.shutdown, wait=True)
         self.service.INFERENCE_WORKER = self.executor
         fake_core = SimpleNamespace(clear_cache=Mock())

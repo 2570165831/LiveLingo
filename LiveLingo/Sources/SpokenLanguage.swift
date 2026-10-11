@@ -1,6 +1,6 @@
 import Foundation
 
-enum ASRLanguageMode: String, Sendable { case english, auto }
+enum ASRLanguageMode: String, Sendable { case english, auto, probe }
 
 struct SpokenLanguage: Equatable, Sendable {
     enum WritingSystem: Hashable, Sendable {
@@ -116,8 +116,34 @@ struct ASRTranscription: Equatable, Sendable {
         let policy: Int
     }
 
+    private struct ProbeResponse: Decodable {
+        let language_mode: String
+        let detected_label: String?
+        let language_probability: Double?
+        let english_probability: Double?
+        let policy: Int
+    }
+
     static func validated(text: String, data: Data, requestedLanguage: ASRLanguageMode) throws -> Self {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if requestedLanguage == .probe {
+            guard trimmed.isEmpty,
+                  let response = try? JSONDecoder().decode(ProbeResponse.self, from: data),
+                  response.language_mode == "probe", response.policy == 1 else {
+                throw QwenRuntimeError.invalidResponse
+            }
+            let probabilities = [response.language_probability, response.english_probability]
+            guard probabilities.allSatisfy({ $0.map { $0.isFinite && (0...1).contains($0) } ?? true }),
+                  response.detected_label.map({ label in
+                      (label == "None" || SpokenLanguage.all.contains { $0.qwenLabel == label })
+                          && probabilities.allSatisfy { $0 != nil }
+                  }) ?? probabilities.allSatisfy({ $0 == nil }) else {
+                throw QwenRuntimeError.invalidResponse
+            }
+            return Self(text: "", languageMode: .probe, detectedLabel: response.detected_label,
+                languageProbability: response.language_probability, englishProbability: response.english_probability,
+                policy: response.policy)
+        }
         guard requestedLanguage == .auto else {
             var result = Self(text: trimmed)
             if let confidence = try? JSONDecoder().decode(ConfidenceResponse.self, from: data),

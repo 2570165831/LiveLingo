@@ -74,7 +74,7 @@ enum SourceLanguagePolicy {
 
     /// One causal stream per configured session. Repairs cannot confirm themselves;
     /// skips, failed probes and missing ordinals clear the previous candidate.
-    struct TriggerState: Sendable {
+    struct TriggerState: Equatable, Codable, Sendable {
         private var previousIndex: Int?
         private var previousLanguage: String?
 

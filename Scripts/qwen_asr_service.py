@@ -18,7 +18,7 @@ import stat
 from contextlib import contextmanager
 import queue
 from importlib.metadata import version
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -80,7 +80,6 @@ INFERENCE_SLOTS = threading.BoundedSemaphore(MAX_INFERENCE_REQUESTS)
 IDLE_MODEL_SECONDS = 120.0
 IDLE_UNLOAD_RETRY_SECONDS = 5.0
 IDLE_MAINTENANCE = None
-INFERENCE_WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-inference")
 AUTO_SELF_CHECKS = {}  # model key -> (loaded object identity, check result); no model references
 ASR_TEXT_TOKEN = 151704
 LANGUAGE_TOKEN = 11528
@@ -462,6 +461,22 @@ def probe_language(model, probe_input_path, check):
     raise ValueError("Unterminated language head")
 
 
+def probe_language_only(model, probe_input_path, model_key):
+    """Prefill the language head only; never generate or retain a speech body."""
+    metadata = {"language_mode": "probe", "detected_label": None,
+                "language_probability": None, "english_probability": None,
+                "policy": SOURCE_POLICY}
+    try:
+        check = auto_self_check(model, model_key)
+        if check is not None:
+            probe = probe_language(model, probe_input_path, check)
+            metadata.update({key: probe[key] for key in (
+                "detected_label", "language_probability", "english_probability")})
+    except Exception:
+        pass  # Unknown head breaks confirmation without invoking any decoder.
+    return metadata
+
+
 def should_decode_detected(label, p_label, p_english):
     code = LANGUAGE_CODES.get(label)
     if code is None or code == "en":
@@ -473,7 +488,7 @@ def should_decode_detected(label, p_label, p_english):
     return p_label >= NON_LATIN_MIN_PROBABILITY and p_english <= NON_LATIN_MAX_ENGLISH_PROBABILITY
 
 
-def transcribe_auto(model, model_input_path, probe_input_path, model_key):
+def transcribe_auto(model, model_input_path, probe_input_path, model_key, confirmed_language=None):
     """Only the opt-in request gets metadata; failed probing uses legacy English."""
     metadata = {"language_mode": "auto", "language": "en", "decode": "forced",
                 "detected_label": None, "language_probability": None,
@@ -487,7 +502,7 @@ def transcribe_auto(model, model_input_path, probe_input_path, model_key):
             metadata.update({key: probe[key] for key in (
                 "detected_label", "language_probability", "english_probability")})
             probe_succeeded = True
-            if should_decode_detected(probe["detected_label"], probe["language_probability"], probe["english_probability"]):
+            if (confirmed_language is None or LANGUAGE_CODES.get(probe["detected_label"]) == confirmed_language) and should_decode_detected(probe["detected_label"], probe["language_probability"], probe["english_probability"]):
                 import mlx.core as mx
                 from mlx_lm.generate import generate_step
 
@@ -514,6 +529,8 @@ def transcribe_auto(model, model_input_path, probe_input_path, model_key):
         # legacy English decoder for this segment's usable text.
         if not probe_succeeded:
             metadata.update(detected_label=None, language_probability=None, english_probability=None)
+    if confirmed_language is not None:
+        return {**metadata, "text": ""}  # English was already delivered; no speculative body.
     result = model.generate(
         model_input_path, language="English", max_tokens=256,
         temperature=0.0, verbose=False,
@@ -581,14 +598,19 @@ def transcribe_parakeet(model, model_input_path):
         model.joint = original
 
 
-def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, probe_input_path=None):
+def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, probe_input_path=None, confirmed_language=None):
     # Keep MLX loading, evaluation and result access on one long-lived thread.
     with MODEL_LOCK:
         try:
             model = model_for(model_key)
             with measure("asr_inference"):
+                if language_mode == "probe":
+                    return probe_language_only(model, probe_input_path or model_input_path, model_key)
                 if language_mode == "auto":
-                    return transcribe_auto(model, model_input_path, probe_input_path or model_input_path, model_key)
+                    arguments = (model, model_input_path, probe_input_path or model_input_path, model_key)
+                    if confirmed_language is not None:
+                        arguments += (confirmed_language,)
+                    return transcribe_auto(*arguments)
                 if model_key == "parakeet":
                     return transcribe_parakeet(model, model_input_path)
                 else:
@@ -603,11 +625,13 @@ def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, 
                 signal_idle_maintenance()
 
 
-def run_registered_transcription(request_id, model_input_path, model_key, language_mode=None, probe_input_path=None):
+def run_registered_transcription(request_id, model_input_path, model_key, language_mode=None, probe_input_path=None, confirmed_language=None):
     with MODEL_STATE_LOCK:
         REQUEST_STATES[request_id] = {'model': model_key, 'state': 'running'}
         signal_idle_maintenance()
     try:
+        if confirmed_language is not None:
+            return transcribe_audio(model_input_path, model_key, language_mode, probe_input_path, confirmed_language)
         return transcribe_audio(model_input_path, model_key, language_mode, probe_input_path)
     finally:
         # A disconnected HTTP caller does not prove inference has stopped.
@@ -794,6 +818,66 @@ class RequestLog:
                 pass
 
 
+class PriorityInferenceExecutor:
+    """One tensor thread; queued formal work overtakes optional language heads.
+
+    A running tensor call is joined, never preempted. FIFO is preserved within
+    each priority and Futures retain cancellation/timeout ownership semantics.
+    """
+    def __init__(self):
+        self.pending = queue.PriorityQueue()
+        self.lock = threading.Lock()
+        self.sequence = 0
+        self.stopping = False
+        self.thread = threading.Thread(target=self.run, name='asr-inference', daemon=True)
+        self.thread.start()
+
+    def submit(self, function, *args, **kwargs):
+        return self.enqueue(0, function, args, kwargs)
+
+    def submit_probe(self, function, *args, **kwargs):
+        return self.enqueue(1, function, args, kwargs)
+
+    def enqueue(self, priority, function, args, kwargs):
+        with self.lock:
+            if self.stopping:
+                raise RuntimeError('Inference executor is shut down')
+            self.sequence += 1
+            future = Future()
+            self.pending.put((priority, self.sequence, future, function, args, kwargs))
+            return future
+
+    def run(self):
+        while True:
+            _, _, future, function, args, kwargs = self.pending.get()
+            if future is None:
+                return
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(function(*args, **kwargs))
+            except BaseException as error:
+                future.set_exception(error)
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        with self.lock:
+            if not self.stopping:
+                self.stopping = True
+                if cancel_futures:
+                    while True:
+                        try:
+                            item = self.pending.get_nowait()
+                        except queue.Empty:
+                            break
+                        item[2].cancel()
+                self.pending.put((2, self.sequence + 1, None, None, (), {}))
+        if wait:
+            self.thread.join()
+
+
+INFERENCE_WORKER = PriorityInferenceExecutor()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "LiveLingoLocalASR/2.1"
 
@@ -847,12 +931,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         should_enhance = query.get("enhance", ["off"])[0] == "speech"
         languages = parse_qs(parsed.query, keep_blank_values=True).get("language", ["English"])
-        if len(languages) != 1 or languages[0] not in {"English", "auto"} or (
-            languages[0] == "auto" and model_key not in {"0.6b", "1.7b"}
+        if len(languages) != 1 or languages[0] not in {"English", "auto", "probe"} or (
+            languages[0] in {"auto", "probe"} and model_key not in {"0.6b", "1.7b"}
         ):
             self.send_json(400, {"error": "Unsupported language mode"})
             return
-        language_mode = "auto" if languages[0] == "auto" else None
+        language_mode = languages[0] if languages[0] in {"auto", "probe"} else None
+        confirmed = parse_qs(parsed.query, keep_blank_values=True).get("confirmed_language", [])
+        if confirmed and (language_mode != "auto" or len(confirmed) != 1 or
+                          confirmed[0] not in set(LANGUAGE_CODES.values()) - {"en"}):
+            self.send_json(400, {"error": "Unsupported confirmed language"})
+            return
+        confirmed_language = confirmed[0] if confirmed else None
         try:
             size = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -899,6 +989,8 @@ class Handler(BaseHTTPRequestHandler):
             audio = self.read_audio_body(size)
             receiving_audio = False
             identity = request_input_identity(audio, model_key, should_enhance, language_mode)
+            if confirmed_language is not None:
+                identity += (confirmed_language,)
             with MODEL_STATE_LOCK:
                 if duplicate:
                     duplicate_payload = duplicate_request_payload(request_id, identity)
@@ -911,13 +1003,16 @@ class Handler(BaseHTTPRequestHandler):
                 temporary_path = temporary.name
                 temporary.write(audio)
             model_input_path = temporary_path
-            if should_enhance:
+            if should_enhance and language_mode != "probe":
                 model_input_path, enhancement = speech_band_enhance(temporary_path)
             started = time.monotonic()
             log_id = uuid.uuid4().hex
             RequestLog.emit(f"ASR request id={log_id} model={model_key} bytes={size}")
-            future = INFERENCE_WORKER.submit(run_registered_transcription, request_id, model_input_path, model_key,
-                                             language_mode, temporary_path)
+            submit = INFERENCE_WORKER.submit_probe if language_mode == "probe" else INFERENCE_WORKER.submit
+            arguments = (request_id, model_input_path, model_key, language_mode, temporary_path)
+            if confirmed_language is not None:
+                arguments += (confirmed_language,)
+            future = submit(run_registered_transcription, *arguments)
             try:
                 text = future.result(timeout=INFERENCE_TIMEOUT_SECONDS)
             except TimeoutError:
@@ -941,15 +1036,17 @@ class Handler(BaseHTTPRequestHandler):
                     request_shutdown(self.server, 'inference deadline exceeded')
                     return
             RequestLog.emit(f"ASR completed id={log_id} model={model_key} seconds={time.monotonic() - started:.3f}")
-            payload = {"text": text, "model": model_key, "request_id": request_id,
+            payload = {"model": model_key, "request_id": request_id,
                        "audio_enhancement": enhancement}
             if isinstance(text, dict):
                 payload.update(text)
-            if language_mode == "auto":
+            else:
+                payload['text'] = text
+            if language_mode in {"auto", "probe"}:
                 label = text['detected_label'] if text['detected_label'] in LANGUAGE_CODES else 'unknown'
                 RequestLog.emit(f"ASR language id={log_id} label={label} "
                       f"p={text['language_probability']} p_en={text['english_probability']} "
-                      f"decode={text['decode']}")
+                      f"decode={text.get('decode', 'head_only')}")
             self.send_json(200, payload)
         except Exception as error:
             if duplicate:

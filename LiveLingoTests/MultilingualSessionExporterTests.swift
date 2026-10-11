@@ -307,6 +307,11 @@ final class MultilingualSessionExporterTests: XCTestCase {
             let model = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
                 .first { $0.name == "model" }!.value!
             var payload: [String: Any] = ["request_id": id, "model": model, "text": model == "primary" ? "" : "冰很冷。"]
+            if request.url?.query?.contains("language=probe") == true {
+                payload.removeValue(forKey: "text")
+                payload.merge(["language_mode": "probe", "detected_label": NSNull(),
+                    "language_probability": NSNull(), "english_probability": NSNull(), "policy": 1]) { _, new in new }
+            }
             if request.url?.query?.contains("language=auto") == true {
                 payload.merge(["language_mode": "auto", "language": "en", "decode": "forced",
                     "detected_label": NSNull(), "language_probability": NSNull(), "english_probability": NSNull(),

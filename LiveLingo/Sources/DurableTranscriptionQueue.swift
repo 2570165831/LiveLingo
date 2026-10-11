@@ -78,8 +78,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     }
 
     static func englishOnly(_ transcriber: @escaping LegacyTranscriber) -> Transcriber {
-        { url, model, enhance, _ in
-            ASRTranscription(text: try await transcriber(url, model, enhance))
+        { url, model, enhance, mode in
+            if mode == .probe { return ASRTranscription(text: "", languageMode: .probe) }
+            return ASRTranscription(text: try await transcriber(url, model, enhance))
         }
     }
 
@@ -103,7 +104,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         if startPaused { try journal.setPaused(true) }
         lock.withLock {
             context = Context(generation: UUID(), journal: journal, persistent: persistent,
-                              identified: identified, handler: handler)
+                              identified: identified, handler: handler,
+                              sourceTrigger: Self.restoredSourceTrigger(journal.records))
             recentFormulaContext = ""
             storageFailure = nil
         }
@@ -594,24 +596,68 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             }
         }
     }
+
+    static func restoredSourceTrigger(_ records: [TranscriptionWorkRecord]) -> SourceLanguagePolicy.TriggerState {
+        // A legacy or interrupted newer ordinal is a causal boundary. Never
+        // skip it to resurrect an older candidate, or infer from saved bodies.
+        let processed = records.filter { $0.sourceTriggerAfter != nil || ($0.status != .pending && $0.status != .manualPending) }
+        return processed.max(by: { $0.ordinal < $1.ordinal })?.sourceTriggerAfter ?? .init()
+    }
+
+    private func commitEnglishBeforeProbe(_ output: Outcome, record claimed: TranscriptionWorkRecord,
+                                          generation: UUID) throws {
+        try lock.withLock {
+            guard let owner = context, owner.generation == generation,
+                  var record = owner.journal.record(id: claimed.id), !output.text.isEmpty,
+                  record.text?.isEmpty != false else { return }
+            record.text = output.text; record.textLanguage = nil
+            try owner.journal.put(record)
+            recentFormulaContext = String(output.text.suffix(1000))
+            emitCommit(record, text: output.text, repair: claimed.attempt != .initial)
+        }
+    }
+
+    private func preserveInitialDecision(_ decision: SourceLanguagePolicy.Decision?,
+                                         record: inout TranscriptionWorkRecord, owner: Context) throws {
+        guard record.attempt == .initial, record.sourceTriggerAfter == nil else { return }
+        var progress = record.sourceTriggerPredecessor ?? .init()
+        progress.advance(index: record.ordinal, decision: decision)
+        record.sourceTriggerDecision = decision; record.sourceTriggerAfter = progress
+        try owner.journal.put(record)
+        context?.sourceTrigger = progress
+    }
     private func run(generation token: UUID) async {
         while true {
             let lease: (Context, TranscriptionWorkRecord, Task<Outcome, Error>)?
             do {
                 lease = try lock.withLock {
                     guard storageFailure == nil, let context, context.generation == token,
-                          let record = try context.journal.claimNext() else {
+                          var record = try context.journal.claimNext() else {
                         worker = nil; active = nil; activeRecord = nil
                         return nil
                     }
+                    if record.sourceTriggerPredecessor == nil {
+                        record.sourceTriggerPredecessor = record.attempt == .initial ? context.sourceTrigger : .init()
+                        try context.journal.put(record)
+                    }
+                    let claimed = record
                     let formulaContext = recentFormulaContext
                     let url = try Self.materializeAudio(record, journal: context.journal)
                     let recording = try context.journal.recordingURL(for: record)
                     let task = Task { [transcriber] in
-                        try await Self.recognize(record, audioURL: url, recordingURL: recording,
+                        try await Self.recognize(claimed, audioURL: url, recordingURL: recording,
                                                  formulaContext: formulaContext, attempts: context.attempts,
-                                                 sourceTrigger: context.sourceTrigger,
-                                                 transcriber: transcriber)
+                                                 sourceTrigger: claimed.sourceTriggerPredecessor ?? .init(),
+                                                 transcriber: transcriber,
+                                                 commitEnglish: { output in
+                                                     try self.commitEnglishBeforeProbe(output, record: claimed, generation: token)
+                                                 }, preserveDecision: { decision in
+                                                     try self.lock.withLock {
+                                                         guard self.context?.generation == token,
+                                                               var current = context.journal.record(id: claimed.id) else { return }
+                                                         try self.preserveInitialDecision(decision, record: &current, owner: context)
+                                                     }
+                                                 })
                     }
                     active = task; activeRecord = record; activeWasPreempted = false
                     return (context, record, task)
@@ -659,9 +705,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         // Only completed initial passes advance the live stream.
                         // Repeated repairs of one ordinal must not confirm itself
                         // or disrupt the next live segment's causal predecessor.
-                        if claimed.attempt == .initial {
-                            context?.sourceTrigger.advance(index: claimed.ordinal, decision: output.sourceDecision)
-                        }
+                        try preserveInitialDecision(output.sourceDecision, record: &record, owner: owner)
+                        let alreadyDelivered = record.text?.isEmpty == false
                         if let candidate = output.candidate {
                             record.candidateText = candidate; record.candidateOrigin = output.origin
                             record.candidateLanguage = nil
@@ -686,14 +731,12 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             markFailure(&record, message: "此处尚未得到可靠的英文转写，音频已保留。", reason: output.failureReason)
                         }
                         try owner.journal.put(record)
-                        if !output.text.isEmpty, record.text == output.text, record.textLanguage == output.language {
+                        if !alreadyDelivered, !output.text.isEmpty, record.text == output.text, record.textLanguage == output.language {
                             emitCommit(record, text: output.text, repair: claimed.attempt != .initial)
                         }
                         if record.candidateText != nil { emitCandidate(record) }
                     case .failure(let error):
-                        if claimed.attempt == .initial {
-                            context?.sourceTrigger.advance(index: claimed.ordinal, decision: nil)
-                        }
+                        try preserveInitialDecision(nil, record: &record, owner: owner)
                         markFailure(&record, message: "本机转写失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))；音频已保留。", reason: .error)
                         try owner.journal.put(record)
                     }
@@ -764,7 +807,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     static func recognize(_ record: TranscriptionWorkRecord, audioURL: URL, recordingURL: URL?,
                                   formulaContext: String, attempts: TranscriptionAttemptCache,
                                   sourceTrigger: SourceLanguagePolicy.TriggerState = .init(),
-                                  transcriber: Transcriber) async throws -> Outcome {
+                                  transcriber: Transcriber,
+                                  commitEnglish: @Sendable (Outcome) throws -> Void = { _ in },
+                                  preserveDecision: @Sendable (SourceLanguagePolicy.Decision) throws -> Void = { _ in }) async throws -> Outcome {
         try Task.checkCancellation()
         if try DigitalSilenceGate.isSilent(audioURL) { return Outcome(silent: true) }
         let attemptNonce = UUID()
@@ -773,7 +818,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             try Task.checkCancellation()
             // Only enhanced exact-range requests recur during automatic repair.
             // Raw first-pass speech and final neighbour clips need no caching.
-            let reusable = enhance && stage != "context" && record.attempt != .manual
+            let reusable = (enhance || mode == .probe) && stage != "context" && record.attempt != .manual
             let fingerprint = reusable ? try? TranscriptionAttemptCache.fingerprint(url) : nil
             let key = fingerprint.map { TranscriptionAttemptCache.Key(id: record.id, model: model,
                                                                        enhanced: enhance, mode: mode, audio: $0) }
@@ -827,43 +872,49 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 ? .rejection(of: primary, audioDuration: record.duration) : .error
         }
         var fallbackVerdict: EnglishTranscriptGate.Verdict?
-        if needsFallback || plan.selected, let model = record.fallbackModelKey {
+        // Any usable primary English is durable before optional work begins.
+        if plan.selected && !output.text.isEmpty { try commitEnglish(output) }
+        if needsFallback, let model = record.fallbackModelKey {
             do {
-                let mode: ASRLanguageMode = plan.selected ? .auto : .english
-                let result = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback", mode: mode)
-                try Task.checkCancellation()
-                let decision = SourceLanguagePolicy.decide(plan,
-                    language: SpokenLanguage.all.first { $0.qwenLabel == result.detectedLabel }?.code,
-                    probability: result.languageProbability, englishProbability: result.englishProbability,
-                    probeFailed: mode == .auto && (result.languageMode != .auto || result.policy != 1 || result.detectedLabel == nil))
-                output.sourceDecision = decision
-                if decision.language != nil, result.decode == .detected,
-                   SourceLanguagePolicy.accepts(result, audioDuration: record.duration, requestedMode: mode) {
-                    return Outcome(text: result.text, language: result.language, sourceDecision: decision)
-                }
-                // An extra probe cannot replace usable English with another
-                // English draft or add a repair candidate. Legacy repairs below
-                // still run when the original text/formula gate requested them.
-                if !needsFallback { return output }
-                let secondary: String
-                if result.decode == .detected {
-                    secondary = try await recognizeStage(audioURL, model: model, enhance: true,
-                                                         stage: "fallbackEn", mode: .english).text
-                } else { secondary = result.text }
-                try Task.checkCancellation()
+                // Formal English repair also precedes the optional language head.
+                let secondary = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback").text
                 let alternate = SpeechPipeline.preferredTranscript(primary: nil, fallback: secondary, audioDuration: record.duration)
                 fallbackVerdict = EnglishTranscriptGate.verdict(secondary)
                 if output.text.isEmpty {
                     output.text = alternate
-                    // A primary error stays the reason: it, not the language, blocks `.otherLanguage`.
                     if primaryError == nil { output.failureReason = .rejection(of: secondary, audioDuration: record.duration) }
-                }
-                else if !alternate.isEmpty, alternate != output.text {
+                } else if !alternate.isEmpty, alternate != output.text {
                     output.candidate = alternate; output.origin = "alternateModel"
                 }
             } catch is CancellationError { throw CancellationError() }
             catch {
-                // A fallback exception must never erase usable primary speech.
+                if output.text.isEmpty { primaryError = error; output.failureReason = .error }
+            }
+        }
+        if plan.selected, let model = record.fallbackModelKey {
+            if !output.text.isEmpty { try commitEnglish(output) }
+            do {
+                let head = try await recognizeStage(audioURL, model: model, enhance: false, stage: "languageProbe", mode: .probe)
+                let decision = SourceLanguagePolicy.decide(plan,
+                    language: SpokenLanguage.all.first { $0.qwenLabel == head.detectedLabel }?.code,
+                    probability: head.languageProbability, englishProbability: head.englishProbability,
+                    probeFailed: head.languageMode != .probe || head.policy != 1 || head.detectedLabel == nil)
+                output.sourceDecision = decision
+                // Persist the head independently of optional body success.
+                try preserveDecision(decision)
+                if let language = decision.language {
+                    let result = try await ASRRequestContext.$confirmedSourceLanguage.withValue(language) {
+                        try await recognizeStage(audioURL, model: model, enhance: true, stage: "confirmedSource", mode: .auto)
+                    }
+                    if result.language == language, result.decode == .detected,
+                       SourceLanguagePolicy.accepts(result, audioDuration: record.duration) {
+                        return Outcome(text: result.text, language: result.language, sourceDecision: decision)
+                    }
+                }
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                // Neither failed heads nor failed source bodies erase English.
+                // The successful head remains the initial causal evidence.
                 if output.text.isEmpty { primaryError = error; output.failureReason = .error }
             }
         }
