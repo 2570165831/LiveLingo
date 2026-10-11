@@ -237,14 +237,14 @@ enum ClassroomFixedText: String, CaseIterable {
     case kindCore, kindRelationship, kindExample, kindPitfall, kindBackground
     case kindPending, stateMissing, stateSupplemented, stateConflict, stateUnclear
     case neutralQuestion, priorEvidenceRule, pendingQuestion, missingFollowUp, supplementedDetail
-    case invalidSupplementDetail, conflictDetail, unclearDetail, missingDetail, retiredExplanation
+    case invalidSupplementDetail, ambiguousSupplementDetail, conflictDetail, unclearDetail, missingDetail, retiredExplanation
     case conflictFallback, unclearFallback, followUpSupplementLine, followUpConflictLine, followUpUnclearLine
-    case earlierRecordLine, sourceLine, earlierSourceLine, candidateLine, replayFallback
+    case earlierRecordLine, sourceLine, earlierSourceLine, candidateLine, replayFallback, followUpTargetLine
     case pronounSuffix, sourceUnlinked, sourceNumericDifference, sourceLegacyPending, sourceCheckLine
     case numericGapSuffix, logisticsHeading, reviewWholeScope, reviewBatchScope, reviewPartialScope
     case reviewDisclaimer, reviewInputRevision, reviewNotebookRevision, reviewSuperseded, reviewPartialExplanation
     case reviewInterrupted, reviewGenericInterruption, reviewProgress, reviewScopedProgress, reviewOriginalPoint
-    case reviewSuggestion, reviewReason, reviewAddition, reviewEvidence, reviewBatchHeading
+    case reviewSuggestion, reviewKindChange, reviewReason, reviewAddition, reviewEvidence, reviewBatchHeading
     case reviewNoSuggestions, interruptionUser, interruptionSleep, interruptionResources, interruptionRecording
     case interruptionManagement, interruptionOther, interruptionBecause, statsCompleted, statsInterruptions
     case statsFailures, statsRetries, statsAverage, statsHeading, unknownReviewPrompt
@@ -253,7 +253,7 @@ enum ClassroomFixedText: String, CaseIterable {
     case numericIndexElsewhere, numericIndexMissing, numericIndexGap, numericFieldConflict
     case numericLiteralElsewhere, numericFieldElsewhere, numericLiteralMissing, numericFieldScope, numericLiteralGap
     case numericCountElsewhere, numericCountMissing, numericCountGap, numericElsewhere, numericMissing
-    case numericValueMissing, numericAmbiguous, numericUnitConflict, noUnit
+    case numericValueMissing, numericAmbiguous, numericUnitConflict, numericSignConflict, noUnit
     case noCompletedBatch, latestCompletedRange, captionCoverage, liveClass
 
     static let usesTargetLanguage = false
@@ -293,6 +293,7 @@ enum ClassroomFixedText: String, CaseIterable {
         .numericValueMissing: ["zh": "正文里的“{0}”在本次原文里找不到同值；请人工确认它对应的对象、条件和来源。", "en": "No matching value for '{0}' was found in this input; manually check its object, conditions and source."],
         .numericAmbiguous: ["zh": "正文里的“{0}”没有单位或属性说明，也没有出现在本次原文中；请人工确认它是编号还是测量值，并补上单位或来源。", "en": "'{0}' has no stated unit or property and was not found in this input. Check whether it is an identifier or measurement, and add the unit or source."],
         .numericUnitConflict: ["zh": "正文里的“{0}”与原文中同一数字的单位不同（原文为 {1}）；请人工确认是换算、推导还是引用错位。", "en": "'{0}' has a different unit from the matching source number ({1}); manually check whether this is conversion, derivation or a misplaced citation."],
+        .numericSignConflict: ["zh": "正文里的“{0}”与原文中对应数值的正负号不同（原文为 {1}）；请人工确认。", "en": "'{0}' has a different sign from the matching source number ({1}); check it manually."],
         .noUnit: ["zh": "无单位", "en": "no unit"],
         .noCompletedBatch: ["zh": "尚无已完成批次", "en": "No completed batches yet"],
         .latestCompletedRange: ["zh": "最近完成：{0}–{1}", "en": "Latest completed: {0}–{1}"],
@@ -319,6 +320,7 @@ enum ClassroomFixedText: String, CaseIterable {
         .missingFollowUp: ["zh": "本次响应没有给出这条跟进判断，旧问题仍然保留。", "en": "This response supplied no follow-up decision for this question; the original question remains open."],
         .supplementedDetail: ["zh": "后文明确补充了同一对象、同一属性的信息。", "en": "Later source text explicitly adds information about the same object and property."],
         .invalidSupplementDetail: ["zh": "本次响应标注为后文补充，但同一次来源没有指向本批中已有原文依据的要点，旧问题保留。", "en": "The claimed clarification is not bound to an evidence-backed point from this same response; the original question remains open."],
+        .ambiguousSupplementDetail: ["zh": "本次响应标注为后文补充，但本批有多条要点引用了同一句原文，无法确定哪一条回答了旧问题，旧问题保留。", "en": "The claimed clarification matches several points that cite the same source sentence, so it cannot be determined which one answers the question; the original question remains open."],
         .conflictDetail: ["zh": "后文与此前记录存在冲突，需要人工核对具体冲突点。", "en": "Later source text conflicts with the earlier record; check the specific conflict manually."],
         .unclearDetail: ["zh": "后文与此前记录的关系仍不明确，需要人工核对。", "en": "The relationship to the earlier record remains unclear and needs manual checking."],
         .missingDetail: ["zh": "本次响应没有给出这条线索的补充，旧问题保留。", "en": "This response supplied no additional evidence for this lead; the original question remains open."],
@@ -329,6 +331,7 @@ enum ClassroomFixedText: String, CaseIterable {
         .followUpConflictLine: ["zh": "后文{0}与此前记录冲突：{1}", "en": "Later source{0} conflicts with the earlier record: {1}"],
         .followUpUnclearLine: ["zh": "后文{0}关系仍不明：{1}", "en": "The relationship of later source{0} remains unclear: {1}"],
         .earlierRecordLine: ["zh": "对应先前记录（仍待核对）：{0}", "en": "Related earlier record (still needs checking): {0}"],
+        .followUpTargetLine: ["zh": "回应先前问题：{0}", "en": "Answers an earlier question: {0}"],
         .sourceLine: ["zh": "原文：{0}", "en": "Source: {0}"],
         .earlierSourceLine: ["zh": "先前原文：{0}", "en": "Earlier source: {0}"],
         .candidateLine: ["zh": "**后文补充候选，原问题仍待核对：**", "en": "**Candidate clarification; the original question still needs checking:**"],
@@ -354,6 +357,7 @@ enum ClassroomFixedText: String, CaseIterable {
         .reviewScopedProgress: ["zh": "9B 思考复查 · {0} {1}/{2} 批（约 5 分钟/批）", "en": "9B reasoning review · {0} {1}/{2} batches (about 5 minutes per batch)"],
         .reviewOriginalPoint: ["zh": "**原笔记 · 要点 {0}**：{1}", "en": "**Original note · point {0}:** {1}"],
         .reviewSuggestion: ["zh": "**9B 建议（待核对）**：{0}", "en": "**9B suggestion (needs checking):** {0}"],
+        .reviewKindChange: ["zh": "**建议类别**：{0} → {1}", "en": "**Suggested category:** {0} → {1}"],
         .reviewReason: ["zh": "**建议理由**：{0}", "en": "**Reason:** {0}"],
         .reviewAddition: ["zh": "**遗漏补充建议（待核对） · {0}**：{1}", "en": "**Suggested missing point (needs checking) · {0}:** {1}"],
         .reviewEvidence: ["zh": "**依据 · 片段 {0}**：{1}", "en": "**Evidence · fragment {0}:** {1}"],

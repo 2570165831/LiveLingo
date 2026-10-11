@@ -845,6 +845,59 @@ struct ASRRecoveryTests {
         #expect(!book.markdown().contains("## 课程安排与待办"))
     }
 
+    /// Issue #25: programming uses of "assignment"/"submit" are not course logistics,
+    /// but real notices (even ones that also mention code) must stay.
+    @Test func logisticsIgnoresProgrammingAssignmentAndSubmit() {
+        for code in [
+            "Variable assignment binds a name to a value.",
+            "Use executor.submit(task) to run the callable.",
+            "Use executor dot submit to run the callable.",
+            "The assignment operator returns the value.",
+        ] {
+            #expect(!LearningNotebook.isScheduleStatement(code), "programming usage is not a schedule item: \(code)")
+        }
+        for notice in [
+            "Assignment 2 is due on Friday.",
+            "Please submit your lab report by Friday.",
+            "Your first assignment will be released next week.",
+            "Submit assignment three by Friday, it uses executor.submit().",
+            "Unit registration closes on Friday",
+            // A sentence break before a sentence-initial "Submit" is not a method call.
+            "The lab is posted. Submit your report by next Monday.",
+            "Okay. Submit it before class on Friday.",
+            "There will be multiple assignments this term.",
+        ] {
+            #expect(LearningNotebook.isScheduleStatement(notice), "real notice must stay: \(notice)")
+        }
+        // Member access still counts as code when it directly joins an identifier.
+        #expect(!LearningNotebook.isScheduleStatement("Then call pool.submit(job) and wait."))
+    }
+
+    @Test func logisticsSectionDropsProgrammingAssignmentForBothTargets() {
+        let segments = [
+            TranscriptSegment(startTime: 10, endTime: 18,
+                              english: "Variable assignment binds a name to a value.",
+                              chinese: "变量赋值把名字绑定到一个值。"),
+            TranscriptSegment(startTime: 20, endTime: 28,
+                              english: "Assignment 2 is due on Friday.",
+                              chinese: "第二次作业周五截止。"),
+        ]
+        var book = LearningNotebook()
+        for segment in segments {
+            try? book.append(evidence: [segment], note: LearningNote(topic: "测试主题", points: [
+                .init(kind: "核心结论", text: "占位要点。")
+            ]))
+        }
+        let markdown = book.markdown()
+        #expect(markdown.contains("## 课程安排与待办"))
+        #expect(markdown.contains("- [00:20] Assignment 2 is due on Friday."))
+        #expect(!markdown.contains("- [00:10] Variable assignment binds a name to a value."))
+
+        let english = LearningNotebook.logisticsSection(from: segments, target: .english)
+        #expect(english.contains("Assignment 2 is due on Friday."))
+        #expect(!english.contains("Variable assignment binds a name to a value."))
+    }
+
     @Test func humanReadableChineseHidesFailurePlaceholderFromExports() {
         // 内存里的占位符保留（它是重试信号），但给人看的出口不该出现英文错误串。
         let placeholder = "[翻译失败：Final output budget exhausted; incomplete output is not committable]"

@@ -101,6 +101,218 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertEqual(notebook.retiredQuestionReferences, [target])
     }
 
+    // MARK: - issue #26：课后复查读取跟进记录
+
+    private func reviewContext(_ prior: LearningNoteBatch, _ later: [LearningNoteBatch]) throws -> (context: [[String: Any]], root: [String: Any]) {
+        let data = Data(try LearningPrompts.reviewInput(prior, laterBatches: later).json.utf8)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return (try XCTUnwrap(root["laterContext"] as? [[String: Any]]), root)
+    }
+
+    /// 指代式补充（和前文没有共同检索词）：笔记已撤下旧问题，复查输入也必须带上这条补充 ✓。
+    func testReviewReceivesCommittedSupplementWithoutSharedTerms() throws {
+        var book = LearningNotebook()
+        let earlier = segment("Its speed is 5 m/s.", "它的速度是5米每秒。")
+        try book.append(evidence: [earlier], note: LearningNote(topic: "小车", points: [
+            LearningPoint(kind: "待确认", text: "速度为5米每秒，对象尚未说明。",
+                          needsContext: "这个速度属于哪辆车？", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false))
+        let prior = book.batches[0]
+        let target = try XCTUnwrap(book.pendingPoints.first?.id)
+        let later = segment("I was referring to cart B.", "我指的是B车。", at: 12)
+        let note = LearningNote(topic: "小车", points: [
+            LearningPoint(kind: "核心结论", text: "前面说的速度属于B车。", sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false, followUps: [
+            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0", "zh0s0"], detail: "后文说明速度属于B车。")
+        ])
+        try book.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(book.retiredQuestionReferences, [target])
+        XCTAssertNil(book.batches[1].note.points[0].clarifies)
+
+        let (context, root) = try reviewContext(prior, [book.batches[1]])
+        XCTAssertEqual((root["laterEvidence"] as? [Any])?.count, 0, "两批原文没有共同检索词，兜底检索找不到")
+        XCTAssertEqual(context.count, 1)
+        XCTAssertEqual(context.first?["pointIndex"] as? Int, 0)
+        XCTAssertEqual(context.first?["text"] as? String, "前面说的速度属于B车。")
+        XCTAssertEqual(context.first?["sources"] as? [String], [later.english, later.chinese])
+        XCTAssertEqual(context.first?["state"] as? String, "后文补充")
+        XCTAssertEqual(root["omittedEarlierCandidates"] as? Int, 0)
+        XCTAssertEqual(book.batches[0], prior, "构造复查输入不改旧批次")
+    }
+
+    /// "前后冲突""关系不明"也交给复查（按时间顺序、带状态）✓；"缺信息"没有线索，不给 ✗。
+    func testReviewReceivesConflictAndUnclearRecordsInOrderButNotMissing() throws {
+        let (book, target, original, _) = try uncertainNotebook()
+        var notebook = book
+        let conflict = segment("Aurora read 22 kilopascals before the valve opened.", "阀打开前Aurora罐读数为22千帕。", at: 12)
+        try notebook.append(evidence: [conflict], note: LearningPrompts.resolvingFollowUps(
+            supplementNote(text: "阀打开前Aurora罐读数为22千帕。", sourceIDs: ["en0s0"],
+                           followUp: LearningFollowUp(alias: "q0", state: .conflict, sourceIDs: ["en0s0"],
+                                                      detail: "后文给出的同一时刻读数与先前不同。")), targets: [target]))
+        let quiet = segment("Boreal had a pressure of 31 kilopascals.", "Boreal罐压强31千帕。", at: 24)
+        try notebook.append(evidence: [quiet], note: LearningPrompts.resolvingFollowUps(
+            supplementNote(text: "Boreal罐压强31千帕。", sourceIDs: ["en0s0"], followUp: nil), targets: [target]))
+        let vague = segment("That reading may have been the other tank.", "那个读数可能是另一个罐的。", at: 36)
+        try notebook.append(evidence: [vague], note: LearningPrompts.resolvingFollowUps(
+            supplementNote(text: "那个读数可能属于另一个罐。", sourceIDs: ["en0s0"],
+                           followUp: LearningFollowUp(alias: "q0", state: .unclear, detail: "后文没有说明是哪一个罐。")),
+            targets: [target]))
+        XCTAssertEqual(notebook.batches.compactMap { $0.followUps?.first?.state }, [.conflict, .missing, .unclear])
+
+        let (context, _) = try reviewContext(original, Array(notebook.batches.dropFirst()))
+        XCTAssertEqual(context.map { $0["state"] as? String }, ["前后冲突", "关系不明"])
+        XCTAssertEqual(context.map { $0["pointIndex"] as? Int }, [0, 0])
+        XCTAssertEqual(context.map { $0["text"] as? String }, ["后文给出的同一时刻读数与先前不同。", "后文没有说明是哪一个罐。"])
+        XCTAssertEqual(context.map { $0["sources"] as? [String] }, [[conflict.english], []])
+    }
+
+    /// 记录必须指向本批旧要点 ✓；坏数据（越界支撑点、来源对不上、也没有说明）不产生条目 ✓；
+    /// 同一对（旧要点，支撑要点）旧版 `clarifies` 已经给过时不重复 ✓。
+    func testReviewFollowUpRecordsStayBoundToThisBatch() throws {
+        let earlier = segment("Its speed is 5 m/s.")
+        let prior = LearningNoteBatch(id: UUID(), evidence: [earlier], note: LearningNote(topic: "小车", points: [
+            LearningPoint(kind: "待确认", text: "速度对象未说明。", sources: [.init(index: 0, quote: earlier.english)],
+                          needsContext: "属于哪辆车？")
+        ]))
+        let reference = LearningNotebook.reference(prior, 0)
+        let later = segment("I was referring to cart B.", at: 12)
+        let support = LearningPoint(kind: "核心结论", text: "速度属于B车。", sources: [.init(index: 0, quote: later.english)],
+                                    clarifies: reference)
+        let elsewhere = LearningNotebook.reference(LearningNoteBatch(id: UUID(), evidence: [], note: LearningNote(topic: "", points: [])), 0)
+        let batch = LearningNoteBatch(id: UUID(), evidence: [later], note: LearningNote(topic: "小车", points: [support]), followUps: [
+            LearningFollowUp(target: elsewhere, state: .conflict, sourceIDs: ["en0s0"], detail: "别处的问题。"),
+            LearningFollowUp(target: reference, state: .supplemented, sourceIDs: ["en9s9"], pointIndex: 7),
+            LearningFollowUp(target: reference, state: .supplemented, sourceIDs: ["en0s0"], pointIndex: 0)
+        ])
+        let (context, _) = try reviewContext(prior, [batch])
+        XCTAssertEqual(context.count, 1)
+        XCTAssertEqual(context.first?["text"] as? String, "速度属于B车。")
+        XCTAssertEqual(context.first?["sources"] as? [String], [later.english])
+        XCTAssertNil(context.first?["state"], "旧版 clarifies 条目保持原格式")
+    }
+
+    /// issue #26 复核：只给跟进判断、没有新要点的批次（noNewKnowledge）不在复查批次里，
+    /// 它的"前后冲突"仍须进入整课复查的 laterContext，并与后续批次的记录按时间顺序排列 ✓；
+    /// 这类批次只提供跟进记录，后文检索（laterEvidence）保持原样 ✓。同步和异步入队都覆盖。
+    @MainActor
+    func testWholeLessonReviewReceivesFollowUpsFromBatchesWithoutPoints() async throws {
+        let (book, target, original, _) = try uncertainNotebook()
+        var notebook = book
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        let conflict = segment("The lecturer now says the 18 kilopascal reading was taken after the valve opened.",
+                               "讲述者此时说18千帕是在阀打开之后测得的。", at: 12)
+        try notebook.append(evidence: [conflict], note: LearningPrompts.resolvingFollowUps(
+            LearningNote(topic: "无新增学习知识", points: [], sourceVersion: 2, noNewKnowledge: true,
+                         followUps: [LearningFollowUp(alias: "q0", state: .conflict, sourceIDs: ["en0s0"], detail: detail)]),
+            targets: [target]))
+        let vague = segment("That reading may have been the other tank.", "那个读数可能是另一个罐的。", at: 24)
+        try notebook.append(evidence: [vague], note: LearningPrompts.resolvingFollowUps(
+            supplementNote(text: "那个读数可能属于另一个罐。", sourceIDs: ["en0s0"],
+                           followUp: LearningFollowUp(alias: "q0", state: .unclear, detail: "后文没有说明是哪一个罐。")),
+            targets: [target]))
+        XCTAssertTrue(notebook.batches[1].note.points.isEmpty)
+        XCTAssertEqual(notebook.batches.compactMap { $0.followUps?.first?.state }, [.conflict, .unclear])
+        let expected = try reviewContext(original, [notebook.batches[2]]).root
+
+        for asynchronous in [false, true] {
+            let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+                .appendingPathComponent("FollowUpOnlyReview-\(UUID())")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            var inputs: [String] = []
+            let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"), observeSleep: false,
+                                            diagnostics: .disabled) { input, _, _, _, _ in
+                inputs.append(input)
+                return #"{"reviewVersion":2,"corrections":[],"additions":[]}"#
+            }
+            addTeardownBlock { await queue.shutdownForTesting(); try FileManager.default.removeItem(at: root) }
+            if asynchronous {
+                try await queue.enqueueAsync(directory: root, notebook: notebook)
+            } else {
+                try queue.enqueue(directory: root, notebook: notebook)
+            }
+            for _ in 0..<200 where queue.hasWork { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertFalse(queue.hasWork, queue.status)
+            XCTAssertEqual(inputs.count, 2, "只复查有要点的两批")
+            let first = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(inputs.first).utf8)) as? [String: Any])
+            let context = try XCTUnwrap(first["laterContext"] as? [[String: Any]])
+            XCTAssertEqual(context.map { $0["state"] as? String }, ["前后冲突", "关系不明"], "async=\(asynchronous)")
+            XCTAssertEqual(context.map { $0["pointIndex"] as? Int }, [0, 0])
+            XCTAssertEqual(context.map { $0["text"] as? String }, [detail, "后文没有说明是哪一个罐。"])
+            XCTAssertEqual(context.map { $0["sources"] as? [String] }, [[conflict.english], []])
+            XCTAssertEqual(first["laterEvidence"] as? NSArray, expected["laterEvidence"] as? NSArray)
+            XCTAssertEqual(first["laterEvidenceOmittedCount"] as? Int, expected["laterEvidenceOmittedCount"] as? Int)
+        }
+    }
+
+    // MARK: - issue #20：同一句原文拆出多条要点
+
+    /// 旧问题“速度属于哪辆车”，后文一句话同时拆出“质量”和“速度”两条要点，都引用这句原文。
+    private func sharedSentenceCase(pointIndex: Int?) throws -> (notebook: LearningNotebook, target: String) {
+        var notebook = LearningNotebook()
+        try notebook.append(evidence: [segment("One cart moved at 4 meters per second.",
+                                               "有一辆车速度为4米每秒，尚未说明是哪辆车。")],
+                            note: LearningNote(topic: "速度", points: [
+                                LearningPoint(kind: "待确认", text: "4米每秒的速度归属尚未说明。",
+                                              needsContext: "速度4米每秒属于哪辆车？", sourceIDs: ["zh0s0"])
+                            ], sourceVersion: 2, noNewKnowledge: false))
+        let target = try XCTUnwrap(notebook.pendingPoints.first?.id)
+        let later = segment("Cart A has a mass of 8 kg and a speed of 4 m/s. Cart B is at rest.",
+                            "A车质量为8千克，速度为4米每秒。B车静止。", at: 12)
+        let note = LearningNote(topic: "小车", points: [
+            LearningPoint(kind: "核心结论", text: "A车质量为8千克。", sourceIDs: ["en0s0", "zh0s0"]),
+            LearningPoint(kind: "核心结论", text: "A车速度为4米每秒。", sourceIDs: ["en0s0", "zh0s0"]),
+            LearningPoint(kind: "核心结论", text: "B车静止。", sourceIDs: ["en0s1", "zh0s1"])
+        ], sourceVersion: 2, noNewKnowledge: false, followUps: [
+            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0"], pointIndex: pointIndex,
+                             detail: "后文说明4米每秒是A车的速度。")
+        ])
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        return (notebook, target)
+    }
+
+    /// 只取"后文补充"标签行（撤下说明那一行也含这四个字，不算）。
+    private func supplementLines(_ markdown: String) -> [String] {
+        markdown.split(separator: "\n").map(String.init).filter { $0.contains("**后文补充") }
+    }
+
+    func testSupplementMatchingSeveralPointsFromOneSentenceKeepsTheQuestionOpen() throws {
+        let (notebook, target) = try sharedSentenceCase(pointIndex: nil)
+        let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+        XCTAssertEqual(committed.state, .unclear)
+        XCTAssertNil(committed.pointIndex)
+        XCTAssertEqual(committed.detail, ClassroomFixedText.ambiguousSupplementDetail.noteText(target: .simplifiedChinese))
+        XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+        XCTAssertEqual(notebook.pendingPoints.map(\.id), [target])
+        let rendered = notebook.markdown()
+        XCTAssertEqual(supplementLines(rendered), [], rendered)
+        let replay = try XCTUnwrap(section(rendered, LearningNotebook.replayHeading), rendered)
+        XCTAssertTrue(replay.contains("属于哪辆车"), replay)
+        XCTAssertTrue(rendered.contains("关系仍不明"), rendered)
+        XCTAssertTrue(rendered.contains("多条要点引用了同一句原文"), rendered)
+    }
+
+    func testSupplementNamingOneOfSeveralMatchingPointsUsesThatPoint() throws {
+        let (notebook, target) = try sharedSentenceCase(pointIndex: 1)
+        let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+        XCTAssertEqual(committed.state, .supplemented)
+        XCTAssertEqual(committed.pointIndex, 1)
+        XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+        let lines = supplementLines(notebook.markdown())
+        XCTAssertEqual(lines.count, 1, lines.joined(separator: "\n"))
+        XCTAssertTrue(lines[0].contains("A车速度为4米每秒。"), lines[0])
+        XCTAssertFalse(lines[0].contains("A车质量为8千克。"), lines[0])
+    }
+
+    func testSupplementNamingAPointOutsideTheCitedSentenceIsRejected() throws {
+        let (notebook, target) = try sharedSentenceCase(pointIndex: 2)
+        let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+        XCTAssertEqual(committed.state, .unclear)
+        XCTAssertNil(committed.pointIndex)
+        XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+        XCTAssertEqual(notebook.pendingPoints.map(\.id), [target])
+        XCTAssertEqual(supplementLines(notebook.markdown()), [])
+    }
+
     /// 真 4B 在旧协议下的实际响应（`clarifies` 全空、也没有 followUps）不能消除旧问题。
     func testMissingFollowUpCannotRetireTheOldQuestion() throws {
         let (book, target, _, _) = try uncertainNotebook()
@@ -116,6 +328,13 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(notebook.markdown().contains("属于哪个储罐"))
         XCTAssertEqual(notebook.batches[1].followUps?.first?.state, .missing)
         XCTAssertTrue(notebook.selectPendingPoints(for: [later]).map(\.id).contains(target))
+        // 从来只有"缺信息"的问题仍然不附任何跟进说明（issue #33 修复不改变这一点）。
+        let rendered = notebook.markdown()
+        let missingDetail = try XCTUnwrap(notebook.batches[1].followUps?.first?.detail)
+        XCTAssertFalse(rendered.contains(missingDetail), rendered)
+        for label in ["后文补充", "与此前记录冲突", "关系仍不明", "缺信息"] {
+            XCTAssertFalse(rendered.contains(label), "\(label): \(rendered)")
+        }
     }
 
     func testUnknownAliasAndStaleTargetAreNeverApplied() throws {
@@ -184,6 +403,100 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(rendered.contains("后文（[00:12–00:22]）"))
     }
 
+    // MARK: - ①a 之后的"缺信息"不能抹掉仍有效的冲突／关系不明说明（issue #33）
+
+    /// 旧问题 → 某批给出 `state`（冲突或关系不明）→ 返回这时的笔记本与目标引用。
+    private func flaggedNotebook(_ state: LearningFollowUp.State, detail: String) throws -> (notebook: LearningNotebook, target: String) {
+        let (book, target, _, _) = try uncertainNotebook()
+        var notebook = book
+        let later = segment("The lecturer now says the 18 kilopascal reading was taken after the valve opened.",
+                            "讲述者此时说18千帕是在阀打开之后测得的。", at: 12)
+        let note = supplementNote(text: "讲述者此时说18千帕是在阀打开之后测得的。", sourceIDs: ["en0s0", "zh0s0"],
+                                  followUp: LearningFollowUp(alias: "q0", state: state, sourceIDs: ["en0s0"], detail: detail))
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(notebook.batches[1].followUps?.first?.state, state)
+        return (notebook, target)
+    }
+
+    /// 一段无关原文：旧问题仍被提供给这一批，`modelFollowUp` 为 nil 时由程序补"缺信息"。
+    private func appendUnrelated(_ notebook: inout LearningNotebook, target: String, at time: Double,
+                                 modelFollowUp: LearningFollowUp? = nil) throws {
+        let unrelated = segment("The ideal gas equation is PV = nRT.", "理想气体状态方程是PV=nRT。", at: time)
+        let offered = notebook.selectPendingPoints(for: [unrelated]).map(\.id)
+        XCTAssertEqual(offered, [target], "唯一的旧问题应被提供给这一批")
+        let note = LearningNote(topic: "理想气体", points: [
+            LearningPoint(kind: "核心结论", text: "理想气体状态方程是PV=nRT。", sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false, followUps: modelFollowUp.map { [$0] })
+        try notebook.append(evidence: [unrelated], note: LearningPrompts.resolvingFollowUps(note, targets: offered))
+        XCTAssertEqual(notebook.batches.last?.followUps?.first?.state, .missing)
+    }
+
+    func testLaterMissingFollowUpDoesNotHideConflict() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: detail)
+        try appendUnrelated(&notebook, target: target, at: 30)
+        XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+        let rendered = notebook.markdown()
+        XCTAssertTrue(try XCTUnwrap(section(rendered, LearningNotebook.replayHeading)).contains("属于哪个储罐"))
+        XCTAssertTrue(rendered.contains("与此前记录冲突"), rendered)
+        XCTAssertTrue(rendered.contains(detail))
+        // 时间指向发现冲突的那一批（00:12），不是之后的无关批次（00:30）。
+        XCTAssertTrue(rendered.contains("后文（[00:12–00:22]）"), rendered)
+        XCTAssertFalse(rendered.contains("[00:30"), rendered)
+    }
+
+    func testLaterMissingFollowUpDoesNotHideUnclear() throws {
+        let detail = "无法确定后文的读数是否就是先前那一项。"
+        var (notebook, target) = try flaggedNotebook(.unclear, detail: detail)
+        try appendUnrelated(&notebook, target: target, at: 30)
+        XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+        let rendered = notebook.markdown()
+        XCTAssertTrue(rendered.contains("关系仍不明"), rendered)
+        XCTAssertTrue(rendered.contains(detail))
+        XCTAssertTrue(rendered.contains("后文（[00:12–00:22]）"), rendered)
+    }
+
+    /// 模型自己明确回答"缺信息"（提示词要求的常见路径），同样不能覆盖冲突说明。
+    func testExplicitModelMissingAfterConflictKeepsTheConflictLine() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: detail)
+        try appendUnrelated(&notebook, target: target, at: 30,
+                            modelFollowUp: LearningFollowUp(alias: "q0", state: .missing, sourceIDs: [],
+                                                            detail: "本段原文没有涉及这项读数。"))
+        let rendered = notebook.markdown()
+        XCTAssertTrue(rendered.contains("与此前记录冲突"), rendered)
+        XCTAssertTrue(rendered.contains(detail))
+        XCTAssertFalse(rendered.contains("本段原文没有涉及这项读数。"))
+    }
+
+    func testRepeatedMissingAfterConflictShowsTheConflictOnce() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: detail)
+        try appendUnrelated(&notebook, target: target, at: 30)
+        try appendUnrelated(&notebook, target: target, at: 48)
+        let rendered = notebook.markdown()
+        XCTAssertEqual(rendered.components(separatedBy: detail).count - 1, 1, rendered)
+        XCTAssertEqual(rendered.components(separatedBy: "与此前记录冲突").count - 1, 1, rendered)
+    }
+
+    /// 最新的有效判断仍然优先：冲突之后给出"后文补充"照常撤下问题。
+    func testSupplementAfterConflictAndMissingStillRetiresTheQuestion() throws {
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: "先前说打开前测得，后文说打开后测得。")
+        try appendUnrelated(&notebook, target: target, at: 30)
+        let later = segment("The earlier 18 kilopascal reading belongs to Aurora and was measured before its inlet valve opened.",
+                            "先前18千帕的压强属于Aurora罐，测量发生在该罐入口阀打开前。", at: 48)
+        let note = supplementNote(text: "先前18千帕的压强属于Aurora罐，测量发生在该罐入口阀打开前。",
+                                  sourceIDs: ["en0s0", "zh0s0"],
+                                  followUp: LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0", "zh0s0"],
+                                                             detail: "后文明确说明了同一压强读数的储罐归属。"))
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+        let rendered = notebook.markdown()
+        XCTAssertNil(section(rendered, LearningNotebook.replayHeading))
+        XCTAssertTrue(rendered.contains("后文补充"))
+        XCTAssertFalse(rendered.contains("与此前记录冲突"), rendered)
+    }
+
     func testFollowUpJudgementNeedsNoExtraModelRequestAndFreezesAliases() throws {
         let (initial, target, _, _) = try uncertainNotebook()
         var book = initial
@@ -207,6 +520,160 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertEqual(notebook.batches.count, 2)
         XCTAssertEqual(notebook.batches[1].followUps?.count, 1)
         XCTAssertNil(notebook.batches[1].note.followUps, "跟进记录只保存在新批次上")
+    }
+
+    // MARK: - ①c "最近更新"要显示本批对旧问题给出的跟进（issue #34）
+
+    func testRecentUpdateShowsConflictAboutEarlierQuestion() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        let (notebook, _) = try flaggedNotebook(.conflict, detail: detail)
+        let whole = notebook.markdown()
+        let latest = notebook.markdown(covering: notebook.batches[1].ids)
+        XCTAssertTrue(latest.contains("讲述者此时说18千帕是在阀打开之后测得的。"), latest)
+        let replay = try XCTUnwrap(section(latest, LearningNotebook.replayHeading), latest)
+        // 旧问题带它自己的时间范围、旧要点原文，再接本批的冲突说明。
+        XCTAssertTrue(replay.contains("- [00:00–00:10] 这项压强读数属于哪个储罐？"), replay)
+        XCTAssertTrue(replay.contains("18千帕的压强归属尚未说明。"), replay)
+        XCTAssertTrue(replay.contains("后文（[00:12–00:22]）与此前记录冲突：\(detail)"), replay)
+        XCTAssertEqual(latest.components(separatedBy: detail).count - 1, 1, latest)
+        // 整课笔记不受影响：说明仍只挂在旧要点下面一次。
+        XCTAssertEqual(whole.components(separatedBy: detail).count - 1, 1, whole)
+        XCTAssertTrue(whole.contains("后文（[00:12–00:22]）与此前记录冲突"), whole)
+    }
+
+    func testRecentUpdateShowsUnclearAboutEarlierQuestion() throws {
+        let detail = "无法确定后文的读数是否就是先前那一项。"
+        let (notebook, _) = try flaggedNotebook(.unclear, detail: detail)
+        let latest = notebook.markdown(covering: notebook.batches[1].ids)
+        let replay = try XCTUnwrap(section(latest, LearningNotebook.replayHeading), latest)
+        XCTAssertTrue(replay.contains("属于哪个储罐"), replay)
+        XCTAssertTrue(replay.contains("后文（[00:12–00:22]）关系仍不明：\(detail)"), replay)
+    }
+
+    func testRecentUpdateMarksSupplementAndRetiredQuestion() throws {
+        let (book, target, _, _) = try uncertainNotebook()
+        var notebook = book
+        let later = segment("The earlier 18 kilopascal reading belongs to Aurora and was measured before its inlet valve opened.",
+                            "先前18千帕的压强属于Aurora罐，测量发生在该罐入口阀打开前。", at: 12)
+        let text = "先前18千帕的压强属于Aurora罐，测量发生在该罐入口阀打开前。"
+        let note = supplementNote(text: text, sourceIDs: ["en0s0", "zh0s0"],
+                                  followUp: LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0", "zh0s0"],
+                                                             detail: "后文明确说明了同一压强读数的储罐归属。"))
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+        let latest = notebook.markdown(covering: notebook.batches[1].ids)
+        XCTAssertEqual(latest.components(separatedBy: text).count - 1, 1, latest)
+        XCTAssertTrue(latest.contains("**后文补充（[00:12–00:22]）：**回应先前问题：这项压强读数属于哪个储罐？"), latest)
+        XCTAssertTrue(latest.contains("原问题由此撤下"), latest)
+        XCTAssertNil(section(latest, LearningNotebook.replayHeading), latest)
+        // 整课笔记照旧：补充挂在旧要点下面，不出现新的"回应先前问题"行。
+        XCTAssertFalse(notebook.markdown().contains("回应先前问题"))
+    }
+
+    /// 只有"缺信息"的批次不多出任何说明；之后的"缺信息"批次也不重复早先的冲突。
+    func testRecentUpdateIgnoresMissingFollowUps() throws {
+        var (notebook, target) = try flaggedNotebook(.conflict, detail: "先前说打开前测得，后文说打开后测得。")
+        var plain = notebook
+        try appendUnrelated(&notebook, target: target, at: 30)
+        let unrelated = segment("The ideal gas equation is PV = nRT.", "理想气体状态方程是PV=nRT。", at: 30)
+        try plain.append(evidence: [unrelated], note: LearningNote(topic: "理想气体", points: [
+            LearningPoint(kind: "核心结论", text: "理想气体状态方程是PV=nRT。", sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false))
+        XCTAssertNil(plain.batches[2].followUps)
+        let latest = notebook.markdown(covering: notebook.batches[2].ids)
+        XCTAssertEqual(latest, plain.markdown(covering: plain.batches[2].ids))
+        XCTAssertFalse(latest.contains("与此前记录冲突"), latest)
+    }
+
+    /// 本批只给出冲突判断、没有新要点时，"最近更新"不能是空的（否则界面显示"没有新增学习要点"）。
+    func testRecentUpdateOfNoNewKnowledgeBatchShowsConflict() throws {
+        let (book, target, _, _) = try uncertainNotebook()
+        var notebook = book
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        let later = segment("The lecturer now says the 18 kilopascal reading was taken after the valve opened.",
+                            "讲述者此时说18千帕是在阀打开之后测得的。", at: 12)
+        let note = LearningNote(topic: "无新增学习知识", points: [], sourceVersion: 2, noNewKnowledge: true,
+                                followUps: [LearningFollowUp(alias: "q0", state: .conflict, sourceIDs: ["en0s0"], detail: detail)])
+        try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(notebook.batches[1].followUps?.first?.state, .conflict)
+        let latest = notebook.markdown(covering: notebook.batches[1].ids)
+        XCTAssertFalse(latest.isEmpty)
+        XCTAssertTrue(latest.contains(detail), latest)
+        XCTAssertTrue(latest.contains("属于哪个储罐"), latest)
+    }
+
+    /// 旧批次因来源修订被撤掉后，本批的冲突说明照样显示，只是不再有旧原文。
+    func testRecentUpdateKeepsConflictWhenEarlierBatchWasInvalidated() throws {
+        let detail = "先前说打开前测得，后文说打开后测得。"
+        var (notebook, _) = try flaggedNotebook(.conflict, detail: detail)
+        let firstSource = try XCTUnwrap(notebook.batches[0].evidence.first?.id)
+        XCTAssertFalse(notebook.invalidate(firstSource).isEmpty)
+        XCTAssertEqual(notebook.batches.count, 1)
+        let latest = notebook.markdown(covering: notebook.batches[0].ids)
+        XCTAssertTrue(latest.contains("后文（[00:12–00:22]）与此前记录冲突：\(detail)"), latest)
+        XCTAssertFalse(latest.contains("18千帕的压强归属尚未说明"), latest)
+        XCTAssertFalse(latest.contains("属于哪个储罐"), latest)
+    }
+
+    // MARK: - ①b "待确认"但没写具体问题的要点（issue #16）
+
+    /// `kind == "待确认"`、`needsContext` 为空的要点：`hasOpenQuestion` 为真、进 `## 需要回听`，
+    /// 后续跟进也必须能看到它（用兜底问题）✓。
+    private func kindOnlyPendingNotebook(_ english: String = "A mass value is mentioned for one object.",
+                                         target: CaptionTranslationTarget = .simplifiedChinese,
+                                         evidence: TranscriptSegment? = nil) throws -> (notebook: LearningNotebook, target: String) {
+        var book = LearningNotebook(target: target)
+        try book.append(evidence: [evidence ?? segment(english)], note: LearningNote(topic: "质量", points: [
+            LearningPoint(kind: "待确认", text: "这个质量值的归属待确认。", sourceIDs: ["en0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false))
+        let point = book.batches[0].note.points[0]
+        XCTAssertNil(point.needsContext)
+        XCTAssertEqual(point.referenceState, .linked)
+        XCTAssertTrue(point.hasOpenQuestion)
+        XCTAssertNotNil(section(book.markdown(), LearningNotebook.replayHeading))
+        return (book, LearningNotebook.reference(book.batches[0], 0))
+    }
+
+    func testKindPendingWithoutQuestionEntersPendingPoints() throws {
+        var (book, target) = try kindOnlyPendingNotebook()
+        let pending = book.pendingPoints
+        XCTAssertEqual(pending.map(\.id), [target])
+        XCTAssertEqual(pending.first?.referenceCheck, false)
+        XCTAssertEqual(pending.first?.question, ClassroomFixedText.pendingQuestion.noteText(target: .simplifiedChinese))
+        let later = segment("The mass value belongs to the cart.", at: 12)
+        XCTAssertEqual(book.selectPendingPoints(for: [later]).map(\.id), [target])
+    }
+
+    func testKindPendingWithoutQuestionAndPronounSourceIsASemanticQuestion() throws {
+        let (book, target) = try kindOnlyPendingNotebook("Its mass value is mentioned.")
+        XCTAssertEqual(book.batches[0].note.points[0].sourceHasPronoun, true)
+        XCTAssertEqual(book.pendingPoints.map(\.id), [target])
+        XCTAssertEqual(book.pendingPoints.first?.referenceCheck, false)
+    }
+
+    func testKindPendingWithoutQuestionCanBeRetiredByALaterSupplement() throws {
+        var (book, target) = try kindOnlyPendingNotebook()
+        let later = segment("The earlier mass value belongs to the cart.", "先前的质量值属于小车。", at: 12)
+        XCTAssertEqual(book.selectPendingPoints(for: [later]).map(\.id), [target])
+        let note = LearningNote(topic: "质量归属", points: [
+            LearningPoint(kind: "核心结论", text: "先前的质量值属于小车。", sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false, followUps: [
+            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0", "zh0s0"],
+                             detail: "后文说明了这项质量的归属。")
+        ])
+        try book.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
+        XCTAssertEqual(book.batches[1].followUps?.first?.state, .supplemented)
+        XCTAssertEqual(book.retiredQuestionReferences, [target])
+        XCTAssertNil(section(book.markdown(), LearningNotebook.replayHeading))
+        XCTAssertTrue(book.pendingPoints.isEmpty)
+    }
+
+    func testKindPendingWithoutQuestionEntersPendingPointsForEnglishTarget() throws {
+        let source = TranscriptSegment(startTime: 0, endTime: 1, english: "提到了一个质量值。",
+                                       chinese: "A mass value is mentioned for one object.", sourceLanguage: "zh")
+        let (book, target) = try kindOnlyPendingNotebook(target: .english, evidence: source)
+        XCTAssertEqual(book.pendingPoints.map(\.id), [target])
+        XCTAssertEqual(book.pendingPoints.first?.question, ClassroomFixedText.pendingQuestion.noteText(target: .english))
     }
 
     // MARK: - ② 数值来源核查
@@ -399,6 +866,91 @@ final class LearningFollowUpTests: XCTestCase {
             XCTAssertTrue(report.isDecidable, source)
             XCTAssertFalse(report.gaps.isEmpty, source)
         }
+    }
+
+    // Issue #29: a power or denominator after a unit is part of the unit, and
+    // the exponent of scientific notation is never a separate measurement.
+    func testPoweredAndCompoundUnitsAreNotTruncatedToAPrefix() {
+        for (claim, source) in [
+            ("加速度为9.8 m/s。", "The acceleration is 9.8 m/s²."),
+            ("面积为5 m。", "The area is 5 m²."),
+            ("密度为2 kg。", "The density is 2 kg/m³."),
+            ("频率为6 Hz。", "The frequency is 10^6 Hz."),
+            ("速度为2 m/s。", "The speed is 3e2 m/s."),
+            ("速度为10 m/s。", "The speed is 3 × 10⁶ m/s."),
+            ("加速度为9.8 m/s。", "The acceleration is 9.8 meters per second squared."),
+            ("密度为2 kg。", "The density is 2 kilograms per cubic meter."),
+            ("密度为2 kg。", "The density is 2 kg/ft³."),
+            ("加速度为9.8 m/s。", "The acceleration is 9.8 meters per second per second."),
+            ("加速度为9.8 m/s。", "The acceleration is 9.8 m/s/s.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [], batchTexts: [source])
+            XCTAssertTrue(report.isDecidable, source)
+            XCTAssertFalse(report.gaps.isEmpty, source)
+        }
+        let unit = LearningNumericProvenance.report(claim: "面积为5 m。", cited: ["The area is 5 m²."], segmentTexts: [])
+        XCTAssertTrue(unit.gaps.joined().contains("单位不同"), "\(unit.gaps)")
+    }
+
+    func testBoundPointFlagsAnAccelerationWrittenAsASpeed() throws {
+        let source = segment("The acceleration is 9.8 m/s².", "加速度为9.8 m/s²。")
+        let point = try XCTUnwrap(boundPoint("加速度为9.8 m/s。", evidence: [source], ids: ["en0s0", "zh0s0"]))
+        XCTAssertEqual(point.referenceState, .numericDifference)
+        XCTAssertTrue(try XCTUnwrap(point.numericGap).contains("单位不同"))
+    }
+
+    func testEquivalentSpellingsOfPoweredUnitsAndScientificNotationStillMatch() {
+        for (claim, source) in [
+            ("加速度为9.8 m/s²。", "The acceleration is 9.8 m/s²."),
+            ("加速度为9.8 m/s^2。", "The acceleration is 9.8 m/s²."),
+            ("加速度为9.8 m/s2。", "The acceleration is 9.8 m/s²."),
+            ("加速度为9.8米每二次方秒。", "The acceleration is 9.8 meters per second squared."),
+            ("加速度为9.8 m/s²。", "The acceleration is 9.8 metres per second squared."),
+            ("密度为2 kg/m3。", "The density is 2 kg/m³."),
+            ("密度为2千克每立方米。", "The density is 2 kilograms per cubic meter."),
+            ("密度为2 kg/m³。", "The density is 2 kilograms per cubic metre."),
+            ("密度为1.5 g/cm³。", "The density is 1.5 grams per cubic centimeter."),
+            ("面积为5平方米。", "The area is 5 square meters."),
+            ("面积为5 m²。", "The area is 5 square metres."),
+            ("面积为5 m2。", "The area is 5 m^2."),
+            ("速度为3 × 10^6 m/s。", "The speed is 3 × 10⁶ m/s."),
+            ("速度为3e6 m/s。", "The speed is 3 × 10⁶ m/s."),
+            ("速度为3000000 m/s。", "The speed is 3e6 m/s."),
+            ("频率为10⁶ Hz。", "The frequency is 10^6 Hz."),
+            ("长度为1.5×10⁻³ m。", "The length is 1.5e-3 m."),
+            ("压强为18 kPa。", "The pressure is 18 kPa."),
+            ("速度为5 m/s。", "The speed is 5 m/s."),
+            // "per second per second" is the spoken form of s²; a repeated denominator folds into its power.
+            ("加速度为9.8 m/s²。", "The acceleration is 9.8 meters per second per second."),
+            ("加速度为9.8 m/s²。", "The acceleration is 9.8 m/s/s."),
+            ("加速度为9.8米每秒每秒。", "The acceleration is 9.8 m/s²."),
+            ("加速度为9.8 m/s^2。", "The acceleration is 9.8 metres per second per second.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [], batchTexts: [source])
+            XCTAssertFalse(report.isDecidable, "\(claim) / \(source)")
+            XCTAssertTrue(report.gaps.isEmpty, "\(claim) / \(source): \(report.gaps)")
+        }
+        // A literal Chinese caption of the spoken form supports the same claim.
+        let english = "Gravity accelerates objects at 9.8 meters per second per second."
+        let chinese = "重力使物体以9.8米每秒每秒的加速度加速。"
+        let gravity = LearningNumericProvenance.report(claim: "重力加速度为 9.8 m/s²。", cited: [english, chinese],
+                                                       segmentTexts: [], batchTexts: [english, chinese])
+        XCTAssertFalse(gravity.isDecidable, "\(gravity.gaps)")
+        XCTAssertTrue(gravity.gaps.isEmpty, "\(gravity.gaps)")
+    }
+
+    func testExponentDigitsNeverBecomeSeparateCountsOrScalars() {
+        XCTAssertFalse(LearningNumericProvenance.mentions(in: "We took 10^3 samples.", preservingCountScalars: true)
+            .contains { $0.value == "3" })
+        XCTAssertFalse(LearningNumericProvenance.mentions(in: "The density is 2 kg/m3.")
+            .contains { $0.value == "3" })
+        let count = LearningNumericProvenance.report(claim: "共有3个样品。", cited: ["We took 10^3 samples."], segmentTexts: [], batchTexts: [])
+        XCTAssertTrue(count.gaps.joined().contains("计数“3个”"), "\(count.gaps)")
+        // A power that is not a base-10 exponent stays one unverifiable value.
+        let power = LearningNumericProvenance.report(claim: "结果为10。", cited: ["The cache holds 2^10 entries."], segmentTexts: [], batchTexts: [])
+        XCTAssertFalse(power.gaps.isEmpty, "\(power.gaps)")
+        let same = LearningNumericProvenance.report(claim: "结果为2^10。", cited: ["The cache holds 2^10 entries."], segmentTexts: [], batchTexts: [])
+        XCTAssertTrue(same.gaps.isEmpty, "\(same.gaps)")
     }
 
     func testCountSupportRecognizesWholeNumberWordsWithoutInventingCounts() {

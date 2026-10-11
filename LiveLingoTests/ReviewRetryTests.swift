@@ -540,6 +540,70 @@ struct ReviewRetryTests {
         await queue.shutdownForTesting()
     }
 
+    /// Issue #19: pausing during an auto-retry countdown must say "paused",
+    /// not "retry starts in N s", while keeping the retry budget for resume.
+    @Test func pauseDuringRetryCountdownShowsPausedNotRetry() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
+        let journal = directory.deletingLastPathComponent().appendingPathComponent("queue.json")
+        var calls = 0
+        let queue = makeQueue(journal: journal, retryDelays: [60]) { _, _, _, _, _ in
+            calls += 1
+            if calls == 1 { throw QwenRuntimeError.requestFailed("模拟本机模型协议错误") }
+            return Self.emptyV2Response
+        }
+        try queue.enqueue(directory: directory, notebook: makeNotebook())
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor { queue.items.first?.retryPending != nil && !queue.running })
+        #expect(queue.status.contains("自动重试将在"), "暂停前应显示重试倒计时，实际状态：\(queue.status)")
+
+        queue.togglePause()
+        #expect(queue.userPaused)
+        #expect(queue.status.contains("已手动暂停"), "暂停后应显示已手动暂停，实际状态：\(queue.status)")
+        #expect(!queue.status.contains("自动重试"), "暂停后不应再说即将重试，实际状态：\(queue.status)")
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(queue.status.contains("已手动暂停"), "再次刷新仍应显示暂停，实际状态：\(queue.status)")
+        #expect(queue.items.first?.retryPending?.attempts == 1, "暂停保留重试预算")
+        #expect(await waitForNoActivity { calls != 1 }, "暂停期间不得发起重试")
+
+        try await queue.waitForPendingStorage()
+        let last = try #require(try events(journal: journal).last)
+        #expect(last.code == "paused" && last.detail == "user",
+                "倒计时中手动暂停应记为用户暂停，实际：\(last.code)/\(last.detail ?? "nil")")
+        await queue.shutdownForTesting()
+    }
+
+    /// Issue #19: once the paused retry's deadline passes, a later refresh must
+    /// not claim the retry is in progress; resuming retries immediately.
+    @Test func pausedRetryPastItsDeadlineStaysPausedUntilResumed() async throws {
+        let clock = TestWallClock()
+        let root = try c06Directory(), journal = root.appendingPathComponent("queue.json")
+        let retry = LearningReviewQueue.RetryState(attempts: 1,
+            notBefore: clock.now().timeIntervalSince1970 + 0.3, code: "request_failed")
+        let waiting = try c06Job(in: root, label: "C19-A", retry: retry)
+        try writeQueueJournal([waiting], version: LearningReviewQueue.journalVersion, to: journal)
+        var calls = 0
+        let queue = makeQueue(journal: journal, clock: clock) { _, _, _, _, _ in
+            calls += 1
+            return Self.emptyV2Response
+        }
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        queue.togglePause()
+        #expect(queue.userPaused)
+        #expect(await waitFor({ clock.now().timeIntervalSince1970 >= retry.notBefore + 0.3 }, seconds: 3))
+        queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(queue.status.contains("已手动暂停"), "过了重试时间仍应显示暂停，实际状态：\(queue.status)")
+        #expect(!queue.status.contains("进行中"), "暂停时不得显示重试进行中，实际状态：\(queue.status)")
+        #expect(calls == 0, "暂停期间不得发起重试")
+        #expect(queue.items.first?.retryPending?.attempts == 1)
+
+        queue.performPrimaryAction()
+        #expect(!queue.userPaused)
+        #expect(await waitFor { queue.items.isEmpty && !queue.running }, "恢复后应立即重试并完成")
+        #expect(calls == 1)
+        await queue.shutdownForTesting()
+    }
+
     @Test func completedBatchCountsStatsAndClearsInterruption() async throws {
         let directory = try makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }

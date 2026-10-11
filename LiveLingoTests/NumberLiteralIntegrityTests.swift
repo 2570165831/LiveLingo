@@ -338,4 +338,82 @@ final class NumberLiteralIntegrityTests: XCTestCase {
         XCTAssertEqual(measurement.gaps.count, 1)
         XCTAssertTrue(measurement.gaps.joined().contains("单位不同"))
     }
+
+    // Issue #15: a measurement that differs from its source only by sign is a
+    // decidable conflict, like a unit mismatch. Ranges and designators keep no sign.
+    private func assertSignConflict(
+        _ result: LearningNumericProvenance.Report, claimed: String, source: String, context: String,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertTrue(result.isDecidable, "\(context): \(result.gaps)", file: file, line: line)
+        XCTAssertEqual(result.gaps.count, 1, "\(context): \(result.gaps)", file: file, line: line)
+        let gap = result.gaps.joined()
+        XCTAssertTrue(gap.contains("正负号"), "\(context): \(gap)", file: file, line: line)
+        XCTAssertTrue(gap.contains("“\(claimed)”"), "\(context): \(gap)", file: file, line: line)
+        XCTAssertTrue(gap.contains(source), "\(context): \(gap)", file: file, line: line)
+    }
+
+    func testDroppedOrAddedMinusSignOnAMeasurementIsADecidableConflict() {
+        assertSignConflict(report("温度为 5°C。", source: "The temperature is -5°C."),
+                           claimed: "5°C", source: "-5°C", context: "dropped sign")
+        assertSignConflict(report("温度为 -5°C。", source: "The temperature is 5°C."),
+                           claimed: "-5°C", source: "5°C", context: "added sign")
+        assertSignConflict(report("温度为零下5摄氏度。", source: "The temperature is 5°C."),
+                           claimed: "零下5摄氏度", source: "5°C", context: "Chinese sign word")
+        assertSignConflict(report("温度为 5°C。", source: "The temperature is minus 5 degrees celsius."),
+                           claimed: "5°C", source: "minus 5", context: "English sign word")
+        assertSignConflict(report("电压为 1.5e3 V。", source: "The voltage is -1.5e3 V."),
+                           claimed: "1.5e3V", source: "-1.5e3V", context: "scientific notation")
+        // The same value and unit only with the opposite sign elsewhere in the batch
+        // is not "cite that sentence too": it is still a sign conflict.
+        let batch = LearningNumericProvenance.report(
+            claim: "温度为 5°C。", cited: ["The tank is sealed."], segmentTexts: ["The tank is sealed."],
+            batchTexts: ["The tank is sealed.", "The temperature is -5°C."])
+        assertSignConflict(batch, claimed: "5°C", source: "-5°C", context: "batch-only opposite sign")
+    }
+
+    func testEquivalentNegativeSpellingsSupportEachOther() {
+        for claim in ["温度为 -5°C。", "温度为 −5°C。", "温度为－5℃。", "温度为零下5摄氏度。", "温度为零下 5 摄氏度。",
+                      "温度为负5摄氏度。", "温度为（-5°C）。", "温度为 minus 5°C。"] {
+            for source in ["The temperature is -5°C.", "The temperature is −5°C.",
+                           "The temperature is minus 5 degrees celsius.", "The temperature is Negative 5°C.",
+                           "温度为零下5摄氏度。", "The range is -5~-3°C, mostly -5°C."] {
+                assertSupported(report(claim, source: source), context: "\(source) -> \(claim)")
+            }
+        }
+        assertSupported(report("温度为 +5°C。", source: "The temperature is 5°C."), context: "explicit plus")
+        assertSupported(report("温度为 5°C。", source: "The temperature is positive 5°C."), context: "positive word")
+    }
+
+    func testHyphenRangesDesignatorsAndToleranceAreNotNegativeSigns() {
+        for (claim, source) in [
+            ("温度为20到25°C。", "The range is 20-25°C."),
+            ("温度为20到25°C。", "The range is 20 - 25°C."),
+            ("第3-5步的温度为5°C。", "Steps 3-5 run at 5°C."),
+            ("样品K-5的温度为5°C。", "Sample K-5 is held at 5°C."),
+            ("CO-2 的温度为 2°C。", "CO-2 is stored at 2°C."),
+            ("x-5处的温度为5°C。", "At x-5 the temperature is 5°C."),
+            ("温度为正负5°C。", "The tolerance is ±5°C."),
+            ("误差为5°C。", "The error is plus or minus 5°C."),
+            ("温度差为5°C。", "The difference is 10°C minus 5°C."),
+            ("温度差为5°C。", "Take 10 minus 5°C."),
+            ("people[-1] 的温度为 5°C。", "people[-1] is at 5°C.")
+        ] {
+            assertSupported(report(claim, source: source), context: "\(source) -> \(claim)")
+        }
+    }
+
+    func testBoundTranslationCannotMaskADroppedSign() throws {
+        let segment = TranscriptSegment(startTime: 0, endTime: 10, english: "The temperature is -5°C.",
+                                        chinese: "温度为零下5摄氏度。")
+        let wrong = LearningPoint(kind: "核心结论", text: "温度为5°C。", sourceIDs: ["en0s0"])
+        let right = LearningPoint(kind: "核心结论", text: "温度为零下5°C。", sourceIDs: ["en0s0"])
+        let note = LearningNote(topic: "温度", points: [wrong, right], sourceVersion: 2)
+        let bound = note.binding(evidence: [segment]).points
+        XCTAssertEqual(bound.map(\.referenceState), [.numericDifference, .linked])
+        let gap = try XCTUnwrap(bound.first?.numericGap)
+        XCTAssertTrue(gap.contains("正负号") && gap.contains("“5°C”"), gap)
+        XCTAssertNil(bound.last?.numericGap)
+        XCTAssertEqual(bound.map(\.text), [wrong.text, right.text], "Never rewrite the note body")
+    }
 }

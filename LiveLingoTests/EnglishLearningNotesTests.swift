@@ -175,6 +175,35 @@ final class EnglishLearningNotesTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("summary-review.md").path))
     }
 
+    func testEnglishReviewReportShowsLocalizedSuggestedCategory() async throws {
+        let root = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("EnglishReviewCategory-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var book = LearningNotebook(target: .english)
+        try book.append(evidence: [foreign()], note: note())
+        var snapshot = SessionSnapshot(segments: book.batches.flatMap(\.evidence), targetLocale: "en")
+        book.writeState(to: &snapshot)
+        try SessionStore(directory: root).save(snapshot)
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"), observeSleep: false,
+                                        diagnostics: .disabled) { _, _, _, _, _ in
+            #"{"reviewVersion":2,"corrections":[{"index":0,"original":"Water flows.","kind":"补充理解","text":"Water flows.","reason":"Synthetic reason."}],"additions":[]}"#
+        }
+        addTeardownBlock { await queue.shutdownForTesting(); try FileManager.default.removeItem(at: root) }
+        queue.allowUnreleasedTargetsForTesting()
+        try queue.enqueue(directory: root, notebook: book, targetLocale: "en")
+        for _ in 0..<100 where queue.hasWork { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(queue.hasWork, queue.status)
+        let report = try String(contentsOf: root.appendingPathComponent("summary-review.md"), encoding: .utf8)
+        let lines = report.components(separatedBy: "\n")
+        let first = try XCTUnwrap(lines.firstIndex(of: "- **原笔记 · 要点 1**：Water flows."), report)
+        XCTAssertEqual(Array(lines[first...].prefix(4)), [
+            "- **原笔记 · 要点 1**：Water flows.",
+            "- **9B 建议（待核对）**：Water flows.",
+            "- **建议类别**：Key finding → Background",
+            "- **建议理由**：Synthetic reason."
+        ], report)
+    }
+
     private func foreign(_ caption: String = "Water flows.", at time: Double = 0) -> TranscriptSegment {
         TranscriptSegment(startTime: time, endTime: time + 1,
             english: "水会流动。", chinese: caption, sourceLanguage: "zh")
@@ -264,6 +293,55 @@ final class EnglishLearningNotesTests: XCTestCase {
             let exported = try String(contentsOf: root.appendingPathComponent("summary-en.md"), encoding: .utf8)
             XCTAssertTrue(exported.contains(state.label(target: .english)))
             XCTAssertEqual(book.batches[1].followUps?.first?.state, state)
+        }
+    }
+
+    /// issue #33: a later "missing" record must not hide an earlier conflict/unclear label (localized path).
+    func testEnglishConflictAndUnclearLabelsSurviveALaterMissingFollowUp() throws {
+        for state in [LearningFollowUp.State.conflict, .unclear] {
+            var book = LearningNotebook(target: .english)
+            try book.append(evidence: [foreign("A pressure reading was taken.")],
+                note: note("A pressure reading has no identified owner.", kind: "待确认", question: "Which tank?"))
+            let target = try XCTUnwrap(book.pendingPoints.first?.id)
+            var flagged = note("The reading was taken after the valve opened.")
+            flagged.followUps = [.init(target: target, state: state, sourceIDs: ["en0s0"],
+                detail: "Before versus after the valve opened.")]
+            try book.append(evidence: [foreign("The reading was taken after the valve opened.", at: 3)], note: flagged)
+            var unrelated = note("The ideal gas equation is PV = nRT.")
+            unrelated.followUps = [.init(target: target, state: .missing)]
+            try book.append(evidence: [foreign("The ideal gas equation is PV = nRT.", at: 6)], note: unrelated)
+            XCTAssertEqual(book.batches[2].followUps?.first?.state, .missing, state.rawValue)
+            XCTAssertEqual(book.pendingPoints.map(\.id), [target])
+            let rendered = book.markdown()
+            XCTAssertTrue(rendered.contains(state.label(target: .english)), "\(state.rawValue): \(rendered)")
+            XCTAssertTrue(rendered.contains("Before versus after the valve opened."), rendered)
+            XCTAssertFalse(rendered.contains(LearningFollowUp.State.missing.label(target: .english)), rendered)
+        }
+    }
+
+    /// issue #34: the latest-update view shows this batch's follow-up about an earlier question.
+    func testEnglishRecentUpdateShowsFollowUpAboutEarlierQuestion() throws {
+        for state in [LearningFollowUp.State.supplemented, .conflict, .unclear] {
+            var book = LearningNotebook(target: .english)
+            try book.append(evidence: [foreign("A pressure reading was taken.")],
+                note: note("A pressure reading has no identified owner.", kind: "待确认", question: "Which tank?"))
+            let target = try XCTUnwrap(book.pendingPoints.first?.id)
+            var later = note("The earlier reading belongs to Aurora.")
+            later.followUps = [.init(target: target, state: state, sourceIDs: ["en0s0"],
+                pointIndex: state == .supplemented ? 0 : nil,
+                detail: "The later source identifies the tank.")]
+            try book.append(evidence: [foreign("The earlier reading belongs to Aurora.", at: 3)], note: later)
+            XCTAssertEqual(book.batches[1].followUps?.first?.state, state)
+            let latest = book.markdown(covering: book.batches[1].ids)
+            XCTAssertTrue(latest.contains("**\(state.label(target: .english))（[00:03–00:04]）:**"), "\(state.rawValue): \(latest)")
+            XCTAssertTrue(latest.contains("Which tank?"), "\(state.rawValue): \(latest)")
+            if state == .supplemented {
+                XCTAssertTrue(latest.contains(ClassroomFixedText.followUpTargetLine.noteFormat(["Which tank?"], target: .english)), latest)
+                XCTAssertTrue(latest.contains(ClassroomFixedText.retiredExplanation.noteText(target: .english)), latest)
+            } else {
+                XCTAssertTrue(latest.contains("The later source identifies the tank."), latest)
+                XCTAssertTrue(latest.contains("A pressure reading has no identified owner."), latest)
+            }
         }
     }
 
