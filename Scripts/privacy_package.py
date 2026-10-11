@@ -59,6 +59,9 @@ TEXT_SUFFIXES = frozenset({".py", ".pyi", ".sh", ".bash", ".zsh", ".md", ".rst",
                            ".c", ".h", ".cpp", ".hpp", ".tcl"})
 TEXT_NAMES = frozenset({"license", "licence", "copying", "notice", "copyright", "readme",
                         "authors", "changes", "changelog", "install", "thanks"})
+LICENSE_NAME = re.compile(r"(?:license[s]?|licence[s]?|copying[0-9]?|notice[s]?|copyright)"
+                          r"(?:[._-][A-Za-z0-9][A-Za-z0-9._+-]*)?", re.IGNORECASE)
+LICENSE_CODE_SUFFIXES = frozenset({".py", ".rs", ".pm", ".c", ".h", ".cpp", ".yml", ".yaml", ".toml", ".json"})
 APP_RESOURCES = frozenset({
     "LanguageRuntime", "ASRRuntime", "Models", "LICENSE", "THIRD_PARTY_NOTICES.md",
     "Assets.car", "AppIcon.icns", "AppIcon.icon", "InfoPlist.strings",
@@ -306,6 +309,11 @@ def allowed_text_file(path, data):
     """A bounded packaging exemption, not a claim to review its text content."""
     if path.suffix.lower() in TEXT_SUFFIXES or path.name.lower() in TEXT_NAMES:
         return True
+    # Upstream SciPy's UNU.RAN author attribution accompanies its license.
+    # This exact notice path is supported, not arbitrary *_AUTHORS files.
+    if ("Licenses" in path.parts and path.parts[-5:] ==
+            ("native-source-notices", "scipy-1.18.1", "subprojects", "unuran", "UNURAN_AUTHORS")):
+        return True
     if re.fullmatch(r"[\w.+-]+-(?:LICENSE|LICENCE|NOTICE)", path.name, re.IGNORECASE):
         return True
     if path.parent.name.endswith(".dist-info") and path.name in (
@@ -317,6 +325,73 @@ def allowed_text_file(path, data):
         return (re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", path.name) is not None
                 or (not path.suffix and data.startswith(b"#!")))
     return False
+
+
+def license_filename(path):
+    """Recognize complete notice filenames, including flattened wheel names.
+
+    Substring matches like LicenseProtection/mod.rs and copying.rs are source
+    code, not licenses. Structured metadata never receives this exemption.
+    """
+    name = path.name.split("__")[-1]
+    return path.suffix.lower() not in LICENSE_CODE_SUFFIXES and bool(
+        name.lower() in ("unlicense", "authors", "authors.txt", "authors.rst", "authors.md")
+        or LICENSE_NAME.fullmatch(name) or re.fullmatch(
+            r"[\w.+-]+[_-](?:LICENSE|LICENCE|NOTICE)(?:\.[\w.+-]+)?", name, re.IGNORECASE))
+
+
+def decode_license_text(path, data):
+    """Legacy upstream notices may use Latin-1 and form-feed page separators.
+
+    Preserve their bytes. This is restricted to named legal texts with a legal
+    heading; arbitrary binary blobs and structured metadata are still rejected.
+    """
+    if not license_filename(path):
+        return None
+    # Upstream RTF notices sometimes carry a trailing NUL terminator. Permit
+    # that terminator only for text RTF without embedded objects or binary data.
+    if path.suffix.lower() == ".rtf":
+        if not data.startswith(b"{\\rtf1") or re.search(rb"\\(?:object|objdata|pict|bin|filetbl)\b", data):
+            return None
+        data = data.rstrip(b"\x00")
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            text = data.decode(encoding)
+        except UnicodeError:
+            continue
+        if (all(char.isprintable() or char.isspace() for char in text)
+                and re.search(r"\b(?:copyright|permission|redistribution|license|licence|public domain)\b", text, re.I)):
+            return text
+    return None
+
+
+def inspect_cargo_license_declaration(path, data, counts):
+    """A Cargo license declaration is parsed metadata, never opaque TOML.
+
+    Only the notice collection's exact declaration filename is supported.
+    Inspect comments and all parsed keys/values using the existing content and
+    local-path policy. Other TOML files remain unsupported.
+    """
+    collection = path.parent.parent.name
+    if not ((path.name == "DECLARATION-Cargo.toml" and collection == "native-cargo-notices") or
+            (path.name == "DECLARED-LICENSE-Cargo.toml" and collection == "outlines-core-0.2.14-cargo")):
+        return False
+    try:
+        import tomllib
+        text = data.decode("utf-8")
+        value = tomllib.loads(text)
+    except (ImportError, UnicodeError, ValueError):
+        raise PrivacyError("invalid-cargo-license-declaration") from None
+    package = value.get("package")
+    if not isinstance(package, dict) or not all(isinstance(package.get(key), str) and package[key]
+                                              for key in ("name", "version", "license")):
+        raise PrivacyError("invalid-cargo-license-declaration")
+    if path.parent.name != package["name"] + "-" + package["version"]:
+        raise PrivacyError("cargo-license-declaration-identity-mismatch")
+    validate_metadata(value)
+    validate_metadata(text)  # Comments cannot hide local paths either.
+    counts["metadata_files"] += 1
+    return True
 
 
 def inspect_portable_resource(path, data, counts):
@@ -421,6 +496,9 @@ def inspect_safetensors(path, size, counts):
 def inspect_metadata_file(path, counts, public_copy):
     suffix = path.suffix.lower()
     size = path.stat().st_size
+    if path.name in ("DECLARATION-Cargo.toml", "DECLARED-LICENSE-Cargo.toml") and size <= JSON_LIMIT:
+        if inspect_cargo_license_declaration(path, path.read_bytes(), counts):
+            return
     if path.name == "py.typed" or suffix in (".pth", ".pem", ".strings"):
         if size > JSON_LIMIT:
             raise PrivacyError("unreviewed-large-metadata")
@@ -453,6 +531,11 @@ def inspect_metadata_file(path, counts, public_copy):
             data = path.read_bytes()
             kind = metadata_kind(data)
             if not kind:
+                license_text = decode_license_text(path, data)
+                if license_text is not None:
+                    validate_metadata(license_text)
+                    counts["unreviewed_text_files"] += 1
+                    return
                 if decode_metadata_text(data) is None:
                     raise PrivacyError("unreviewed-binary-package-entry")
                 if not allowed_text_file(path, data):
