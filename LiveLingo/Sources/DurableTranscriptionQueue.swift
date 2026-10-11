@@ -723,6 +723,15 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         record.sourceTriggerPredecessor = .init()
                         try context.journal.put(record)
                     }
+                    if record.attempt == .initial, record.sourceTriggerPredecessor == nil {
+                        try refreshInitialProgress(context)
+                        let predecessor = record.ordinal == 0 ? SourceLanguagePolicy.TriggerState()
+                            : context.journal.records.first { $0.ordinal == record.ordinal - 1 }?.sourceTriggerAfter
+                        if let predecessor {
+                            record.sourceTriggerPredecessor = predecessor
+                            try context.journal.put(record)
+                        }
+                    }
                     let claimed = record
                     let formulaContext = recentFormulaContext
                     let url = try Self.materializeAudio(record, journal: context.journal)
@@ -811,10 +820,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             } else { record.text = output.text; record.textLanguage = output.language }
                             record.status = .completed; record.failure = nil; record.failureReason = nil
                             if output.language == nil { recentFormulaContext = String(output.text.suffix(1000)) }
-                        } else if output.sourceInput != nil {
-                            // No usable English yet. The optional source pass
-                            // owns this range; do not spend repair budget early.
-                            record.status = .active; record.failureReason = output.failureReason
+                        } else if claimed.attempt == .initial, record.hasProvisionalInitialEnglish {
+                            record.status = .completed; record.failure = nil; record.failureReason = nil
                         } else if output.otherLanguage {
                             record.status = .otherLanguage
                             record.failure = "此处为\(SavedProcessingPresentation.untranscribedSpeech)，音频已保留，可手动重试。"
@@ -828,7 +835,11 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         }
                         if record.candidateText != nil { emitCandidate(record) }
                     case .failure(let error):
-                        markFailure(&record, message: "本机转写失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))；音频已保留。", reason: .error)
+                        if claimed.attempt == .initial, record.hasProvisionalInitialEnglish {
+                            record.status = .completed; record.failure = nil; record.failureReason = nil
+                        } else {
+                            markFailure(&record, message: "本机转写失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))；音频已保留。", reason: .error)
+                        }
                         try preserveInitialDecision(nil, record: &record, owner: owner)
                         try owner.journal.put(record)
                     }
@@ -906,6 +917,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     // A successful persisted head may resume body-only work.
                     guard !task.isCancelled else { return }
                     guard var record = owner.journal.record(id: claimed.id) else { return }
+                    let previousFailure = record.failure
+                    let previousReason = record.failureReason
                     switch result {
                     case .success(let output):
                         if output.sourceDeferred { return }
@@ -933,20 +946,30 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             }
                         } else {
                             if record.text?.isEmpty != false, record.status != .silent {
-                                markFailure(&record, message: "此处尚未得到可靠的转写，音频已保留。", reason: output.failureReason)
+                                markFailure(&record, message: record.failure ?? "此处尚未得到可靠的英文转写，音频已保留。",
+                                    reason: record.failureReason ?? output.failureReason)
                             }
                             try owner.journal.put(record)
                         }
-                    case .failure:
+                    case .failure(let error):
                         record.sourceProbeFinished = true
                         try preserveInitialDecision(nil, record: &record, owner: owner)
                         if record.text?.isEmpty != false, record.status != .silent {
-                            markFailure(&record, message: "本机转写失败；音频已保留。", reason: .error)
+                            markFailure(&record, message: record.failure
+                                ?? "本机转写失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))；音频已保留。",
+                                reason: record.failureReason ?? .error)
                         }
                         try owner.journal.put(record)
                     }
+                    // Old journals can still contain an active source pass with
+                    // English already delivered. Every finished head/body path
+                    // must close that work, including English and failed probes.
+                    if record.status == .active, record.text?.isEmpty == false {
+                        record.status = .completed; record.failure = nil; record.failureReason = nil
+                        try owner.journal.put(record)
+                    }
                     if !record.needsWork { owner.attempts.remove(id: record.id) }
-                    if let failure = record.failure {
+                    if let failure = record.failure, failure != previousFailure || record.failureReason != previousReason {
                         let recording = record.recordingFile.map {
                             owner.journal.directory.deletingLastPathComponent().appendingPathComponent($0)
                         }
@@ -1091,12 +1114,15 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 ? .rejection(of: primary, audioDuration: record.duration) : .error
         }
         var fallbackVerdict: EnglishTranscriptGate.Verdict?
+        var fallbackSucceeded = false
+        var fallbackFailed = false
         // Any usable primary English is durable before optional work begins.
         if plan.selected && !output.text.isEmpty { try commitEnglish(output) }
         if needsFallback, let model = record.fallbackModelKey {
             do {
                 // Formal English repair also precedes the optional language head.
                 let secondary = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback").text
+                fallbackSucceeded = true
                 let alternate = SpeechPipeline.preferredTranscript(primary: nil, fallback: secondary, audioDuration: record.duration)
                 fallbackVerdict = EnglishTranscriptGate.verdict(secondary)
                 if output.text.isEmpty {
@@ -1107,10 +1133,17 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 }
             } catch is CancellationError { throw CancellationError() }
             catch {
+                fallbackFailed = true
                 if output.text.isEmpty { primaryError = error; output.failureReason = .error }
             }
         }
-        if deferSource {
+        // A formal service error is final for this pass. Never send a language
+        // request to the same failed fallback before reporting the error.
+        if sourceOnly == nil, output.text.isEmpty, !fallbackSucceeded, let primaryError { throw primaryError }
+        if fallbackFailed { return output }
+        if deferSource, record.fallbackModelKey != nil,
+           plan.selected || record.sourceTriggerPredecessor == nil,
+           !output.text.isEmpty || record.sourceTriggerPredecessor == nil {
             output.sourceDecision = nil; output.sourceInput = input
             return output
         }

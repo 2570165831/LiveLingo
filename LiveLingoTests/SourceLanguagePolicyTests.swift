@@ -346,7 +346,7 @@ final class SourceLanguagePolicyTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(bundled.parametersSHA256, "ae05eb38a3c49a983db1f8403da7fc0bd8e36d8da9405672b9012d7fb9db26dc")
         XCTAssertEqual(bundled.syntheticGroups.reduce(0) { $0 + $1.rows.count }, 4_125)
         XCTAssertEqual(bundled.queueGroups.map(\.name),
-            ["labels", "confidence-and-errors", "abnormal-heads", "formal-errors-can-probe", "initial-failure"])
+            ["labels", "confidence-and-errors", "abnormal-heads", "formal-errors-stop-probe", "initial-failure"])
         return bundled
     }
 
@@ -461,9 +461,8 @@ final class SourceLanguagePolicyTests: XCTestCase, @unchecked Sendable {
             }
             if mode == .english {
                 if row.formalErrors {
-                    // Both formal recognizers throw. An ordinary error still
-                    // permits a deferred head; this non-task cancellation
-                    // reaches run()'s real .failure branch, before any head.
+                    // Both formal recognizers throw. Report either ordinary
+                    // errors or non-task cancellation before any language head.
                     if row.initialFailure { throw CancellationError() }
                     throw URLError(.timedOut)
                 }
@@ -524,7 +523,7 @@ final class SourceLanguagePolicyTests: XCTestCase, @unchecked Sendable {
                 XCTAssertTrue(rowCalls.contains { $0.model == "primary" && !$0.enhanced })
                 XCTAssertTrue(rowCalls.contains { $0.model == "fallback" && $0.mode == .english })
             }
-            if row.initialFailure {
+            if row.formalErrors {
                 XCTAssertNil(record.sourceProbeInput)
                 XCTAssertGreaterThan(record.automaticRetryCount, 0)
                 XCTAssertNil(row.expected)
@@ -543,13 +542,19 @@ final class SourceLanguagePolicyTests: XCTestCase, @unchecked Sendable {
                 XCTAssertEqual(probeSnapshot.after, row.expectedAfter)
                 XCTAssertNil(probeSnapshot.decision)
                 XCTAssertEqual(bodySnapshot, probeSnapshot)
-                XCTAssertEqual(probeSnapshot.progress, rows.last?.expectedAfter)
+                XCTAssertEqual(probeSnapshot.progress, schedule == .sequential ? row.expectedAfter : rows.last?.expectedAfter)
                 let predecessor = try XCTUnwrap(rows.first { $0.index == row.index - 1 })
                 XCTAssertEqual(repairBodies.first?.confirmedLanguage, predecessor.oracleDecision.qualifiedLanguage)
             } else {
-                XCTAssertEqual(record.sourceProbeInput, SourceLanguagePolicy.ProbeInput(parakeetAccepted: row.parakeetAccepted,
-                    mean: row.mean, minimum: row.minimum))
-                XCTAssertEqual(record.sourceProbeFinished, true)
+                if let input = record.sourceProbeInput {
+                    XCTAssertEqual(input, SourceLanguagePolicy.ProbeInput(parakeetAccepted: row.parakeetAccepted,
+                        mean: row.mean, minimum: row.minimum))
+                    XCTAssertEqual(record.sourceProbeFinished, true)
+                } else {
+                    // A resolved, high-confidence English predecessor needs no
+                    // optional lane; unresolved backlog heads remain ordered.
+                    XCTAssertEqual(row.expected?.selected, false)
+                }
             }
         }
         if let last = rows.last {

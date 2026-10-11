@@ -158,7 +158,7 @@ def queue_groups(simulator, parameters):
                      case(mean=.99)]
     result = []
     for name, cases in (("labels", labels), ("confidence-and-errors", edges),
-                        ("abnormal-heads", malformed), ("formal-errors-can-probe", formal_errors),
+                        ("abnormal-heads", malformed), ("formal-errors-stop-probe", formal_errors),
                         ("initial-failure", failure)):
         inputs = []
         for index, item in enumerate(cases):
@@ -170,7 +170,7 @@ def queue_groups(simulator, parameters):
                            or (head["label"] is None and all(p is None for p in probabilities)))
             failed = (head["throws"] or head["mode"] != "probe" or head["policy"] != 1
                       or head["label"] is None or not valid_probabilities
-                      or (head["validated"] and not valid_label) or item["initialFailure"])
+                      or (head["validated"] and not valid_label) or item["formalErrors"])
             inputs.append(metadata_row(index, track=name,
                 parakeet_accepted=item["parakeetAccepted"], pk_mean_probability=item["mean"],
                 pk_min_probability=item["minimum"], probe_language=QWEN_LABELS.get(head["label"]),
@@ -184,7 +184,7 @@ def queue_groups(simulator, parameters):
             after = {"previousIndex": golden["index"],
                      "previousLanguage": golden["expected"]["qualifiedLanguage"]}
             rows.append({"index": golden["index"], **item,
-                         "expected": None if item["initialFailure"] else golden["expected"],
+                         "expected": None if item["formalErrors"] else golden["expected"],
                          "oracleDecision": golden["expected"],
                          "expectedBefore": before, "expectedAfter": after})
             before = after
