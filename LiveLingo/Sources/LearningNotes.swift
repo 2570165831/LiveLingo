@@ -778,7 +778,7 @@ enum LearningNumericProvenance {
 
     private static func superscriptPower(_ power: Int) -> String {
         let digits = Array("⁰¹²³⁴⁵⁶⁷⁸⁹")
-        return (power < 0 ? "⁻" : "") + String(String(abs(power)).compactMap { $0.wholeNumberValue.map { digits[$0] } })
+        return (power < 0 ? "⁻" : "") + String(String(power.magnitude).compactMap { $0.wholeNumberValue.map { digits[$0] } })
     }
 
     private enum UnitPower { case none, value(Int, length: Int), unreadable(length: Int) }
@@ -837,7 +837,12 @@ enum LearningNumericProvenance {
         switch unitPower(at: body.dropFirst(length)) {
         case .none: break
         case .value(let suffix, let suffixLength):
-            power *= suffix; length += suffixLength
+            let product = power.multipliedReportingOverflow(by: suffix)
+            guard !product.overflow else {
+                // Consume the suffix without treating an overflowing power as the bare unit.
+                return (prefixLength + length + suffixLength, family + "…")
+            }
+            power = product.partialValue; length += suffixLength
         case .unreadable(let suffixLength):
             // Never accept the unit before an unreadable power as the same unit.
             return (prefixLength + length + suffixLength, family + "…")
@@ -859,7 +864,9 @@ enum LearningNumericProvenance {
         let previous = split(last), next = split(Substring(term))
         guard !last.contains("·"), !last.hasSuffix("…"), !previous.base.isEmpty, previous.base == next.base,
               previous.power > 0, next.power > 0 else { return family + "/" + term }
-        return String(family[..<slash]) + "/" + String(previous.base) + superscriptPower(previous.power + next.power)
+        let sum = previous.power.addingReportingOverflow(next.power)
+        guard !sum.overflow else { return family + "/" + term }
+        return String(family[..<slash]) + "/" + String(previous.base) + superscriptPower(sum.partialValue)
     }
 
     /// The complete unit after a number, including powers and denominators.
@@ -915,7 +922,7 @@ enum LearningNumericProvenance {
             var mantissa = base, exponent = (group(2) ?? group(3) ?? group(4)).map(plain)
             if exponent == nil, base == "10" { mantissa = "1"; exponent = (group(5) ?? group(6)).map(plain) }
             let value: String
-            if let exponent, let power = Int(exponent), abs(power) <= 30,
+            if let exponent, let power = Int(exponent), (-30...30).contains(power),
                let significand = Decimal(string: mantissa, locale: Locale(identifier: "en_US_POSIX")) {
                 value = NSDecimalNumber(decimal: Decimal(sign: .plus, exponent: power, significand: significand)).stringValue
             } else {
