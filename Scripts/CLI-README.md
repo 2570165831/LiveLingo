@@ -53,6 +53,14 @@ notes for private readback. Scoring those detailed artifacts with
 `--include-content` enables source meanings and point readback. A summary-only
 probe is insufficient for semantic or detailed structural scoring.
 
+`Scripts/build-learning-quality-cli.sh NEW_OUTPUT_DIRECTORY` writes
+`quality-build-manifest.json` next to the binary: the executable hash, the
+compiler exit code, purpose `production-quality-probe` and repo-relative
+source hashes checked before and after the compile (no manifest when the
+compile fails or a source changes meanwhile). `learning-quality-cli` checks it
+and copies it into the output with `--include-content`; the evaluator rejects a
+production-model result without it.
+
 `target-acceptance-cli judge` omits literal stable prefixes and number fragments;
 `judge --include-content` enables them. `target_eval.calibrate` and
 `benchmark-asr-chunking.py` require `--include-content` for detailed/content
