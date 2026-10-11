@@ -257,6 +257,7 @@ class LegalNoticePolicyTests(unittest.TestCase):
         self.assertIsNone(privacy.decode_license_text(Path("LICENSE"), b"Copyright\0License"))
         self.assertIsNotNone(privacy.decode_license_text(Path("License.rtf"), b"{\\rtf1 Copyright License}\0"))
         self.assertIsNone(privacy.decode_license_text(Path("License.rtf"), b"{\\rtf1 Copyright \\object License}\0"))
+        self.assertIsNone(privacy.decode_license_text(Path("License.rtf"), b"{\\rtf1 Copyright \\bin3 abc License}\0"))
 
     def test_code_and_workflow_substring_matches_are_not_notices(self):
         for name in ("copying.rs", "copyright.pm", "license.yml", "LicenseProtection.py", "mod.rs", "data.npy"):

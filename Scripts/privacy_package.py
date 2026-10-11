@@ -351,7 +351,7 @@ def decode_license_text(path, data):
     # Upstream RTF notices sometimes carry a trailing NUL terminator. Permit
     # that terminator only for text RTF without embedded objects or binary data.
     if path.suffix.lower() == ".rtf":
-        if not data.startswith(b"{\\rtf1") or re.search(rb"\\(?:object|objdata|pict|bin|filetbl)\b", data):
+        if not data.startswith(b"{\\rtf1") or re.search(rb"\\(?:object|objdata|pict|bin|filetbl)(?![A-Za-z])", data):
             return None
         data = data.rstrip(b"\x00")
     for encoding in ("utf-8-sig", "cp1252"):
