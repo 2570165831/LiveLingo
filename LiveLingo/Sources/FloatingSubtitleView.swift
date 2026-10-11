@@ -28,7 +28,7 @@ private struct FloatingSubtitleContent: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
-                Text(model.isRecording ? "实时字幕 · 初译" : model.phaseLabel)
+                Text(model.floatingSubtitleHeader)
                     .font(.system(size: 12 * scale, weight: .semibold))
                     .foregroundStyle(Color(white: palette.headerWhite))
                 Spacer()
@@ -125,6 +125,13 @@ private struct FloatingSubtitleContent: View {
 
 /// Preview wording shared by the classroom window and floating captions.
 extension AppModel {
+    /// "初译" names the live preview translation, so it is shown only while that
+    /// preview can actually run; otherwise the Chinese line is the formal translation.
+    var floatingSubtitleHeader: String {
+        guard isRecording else { return phaseLabel }
+        return previewTranslationEnabled && supportsPreviewTranslation ? "实时字幕 · 初译" : "实时字幕"
+    }
+
     func floatingSubtitlePresentation(mode: FloatingSubtitleDisplayMode) -> FloatingSubtitlePresentation {
         var translatedText = floatingTranslationWithoutPreview ?? previewChineseDisplay
         var hasTranslation = true
