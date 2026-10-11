@@ -1196,8 +1196,7 @@ private struct LegacyEnglishFloatingSubtitleView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
-                Text(model.isRecording ? (model.previewTranslationEnabled && model.supportsPreviewTranslation
-                                          ? "实时字幕 · 初译" : "实时字幕") : model.phaseLabel)
+                Text(model.isRecording ? "实时字幕 · 初译" : model.phaseLabel)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color(white: 0.8))
                 Spacer()
