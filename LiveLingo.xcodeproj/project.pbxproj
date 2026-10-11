@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B7C200000000000000000001 /* SessionArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C200000000000000000002 /* SessionArchiveTests.swift */; };
 		E10000000000000000000003 /* MLXExitCancellationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000004 /* MLXExitCancellationTests.swift */; };
 		E10000000000000000000001 /* SessionEnergyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002 /* SessionEnergyTests.swift */; };
 		DAFB00000000000000000005 /* DataSafetyRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAFA00000000000000000005 /* DataSafetyRuntimeTests.swift */; };
@@ -152,6 +153,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B7C200000000000000000002 /* SessionArchiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionArchiveTests.swift; sourceTree = "<group>"; };
 		E10000000000000000000004 /* MLXExitCancellationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLXExitCancellationTests.swift; sourceTree = "<group>"; };
 		E10000000000000000000002 /* SessionEnergyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionEnergyTests.swift; sourceTree = "<group>"; };
 		DAFA00000000000000000005 /* DataSafetyRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSafetyRuntimeTests.swift; sourceTree = "<group>"; };
@@ -439,7 +441,7 @@
 				E10000000000000000000004 /* MLXExitCancellationTests.swift */,
 				E80300000000000000000002 /* PrivacyStorageTests.swift */,
 				E80200000000000000000002 /* PrivacyTransportTests.swift */,
-				E80100000000000000000002 /* PrivacyRuntimeTests.swift */, A20000000000000000000013 /* RealtimePolicyTests.swift */, A20000000000000000000019 /* TranslationAcceptanceTests.swift */, A2000000000000000000001A /* AudioContinuityTests.swift */, A2000000000000000000001B /* ExportAndPriorityTests.swift */, A2000000000000000000001C /* ReviewRetryTests.swift */, A2000000000000000000001D /* MediaImportTests.swift */, A2000000000000000000001E /* ClassroomPresentationTests.swift */, A2000000000000000000001F /* LearningFollowUpTests.swift */, 4C6F7E0AA37E495AAA0B5C85 /* CountLanguageAcceptanceTests.swift */, 9505FFEB607E48AF8146001F /* NumberLiteralIntegrityTests.swift */, B0AE357E04C9DB48AE7E5DAE /* CodeIndexProvenanceTests.swift */,);
+				E80100000000000000000002 /* PrivacyRuntimeTests.swift */, A20000000000000000000013 /* RealtimePolicyTests.swift */, A20000000000000000000019 /* TranslationAcceptanceTests.swift */, A2000000000000000000001A /* AudioContinuityTests.swift */, A2000000000000000000001B /* ExportAndPriorityTests.swift */, A2000000000000000000001C /* ReviewRetryTests.swift */, A2000000000000000000001D /* MediaImportTests.swift */, A2000000000000000000001E /* ClassroomPresentationTests.swift */, A2000000000000000000001F /* LearningFollowUpTests.swift */, 4C6F7E0AA37E495AAA0B5C85 /* CountLanguageAcceptanceTests.swift */, 9505FFEB607E48AF8146001F /* NumberLiteralIntegrityTests.swift */, B7C200000000000000000002 /* SessionArchiveTests.swift */, B0AE357E04C9DB48AE7E5DAE /* CodeIndexProvenanceTests.swift */,);
 			path = LiveLingoTests;
 			sourceTree = "<group>";
 		};
@@ -644,7 +646,7 @@
 				84845F083D7F515C9602CB68 /* TranscriptStateTests.swift in Sources */,A10000000000000000000008 /* SessionExporterTests.swift in Sources */,
 				E80300000000000000000001 /* PrivacyStorageTests.swift in Sources */,
 				E80200000000000000000001 /* PrivacyTransportTests.swift in Sources */,
-				E80100000000000000000001 /* PrivacyRuntimeTests.swift in Sources */, A10000000000000000000013 /* RealtimePolicyTests.swift in Sources */, A10000000000000000000019 /* TranslationAcceptanceTests.swift in Sources */, A1000000000000000000001A /* AudioContinuityTests.swift in Sources */, A1000000000000000000001B /* ExportAndPriorityTests.swift in Sources */, A1000000000000000000001C /* ReviewRetryTests.swift in Sources */, A1000000000000000000001D /* MediaImportTests.swift in Sources */, A1000000000000000000001E /* ClassroomPresentationTests.swift in Sources */, A1000000000000000000001F /* LearningFollowUpTests.swift in Sources */, 324C076031A3417B868B9D8D /* CountLanguageAcceptanceTests.swift in Sources */, D4E69378D56E4279BE15D3B3 /* NumberLiteralIntegrityTests.swift in Sources */, 97F1A2C9FD8748DB092D32F2 /* CodeIndexProvenanceTests.swift in Sources */,);
+				E80100000000000000000001 /* PrivacyRuntimeTests.swift in Sources */, A10000000000000000000013 /* RealtimePolicyTests.swift in Sources */, A10000000000000000000019 /* TranslationAcceptanceTests.swift in Sources */, A1000000000000000000001A /* AudioContinuityTests.swift in Sources */, A1000000000000000000001B /* ExportAndPriorityTests.swift in Sources */, A1000000000000000000001C /* ReviewRetryTests.swift in Sources */, A1000000000000000000001D /* MediaImportTests.swift in Sources */, A1000000000000000000001E /* ClassroomPresentationTests.swift in Sources */, A1000000000000000000001F /* LearningFollowUpTests.swift in Sources */, 324C076031A3417B868B9D8D /* CountLanguageAcceptanceTests.swift in Sources */, D4E69378D56E4279BE15D3B3 /* NumberLiteralIntegrityTests.swift in Sources */, B7C200000000000000000001 /* SessionArchiveTests.swift in Sources */, 97F1A2C9FD8748DB092D32F2 /* CodeIndexProvenanceTests.swift in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */

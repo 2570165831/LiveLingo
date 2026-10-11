@@ -19,8 +19,15 @@ struct SessionCaptureStart: Equatable, Sendable {
     let utcOffsetSeconds: Int
 
     init?(date: Date, utcOffsetSeconds: Int) {
-        guard date.timeIntervalSince1970.isFinite, abs(utcOffsetSeconds) <= 18 * 3_600,
-              utcOffsetSeconds % 60 == 0 else { return nil }
+        // Check the signed range before any magnitude calculation: abs(Int.min)
+        // traps, and stored metadata must never be able to crash a reader.
+        // The yyyy labels support Gregorian years 0001...9999, through the
+        // final millisecond. Reject finite but unrenderable dates as well.
+        guard (-62_135_596_800...253_402_300_799.999).contains(date.timeIntervalSince1970),
+              (-18 * 3_600...18 * 3_600).contains(utcOffsetSeconds),
+              utcOffsetSeconds % 60 == 0,
+              (-62_135_596_800...253_402_300_799.999).contains(
+                date.timeIntervalSince1970 + Double(utcOffsetSeconds)) else { return nil }
         self.date = date
         self.utcOffsetSeconds = utcOffsetSeconds
     }
@@ -88,8 +95,8 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
     var createdAt: Date
     var updatedAt: Date
     /// When live capture started and the UTC offset in force there. Nil for
-    /// imports and older courses; omitted by Codable and kept out of the
-    /// reader-version gate so older readers still open the course.
+    /// imports and older courses; omitted by Codable when absent. Either key
+    /// requires reader version 3, so older readers cannot silently discard it.
     var captureStartedAt: Date? = nil
     var captureUTCOffsetSeconds: Int? = nil
     /// Optimistic concurrency token. Keep the value returned by save/append.
@@ -1110,20 +1117,24 @@ final class SessionStore: @unchecked Sendable {
 }
 
 enum SessionArchiveCoding {
-    static let currentReaderVersion = 2
+    static let currentReaderVersion = 3
     /// Keep the frozen schema-1 payload and input fingerprints unchanged. The
     /// envelope/row gates old readers before they can discard new semantics.
     static func minimumReaderVersion(for data: Data) throws -> Int {
+        let captureTimeKeys: Set<String> = ["captureStartedAt", "captureUTCOffsetSeconds"]
         let modernKeys: Set<String> = ["targetLocale", "sourceLanguage", "captionAnnotation", "translationFailures",
             "pendingCaptionRepairs", "lastErrorSource", "captureError", "retireGenerationCheckpoint"]
-        func containsModernField(_ value: Any) -> Bool {
+        func containsField(_ value: Any, keys: Set<String>) -> Bool {
             if let object = value as? [String: Any] {
-                return !modernKeys.isDisjoint(with: object.keys) || object.values.contains(where: containsModernField)
+                return !keys.isDisjoint(with: object.keys) || object.values.contains { containsField($0, keys: keys) }
             }
-            if let array = value as? [Any] { return array.contains(where: containsModernField) }
+            if let array = value as? [Any] { return array.contains { containsField($0, keys: keys) } }
             return false
         }
-        return containsModernField(try JSONSerialization.jsonObject(with: data)) ? currentReaderVersion : 1
+        let object = try JSONSerialization.jsonObject(with: data)
+        if containsField(object, keys: captureTimeKeys) { return 3 }
+        // Version-2 semantics remain version 2 even as newer gates are added.
+        return containsField(object, keys: modernKeys) ? 2 : 1
     }
     static let genesisDigest = String(repeating: "0", count: 64)
     static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }

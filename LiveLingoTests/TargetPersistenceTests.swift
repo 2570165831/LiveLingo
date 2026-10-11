@@ -82,7 +82,7 @@ struct TargetPersistenceTests {
         #expect(try SessionArchiveCoding.encode(stamped) == Data(Self.oldSnapshotJSON.utf8))
     }
 
-    @Test func captureStartRoundTripsWithoutGatingOldReadersOrInputs() throws {
+    @Test func captureStartRoundTripsWithReaderGateAndUnchangedInputs() throws {
         let original = try baselineSnapshot()
         #expect(original.captureStart == nil)
         var stamped = original
@@ -94,7 +94,7 @@ struct TargetPersistenceTests {
         let loaded = try SessionArchiveCoding.decode(SessionSnapshot.self, from: bytes)
         #expect(loaded == stamped)
         #expect(loaded.captureStart == start)
-        #expect(try SessionArchiveCoding.minimumReaderVersion(for: bytes) == 1)
+        #expect(try SessionArchiveCoding.minimumReaderVersion(for: bytes) == 3)
         #expect(try loaded.inputFingerprint() == Self.oldInputFingerprint)
         try SessionStore.validatePreservation(from: original, to: loaded)
         var cleared = loaded
