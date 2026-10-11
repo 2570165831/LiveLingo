@@ -941,7 +941,7 @@
       "repository": "https://github.com/tormol/encode_unicode",
       "licenseFile": null,
       "authors": [
-        "Torbj\u00f8rn Birch Moltu <t.b.moltu@lyse.net>"
+        "Torbjørn Birch Moltu <t.b.moltu@lyse.net>"
       ],
       "texts": [
         {
@@ -2505,7 +2505,8 @@
         }
       ],
       "bundledSource": "CorrespondingSource/option-ext-0.2.0.crate",
-      "sourceURL": "https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate"
+      "sourceURL": "https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate",
+      "bundledSourceSHA256": "98db8d44c96295b9bfa85a4aacfedd6690c3155123b10b3090e74fea0cab5925"
     },
     {
       "name": "paste",
@@ -5216,7 +5217,9 @@
         {
           "path": "windows-sys-0.48.0/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.48.0/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "83caf48e8509b0f319e1ed4d9362248be594bf8ec3b6a7a81487556d1ca458b2"
@@ -5245,7 +5248,9 @@
         {
           "path": "windows-sys-0.52.0/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.52.0/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "17a51f78e1ad133a82c098466abbd1028f852853c98a7d606dda18a2509b9099"
@@ -5273,7 +5278,9 @@
         {
           "path": "windows-sys-0.59.0/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.59.0/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "e8b9248a246d6264f26e448d125bb914ee62dfd42a8a757ea318ae8d4a578aee"
@@ -5302,7 +5309,9 @@
         {
           "path": "windows-sys-0.60.2/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.60.2/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "85dd5fca2fdef6a27154e2522acee5471e4063e5323259f65e2ec18ca0f63a0b"
@@ -5331,7 +5340,9 @@
         {
           "path": "windows-sys-0.61.2/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.61.2/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "a48ff77be5dd144f696440880d34a8b4d9ac89f6c2a31cf45fe9cfa137f14a7f"
@@ -9132,7 +9143,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "licenseFile": null,
       "authors": null,
-      "texts": [
+      "texts": [],
+      "omittedNonNoticeSources": [
         {
           "path": "objc2-foundation-0.3.2/src/copying.rs",
           "sha256": "259b22f571b54fed25f68ec5abd8eda223e7b0547a806f13ba797a0eabecd64f"
@@ -9631,7 +9643,8 @@
       "repository": "https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-metadata",
       "licenseFile": null,
       "authors": null,
-      "texts": [
+      "texts": [],
+      "omittedNonNoticeSources": [
         {
           "path": "wasm-metadata-0.244.0/src/oci_annotations/authors.rs",
           "sha256": "241d116ecc7ec20e3c67cb8e9edb00ef98feab4af4a87f4f00b1f21bc3e8d1f2"
@@ -10558,7 +10571,8 @@
         }
       ],
       "sourceArchive": "work/mlx-integration-20260910/native-source-audit/crates/colored-3.1.1.crate",
-      "bundledSource": "CorrespondingSource/colored-3.1.1.crate"
+      "bundledSource": "CorrespondingSource/colored-3.1.1.crate",
+      "bundledSourceSHA256": "3b708de9867926bf175bd49c9f3cdd4acaf397a81a1f48e7d51cf51cf94f3104"
     },
     {
       "name": "combine",
@@ -11885,7 +11899,7 @@
       "licenseFile": null,
       "authors": [
         "Andrew Straw <strawman@astraw.com>",
-        "Ren\u00e9 Kijewski <rene.kijewski@fu-berlin.de>",
+        "René Kijewski <rene.kijewski@fu-berlin.de>",
         "Ryan Lopopolo <rjl@hyperbo.la>"
       ],
       "texts": [
@@ -11911,7 +11925,7 @@
       "repository": "https://github.com/strawlab/iana-time-zone",
       "licenseFile": null,
       "authors": [
-        "Ren\u00e9 Kijewski <crates.io@k6i.de>"
+        "René Kijewski <crates.io@k6i.de>"
       ],
       "texts": [
         {
@@ -11945,7 +11959,8 @@
         }
       ],
       "sourceArchive": "work/mlx-integration-20260910/native-source-audit/crates/inferno-0.11.21.crate",
-      "bundledSource": "CorrespondingSource/inferno-0.11.21.crate"
+      "bundledSource": "CorrespondingSource/inferno-0.11.21.crate",
+      "bundledSourceSHA256": "be0b729029ed92ec8bab138c571b1fa2860623be86d90d67b4b0be7b1745adc5"
     },
     {
       "name": "inventory",
@@ -12251,7 +12266,7 @@
       "repository": "https://github.com/rust-lang-nursery/lazy-static.rs",
       "licenseFile": null,
       "authors": [
-        "Marvin L\u00f6bel <loebel.marvin@gmail.com>"
+        "Marvin Löbel <loebel.marvin@gmail.com>"
       ],
       "texts": [
         {
@@ -12797,7 +12812,7 @@
       "repository": "https://github.com/faern/oneshot",
       "licenseFile": null,
       "authors": [
-        "Linus F\u00e4rnstrand <faern@faern.net>"
+        "Linus Färnstrand <faern@faern.net>"
       ],
       "texts": [
         {
@@ -12918,6 +12933,13 @@
           "path": "openssl-src-300.5.5+3.5.5/openssl/external/perl/Text-Template-1.56/LICENSE",
           "sha256": "9837f05336ef3cbacb6a96e1672a0426d81ad01191f214b8d48e22ca62338181"
         },
+        {
+          "path": "openssl-src-300.5.5+3.5.5/COPYRIGHT-perl-helper.txt",
+          "sha256": "c5d6631657960c42b618116d0f0bb054299bc80de3be168dd52aafbf1a5ed8db",
+          "scope": "Copyright and license header retained from the otherwise non-notice Perl helper source."
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "openssl-src-300.5.5+3.5.5/openssl/util/perl/OpenSSL/copyright.pm",
           "sha256": "04213b69dbebc8ba0dd8a6216af1d9422f9b63619c1cf2f1d8aa107b83bbb608"
@@ -13624,7 +13646,7 @@
       "repository": "https://github.com/kornelski/rust-rgb",
       "licenseFile": null,
       "authors": [
-        "Kornel Lesi\u0144ski <kornel@geekhood.net>",
+        "Kornel Lesiński <kornel@geekhood.net>",
         "James Forster <james.forsterer@gmail.com>"
       ],
       "texts": [
@@ -13849,7 +13871,7 @@
       "repository": "https://github.com/nabijaczleweli/safe-transmute-rs",
       "licenseFile": null,
       "authors": [
-        "\u043d\u0430\u0431 <nabijaczleweli@gmail.com>",
+        "наб <nabijaczleweli@gmail.com>",
         "Eduardo Pinho <enet4mikeenet@gmail.com>",
         "Lukas Kalbertodt <lukas.kalbertodt@gmail.com>",
         "Philipp Tessenow <philipp@tessenow.org>",
@@ -15446,7 +15468,9 @@
         {
           "path": "windows-0.62.2/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-0.62.2/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "509ea1e4050ac10b39d13d7fa6ca21b22fea065c31f149aa679b16442fe82a76"
@@ -15682,7 +15706,9 @@
         {
           "path": "windows-sys-0.45.0/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.45.0/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "d39897ebdb9aef7146327e7ff78fef04d7f53bc5e09fcbdd090fdc985ce3cdf6"

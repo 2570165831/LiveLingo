@@ -1,0 +1,234 @@
+{
+  "scope": "Static inspection of corresponding build source subsets. Original tarballs are preserved outside the candidate. This does not prove a byte-identical rebuild of the installed libraries.",
+  "archives": [
+    {
+      "package": "mpg123",
+      "version": "1.32.3",
+      "originalSHA256": "2d9913a57d4ee8f497a182c6e82582602409782a4fb481e989feebf4435867b4",
+      "preparedSHA256": "c62fcd6ac39e466bd838f84a35a92ea80fcffa1cedd7dbec6c78eaefc030e330",
+      "retainedFiles": 305,
+      "originalLicenseHashes": {
+        "mpg123-1.32.3/AUTHORS": "bfa5dab0ed3b3ea7a9c76961fcf76df5a5d8e5107cb05d31cf6c5880919b89e5",
+        "mpg123-1.32.3/COPYING": "c22482728a634a8dfdb4ff72a96d4c1ed64cd8f3e79335c401751ac591609366",
+        "mpg123-1.32.3/doc/LICENSE": "cca79ea6fc0a7715e52450df2d86311f990e85067dd13f4d7f5a88d4fd23a07c"
+      },
+      "retainedInventorySHA256": "94ea2e71ca51e6345193a7c8ec585a3205d46f19f017dbc722c8e405659c6761",
+      "redactedComments": [],
+      "privacyStatus": "passed",
+      "omittedCount": 56
+    },
+    {
+      "package": "libsndfile",
+      "version": "1.2.2",
+      "originalSHA256": "3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e",
+      "preparedSHA256": "dc9ebdd9cf55b181d7bcad78dc64d6692b77938bfcb3e5d1aa63c6440f8a8ffe",
+      "retainedFiles": 256,
+      "originalLicenseHashes": {
+        "libsndfile-1.2.2/src/GSM610/COPYRIGHT": "1bbe7119b1bcd1489e0f36cb95b8902f7f0ceec9a2f3a67394bc9f4709a4e0a7",
+        "libsndfile-1.2.2/AUTHORS": "373fb9abaa154db5da8ab692853da32ced8977b817a713913953c63e50eb4499",
+        "libsndfile-1.2.2/COPYING": "ad01ea5cd2755f6048383c8d54c88459cd6fcb17757c5c8892f8c5ea060f6140"
+      },
+      "retainedInventorySHA256": "91de1fa561aecb2df3538c0a4ecc7962027edd5a95e7afb21efe00e3916b876b",
+      "redactedComments": [],
+      "privacyStatus": "passed",
+      "omittedCount": 98
+    },
+    {
+      "package": "lame",
+      "version": "3.100",
+      "originalSHA256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+      "preparedSHA256": "c07145e35be54c7dfcdbb58de11545d536a6e641b83e9387de4ba078373d513b",
+      "retainedFiles": 205,
+      "originalLicenseHashes": {
+        "lame-3.100/COPYING": "bfe4a52dc4645385f356a8e83cc54216a293e3b6f1cb4f79f5fc0277abf937fd",
+        "lame-3.100/LICENSE": "7a40cbd8818c57e5285e83c772a459a996d1662c824a879836b97b473c07cae4",
+        "lame-3.100/mpglib/AUTHORS": "d8ecf9556aafa8c653796d6be3dc43deea374257680e21c30109a5c3c4484263",
+        "lame-3.100/debian/copyright": "1f27f9f698183275bd615c1140b7bf6e498750e9280597c6eb39790e54ae809b"
+      },
+      "retainedInventorySHA256": "93aae4e8fe873567a030d0200a2597a0fab829de0b27b0b0fbf4ed202bde5563",
+      "redactedComments": [],
+      "privacyStatus": "passed",
+      "omittedCount": 121
+    },
+    {
+      "package": "colored",
+      "version": "3.1.1",
+      "originalSHA256": "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34",
+      "preparedSHA256": "3b708de9867926bf175bd49c9f3cdd4acaf397a81a1f48e7d51cf51cf94f3104",
+      "retainedFiles": 19,
+      "originalLicenseHashes": {
+        "colored-3.1.1/LICENSE": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+      },
+      "retainedInventorySHA256": "4e90fb672fd863d8ef190604104a2d7c226047296867d54f944b51f3db5ec7c7",
+      "redactedComments": [],
+      "privacyStatus": "passed",
+      "omittedCount": 13
+    },
+    {
+      "package": "inferno",
+      "version": "0.11.21",
+      "originalSHA256": "232929e1d75fe899576a3d5c7416ad0d88dbfbb3c3d6aa00873a7408a50ddb88",
+      "preparedSHA256": "be0b729029ed92ec8bab138c571b1fa2860623be86d90d67b4b0be7b1745adc5",
+      "retainedFiles": 45,
+      "omitted": [
+        {
+          "path": "inferno-0.11.21/.codecov.yml",
+          "reason": "upstream-platform-or-ci-metadata"
+        },
+        {
+          "path": "inferno-0.11.21/.github/codecov.yml",
+          "reason": "upstream-tests-docs-examples-ci"
+        },
+        {
+          "path": "inferno-0.11.21/.github/dependabot.yml",
+          "reason": "upstream-tests-docs-examples-ci"
+        },
+        {
+          "path": "inferno-0.11.21/.github/workflows/check.yml",
+          "reason": "upstream-tests-docs-examples-ci"
+        },
+        {
+          "path": "inferno-0.11.21/.github/workflows/scheduled.yml",
+          "reason": "upstream-tests-docs-examples-ci"
+        },
+        {
+          "path": "inferno-0.11.21/.github/workflows/test.yml",
+          "reason": "upstream-tests-docs-examples-ci"
+        },
+        {
+          "path": "inferno-0.11.21/README.md",
+          "reason": "upstream-maintenance-or-documentation"
+        },
+        {
+          "path": "inferno-0.11.21/src/bin/flamegraph.rs",
+          "reason": "trailing-cfg-test-module-only"
+        },
+        {
+          "path": "inferno-0.11.21/src/collapse/common.rs",
+          "reason": "trailing-cfg-test-module-only"
+        },
+        {
+          "path": "inferno-0.11.21/src/collapse/dtrace.rs",
+          "reason": "trailing-cfg-test-module-only"
+        },
+        {
+          "path": "inferno-0.11.21/src/collapse/matcher.rs",
+          "reason": "trailing-cfg-test-module-only"
+        },
+        {
+          "path": "inferno-0.11.21/src/collapse/perf.rs",
+          "reason": "trailing-cfg-test-module-only"
+        },
+        {
+          "path": "inferno-0.11.21/src/collapse/vsprof.rs",
+          "reason": "trailing-cfg-test-module-only"
+        },
+        {
+          "path": "inferno-0.11.21/src/flamegraph/color/mod.rs",
+          "reason": "trailing-cfg-test-module-only"
+        },
+        {
+          "path": "inferno-0.11.21/src/flamegraph/color/palette_map.rs",
+          "reason": "trailing-cfg-test-module-only"
+        },
+        {
+          "path": "inferno-0.11.21/src/flamegraph/color/palettes.rs",
+          "reason": "trailing-cfg-test-module-only"
+        },
+        {
+          "path": "inferno-0.11.21/src/flamegraph/mod.rs",
+          "reason": "trailing-cfg-test-module-only"
+        }
+      ],
+      "redactedComments": [],
+      "originalLicenseHashes": {
+        "inferno-0.11.21/LICENSE": "1ffb70c33c4f79f04e947facc5c7851f289609256aacb47fc115f700427d9520"
+      },
+      "retainedInventorySHA256": "6152cfd1f66a3679ac04fbd6f8909c2fa8b1624a9e8d1f2ae1c3976843c58176",
+      "privacyStatus": "passed"
+    },
+    {
+      "package": "option-ext",
+      "version": "0.2.0",
+      "originalSHA256": "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d",
+      "preparedSHA256": "98db8d44c96295b9bfa85a4aacfedd6690c3155123b10b3090e74fea0cab5925",
+      "retainedFiles": 8,
+      "originalLicenseHashes": {
+        "option-ext-0.2.0/LICENSE.txt": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172"
+      },
+      "retainedInventorySHA256": "42c20255f401bd533a32d302368a14fe4f2f4ce4824f04920f33ef643df45dbe",
+      "redactedComments": [],
+      "privacyStatus": "passed",
+      "omittedCount": 0
+    },
+    {
+      "package": "gcc",
+      "version": "13.4.0",
+      "originalSHA256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
+      "preparedSHA256": "0b31a2cb846da4e906dbe1bad01234cbd8b5ba6786b0da51ffa2069caa1892a6",
+      "retainedFiles": 10013,
+      "originalLicenseHashes": {
+        "gcc-13.4.0/COPYING.LIB": "a9bdde5616ecdd1e980b44f360600ee8783b1f99b8cc83a2beb163a0a390e861",
+        "gcc-13.4.0/libquadmath/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
+        "gcc-13.4.0/libgo/go/golang.org/x/mod/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/libgo/go/golang.org/x/xerrors/LICENSE": "84d554e7a5d139b7c7b5d6ef0670ae556c4cdcfa354eaad72a1c07c08012c96f",
+        "gcc-13.4.0/libgo/go/golang.org/x/tools/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/libgo/go/golang.org/x/sync/AUTHORS": "b82446c166daa6932dc33418961ed7a7f06c5a9fee17e9d214e16079e3442757",
+        "gcc-13.4.0/libgo/go/golang.org/x/sync/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/libgo/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/libstdc++-v3/include/pstl/LICENSE.txt": "0ca8cbe9219a841f9bc8fbb1f8ecdf5e39b1b0e23ee10fb6b0c090d8987dd1eb",
+        "gcc-13.4.0/libstdc++-v3/doc/html/manual/license.html": "2906eca1abfe0c78daea99197a6eb130603c2dac4aa8cd7863526ea52cd3f030",
+        "gcc-13.4.0/zlib/contrib/dotzlib/LICENSE_1_0.txt": "36266a8fd073568394cb81cdb2b124f7fdae2c64c1a7ed09db34b4d22efa2951",
+        "gcc-13.4.0/libphobos/src/LICENSE_1_0.txt": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+        "gcc-13.4.0/libphobos/libdruntime/LICENSE.txt": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+        "gcc-13.4.0/libcody/LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+        "gcc-13.4.0/contrib/unicode/unicode-license.txt": "72a95a3930bf6fc1961c08c3011321d294c5d9ee9c5d10b535c1afca15287fba",
+        "gcc-13.4.0/COPYING3.LIB": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
+        "gcc-13.4.0/COPYING": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
+        "gcc-13.4.0/COPYING.RUNTIME": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+        "gcc-13.4.0/include/COPYING": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
+        "gcc-13.4.0/include/COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "gcc-13.4.0/gcc/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
+        "gcc-13.4.0/gcc/testsuite/gcc.dg/params/LICENSE": "4919cfb14a73cd64fcef67b107613970cf1659a09aa675dba31314f373bc7204",
+        "gcc-13.4.0/gcc/testsuite/gcc.dg/vect/tsvc/license.txt": "0bf700c6654f3e72308035d7ebb60abcc486e673ee8a72d19101f80812288f1c",
+        "gcc-13.4.0/gcc/ada/doc/share/gnu_free_documentation_license.rst": "e1c24b9f8545fe967f839a98bda32478fa1939f45aab4ec31c3d0ad2d10ed47e",
+        "gcc-13.4.0/gcc/ada/doc/share/copyright.tex": "c0a2678e14049ef3d4ba0d9dd7abf8b0dbb8335d6e2311b2d2f568035321f2b7",
+        "gcc-13.4.0/gcc/m2/images/LICENSE.IMG": "ae8b2a985bd93e0785c3a9caa1762d9e958e62b6df819e705c26b2f7c421a2f6",
+        "gcc-13.4.0/gcc/m2/COPYING3.LIB": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
+        "gcc-13.4.0/gcc/m2/COPYING.RUNTIME": "736da4b68a76fa1e027a2ef2366946240662b5a179d1ed95b3b08cc33dab0d89",
+        "gcc-13.4.0/gcc/m2/COPYING.FDL": "8d9fa5772d8f68d715749c4cbeab2bf225d631054852491e1ef89a78fd201543",
+        "gcc-13.4.0/gcc/m2/COPYING3": "0ae0485a5bd37a63e63603596417e4eb0e653334fa6c7f932ca3a0e85d4af227",
+        "gcc-13.4.0/gcc/go/gofrontend/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/gcc/COPYING3.LIB": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
+        "gcc-13.4.0/gcc/COPYING": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
+        "gcc-13.4.0/gcc/COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "gcc-13.4.0/libiberty/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
+        "gcc-13.4.0/libiberty/copying-lib.texi": "deda581ced57145d3ed4f099f79aeeaf3f0275758db02c607321131a3043fe95",
+        "gcc-13.4.0/COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "gcc-13.4.0/libsanitizer/LICENSE.TXT": "74c2b24539a53c34abddb559266d89cb653b0198cd2faf9c04763d3223db7f6d",
+        "gcc-13.4.0/libffi/LICENSE": "a61d06e8f7be57928e71e800eb9273b05cb8868c484108afe41e4305bb320dde",
+        "gcc-13.4.0/libffi/LICENSE-BUILDTOOLS": "e67978cd18816c0cb7d29aaaacde7b7447402c2fb321a051698890a8eaedda94"
+      },
+      "retainedInventorySHA256": "7a094c896bd4b386054d91c85aeedd293ea9a42f84fb93cd2866a2e7bd46c080",
+      "redactedComments": [
+        {
+          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/darwin/ctype_base.h",
+          "commentExamples": 1,
+          "originalSHA256": "3606252ed945445ee1606af2a16e761166961c59eb1656b969b9a5147a017f6d"
+        },
+        {
+          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/freebsd/ctype_base.h",
+          "commentExamples": 1,
+          "originalSHA256": "39c32696cb15ae577c099c4e7da61470436296f414c018179093bd216fcfeffc"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/diagnostic.h",
+          "commentExamples": 1,
+          "originalSHA256": "94781ae0ab138d083f6679a1521071723de43930ad8ee077d58b2c165bbf4242"
+        }
+      ],
+      "privacyStatus": "passed",
+      "omittedCount": 115373
+    }
+  ]
+}

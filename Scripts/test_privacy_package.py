@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from Scripts import privacy_package as privacy
 from Scripts import model_files
+from Scripts import reviewed_resources
 from Scripts.test_model_files import write_model
 
 
@@ -466,6 +467,7 @@ class PrivacyPackageTests(unittest.TestCase):
 
     def run_bundle(self, bundle, repo, args):
         with patch.object(bundle, "REPO_ROOT", repo), patch.object(bundle, "is_apfs", return_value=False), \
+             patch.object(reviewed_resources, "entries", return_value={}), \
              patch.object(bundle, "repair_portable_asr_dylib_links"), patch.object(sys, "argv", args), \
              contextlib.redirect_stdout(io.StringIO()):
             bundle.main()
@@ -482,7 +484,8 @@ class PrivacyPackageTests(unittest.TestCase):
         self.assertEqual((app / ".migration-source-fixture/transcript.txt").read_text(), CANARY)
         self.assertFalse(any(p.name.startswith(".migration-source") for p in output.rglob("*")))
         self.assertFalse((output / "Contents/Resources/LanguageRuntime/.cli-runtime").exists())
-        privacy.inspect_tree(output)
+        with patch.object(reviewed_resources, "entries", return_value={}):
+            privacy.inspect_tree(output)
         for relative in bundle.REQUIRED_MODEL_FILES:
             self.assertTrue((output / "Contents/Resources/Models" / relative / "model-00002-of-00002.safetensors").is_file())
 

@@ -88,6 +88,9 @@ python3.13 Scripts/prepare-mlx-runtime.py \
 python3.13 Scripts/prepare-mlx-runtime.py --mode asr \
   --base-python /absolute/path/to/locked-asr-python \
   --output /absolute/path/to/asr-python
+python3.13 Scripts/prepare-model-inputs.py \
+  --base-models /absolute/path/to/locked-models \
+  --output /absolute/path/to/prepared-models
 ```
 
 语言输出供下面的 `--runtime` 使用，ASR 输出直接供 `--asr-python` 使用。准备脚本先收集全部可识别许可证和 `License-File` 声明的原文，包含被剔除的测试/示例目录；集中副本的相对原名与 SHA-256 记录在 `runtime-preparation.json`，不改许可证字节。缺少许可证就失败。删除范围限于测试、缓存、Tk/IDLE/turtle、ensurepip/venv、安装工具、开发夹具和 App 不使用的展示/训练资源；保留 Python 模块、动态库和必要数据。SciPy 导入需要 `numpy.f2py`，SymPy 导入需要 MathML 模块，不能整目录删除它们；sklearn 导入时需要自己的 CSS，同样保留。
@@ -95,6 +98,14 @@ python3.13 Scripts/prepare-mlx-runtime.py --mode asr \
 副本中的 Python 源码仅在编码或不可打印字符不被隐私门接受时规范化，并比较完整语法树确保含义不变；wheel 元数据保留版本、依赖和许可头，去掉 README 长描述与本机安装溯源，重建 RECORD。certifi 保留每个证书块，只去掉标签注释。原始输入始终只读，输出存在时拒绝覆盖；失败的输出保留供诊断，不自动删除。
 
 准备和组装都使用真实隐私门。非标准许可证名有严格的授权文本规则；Cargo 许可声明限定文件名和目录，解析全部字段并继续检查课堂内容、本机路径及注释。未知运行数据和对应源码附件不会因此自动获准。若现成环境仍含被门拒绝的必要资源，脚本返回失败；不得把已生成目录称为可分发运行库。导入检查应覆盖语言库的 worker/engine/checks 及 ASR 服务的实际依赖，仅导入，不加载模型。已签名 Python helper 的 sandbox-inherit 权限可能使其无法由未沙盒化的构建进程直接启动；兼容 Python 导入精简树的检查应单独记录，不能冒充最终 App 内运行验收。
+
+[PrivacyResources.json](../Packaging/PrivacyResources.json) 只批准确切 App 相对路径及 SHA-256，逐项记录包版本和必要性；不是扩展名白名单。当前类别是 Outlines JSON Schema、SymPy/Lark 语法、sklearn 导入时读取的 CSS、librosa 数值 MessagePack、Parakeet v2 内嵌词表、原样授权文本及七份对应源码归档。路径或哈希变化都拒绝；清单外同类文件继续走原门禁。JSON Schema 的片段引用、语法正则和授权文本标记按格式检查，其他元数据、注释和本机路径继续检查；MessagePack 只接受有限数值结构，不反序列化执行对象。Parakeet 配置的词表仅按 token 拼写检查，重复的 labels 必须与词表完全一致，其他配置字段沿用原门禁；来源是现成 v2 转换模型，未宣称已核实上游提交号。
+
+对应源码由 `Scripts/prepare_source_archive.py` 的 API 准备，逐成员流式检查，不解包执行。源包及各授权文本哈希、保留文件数量、被剔除的测试/文档/无关语言组件和注释例子处理见 [SourceArchiveAudit.json](../Packaging/SourceArchiveAudit.json)。原始上游哈希与精简后哈希分别记录；授权文本字节不改，所选实现和构建输入保留。音频库构建脚本随 libsndfile 归档保存；仅 BSD 的四份可选 codec 源包移出分发，版权声明仍保留。该静态审计没有重建对应库，不能证明与已装二进制逐字节一致。更新清单必须人工核对来源、实际依赖和内容，不能把拒绝项自动加进去。
+
+模型准备只选择 App 已使用的四个模型。翻译提示由 App 自行构造，因此移出复制的 chat template；Parakeet 从 `joint.vocabulary` 读取词表，因此移出训练 tokenizer，并只清除 `tokenizer.dir` 的训练路径。权重和内嵌词表不改，不加载模型；前后检查 safetensors 头、分片索引和必需文件。其他私人字段仍拒绝。下面两项模型参数均指向准备后的模型根目录。
+
+合成树回归可运行 `python3.13 -B -m unittest Scripts.test_privacy_package Scripts.test_model_files Scripts.test_runtime_prepare Scripts.test_reviewed_resources Scripts.test_model_prepare`；Python 全套使用 `python3.13 -B -m unittest -v`，按 CONTRIBUTING.md 保留过滤后的日志及跳过原因。使用现成 App 的 site-packages 时只读加入 PYTHONPATH，关闭字节码写入和在线模型访问。
 - 模型加载时的语法词表改用内置字符转换，保留每个原始字节和 token ID；未知 ByteLevel 字符仍拒绝，普通新增 token 仍按 UTF-8 编码，特殊 token 仍排除。词表仍在加载时准备，不把开销移到首次笔记。`test_grammar_bytes.py` 检查无效 Latin-1 字符、其他 Unicode、代理项及新增/特殊 token 边界；`test_grammar_vocabulary.py` 可用本地分词器核对中文、化学式和表情。构建步骤变快不等于整场翻译加速或耗电下降。
 - 普通翻译和摘要会复用同一模型中完全相同的输入前缀，减少任务切换后重复读取固定提示。非思考模式的结构化笔记也可使用剩余额度，最多保存 256 个输入 token；普通任务最多保存 512 个。每个已加载模型仍最多保留两份快照，合计受 128 MiB 限制。笔记不能挤掉字幕或普通摘要的快照，也不改变它们的淘汰顺序；普通任务需要空间时先释放笔记快照，再释放最久未使用的普通快照。优先复用最长的完全一致前缀，每个请求取得独立副本，语法约束状态分别创建。不复用生成答案、不裁剪输入；思考、带输出前缀的续写和断点恢复不读取新请求的前缀缓存，模型卸载时缓存一并释放。
 - 笔记缓存的本机验证包括 94 项运行库检查，以及 4B、9B 共 44 次生成的 22 组对照，完整文本和 token 序列均一致；8 次中途恢复及 8 次完成结果重放通过。每档只有两组笔记缓存命中的计时样本，平均数、中位数和最长耗时均保留；这些结果不等于真实课堂准确率、普遍加速或整机省电。新增笔记快照会使用部分原来空闲的内存额度，总上限不变。
@@ -114,13 +125,15 @@ python3.13 Scripts/prepare-mlx-runtime.py --mode asr \
 ./Scripts/bundle-mlx-app.py \
   --app work/ReleaseDerivedData/Build/Products/Release/LiveLingo.app \
   --runtime /absolute/path/to/LanguageRuntime \
-  --models /absolute/path/to/language-models \
-  --asr-models /absolute/path/to/asr-models \
+  --models /absolute/path/to/prepared-models \
+  --asr-models /absolute/path/to/prepared-models \
   --asr-python /absolute/path/to/portable-python \
   --output work/OfflineCandidate/LiveLingo.app
 ```
 
 输出目录必须不存在。组装后的 App 包含运行库和模型，排除录音测试 CLI、质量评估 CLI、XCTest 与虚拟音频播放器。开发 CLI 的说明见 [Scripts/CLI-README.md](../Scripts/CLI-README.md)，它只供开发测试，不随 App 或 DMG 交付。
+
+只读候选检查：`python3.13 Scripts/sign-offline-app.py --scan work/OfflineCandidate/LiveLingo.app` 和 `python3.13 Scripts/sign-offline-app.py --verify-only --app work/OfflineCandidate/LiveLingo.app`。这两种模式不签名、不查询钥匙串；未签名候选的签名验证失败须照实记录，不能称为签名通过。
 
 ## 签名、公证与 DMG
 

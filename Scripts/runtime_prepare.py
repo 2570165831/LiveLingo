@@ -130,6 +130,8 @@ def removal_reason(relative, stdlib, selected_files):
             return "unused-package-apis"
         if package_file == Path("setuptools/config/setuptools.schema.json"):
             return "development-resources"
+        if package_file == Path("scipy/stats/_sobol_direction_numbers.npz"):
+            return "unused-sobol-quasi-monte-carlo-data"
         if package_file.name == "meson.build" or package_file.suffix.lower() in DEVELOPMENT_SUFFIXES:
             return "development-resources"
         # Read only by optional notebook display/manual APIs, not app inference.
@@ -319,7 +321,13 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
             shutil.copy2(source, output / name)
         for source in supplements.iterdir():
             if source.is_dir() and not source.is_symlink():
-                shutil.copytree(source, notice_root / source.name)
+                for notice in source.rglob("*"):
+                    if (notice.is_file() and license_filename(notice)
+                            and any(excluded(part) for part in notice.relative_to(source).parts)):
+                        raise PrivacyError("supplement-license-needs-safe-relative-name")
+                shutil.copytree(source, notice_root / source.name,
+                                ignore=lambda directory, names: [name for name in names
+                                                                  if excluded(name)])
             elif source.name in ("AUDIT.json", "README.md"):
                 shutil.copy2(source, notice_root / source.name)
         manifest = {"components": components, "missingLicenseFiles": missing, "python": "python",

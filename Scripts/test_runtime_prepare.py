@@ -45,6 +45,21 @@ class RuntimePreparationTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_supplement_empty_test_directory_is_not_copied(self):
+        notices = self.repo / "Packaging/MLXLicenses/native-fixture"
+        (notices / "tests").mkdir(parents=True)
+        (notices / "LICENSE.txt").write_text("Copyright fixture. Permission is hereby granted.\n")
+        self.prepare(mode="language")
+        self.assertTrue((self.output / "Licenses/native-fixture/LICENSE.txt").is_file())
+        self.assertFalse((self.output / "Licenses/native-fixture/tests").exists())
+
+    def test_supplement_test_license_is_not_silently_lost(self):
+        notice = self.repo / "Packaging/MLXLicenses/native-fixture/tests/LICENSE.txt"
+        notice.parent.mkdir(parents=True)
+        notice.write_text("Copyright fixture. Permission is hereby granted.\n")
+        with self.assertRaisesRegex(privacy.PrivacyError, "supplement-license-needs-safe-relative-name"):
+            self.prepare(mode="language")
+
     def write(self, relative, data):
         path = self.base / relative
         path.parent.mkdir(parents=True, exist_ok=True)

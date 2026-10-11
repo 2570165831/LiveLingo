@@ -140,7 +140,7 @@ def parse_metadata(data, kind):
             parser.Parse(data, True)
         return plistlib.loads(data, dict_type=_UniqueMetadata)
     except (UnicodeError, ValueError, TypeError, OverflowError, RecursionError,
-            plistlib.InvalidFileException, ExpatError, struct.error):
+            plistlib.InvalidFileException, ExpatError, struct.error, AttributeError):
         raise PrivacyError("invalid-package-" + kind) from None
 
 
@@ -493,7 +493,14 @@ def inspect_safetensors(path, size, counts):
     return header
 
 
-def inspect_metadata_file(path, counts, public_copy):
+def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, approvals=None):
+    if reviewed_path is not None:
+        if __package__:
+            from .reviewed_resources import inspect
+        else:
+            from reviewed_resources import inspect
+        if inspect(path, reviewed_path, approvals, counts):
+            return
     suffix = path.suffix.lower()
     size = path.stat().st_size
     if path.name in ("DECLARATION-Cargo.toml", "DECLARED-LICENSE-Cargo.toml") and size <= JSON_LIMIT:
@@ -561,6 +568,12 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise PrivacyError("package-root-not-real-directory")
+    if __package__:
+        from .reviewed_resources import entries, tree_prefix
+    else:
+        from reviewed_resources import entries, tree_prefix
+    approvals = entries()
+    prefix = tree_prefix(root)
     if layout in ("app-only", "dmg"):
         expected = {"LiveLingo.app"} if layout == "app-only" else {"LiveLingo.app", "Applications", "使用说明.txt"}
         if {p.name for p in root.iterdir()} != expected:
@@ -596,7 +609,12 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                 if path.name not in APP_RESOURCES and not path.name.endswith(".lproj"):
                     raise PrivacyError("unexpected-app-resource")
             mode = path.lstat().st_mode
+            relative = prefix + path.relative_to(root).as_posix()
+            if relative.startswith("LiveLingo.app/"):
+                relative = relative[len("LiveLingo.app/"):]
             if stat.S_ISLNK(mode):
+                if relative in approvals:
+                    raise PrivacyError("reviewed-resource-symlink")
                 if path.suffix.lower() in STRUCTURED_SUFFIXES:
                     raise PrivacyError("structured-metadata-symlink")
                 validate_link(path, root, layout == "dmg")
@@ -606,7 +624,7 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                 counts["files"] += 1
                 if path.name.lower() in CONTENT_NAMES or path.name.lower().endswith(CONTENT_SUFFIXES):
                     raise PrivacyError("classroom-content-file")
-                inspect_metadata_file(path, counts, public_copy)
+                inspect_metadata_file(path, counts, public_copy, reviewed_path=relative, approvals=approvals)
             else:
                 raise PrivacyError("special-package-entry")
 
