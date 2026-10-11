@@ -520,26 +520,30 @@ struct LiveLingoCLI {
    }
    return renderer.targetLine(segment)
   }
-  func renderedCue(_ segment: TranscriptSegment, index: Int) throws -> String {
+  func cueLines(_ segment: TranscriptSegment) throws -> [String] {
+   if usesLegacyFormat { return [segment.english, legacyTargetLine(segment)] }
    if let language = traditional {
-    if usesLegacyRegionalFormat {
-     return "\(index + 1)\n\(SessionExporter.srtTimestamp(segment.startTime)) --> \(SessionExporter.srtTimestamp(segment.endTime))\n"
-       + [segment.english, try renderedTarget(segment)].joined(separator: "\n")
-    }
-    return try SessionExporter.renderedSRTCue(segment, index: index, outputLanguage: language, converter: converter)
+    if usesLegacyRegionalFormat { return [segment.english, try renderedTarget(segment)] }
+    return try SessionExporter.renderedCaptionLines(segment, outputLanguage: language, converter: converter)
    }
-   return renderer.srtCue(segment, index: index)
+   return renderer.srtLines(segment)
   }
   let english=try exportText("transcript-en.txt")
   let chinese=try exportText(targetTranscriptName)
   let targetLines = try usesLegacyFormat ? segments.map(legacyTargetLine) : segments.map { try renderedTarget($0) }
   guard english == segments.map(SessionExporter.sourceLine).joined(separator:"\n")+"\n",
         chinese == targetLines.joined(separator:"\n")+"\n" else { throw CLIError.inconsistentExport }
-  let expectedSRT = try segments.enumerated().map { index, segment in
-   try usesLegacyFormat ? legacySRTCue(segment, index: index) : renderedCue(segment, index: index)
+  let expectedLines = try segments.map(cueLines)
+  let expectedSRT = segments.enumerated().map { index, segment in
+   SessionExporter.srtCueText(segment, index: index, lines: expectedLines[index])
+  }.joined(separator: "\n\n") + "\n"
+  // Exports written before blank lines were removed from cue text joined the
+  // raw lines. The two forms differ only for line breaks or blank lines in text.
+  let rawSRT = segments.enumerated().map { index, segment in
+   SessionExporter.srtCueHeader(segment, index: index) + expectedLines[index].joined(separator: "\n")
   }.joined(separator: "\n\n") + "\n"
   let savedSRT = try exportText("bilingual.srt")
-  if savedSRT != expectedSRT {
+  if savedSRT != expectedSRT, savedSRT != rawSRT {
    // An old synthetic English fixture used two lines. Accept that complete
    // layout only for snapshot-free, unmarked exports, never for generation.
    let fixtureRenderer = OutputLanguage.SavedRenderer.fixtureEnglishTwoLine
@@ -579,11 +583,6 @@ struct LiveLingoCLI {
  // humanReadableChinese target line. Do not route it through the new renderer.
  private static func legacyTargetLine(_ segment: TranscriptSegment) -> String {
   SessionExporter.humanReadableChinese(segment.chinese)
- }
-
- private static func legacySRTCue(_ segment: TranscriptSegment, index: Int) -> String {
-  "\(index + 1)\n\(SessionExporter.srtTimestamp(segment.startTime)) --> \(SessionExporter.srtTimestamp(segment.endTime))\n"
-   + segment.english + "\n" + legacyTargetLine(segment)
  }
 
  static func verifyProcessing(state: TranscriptionProcessingState?, snapshot: SessionSnapshot?, segmentCount: Int) throws {

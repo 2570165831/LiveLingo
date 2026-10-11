@@ -108,6 +108,15 @@ final class TraditionalSessionExporterTests: XCTestCase {
         }
     }
 
+    func testRegionalSRTCueDropsBlankLinesAfterRendering() throws {
+        let split = TranscriptSegment(startTime: 1, endTime: 2, english: source + "\n\n" + source,
+            chinese: "头发在这里。\r\n\r\n头发在这里。", sourceLanguage: "ja")
+        for variant in variants {
+            XCTAssertEqual(try SessionExporter.renderedSRTCue(split, index: 1, outputLanguage: variant.language),
+                "2\n00:00:01,000 --> 00:00:02,000\n" + source + "\n" + source + "\n" + variant.target + "\n" + variant.target)
+        }
+    }
+
     func testRegionalSessionBytesKeepJSONLAndSourceIdenticalToSimplifiedExport() throws {
         let baseline = try directory()
         let input = segments

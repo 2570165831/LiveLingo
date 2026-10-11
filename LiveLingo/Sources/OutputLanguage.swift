@@ -205,18 +205,24 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
                     : SessionExporter.targetLine(segment, target: .simplifiedChinese)
             }
         }
+        /// Caption lines of one SRT cue before blank lines are removed.
+        func srtLines(_ segment: TranscriptSegment) -> [String] {
+            switch self {
+            case .output(let language): return SessionExporter.captionLines(segment, outputLanguage: language)
+            case .fixtureEnglishTwoLine: return [segment.english, targetLine(segment)]
+            case .fixtureTraditionalChinese(let usesLegacyFormat):
+                return usesLegacyFormat ? [segment.english, targetLine(segment)]
+                    : SessionExporter.captionLines(segment, target: .simplifiedChinese)
+            }
+        }
         func srtCue(_ segment: TranscriptSegment, index: Int) -> String {
             switch self {
             case .output(let language): return SessionExporter.srtCue(segment, index: index, outputLanguage: language)
-            case .fixtureEnglishTwoLine:
-                return "\(index + 1)\n\(SessionExporter.srtTimestamp(segment.startTime)) --> \(SessionExporter.srtTimestamp(segment.endTime))\n"
-                    + [segment.english, targetLine(segment)].joined(separator: "\n")
-            case .fixtureTraditionalChinese(let usesLegacyFormat):
-                if !usesLegacyFormat {
-                    return SessionExporter.srtCue(segment, index: index, target: .simplifiedChinese)
-                }
-                return "\(index + 1)\n\(SessionExporter.srtTimestamp(segment.startTime)) --> \(SessionExporter.srtTimestamp(segment.endTime))\n"
-                    + [segment.english, targetLine(segment)].joined(separator: "\n")
+            case .fixtureTraditionalChinese(usesLegacyFormat: false):
+                return SessionExporter.srtCue(segment, index: index, target: .simplifiedChinese)
+            case .fixtureEnglishTwoLine, .fixtureTraditionalChinese(usesLegacyFormat: true):
+                // Historical fixture layouts keep their original raw join.
+                return SessionExporter.srtCueHeader(segment, index: index) + srtLines(segment).joined(separator: "\n")
             }
         }
     }

@@ -952,8 +952,25 @@ enum SessionExporter {
     }
 
     static func srtCue(_ segment: TranscriptSegment, index: Int, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
-        return "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
-            + captionLines(segment, target: target).joined(separator: "\n")
+        srtCueText(segment, index: index, lines: captionLines(segment, target: target))
+    }
+
+    static func srtCueHeader(_ segment: TranscriptSegment, index: Int) -> String {
+        "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
+    }
+
+    /// SRT ends a cue at the first blank line, so cue text must not contain one.
+    /// Split on every newline form, drop empty or whitespace-only lines and keep
+    /// the remaining lines unchanged. Only the SRT exit uses this; saved text,
+    /// JSONL and transcripts keep the original text.
+    static func srtBodyLines(_ lines: [String]) -> [String] {
+        lines.flatMap { $0.split(whereSeparator: \.isNewline) }
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .map(String.init)
+    }
+
+    static func srtCueText(_ segment: TranscriptSegment, index: Int, lines: [String]) -> String {
+        srtCueHeader(segment, index: index) + srtBodyLines(lines).joined(separator: "\n")
     }
 
     /// Saved text can be verified before its language is released for generation.
@@ -982,8 +999,7 @@ enum SessionExporter {
     }
 
     static func srtCue(_ segment: TranscriptSegment, index: Int, outputLanguage: OutputLanguage) -> String {
-        "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
-            + captionLines(segment, outputLanguage: outputLanguage).joined(separator: "\n")
+        srtCueText(segment, index: index, lines: captionLines(segment, outputLanguage: outputLanguage))
     }
 
     /// The existing targetLine/captionLines/srtCue APIs remain generation text
@@ -1010,9 +1026,8 @@ enum SessionExporter {
 
     static func renderedSRTCue(_ segment: TranscriptSegment, index: Int, outputLanguage: OutputLanguage,
                                converter: ChineseScriptConverter = .shared) throws -> String {
-        "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
-            + (try renderedCaptionLines(segment, outputLanguage: outputLanguage, converter: converter))
-                .joined(separator: "\n")
+        srtCueText(segment, index: index,
+            lines: try renderedCaptionLines(segment, outputLanguage: outputLanguage, converter: converter))
     }
 
     static func export(
