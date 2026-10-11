@@ -1,6 +1,7 @@
 """Read native load-command strings without executing code or trusting otool text."""
 import os
 from pathlib import Path
+import posixpath
 import struct
 import subprocess
 
@@ -15,10 +16,15 @@ THIN = {b"\xce\xfa\xed\xfe": ("<", 28), b"\xfe\xed\xfa\xce": (">", 28),
 FAT = {b"\xca\xfe\xba\xbe": (">", False), b"\xbe\xba\xfe\xca": ("<", False),
        b"\xca\xfe\xba\xbf": (">", True), b"\xbf\xba\xfe\xca": ("<", True)}
 DYLIB = {0xC, 0xD, 0x80000018, 0x8000001F, 0x20, 0x80000023}
+ID_DYLIB = 0xD
+DEPENDENCIES = DYLIB - {ID_DYLIB}
 RPATH = 0x8000001C
 STRINGS = DYLIB | {RPATH, 0xE, 0xF, 0x12, 0x13, 0x14, 0x15, 0x27, 0x80000035}
 PRIVATE_ROOTS = ("/" + "Users/", "/home/", "/Volumes/", "/private/var/", "/private/tmp/",
-                 "/var/folders/", "/synthetic/")
+                 "/var/folders/", "/synthetic/", "/opt/homebrew/", "/usr/local/",
+                 "/opt/local/", "/tmp/")
+SYSTEM_ROOTS = ("/usr/lib", "/System/Library", "/Library/Apple/System/Library")
+LOADER_ANCHORS = ("@loader_path", "@executable_path", "@rpath")
 
 
 def load_paths(path):
@@ -110,12 +116,43 @@ def private_path(value):
     return any(root in value for root in PRIVATE_ROOTS) or "file://" in value or value.startswith("~/")
 
 
+def allowed_load_path(command, value):
+    """Allow portable loads; upstream identities are a separate namespace.
+
+    delocate assigns /DLC identities to avoid collisions between wheel libraries,
+    while rewriting actual dependencies to @loader_path. Relative build IDs
+    (for example protobuf's bazel-out ID) likewise do not select a load location.
+    These identity exceptions never apply to dependencies or LC_RPATH.
+    """
+    if private_path(value):
+        return False
+    if any(value == anchor or value.startswith(anchor + "/") for anchor in LOADER_ANCHORS):
+        return True
+    normalized = posixpath.normpath(value)
+    if value.startswith("/") and any(normalized == root or normalized.startswith(root + "/")
+                                     for root in SYSTEM_ROOTS):
+        return True
+    if command == ID_DYLIB:
+        components = value.split("/")
+        if any(part in (".", "..") for part in components):
+            return False
+        if value.startswith("/DLC/") and len(components) >= 4:
+            return True
+        # Keep ordinary upstream relative IDs, not unrecognized dyld macros,
+        # URLs, or machine-specific absolute identifiers.
+        return not value.startswith(("/", "@", "~")) and ":" not in value
+    return False
+
+
 def inspect_load_paths(path, counts):
     paths = load_paths(path)
     if paths is None:
         return False
     if any(private_path(value) for _, value in paths):
         raise PrivacyError("local-path-macho-load-command")
+    if any(command in STRINGS and not allowed_load_path(command, value)
+           for command, value in paths):
+        raise PrivacyError("nonportable-macho-load-command")
     counts["macho_files"] = counts.get("macho_files", 0) + 1
     counts["macho_load_paths"] = counts.get("macho_load_paths", 0) + len(paths)
     return True
@@ -127,36 +164,52 @@ def make_portable(path, root):
     paths = load_paths(path)
     if paths is None:
         return []
+    if (path.is_symlink() or root.is_symlink() or not root.is_dir()
+            or not path.resolve().is_relative_to(root.resolve())):
+        raise PrivacyError("invalid-macho-repair-path")
     changes, arguments = [], []
+    def bundled_dependency(value):
+        # Consult only regular files inside this prepared copy. Never inspect
+        # an old absolute path or guess between duplicate bundled libraries.
+        candidates = [p for p in root.rglob(Path(value).name)
+                      if p.is_file() and not p.is_symlink()
+                      and p.resolve().is_relative_to(root.resolve())]
+        if len(candidates) != 1:
+            raise PrivacyError("unresolved-private-macho-dependency")
+        return "@loader_path/" + os.path.relpath(candidates[0], path.parent)
+
+    unsafe_rpaths = [value for command, value in sorted(set(paths))
+                     if command == RPATH and not allowed_load_path(command, value)]
+    repaired_dependencies = set()
+    if unsafe_rpaths:
+        # Deleting a build search directory is safe for the static load graph
+        # only after @rpath imports no longer need it. Resolve those imports to
+        # unique shipped files, or fail before running install_name_tool.
+        for command, value in sorted(set(paths)):
+            if command in DEPENDENCIES and value.startswith("@rpath/"):
+                replacement = bundled_dependency(value)
+                arguments += ["-change", value, replacement]
+                repaired_dependencies.add(value)
+                changes.append({"command": command, "action": "replaced", "replacement": replacement,
+                                "reason": "resolve-shipped-library-before-removing-build-rpath"})
     for command, value in sorted(set(paths)):
-        if not private_path(value):
+        if allowed_load_path(command, value):
             continue
-        if command == 0xD:
+        if command == ID_DYLIB:
             replacement = "@rpath/" + path.name
             arguments += ["-id", replacement]
-        elif command == RPATH or command in DYLIB:
-            # The old build root is intentionally not consulted. Resolve only
-            # files shipped in this copy, refusing ambiguous library matches.
-            candidates = ([p for p in root.rglob(Path(value).name) if p.is_file() and not p.is_symlink()]
-                          if command in DYLIB else [])
-            if command == RPATH:
-                directories = ([root / "lib"] if Path(value).name == "lib" and (root / "lib").is_dir()
-                               else [p for p in root.rglob(Path(value).name) if p.is_dir() and not p.is_symlink()])
-                if len(directories) != 1:
-                    raise PrivacyError("unresolved-private-macho-rpath")
-                replacement = "@loader_path/" + os.path.relpath(directories[0], path.parent)
-                if (RPATH, replacement) in paths:
-                    arguments += ["-delete_rpath", value]
-                else:
-                    arguments += ["-rpath", value, replacement]
-            elif len(candidates) == 1:
-                replacement = "@loader_path/" + os.path.relpath(candidates[0], path.parent)
-                arguments += ["-change", value, replacement]
-            else:
-                raise PrivacyError("unresolved-private-macho-dependency")
+        elif command == RPATH:
+            replacement = None
+            arguments += ["-delete_rpath", value]
+        elif command in DEPENDENCIES:
+            if value in repaired_dependencies:
+                continue
+            replacement = bundled_dependency(value)
+            arguments += ["-change", value, replacement]
         else:
             raise PrivacyError("unsupported-private-macho-load-command")
-        changes.append({"command": command, "replacement": replacement,
+        changes.append({"command": command, "action": "removed" if replacement is None else "replaced",
+                        "replacement": replacement,
                         "reason": "remove-build-machine-load-path"})
     if arguments:
         result = subprocess.run(["/usr/bin/install_name_tool", *arguments, str(path)], capture_output=True)

@@ -429,7 +429,7 @@ class PrivacyPackageTests(unittest.TestCase):
     def bundle_inputs(self, bundle):
         repo = self.root / "repo"
         for path in ("LICENSE", "Packaging/THIRD_PARTY_NOTICES.md", "Scripts/qwen_asr_service.py"):
-            self.write(path, "synthetic public file", repo)
+            self.write(path, "# synthetic public file" if path.endswith(".py") else "synthetic public file", repo)
         for name in bundle.RUNTIME_MODULES:
             self.write("Scripts/mlx_runtime/" + name, "# synthetic runtime module", repo)
         notices = {n for _, n in bundle.LANGUAGE_MODELS}
@@ -836,7 +836,7 @@ class PrivacyPackageMetadataTests(unittest.TestCase):
         for filename in ("LICENSE", "README", "fixture-LICENSE", "notices.txt", "script.py", "tool.sh",
                          "fixture-1.dist-info/METADATA", "bin/python3.13"):
             with self.subTest(filename=filename):
-                payload = b"Synthetic public fixture"
+                payload = b"# Synthetic public fixture" if filename.endswith(".py") else b"Synthetic public fixture"
                 directory, _, destination = self.case(payload, filename)
                 counts = privacy.copy_distribution_tree(directory, destination)
                 self.assertEqual(counts["unreviewed_text_files"], 1)

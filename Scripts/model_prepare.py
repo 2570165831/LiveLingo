@@ -1,8 +1,9 @@
 """Prepare offline model loader inputs from a read-only model root.
 
 Only the four reviewed model IDs are selected. Omit training/repository extras
-that their App loaders do not use. Weights and vocabulary data are never edited
-or loaded; large files are copied with APFS clones when possible.
+that their App loaders do not use, including Parakeet's unused training
+tokenizer vocabulary. Weights and retained inference vocabularies are never
+edited or loaded; large files are copied with APFS clones when possible.
 """
 import argparse
 import hashlib
@@ -28,6 +29,10 @@ PARAKEET = "mlx-community/parakeet-tdt-0.6b-v2"
 
 
 def modification_reason(item):
+    if item["file"] == ".gitattributes":
+        return "Omit Git attributes and Git LFS tracking metadata; offline loaders use the materialized model files."
+    if item["file"] == ".git":
+        return "Omit Git repository history and bookkeeping; these are not inference inputs."
     if excluded(item["file"]):
         return "Omit download caches and local loader bookkeeping; these are not model inputs."
     if item["file"] == "config.json" and item["model"] == PARAKEET:
@@ -35,6 +40,27 @@ def modification_reason(item):
     if item["model"] == PARAKEET and item["file"] in ("tokenizer.model", "tokenizer.vocab"):
         return "Omit unused training tokenizer inputs; decoding uses joint.vocabulary."
     return "The application constructs translation prompts itself; omit unused chat templates."
+
+
+def modification_notice(identifier, records):
+    """Rebuild notice wording from existing change records without touching model data.
+
+    An outer assembler may reuse this with a copied MODIFICATIONS.json instead
+    of preparing the weights again. Existing source/prepared hashes are retained;
+    this wording refresh does not assert those hashes were freshly verified.
+    """
+    if (identifier not in REQUIRED_MODEL_FILES or not isinstance(records, list)
+            or any(not isinstance(item, dict) or not isinstance(item.get("file"), str)
+                   or item.get("model", identifier) != identifier for item in records)):
+        raise PrivacyError("invalid-model-modification-records")
+    changes = [{**item, "model": identifier, "contributor": "Li", "date": "2026-10-11",
+                "reason": modification_reason({**item, "model": identifier})} for item in records]
+    scope = "Omit unused repository and prompt-template metadata."
+    if identifier == PARAKEET:
+        scope += " Parakeet's unused training tokenizer model and vocabulary are also omitted."
+    return {"model": identifier, "contributor": "Li", "date": "2026-10-11", "changes": changes,
+            "scope": scope,
+            "unchanged": "Weights, retained inference vocabularies, original attribution and licenses are preserved."}
 
 
 def prepare(base, output):
@@ -96,12 +122,8 @@ def prepare(base, output):
                            "sourceSHA256": hashlib.sha256(path.read_bytes()).hexdigest(),
                            "preparedSHA256": hashlib.sha256(target.read_bytes()).hexdigest()})
         check_model_files(destination, REQUIRED_MODEL_FILES[identifier])
-        changes = [{**item, "contributor": "Li", "date": "2026-10-11",
-                    "reason": modification_reason(item)}
-                   for item in report if item["model"] == identifier]
-        (destination / "MODIFICATIONS.json").write_text(json.dumps({"model": identifier,
-            "contributor": "Li", "date": "2026-10-11", "changes": changes,
-            "unchanged": "Weights, tokenizer vocabularies, original attribution and licenses are preserved."},
+        records = [item for item in report if item["model"] == identifier]
+        (destination / "MODIFICATIONS.json").write_text(json.dumps(modification_notice(identifier, records),
             ensure_ascii=False, indent=2) + "\n")
     inspect_tree(output)
     return report

@@ -1,5 +1,6 @@
 """Corresponding-source build coverage, including real offline configure runs."""
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -18,6 +19,66 @@ from Scripts.privacy_package import PrivacyError
 
 
 class SourceBuildPolicyTests(unittest.TestCase):
+    def test_complete_darwin_gcc_inputs_are_hash_bound(self):
+        directory = build.REPO / "Packaging/MLXLicenses/GCC-runtime-13.4.0"
+        inputs = build.gcc_source_inputs(directory)
+        self.assertEqual(set(inputs), {build.GCC_FULL, build.GCC_PATCH, build.GCC_MAPPING})
+        self.assertNotIn("gcc-13.4.0.tar.xz", inputs)
+
+    def test_gcc_input_tampering_is_rejected(self):
+        directory = build.REPO / "work/relpipe/gcc-review2" / ("input-fixture-" + str(time.time_ns()))
+        directory.mkdir(parents=True)
+        inputs = {}
+        for name in (build.GCC_FULL, build.GCC_PATCH, build.GCC_MAPPING):
+            (directory / name).write_bytes(b"pinned input\n")
+            inputs[name] = {"sha256": hashlib.sha256(b"pinned input\n").hexdigest()}
+        (directory / "PROVENANCE.json").write_text(json.dumps({"darwinCorrespondingSource": {"inputs": inputs}}))
+        (directory / build.GCC_PATCH).write_bytes(b"changed input\n")
+        with self.assertRaisesRegex(PrivacyError, "gcc-darwin-source-hash-mismatch"):
+            build.gcc_source_inputs(directory)
+        directory.rename(build.REPO / "work/relpipe/superseded" / directory.name)
+
+    def test_native_gcc_does_not_pass_when_only_compiler_configuration_succeeds(self):
+        root = build.REPO / "work/relpipe/gcc-review2" / ("native-fixture-" + str(time.time_ns()))
+        root.mkdir(parents=True)
+        source = root / "gcc-13.4.0"
+        source.mkdir()
+        for name in ["gcc/config/aarch64/darwin.h", "gcc/config/aarch64/t-aarch64-darwin",
+                     "libgcc/config/aarch64/t-darwin", "libgfortran/configure", "libquadmath/configure"]:
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fixture\n")
+        commands = []
+        def run(command, directory, log, **kwargs):
+            commands.append(command)
+            return {"exit": 2 if "all-gcc" in command else 0, "log": log.name}
+        sdk = type("Result", (), {"stdout": "/public-sdk\n"})()
+        with patch.object(build, "gcc_source_inputs", return_value={}), \
+             patch.object(build, "unpack", return_value=source), \
+             patch.object(build.platform, "system", return_value="Darwin"), \
+             patch.object(build.platform, "machine", return_value="arm64"), \
+             patch.object(build.platform, "release", return_value="27.2.0"), \
+             patch.object(build, "run_gcc_offline", side_effect=run), \
+             patch.object(build.subprocess, "run", return_value=sdk):
+            result = build.check_gcc_native(root, root / "output")
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["runtimeLibraries"], {})
+        configure = next(c for c in commands if any("--build=" in str(x) for x in c))
+        for option in ("--build=", "--host=", "--target="):
+            self.assertIn(option + "aarch64-apple-darwin27", configure)
+        self.assertFalse(any("x86_64" in str(c) for c in commands))
+        root.rename(build.REPO / "work/relpipe/superseded" / root.name)
+
+    def test_gcc_timeout_kills_descendants_after_make_parent_exits(self):
+        root = build.REPO / "work/relpipe/gcc-review2"
+        process = type("Process", (), {"pid": 12345})()
+        process.wait = unittest.mock.Mock(side_effect=[subprocess.TimeoutExpired("make", 1), -15])
+        with patch.object(build.subprocess, "Popen", return_value=process), patch.object(build.os, "killpg") as kill:
+            result = build.run_gcc_offline(["make"], root, root / "timeout-fixture.log", timeout=1,
+                                         stop_at=datetime.now(timezone.utc) + timedelta(seconds=60))
+        self.assertTrue(result["timedOut"])
+        self.assertEqual([call.args[1] for call in kill.call_args_list], [build.signal.SIGTERM, build.signal.SIGKILL])
+
     def test_doc_manual_and_automake_include_inputs_are_retained(self):
         for package, name in [("lame", "doc/html/Makefile.in"), ("lame", "ACM/ddk/Makefile.in"),
                               ("mpg123", "man1/mpg123.1"), ("mpg123", "src/tests/Makemodule.am"),
@@ -86,7 +147,12 @@ class BundledSourceBuildTests(unittest.TestCase):
                     self.assertEqual(change["contributor"], "Li")
                     self.assertEqual(change["date"], "2026-10-11")
                     data = archive.extractfile(change["path"]).read()
-                    self.assertIn(b"Modified by Li on 2026-10-11", data)
+                    notice_data = archive.extractfile(change.get("noticePath", change["path"])).read()
+                    self.assertIn(b"Modified by Li on 2026-10-11", notice_data)
+                    if root == "gcc-13.4.0":
+                        # Text notices are in-file; changed binary fixtures have
+                        # separate, exact per-file notices to retain their format.
+                        self.assertEqual(notice["omittedCount"], 0)
                     self.assertEqual(hashlib.sha256(data).hexdigest(), change["preparedSHA256"])
                 if root == "inferno-0.11.21":
                     modules = [m.name for m in archive if m.isfile() and m.name.endswith(".rs")

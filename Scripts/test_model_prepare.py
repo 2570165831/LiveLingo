@@ -28,6 +28,7 @@ class ModelPreparationTests(unittest.TestCase):
                 (path / "config.json").write_text(json.dumps({"joint": {"vocabulary": ["a", "b"]},
                                                            "tokenizer": {"dir": "/synthetic/build"}}))
                 (path / "tokenizer.model").write_bytes(b"unused training data")
+                (path / "tokenizer.vocab").write_bytes(b"unused training vocabulary")
             elif "tokenizer.json" in required:
                 (path / "tokenizer_config.json").write_text('{"chat_template":"unused template"}')
                 (path / "chat_template.jinja").write_text("unused template")
@@ -56,6 +57,53 @@ class ModelPreparationTests(unittest.TestCase):
         self.assertEqual(config["joint"]["vocabulary"], ["a", "b"])
         self.assertNotIn("dir", config["tokenizer"])
         self.assertFalse((self.output / prepare.PARAKEET / "tokenizer.model").exists())
+        self.assertFalse((self.output / prepare.PARAKEET / "tokenizer.vocab").exists())
+
+    def test_git_metadata_has_its_own_reason_and_notice_limits_preservation_claim(self):
+        for identifier in [prepare.PARAKEET, "mlx-community/Qwen3.5-4B-MLX-8bit"]:
+            source = self.base / identifier
+            (source / ".gitattributes").write_text("*.safetensors filter=lfs diff=lfs merge=lfs -text\n")
+            (source / ".git").mkdir()
+            (source / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        before = self.snapshot(self.base)
+        prepare.prepare(self.base, self.output)
+        self.assertEqual(before, self.snapshot(self.base))
+        for identifier in prepare.REQUIRED_MODEL_FILES:
+            model = self.output / identifier
+            notice = json.loads((model / "MODIFICATIONS.json").read_text())
+            self.assertIn("retained inference vocabularies", notice["unchanged"])
+            if identifier == prepare.PARAKEET:
+                self.assertIn("training tokenizer model and vocabulary", notice["scope"])
+            else:
+                self.assertNotIn("training tokenizer", notice["scope"])
+            for change in notice["changes"]:
+                if change["file"] in (".gitattributes", ".git"):
+                    self.assertIn("Git", change["reason"])
+                    self.assertNotIn("prompt", change["reason"])
+                    self.assertNotIn("chat", change["reason"])
+                    self.assertFalse((model / change["file"]).exists())
+                if change["file"] == ".gitattributes":
+                    self.assertIn("LFS", change["reason"])
+            if identifier == prepare.PARAKEET:
+                training, = [c for c in notice["changes"] if c["file"] == "tokenizer.vocab"]
+                self.assertIn("unused training", training["reason"])
+                config = json.loads((model / "config.json").read_text())
+                self.assertEqual(config["joint"]["vocabulary"], ["a", "b"])
+
+    def test_wording_refresh_reuses_old_change_hashes_without_touching_models(self):
+        records = [{"model": prepare.PARAKEET, "file": ".gitattributes", "action": "omitted-unused-loader-input",
+                    "reason": "old chat-template wording"},
+                   {"model": prepare.PARAKEET, "file": "config.json", "action": "omitted-unused-metadata",
+                    "sourceSHA256": "1" * 64, "preparedSHA256": "2" * 64}]
+        before = self.snapshot(self.base)
+        original = json.dumps(records)
+        notice = prepare.modification_notice(prepare.PARAKEET, records)
+        self.assertEqual(json.dumps(records), original)
+        self.assertEqual(before, self.snapshot(self.base))
+        self.assertIn("Git LFS", notice["changes"][0]["reason"])
+        self.assertEqual(notice["changes"][1]["sourceSHA256"], "1" * 64)
+        self.assertEqual(notice["changes"][1]["preparedSHA256"], "2" * 64)
+        self.assertFalse(self.output.exists())
 
     def test_other_private_fields_are_still_rejected(self):
         path = self.base / prepare.PARAKEET / "config.json"

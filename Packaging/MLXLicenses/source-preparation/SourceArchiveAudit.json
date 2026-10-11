@@ -124,12 +124,12 @@
       "package": "inferno",
       "version": "0.11.21",
       "originalSHA256": "232929e1d75fe899576a3d5c7416ad0d88dbfbb3c3d6aa00873a7408a50ddb88",
-      "preparedSHA256": "0b3561bfdb5b7d4c273ff7d4c2a3f493bbd1a5c7584324bcab6dbed4d871f7d5",
+      "preparedSHA256": "82bfd3536b33836d59fd78ff1e56adc5f6fc2191716d2ce6c03bcbeb4f4b4c27",
       "retainedFiles": 47,
       "redactedComments": [
         {
           "path": "inferno-0.11.21/src/flamegraph/color/palettes.rs",
-          "commentExamples": 1,
+          "commentExamples": 2,
           "originalSHA256": "8ceb22801e5c86b796f8e1f4ea8e2a474dfcbcd51aaca1f65afab3d9694b8172"
         }
       ],
@@ -141,23 +141,23 @@
           "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
           "reason": "Distribution privacy policy; no build-machine locations in source copies.",
           "originalSHA256": "8ceb22801e5c86b796f8e1f4ea8e2a474dfcbcd51aaca1f65afab3d9694b8172",
-          "preparedSHA256": "ee9b2c0b706720bff3b01ba194b5fefcb2b7443cdf0f9402d5e0eca155f6065b"
+          "preparedSHA256": "da4e3aa63620c37e7be83e4c71e67090a2b6391d1014d45bd3e5767ce82fa6ee"
         }
       ],
       "modificationNotice": "inferno-0.11.21/MODIFICATIONS.json",
       "originalLicenseHashes": {
         "inferno-0.11.21/LICENSE": "1ffb70c33c4f79f04e947facc5c7851f289609256aacb47fc115f700427d9520"
       },
-      "retainedInventorySHA256": "0d48e45d121a22e01a64aebb474ba25d49e6426af210b5fcc3e54d850f34426d",
+      "retainedInventorySHA256": "0180f318dc372563f081c97b8d8258ab3b737bf9a56b8d78fddd55098a15cbc7",
       "relative": "native-cargo-notices/CorrespondingSource/inferno-0.11.21.crate",
       "originalBytes": 102615,
-      "bundledBytes": 101128,
+      "bundledBytes": 101111,
       "privacyStatus": "passed",
-      "omittedCount": 6,
-      "omissionReasons": {
-        "upstream-platform-or-ci-metadata": 6
+      "privacyCounts": {
+        "opaque_binary_files": 0,
+        "source_archive_members": 47
       },
-      "omittedInventorySHA256": "29c1b018009de40db74207f3e563c8095442ab879767142a705e2f45b84197d6"
+      "omittedCount": 6
     },
     {
       "package": "option-ext",
@@ -179,187 +179,6 @@
       "omittedCount": 0,
       "omissionReasons": {},
       "omittedInventorySHA256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-    },
-    {
-      "package": "gcc",
-      "version": "13.4.0",
-      "originalSHA256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
-      "preparedSHA256": "ffdace83e1264e703a269f04aa15ddcaea27e57c03b69d339031253767c1bb9c",
-      "retainedFiles": 10508,
-      "redactedComments": [
-        {
-          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/darwin/ctype_base.h",
-          "commentExamples": 1,
-          "originalSHA256": "3606252ed945445ee1606af2a16e761166961c59eb1656b969b9a5147a017f6d"
-        },
-        {
-          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/freebsd/ctype_base.h",
-          "commentExamples": 1,
-          "originalSHA256": "39c32696cb15ae577c099c4e7da61470436296f414c018179093bd216fcfeffc"
-        },
-        {
-          "path": "gcc-13.4.0/libstdc++-v3/doc/html/manual/documentation_hacking.html",
-          "commentExamples": 1,
-          "originalSHA256": "634455369b57b1754cd21548fe5c4d95cabe4b72a7bdc0160d7db6cf1cc2d2da"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/diagnostic.h",
-          "commentExamples": 1,
-          "originalSHA256": "94781ae0ab138d083f6679a1521071723de43930ad8ee077d58b2c165bbf4242"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/doc/gcov.1",
-          "commentExamples": 3,
-          "originalSHA256": "400cc70c9cdbfdbe2650f2d64af4d10b67d61cdd6a31f4b14771783ff823e07b"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/doc/gnat_ugn.info",
-          "commentExamples": 25,
-          "originalSHA256": "b54344089d47772da0afcd6ce9cbbb6ec78bba3d45197691ab459aa7dc481985"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/doc/gcc.info",
-          "commentExamples": 3,
-          "originalSHA256": "3afc169acf51e94bead14ee5e6a8da40842e1759bcf5404f600a0c4c12c7a8be"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/doc/gcov.texi",
-          "commentExamples": 3,
-          "originalSHA256": "7f908be2c6f420f7aea47424c6c7bbfaa0e9f43d5026ef2972873d6e1ecee188"
-        }
-      ],
-      "modified": [
-        {
-          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/darwin/ctype_base.h",
-          "date": "2026-10-11",
-          "contributor": "Li",
-          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
-          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
-          "originalSHA256": "3606252ed945445ee1606af2a16e761166961c59eb1656b969b9a5147a017f6d",
-          "preparedSHA256": "72a1928fa5002190fd963a75174b89ef54c4c89bde0885863239c29f5dfc2719"
-        },
-        {
-          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/freebsd/ctype_base.h",
-          "date": "2026-10-11",
-          "contributor": "Li",
-          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
-          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
-          "originalSHA256": "39c32696cb15ae577c099c4e7da61470436296f414c018179093bd216fcfeffc",
-          "preparedSHA256": "93b729e6fe2f9016a8d4cc1ef71b9ae30d044fdfa18de2b5ab2d5e8afa18727f"
-        },
-        {
-          "path": "gcc-13.4.0/libstdc++-v3/doc/html/manual/documentation_hacking.html",
-          "date": "2026-10-11",
-          "contributor": "Li",
-          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
-          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
-          "originalSHA256": "634455369b57b1754cd21548fe5c4d95cabe4b72a7bdc0160d7db6cf1cc2d2da",
-          "preparedSHA256": "17b61bfe5a2b1fa9dbb144d0556a94b553bb42bbfccb72df268f55caea3bad48"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/diagnostic.h",
-          "date": "2026-10-11",
-          "contributor": "Li",
-          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
-          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
-          "originalSHA256": "94781ae0ab138d083f6679a1521071723de43930ad8ee077d58b2c165bbf4242",
-          "preparedSHA256": "25c66b852ba1779c9ebaa7d3ceb262bc8dc602fb3e5e3abf498e2f08ac6a10b8"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/doc/gcov.1",
-          "date": "2026-10-11",
-          "contributor": "Li",
-          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
-          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
-          "originalSHA256": "400cc70c9cdbfdbe2650f2d64af4d10b67d61cdd6a31f4b14771783ff823e07b",
-          "preparedSHA256": "2007646490a19d9a27b1c72357bbc00ffb047fa15af2c48de898d6daa8830efe"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/doc/gnat_ugn.info",
-          "date": "2026-10-11",
-          "contributor": "Li",
-          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
-          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
-          "originalSHA256": "b54344089d47772da0afcd6ce9cbbb6ec78bba3d45197691ab459aa7dc481985",
-          "preparedSHA256": "b1ddba20226e979c5e861995760461aae04ac400dfb0148bee74f3d041c7b230"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/doc/gcc.info",
-          "date": "2026-10-11",
-          "contributor": "Li",
-          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
-          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
-          "originalSHA256": "3afc169acf51e94bead14ee5e6a8da40842e1759bcf5404f600a0c4c12c7a8be",
-          "preparedSHA256": "c5c67511cc972c24ef553a478d07823364777b6b55b4045109c991ea43358517"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/doc/gcov.texi",
-          "date": "2026-10-11",
-          "contributor": "Li",
-          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
-          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
-          "originalSHA256": "7f908be2c6f420f7aea47424c6c7bbfaa0e9f43d5026ef2972873d6e1ecee188",
-          "preparedSHA256": "14a3f16e4c7f4f62725a1577ba9769433bc8a2646212b80128b02956455ab139"
-        }
-      ],
-      "modificationNotice": "gcc-13.4.0/MODIFICATIONS.json",
-      "originalLicenseHashes": {
-        "gcc-13.4.0/COPYING.LIB": "a9bdde5616ecdd1e980b44f360600ee8783b1f99b8cc83a2beb163a0a390e861",
-        "gcc-13.4.0/libquadmath/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
-        "gcc-13.4.0/libgo/go/golang.org/x/mod/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
-        "gcc-13.4.0/libgo/go/golang.org/x/xerrors/LICENSE": "84d554e7a5d139b7c7b5d6ef0670ae556c4cdcfa354eaad72a1c07c08012c96f",
-        "gcc-13.4.0/libgo/go/golang.org/x/tools/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
-        "gcc-13.4.0/libgo/go/golang.org/x/sync/AUTHORS": "b82446c166daa6932dc33418961ed7a7f06c5a9fee17e9d214e16079e3442757",
-        "gcc-13.4.0/libgo/go/golang.org/x/sync/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
-        "gcc-13.4.0/libgo/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
-        "gcc-13.4.0/libstdc++-v3/include/pstl/LICENSE.txt": "0ca8cbe9219a841f9bc8fbb1f8ecdf5e39b1b0e23ee10fb6b0c090d8987dd1eb",
-        "gcc-13.4.0/libstdc++-v3/doc/html/manual/license.html": "2906eca1abfe0c78daea99197a6eb130603c2dac4aa8cd7863526ea52cd3f030",
-        "gcc-13.4.0/zlib/contrib/dotzlib/LICENSE_1_0.txt": "36266a8fd073568394cb81cdb2b124f7fdae2c64c1a7ed09db34b4d22efa2951",
-        "gcc-13.4.0/libphobos/src/LICENSE_1_0.txt": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
-        "gcc-13.4.0/libphobos/libdruntime/LICENSE.txt": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
-        "gcc-13.4.0/libcody/LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-        "gcc-13.4.0/contrib/unicode/unicode-license.txt": "72a95a3930bf6fc1961c08c3011321d294c5d9ee9c5d10b535c1afca15287fba",
-        "gcc-13.4.0/COPYING3.LIB": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
-        "gcc-13.4.0/COPYING": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
-        "gcc-13.4.0/COPYING.RUNTIME": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
-        "gcc-13.4.0/include/COPYING": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
-        "gcc-13.4.0/include/COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
-        "gcc-13.4.0/gcc/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
-        "gcc-13.4.0/gcc/testsuite/gcc.dg/params/LICENSE": "4919cfb14a73cd64fcef67b107613970cf1659a09aa675dba31314f373bc7204",
-        "gcc-13.4.0/gcc/testsuite/gcc.dg/vect/tsvc/license.txt": "0bf700c6654f3e72308035d7ebb60abcc486e673ee8a72d19101f80812288f1c",
-        "gcc-13.4.0/gcc/ada/doc/share/gnu_free_documentation_license.rst": "e1c24b9f8545fe967f839a98bda32478fa1939f45aab4ec31c3d0ad2d10ed47e",
-        "gcc-13.4.0/gcc/ada/doc/share/copyright.tex": "c0a2678e14049ef3d4ba0d9dd7abf8b0dbb8335d6e2311b2d2f568035321f2b7",
-        "gcc-13.4.0/gcc/m2/images/LICENSE.IMG": "ae8b2a985bd93e0785c3a9caa1762d9e958e62b6df819e705c26b2f7c421a2f6",
-        "gcc-13.4.0/gcc/m2/COPYING3.LIB": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
-        "gcc-13.4.0/gcc/m2/COPYING.RUNTIME": "736da4b68a76fa1e027a2ef2366946240662b5a179d1ed95b3b08cc33dab0d89",
-        "gcc-13.4.0/gcc/m2/COPYING.FDL": "8d9fa5772d8f68d715749c4cbeab2bf225d631054852491e1ef89a78fd201543",
-        "gcc-13.4.0/gcc/m2/COPYING3": "0ae0485a5bd37a63e63603596417e4eb0e653334fa6c7f932ca3a0e85d4af227",
-        "gcc-13.4.0/gcc/go/gofrontend/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
-        "gcc-13.4.0/gcc/COPYING3.LIB": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
-        "gcc-13.4.0/gcc/COPYING": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
-        "gcc-13.4.0/gcc/COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
-        "gcc-13.4.0/libiberty/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
-        "gcc-13.4.0/libiberty/copying-lib.texi": "deda581ced57145d3ed4f099f79aeeaf3f0275758db02c607321131a3043fe95",
-        "gcc-13.4.0/COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
-        "gcc-13.4.0/libsanitizer/LICENSE.TXT": "74c2b24539a53c34abddb559266d89cb653b0198cd2faf9c04763d3223db7f6d",
-        "gcc-13.4.0/libffi/LICENSE": "a61d06e8f7be57928e71e800eb9273b05cb8868c484108afe41e4305bb320dde",
-        "gcc-13.4.0/libffi/LICENSE-BUILDTOOLS": "e67978cd18816c0cb7d29aaaacde7b7447402c2fb321a051698890a8eaedda94"
-      },
-      "retainedInventorySHA256": "e0adbf1a2796dd6281d43e412db97ba273c6ab9114691c95d7b55b6820151f3a",
-      "relative": "GCC-runtime-13.4.0/gcc-13.4.0.tar.xz",
-      "originalBytes": 88530720,
-      "bundledBytes": 72303984,
-      "privacyStatus": "passed",
-      "omittedCount": 114879,
-      "omissionReasons": {
-        "optional-upstream-history": 188,
-        "unbundled-language-components": 9562,
-        "optional-upstream-release-or-regression-maintenance": 192,
-        "optional-compiler-regression-input": 104680,
-        "optional-libstdcxx-supplementary-docbook-publication": 109,
-        "optional-zlib-contributed-programs": 148
-      },
-      "omittedInventorySHA256": "293525b0067c95e502d233d4c505a19bfe7e91f5c419b5f309d6a899b73a5af2"
     },
     {
       "package": "libogg",
@@ -488,6 +307,189 @@
         "optional-upstream-history": 1
       },
       "omittedInventorySHA256": "96a2b35990419f0e5b8bfd66f5a79bb0db9bf533ea50cbd8a9a99d44ebc8c584"
+    },
+    {
+      "package": "gcc",
+      "version": "13.4.0",
+      "originalSHA256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
+      "preparedSHA256": "defcacea843f6dd703f0760a90403b19cf5ca5cca08509251112e2533c4e9ce5",
+      "retainedFiles": 125390,
+      "redactedComments": [],
+      "modified": [
+        {
+          "path": "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "8122ac4e2559fd1b82858bb7940346df13407a74d5409cb4227e19f1aadd27a1",
+          "preparedSHA256": "e761ca7f5387f2cbe18a91100b63e32b19b3171067aca8bd17a1bd88f0fe14c7",
+          "noticePath": "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho.MODIFICATIONS.txt",
+          "noticeMechanism": "adjacent per-file dated notice; preserve binary fixture format"
+        },
+        {
+          "path": "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho4",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "3b8ab42bf8a0ea1d8dcb8f7df95a10882668fcc3d41fd168de010957688acc46",
+          "preparedSHA256": "2387f6e38c73a19c743329d0fb82ca31e306d82c8f7512f5812810b3d6a56c05",
+          "noticePath": "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho4.MODIFICATIONS.txt",
+          "noticeMechanism": "adjacent per-file dated notice; preserve binary fixture format"
+        },
+        {
+          "path": "gcc-13.4.0/libgo/go/cmd/go/testdata/script/README",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "033777162a8ef44d29c280f6f3d4146708b68e34c3af66a7daa7cced90af2bc7",
+          "preparedSHA256": "128d39ec80c70743b1483bac5cac86ba7e1c208b1cd993cc650b5e2581bb5fd1",
+          "noticePath": "gcc-13.4.0/libgo/go/cmd/go/testdata/script/README",
+          "noticeMechanism": "dated in-file comment, appended to retain source/test line positions and all license bytes"
+        },
+        {
+          "path": "gcc-13.4.0/libgo/go/go/internal/gcimporter/testdata/versions/test_go1.7_0.a",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "ac8f6a00a71ce3ecd672f571cd51e6084c4dba5b86d1e326bb5f08921e8dcd10",
+          "preparedSHA256": "0844a9425adcc349b0315eb2f39745882f460bb323c5690c5aeab05556b74a35",
+          "noticePath": "gcc-13.4.0/libgo/go/go/internal/gcimporter/testdata/versions/test_go1.7_0.a.MODIFICATIONS.txt",
+          "noticeMechanism": "adjacent per-file dated notice; preserve binary fixture format"
+        },
+        {
+          "path": "gcc-13.4.0/libgo/go/runtime/debug/stack_test.go",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "9b17547ea16ad4c02b653aba0972336b9bbe415e1a1e72610a2eeb6154e3d75e",
+          "preparedSHA256": "80cd75637f2c23ad44be851551b324e902d753a50b318ee6023eef8b8541e810",
+          "noticePath": "gcc-13.4.0/libgo/go/runtime/debug/stack_test.go",
+          "noticeMechanism": "dated in-file comment, appended to retain source/test line positions and all license bytes"
+        },
+        {
+          "path": "gcc-13.4.0/libgo/go/golang.org/x/mod/zip/zip.go",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "558f97fff90d03c6395b4b684e12c2f8b3e2ea8f25e3752176369a2c88cd2a58",
+          "preparedSHA256": "e092338af298ea2e94d7ddca8476200b58f6df90c5f7eb449f6d709e69eb3374",
+          "noticePath": "gcc-13.4.0/libgo/go/golang.org/x/mod/zip/zip.go",
+          "noticeMechanism": "dated in-file comment, appended to retain source/test line positions and all license bytes"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/testsuite/go.test/test/interface/fake.go",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "d4581b444ff6ff1416b2d2f149a419f7e087c933eecc883840148ae9c2f5adaa",
+          "preparedSHA256": "6a1523845602d4e0030eaacc17f66c052f68320ec1dc5d947dfe13fba131b919",
+          "noticePath": "gcc-13.4.0/gcc/testsuite/go.test/test/interface/fake.go",
+          "noticeMechanism": "dated in-file comment, appended to retain source/test line positions and all license bytes"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/bug345.dir/main.go",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "d78d2491cad89653de7af17643a6a9f8b832abb0d4360eab1b8171c200e2ea0e",
+          "preparedSHA256": "f670e941abee95a819e21ba519abcc17ac0aaf96ebef78be7f9ff1ef215403c3",
+          "noticePath": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/bug345.dir/main.go",
+          "noticeMechanism": "dated in-file comment, appended to retain source/test line positions and all license bytes"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/issue5963.go",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "e1bc628a54daac21f3a56603adf36a8a4b67413e9eef17f05eb8a74c4858fcec",
+          "preparedSHA256": "6e0a09483f0b33c85a48d941a5d6c4a39ed3887ba94913e1bb6a1b0f6d5e55cb",
+          "noticePath": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/issue5963.go",
+          "noticeMechanism": "dated in-file comment, appended to retain source/test line positions and all license bytes"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/bug142.go",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "26fdf672a2401829982ccc64277c3c148b148763c1baf61697c732249efaf734",
+          "preparedSHA256": "90d43bd032525ff1f8a3b4c00f0c2a0f57f8d4bca8fff62bb72bb1c2c696bd31",
+          "noticePath": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/bug142.go",
+          "noticeMechanism": "dated in-file comment, appended to retain source/test line positions and all license bytes"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/ada/libgnat/g-dirope.ads",
+          "change": "Replace public upstream home-root example by equal-length neutral root. Binary regression fixture string lengths are unchanged.",
+          "contributor": "Li",
+          "date": "2026-10-11",
+          "originalSHA256": "75a519de7a4501157a0eb1154bccde40ea4c41e49ee9414492c111944eb82b90",
+          "preparedSHA256": "8200c0cb319509e7f1f1123ccb9982311972e1372f8e02ea348d563673a12c39",
+          "noticePath": "gcc-13.4.0/gcc/ada/libgnat/g-dirope.ads",
+          "noticeMechanism": "dated in-file comment, appended to retain source/test line positions and all license bytes"
+        }
+      ],
+      "modificationNotice": "gcc-13.4.0/MODIFICATIONS.json",
+      "originalLicenseHashes": {
+        "gcc-13.4.0/COPYING.LIB": "a9bdde5616ecdd1e980b44f360600ee8783b1f99b8cc83a2beb163a0a390e861",
+        "gcc-13.4.0/libquadmath/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
+        "gcc-13.4.0/libgo/go/golang.org/x/mod/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/libgo/go/golang.org/x/xerrors/LICENSE": "84d554e7a5d139b7c7b5d6ef0670ae556c4cdcfa354eaad72a1c07c08012c96f",
+        "gcc-13.4.0/libgo/go/golang.org/x/tools/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/libgo/go/golang.org/x/sync/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/libgo/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/libstdc++-v3/include/pstl/LICENSE.txt": "0ca8cbe9219a841f9bc8fbb1f8ecdf5e39b1b0e23ee10fb6b0c090d8987dd1eb",
+        "gcc-13.4.0/libstdc++-v3/doc/html/manual/license.html": "2906eca1abfe0c78daea99197a6eb130603c2dac4aa8cd7863526ea52cd3f030",
+        "gcc-13.4.0/zlib/contrib/dotzlib/LICENSE_1_0.txt": "36266a8fd073568394cb81cdb2b124f7fdae2c64c1a7ed09db34b4d22efa2951",
+        "gcc-13.4.0/libphobos/src/LICENSE_1_0.txt": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+        "gcc-13.4.0/libphobos/libdruntime/LICENSE.txt": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+        "gcc-13.4.0/libcody/LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+        "gcc-13.4.0/COPYING3.LIB": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
+        "gcc-13.4.0/COPYING": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
+        "gcc-13.4.0/COPYING.RUNTIME": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+        "gcc-13.4.0/include/COPYING": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
+        "gcc-13.4.0/include/COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "gcc-13.4.0/gcc/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
+        "gcc-13.4.0/gcc/testsuite/gcc.dg/params/LICENSE": "4919cfb14a73cd64fcef67b107613970cf1659a09aa675dba31314f373bc7204",
+        "gcc-13.4.0/gcc/testsuite/gcc.dg/vect/tsvc/license.txt": "0bf700c6654f3e72308035d7ebb60abcc486e673ee8a72d19101f80812288f1c",
+        "gcc-13.4.0/gcc/m2/images/LICENSE.IMG": "ae8b2a985bd93e0785c3a9caa1762d9e958e62b6df819e705c26b2f7c421a2f6",
+        "gcc-13.4.0/gcc/m2/COPYING3.LIB": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
+        "gcc-13.4.0/gcc/m2/COPYING.RUNTIME": "736da4b68a76fa1e027a2ef2366946240662b5a179d1ed95b3b08cc33dab0d89",
+        "gcc-13.4.0/gcc/m2/COPYING.FDL": "8d9fa5772d8f68d715749c4cbeab2bf225d631054852491e1ef89a78fd201543",
+        "gcc-13.4.0/gcc/m2/COPYING3": "0ae0485a5bd37a63e63603596417e4eb0e653334fa6c7f932ca3a0e85d4af227",
+        "gcc-13.4.0/gcc/go/gofrontend/LICENSE": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+        "gcc-13.4.0/gcc/COPYING3.LIB": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c",
+        "gcc-13.4.0/gcc/COPYING": "231f7edcc7352d7734a96eef0b8030f77982678c516876fcb81e25b32d68564c",
+        "gcc-13.4.0/gcc/COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "gcc-13.4.0/libiberty/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
+        "gcc-13.4.0/libiberty/copying-lib.texi": "deda581ced57145d3ed4f099f79aeeaf3f0275758db02c607321131a3043fe95",
+        "gcc-13.4.0/COPYING3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "gcc-13.4.0/libsanitizer/LICENSE.TXT": "74c2b24539a53c34abddb559266d89cb653b0198cd2faf9c04763d3223db7f6d",
+        "gcc-13.4.0/libffi/LICENSE": "a61d06e8f7be57928e71e800eb9273b05cb8868c484108afe41e4305bb320dde",
+        "gcc-13.4.0/libffi/LICENSE-BUILDTOOLS": "e67978cd18816c0cb7d29aaaacde7b7447402c2fb321a051698890a8eaedda94"
+      },
+      "retainedInventorySHA256": "b28a3f107ffed3e27a414d02faf6d1b19e746cca1f3a97c174bbc1d1a7e44f20",
+      "relative": "GCC-runtime-13.4.0/gcc-13.4.0-full.tar.xz",
+      "originalBytes": 88530720,
+      "bundledBytes": 130471676,
+      "privacyStatus": "passed",
+      "omittedCount": 0,
+      "omissionReasons": {},
+      "omittedInventorySHA256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "expandedRegularFileBytes": 700250407,
+      "originalFileCount": 125386,
+      "publicExampleReplacement": "Equal-length neutral root; each changed text has an in-file dated notice; each changed binary fixture has an adjacent per-file dated notice.",
+      "added": [
+        "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho.MODIFICATIONS.txt",
+        "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho4.MODIFICATIONS.txt",
+        "gcc-13.4.0/libgo/go/go/internal/gcimporter/testdata/versions/test_go1.7_0.a.MODIFICATIONS.txt",
+        "gcc-13.4.0/MODIFICATIONS.json"
+      ],
+      "fullSource": true,
+      "privacyCounts": {
+        "opaque_binary_files": 567,
+        "source_archive_members": 125390,
+        "opaque_source_fixtures": 312,
+        "source_catalog_files": 42
+      }
     }
   ]
 }

@@ -552,6 +552,12 @@ def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, appr
                     raise PrivacyError("unreviewed-binary-package-entry")
                 if not allowed_text_file(path, data):
                     raise PrivacyError("unsupported-package-file-format")
+                if __package__:
+                    from .privacy_text import inspect_text
+                else:
+                    from privacy_text import inspect_text
+                inspect_text(data, path.name)
+                counts["path_scanned_text_files"] = counts.get("path_scanned_text_files", 0) + 1
                 counts["unreviewed_text_files"] += 1
                 return
     if size > JSON_LIMIT:
@@ -634,6 +640,24 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                 raise PrivacyError("special-package-entry")
 
     walk(root)
+    # The unchanged assembler first copies a reference with explicitly pending
+    # stages. Once the caller binds it to the final dylib, later privacy checks
+    # also reject stale hashes. Pending stages are counted, never presented as
+    # evidence that a candidate matches a publisher binary.
+    app = root if (root / "Contents").is_dir() else root / "LiveLingo.app"
+    provenance = app / "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/soundfile-binary-provenance.json"
+    if provenance.is_file() and not provenance.is_symlink():
+        value = read_json(provenance)
+        if value.get("schemaVersion") == 2:
+            if value.get("status") == "final-bound":
+                if __package__:
+                    from .binary_provenance import verify_app_provenance
+                else:
+                    from binary_provenance import verify_app_provenance
+                verify_app_provenance(app)
+                counts["bound_binary_provenance"] = 1
+            else:
+                counts["pending_binary_provenance"] = 1
     return counts
 
 

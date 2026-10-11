@@ -73,6 +73,41 @@ def schema_view(value):
     return value
 
 
+def public_example_spellings(examples, *, source_only=False):
+    """Validate reviewed public spellings used only with exact file hashes."""
+    if not isinstance(examples, list) or not examples:
+        raise PrivacyError("invalid-reviewed-public-examples")
+    allowed = []
+    for example in examples:
+        if not isinstance(example, dict) or set(example) != {"style", "path"} or not isinstance(example["path"], str):
+            raise PrivacyError("invalid-reviewed-public-examples")
+        value = example["path"]
+        if value.startswith(("/", "\\")) or ".." in PurePosixPath(value.replace("\\", "/")).parts:
+            raise PrivacyError("invalid-reviewed-public-examples")
+        if example["style"] == "posix" and value.startswith(("home/", "opt/homebrew/", "usr/local/opt/")):
+            allowed.append("/" + value)
+        elif example["style"] == "windows" and value.startswith(("Users\\", "Documents and Settings\\")):
+            allowed.extend(["C:\\" + value, "C:\\\\" + value.replace("\\", "\\\\")])
+        elif example["style"] == "windows-url" and value.startswith("Users/"):
+            allowed.append("/C:/" + value)
+        elif source_only and example["style"] == "rooted-package" and re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", value):
+            spelling = "/" + value
+            scan_host_paths(spelling.encode(), source_code=True)
+            allowed.append(spelling)
+        elif source_only and example["style"] == "source-literal-hex" and re.fullmatch(r"(?:[0-9a-f]{2}){1,4096}", value):
+            try:
+                spelling = bytes.fromhex(value).decode("utf-8")
+            except UnicodeError:
+                raise PrivacyError("invalid-reviewed-public-examples") from None
+            if not all(c.isprintable() for c in spelling):
+                raise PrivacyError("invalid-reviewed-public-examples")
+            scan_host_paths(spelling.encode(), source_code=True)
+            allowed.append(spelling)
+        else:
+            raise PrivacyError("invalid-reviewed-public-examples")
+    return allowed
+
+
 def inspect(path, relative, approvals, counts):
     item = approvals.get(relative)
     if item is None:
@@ -108,6 +143,32 @@ def inspect(path, relative, approvals, counts):
         value["joint"] = {k: v for k, v in value["joint"].items() if k != "vocabulary"}
         validate_metadata(value)
         counts["metadata_files"] += 1
+    elif item["format"] in ("python-public-examples", "text-public-examples"):
+        if __package__:
+            from .privacy_text import inspect_text
+        else:
+            from privacy_text import inspect_text
+        allowed = public_example_spellings(item.get("publicHostPathExamples"))
+        inspect_text(data, path.name, allowed=allowed)
+        counts["path_scanned_text_files"] = counts.get("path_scanned_text_files", 0) + 1
+    elif item["format"] == "source-build-text":
+        if __package__:
+            from .source_archive import source_text
+            from .privacy_literals import inspect_source_literals
+        else:
+            from source_archive import source_text
+            from privacy_literals import inspect_source_literals
+        text = source_text(data, path.name)
+        if text is None:
+            raise PrivacyError("invalid-reviewed-build-text")
+        allowed = public_example_spellings(item["publicHostPathExamples"]) if "publicHostPathExamples" in item else []
+        def scan(value):
+            for public in allowed:
+                value = value.replace(public, "PUBLIC_UPSTREAM_EXAMPLE")
+            scan_host_paths(value.encode("utf-8", errors="surrogatepass"), source_code=True)
+        scan(text)
+        inspect_source_literals(text, path.name, scan)
+        counts["path_scanned_text_files"] = counts.get("path_scanned_text_files", 0) + 1
     elif item["format"] in ("lark-grammar", "css"):
         text = decode_metadata_text(data)
         if text is None:
@@ -150,13 +211,14 @@ def scan_host_paths(data, *, source_code=False):
     expressions such as system header includes or regular-expression slashes.
     """
     data = re.sub(rb"https?://[^\s\"<>]+", b"", data, flags=re.I)
-    roots = rb"(?<![\w:/.])/(?:Users|Volumes|home|private/(?:tmp|var)|synthetic)/"
+    roots = (rb"(?:(?<![\w:/.])|(?<=-I)|(?<=-L)|(?<=\.\.))"
+             rb"/(?:Users|Volumes|home|private/(?:tmp|var)|var/folders|opt/homebrew|usr/local/(?:Cellar|opt)|synthetic)/")
     # Public source may implement file:// and shell ~ expansion. Those syntax
     # tokens disclose no actual location; parsed metadata still rejects them.
     syntax = rb"[A-Za-z]:[/\\](?:Users|Documents and Settings)[/\\]"
     if not source_code:
         syntax = rb"file://|~[/\\]|" + syntax
-    if (re.search(roots, data) or re.search(syntax, data, re.I)
+    if (re.search(roots, data, re.I) or re.search(syntax, data, re.I)
             or re.search(rb"file:///+(?:Users|Volumes|home|private/(?:tmp|var)|synthetic)/", data, re.I)):
         raise PrivacyError("local-path-metadata")
 

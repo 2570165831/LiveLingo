@@ -174,7 +174,14 @@ def copy_runtime_file(source, destination, *, clone):
     if source.suffix == ".py":
         original = source.read_bytes()
         normalized = normalized_python(original)
-        if original != normalized:
+        if __package__:
+            from .runtime_configuration import prepare_configuration
+        else:
+            from runtime_configuration import prepare_configuration
+        configured, fields = prepare_configuration(normalized, source)
+        if fields:
+            data, change = configured, "runtime-configuration-relocated"
+        elif original != normalized:
             lines = normalized.splitlines(keepends=True)
             insertion = 1 if normalized.startswith(b"#!") else 0
             for index, line in enumerate(lines[:2]):
@@ -297,6 +304,14 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
                                       "loadCommands": native_changes,
                                       "originalSHA256": hashlib.sha256(path.read_bytes()).hexdigest(),
                                       "preparedSHA256": hashlib.sha256(target.read_bytes()).hexdigest()})
+                if action == "runtime-configuration-relocated":
+                    modifications[-1]["reason"] = "Installed directories derive from the copied module location; build-machine paths and profile data are omitted from generated configuration. Other generated fields and executable code remain intact."
+                    if __package__:
+                        from .runtime_configuration import prepare_configuration
+                    else:
+                        from runtime_configuration import prepare_configuration
+                    _, fields = prepare_configuration(normalized_python(path.read_bytes()), relative)
+                    modifications[-1]["configurationFields"] = fields
         changed[action] += 1
     inventory = []
     component_licenses = {name: [] for name in selected}
@@ -372,7 +387,7 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
               "removed": dict(removed), "changed": dict(changed), "licenses": inventory, "missingLicenseFiles": missing}
     (output / "runtime-preparation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     (output / "MODIFICATIONS.json").write_text(json.dumps({"contributor": "Li", "date": "2026-10-11",
-        "scope": "Prepared third-party runtime copies; originals unchanged. Python normalization preserves the AST; metadata descriptions and certificate labels are omitted; certificate blocks are unchanged. Native load paths are made portable without signing.",
+        "scope": "Prepared third-party runtime copies; originals unchanged. Encoding normalization preserves the AST. Generated CPython paths are relocated; generated NumPy/SciPy build locations are omitted. Install/build configuration files, headers and compiler inputs are outside this inference runtime. Metadata descriptions and certificate labels are omitted; certificate blocks are unchanged. Native load paths are made portable without signing.",
         "files": modifications}, ensure_ascii=False, indent=2) + "\n")
     if missing:
         raise PrivacyError("runtime-license-files-missing")

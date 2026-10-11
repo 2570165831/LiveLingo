@@ -261,6 +261,9 @@ def prepare(source, destination, package, version, additions=()):
                 if package == "inferno" and path.parts[1:] == ("src", "flamegraph", "color", "palettes.rs"):
                     clean, count = re.subn(re.escape(b"C:/" + b"Users/User/AppData/Local/Programs/"), b'C:/Public/Programs/', clean)
                     changes += count
+                    escaped = b"C:\\\\" + b"Users\\\\User\\\\AppData\\\\Local\\\\Programs\\\\"
+                    clean, count = re.subn(re.escape(escaped), lambda match: b"C:\\\\Public\\\\Programs\\\\", clean)
+                    changes += count
                 # Documentation examples and exporter metadata do not enter
                 # compiled code. GNU Info offsets must keep their original
                 # positions, so replacements there have exactly equal length.
@@ -270,7 +273,13 @@ def prepare(source, destination, package, version, additions=()):
                 if (document or info) and not license_filename(Path(member.name)):
                     def neutral(match):
                         return (b"EXAMPLE" + b"_" * (len(match[0]) - 7)) if info else b"UPSTREAM_HOME/example"
-                    clean, count = re.subn(rb"/(?:Users|Volumes|home)/[^\s\"<>]+", neutral, clean)
+                    # Markup entities delimit escaped tags as surely as '<'.
+                    # In HTML/XML stop before an entity rather than swallowing
+                    # the escaped closing tag into a home-path replacement.
+                    markup = path.suffix.lower() in (".html", ".htm", ".xml")
+                    roots = (rb"/(?:Users|Volumes|home)/[^\s\"<>&]+" if markup
+                             else rb"/(?:Users|Volumes|home)/[^\s\"<>]+")
+                    clean, count = re.subn(roots, neutral, clean)
                     changes += count
                 if changes:
                     description = b"Modified by Li on 2026-10-11: neutralize upstream home-path examples; see MODIFICATIONS.json."
@@ -278,6 +287,9 @@ def prepare(source, destination, package, version, additions=()):
                         clean += b"\n" + description + b"\n"
                     elif path.suffix == ".texi":
                         clean = b"@c " + description + b"\n" + clean
+                    elif (path.suffix.lower() in (".man", ".roff")
+                          or re.fullmatch(r"\.[1-9][A-Za-z]*", path.suffix)):
+                        clean = b'.\\" ' + description + b"\n" + clean
                     elif clean.lstrip().startswith(b"<?xml") or path.suffix == ".html":
                         # XML declarations must stay at the beginning.
                         notice = b"<!-- " + description + b" -->\n"

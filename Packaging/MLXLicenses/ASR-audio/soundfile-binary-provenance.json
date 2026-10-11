@@ -1,6 +1,19 @@
 {
+  "schemaVersion": 2,
+  "component": "libsndfile-arm64",
   "source": "https://raw.githubusercontent.com/bastibe/libsndfile-binaries/a3e6f9769d0c7e91d2d036cf0fdbe5b4bbf18b87/libsndfile_arm64.dylib",
   "upstreamSHA256": "e9fd4d76bc457dcfb956617e8d467df85087ce069747fccd78e1e702d8629c14",
-  "localSHA256": "e9fd4d76bc457dcfb956617e8d467df85087ce069747fccd78e1e702d8629c14",
-  "exactMatch": true
+  "comparisonSemantics": "inputExactMatch compares inputSHA256 with upstreamSHA256; exactMatch compares finalBundledSHA256 with upstreamSHA256; finalMatchesInput compares finalBundledSHA256 with inputSHA256. None of these fields asserts a byte-identical source rebuild.",
+  "inputStage": "read-only-runtime-input-before-preparation",
+  "inputPathBase": "asr-python-root",
+  "inputPath": "lib/python3.13/site-packages/_soundfile_data/libsndfile_arm64.dylib",
+  "inputSHA256": null,
+  "inputExactMatch": null,
+  "finalStage": "pending-assembly",
+  "finalPathBase": "app-root",
+  "finalBundledPath": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/_soundfile_data/libsndfile_arm64.dylib",
+  "finalBundledSHA256": null,
+  "exactMatch": null,
+  "finalMatchesInput": null,
+  "status": "awaiting-input-and-final-binding"
 }
