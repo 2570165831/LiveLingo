@@ -419,6 +419,14 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             record.failureReason = .interrupted
             try put(record)
         }
+        // Legacy or edited journals can leave an already exhausted retry in
+        // the waiting state. Persist its terminal status without another debit
+        // or changing the failure/candidate evidence needed for manual retry.
+        for var record in state.records where record.status == .retryWaiting
+            && record.automaticRetryCount >= Self.maximumAutomaticRetries {
+            record.status = .failed
+            try put(record)
+        }
         if state.sequence == 0 { try setPaused(false) }
         }
     }
@@ -642,7 +650,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             // Fresh captions keep priority over every repair, in arrival order.
             // Repairs are FIFO among themselves: a newer manual pass cannot
             // indefinitely overtake an older automatic retry with budget left.
-            let candidate = state.records.first { $0.status == .pending }
+            let candidate = state.records.first { $0.status == .pending && $0.isClaimable }
                 ?? state.records.first(where: \.isClaimable)
             guard var record = candidate else { return nil }
             if record.status == .retryWaiting { record.attempt = .automaticRetry; record.automaticRetryCount += 1 }

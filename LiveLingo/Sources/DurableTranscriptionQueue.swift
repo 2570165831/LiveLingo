@@ -622,11 +622,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         lock.withLock {
             guard storageFailure == nil, let context, !context.journal.isPaused else { return }
             let records = context.journal.records
-            if worker == nil, records.contains(where: {
-                $0.status == .pending || ($0.sourceTriggerPendingBoundary != true
-                    && ($0.sourceProbeInput == nil || $0.sourceProbeFinished == true)
-                    && [.retryWaiting, .manualPending].contains($0.status))
-            }) {
+            // Use the same budget/source gate as claimNext and processingState;
+            // an exhausted legacy retry must not repeatedly wake an idle pump.
+            if worker == nil, records.contains(where: \.isClaimable) {
                 worker = Task { [weak self] in await self?.run(generation: context.generation) }
             }
             if sourceWorker == nil, worker == nil,

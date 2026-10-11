@@ -287,6 +287,94 @@ final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(state.hasAutomaticWork)
     }
 
+    // P2b: journal-only recovery regressions. No ASR, queue pump, or audio opens.
+    private func p2bRecoveryDirectory() throws -> URL {
+        let root = TestFixtureDirectory.root.appendingPathComponent("LiveLingo-P2b-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        // Retained inside the invocation's worker directory; no user Trash writes.
+        return root
+    }
+
+    func testP2bRecoveryNormalizesExhaustedWaiterWithoutLosingEvidence() throws {
+        let root = try p2bRecoveryDirectory(), id = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+        var exhausted = work(id, ordinal: 0, status: .retryWaiting)
+        exhausted.attempt = .automaticRetry
+        exhausted.automaticRetryCount = DurableTranscriptionJournal.maximumAutomaticRetries
+        exhausted.manualRetryCount = 1
+        exhausted.text = "The original synthetic caption."
+        exhausted.candidateText = "An unconfirmed synthetic candidate."
+        exhausted.candidateOrigin = "sameRangeRevision"
+        exhausted.failure = "Synthetic recognition failure."
+        exhausted.failureReason = .error
+        try journal.put(exhausted)
+        try journal.setPaused(true)
+        try journal.checkpoint()
+
+        let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+        var expected = exhausted
+        expected.status = .failed
+        XCTAssertEqual(reopened.record(id: exhausted.id), expected,
+                       "Recovery may change only the exhausted waiting status")
+        XCTAssertTrue(reopened.isPaused)
+        XCTAssertNil(try reopened.claimNext())
+        let state = reopened.processingState
+        XCTAssertEqual(state.pendingCount, 0)
+        XCTAssertEqual(state.backlogSeconds, 0)
+        XCTAssertEqual(state.claimableCount, 0)
+        XCTAssertEqual(state.failedCount, 1)
+        XCTAssertEqual(state.candidateCount, 1)
+        XCTAssertEqual(state.failedWithCandidateCount, 1)
+        XCTAssertEqual(state.unresolvedCount, 1)
+        XCTAssertFalse(state.hasAutomaticWork)
+
+        // Reopening without checkpointing must replay the normalization mutation.
+        let replayed = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+        XCTAssertEqual(replayed.record(id: exhausted.id), expected)
+        XCTAssertEqual(replayed.processingState, state)
+        try replayed.retry(id: exhausted.id)
+        XCTAssertFalse(replayed.processingState.hasAutomaticWork, "Manual work still respects pause")
+        try replayed.setPaused(false)
+        XCTAssertTrue(replayed.processingState.hasAutomaticWork)
+        let claimed = try XCTUnwrap(replayed.claimNext())
+        XCTAssertEqual(claimed.id, exhausted.id)
+        XCTAssertEqual(claimed.attempt, .manual)
+        XCTAssertEqual(claimed.automaticRetryCount, exhausted.automaticRetryCount)
+        XCTAssertEqual(claimed.manualRetryCount, 2)
+    }
+
+    func testP2bRecoveryRetainsClaimableBudgetAndFreshCaptionPriority() throws {
+        let root = try p2bRecoveryDirectory(), id = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+        var exhausted = work(id, ordinal: 0, status: .retryWaiting)
+        exhausted.automaticRetryCount = DurableTranscriptionJournal.maximumAutomaticRetries
+        var waiting = work(id, ordinal: 1, status: .retryWaiting)
+        waiting.automaticRetryCount = 1
+        var manual = work(id, ordinal: 2, status: .manualPending)
+        manual.automaticRetryCount = DurableTranscriptionJournal.maximumAutomaticRetries
+        let fresh = work(id, ordinal: 3)
+        for record in [exhausted, waiting, manual, fresh] { try journal.put(record) }
+
+        let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: id)
+        XCTAssertEqual(reopened.records.map(\.status), [.failed, .retryWaiting, .manualPending, .pending])
+        XCTAssertEqual(reopened.processingState.pendingCount, 3)
+        XCTAssertEqual(reopened.processingState.claimableCount, 3)
+        XCTAssertTrue(reopened.processingState.hasAutomaticWork)
+        for expected in [fresh, waiting, manual] {
+            var claimed = try XCTUnwrap(reopened.claimNext())
+            XCTAssertEqual(claimed.id, expected.id)
+            XCTAssertEqual(claimed.automaticRetryCount,
+                           expected.automaticRetryCount + (expected.status == .retryWaiting ? 1 : 0))
+            XCTAssertEqual(claimed.manualRetryCount, expected.status == .manualPending ? 1 : 0)
+            claimed.status = .completed
+            try reopened.put(claimed)
+        }
+        XCTAssertNil(try reopened.claimNext())
+        XCTAssertEqual(reopened.processingState.pendingCount, 0)
+        XCTAssertEqual(reopened.processingState.failedCount, 1)
+        XCTAssertFalse(reopened.processingState.hasAutomaticWork)
+    }
+
     func testDeferredSourceRepairsAreNotClaimableOrTerminalFailures() throws {
         for status in [TranscriptionWorkRecord.Status.retryWaiting, .manualPending] {
             for waitsForProbe in [false, true] {
