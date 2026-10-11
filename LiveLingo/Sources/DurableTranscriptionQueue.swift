@@ -512,8 +512,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                   original.channelCount == part.channelCount, original.formatTag == part.formatTag,
                   original.bitsPerSample == part.bitsPerSample,
                   part.frameCount == record.endFrame - record.startFrame else { continue }
-            // Compare only this bounded range, never read an entire lecture.
-            let extract = try WAVContextClip.extract(from: recording, start: record.start, end: record.end, padding: 0)
+            // Compare only this bounded range, never read an entire lecture. Use the record's
+            // integer frames: frame / rate * rate need not round-trip to the same frame.
+            let extract = try WAVContextClip.extract(from: recording, start: record.start, end: record.end, padding: 0,
+                frameRange: Int(record.startFrame)..<Int(record.endFrame))
             defer { try? FileManager.default.removeItem(at: extract) }
             let extracted = try WAVContextClip.readLayout(at: extract)
             let source = try FileHandle(forReadingFrom: chunk)

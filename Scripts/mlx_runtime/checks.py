@@ -13,15 +13,26 @@ UNITS = pint.UnitRegistry()
 NUMBER = r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d{1,2})?'
 QUANTITY = re.compile(rf'^({NUMBER})\s+([A-Za-z][A-Za-z0-9/*^ .-]{{0,32}})$')
 UNIT_EXPONENT = re.compile(r'(?:\^|\*\*)\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)')
+# Unambiguous written operators only. U+00B7 '·' stays unsupported because it
+# is also a decimal point; no NFKC folding, which would turn '3²' into '32'.
+OPERATORS = (('\u00d7', '*'), ('\u22c5', '*'), ('\u00f7', '/'), ('\u2212', '-'))
+LATEX_OPERATORS = ((re.compile(r'\\(?:times|cdot)(?![A-Za-z])'), '*'), (re.compile(r'\\div(?![A-Za-z])'), '/'))
+
+
+def normalize_operators(text):
+    for written, operator in OPERATORS: text = text.replace(written, operator)
+    for pattern, operator in LATEX_OPERATORS: text = pattern.sub(operator, text)
+    return text
 
 
 def arithmetic(text):
     if len(text) > 160: raise ValueError('表达式过长')
-    tree = ast.parse(text.replace('^', '**'), mode='eval')
+    source = text.replace('^', '**')
+    tree = ast.parse(source, mode='eval')
     if len(list(ast.walk(tree))) > 64: raise ValueError('表达式过于复杂')
     def visit(node):
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-            literal = ast.get_source_segment(text.replace('^','**'), node)
+            literal = ast.get_source_segment(source, node)
             if len(literal) > 24 or abs(node.value) > 1e12: raise ValueError('数值超出核算范围')
             return sp.Rational(literal)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
@@ -90,7 +101,7 @@ def check(expression, language=None):
         if '->' in expression or '→' in expression:
             ok, scope = reaction(expression); method='ChemPy'
         else:
-            written = expression
+            expression = written = normalize_operators(expression)
             if language in ('es', 'fr'):
                 from latin_numbers import normalize_expression
                 expression = normalize_expression(expression, language)

@@ -1021,7 +1021,8 @@ struct LiveLingoCLI {
  // leaking classroom text. Identifiers are parsed, never copied arbitrarily.
  static func safeEvent(_ event: String, fields: [String: Any], elapsed: TimeInterval) -> [String: Any] {
   let events: Set<String> = ["prepare", "state", "capture", "capture_ready", "review_start", "review_done",
-                             "review_skipped", "exported", "finished", "save_failed", "opened", "resumed", "translation_failure"]
+                             "review_skipped", "exported", "finished", "save_failed", "opened", "resumed", "translation_failure",
+                             "transcription_unresolved"]
   var result: [String: Any] = ["event": events.contains(event) ? (event == "finished" ? "processing_finished" : event) : "progress"]
   if event == "translation_failure" {
    // Reject bridged booleans/numbers, arbitrary text and unrelated fields.
@@ -1039,7 +1040,7 @@ struct LiveLingoCLI {
               "otherLanguageTranscription", "jobs", "bytes", "revision", "batches"] {
    if let value = fields[key] as? Int, value >= 0 { result[key] = value }
   }
-  for key in ["chineseCaptions", "otherLanguageCaptions", "languageProbes"] {
+  for key in ["chineseCaptions", "otherLanguageCaptions", "languageProbes", "failed", "candidates", "failedWithCandidate"] {
    // NSNumber/Bool and floating-point coercions must not become count fields.
    if let raw = fields[key], type(of: raw) == Int.self, let value = raw as? Int, value >= 0 {
     result[key] = value

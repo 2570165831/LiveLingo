@@ -1420,6 +1420,61 @@ final class CaptionIdentityTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("transcript-zh-Hans.txt"), encoding: .utf8),
                        snapshot.segments[0].chinese + "\n")
     }
+
+    /// Issue #30: an earlier informational notice must not hide a later save
+    /// failure in the status bar, and the notice returns once a save succeeds.
+    func testUnresolvedSaveFailureOutranksSessionNoticeUntilASaveSucceeds() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiveLingo-SaveErrorPriority-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        var snapshot = SessionSnapshot()
+        snapshot.segments = [TranscriptSegment(startTime: 0, endTime: 8,
+            english: "Synthetic saved sentence for the status check.", chinese: "用于状态检查的合成句子。",
+            sessionID: snapshot.sessionID)]
+        snapshot.processing.paused = true
+        _ = try SessionStore(directory: root).save(snapshot)
+        let model = try makeModel(.unavailable)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root)
+        model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: 0, end: 8, message: "合成提示：此处转写待确认。"))
+        let notice = try XCTUnwrap(model.sessionNotice)
+        XCTAssertEqual(model.errorMessage, notice)
+
+        // Saved-course write fails (recorded as a storage failure).
+        let blocker = root.appendingPathComponent("transcript-en.txt", isDirectory: true)
+        try FileManager.default.createDirectory(at: blocker, withIntermediateDirectories: false)
+        model.retrySavedSessionWrite()
+        try await eventually { !model.archiveLoading }
+        let storageFailure = try XCTUnwrap(model.archiveError)
+        XCTAssertTrue(storageFailure.hasPrefix("课程进度仍未保存"))
+        XCTAssertEqual(model.errorMessage, storageFailure, "A stale notice must not hide an unresolved save failure")
+        XCTAssertEqual(model.sessionNotice, notice, "The notice is kept for status details")
+        // Remove only the synthetic obstruction created immediately above.
+        try FileManager.default.removeItem(at: blocker)
+        model.retrySavedSessionWrite()
+        try await eventually { !model.archiveLoading }
+        XCTAssertNil(model.archiveError)
+        XCTAssertEqual(model.errorMessage, notice)
+
+        // Autosave fails through the bound saver's real callback, then a save succeeds.
+        model.failBoundAutosaveForTesting(CocoaError(.fileWriteOutOfSpace))
+        let autosaveFailure = try XCTUnwrap(model.archiveError)
+        XCTAssertTrue(autosaveFailure.hasPrefix("课程进度保存失败"))
+        XCTAssertEqual(model.errorMessage, autosaveFailure)
+        try await model.flushSavedCourseForTesting()
+        XCTAssertNil(model.archiveError)
+        XCTAssertEqual(model.errorMessage, notice)
+
+        // A sticky non-storage error keeps its old rank below the notice.
+        model.receiveTranscriptionNoticeForTesting(.failure("合成处理错误"))
+        try await eventually { model.archiveError != nil }
+        let processingError = try XCTUnwrap(model.archiveError)
+        XCTAssertFalse(processingError.hasPrefix("课程进度"))
+        XCTAssertEqual(model.errorMessage, notice)
+        model.dismissSessionNotice()
+        XCTAssertEqual(model.errorMessage, processingError)
+    }
 }
 
 // Append to CaptionIdentityTests.swift. No new target registration or production seam.

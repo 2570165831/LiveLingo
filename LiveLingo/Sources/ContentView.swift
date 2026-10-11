@@ -622,6 +622,9 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(model.segments.isEmpty)
+                    .help(model.legacyProvenanceUnavailable ? "旧课程需先在“录音处理”中重建笔记"
+                        : model.savedProcessingIsPaused ? "处理已暂停：在“录音处理”中继续后可更新笔记"
+                        : "立即把新内容整理进笔记")
                     .accessibilityLabel("更新课堂笔记")
                     .accessibilityIdentifier("classroom-refresh-notes")
                 }
@@ -699,6 +702,7 @@ struct ContentView: View {
                     .font(.headline)
                 if let error = model.errorMessage {
                     Text(error)
+                    if let notice = model.sessionNotice, notice != error { Text(notice) }
                     Divider()
                 }
                 if let notice = model.chineseDisplayNotice { Text(notice) }

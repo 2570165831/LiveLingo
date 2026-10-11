@@ -86,6 +86,14 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
     var failureReason: FailureReason?
     var duration: TimeInterval { max(0, end - start) }
     var needsWork: Bool { [.pending, .active, .retryWaiting, .manualPending].contains(status) }
+    /// Exactly what `claimNext()` may take. A `.retryWaiting` record with an
+    /// exhausted budget (only from a legacy or edited journal) is never taken.
+    var isClaimable: Bool {
+        status == .pending || status == .manualPending
+            || (status == .retryWaiting && automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries)
+    }
+    /// Failed for good unless someone retries it by hand.
+    var isStuckFailed: Bool { status == .failed || (status == .retryWaiting && !isClaimable) }
     /// An unfinished manual retry of non-English speech heard nothing new, so
     /// that terminal verdict stands. With a fallback model, this reason otherwise
     /// only remains on a chunk awaiting its first automatic retry, which offers
@@ -170,8 +178,20 @@ struct TranscriptionProcessingState: Sendable, Equatable {
     /// Terminal non-English chunks without a pending candidate. Disjoint from
     /// `unresolvedCount`: nothing is pending or failed.
     var otherLanguageCount = 0
+    /// Records `claimNext()` can still take without anyone's help.
+    var claimableCount = 0
+    /// Failed records that only a manual retry can move again.
+    var failedCount = 0
+    /// Records carrying a candidate that waits for confirmation.
+    var candidateCount = 0
+    /// Records counted in both `failedCount` and `candidateCount`.
+    var failedWithCandidateCount = 0
     /// Audio is opened on demand; no waiting task retains decoded audio.
     let prefetchedCount: Int = 0
+    /// Transcription can still move on its own: something is running, or the
+    /// unpaused queue holds a record `claimNext()` will take. Failed segments
+    /// and unconfirmed candidates need a person and do not count.
+    var hasAutomaticWork: Bool { activeCount > 0 || (claimableCount > 0 && !isPaused) }
 }
 
 /// Written before opening each audio file. One marker per uncommitted chunk
@@ -568,10 +588,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             // Repairs are FIFO among themselves: a newer manual pass cannot
             // indefinitely overtake an older automatic retry with budget left.
             let candidate = state.records.first { $0.status == .pending }
-                ?? state.records.first {
-                    $0.status == .manualPending
-                        || ($0.status == .retryWaiting && $0.automaticRetryCount < Self.maximumAutomaticRetries)
-                }
+                ?? state.records.first(where: \.isClaimable)
             guard var record = candidate else { return nil }
             if record.status == .retryWaiting { record.attempt = .automaticRetry; record.automaticRetryCount += 1 }
             else if record.status == .manualPending { record.attempt = .manual; record.manualRetryCount += 1 }
@@ -610,7 +627,11 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
                 pendingCount: pending.count, backlogSeconds: pending.reduce(0) { $0 + $1.duration },
                 unresolvedCount: state.records.filter { $0.status == .failed || $0.status == .retryWaiting || $0.candidateText != nil }.count,
                 // A pending candidate still needs confirmation; it is counted once, as unresolved.
-                otherLanguageCount: state.records.filter { $0.status == .otherLanguage && $0.candidateText == nil }.count)
+                otherLanguageCount: state.records.filter { $0.status == .otherLanguage && $0.candidateText == nil }.count,
+                claimableCount: state.records.filter(\.isClaimable).count,
+                failedCount: state.records.filter(\.isStuckFailed).count,
+                candidateCount: state.records.filter { $0.candidateText != nil }.count,
+                failedWithCandidateCount: state.records.filter { $0.isStuckFailed && $0.candidateText != nil }.count)
         }
     }
 }

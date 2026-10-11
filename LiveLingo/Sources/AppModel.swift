@@ -587,6 +587,8 @@ final class AppModel: ObservableObject {
         set {
             let oldValue = captionStream.volatileEnglish
             captionStream.volatileEnglish = newValue
+            // Only a timed preview event knows its range; it sets it right after.
+            volatileRangeEnd = nil
             // Preserve source identity, stale-result clearing and wake-up semantics.
             if newValue != oldValue { markPreviewSourceChanged() }
             if oldValue.isEmpty || newValue.isEmpty || !newValue.hasPrefix(oldValue) {
@@ -594,6 +596,14 @@ final class AppModel: ObservableObject {
             }
             previewWake?.signal()
         }
+    }
+    /// End of the shown preview on the session-audio timeline; nil when unknown.
+    private var volatileRangeEnd: TimeInterval?
+    /// A final that ends well before the shown preview belongs to an earlier
+    /// chunk; it must not clear speech the preview has already moved on to.
+    private func previewOutlivesFinal(endingAt finalEnd: TimeInterval) -> Bool {
+        guard let previewEnd = volatileRangeEnd, finalEnd > 0 else { return false }
+        return previewEnd > finalEnd + 0.25
     }
     /// On by default for new preferences. An explicit prior choice is retained.
     @Published var previewTranslationEnabled: Bool {
@@ -1356,7 +1366,18 @@ final class AppModel: ObservableObject {
 
     var errorMessage: String? {
         if case .failed(let message) = phase { return message }
-        return (isRecording ? captureHealthNotice : nil) ?? sessionNotice ?? archiveError ?? setupError
+        return (isRecording ? captureHealthNotice : nil) ?? unresolvedSaveError ?? sessionNotice ?? archiveError ?? setupError
+    }
+
+    /// A save failure that is still unresolved outranks an informational notice,
+    /// so an earlier "saved" notice cannot hide it. Other archive errors keep
+    /// their lower rank; each of these clears itself on the next successful save.
+    private var unresolvedSaveError: String? {
+        guard let archiveError else { return nil }
+        if archiveError == archiveWriteError { return archiveError }
+        if let processing = sessionSnapshot?.processing, processing.lastErrorSource == .storage,
+           processing.lastError == archiveError { return archiveError }
+        return nil
     }
 
     func dismissSessionNotice() {
@@ -1380,8 +1401,24 @@ final class AppModel: ObservableObject {
         startRuntimeReadinessMonitor()
     }
 
+    /// Shown when the notes refresh is requested while saved processing is
+    /// parked; scheduling refuses that request, so the click must say why.
+    static let notesPausedStatus = "译文与笔记处理已暂停 · 继续处理后可更新笔记"
+    /// A legacy course cannot resume until its notes are explicitly rebuilt.
+    static let notesLegacyStatus = "旧课程笔记缺少来源批次 · 在“录音处理”中重建后可更新"
+
     func requestSummaryRefresh() {
         guard !segments.isEmpty else { return }
+        // Checked before the translation-worker branch: during a park the
+        // worker can still be set, and no refresh may be queued past a pause.
+        if case .saved = phase, legacyProvenanceUnavailable {
+            summaryStatus = Self.notesLegacyStatus
+            return
+        }
+        if processingPaused {
+            summaryStatus = Self.notesPausedStatus
+            return
+        }
         summaryRetryNotBefore = nil
         if translationWorker != nil && !summaryConcurrencyAllowed {
             summaryRefreshRequested = true
@@ -3005,6 +3042,10 @@ final class AppModel: ObservableObject {
                     resetCaptionRecoveryRound()
                 }
                 processingPaused = false
+                if summaryStatus == Self.notesPausedStatus || summaryStatus == Self.notesLegacyStatus {
+                    summaryStatus = lastSummarizedSegmentCount > 0
+                        ? "已整理 \(lastSummarizedSegmentCount) 段 · 本机生成" : "等待课堂内容"
+                }
                 restorePendingCaptionWork()
                 drainTranslationQueue()
                 startSavedDrain()
@@ -3251,9 +3292,10 @@ final class AppModel: ObservableObject {
             lastAudioLevelAt = Date()
             waveformSamples.removeFirst()
             waveformSamples.append(level)
-        case let .volatile(text, _, _, observedAt):
+        case let .volatile(text, start, end, observedAt):
             tracePreviewReceiveHop(ProcessInfo.processInfo.systemUptime - observedAt)
             volatileEnglish = text
+            if !text.isEmpty, end > start, end > 0 { volatileRangeEnd = end }
             // Preview updates do not use the translation model. Let a summary
             // finish unless caption backlog or memory pressure requires yielding.
         case let .final(text, start, end, hints, language):
@@ -3355,7 +3397,7 @@ final class AppModel: ObservableObject {
             segment.updateCaptionAnnotation(targetCode: target.rawValue,
                 formulaUncertain: (segment.sourceLanguage == nil || segment.sourceLanguage == "en") && FormulaASRReview.uncertain(segment.english))
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
-            volatileEnglish = ""
+            if !previewOutlivesFinal(endingAt: segment.endTime) { volatileEnglish = "" }
             markCaptionActivity()
             segments.append(segment)
             segments.sort { $0.startTime == $1.startTime ? $0.id.uuidString < $1.id.uuidString : $0.startTime < $1.startTime }
@@ -3567,8 +3609,11 @@ final class AppModel: ObservableObject {
         consume(.final(text: text, start: start, end: end, hints: []))
     }
     func receiveLivePreviewForTesting(_ text: String, chinese: String? = nil) {
+        receiveLivePreviewForTesting(text, start: 0, end: 0, chinese: chinese)
+    }
+    func receiveLivePreviewForTesting(_ text: String, start: TimeInterval, end: TimeInterval, chinese: String? = nil) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
-        consume(.volatile(text: text, start: 0, end: 0,
+        consume(.volatile(text: text, start: start, end: end,
                           observedAt: ProcessInfo.processInfo.systemUptime))
         if let chinese { previewChinese = chinese }
     }
@@ -3576,6 +3621,11 @@ final class AppModel: ObservableObject {
     func receiveTranscriptionNoticeForTesting(_ event: SpeechPipeline.Event) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         consume(event)
+    }
+    /// Runs the bound saver's real failure callback, as a failed autosave would.
+    func failBoundAutosaveForTesting(_ error: Error) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        sessionSaver?.onFailure?(error)
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
     var translationQueueForTesting: [UUID] { translationQueue }
@@ -5904,6 +5954,13 @@ extension AppModel {
                 guard sessionID == identity, generation == epoch else {
                     throw QwenRuntimeError.requestFailed("CLI resume changed the session identity")
                 }
+                if let state = transcriptionProcessing, state.failedCount + state.candidateCount > 0 {
+                    // Counts only. A segment can be both failed and awaiting a
+                    // candidate; the overlap says how many are in both counts.
+                    report("transcription_unresolved", ["sessionID": identity.uuidString,
+                        "failed": state.failedCount, "candidates": state.candidateCount,
+                        "failedWithCandidate": state.failedWithCandidateCount])
+                }
                 // Same bounded, admission-gated notes completion as a live run,
                 // plus an explicit stall guard: a blocked admission must fail the
                 // run instead of quietly waiting out the whole deadline.
@@ -6036,9 +6093,9 @@ extension AppModel {
     private var cliSavedWorkPending: Bool {
         processingTask != nil || translationWorker != nil || summaryTask != nil
             || hasPendingTranslationWork
-            || (transcriptionProcessing?.pendingCount ?? 0) > 0
-            || (transcriptionProcessing?.activeCount ?? 0) > 0
-            || (transcriptionProcessing?.unresolvedCount ?? 0) > 0
+            // Failed segments and unconfirmed candidates wait for a person, so
+            // the resume must not sit out its deadline on them.
+            || transcriptionProcessing?.hasAutomaticWork == true
     }
 }
 #endif
