@@ -60,7 +60,8 @@ class AutoLanguageTests(unittest.TestCase):
 
         def encode(self, text, **kwargs):
             if text == '<asr_text>': return [service.ASR_TEXT_TOKEN]
-            return list(self.heads[text[1:]])
+            # Names without a fixture (e.g. most self-names) take too many tokens.
+            return list(self.heads.get(text[1:], [990, 991, 992, 993]))
 
         def decode(self, tokens, skip_special_tokens=False):
             for label, head in self.heads.items():
@@ -187,6 +188,71 @@ class AutoLanguageTests(unittest.TestCase):
                 self.generate_step.return_value = iter([(400, None), (151643, None)])
                 result = self.auto(self.model(label))
                 self.assertEqual((result['detected_label'], result['language']), (label, code))
+
+    def native_model(self, name, p_label, p_english=.01, **tokens):
+        model = self.model('Chinese', p_label, p_english)
+        tokenizer = model._model._tokenizer
+        tokenizer.heads.update(tokens)
+        model._model.head = tokenizer.encode(' ' + name) + [service.ASR_TEXT_TOKEN]
+        return model
+
+    def test_native_script_language_heads_map_to_supported_labels(self):
+        # Observed head shapes: " 中文" in two tokens, " Français" in one.
+        for name, p, label, code, tokens in [
+            ('中文', .95, 'Chinese', 'zh', {'中': [310], '中文': [310, 311]}),
+            ('Français', .98, 'French', 'fr', {'Français': [312]}),
+            ('Italiano', .98, 'Italian', 'it', {'Italiano': [209, 313]}),
+        ]:
+            with self.subTest(label=label):
+                service.AUTO_SELF_CHECKS.clear()
+                self.generate_step.return_value = iter([(400, None), (151645, None)])
+                model = self.native_model(name, p, **tokens)
+                result = self.auto(model)
+                self.assertEqual((result['decode'], result['language'], result['detected_label']),
+                                 ('detected', code, label))
+                # Probability bookkeeping is unchanged: the head's first token.
+                self.assertAlmostEqual(result['language_probability'], p, places=6)
+                self.assertAlmostEqual(result['english_probability'], .01, places=6)
+                model.generate.assert_not_called()
+
+    def test_native_heads_without_an_attributable_first_token_are_rejected(self):
+        chinese = AutoLanguageTests.Tokenizer().heads['Chinese'][0]
+        for case, name, tokens in [
+            # The first token is another language's English label, not this name.
+            ('foreign-first-token', '\u65e5\u672c\u8a9e', {'\u65e5\u672c\u8a9e': [chinese, 314]}),
+            # Starts with a bare space token, so p(head[0]) is not the language's.
+            ('bare-space', '\u0e44\u0e17\u0e22', {'': [315], '\u0e44\u0e17\u0e22': [315, 316]}),
+            # Self-names of two languages share their first token, even though
+            # the other name is too long to ever be parsed itself.
+            ('alias-collision', 'Bahasa Indonesia',
+             {'Bah': [317], 'Bahasa Indonesia': [317, 318], 'Bahasa Melayu': [317, 319, 322, 323]}),
+            # Not a supported language or self-name at all.
+            ('unknown', 'Klingon', {'Klingon': [320]}),
+        ]:
+            with self.subTest(case=case):
+                service.AUTO_SELF_CHECKS.clear()
+                model = self.native_model(name, .99, **tokens)
+                result = self.auto(model)
+                self.assert_forced(model, result)
+                self.assertIsNone(result['detected_label'])
+
+    def test_native_head_sharing_an_english_label_token_is_dropped_not_ambiguous(self):
+        # 'Can' is the first token of the English label " Cantonese" (300, 301).
+        tokens = {'Can': [300], 'Canario': [300, 321]}
+        with patch.dict(service.NATIVE_LANGUAGE_LABELS, {'Canario': 'Spanish'}):
+            model = self.native_model('Canario', .99, **tokens)
+            result = self.auto(model)
+            self.assert_forced(model, result)
+            self.assertIsNone(result['detected_label'])
+            service.AUTO_SELF_CHECKS.clear()
+            model = self.native_model('Cantonese', .95, **tokens)
+            self.assertEqual(self.auto(model)['language'], 'yue')
+
+    def test_native_language_names_map_only_to_supported_labels(self):
+        self.assertTrue(set(service.NATIVE_LANGUAGE_LABELS.values()) <= set(service.LANGUAGE_CODES))
+        self.assertFalse(set(service.NATIVE_LANGUAGE_LABELS) & (set(service.LANGUAGE_CODES) | {'None'}))
+        for name in ('中文', '汉语', '普通话'):
+            self.assertEqual(service.NATIVE_LANGUAGE_LABELS[name], 'Chinese')
 
     def test_probe_prefills_through_language_and_leaves_delimiter_unconsumed(self):
         model = self.model('Cantonese')

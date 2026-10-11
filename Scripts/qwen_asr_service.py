@@ -103,6 +103,20 @@ LATIN_LANGUAGE_CODES = frozenset({
     "de", "fr", "es", "pt", "id", "it", "vi", "tr", "ms", "nl", "sv",
     "da", "fi", "pl", "cs", "fil", "ro", "hu",
 })
+# The model sometimes writes a language's own name as its head (" 中文",
+# " Français") instead of the English label. Report the supported label.
+NATIVE_LANGUAGE_LABELS = {
+    "中文": "Chinese", "汉语": "Chinese", "漢語": "Chinese", "普通话": "Chinese",
+    "普通話": "Chinese", "粤语": "Cantonese", "粵語": "Cantonese", "广东话": "Cantonese",
+    "廣東話": "Cantonese", "العربية": "Arabic", "Deutsch": "German", "Français": "French",
+    "Español": "Spanish", "Português": "Portuguese", "Bahasa Indonesia": "Indonesian",
+    "Italiano": "Italian", "한국어": "Korean", "Русский": "Russian", "ไทย": "Thai",
+    "ภาษาไทย": "Thai", "Tiếng Việt": "Vietnamese", "日本語": "Japanese", "Türkçe": "Turkish",
+    "हिन्दी": "Hindi", "हिंदी": "Hindi", "Bahasa Melayu": "Malay", "Nederlands": "Dutch",
+    "Svenska": "Swedish", "Dansk": "Danish", "Suomi": "Finnish", "Polski": "Polish",
+    "Čeština": "Czech", "فارسی": "Persian", "Ελληνικά": "Greek", "Română": "Romanian",
+    "Magyar": "Hungarian", "Македонски": "Macedonian",
+}
 
 
 def resolve_model_root(explicit=None, environ=None) -> Path:
@@ -397,7 +411,25 @@ def auto_self_check(model, model_key):
             if not tokens or len(tokens) > 3 or tokenizer.decode(tokens) != " " + label:
                 raise ValueError("Unsupported language head")
             heads.setdefault(tokens[0], []).append(label)
-        check = {"labels": frozenset(labels + ["None"]), "english_token": english[0], "heads": heads}
+        # A self-name is accepted only if its first token, whose probability is
+        # reported, starts that name and belongs to no other language.
+        native = {name: tokenizer.encode(" " + name, add_special_tokens=False)
+                  for name in NATIVE_LANGUAGE_LABELS}
+        owners = {}
+        for name, tokens in native.items():
+            owners.setdefault(tokens[0] if tokens else None, set()).add(NATIVE_LANGUAGE_LABELS[name])
+        aliases = {}
+        for name, tokens in native.items():
+            label = NATIVE_LANGUAGE_LABELS[name]
+            first = tokenizer.decode(tokens[:1])
+            if (0 < len(tokens) <= 3 and tokenizer.decode(tokens) == " " + name
+                    and len(first) > 1 and first.startswith(" ") and name.startswith(first[1:])
+                    and owners[tokens[0]] == {label} and heads.get(tokens[0], [label]) == [label]):
+                aliases[name] = label
+        for name, label in aliases.items():
+            heads.setdefault(native[name][0], [label])
+        check = {"labels": frozenset(labels + ["None"]), "english_token": english[0],
+                 "heads": heads, "aliases": aliases}
     except Exception:
         # Neither exception messages nor model output belong in diagnostics.
         pass
@@ -444,12 +476,15 @@ def probe_language(model, probe_input_path, check):
         token = int(mx.argmax(logits).item())
         if token == ASR_TEXT_TOKEN:
             label_text = inner._tokenizer.decode(head)
-            if not label_text.startswith(" ") or label_text[1:] not in check["labels"]:
+            name = label_text[1:]
+            label = name if name in check["labels"] else check.get("aliases", {}).get(name)
+            if not label_text.startswith(" ") or label is None:
                 raise ValueError("Unparsed language head")
-            if len(check["heads"].get(head[0], [])) != 1:
+            # The first token's probability must be this label's alone.
+            if check["heads"].get(head[0], []) != [label]:
                 raise ValueError("Ambiguous language head")
             return {
-                "detected_label": label_text[1:],
+                "detected_label": label,
                 "language_probability": float(probabilities[head[0]].item()),
                 "english_probability": float(probabilities[check["english_token"]].item()),
                 "cache": cache,
