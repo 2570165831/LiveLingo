@@ -200,6 +200,58 @@ struct SessionStoreTests {
         #expect(try Data(contentsOf: fixture.root.appendingPathComponent("bilingual.jsonl")) == raw)
     }
 
+    private func segmentRow(time: TimeInterval) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "id": UUID().uuidString, "startTime": time, "endTime": time,
+            "english": "Synthetic caption.", "chinese": ""
+        ] as [String: Any])
+    }
+
+    /// Times are session-relative; a finite value beyond Int range used to
+    /// load and then trap when the caption was shown or exported.
+    @Test func implausiblyLargeCaptionTimesAreRejectedAtDecode() throws {
+        let bound: TimeInterval = 1_000_000_000
+        for time in [1e20, 1e10, bound.nextUp] {
+            #expect(throws: DecodingError.self) {
+                try SessionArchiveCoding.decode(TranscriptSegment.self, from: try segmentRow(time: time))
+            }
+        }
+        let edge = try SessionArchiveCoding.decode(TranscriptSegment.self, from: try segmentRow(time: bound))
+        #expect(edge.startTime == bound && edge.endTime == bound)
+    }
+
+    @Test func legacyCourseWithImplausibleCaptionTimeIsCorrupt() throws {
+        let fixture = try Fixture(); defer { fixture.clean() }
+        var jsonl = try segmentRow(time: 2)
+        jsonl.append(Data("\n".utf8))
+        jsonl.append(try segmentRow(time: 1e20))
+        jsonl.append(Data("\n".utf8))
+        try jsonl.write(to: fixture.root.appendingPathComponent("bilingual.jsonl"))
+        #expect(throws: SessionStoreError.corruptJournal(line: 2)) { try fixture.store.loadDetailed() }
+    }
+
+    @Test func snapshotValidationRejectsImplausibleCaptionTimes() throws {
+        let huge = TranscriptSegment(startTime: 1e20, endTime: 1e20, english: "Synthetic caption.", chinese: "")
+        let invalidSegment = SessionStoreError.invalidState("字幕的会话、时间或修订号不一致")
+        try SessionSnapshot(segments: [segment()], batches: [batch([segment()])]).validate()
+        #expect(throws: invalidSegment) { try SessionSnapshot(segments: [huge]).validate() }
+        #expect(throws: invalidSegment) {
+            try SessionSnapshot(segments: [segment()], batches: [batch([huge])]).validate()
+        }
+
+        let previous = segment()
+        let replacement = segment(id: previous.id, revision: 1, english: "Corrected synthetic caption.")
+        let revision = SessionInputRevision(fromRevision: 0, toRevision: 1, previousSegment: previous,
+                                            replacementSegment: replacement, reason: "Synthetic correction")
+        try SessionSnapshot(inputRevision: 1, segments: [replacement], revisionHistory: [revision]).validate()
+        var hugeRevision = revision
+        hugeRevision.previousSegment = TranscriptSegment(id: previous.id, startTime: 1e20, endTime: 1e20,
+                                                         english: previous.english, chinese: "")
+        #expect(throws: SessionStoreError.invalidState("修订历史含无效或其他课程的字幕")) {
+            try SessionSnapshot(inputRevision: 1, segments: [replacement], revisionHistory: [hugeRevision]).validate()
+        }
+    }
+
     @Test func fullSnapshotRestoresIdentityNotesProgressAudioAndCheckpoints() throws {
         let fixture = try Fixture(); defer { fixture.clean() }
         let id = UUID()

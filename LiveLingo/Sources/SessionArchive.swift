@@ -123,6 +123,7 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
         for segment in segments + batches.flatMap(\.evidence) {
             guard segment.startTime.isFinite, segment.endTime.isFinite,
                   segment.startTime >= 0, segment.endTime >= segment.startTime,
+                  segment.endTime <= TranscriptSegment.maximumTimestamp,
                   segment.inputRevision >= 0, segment.inputRevision <= inputRevision,
                   segment.sessionID == nil || segment.sessionID == sessionID else {
                 throw SessionStoreError.invalidState("字幕的会话、时间或修订号不一致")
@@ -175,6 +176,7 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
             for segment in [change.previousSegment, change.replacementSegment] + change.retainedBatches.flatMap(\.evidence) {
                 guard segment.startTime.isFinite, segment.endTime.isFinite,
                       segment.startTime >= 0, segment.endTime >= segment.startTime,
+                      segment.endTime <= TranscriptSegment.maximumTimestamp,
                       segment.inputRevision >= 0, segment.inputRevision <= inputRevision,
                       segment.sessionID == nil || segment.sessionID == sessionID else {
                     throw SessionStoreError.invalidState("修订历史含无效或其他课程的字幕")

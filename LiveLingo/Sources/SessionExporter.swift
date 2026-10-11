@@ -1085,7 +1085,7 @@ enum SessionExporter {
     }
 
     static func srtTimestamp(_ interval: TimeInterval) -> String {
-        let milliseconds = max(0, Int((interval * 1_000).rounded()))
+        let milliseconds = TimestampClock.roundedMilliseconds(interval)
         let hours = milliseconds / 3_600_000
         let minutes = (milliseconds / 60_000) % 60
         let seconds = (milliseconds / 1_000) % 60
@@ -1334,7 +1334,7 @@ enum NotesExportDocument {
     }
 
     static func timestamp(_ interval: TimeInterval) -> String {
-        let total = max(0, Int(interval.rounded()))
+        let total = TimestampClock.roundedSeconds(interval)
         let hours = total / 3_600
         let minutes = (total / 60) % 60
         let seconds = total % 60

@@ -2816,7 +2816,7 @@ enum LectureSummaryInput {
     }
 
     private static func clock(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds))
+        let total = TimestampClock.truncatedSeconds(seconds)
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
 }
