@@ -28,8 +28,12 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-import simulate
-from simulate import InputError, Parameters
+if __package__:
+    from . import simulate
+    from .simulate import InputError, Parameters
+else:
+    import simulate
+    from simulate import InputError, Parameters
 
 SCOPE = "post_hoc_comparison_not_preregistered"
 WARNING = (

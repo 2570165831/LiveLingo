@@ -14,9 +14,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, replace
 from pathlib import Path
 
-import posthoc
-import simulate
-from simulate import InputError, Parameters
+if __package__:
+    from . import posthoc, simulate
+    from .simulate import InputError, Parameters
+else:
+    import posthoc
+    import simulate
+    from simulate import InputError, Parameters
 
 FROZEN = Parameters(latin_threshold=0.55, nonlatin_consensus=False)
 CASE_KEYS = {

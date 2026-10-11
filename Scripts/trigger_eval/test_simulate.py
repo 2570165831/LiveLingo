@@ -19,8 +19,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, replace
 from pathlib import Path
 
-import simulate as evaluator
-from simulate import InputError, Parameters, clopper_pearson_upper, simulate
+if __package__:
+    from . import simulate as evaluator
+    from .simulate import InputError, Parameters, clopper_pearson_upper, simulate
+else:
+    import simulate as evaluator
+    from simulate import InputError, Parameters, clopper_pearson_upper, simulate
 
 
 def row(index: int = 0, **changes):
