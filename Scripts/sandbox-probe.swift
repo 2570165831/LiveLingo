@@ -49,7 +49,25 @@ enum SandboxProbe {
         try require(ancestor < 0 && code == EPERM, "ancestor access was not denied by sandbox")
     }
 
-    static func main() throws {
+    static func detail(_ error: Error) -> String {
+        switch error {
+        case SensitiveFileIO.Failure.system(let operation, let code): return "\(operation): errno=\(code)"
+        case SensitiveFileIO.Failure.unsafePath: return "unsafe_path"
+        case ProbeError.assertion(let message): return message
+        case SessionStoreError.io(let operation, let code): return "\(operation): errno=\(code)"
+        default: return "\(type(of: error)): \(error.localizedDescription)"
+        }
+    }
+
+    /// The probe's container is synthetic, but messages may still carry paths;
+    /// keep them relative to the container so result.json names no user home.
+    static func redacted(_ text: String) -> String {
+        text.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path, with: "~")
+            .replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
+    }
+
+    @MainActor
+    static func main() async throws {
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--seed-recovery" {
             try sandboxIdentity()
             let destination = root(CommandLine.arguments[2]).appendingPathComponent("recovery", isDirectory: true)
@@ -64,16 +82,11 @@ enum SandboxProbe {
         var checks: [Check] = []
         func check(_ name: String, _ action: () throws -> Void) {
             do { try action(); checks.append(Check(name: name, passed: true, detail: nil)) }
-            catch {
-                let detail: String
-                switch error {
-                case SensitiveFileIO.Failure.system(let operation, let code): detail = "\(operation): errno=\(code)"
-                case SensitiveFileIO.Failure.unsafePath: detail = "unsafe_path"
-                case ProbeError.assertion(let message): detail = message
-                default: detail = "\(type(of: error))"
-                }
-                checks.append(Check(name: name, passed: false, detail: detail))
-            }
+            catch { checks.append(Check(name: name, passed: false, detail: redacted(detail(error)))) }
+        }
+        func checkAsync(_ name: String, _ action: () async throws -> Void) async {
+            do { try await action(); checks.append(Check(name: name, passed: true, detail: nil)) }
+            catch { checks.append(Check(name: name, passed: false, detail: redacted(detail(error)))) }
         }
         check("sandbox_identity") { try sandboxIdentity() }
         guard checks[0].passed else {
@@ -96,6 +109,7 @@ enum SandboxProbe {
             let fm = FileManager.default, base = root(location)
             try fm.createDirectory(at: base, withIntermediateDirectories: true)
             func test(_ name: String, _ action: () throws -> Void) { check(location + "." + name, action) }
+            func testAsync(_ name: String, _ action: () async throws -> Void) async { await checkAsync(location + "." + name, action) }
             test("open_existing") {
                 let directory = try SensitiveFileIO.Directory.open(at: base, create: false, tighten: false)
                 try directory.assertStillAtOriginalPath()
@@ -217,6 +231,133 @@ enum SandboxProbe {
                 try require(try SessionWorkspace.recordingRecoveries(in: directory) == [value], "recovery index differs")
                 _ = try SessionWorkspace.saveRecordingRecoveries([], in: directory, retiring: [value])
                 try require(try SessionWorkspace.recordingRecoveries(in: directory).isEmpty, "recovery retirement failed")
+            }
+            test("recording_recovery_bookmark") {
+                // The app-scope entitlement must let the sandbox create and
+                // resolve the grants a relaunched recovery depends on.
+                let directory = base.appendingPathComponent("recovery-bookmark")
+                let selected = base.appendingPathComponent("bookmark-selected", isDirectory: true)
+                let course = selected.appendingPathComponent("course", isDirectory: true)
+                try fm.createDirectory(at: course, withIntermediateDirectories: true)
+                let value = SessionWorkspace.RecordingRecovery(id: UUID(), directory: target, outputRoot: base,
+                                                               createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+                    .withOutputRoot(selected).promoted(to: course)
+                try require(value.outputRootBookmark != nil && value.directoryBookmark != nil, "security bookmark was not created")
+                _ = try SessionWorkspace.saveRecordingRecoveries([value], in: directory)
+                let stored = try SessionWorkspace.recordingRecoveries(in: directory)
+                try require(stored == [value], "bookmarked recovery index differs")
+                let moved = base.appendingPathComponent("bookmark-moved", isDirectory: true)
+                try fm.moveItem(at: selected, to: moved)
+                let access = try SessionWorkspace.ScopedFolderAccess(bookmark: stored[0].directoryBookmark!)
+                defer { access.stop() }
+                try require(access.url.resolvingSymlinksInPath().path
+                            == moved.appendingPathComponent("course").resolvingSymlinksInPath().path, "bookmark did not follow the move")
+                try SensitiveFileIO.atomicWrite(Data("synthetic".utf8), to: access.url.appendingPathComponent("probe.txt"))
+                _ = try SessionWorkspace.saveRecordingRecoveries([], in: directory, retiring: stored)
+            }
+            // The checks below run the App's own persistence entry points end to
+            // end inside the container; none of them is reimplemented here.
+            let segment = TranscriptSegment(id: UUID(), startTime: 1, endTime: 3,
+                                            english: "Synthetic sandbox caption.", chinese: "合成沙盒字幕。")
+            test("session_store_roundtrip") {
+                let directory = base.appendingPathComponent("session-store", isDirectory: true)
+                let store = SessionStore(directory: directory)
+                let initial = try store.save(SessionSnapshot(createdAt: Date(timeIntervalSince1970: 1_000)))
+                let appended = try store.append(.upsertSegment(segment), expectedRevision: initial.storageRevision)
+                for name in [SessionStore.snapshotFileName, SessionStore.journalFileName, ".session-store.lock"] {
+                    try require(try info(directory.appendingPathComponent(name)).st_mode & S_IFMT == S_IFREG,
+                                "store did not create \(name)")
+                }
+                let loaded = try SessionStore(directory: directory).loadDetailed()
+                try require(loaded.origin == .snapshot && loaded.incompleteTailBytes == 0, "store reload origin differs")
+                try require(loaded.snapshot == appended && loaded.snapshot?.segments == [segment], "store reload differs")
+                try require(loaded.snapshot?.lastJournalSequence == 1, "journal replay differs")
+            }
+            func recordedSession() throws -> URL {
+                let session = location == "tmp" ? try SessionWorkspace.makeTemporarySessionDirectory()
+                    : try SessionWorkspace.makeRecoverableTemporarySessionDirectory()
+                try SensitiveFileIO.atomicWrite(Data("synthetic audio placeholder".utf8),
+                                                to: session.appendingPathComponent(SessionWorkspace.recordingFileName))
+                return session
+            }
+            test("temporary_session_copy") {
+                let session = try recordedSession()
+                let courses = base.appendingPathComponent("copied-courses", isDirectory: true)
+                try fm.createDirectory(at: courses, withIntermediateDirectories: false)
+                let receipt = try SessionWorkspace.copyTemporarySession(from: session, to: courses, preferredName: "Course")
+                try require(receipt.destinationDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path
+                            == courses.resolvingSymlinksInPath().path, "copy left the container destination")
+                try require(try SessionTreeMigration.manifest(of: receipt.destinationDirectory) == receipt.entries
+                            && receipt.fileCount == 1, "copied tree differs")
+                try require(fm.fileExists(atPath: session.path), "copy removed its source")
+                try SessionWorkspace.discardTemporarySession(session)
+            }
+            test("temporary_session_promote") {
+                let session = try recordedSession()
+                let courses = base.appendingPathComponent("promoted-courses", isDirectory: true)
+                try fm.createDirectory(at: courses, withIntermediateDirectories: false)
+                let promoted = try SessionWorkspace.promoteTemporarySession(from: session, to: courses, preferredName: "Course")
+                try require(promoted.deletingLastPathComponent().resolvingSymlinksInPath().path
+                            == courses.resolvingSymlinksInPath().path, "promotion left the container destination")
+                try require(try Data(contentsOf: promoted.appendingPathComponent(SessionWorkspace.recordingFileName))
+                            == Data("synthetic audio placeholder".utf8), "promoted recording differs")
+                let recovery = try JSONSerialization.jsonObject(
+                    with: Data(contentsOf: promoted.appendingPathComponent("migration-recovery.json"))) as? [String: String]
+                guard let source = recovery?["source"] else { throw ProbeError.assertion("recovery record missing") }
+                try require(!fm.fileExists(atPath: session.path) && fm.fileExists(atPath: source),
+                            "source was not retired to a recoverable sibling")
+                let record = session.deletingLastPathComponent().appendingPathComponent(".LiveLingo-Cleanup")
+                    .appendingPathComponent(String(session.lastPathComponent.dropFirst(SessionWorkspace.temporaryPrefix.count)) + ".json")
+                try require(!fm.fileExists(atPath: record.path), "promoted session is still pending cleanup")
+            }
+            await testAsync("review_queue_journal") {
+                let journal = base.appendingPathComponent("review", isDirectory: true)
+                    .appendingPathComponent("learning-review-queue.json")
+                let first = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled)
+                first.togglePause()
+                try await first.waitForPendingStorage()
+                try require(first.userPaused, "pause was not applied")
+                for url in [journal, journal.appendingPathExtension("lock")] {
+                    try require(try info(url).st_mode & S_IFMT == S_IFREG, "queue did not create \(url.lastPathComponent)")
+                }
+                let second = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled)
+                try require(second.userPaused && second.journalForTesting.version == LearningReviewQueue.journalVersion,
+                            "reloaded journal differs")
+                // A reloaded queue must be able to write back over its own read.
+                second.togglePause()
+                try await second.waitForPendingStorage()
+                let third = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled)
+                try require(!second.userPaused && !third.userPaused, "journal write-back after reload failed")
+                for queue in [first, second, third] { await queue.shutdownForTesting() }
+            }
+            test("export_subfolder") {
+                let course = base.appendingPathComponent("exports/course", isDirectory: true)
+                try fm.createDirectory(at: course, withIntermediateDirectories: true)
+                let target = SessionExporter.targetTranscriptFileName(for: OutputLanguage.simplifiedChinese.rawValue)
+                func requireExport(_ chinese: String, in directory: URL) throws {
+                    try require(try Data(contentsOf: course.appendingPathComponent("transcript-en.txt"))
+                                == Data("Synthetic sandbox caption.\n".utf8), "exported transcript differs")
+                    try require(try Data(contentsOf: course.appendingPathComponent(target))
+                                == Data((chinese + "\n").utf8), "exported target transcript differs")
+                    for name in ["bilingual.jsonl", "bilingual.srt", "manifest.json"] {
+                        try require(fm.fileExists(atPath: directory.appendingPathComponent(name).path), "export missed \(name)")
+                    }
+                }
+                // The first export swaps a staged folder in through the parent;
+                // a re-export publishes a versioned generation inside the course.
+                try SessionExporter.export(segments: [segment], sessionDirectory: course,
+                                           createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+                try require(try SessionExporter.currentExportDirectory(in: course).path == course.path, "initial export differs")
+                try requireExport("合成沙盒字幕。", in: course)
+                var revised = segment
+                revised.chinese = "修订后的合成沙盒字幕。"
+                try SessionExporter.export(segments: [revised], sessionDirectory: course,
+                                           createdAt: Date(timeIntervalSince1970: 1_700_000_100))
+                let generation = try SessionExporter.currentExportDirectory(in: course)
+                try require(generation.path != course.path, "re-export did not publish a generation")
+                try requireExport("修订后的合成沙盒字幕。", in: generation)
+                try require(try fm.contentsOfDirectory(atPath: base.appendingPathComponent("exports").path) == ["course"],
+                            "export left staging residue")
             }
         }
         let passed = checks.allSatisfy(\.passed)

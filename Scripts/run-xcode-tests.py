@@ -212,6 +212,18 @@ def sandboxed_host(app):
     return 'com.apple.security.app-sandbox' in shown.stdout
 
 
+def trash_entries():
+    """Names directly in the user's Trash, listed read-only; None if unreadable.
+
+    Tests must keep fixtures in their own temporary directories, so a run that
+    adds an entry here failed that contract. Nothing is ever removed from it.
+    """
+    try:
+        return set(os.listdir(Path.home() / '.Trash'))
+    except OSError:
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     global DD, OUT
@@ -271,6 +283,7 @@ def main():
     if args.parallel == 'YES':
         command += ['-parallel-testing-worker-count', str(args.workers)]
     command += ['-only-testing:' + name for name in args.only]
+    trash_before = trash_entries()
     load_before = os.getloadavg()
     started = time.monotonic()
     state = {'last_output': started, 'last_test': None, 'last_test_at': started}
@@ -377,6 +390,14 @@ def main():
                'exit_code': returncode, 'timed_out': timed_out, 'samples': samples,
                'host_identities': [{'pid': pid, 'identity': row} for pid, row in observed_hosts.items()],
                'log': str(log_path), 'xcresult': str(result_path), 'last_test': state['last_test']}
+    trash_after = trash_entries()
+    if trash_before is None or trash_after is None:
+        receipt['trash_guard_error'] = 'could not list the user Trash'
+        print(receipt['trash_guard_error'])
+    else:
+        receipt['trash_added'] = sorted(trash_after - trash_before)
+        if receipt['trash_added']:
+            print('tests added entries to the user Trash: ' + ', '.join(receipt['trash_added']))
     (OUT / (args.name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps({key: receipt[key] for key in ('name', 'wall_s', 'exit_code', 'timed_out', 'last_test')}), flush=True)
     if timed_out or returncode != 0:
@@ -439,7 +460,7 @@ def main():
         guards.append({'guard': script, 'exit_code': checked.returncode})
         print(output.rstrip())
     receipt['guards'] = guards
-    passed = all(item['exit_code'] == 0 for item in guards)
+    passed = all(item['exit_code'] == 0 for item in guards) and not receipt.get('trash_added')
     # Keep worker directories (fixtures, screenshots) as evidence after a
     # failure; after a pass their events are already in the verification log.
     if passed and not args.keep_workers:

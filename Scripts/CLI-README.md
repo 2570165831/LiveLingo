@@ -362,8 +362,9 @@ and in `candidates`; `failedWithCandidate` is that overlap. The three counts
 accept only nonnegative native Swift integers.
 
 For cleanup, first ensure the CLI has exited, keep the result/required logs,
-and move only its explicit test output/build paths to Trash. Never remove
-real session directories or the installed app as part of a CLI test.
+and leave its explicit test output/build paths inside the ignored `work/`
+directory. Never move test output to the user's Trash, and never remove real
+session directories or the installed app as part of a CLI test.
 
 ## Frozen scoreboard
 

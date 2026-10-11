@@ -953,6 +953,8 @@ final class AppModel: ObservableObject {
     @Published var outputDirectory: URL?
     @Published private(set) var recoverableRecordings: [SessionWorkspace.RecordingRecovery] = []
     private var recordingRecoveryDirectory: URL?
+    /// Bookmark grants opened by the latest recovery; released on the next one.
+    private var recoveredFolderGrants: [SessionWorkspace.ScopedFolderAccess] = []
     @Published var selectedMode: ModelMode {
         didSet {
             guard selectedMode != oldValue else { return }
@@ -1453,12 +1455,34 @@ final class AppModel: ObservableObject {
                         continuation.resume(returning: nil)
                         return
                     }
-                    self.outputDirectory = directory
+                    self.useOutputDirectory(directory)
                     continuation.resume(returning: directory)
                 }
             }
         }
         #endif
+    }
+
+    /// Adopts a folder the user just selected in an open panel. A recovered,
+    /// not yet promoted recording records it with a fresh grant, so a later
+    /// relaunch saves there instead of the folder it could no longer reach.
+    /// Re-choosing the same folder also stores a fresh grant: that is what the
+    /// legacy and unreachable-folder notices ask for.
+    func useOutputDirectory(_ directory: URL) {
+        outputDirectory = directory
+        guard let staging = temporarySessionDirectory,
+              let recovery = recoverableRecordings.first(where: { $0.id == sessionID && $0.needsPromotion }),
+              recovery.directory == staging else { return }
+        var updated = recovery.withOutputRoot(directory)
+        // Never drop an existing grant for this folder when a new one cannot be made.
+        if updated.outputRootBookmark == nil, recovery.outputRoot == directory {
+            updated.outputRootBookmark = recovery.outputRootBookmark
+        }
+        guard updated != recovery else { return }
+        do { try storeRecordingRecovery(updated) }
+        catch {
+            archiveNotice = "保存位置已更换；恢复记录尚未更新：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+        }
     }
 
     func convertCurrentSessionToRecording() async {
@@ -1484,6 +1508,7 @@ final class AppModel: ObservableObject {
             try await flushSessionArchive()
             guard sessionID == identity, generation == epoch else { return }
             let recovery = SessionWorkspace.RecordingRecovery(id: identity, directory: source, outputRoot: directory)
+                .withOutputRoot(directory)
             try storeRecordingRecovery(recovery)
         } catch {
             archiveError = "录音继续保留；转换后的保存或恢复索引尚未确认：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
@@ -1508,17 +1533,57 @@ final class AppModel: ObservableObject {
         else { preferences.set(try SessionArchiveCoding.encode(remaining), forKey: "LiveLingo.pendingRecordingRecovery") }
     }
 
+    /// Sandbox grants from the open panel end with that process, so a
+    /// relaunched recovery reopens the selected folders through their
+    /// app-scoped bookmarks and keeps those grants while the course is open.
     func recoverRecording(_ recovery: SessionWorkspace.RecordingRecovery) async {
         guard !phase.isBusy, !archiveLoading else { return }
+        var record = recovery
+        var grants: [SessionWorkspace.ScopedFolderAccess] = []
+        var notice = "已恢复未完成录音；处理保持暂停，可重试保存到所选目录。"
+        // A promoted course lives in the user's folder; staging stays in the container.
+        if !recovery.needsPromotion, let bookmark = recovery.directoryBookmark {
+            guard let access = try? SessionWorkspace.ScopedFolderAccess(bookmark: bookmark) else {
+                archiveError = "录音恢复失败，原件已保留：课程文件夹已无法访问，请用“打开课程…”重新选择该文件夹。"
+                return
+            }
+            grants.append(access)
+            record.directory = access.url
+            if access.isStale { record.directoryBookmark = SessionWorkspace.securityBookmark(for: access.url) }
+        }
+        var outputRoot: URL? = recovery.outputRoot
+        if let bookmark = recovery.outputRootBookmark {
+            if let access = try? SessionWorkspace.ScopedFolderAccess(bookmark: bookmark) {
+                grants.append(access)
+                record.outputRoot = access.url
+                outputRoot = access.url
+                if access.isStale { record.outputRootBookmark = SessionWorkspace.securityBookmark(for: access.url) }
+            } else {
+                outputRoot = nil
+                notice = "已恢复未完成录音；原保存目录已无法访问，请用“保存位置…”重新选择后再重试保存。"
+            }
+        } else {
+            notice = "已恢复未完成录音；这条恢复记录来自旧版，没有保存目录的访问授权。若保存失败，请用“保存位置…”重新选择后重试。"
+        }
         do {
-            guard try await SessionStore(directory: recovery.directory).loadAsync()?.sessionID == recovery.id else {
+            guard try await SessionStore(directory: record.directory).loadAsync()?.sessionID == recovery.id else {
                 throw SessionStoreError.identityConflict("恢复位置属于另一课程，原件已保留")
             }
-            try await openSavedSession(recovery.directory, allowAutomaticProcessing: false)
-            outputDirectory = recovery.outputRoot
-            temporarySessionDirectory = recovery.needsPromotion ? recovery.directory : nil
-            archiveNotice = "已恢复未完成录音；处理保持暂停，可重试保存到所选目录。"
-        } catch { archiveError = "录音恢复失败，原件已保留：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
+            try await openSavedSession(record.directory, allowAutomaticProcessing: false)
+            recoveredFolderGrants = grants
+            outputDirectory = outputRoot
+            temporarySessionDirectory = record.needsPromotion ? record.directory : nil
+            archiveNotice = notice
+        } catch {
+            let hint = !recovery.needsPromotion && recovery.directoryBookmark == nil
+                ? "；如课程文件夹无法访问，请用“打开课程…”重新选择" : ""
+            archiveError = "录音恢复失败，原件已保留：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))\(hint)"
+            return
+        }
+        // Persist moved locations and refreshed stale bookmarks.
+        guard record != recovery else { return }
+        do { try storeRecordingRecovery(record) }
+        catch { archiveNotice = notice + "恢复记录尚未更新：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
     }
 
     func start() {
@@ -4989,10 +5054,8 @@ final class AppModel: ObservableObject {
                     }
                     try validateLifecycleCompletion(revision)
                     guard let snapshot else { throw SessionStoreError.missingSnapshot }
-                    if var recovery = recoverableRecordings.first(where: { $0.id == identity }) {
-                        recovery.directory = copied.destinationDirectory
-                        recovery.needsPromotion = false
-                        try storeRecordingRecovery(recovery)
+                    if let recovery = recoverableRecordings.first(where: { $0.id == identity }) {
+                        try storeRecordingRecovery(recovery.promoted(to: copied.destinationDirectory))
                         try validateLifecycleCompletion(revision)
                     }
                     try noteReviewQueue.relocatePausedCourse(sessionID: identity,

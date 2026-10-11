@@ -45,9 +45,71 @@ enum SessionWorkspace {
     struct RecordingRecovery: Codable, Equatable, Identifiable, Sendable {
         let id: UUID
         var directory: URL
-        let outputRoot: URL
+        var outputRoot: URL
         var needsPromotion: Bool = true
         var createdAt: Date = Date()
+        /// App-scoped security bookmarks. An open-panel grant lasts only for
+        /// the process that showed the panel, so a relaunch must resolve
+        /// these. Records written before they existed omit both keys and keep
+        /// the plain-URL behaviour.
+        var outputRootBookmark: Data? = nil
+        var directoryBookmark: Data? = nil
+
+        /// The folder the user selected for this recording, with its grant.
+        func withOutputRoot(_ url: URL) -> Self {
+            var copy = self
+            copy.outputRoot = url
+            copy.outputRootBookmark = SessionWorkspace.securityBookmark(for: url)
+            return copy
+        }
+
+        /// The copied course folder inside the selected output root.
+        func promoted(to destination: URL) -> Self {
+            var copy = self
+            copy.directory = destination
+            copy.needsPromotion = false
+            copy.directoryBookmark = SessionWorkspace.securityBookmark(for: destination)
+            return copy
+        }
+    }
+
+    /// Nil when the folder cannot be bookmarked; callers keep the plain URL.
+    static func securityBookmark(for url: URL) -> Data? {
+        try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+
+    /// A resolved app-scoped bookmark whose sandbox grant stays open until
+    /// `stop()` or deinit.
+    final class ScopedFolderAccess {
+        let url: URL
+        let isStale: Bool
+        private var accessing: Bool
+
+        /// Throws when the folder is gone, trashed or the bookmark is unreadable.
+        init(bookmark: Data) throws {
+            var stale = false
+            let resolved = try URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI, .withoutMounting],
+                                   relativeTo: nil, bookmarkDataIsStale: &stale)
+            accessing = resolved.startAccessingSecurityScopedResource()
+            url = resolved
+            isStale = stale
+            var isDirectory: ObjCBool = false
+            // A trashed folder still resolves; it must not receive the recording.
+            let trashed = resolved.pathComponents.contains { $0 == ".Trash" || $0 == ".Trashes" }
+            guard !trashed, FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                stop()
+                throw SessionStoreError.unsafePath(resolved.path)
+            }
+        }
+
+        func stop() {
+            guard accessing else { return }
+            url.stopAccessingSecurityScopedResource()
+            accessing = false
+        }
+
+        deinit { stop() }
     }
     private struct RecoveryIndex: Codable {
         var version = 1
@@ -88,7 +150,8 @@ enum SessionWorkspace {
         guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               Set(object.keys) == Set(["version", "recordings"]),
               let records = object["recordings"] as? [[String: Any]],
-              records.allSatisfy({ Set($0.keys).isSubset(of: ["id", "directory", "outputRoot", "needsPromotion", "createdAt"]) }) else {
+              records.allSatisfy({ Set($0.keys).isSubset(of: ["id", "directory", "outputRoot", "needsPromotion", "createdAt",
+                                                                "outputRootBookmark", "directoryBookmark"]) }) else {
             throw SessionStoreError.invalidState("录音恢复索引含未知状态，原文件已保留")
         }
         let index = try SessionArchiveCoding.decode(RecoveryIndex.self, from: bytes)

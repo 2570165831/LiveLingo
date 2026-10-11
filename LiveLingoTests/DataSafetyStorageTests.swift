@@ -457,6 +457,58 @@ final class DataSafetyStorageTests: XCTestCase {
         }
     }
 
+    /// Sandbox relaunch: the recovery index keeps app-scoped bookmarks for the
+    /// selected output root and promoted course folder, still reads records
+    /// written before bookmarks existed, and re-encodes those unchanged.
+    func testRecoveryIndexStoresFolderBookmarksAndReadsLegacyRecords() throws {
+        let root = try DataSafetyFixtures.make("recovery-bookmarks")
+        defer { DataSafetyFixtures.preserve(root) }
+        let output = root.appendingPathComponent("selected", isDirectory: true)
+        let course = output.appendingPathComponent("course", isDirectory: true)
+        try FileManager.default.createDirectory(at: course, withIntermediateDirectories: true)
+        let legacyID = UUID()
+        let legacy = #"{"version":1,"recordings":[{"id":"\#(legacyID.uuidString)","directory":"\#(root.appendingPathComponent("a").absoluteString)","outputRoot":"\#(output.absoluteString)","needsPromotion":true,"createdAt":1700000000}]}"#
+        let index = root.appendingPathComponent("pending-recordings.json")
+        try Data(legacy.utf8).write(to: index)
+        let read = try SessionWorkspace.recordingRecoveries(in: root)
+        XCTAssertEqual(read.map(\.id), [legacyID])
+        XCTAssertNil(read.first?.outputRootBookmark)
+        XCTAssertNil(read.first?.directoryBookmark)
+        try SessionWorkspace.saveRecordingRecoveries([], in: root)
+        let reencoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [String: Any])
+        let legacyKeys = try XCTUnwrap((reencoded["recordings"] as? [[String: Any]])?.first?.keys)
+        XCTAssertEqual(Set(legacyKeys), ["id", "directory", "outputRoot", "needsPromotion", "createdAt"],
+                       "a record without bookmarks keeps the format older readers accept")
+
+        let selected = SessionWorkspace.RecordingRecovery(id: UUID(), directory: root.appendingPathComponent("b"), outputRoot: root,
+                                                          createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+            .withOutputRoot(output)
+        XCTAssertEqual(selected.outputRoot, output)
+        XCTAssertNotNil(selected.outputRootBookmark)
+        let promoted = selected.promoted(to: course)
+        XCTAssertFalse(promoted.needsPromotion)
+        XCTAssertNotNil(promoted.directoryBookmark)
+        try SessionWorkspace.saveRecordingRecoveries([promoted], in: root)
+        let stored = try XCTUnwrap(SessionWorkspace.recordingRecoveries(in: root).first { $0.id == promoted.id })
+        XCTAssertEqual(stored, promoted)
+
+        let moved = root.appendingPathComponent("moved-selected", isDirectory: true)
+        try FileManager.default.moveItem(at: output, to: moved)
+        let outputAccess = try SessionWorkspace.ScopedFolderAccess(bookmark: try XCTUnwrap(stored.outputRootBookmark))
+        defer { outputAccess.stop() }
+        XCTAssertEqual(outputAccess.url.resolvingSymlinksInPath().path, moved.resolvingSymlinksInPath().path)
+        let courseAccess = try SessionWorkspace.ScopedFolderAccess(bookmark: try XCTUnwrap(stored.directoryBookmark))
+        defer { courseAccess.stop() }
+        XCTAssertEqual(courseAccess.url.resolvingSymlinksInPath().path,
+                       moved.appendingPathComponent("course").resolvingSymlinksInPath().path)
+        XCTAssertThrowsError(try SessionWorkspace.ScopedFolderAccess(bookmark: Data("synthetic unreadable bookmark".utf8)))
+        // A folder moved to the Trash still resolves, but must not receive the recording.
+        let trash = root.appendingPathComponent(".Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: false)
+        try FileManager.default.moveItem(at: moved, to: trash.appendingPathComponent("selected"))
+        XCTAssertThrowsError(try SessionWorkspace.ScopedFolderAccess(bookmark: try XCTUnwrap(stored.outputRootBookmark)))
+    }
+
     func testN06LegacyRegularExportsArePreservedAndReconciled() throws {
         let root = try DataSafetyFixtures.make("N06")
         defer { DataSafetyFixtures.preserve(root) }

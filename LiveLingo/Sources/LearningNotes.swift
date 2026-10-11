@@ -2578,6 +2578,9 @@ struct ReviewDiagnosticsStore: Sendable {
 
     let directory: URL
     let policy: ReviewDiagnosticsPolicy
+    /// How rotation discards an owned snapshot. The app moves it to the Trash so
+    /// it stays recoverable; tests inject a move into their own fixture folder.
+    var discard: @Sendable (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
 
     @discardableResult
     func write(_ snapshot: ReviewDiagnosticSnapshot) -> URL? {
@@ -2728,7 +2731,7 @@ struct ReviewDiagnosticsStore: Sendable {
         var removed = 0
         for entry in owned where entry.url != kept {
             guard count > policy.maximumFiles || total > policy.maximumTotalBytes else { break }
-            guard (try? manager.trashItem(at: entry.url, resultingItemURL: nil)) != nil else { continue }
+            guard (try? discard(entry.url)) != nil else { continue }
             count -= 1
             total -= entry.size
             removed += 1

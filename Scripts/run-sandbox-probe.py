@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile real storage code into an isolated, ad-hoc signed sandbox App."""
+"""Compile the real App sources into an isolated, ad-hoc signed sandbox App."""
 import argparse
 import hashlib
 import json
@@ -21,7 +21,9 @@ CASES = (
     "reject_non_directory", "atomic_write_read", "atomic_replace_permissions",
     "append_read", "reject_file_symlink", "assert_path_identity", "move_remove_directory",
     "recovery_scan", "temporary_session_cleanup", "pending_cleanup_retry",
-    "recording_recovery_index",
+    "recording_recovery_index", "recording_recovery_bookmark",
+    "session_store_roundtrip", "temporary_session_copy", "temporary_session_promote",
+    "review_queue_journal", "export_subfolder",
 )
 EXPECTED = {"sandbox_identity", "container_parent_tracking"} | {f"{root}.{case}" for root in ("tmp", "support") for case in CASES}
 
@@ -50,39 +52,31 @@ def validate_result(value, returncode, bundle_id):
     return passed
 
 
-def between(text, start, end):
-    if text.count(start) != 1 or text.count(end) != 1:
-        raise ValueError("storage source declaration boundaries changed")
-    return text[text.index(start):text.index(end)]
+APP_ENTRY = "LiveLingoApp.swift"
 
 
 def storage_sources(output):
-    """Use verbatim declarations, without mocks or rewritten storage methods.
+    """Compile every App source verbatim, without mocks or rewritten methods.
 
-    SessionExporter and SessionArchive also contain the UI/model graph. Select
-    their standalone storage declarations; omit only the two migration entry
-    points, which are outside this probe's cleanup/persistence scope.
+    The probe supplies the process entry point, so exactly one line of
+    LiveLingoApp.swift changes: its standalone `@main` attribute becomes an
+    empty line. Any other entry-point shape fails closed before output.
     """
-    exporter = (REPO / "LiveLingo/Sources/SessionExporter.swift").read_text()
-    workspace = between(exporter, "enum SessionWorkspaceError:", "enum SessionExporter {")
-    workspace = workspace.replace(between(workspace, "    static func promoteTemporarySession(",
-                                          "    static func discardTemporarySession("), "")
-    workspace = workspace.replace(between(workspace, "    static func copyTemporarySession(",
-                                          "    private static func validateTemporarySession("), "")
-    archive = (REPO / "LiveLingo/Sources/SessionArchive.swift").read_text()
-    coding = between(archive, "enum SessionStoreError:", "struct SessionLoadResult:")
-    coding += between(archive, "enum SessionArchiveCoding {", "/// A grammar check distinguishes")
-    selected = output / "StorageDeclarations.swift"
-    selected.write_text("import Foundation\nimport Darwin\nimport CryptoKit\n" + workspace + coding)
-    paths = [REPO / "LiveLingo/Sources/SensitiveFileIO.swift", REPO / "LiveLingo/Sources/ExitDeadline.swift",
-             selected, REPO / "Scripts/sandbox-probe.swift"]
+    app_sources = sorted((REPO / "LiveLingo/Sources").glob("*.swift"))
+    entry_source = REPO / "LiveLingo/Sources" / APP_ENTRY
+    text = entry_source.read_text() if entry_source in app_sources else ""
+    lines = text.split("\n")
+    if text.count("@main") != 1 or lines.count("@main") != 1:
+        raise ValueError("App entry point changed; refusing to guess the probe entry")
+    entry = output / APP_ENTRY
+    entry.write_text("\n".join("" if line == "@main" else line for line in lines))
+    probe = REPO / "Scripts/sandbox-probe.swift"
+    paths = [path for path in app_sources if path != entry_source] + [entry, probe]
     return paths, {
         "whole_sources": {str(path.relative_to(REPO)): hashlib.sha256(path.read_bytes()).hexdigest()
-                          for path in paths if path.is_relative_to(REPO)},
-        "declaration_sources": {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest()
-                                for name in ("LiveLingo/Sources/SessionExporter.swift", "LiveLingo/Sources/SessionArchive.swift")},
-        "selected_declarations_sha256": hashlib.sha256(selected.read_bytes()).hexdigest(),
-        "omitted_workspace_methods": ["promoteTemporarySession", "copyTemporarySession"],
+                          for path in app_sources + [probe]},
+        "entry_source_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
+        "removed_entry_attribute": f"LiveLingo/Sources/{APP_ENTRY}: @main",
     }
 
 
@@ -150,7 +144,7 @@ def main():
         built = run(["xcrun", "swiftc", "-D", "DEBUG", "-swift-version", "6", "-parse-as-library", "-warnings-as-errors",
                      "-target", "arm64-apple-macos14.0", "-module-cache-path", str(root / "module-cache"),
                      "-file-prefix-map", f"{REPO}=.", "-file-prefix-map", f"{root}=./validation",
-                     *map(str, sources), "-o", str(executable)], timeout=180)
+                     *map(str, sources), "-o", str(executable)], timeout=900)
         (output / "build.log").write_text(built.stdout + built.stderr)
         if built.returncode:
             raise RuntimeError("probe compile failed; see build.log")
@@ -166,7 +160,7 @@ def main():
         for location in ("tmp", "support"):
             seeded = run([str(executable), "--seed-recovery", location], timeout=30)
             report["recovery_seed_exit_codes"][location] = seeded.returncode
-        probe = run([str(executable)], timeout=60)
+        probe = run([str(executable)], timeout=120)
         value = json.loads(probe.stdout)
         report["probe"] = value
         report["exit_code"] = probe.returncode

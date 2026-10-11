@@ -499,6 +499,28 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
     }
 
+    func testRecordingHeaderNamesPreviewTranslationOnlyWhenItCanRun() async throws {
+        try enableHostAccessibility()
+        for (supported, enabled, header, absent) in [(true, true, "实时字幕 · 初译", "实时字幕"),
+                                                     (true, false, "实时字幕", "实时字幕 · 初译"),
+                                                     (false, true, "实时字幕", "实时字幕 · 初译")] {
+            let (model, store) = try fixture()
+            model.previewTranslationSupportForTesting = supported
+            model.previewTranslationEnabled = enabled
+            model.loadPresentationForTesting(phase: .recording, evidence: [
+                TranscriptSegment(startTime: 0, endTime: 2, english: "The water is cold.", chinese: "水很冷。")
+            ])
+            let (window, controller) = host(floating(model, store: store))
+            defer { window.close() }
+            try await resizeAndSettle(window, view: controller.view)
+            let text = accessibleNodes(in: controller.view).flatMap { node in
+                [node.value("accessibilityLabel") as? String, node.value("accessibilityValue") as? String].compactMap { $0 }
+            }
+            XCTAssertTrue(text.contains(header), "supported=\(supported) enabled=\(enabled); actual=\(text)")
+            XCTAssertFalse(text.contains(absent), "supported=\(supported) enabled=\(enabled); actual=\(text)")
+        }
+    }
+
     func testNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset() async throws {
         let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
         let preferences = FloatingSubtitlePreferences(store: fixture.defaults)
