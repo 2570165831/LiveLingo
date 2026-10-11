@@ -266,6 +266,18 @@ extension ChineseScriptConverter {
             return (scanner.blockProtected, scanner.protected)
         }
 
+        /// UTF-8 byte mask of code only, without formulas or JSON keys: fenced
+        /// and indented code blocks when `blocks` is set, plus inline code
+        /// spans when `inline` is set. A single line taken out of a document
+        /// should skip `blocks`, since its indentation alone says nothing.
+        static func codeMask(_ text: String, blocks: Bool = true, inline: Bool = true) -> [Bool] {
+            var scanner = Scanner(bytes: Array(text.utf8))
+            if blocks { scanner.blocks() }
+            scanner.blockProtected = scanner.protected
+            if inline { scanner.inlineCode() }
+            return scanner.protected
+        }
+
         private static func scan(_ text: String) -> Scanner {
             var scanner = Scanner(bytes: Array(text.utf8))
             scanner.blocks()

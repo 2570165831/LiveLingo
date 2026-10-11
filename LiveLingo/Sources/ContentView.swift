@@ -2104,6 +2104,7 @@ struct SummaryMarkdownView: View {
         let lines = self.lines
         let document = language.profile.renderer == .identity || isLegacyRendered
             ? nil : ChineseScriptConverter.RenderText(lines.joined(separator: "\n"))
+        let codeLines = FormulaDisplay.codeBlockLines(lines)
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, _ in
                 switch SummaryMarkdownLine.displayed(lines, at: index, language: language,
@@ -2130,7 +2131,7 @@ struct SummaryMarkdownView: View {
                         }
                 case let .sourceEvidence(label, text, indentation):
                     DisclosureGroup(label) {
-                        Text(markdown: text, bodySize: 15 * scale, baseBodySize: 15)
+                        Text(markdown: text, bodySize: 15 * scale, baseBodySize: 15, codeProtected: codeLines[index])
                             .font(.system(size: 15 * scale))
                             .lineSpacing(5)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2143,14 +2144,14 @@ struct SummaryMarkdownView: View {
                             .fill(Color.secondary)
                             .frame(width: 6, height: 6)
                             .padding(.top, 7)
-                        Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16)
+                        Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16, codeProtected: codeLines[index])
                             .font(.system(size: 16 * scale))
                             .lineSpacing(5)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.leading, CGFloat(indentation) * 14)
                 case let .paragraph(text):
-                    Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16)
+                    Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16, codeProtected: codeLines[index])
                         .font(.system(size: 16 * scale))
                         .lineSpacing(5)
                         .foregroundStyle(.primary)
@@ -2219,11 +2220,11 @@ struct ReviewChangeView: View {
 
 private extension Text {
     @MainActor
-    init(markdown source: String, bodySize: Double = 18, baseBodySize: Double = 18) {
+    init(markdown source: String, bodySize: Double = 18, baseBodySize: Double = 18, codeProtected: Bool = false) {
         #if DEBUG
         SummaryRenderingDiagnostics.record(\.inlineParses)
         #endif
-        self = FormulaDisplay.runs(source).reduce(Text("")) { result, run in
+        self = FormulaDisplay.runs(source, codeProtected: codeProtected).reduce(Text("")) { result, run in
             let part: Text
             if run.script != 0 {
                 part = Text(verbatim: run.text).font(.system(size: ReadingTypography.scriptSize(bodySize: bodySize, baseBodySize: baseBodySize, nested: run.nested)))

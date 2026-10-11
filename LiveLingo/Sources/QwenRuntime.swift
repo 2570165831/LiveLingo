@@ -3437,22 +3437,67 @@ struct FormulaDisplayRun: Equatable {
     var nested = 0
 }
 enum FormulaDisplay {
-    static func runs(_ source: String) -> [FormulaDisplayRun] {
+    /// Splits `source` into plain text and `$…$` / `\(…)` math. Code is literal:
+    /// a match that touches inline code or a code block, or whose `$` is
+    /// escaped as `\$`, stays plain text. `codeProtected` marks a line the
+    /// caller knows lies inside a code block of the surrounding document.
+    static func runs(_ source: String, codeProtected: Bool = false) -> [FormulaDisplayRun] {
+        if codeProtected { return source.isEmpty ? [] : [.init(text: source, script: 0, math: false)] }
         let expression = try! NSRegularExpression(pattern: #"\$([^$\n]+)\$|\\\((.+?)\\\)"#)
         let ns = source as NSString
-        var result: [FormulaDisplayRun] = [], offset = 0
-        for match in expression.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
+        var result: [FormulaDisplayRun] = [], offset = 0, cursor = 0
+        var codeMask: [Bool]?
+        func touchesCode(_ range: NSRange) -> Bool {
+            // Code blocks only exist across lines; a lone line is scanned for inline code.
+            let mask = codeMask ?? ChineseScriptConverter.RenderText.codeMask(source, blocks: source.utf8.contains(10))
+            codeMask = mask
+            guard let bounds = Range(range, in: source) else { return false }
+            let lower = source.utf8.distance(from: source.startIndex, to: bounds.lowerBound)
+            let upper = source.utf8.distance(from: source.startIndex, to: bounds.upperBound)
+            return mask[lower..<upper].contains(true)
+        }
+        func escaped(_ location: Int) -> Bool {
+            var start = location
+            while start > 0, ns.character(at: start - 1) == 92 { start -= 1 }
+            return (location - start) % 2 != 0
+        }
+        while cursor < ns.length,
+              let match = expression.firstMatch(in: source, range: NSRange(location: cursor, length: ns.length - cursor)) {
             // A dollar amount followed by another amount is not inline math.
             if NSMaxRange(match.range) < ns.length,
                let next = UnicodeScalar(ns.character(at: NSMaxRange(match.range))),
-               CharacterSet.decimalDigits.contains(next) { continue }
+               CharacterSet.decimalDigits.contains(next) { cursor = NSMaxRange(match.range); continue }
+            let dollar = match.range(at: 1).location != NSNotFound
+            if touchesCode(match.range)
+                || (dollar && (escaped(match.range.location) || escaped(NSMaxRange(match.range) - 1))) {
+                // The opener was not a real one; a later delimiter may still start math.
+                cursor = match.range.location + 1
+                continue
+            }
             if match.range.location > offset { result.append(.init(text: ns.substring(with: NSRange(location: offset, length: match.range.location-offset)), script: 0, math: false)) }
-            let range = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
+            let range = dollar ? match.range(at: 1) : match.range(at: 2)
             result += mathRuns(ns.substring(with: range))
             offset = NSMaxRange(match.range)
+            cursor = offset
         }
         if offset < ns.length { result.append(.init(text: ns.substring(from: offset), script: 0, math: false)) }
         return result
+    }
+
+    /// For each line, whether it lies inside a fenced or indented code block of
+    /// the whole text. Callers that render notes line by line pass this as
+    /// `codeProtected`, because a single line has lost that context.
+    static func codeBlockLines(_ lines: [String]) -> [Bool] {
+        guard lines.contains(where: { $0.contains("$") || $0.contains(#"\("#) }) else {
+            return Array(repeating: false, count: lines.count)
+        }
+        let mask = ChineseScriptConverter.RenderText.codeMask(lines.joined(separator: "\n"), inline: false)
+        var start = 0
+        return lines.map { line in
+            let count = line.utf8.count
+            defer { start += count + 1 }
+            return count > 0 && !mask[start..<(start + count)].contains(false)
+        }
     }
     static func mathRuns(_ source: String) -> [FormulaDisplayRun] {
         var text = source

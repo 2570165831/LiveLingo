@@ -1601,8 +1601,15 @@ enum PDFNotesWriter {
     static func attributedDocument(_ snapshot: NotesExportSnapshot,
                                    rendered: NotesExportDocument.RenderedFields? = nil) -> NSAttributedString {
         let output = NSMutableAttributedString()
-        func append(_ text: String, style: Style) {
-            output.append(line(text, style: style))
+        func append(_ text: String, style: Style, codeProtected: Bool = false) {
+            output.append(line(text, style: style, codeProtected: codeProtected))
+        }
+        /// Markdown is laid out line by line, so code-block context is taken from the whole text.
+        func appendMarkdown(_ text: String) {
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            for (line, code) in zip(lines, FormulaDisplay.codeBlockLines(lines)) {
+                append(line, style: Style.markdown(line), codeProtected: code)
+            }
         }
 
         append("\(rendered?.className ?? snapshot.className) · \(NotesExportDocument.scopeLabel(snapshot, rendered: rendered)) · \(snapshot.classDate)", style: .title)
@@ -1620,16 +1627,12 @@ enum PDFNotesWriter {
         if notes.isEmpty {
             append(NotesExportDocument.fixed(.emptyNotes, target: snapshot.target, rendered: rendered), style: .body)
         } else {
-            for line in notes.split(separator: "\n", omittingEmptySubsequences: false) {
-                append(String(line), style: Style.markdown(String(line)))
-            }
+            appendMarkdown(notes)
         }
 
         if let review = NotesExportDocument.reviewBody(snapshot, rendered: rendered) {
             append(NotesExportDocument.reviewHeading(for: snapshot.target, rendered: rendered), style: .heading)
-            for line in review.split(separator: "\n", omittingEmptySubsequences: false) {
-                append(String(line), style: Style.markdown(String(line)))
-            }
+            appendMarkdown(review)
         }
 
         if snapshot.includesTranscript, !snapshot.transcript.isEmpty {
@@ -1675,7 +1678,7 @@ enum PDFNotesWriter {
         return trimmed
     }
 
-    static func line(_ source: String, style: Style) -> NSAttributedString {
+    static func line(_ source: String, style: Style, codeProtected: Bool = false) -> NSAttributedString {
         let text = text(of: style, line: source)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
@@ -1711,7 +1714,7 @@ enum PDFNotesWriter {
         }
 
         let result = NSMutableAttributedString()
-        for run in inlineRuns(text, size: size, bold: bold) {
+        for run in inlineRuns(text, size: size, bold: bold, codeProtected: codeProtected) {
             result.append(run)
         }
         result.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: result.length))
@@ -1726,13 +1729,14 @@ enum PDFNotesWriter {
 
     /// Inline runs: `**bold**` (paired by `MarkdownBold`) plus `$…$` / `\(…)`
     /// formulas, which are rendered with real sub/superscript baselines
-    /// instead of raw LaTeX-ish markers.
-    static func inlineRuns(_ source: String, size: CGFloat, bold: Bool) -> [NSAttributedString] {
+    /// instead of raw LaTeX-ish markers. `codeProtected` (a line inside a code
+    /// block) keeps every `$` literal.
+    static func inlineRuns(_ source: String, size: CGFloat, bold: Bool, codeProtected: Bool = false) -> [NSAttributedString] {
         var runs: [NSAttributedString] = []
 
         func appendPlain(_ piece: String, strong: Bool) {
             guard !piece.isEmpty else { return }
-            for run in FormulaDisplay.runs(piece) {
+            for run in FormulaDisplay.runs(piece, codeProtected: codeProtected) {
                 let nestedScale = run.nested == 0 ? 1 : CGFloat(ReadingTypography.nestedScriptScale)
                 let fontSize = run.script == 0 ? size : size * 0.72 * nestedScale
                 let font = font(size: fontSize, bold: strong || (run.math && !run.text.isEmpty))

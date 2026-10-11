@@ -707,6 +707,70 @@ final class NotesExportTests: XCTestCase {
         }
     }
 
+    /// Issue #27：行内代码、代码块和转义的 `\$` 里的 `$` 不是公式边界，必须原样保留。
+    func testFormulaDisplayKeepsDollarSignsInsideCode() {
+        for source in ["Run `echo $HOME $PATH`.", "Use `$(document)` and `$(window)`.",
+                       #"Use \$HOME and \$PATH"#, "``a ` $x$ ``", "🙂 `$x $y` 和 `$z`",
+                       "```sh\necho $HOME $PATH\n```"] {
+            let runs = FormulaDisplay.runs(source)
+            XCTAssertEqual(runs.map(\.text).joined(), source, source)
+            XCTAssertEqual(runs.filter(\.math), [], source)
+        }
+        // 代码之后的真公式仍然显示为公式；含中文时 UTF-16 与 UTF-8 偏移要对得上。
+        XCTAssertEqual(FormulaDisplay.runs("`$a` then $x^2$"), [
+            .init(text: "`$a` then ", script: 0, math: false),
+            .init(text: "x", script: 0, math: true), .init(text: "2", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("中文 `$x $y` 后 $a_1$"), [
+            .init(text: "中文 `$x $y` 后 ", script: 0, math: false),
+            .init(text: "a", script: 0, math: true), .init(text: "1", script: -1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("```sh\necho $HOME\n```\n速度 $v^2$"), [
+            .init(text: "```sh\necho $HOME\n```\n速度 ", script: 0, math: false),
+            .init(text: "v", script: 0, math: true), .init(text: "2", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs(#"`\(a\)` 与 \(b^2\)"#), [
+            .init(text: #"`\(a\)` 与 "#, script: 0, math: false),
+            .init(text: "b", script: 0, math: true), .init(text: "2", script: 1, math: true),
+        ])
+        // 回归：金额、代码外的公式写法不变。
+        XCTAssertEqual(FormulaDisplay.runs("price $5 and $10"), [.init(text: "price $5 and $10", script: 0, math: false)])
+        XCTAssertEqual(FormulaDisplay.runs("$5 and $10 and $x$"), [
+            .init(text: "$5 and $10 and ", script: 0, math: false), .init(text: "x", script: 0, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs(#"\(a^2\)"#), [
+            .init(text: "a", script: 0, math: true), .init(text: "2", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("cost $a_1$ vs $x^2$").filter(\.math).map(\.text), ["a", "1", "x", "2"])
+        // 逐行显示时，调用方按整篇判断某行在代码块里，这一行整行原样保留。
+        XCTAssertEqual(FormulaDisplay.runs("echo $HOME $PATH", codeProtected: true),
+                       [.init(text: "echo $HOME $PATH", script: 0, math: false)])
+        XCTAssertEqual(FormulaDisplay.runs("", codeProtected: true), [])
+        XCTAssertEqual(FormulaDisplay.codeBlockLines(["说明 $x$", "```sh", "echo $HOME $PATH", "", "```", "速度 $v^2$"]),
+                       [false, true, true, false, true, false])
+        // 单独一行的缩进不算代码块：段落续行里的公式照常显示。
+        XCTAssertEqual(FormulaDisplay.codeBlockLines(["速度", "    $v^2$"]), [false, false])
+        XCTAssertEqual(FormulaDisplay.runs("    $v^2$").filter(\.math).map(\.text), ["v", "2"])
+    }
+
+    /// Issue #27：PDF/Word 导出逐行排版，代码块里的行（没有反引号）和行内代码都要保留 `$`。
+    func testExportKeepsDollarSignsInCode() throws {
+        let notes = """
+        ## Shell 与 jQuery
+        - 用 `echo $HOME $PATH` 查看变量，jQuery 写 `$(document)` 和 `$(window)`，速度 $v^2$。
+        ```sh
+        echo $HOME $PATH
+        ```
+        """
+        let snapshot = snapshot(notes: notes, review: nil, withTranscript: false)
+        let text = PDFNotesWriter.attributedDocument(snapshot).string
+        XCTAssertTrue(text.contains("用 `echo $HOME $PATH` 查看变量，jQuery 写 `$(document)` 和 `$(window)`，速度 v2。\n"), text)
+        XCTAssertTrue(text.contains("\necho $HOME $PATH\n"), text)
+        let word = try plainText(of: snapshot, format: .word)
+        XCTAssertTrue(word.contains("`$(document)` 和 `$(window)`"), word)
+        XCTAssertTrue(word.contains("echo $HOME $PATH"), word)
+    }
+
     /// 导出（PDF/Word 共用）里嵌套下标比外层上标更小、位置仍在基线之上。
     func testExportDrawsNestedScriptsSmallerInsideTheirParentScript() throws {
         let size = PDFNotesWriter.bodySize
