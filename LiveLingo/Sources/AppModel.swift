@@ -588,6 +588,7 @@ final class AppModel: ObservableObject {
             let oldValue = captionStream.volatileEnglish
             captionStream.volatileEnglish = newValue
             // Only a timed preview event knows its range; it sets it right after.
+            volatileRangeStart = nil
             volatileRangeEnd = nil
             // Preserve source identity, stale-result clearing and wake-up semantics.
             if newValue != oldValue { markPreviewSourceChanged() }
@@ -597,8 +598,16 @@ final class AppModel: ObservableObject {
             previewWake?.signal()
         }
     }
-    /// End of the shown preview on the session-audio timeline; nil when unknown.
+    /// Shown preview interval on the session-audio timeline; nil when unknown.
+    private var volatileRangeStart: TimeInterval?
     private var volatileRangeEnd: TimeInterval?
+    /// A silent chunk may clear only a preview entirely within its own range.
+    /// Unknown ranges and previews extending into another chunk are retained.
+    private func emptyPreviewOwnsCurrentRange(start: TimeInterval, end: TimeInterval) -> Bool {
+        guard start.isFinite, end.isFinite, start >= 0, end > start,
+              let previewStart = volatileRangeStart, let previewEnd = volatileRangeEnd else { return false }
+        return start <= previewStart && previewEnd <= end
+    }
     /// A final that ends well before the shown preview belongs to an earlier
     /// chunk; it must not clear speech the preview has already moved on to.
     private func previewOutlivesFinal(endingAt finalEnd: TimeInterval) -> Bool {
@@ -3435,8 +3444,14 @@ final class AppModel: ObservableObject {
             waveformSamples.append(level)
         case let .volatile(text, start, end, observedAt):
             tracePreviewReceiveHop(ProcessInfo.processInfo.systemUptime - observedAt)
+            if text.isEmpty {
+                guard emptyPreviewOwnsCurrentRange(start: start, end: end) else { return }
+            }
             volatileEnglish = text
-            if !text.isEmpty, end > start, end > 0 { volatileRangeEnd = end }
+            if !text.isEmpty, start.isFinite, end.isFinite, start >= 0, end > start {
+                volatileRangeStart = start
+                volatileRangeEnd = end
+            }
             // Preview updates do not use the translation model. Let a summary
             // finish unless caption backlog or memory pressure requires yielding.
         case let .final(text, start, end, hints, language):
@@ -3781,7 +3796,11 @@ final class AppModel: ObservableObject {
         consume(.final(text: text, start: start, end: end, hints: []))
     }
     func receiveLivePreviewForTesting(_ text: String, chinese: String? = nil) {
-        receiveLivePreviewForTesting(text, start: 0, end: 0, chinese: chinese)
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        // Untimed presentation fixtures replace state directly; they are not
+        // silent audio events with an invented zero-length ownership range.
+        volatileEnglish = text
+        if let chinese { previewChinese = chinese }
     }
     func receiveLivePreviewForTesting(_ text: String, start: TimeInterval, end: TimeInterval, chinese: String? = nil) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
