@@ -174,6 +174,8 @@ class RunnerHarness:
             if timeout else exit_code
         self.guard_exit_code = 0
         self.guard_commands = []
+        # Read-only Trash listings in call order; the last one repeats.
+        self.trash = [{"existing-user-item"}]
         self.sandboxed = False
         self.now = 0.0
         self.launched = False
@@ -219,6 +221,7 @@ class RunnerHarness:
             ], ["synthetic preference audit"])),
             "retire_workers": Mock(return_value=["worker-810001-synthetic"]),
             "sandboxed_host": Mock(side_effect=lambda app: self.sandboxed),
+            "trash_entries": Mock(side_effect=self.trash_listing),
             "threading": SimpleNamespace(Thread=self.make_reader),
             "time": SimpleNamespace(
                 monotonic=lambda: self.now,
@@ -293,6 +296,9 @@ class RunnerHarness:
         })
         self.launched = True
         return self.process
+
+    def trash_listing(self):
+        return self.trash.pop(0) if len(self.trash) > 1 else self.trash[0]
 
     def make_reader(self, **kwargs):
         self.reader = InlineReader(**kwargs)
@@ -652,6 +658,50 @@ class GateAndCleanupTests(unittest.TestCase):
             command = harness.command
             self.assertEqual(command[command.index("CODE_SIGNING_ALLOWED=NO") + 1], "test-without-building")
             self.assertNotIn("clean", command)
+
+    def test_new_trash_entries_fail_an_otherwise_green_run_and_keep_workers(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.trash = [{"existing-user-item"},
+                             {"existing-user-item", "ASRDirectoryIdentity-synthetic"}]
+            self.assertEqual(harness.runner.main(), 1)
+            self.assertEqual(harness.runner.trash_entries.call_count, 2)
+            receipt = harness.receipt()
+            self.assertEqual(receipt["trash_added"], ["ASRDirectoryIdentity-synthetic"])
+            harness.runner.retire_workers.assert_not_called()
+            self.assertIn("ASRDirectoryIdentity-synthetic", str(harness.printed.call_args_list))
+
+    def test_unchanged_trash_passes_and_removed_entries_are_not_failures(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.trash = [{"existing-user-item", "emptied-by-user"}, {"existing-user-item"}]
+            self.assertEqual(harness.runner.main(), 0)
+            self.assertEqual(harness.receipt()["trash_added"], [])
+
+    def test_unreadable_trash_is_recorded_without_failing_the_run(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.trash = [None]
+            self.assertEqual(harness.runner.main(), 0)
+            receipt = harness.receipt()
+            self.assertNotIn("trash_added", receipt)
+            self.assertEqual(receipt["trash_guard_error"], "could not list the user Trash")
+
+    def test_failed_xcodebuild_still_records_new_trash_entries(self):
+        with RunnerHarness(self, exit_code=65) as harness:
+            harness.trash = [set(), {"review-failure-synthetic.json"}]
+            self.assertEqual(harness.runner.main(), 65)
+            self.assertEqual(harness.receipt()["trash_added"], ["review-failure-synthetic.json"])
+
+
+class TrashListingTests(unittest.TestCase):
+    def test_lists_names_read_only_and_reports_unreadable_trash_as_none(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+            home = Path(temporary)
+            with patch.object(Path, "home", return_value=home):
+                self.assertIsNone(runner.trash_entries())
+                (home / ".Trash").mkdir()
+                (home / ".Trash" / "synthetic-entry").write_text("synthetic\n")
+                self.assertEqual(runner.trash_entries(), {"synthetic-entry"})
+            self.assertEqual((home / ".Trash" / "synthetic-entry").read_text(), "synthetic\n")
 
 
 class WorkerDirectoryTests(unittest.TestCase):

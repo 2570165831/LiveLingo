@@ -183,7 +183,7 @@ final class ResourceSchedulingTests: XCTestCase {
         let other = root.appendingPathComponent("Models-other", isDirectory: true)
         try manager.createDirectory(at: models, withIntermediateDirectories: true)
         try manager.createDirectory(at: other, withIntermediateDirectories: true)
-        addTeardownBlock { try? manager.trashItem(at: root, resultingItemURL: nil) }
+        addTeardownBlock { try manager.removeItem(at: root) }
         let link = root.appendingPathComponent("linked-models")
         try manager.createSymbolicLink(at: link, withDestinationURL: models)
         let wrongLink = root.appendingPathComponent("other-link")

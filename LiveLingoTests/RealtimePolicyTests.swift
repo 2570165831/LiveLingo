@@ -1535,14 +1535,27 @@ final class RealtimePolicyTests: XCTestCase {
         try "保留的既有数据".write(to: userFile, atomically: true, encoding: .utf8)
         let lookalike = directory.appendingPathComponent("review-failure-notes.json")
         try "类似但非本地诊断".write(to: lookalike, atomically: true, encoding: .utf8)
+        // Rotation discards into this test's own directory, never the user's Trash.
+        let discarded = root.appendingPathComponent("Discarded")
+        try FileManager.default.createDirectory(at: discarded, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
         let store = ReviewDiagnosticsStore(directory: directory,
-                                           policy: .init(maximumFiles: 2, maximumFileBytes: 4_096, maximumTotalBytes: 16_384))
+                                           policy: .init(maximumFiles: 2, maximumFileBytes: 4_096, maximumTotalBytes: 16_384),
+                                           discard: { url in
+                                               try FileManager.default.moveItem(
+                                                   at: url, to: discarded.appendingPathComponent(url.lastPathComponent))
+                                           })
         var written: [URL] = []
         for index in 0..<4 {
             written.append(try XCTUnwrap(store.write(diagnosticSnapshot(index: index, input: "输入", response: "回答"))))
+            // Distinct modification times keep the oldest-first order deterministic.
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000 + Double(index))],
+                                                  ofItemAtPath: written[index].path)
         }
         let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         XCTAssertEqual(names.filter { ReviewDiagnosticsStore.isOwnedName($0) }.count, 2)
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: discarded.path)),
+                       Set(written[0..<2].map(\.lastPathComponent)))
         XCTAssertTrue(names.contains("用户笔记.json"))
         XCTAssertTrue(names.contains("review-failure-notes.json"))
         XCTAssertEqual(try String(contentsOf: userFile, encoding: .utf8), "保留的既有数据")
