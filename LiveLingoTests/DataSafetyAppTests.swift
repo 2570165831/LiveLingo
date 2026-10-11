@@ -133,6 +133,125 @@ final class DataSafetyAppTests: XCTestCase {
         await queue.shutdownForTesting()
     }
 
+    /// Converts a live course to a recording in `root/selected` and leaves its
+    /// recovery record behind, as an interrupted process would.
+    private func interruptedConvertedRecording(_ root: URL, defaults: TestUserDefaults) async throws
+        -> (SessionWorkspace.RecordingRecovery, URL) {
+        let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Synthetic audio." }, enableAudioAnalysis: false)
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue-first-launch.json"), observeSleep: false,
+            diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
+        let model = AppModel(reviewQueue: queue, pipeline: pipeline, backgroundServices: false,
+            defaults: defaults, recoveryDirectory: root)
+        let staging = root.appendingPathComponent(SessionWorkspace.temporaryPrefix + UUID().uuidString)
+        let output = root.appendingPathComponent("selected", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        try await model.beginLiveCourseForTesting(directory: staging, outputRoot: output)
+        await model.convertCurrentSessionToRecording(in: output)
+        XCTAssertNil(model.archiveError)
+        await pipeline.stopCapture(continueTranscribing: false)
+        await queue.shutdownForTesting()
+        return (try XCTUnwrap(SessionWorkspace.recordingRecoveries(in: root).first), output)
+    }
+
+    private func relaunchedModel(_ root: URL, defaults: TestUserDefaults) -> (AppModel, LearningReviewQueue) {
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue-relaunch.json"), observeSleep: false,
+            diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
+        let model = AppModel(reviewQueue: queue,
+            pipeline: SpeechPipeline(transcriber: { _, _, _ in "Synthetic audio." }, enableAudioAnalysis: false),
+            backgroundServices: false, defaults: defaults, recoveryDirectory: root)
+        return (model, queue)
+    }
+
+    private func samePath(_ lhs: URL?, _ rhs: URL) -> Bool {
+        lhs?.standardizedFileURL.resolvingSymlinksInPath().path == rhs.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// The open-panel grant ends with its process: a relaunched recovery must
+    /// reach the selected folder through its bookmark, even after a move.
+    func testRecoveryAfterRelaunchResolvesTheSelectedFolderBookmark() async throws {
+        let root = try DataSafetyFixtures.make("recovery-relaunch"); defer { DataSafetyFixtures.preserve(root) }
+        let suite = "LiveLingo-Test-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+        let (record, output) = try await interruptedConvertedRecording(root, defaults: defaults)
+        XCTAssertNotNil(record.outputRootBookmark, "conversion must persist a grant for the selected folder")
+        let moved = root.appendingPathComponent("selected-moved", isDirectory: true)
+        try FileManager.default.moveItem(at: output, to: moved)
+        let (model, queue) = relaunchedModel(root, defaults: defaults)
+        XCTAssertEqual(model.recoverableRecordings.map(\.id), [record.id])
+        await model.recoverRecording(record)
+        XCTAssertNil(model.archiveError)
+        XCTAssertTrue(samePath(model.outputDirectory, moved), "\(String(describing: model.outputDirectory))")
+        await queue.shutdownForTesting()
+    }
+
+    func testRecoveryWithUnavailableSelectedFolderAsksForItAgain() async throws {
+        let root = try DataSafetyFixtures.make("recovery-folder-gone"); defer { DataSafetyFixtures.preserve(root) }
+        let suite = "LiveLingo-Test-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+        let (record, output) = try await interruptedConvertedRecording(root, defaults: defaults)
+        try FileManager.default.removeItem(at: output)
+        let (model, queue) = relaunchedModel(root, defaults: defaults)
+        await model.recoverRecording(record)
+        XCTAssertNil(model.archiveError)
+        XCTAssertNil(model.outputDirectory, "an unreachable folder must not be reused silently")
+        XCTAssertTrue(model.archiveNotice?.contains("保存位置") == true, "\(String(describing: model.archiveNotice))")
+        XCTAssertEqual(model.recoverableRecordings.map(\.id), [record.id], "the recording stays recoverable")
+        let replacement = root.appendingPathComponent("replacement", isDirectory: true)
+        try FileManager.default.createDirectory(at: replacement, withIntermediateDirectories: true)
+        model.useOutputDirectory(replacement)
+        XCTAssertEqual(model.outputDirectory, replacement)
+        let stored = try XCTUnwrap(SessionWorkspace.recordingRecoveries(in: root).first { $0.id == record.id })
+        XCTAssertEqual(stored.outputRoot, replacement, "a later relaunch must use the newly selected folder")
+        XCTAssertNotNil(stored.outputRootBookmark)
+        await queue.shutdownForTesting()
+    }
+
+    func testLegacyRecoveryRecordWithoutBookmarkKeepsThePlainFolder() async throws {
+        let root = try DataSafetyFixtures.make("recovery-legacy"); defer { DataSafetyFixtures.preserve(root) }
+        let suite = "LiveLingo-Test-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+        let (record, output) = try await interruptedConvertedRecording(root, defaults: defaults)
+        var legacy = record
+        legacy.outputRootBookmark = nil
+        try SessionWorkspace.saveRecordingRecoveries([legacy], in: root, expected: [record])
+        let (model, queue) = relaunchedModel(root, defaults: defaults)
+        XCTAssertEqual(model.recoverableRecordings, [legacy])
+        await model.recoverRecording(legacy)
+        XCTAssertNil(model.archiveError)
+        XCTAssertEqual(model.outputDirectory, output)
+        XCTAssertTrue(model.archiveNotice?.contains("旧版") == true, "\(String(describing: model.archiveNotice))")
+        await queue.shutdownForTesting()
+    }
+
+    func testRecoveryOpensThePromotedCourseThroughItsBookmark() async throws {
+        let root = try DataSafetyFixtures.make("recovery-promoted"); defer { DataSafetyFixtures.preserve(root) }
+        let suite = "LiveLingo-Test-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+        let output = root.appendingPathComponent("selected", isDirectory: true)
+        let course = output.appendingPathComponent("course", isDirectory: true)
+        try FileManager.default.createDirectory(at: course, withIntermediateDirectories: true)
+        let snapshot = SessionSnapshot()
+        _ = try SessionStore(directory: course).save(snapshot)
+        let record = SessionWorkspace.RecordingRecovery(id: snapshot.sessionID, directory: course, outputRoot: output)
+            .withOutputRoot(output).promoted(to: course)
+        try SessionWorkspace.saveRecordingRecoveries([record], in: root)
+        let moved = output.appendingPathComponent("course-renamed", isDirectory: true)
+        try FileManager.default.moveItem(at: course, to: moved)
+        let (model, queue) = relaunchedModel(root, defaults: defaults)
+        await model.recoverRecording(record)
+        XCTAssertNil(model.archiveError)
+        XCTAssertTrue(samePath(model.savedSessionDirectory, moved), "\(String(describing: model.savedSessionDirectory))")
+        await queue.shutdownForTesting()
+    }
+
     func testAPP03StoppedSaveFailureCanBeRetriedDirectly() async throws {
         let root = try DataSafetyFixtures.make("APP03"); defer { DataSafetyFixtures.preserve(root) }
         let suite = "LiveLingo-Test-\(UUID())"

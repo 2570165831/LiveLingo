@@ -32,7 +32,7 @@ CASE_NAMES = (
     "reject_non_directory", "atomic_write_read", "atomic_replace_permissions",
     "append_read", "reject_file_symlink", "assert_path_identity", "move_remove_directory",
     "recovery_scan", "temporary_session_cleanup", "pending_cleanup_retry",
-    "recording_recovery_index",
+    "recording_recovery_index", "recording_recovery_bookmark",
 )
 CHECK_NAMES = ("sandbox_identity", "container_parent_tracking") + tuple(
     f"{root}.{case}" for root in ("tmp", "support") for case in CASE_NAMES

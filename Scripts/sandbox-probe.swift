@@ -218,6 +218,29 @@ enum SandboxProbe {
                 _ = try SessionWorkspace.saveRecordingRecoveries([], in: directory, retiring: [value])
                 try require(try SessionWorkspace.recordingRecoveries(in: directory).isEmpty, "recovery retirement failed")
             }
+            test("recording_recovery_bookmark") {
+                // The app-scope entitlement must let the sandbox create and
+                // resolve the grants a relaunched recovery depends on.
+                let directory = base.appendingPathComponent("recovery-bookmark")
+                let selected = base.appendingPathComponent("bookmark-selected", isDirectory: true)
+                let course = selected.appendingPathComponent("course", isDirectory: true)
+                try fm.createDirectory(at: course, withIntermediateDirectories: true)
+                let value = SessionWorkspace.RecordingRecovery(id: UUID(), directory: target, outputRoot: base,
+                                                               createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+                    .withOutputRoot(selected).promoted(to: course)
+                try require(value.outputRootBookmark != nil && value.directoryBookmark != nil, "security bookmark was not created")
+                _ = try SessionWorkspace.saveRecordingRecoveries([value], in: directory)
+                let stored = try SessionWorkspace.recordingRecoveries(in: directory)
+                try require(stored == [value], "bookmarked recovery index differs")
+                let moved = base.appendingPathComponent("bookmark-moved", isDirectory: true)
+                try fm.moveItem(at: selected, to: moved)
+                let access = try SessionWorkspace.ScopedFolderAccess(bookmark: stored[0].directoryBookmark!)
+                defer { access.stop() }
+                try require(access.url.resolvingSymlinksInPath().path
+                            == moved.appendingPathComponent("course").resolvingSymlinksInPath().path, "bookmark did not follow the move")
+                try SensitiveFileIO.atomicWrite(Data("synthetic".utf8), to: access.url.appendingPathComponent("probe.txt"))
+                _ = try SessionWorkspace.saveRecordingRecoveries([], in: directory, retiring: stored)
+            }
         }
         let passed = checks.allSatisfy(\.passed)
         let result = Result(bundle_id: Bundle.main.bundleIdentifier ?? "", passed: passed, checks: checks)
