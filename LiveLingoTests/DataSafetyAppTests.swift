@@ -106,6 +106,33 @@ final class DataSafetyAppTests: XCTestCase {
         await queue.shutdownForTesting()
     }
 
+    /// Issue #13: a live course started before midnight and stopped after it
+    /// keeps its start in the course data and in the promoted folder name.
+    func testAPP02bConvertedLiveCourseKeepsItsCaptureStart() async throws {
+        let root = try DataSafetyFixtures.make("APP02b"); defer { DataSafetyFixtures.preserve(root) }
+        let suite = "LiveLingo-Test-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+        let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Synthetic audio." }, enableAudioAnalysis: false)
+        let (model, queue) = fixture(root, defaults: defaults, pipeline: pipeline)
+        // Promotion only accepts a staging folder directly under the host's temporary root.
+        let staging = try SessionWorkspace.temporaryRoot()
+            .appendingPathComponent(SessionWorkspace.temporaryPrefix + UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        let output = root.appendingPathComponent("selected")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let start = try XCTUnwrap(SessionCaptureStart(date: Date(timeIntervalSince1970: 1_791_474_600),
+                                                      utcOffsetSeconds: 8 * 3_600))
+        try await model.beginLiveCourseForTesting(directory: staging, outputRoot: output, captureStart: start)
+        await model.convertCurrentSessionToRecording(in: output)
+        XCTAssertEqual(try SessionStore(directory: staging).load()?.captureStart, start)
+        await model.stopSavedCourseForTesting()
+        let promoted = output.appendingPathComponent("LiveLingo 2026-10-08 23.50.00")
+        XCTAssertEqual(try SessionStore(directory: promoted).load()?.captureStart, start)
+        await queue.shutdownForTesting()
+    }
+
     func testAPP03StoppedSaveFailureCanBeRetriedDirectly() async throws {
         let root = try DataSafetyFixtures.make("APP03"); defer { DataSafetyFixtures.preserve(root) }
         let suite = "LiveLingo-Test-\(UUID())"

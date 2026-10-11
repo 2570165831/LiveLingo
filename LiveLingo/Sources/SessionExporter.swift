@@ -1202,6 +1202,8 @@ struct NotesExportSnapshot: Equatable, Sendable {
     /// Nil preserves local-time export; a supplied zone makes a snapshot's
     /// date and timestamp independent of the machine rendering it.
     var exportTimeZone: TimeZone? = nil
+    /// Recorded capture start; nil keeps the legacy folder-name/export date.
+    var classStart: SessionCaptureStart? = nil
 
     var classDate: String { NotesExportDocument.classDate(of: self) }
 }
@@ -1323,7 +1325,11 @@ enum NotesExportDocument {
     static let disclaimer = "本文件由本机模型生成，未经人工逐句核对；正文按主题整理，“需要回听”和“来源检查”两节列出的内容仍需自行核对。"
 
     static func classDate(of snapshot: NotesExportSnapshot) -> String {
-        // Prefer the date inside the recording folder name (the class date).
+        // The recorded capture start wins, shown in the zone where it started.
+        if let start = snapshot.classStart {
+            return start.displayLabel(hanPunctuation: snapshot.target.profile.script == .han)
+        }
+        // Older courses: the date inside the recording folder name (the class date).
         if let name = snapshot.sessionName, let range = name.range(of: #"\d{4}-\d{2}-\d{2}"#, options: .regularExpression) {
             return String(name[range])
         }
@@ -1345,7 +1351,8 @@ enum NotesExportDocument {
     }
 
     static func defaultFileName(_ snapshot: NotesExportSnapshot, format: NotesExportFormat) -> String {
-        "\(snapshot.className) \(classDate(of: snapshot)) \(scopeLabel(snapshot)).\(format.fileExtension)"
+        let date = snapshot.classStart?.fileNameLabel ?? classDate(of: snapshot)
+        return "\(snapshot.className) \(date) \(scopeLabel(snapshot)).\(format.fileExtension)"
     }
 
     static func timestamp(_ interval: TimeInterval) -> String {

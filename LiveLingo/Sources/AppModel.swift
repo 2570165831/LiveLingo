@@ -1070,6 +1070,9 @@ final class AppModel: ObservableObject {
     private var generation = 0
     private var sessionID = UUID()
     private var sessionSnapshot: SessionSnapshot?
+    /// Set once when live capture starts; a live-only course has no archive
+    /// until it is converted, so this carries the start into it.
+    private var currentCaptureStart: SessionCaptureStart?
     private var sessionSaver: SessionSaveCoordinator?
     private var finalizationOwner: UUID?
     private var finalizationInProgress = false
@@ -1753,7 +1756,8 @@ final class AppModel: ObservableObject {
             includesTranscript: exportIncludesTranscript && !transcript.isEmpty,
             target: outputLanguage,
             notesAreLegacyRendered: exportScope == .wholeLesson && summaryIsLegacyRendered,
-            scheduleEvidence: notesScheduleEvidence
+            scheduleEvidence: notesScheduleEvidence,
+            classStart: sessionSnapshot?.captureStart ?? currentCaptureStart
         )
     }
 
@@ -2107,6 +2111,7 @@ final class AppModel: ObservableObject {
             audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)],
             transcriptionJournalPath: DurableTranscriptionJournal.directoryName + "/work.jsonl",
             targetLocale: outputLanguage.persistedLocale)
+        if restored == nil { snapshot.captureStart = currentCaptureStart }
         snapshot.generation = generation
         sessionSnapshot = snapshot
         let saver = SessionSaveCoordinator(directory: directory, sessionID: sessionID, restored: restored,
@@ -2527,6 +2532,7 @@ final class AppModel: ObservableObject {
         stopCandidatePlayback()
         sessionSaver = nil
         sessionSnapshot = nil
+        currentCaptureStart = nil
         sessionID = UUID()
         finalizationOwner = nil
         processingTask?.cancel()
@@ -2625,7 +2631,9 @@ final class AppModel: ObservableObject {
             try validateLifecycleCompletion(revision)
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
 
-            let sessionName = Self.sessionFolderName()
+            let captureStart = SessionCaptureStart.now()
+            currentCaptureStart = captureStart
+            let sessionName = Self.sessionFolderName(startedAt: captureStart)
             let recordingURL: URL
             if storageMode.usesTemporaryRecording {
                 let temporaryDirectory = try SessionWorkspace.makeRecoverableTemporarySessionDirectory()
@@ -3416,9 +3424,11 @@ final class AppModel: ObservableObject {
     func cancelTypedTranslation() { manualTranslationTask?.cancel() }
 
     #if DEBUG
-    func beginLiveCourseForTesting(directory: URL, outputRoot: URL) async throws {
+    func beginLiveCourseForTesting(directory: URL, outputRoot: URL,
+                                   captureStart: SessionCaptureStart? = nil) async throws {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         resetSessionStateForNewRun()
+        currentCaptureStart = captureStart
         sessionDirectory = directory
         temporarySessionDirectory = directory
         outputDirectory = outputRoot
@@ -4910,7 +4920,8 @@ final class AppModel: ObservableObject {
             try await waitForLifecycle { await summary?.value }
             try await flushSessionArchive()
             try validateLifecycleCompletion(revision)
-            let preferredName = Self.sessionFolderName()
+            // Name the promoted folder for the capture start, not the stop time.
+            let preferredName = Self.sessionFolderName(startedAt: sessionSnapshot?.captureStart ?? currentCaptureStart)
             let identity = sessionID, epoch = generation
             let migration = try await waitForLifecycle { [self] in
                 try await noteReviewQueue.withCourseWritersPaused(sessionID: identity,
@@ -5004,11 +5015,14 @@ final class AppModel: ObservableObject {
         "⚠️ 录音已停止，**后面的内容不会再录**：\(message) 已自动保存当前录音和 \(segmentCount) 段字幕；要继续录制请重新点开始（会新建一次会话）。"
     }
 
-    private static func sessionFolderName() -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        return "LiveLingo \(formatter.string(from: Date()))"
+    nonisolated static func sessionFolderName(startedAt start: SessionCaptureStart? = nil) -> String {
+        guard let start else {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+            return "LiveLingo \(formatter.string(from: Date()))"
+        }
+        return "LiveLingo \(start.formatted("yyyy-MM-dd HH.mm.ss"))"
     }
 
     private static let modelModeDefaultsKey = "LiveLingo.modelMode"

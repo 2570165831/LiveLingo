@@ -28,11 +28,12 @@ final class NotesExportTests: XCTestCase {
         """,
         withReview: Bool = false,
         withTranscript: Bool = true,
-        transcript: [TranscriptSegment]? = nil
+        transcript: [TranscriptSegment]? = nil,
+        sessionName: String? = "LiveLingo 2026-09-16 14.07.48"
     ) -> NotesExportSnapshot {
         NotesExportSnapshot(
             className: "实时课堂",
-            sessionName: "LiveLingo 2026-09-16 14.07.48",
+            sessionName: sessionName,
             scope: scope,
             scopeDetail: scope == .wholeLesson ? "已整理 24 / 26 段已翻译内容" : "最近完成：12:30–15:00",
             coverageLine: "已整理 24 / 26 段已翻译内容",
@@ -409,6 +410,58 @@ final class NotesExportTests: XCTestCase {
             NotesExportDocument.defaultFileName(snapshot(scope: .latest), format: .plainText),
             "实时课堂 2026-09-16 最近更新.txt"
         )
+    }
+
+    /// Issue #13: 2026-10-08 23:50 in UTC+8, exported on another day from a
+    /// machine in UTC, from a renamed folder or one named at a later stop.
+    func testRecordedCaptureStartWinsOverFolderAndExportDates() throws {
+        let start = try XCTUnwrap(SessionCaptureStart(date: Date(timeIntervalSince1970: 1_791_474_600),
+                                                      utcOffsetSeconds: 8 * 3_600))
+        for name in ["Physics lecture 3", "LiveLingo 2026-10-09 00.10.00", nil] {
+            var notes = snapshot(sessionName: name)
+            notes.exportTimeZone = TimeZone(secondsFromGMT: 0)
+            notes.classStart = start
+            XCTAssertEqual(notes.classDate, "2026-10-08 23:50（UTC+8）")
+            XCTAssertEqual(NotesExportDocument.defaultFileName(notes, format: .markdown),
+                           "实时课堂 2026-10-08_2350_UTC+8 整课笔记.md")
+            for format in NotesExportFormat.allCases {
+                let text = try plainText(of: notes, format: format)
+                XCTAssertTrue(text.contains("实时课堂 · 整课笔记 · 2026-10-08 23:50（UTC+8）"), "\(format)")
+            }
+        }
+    }
+
+    func testCaptureStartZoneLabelsUseShortOffsets() throws {
+        let instant = Date(timeIntervalSince1970: 1_791_474_600) // 2026-10-08 15:50 UTC
+        let cases: [(Int, String, String)] = [
+            (8 * 3_600, "2026-10-08 23:50（UTC+8）", "2026-10-08_2350_UTC+8"),
+            (19_800, "2026-10-08 21:20（UTC+5:30）", "2026-10-08_2120_UTC+5.30"),
+            (-5 * 3_600, "2026-10-08 10:50（UTC-5）", "2026-10-08_1050_UTC-5"),
+            (0, "2026-10-08 15:50（UTC+0）", "2026-10-08_1550_UTC+0"),
+            (-12_600, "2026-10-08 12:20（UTC-3:30）", "2026-10-08_1220_UTC-3.30"),
+        ]
+        for (offset, display, file) in cases {
+            let start = try XCTUnwrap(SessionCaptureStart(date: instant, utcOffsetSeconds: offset))
+            XCTAssertEqual(start.displayLabel(), display)
+            XCTAssertEqual(start.fileNameLabel, file)
+        }
+        let start = try XCTUnwrap(SessionCaptureStart(date: instant, utcOffsetSeconds: 8 * 3_600))
+        var english = snapshot()
+        english.target = .english
+        english.classStart = start
+        XCTAssertEqual(english.classDate, "2026-10-08 23:50 (UTC+8)")
+        XCTAssertNil(SessionCaptureStart(date: instant, utcOffsetSeconds: 19 * 3_600))
+        XCTAssertNil(SessionCaptureStart(date: instant, utcOffsetSeconds: 30))
+        XCTAssertEqual(AppModel.sessionFolderName(startedAt: start), "LiveLingo 2026-10-08 23.50.00")
+    }
+
+    /// Older courses without a recorded start keep a date-only label and never gain a zone.
+    func testCoursesWithoutCaptureStartKeepDateOnlyLabels() {
+        var notes = snapshot(sessionName: "Physics lecture 3")
+        notes.exportTimeZone = TimeZone(secondsFromGMT: 0)
+        XCTAssertEqual(notes.classDate, "2026-09-16")
+        XCTAssertEqual(NotesExportDocument.defaultFileName(notes, format: .plainText), "实时课堂 2026-09-16 整课笔记.txt")
+        XCTAssertEqual(snapshot().classDate, "2026-09-16")
     }
 
     func testEmptyScopeIsMarkedInsteadOfWritingAnEmptyDocument() throws {
