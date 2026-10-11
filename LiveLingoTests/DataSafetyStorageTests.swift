@@ -25,11 +25,11 @@ enum DataSafetyFixtures {
 private final class RecoveryScanProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var inspected: [String] = []
-    private var outcome: Result<SessionSnapshot, Error>?
+    private var outcome: Result<Void, Error>?
     var names: [String] { lock.withLock { inspected } }
-    var result: Result<SessionSnapshot, Error>? { lock.withLock { outcome } }
+    var result: Result<Void, Error>? { lock.withLock { outcome } }
     func record(_ url: URL) { lock.withLock { inspected.append(url.lastPathComponent) } }
-    func finish(_ value: Result<SessionSnapshot, Error>) { lock.withLock { outcome = value } }
+    func finish(_ value: Result<Void, Error>) { lock.withLock { outcome = value } }
 }
 
 final class DataSafetyStorageTests: XCTestCase {
@@ -149,6 +149,11 @@ final class DataSafetyStorageTests: XCTestCase {
     /// not return; it is released afterwards so a failing run cannot hang.
     private func saveWhileInspectionStalls(_ stored: SessionSnapshot, in root: URL, probe: RecoveryScanProbe,
                                            limit: TimeInterval = 10) -> Bool {
+        whileInspectionStalls(probe: probe, limit: limit) { _ = try SessionStore(directory: root).save(stored) }
+    }
+
+    private func whileInspectionStalls(probe: RecoveryScanProbe, limit: TimeInterval = 10,
+                                       _ work: @escaping @Sendable () throws -> Void) -> Bool {
         let release = DispatchSemaphore(value: 0)
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
@@ -156,7 +161,7 @@ final class DataSafetyStorageTests: XCTestCase {
                 try SensitiveFileIO.$beforeTemporaryInspection.withValue({ url in
                     probe.record(url)
                     _ = release.wait(timeout: .now() + 60)
-                }) { try SessionStore(directory: root).save(stored) }
+                }) { try work() }
             })
             done.signal()
         }
@@ -402,6 +407,27 @@ final class DataSafetyStorageTests: XCTestCase {
             .filter { $0.lastPathComponent.hasPrefix(".course.initial-export-") }
         XCTAssertEqual(siblings.count, 1, "An unavailable trusted parent permits publication but preserves its residual")
         for sibling in siblings { XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: sibling.path).isEmpty) }
+    }
+
+    func testDU05StalledRecoveryScanNeverHoldsTheRecordingRecoveryIndexLocks() throws {
+        let root = try DataSafetyFixtures.make("DU05-recording-index")
+        defer { DataSafetyFixtures.preserve(root) }
+        let a = SessionWorkspace.RecordingRecovery(id: UUID(), directory: root.appendingPathComponent("a"), outputRoot: root)
+        let b = SessionWorkspace.RecordingRecovery(id: UUID(), directory: root.appendingPathComponent("b"), outputRoot: root)
+        try SessionWorkspace.saveRecordingRecoveries([a], in: root)
+        let index = root.appendingPathComponent("pending-recordings.json")
+        let empty = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try interruptedWrite(Data(), to: index, orphan: empty)
+        // A save holds the in-process recovery lock and the index flock; the
+        // recovery scan, whose open can stall, must not run under them.
+        let probe = RecoveryScanProbe()
+        let finished = whileInspectionStalls(probe: probe) { try SessionWorkspace.saveRecordingRecoveries([b], in: root) }
+        XCTAssertTrue(finished, "A stalled recovery scan must not hold the recording-recovery locks")
+        XCTAssertEqual(probe.names, [], "Saving the recovery index never runs the recovery scan")
+        XCTAssertNoThrow(try XCTUnwrap(probe.result).get())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: empty.path))
+        XCTAssertEqual(Set(try SessionWorkspace.recordingRecoveries(in: root).map(\.id)), Set([a.id, b.id]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: empty.path), "Reading the index at startup still retires it")
     }
 
     func testN02StaleRecoveryIndexSaveMergesAnotherRecording() throws {

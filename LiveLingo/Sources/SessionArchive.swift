@@ -566,8 +566,9 @@ final class SessionStore: @unchecked Sendable {
 
     func load() throws -> SessionSnapshot? { try loadDetailed().snapshot }
 
-    /// Opening a course is the only point that runs the best-effort temporary
-    /// recovery scan, and the scan holds neither store lock. Saves never scan.
+    /// Opening a course runs the best-effort temporary recovery scan, outside
+    /// both store locks. Write transactions and the no-scan reads below never
+    /// scan; anything that calls this still waits for the scan itself.
     func loadDetailed() throws -> SessionLoadResult {
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireSessionDirectory(directory)
@@ -576,9 +577,15 @@ final class SessionStore: @unchecked Sendable {
         return try locked(writing: false) { try read().result }
     }
 
+    /// A read that never runs the recovery scan, for readers that are not
+    /// opening the course: a saver's readback and the review queue's storage.
+    func loadDetailedWithoutRecovery() throws -> SessionLoadResult {
+        try locked(writing: false) { try read().result }
+    }
+
     /// A saver's readback of its own committed state; it never scans.
     func loadCommittedSnapshot() throws -> SessionSnapshot? {
-        try locked(writing: false) { try read().result }.snapshot
+        try loadDetailedWithoutRecovery().snapshot
     }
 
     func loadDetailedAsync() async throws -> SessionLoadResult {
@@ -1011,7 +1018,8 @@ final class SessionStore: @unchecked Sendable {
 
     /// Runs outside the process and disk locks (DU-05). Each candidate is
     /// protected by its own writer lease and creation receipt, never by the
-    /// store lock, so a slow or stuck open here cannot delay any save.
+    /// store lock, so a slow or stuck open here cannot delay this or another
+    /// store's write transaction. It does delay the caller of loadDetailed.
     private func inspectTemporaryItemsOnce() {
         let first = recoveryClaim.withLock {
             defer { inspectedTemporaryItems = true }
