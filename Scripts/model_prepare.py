@@ -27,6 +27,16 @@ PUBLIC_FILES |= frozenset({"processor_config.json", "video_preprocessor_config.j
 PARAKEET = "mlx-community/parakeet-tdt-0.6b-v2"
 
 
+def modification_reason(item):
+    if excluded(item["file"]):
+        return "Omit download caches and local loader bookkeeping; these are not model inputs."
+    if item["file"] == "config.json" and item["model"] == PARAKEET:
+        return "Remove tokenizer.dir, an export-time training directory; decoding uses joint.vocabulary."
+    if item["model"] == PARAKEET and item["file"] in ("tokenizer.model", "tokenizer.vocab"):
+        return "Omit unused training tokenizer inputs; decoding uses joint.vocabulary."
+    return "The application constructs translation prompts itself; omit unused chat templates."
+
+
 def prepare(base, output):
     base, output = Path(base), Path(output)
     if base.is_symlink() or not base.is_dir() or output.exists() or output.is_symlink():
@@ -86,6 +96,13 @@ def prepare(base, output):
                            "sourceSHA256": hashlib.sha256(path.read_bytes()).hexdigest(),
                            "preparedSHA256": hashlib.sha256(target.read_bytes()).hexdigest()})
         check_model_files(destination, REQUIRED_MODEL_FILES[identifier])
+        changes = [{**item, "contributor": "Li", "date": "2026-10-11",
+                    "reason": modification_reason(item)}
+                   for item in report if item["model"] == identifier]
+        (destination / "MODIFICATIONS.json").write_text(json.dumps({"model": identifier,
+            "contributor": "Li", "date": "2026-10-11", "changes": changes,
+            "unchanged": "Weights, tokenizer vocabularies, original attribution and licenses are preserved."},
+            ensure_ascii=False, indent=2) + "\n")
     inspect_tree(output)
     return report
 

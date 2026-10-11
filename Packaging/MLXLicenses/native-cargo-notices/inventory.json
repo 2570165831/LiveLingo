@@ -941,7 +941,7 @@
       "repository": "https://github.com/tormol/encode_unicode",
       "licenseFile": null,
       "authors": [
-        "Torbjørn Birch Moltu <t.b.moltu@lyse.net>"
+        "Torbj\u00f8rn Birch Moltu <t.b.moltu@lyse.net>"
       ],
       "texts": [
         {
@@ -2506,7 +2506,7 @@
       ],
       "bundledSource": "CorrespondingSource/option-ext-0.2.0.crate",
       "sourceURL": "https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate",
-      "bundledSourceSHA256": "98db8d44c96295b9bfa85a4aacfedd6690c3155123b10b3090e74fea0cab5925"
+      "bundledSourceSHA256": "a0a3d07d4eb134e39373e1bcd5563db67ed0765bc339ab7a24b4b8def28c8af8"
     },
     {
       "name": "paste",
@@ -10572,7 +10572,7 @@
       ],
       "sourceArchive": "work/mlx-integration-20260910/native-source-audit/crates/colored-3.1.1.crate",
       "bundledSource": "CorrespondingSource/colored-3.1.1.crate",
-      "bundledSourceSHA256": "3b708de9867926bf175bd49c9f3cdd4acaf397a81a1f48e7d51cf51cf94f3104"
+      "bundledSourceSHA256": "0c7ecb2f3900c4687a23b3965f6dc491b37e8c9a2b96e7011e06780af221d21f"
     },
     {
       "name": "combine",
@@ -11899,7 +11899,7 @@
       "licenseFile": null,
       "authors": [
         "Andrew Straw <strawman@astraw.com>",
-        "René Kijewski <rene.kijewski@fu-berlin.de>",
+        "Ren\u00e9 Kijewski <rene.kijewski@fu-berlin.de>",
         "Ryan Lopopolo <rjl@hyperbo.la>"
       ],
       "texts": [
@@ -11925,7 +11925,7 @@
       "repository": "https://github.com/strawlab/iana-time-zone",
       "licenseFile": null,
       "authors": [
-        "René Kijewski <crates.io@k6i.de>"
+        "Ren\u00e9 Kijewski <crates.io@k6i.de>"
       ],
       "texts": [
         {
@@ -11960,7 +11960,7 @@
       ],
       "sourceArchive": "work/mlx-integration-20260910/native-source-audit/crates/inferno-0.11.21.crate",
       "bundledSource": "CorrespondingSource/inferno-0.11.21.crate",
-      "bundledSourceSHA256": "be0b729029ed92ec8bab138c571b1fa2860623be86d90d67b4b0be7b1745adc5"
+      "bundledSourceSHA256": "0b3561bfdb5b7d4c273ff7d4c2a3f493bbd1a5c7584324bcab6dbed4d871f7d5"
     },
     {
       "name": "inventory",
@@ -12266,7 +12266,7 @@
       "repository": "https://github.com/rust-lang-nursery/lazy-static.rs",
       "licenseFile": null,
       "authors": [
-        "Marvin Löbel <loebel.marvin@gmail.com>"
+        "Marvin L\u00f6bel <loebel.marvin@gmail.com>"
       ],
       "texts": [
         {
@@ -12812,7 +12812,7 @@
       "repository": "https://github.com/faern/oneshot",
       "licenseFile": null,
       "authors": [
-        "Linus Färnstrand <faern@faern.net>"
+        "Linus F\u00e4rnstrand <faern@faern.net>"
       ],
       "texts": [
         {
@@ -13646,7 +13646,7 @@
       "repository": "https://github.com/kornelski/rust-rgb",
       "licenseFile": null,
       "authors": [
-        "Kornel Lesiński <kornel@geekhood.net>",
+        "Kornel Lesi\u0144ski <kornel@geekhood.net>",
         "James Forster <james.forsterer@gmail.com>"
       ],
       "texts": [
@@ -13871,7 +13871,7 @@
       "repository": "https://github.com/nabijaczleweli/safe-transmute-rs",
       "licenseFile": null,
       "authors": [
-        "наб <nabijaczleweli@gmail.com>",
+        "\u043d\u0430\u0431 <nabijaczleweli@gmail.com>",
         "Eduardo Pinho <enet4mikeenet@gmail.com>",
         "Lukas Kalbertodt <lukas.kalbertodt@gmail.com>",
         "Philipp Tessenow <philipp@tessenow.org>",

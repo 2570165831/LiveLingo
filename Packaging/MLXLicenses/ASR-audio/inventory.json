@@ -7,9 +7,13 @@
       "libogg-1.3.5/COPYING",
       "libogg-1.3.5/AUTHORS"
     ],
-    "upstreamArchive": "CorrespondingSource/libogg-1.3.5.tar.gz",
-    "bundledSource": false,
-    "sourceRequirement": "BSD-3-Clause: retain publisher and component notices; an offline source archive is not required for the bundled library."
+    "bundledSource": true,
+    "sourceRequirement": "Original component license/copyright texts retained. Source included as a static module and offline rebuild input of the distributed LGPL libsndfile, rather than treating the codec as an optional standalone BSD component.",
+    "archive": "CorrespondingSource/libogg-1.3.5.tar.gz",
+    "originalSHA256": "0eb4b4b9420a0f51db142ba3f9c64b333f826532dc0f48c6410ae51f4799b664",
+    "originalBytes": 593071,
+    "bundledArchiveSHA256": "1154a499953e52739fc0d2bf47dbbc89d987903902f4a46bbd5ebc00942e05a7",
+    "bundledBytes": 593137
   },
   {
     "name": "libvorbis-1.3.7",
@@ -19,9 +23,13 @@
       "libvorbis-1.3.7/COPYING",
       "libvorbis-1.3.7/AUTHORS"
     ],
-    "upstreamArchive": "CorrespondingSource/libvorbis-1.3.7.tar.gz",
-    "bundledSource": false,
-    "sourceRequirement": "BSD-3-Clause: retain publisher and component notices; an offline source archive is not required for the bundled library."
+    "bundledSource": true,
+    "sourceRequirement": "Original component license/copyright texts retained. Source included as a static module and offline rebuild input of the distributed LGPL libsndfile, rather than treating the codec as an optional standalone BSD component.",
+    "archive": "CorrespondingSource/libvorbis-1.3.7.tar.gz",
+    "originalSHA256": "0e982409a9c3fc82ee06e08205b1355e5c6aa4c36bca58146ef399621b0ce5ab",
+    "originalBytes": 1658963,
+    "bundledArchiveSHA256": "d23f23eb84dd0b4758f95dad63870b2ff1b41d519f2f11dc1b888fdef9d0df5f",
+    "bundledBytes": 1250163
   },
   {
     "name": "flac-1.4.3",
@@ -34,9 +42,13 @@
       "flac-1.4.3/COPYING.LGPL",
       "flac-1.4.3/COPYING.Xiph"
     ],
-    "upstreamArchive": "CorrespondingSource/flac-1.4.3.tar.xz",
-    "bundledSource": false,
-    "sourceRequirement": "BSD-3-Clause: retain publisher and component notices; an offline source archive is not required for the bundled library."
+    "bundledSource": true,
+    "sourceRequirement": "Original component license/copyright texts retained. Source included as a static module and offline rebuild input of the distributed LGPL libsndfile, rather than treating the codec as an optional standalone BSD component.",
+    "archive": "CorrespondingSource/flac-1.4.3.tar.xz",
+    "originalSHA256": "6c58e69cd22348f441b861092b825e591d0b822e106de6eb0ee4d05d27205b70",
+    "originalBytes": 1006728,
+    "bundledArchiveSHA256": "714bd0783fee2d4f8b1886044bf540b3d1d35a4ae83959f29feab14030f3bfbc",
+    "bundledBytes": 1597828
   },
   {
     "name": "opus-1.4",
@@ -46,9 +58,13 @@
       "opus-1.4/COPYING",
       "opus-1.4/AUTHORS"
     ],
-    "upstreamArchive": "CorrespondingSource/opus-1.4.tar.gz",
-    "bundledSource": false,
-    "sourceRequirement": "BSD-3-Clause: retain publisher and component notices; an offline source archive is not required for the bundled library."
+    "bundledSource": true,
+    "sourceRequirement": "Original component license/copyright texts retained. Source included as a static module and offline rebuild input of the distributed LGPL libsndfile, rather than treating the codec as an optional standalone BSD component.",
+    "archive": "CorrespondingSource/opus-1.4.tar.gz",
+    "originalSHA256": "c9b32b4253be5ae63d1ff16eea06b94b5f0f2951b7a02aceef58e3a3ce49c51f",
+    "originalBytes": 1063408,
+    "bundledArchiveSHA256": "fa8a62c1d947b10cd5840433fc8895713639ed02fa8fe80d6bc702b8f587c0d6",
+    "bundledBytes": 1060971
   },
   {
     "name": "mpg123-1.32.3",
@@ -60,7 +76,11 @@
       "mpg123-1.32.3/COPYING",
       "mpg123-1.32.3/doc/LICENSE"
     ],
-    "bundledArchiveSHA256": "c62fcd6ac39e466bd838f84a35a92ea80fcffa1cedd7dbec6c78eaefc030e330"
+    "bundledArchiveSHA256": "45437aea0b02902a75ce06eb67ba5b7be42b9936911808e47e23e750426a6147",
+    "bundledSource": true,
+    "originalSHA256": "2d9913a57d4ee8f497a182c6e82582602409782a4fb481e989feebf4435867b4",
+    "originalBytes": 1111054,
+    "bundledBytes": 1096250
   },
   {
     "name": "lame-3.100",
@@ -73,7 +93,11 @@
       "lame-3.100/mpglib/AUTHORS",
       "lame-3.100/debian/copyright"
     ],
-    "bundledArchiveSHA256": "c07145e35be54c7dfcdbb58de11545d536a6e641b83e9387de4ba078373d513b"
+    "bundledArchiveSHA256": "c528e2cfbd4d50825132bd11b83fe0919b9d06119a4c21e2091d21bb7030bec2",
+    "bundledSource": true,
+    "originalSHA256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+    "originalBytes": 1524133,
+    "bundledBytes": 1150149
   },
   {
     "name": "libsndfile-1.2.2",
@@ -85,6 +109,10 @@
       "libsndfile-1.2.2/AUTHORS",
       "libsndfile-1.2.2/COPYING"
     ],
-    "bundledArchiveSHA256": "dc9ebdd9cf55b181d7bcad78dc64d6692b77938bfcb3e5d1aa63c6440f8a8ffe"
+    "bundledArchiveSHA256": "944309d677c7fa4fac6f886be39b254c846001cb1f173483fbdfec1650900d3a",
+    "bundledSource": true,
+    "originalSHA256": "3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e",
+    "originalBytes": 730760,
+    "bundledBytes": 1038112
   }
 ]

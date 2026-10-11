@@ -35,27 +35,27 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/lame-3.100.tar.gz",
-      "sha256": "c07145e35be54c7dfcdbb58de11545d536a6e641b83e9387de4ba078373d513b",
+      "sha256": "c528e2cfbd4d50825132bd11b83fe0919b9d06119a4c21e2091d21bb7030bec2",
       "format": "source-tar",
       "package": "lame",
       "version": "3.100",
-      "reason": "Corresponding build source for the bundled GNU/LGPL/MPL/CDDL component. Original upstream hash, source subset audit and static-validation limitations are in SourceArchiveAudit.json. Legal notice bytes remain unchanged; unrelated tests/docs/IDE payloads are omitted."
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
     },
     {
       "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/libsndfile-1.2.2.tar.xz",
-      "sha256": "dc9ebdd9cf55b181d7bcad78dc64d6692b77938bfcb3e5d1aa63c6440f8a8ffe",
+      "sha256": "944309d677c7fa4fac6f886be39b254c846001cb1f173483fbdfec1650900d3a",
       "format": "source-tar",
       "package": "libsndfile",
       "version": "1.2.2",
-      "reason": "Corresponding build source for the bundled GNU/LGPL/MPL/CDDL component. Original upstream hash, source subset audit and static-validation limitations are in SourceArchiveAudit.json. Legal notice bytes remain unchanged; unrelated tests/docs/IDE payloads are omitted."
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
     },
     {
       "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/mpg123-1.32.3.tar.bz2",
-      "sha256": "c62fcd6ac39e466bd838f84a35a92ea80fcffa1cedd7dbec6c78eaefc030e330",
+      "sha256": "45437aea0b02902a75ce06eb67ba5b7be42b9936911808e47e23e750426a6147",
       "format": "source-tar",
       "package": "mpg123",
       "version": "1.32.3",
-      "reason": "Corresponding build source for the bundled GNU/LGPL/MPL/CDDL component. Original upstream hash, source subset audit and static-validation limitations are in SourceArchiveAudit.json. Legal notice bytes remain unchanged; unrelated tests/docs/IDE payloads are omitted."
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
     },
     {
       "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/flac-1.4.3/AUTHORS",
@@ -107,35 +107,35 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/Licenses/GCC-runtime-13.4.0/gcc-13.4.0.tar.xz",
-      "sha256": "0b31a2cb846da4e906dbe1bad01234cbd8b5ba6786b0da51ffa2069caa1892a6",
+      "sha256": "ffdace83e1264e703a269f04aa15ddcaea27e57c03b69d339031253767c1bb9c",
       "format": "source-tar",
       "package": "gcc",
       "version": "13.4.0",
-      "reason": "Corresponding source for GNU runtime libraries bundled with SciPy 1.18.1. Runtime implementation and build sources retained, no unbundled compiler tests/frontends or generated binary documentation/catalogs. See SourceArchiveAudit.json for original hash and static-audit limitations."
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
     },
     {
       "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/CorrespondingSource/colored-3.1.1.crate",
-      "sha256": "3b708de9867926bf175bd49c9f3cdd4acaf397a81a1f48e7d51cf51cf94f3104",
+      "sha256": "0c7ecb2f3900c4687a23b3965f6dc491b37e8c9a2b96e7011e06780af221d21f",
       "format": "source-tar",
       "package": "colored",
       "version": "3.1.1",
-      "reason": "Corresponding build source for the bundled GNU/LGPL/MPL/CDDL component. Original upstream hash, source subset audit and static-validation limitations are in SourceArchiveAudit.json. Legal notice bytes remain unchanged; unrelated tests/docs/IDE payloads are omitted."
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
     },
     {
       "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/CorrespondingSource/inferno-0.11.21.crate",
-      "sha256": "be0b729029ed92ec8bab138c571b1fa2860623be86d90d67b4b0be7b1745adc5",
+      "sha256": "0b3561bfdb5b7d4c273ff7d4c2a3f493bbd1a5c7584324bcab6dbed4d871f7d5",
       "format": "source-tar",
       "package": "inferno",
       "version": "0.11.21",
-      "reason": "Corresponding build source for the bundled GNU/LGPL/MPL/CDDL component. Original upstream hash, source subset audit and static-validation limitations are in SourceArchiveAudit.json. Legal notice bytes remain unchanged; unrelated tests/docs/IDE payloads are omitted."
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
     },
     {
       "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/CorrespondingSource/option-ext-0.2.0.crate",
-      "sha256": "98db8d44c96295b9bfa85a4aacfedd6690c3155123b10b3090e74fea0cab5925",
+      "sha256": "a0a3d07d4eb134e39373e1bcd5563db67ed0765bc339ab7a24b4b8def28c8af8",
       "format": "source-tar",
       "package": "option-ext",
       "version": "0.2.0",
-      "reason": "Corresponding build source for the bundled GNU/LGPL/MPL/CDDL component. Original upstream hash, source subset audit and static-validation limitations are in SourceArchiveAudit.json. Legal notice bytes remain unchanged; unrelated tests/docs/IDE payloads are omitted."
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
     },
     {
       "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/aws-lc-sys-0.35.0/LICENSE",
@@ -320,6 +320,54 @@
       "package": "mlx-community/parakeet-tdt-0.6b-v2",
       "version": "v2",
       "reason": "The actual mlx_audio Parakeet loader reads joint.vocabulary directly as token spellings. A slash token is vocabulary data; every other config field and actual host paths in token strings remain inspected. The exported labels list must equal joint.vocabulary exactly. Source is the read-only installed mlx-community conversion of NVIDIA Parakeet TDT 0.6B v2; no upstream commit revision is asserted."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/tokenizers/tools/visualizer-styles.css",
+      "sha256": "cc0c9dab5a06583f10125978f9ec8bf0b970d01d6cb72fe1a48137b58c4bd369",
+      "format": "css",
+      "package": "tokenizers",
+      "version": "0.23.2",
+      "reason": "Required by the eager tokenizers.tools.visualizer import; retained alongside sklearn eager CSS."
+    },
+    {
+      "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/tokenizers/tools/visualizer-styles.css",
+      "sha256": "cc0c9dab5a06583f10125978f9ec8bf0b970d01d6cb72fe1a48137b58c4bd369",
+      "format": "css",
+      "package": "tokenizers",
+      "version": "0.23.0rc0",
+      "reason": "Required by the eager tokenizers.tools.visualizer import; retained alongside sklearn eager CSS."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/libogg-1.3.5.tar.gz",
+      "sha256": "1154a499953e52739fc0d2bf47dbbc89d987903902f4a46bbd5ebc00942e05a7",
+      "format": "source-tar",
+      "package": "libogg",
+      "version": "1.3.5",
+      "reason": "Static codec source needed to rebuild the combined LGPL libsndfile with its shipped features; preserve original component notices and build inputs."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/libvorbis-1.3.7.tar.gz",
+      "sha256": "d23f23eb84dd0b4758f95dad63870b2ff1b41d519f2f11dc1b888fdef9d0df5f",
+      "format": "source-tar",
+      "package": "libvorbis",
+      "version": "1.3.7",
+      "reason": "Static codec source needed to rebuild the combined LGPL libsndfile with its shipped features; preserve original component notices and build inputs."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/flac-1.4.3.tar.xz",
+      "sha256": "714bd0783fee2d4f8b1886044bf540b3d1d35a4ae83959f29feab14030f3bfbc",
+      "format": "source-tar",
+      "package": "flac",
+      "version": "1.4.3",
+      "reason": "Static codec source needed to rebuild the combined LGPL libsndfile with its shipped features; preserve original component notices and build inputs."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/opus-1.4.tar.gz",
+      "sha256": "fa8a62c1d947b10cd5840433fc8895713639ed02fa8fe80d6bc702b8f587c0d6",
+      "format": "source-tar",
+      "package": "opus",
+      "version": "1.4",
+      "reason": "Static codec source needed to rebuild the combined LGPL libsndfile with its shipped features; preserve original component notices and build inputs."
     }
   ]
 }

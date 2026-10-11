@@ -1,0 +1,373 @@
+{
+  "version": 1,
+  "resources": [
+    {
+      "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/librosa/core/intervals.msgpack",
+      "sha256": "fb2159492485c1786798349ab9655c0665d26d6ce7a98228550adccd59e2a941",
+      "format": "numeric-msgpack",
+      "package": "librosa",
+      "version": "0.11.0",
+      "reason": "librosa.core.intervals reads the finite numeric interval map at import time; only numeric MessagePack primitives are decoded."
+    },
+    {
+      "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/sklearn/utils/_repr_html/estimator.css",
+      "sha256": "311924a5e25246cba392e1e4fc60620ed2692743bb9e4270df4e92b899047a0e",
+      "format": "css",
+      "package": "scikit-learn",
+      "version": "1.9.0",
+      "reason": "sklearn imports this stylesheet eagerly from utils._repr_html; required by the mlx_audio/librosa dependency import graph."
+    },
+    {
+      "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/sklearn/utils/_repr_html/features.css",
+      "sha256": "9ccb7119a228f85b0fcaea2b5883034a1b47d35b06688602ccd69d0fdcf79452",
+      "format": "css",
+      "package": "scikit-learn",
+      "version": "1.9.0",
+      "reason": "sklearn imports this stylesheet eagerly from utils._repr_html; required by the mlx_audio/librosa dependency import graph."
+    },
+    {
+      "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/sklearn/utils/_repr_html/params.css",
+      "sha256": "d846f25d915f78de7a7c38b75893e9cfceb62caba5c8594bf0e39b777f4c7a6c",
+      "format": "css",
+      "package": "scikit-learn",
+      "version": "1.9.0",
+      "reason": "sklearn imports this stylesheet eagerly from utils._repr_html; required by the mlx_audio/librosa dependency import graph."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/lame-3.100.tar.gz",
+      "sha256": "c528e2cfbd4d50825132bd11b83fe0919b9d06119a4c21e2091d21bb7030bec2",
+      "format": "source-tar",
+      "package": "lame",
+      "version": "3.100",
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/libsndfile-1.2.2.tar.xz",
+      "sha256": "944309d677c7fa4fac6f886be39b254c846001cb1f173483fbdfec1650900d3a",
+      "format": "source-tar",
+      "package": "libsndfile",
+      "version": "1.2.2",
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/mpg123-1.32.3.tar.bz2",
+      "sha256": "45437aea0b02902a75ce06eb67ba5b7be42b9936911808e47e23e750426a6147",
+      "format": "source-tar",
+      "package": "mpg123",
+      "version": "1.32.3",
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/flac-1.4.3/AUTHORS",
+      "sha256": "ac4e8005a9725bcbd532f163250eac193266113c90075e6728370e3d3f5e81e0",
+      "format": "notice-text",
+      "package": "flac",
+      "version": "1.4.3",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/lame-3.100/debian/copyright",
+      "sha256": "1f27f9f698183275bd615c1140b7bf6e498750e9280597c6eb39790e54ae809b",
+      "format": "notice-text",
+      "package": "lame",
+      "version": "3.100",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/libsndfile-1.2.2/AUTHORS",
+      "sha256": "373fb9abaa154db5da8ab692853da32ced8977b817a713913953c63e50eb4499",
+      "format": "notice-text",
+      "package": "libsndfile",
+      "version": "1.2.2",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/CPython-3.13.7-20250902/LICENSE.bdb.txt",
+      "sha256": "3bdff06e69991c94664f2ef5c5f8096f60b7dbec071756ea6cc26b445e06ec5b",
+      "format": "notice-text",
+      "package": "CPython",
+      "version": "3.13.7",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/CPython-3.13.7-20250902/LICENSE.cpython.txt",
+      "sha256": "86e61415828a8b5b06ec8d024e6f086ce155a8b85fd0c419c0ba4dc004e74fdd",
+      "format": "notice-text",
+      "package": "CPython",
+      "version": "3.13.7",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/CPython-3.13.7-20250902/LICENSE.openssl-1.1.txt",
+      "sha256": "9c04cce50c4989d5601dd8b07f6ab922c40388b66ac736c9007cb1ed9d9dd560",
+      "format": "notice-text",
+      "package": "CPython",
+      "version": "3.13.7",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/GCC-runtime-13.4.0/gcc-13.4.0.tar.xz",
+      "sha256": "ffdace83e1264e703a269f04aa15ddcaea27e57c03b69d339031253767c1bb9c",
+      "format": "source-tar",
+      "package": "gcc",
+      "version": "13.4.0",
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/CorrespondingSource/colored-3.1.1.crate",
+      "sha256": "0c7ecb2f3900c4687a23b3965f6dc491b37e8c9a2b96e7011e06780af221d21f",
+      "format": "source-tar",
+      "package": "colored",
+      "version": "3.1.1",
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/CorrespondingSource/inferno-0.11.21.crate",
+      "sha256": "0b3561bfdb5b7d4c273ff7d4c2a3f493bbd1a5c7584324bcab6dbed4d871f7d5",
+      "format": "source-tar",
+      "package": "inferno",
+      "version": "0.11.21",
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/CorrespondingSource/option-ext-0.2.0.crate",
+      "sha256": "a0a3d07d4eb134e39373e1bcd5563db67ed0765bc339ab7a24b4b8def28c8af8",
+      "format": "source-tar",
+      "package": "option-ext",
+      "version": "0.2.0",
+      "reason": "Corresponding source with build inputs, manuals and dated modification notices retained; per-member privacy checks remain mandatory."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/aws-lc-sys-0.35.0/LICENSE",
+      "sha256": "5df09a98cac8843239a4d8f48a85089de6b68ed106612afcd2aa37a6453c2e3f",
+      "format": "notice-text",
+      "package": "aws-lc-sys",
+      "version": "0.35.0",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/aws-lc-sys-0.35.0/aws-lc/LICENSE",
+      "sha256": "f0a0b74fec39a87c807766c7ddb1e952be0583527a9b1d30f96ab400fe990356",
+      "format": "notice-text",
+      "package": "aws-lc-sys",
+      "version": "0.35.0",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/untrusted-0.9.0/LICENSE.txt",
+      "sha256": "7abd9b6960dcf7d4d0a48606a5b71bfe37d472db68d70637f3a58a56785f1621",
+      "format": "notice-text",
+      "package": "untrusted",
+      "version": "0.9.0",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-source-notices/numpy-2.5.3/numpy/_core/src/highway/debian/copyright",
+      "sha256": "6e4ecf1cae052b678ea3178dd4b3652d581ee66a82d58db8800dd7d80dd6de76",
+      "format": "notice-text",
+      "package": "numpy",
+      "version": "2.5.3",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-source-notices/numpy-2.5.3/vendored-meson/meson/docs/theme/extra/templates/license.html",
+      "sha256": "15fcbcade0003df4b37350f12bea7dfeb25d4d2ac9e99d12d893773c4d5359fd",
+      "format": "notice-text",
+      "package": "numpy",
+      "version": "2.5.3",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-source-notices/numpy-2.5.3/vendored-meson/meson/packaging/License.rtf",
+      "sha256": "e3e8d7b15b2021c994047314ad0ac5e367561f64771a60a85a9c0952d8cd4c3a",
+      "format": "notice-text",
+      "package": "numpy",
+      "version": "2.5.3",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/native-source-notices/numpy-2.5.3/vendored-meson/meson/packaging/macpages/English.lproj/license.html",
+      "sha256": "bca11d525505d21cdfb021e634b0f1d48ece827f9bedcf8cd41356c48a09be24",
+      "format": "notice-text",
+      "package": "numpy",
+      "version": "2.5.3",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/outlines-core-0.2.14-cargo/aws-lc-sys-0.35.0/LICENSE",
+      "sha256": "5df09a98cac8843239a4d8f48a85089de6b68ed106612afcd2aa37a6453c2e3f",
+      "format": "notice-text",
+      "package": "aws-lc-sys",
+      "version": "0.35.0",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/outlines-core-0.2.14-cargo/untrusted-0.9.0/LICENSE.txt",
+      "sha256": "7abd9b6960dcf7d4d0a48606a5b71bfe37d472db68d70637f3a58a56785f1621",
+      "format": "notice-text",
+      "package": "untrusted",
+      "version": "0.9.0",
+      "reason": "Preserve required upstream legal/author notice bytes; inspect C/RTF/HTML/signature or standard-license-reference syntax rather than treating delimiters as host paths."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft201909/metaschema.json",
+      "sha256": "7b761b3e121f0a0ca1ea2a0b8e2cc856bcf801604b8268d71bacaa202bc0c13b",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft201909/vocabularies/applicator",
+      "sha256": "6895100e99726fbb107058512bbec3ecfd4b24e8fd2facee3e505ee72b0d4c31",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft201909/vocabularies/validation",
+      "sha256": "1e526c1d335a734805fc82cf5798c12b960ad7da2517c66cda5a1b09359c3c1c",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft202012/metaschema.json",
+      "sha256": "41da76f5afb7ce062d248f762463a92f7ca47e4e0f905b224ba6afeef91ded0f",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft202012/vocabularies/applicator",
+      "sha256": "c4a6e4147b91fef7fea6dc058cb1bf93402f7414b76578a8b16aaf1dad6aacef",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft202012/vocabularies/core",
+      "sha256": "c2d12a8e4dd11d336dfc83a3f663aa4c69f0b49b3beb094ffeb25b5316f4803d",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft202012/vocabularies/validation",
+      "sha256": "7010a31e541f32d2be721e2de348df75c9b36876a3ed304877fc0abda1d37a58",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft4/metaschema.json",
+      "sha256": "e1489d0b4755f02793302591d3fcb8f07b6893a82a94f24895f8e4edf11b82e2",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft6/metaschema.json",
+      "sha256": "c29dfce9f54835c3a06c03b3c5d5ec0eda77706568f9c4df7cfbc7566a51006d",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/jsonschema_specifications/schemas/draft7/metaschema.json",
+      "sha256": "3d5392088261606c559b603f385329c9f1ab45b5d667eb990687453b055d405e",
+      "format": "json-schema",
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "reason": "The jsonschema_specifications registry reads all bundled official meta-schemas when the app imports jsonschema/outlines."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/outlines/grammars/arithmetic.lark",
+      "sha256": "e1a5ac67f2244bd9cfecd1a285d80f7f4c1668fdad9f4c5bfe3845345e70b39d",
+      "format": "lark-grammar",
+      "package": "outlines",
+      "version": "1.3.3",
+      "reason": "outlines.grammars imports arithmetic/json at module import; json.lark imports common terminals for constrained JSON output."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/outlines/grammars/common.lark",
+      "sha256": "87a98f555d2f8adadb0925435272ff1af42b8827f0acdf04b562c58acb372bd4",
+      "format": "lark-grammar",
+      "package": "outlines",
+      "version": "1.3.3",
+      "reason": "outlines.grammars imports arithmetic/json at module import; json.lark imports common terminals for constrained JSON output."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/outlines/grammars/json.lark",
+      "sha256": "e9dea8c290338159003944ac20d83a30bbbcd5557f1d092746c32c4971d807e9",
+      "format": "lark-grammar",
+      "package": "outlines",
+      "version": "1.3.3",
+      "reason": "outlines.grammars imports arithmetic/json at module import; json.lark imports common terminals for constrained JSON output."
+    },
+    {
+      "path": "Contents/Resources/Models/mlx-community/parakeet-tdt-0.6b-v2/config.json",
+      "sha256": "ea17fcecb63c0368edb2a54e59c52d0fad53196679dce574f538252fd94123f2",
+      "format": "parakeet-config",
+      "package": "mlx-community/parakeet-tdt-0.6b-v2",
+      "version": "v2",
+      "reason": "The actual mlx_audio Parakeet loader reads joint.vocabulary directly as token spellings. A slash token is vocabulary data; every other config field and actual host paths in token strings remain inspected. The exported labels list must equal joint.vocabulary exactly. Source is the read-only installed mlx-community conversion of NVIDIA Parakeet TDT 0.6B v2; no upstream commit revision is asserted."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/tokenizers/tools/visualizer-styles.css",
+      "sha256": "cc0c9dab5a06583f10125978f9ec8bf0b970d01d6cb72fe1a48137b58c4bd369",
+      "format": "css",
+      "package": "tokenizers",
+      "version": "0.23.2",
+      "reason": "Required by the eager tokenizers.tools.visualizer import; retained alongside sklearn eager CSS."
+    },
+    {
+      "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/tokenizers/tools/visualizer-styles.css",
+      "sha256": "cc0c9dab5a06583f10125978f9ec8bf0b970d01d6cb72fe1a48137b58c4bd369",
+      "format": "css",
+      "package": "tokenizers",
+      "version": "0.23.0rc0",
+      "reason": "Required by the eager tokenizers.tools.visualizer import; retained alongside sklearn eager CSS."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/libogg-1.3.5.tar.gz",
+      "sha256": "1154a499953e52739fc0d2bf47dbbc89d987903902f4a46bbd5ebc00942e05a7",
+      "format": "source-tar",
+      "package": "libogg",
+      "version": "1.3.5",
+      "reason": "Static codec source needed to rebuild the combined LGPL libsndfile with its shipped features; preserve original component notices and build inputs."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/libvorbis-1.3.7.tar.gz",
+      "sha256": "d23f23eb84dd0b4758f95dad63870b2ff1b41d519f2f11dc1b888fdef9d0df5f",
+      "format": "source-tar",
+      "package": "libvorbis",
+      "version": "1.3.7",
+      "reason": "Static codec source needed to rebuild the combined LGPL libsndfile with its shipped features; preserve original component notices and build inputs."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/flac-1.4.3.tar.xz",
+      "sha256": "714bd0783fee2d4f8b1886044bf540b3d1d35a4ae83959f29feab14030f3bfbc",
+      "format": "source-tar",
+      "package": "flac",
+      "version": "1.4.3",
+      "reason": "Static codec source needed to rebuild the combined LGPL libsndfile with its shipped features; preserve original component notices and build inputs."
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/CorrespondingSource/opus-1.4.tar.gz",
+      "sha256": "fa8a62c1d947b10cd5840433fc8895713639ed02fa8fe80d6bc702b8f587c0d6",
+      "format": "source-tar",
+      "package": "opus",
+      "version": "1.4",
+      "reason": "Static codec source needed to rebuild the combined LGPL libsndfile with its shipped features; preserve original component notices and build inputs."
+    }
+  ]
+}

@@ -1,172 +1,308 @@
 {
-  "scope": "Static inspection of corresponding build source subsets. Original tarballs are preserved outside the candidate. This does not prove a byte-identical rebuild of the installed libraries.",
+  "scope": "Build inputs retained; offline configure/dry-run results are separate. Originals are unmodified. Each archive contains a dated MODIFICATIONS.json. No byte-identical rebuilt binary is claimed.",
   "archives": [
     {
       "package": "mpg123",
       "version": "1.32.3",
       "originalSHA256": "2d9913a57d4ee8f497a182c6e82582602409782a4fb481e989feebf4435867b4",
-      "preparedSHA256": "c62fcd6ac39e466bd838f84a35a92ea80fcffa1cedd7dbec6c78eaefc030e330",
-      "retainedFiles": 305,
+      "preparedSHA256": "45437aea0b02902a75ce06eb67ba5b7be42b9936911808e47e23e750426a6147",
+      "retainedFiles": 360,
+      "redactedComments": [
+        {
+          "path": "mpg123-1.32.3/doc/README.gain",
+          "commentExamples": 4,
+          "originalSHA256": "d50ab8bbe448a7b491a51eab8f0766e953eac35c5247f9d1d4e7556624ddaf7d"
+        }
+      ],
+      "modified": [
+        {
+          "path": "mpg123-1.32.3/doc/README.gain",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "d50ab8bbe448a7b491a51eab8f0766e953eac35c5247f9d1d4e7556624ddaf7d",
+          "preparedSHA256": "2b086bc6fb5aef37f6080bb27aee44641c1515367d6befd9017852f968a38326"
+        }
+      ],
+      "modificationNotice": "mpg123-1.32.3/MODIFICATIONS.json",
       "originalLicenseHashes": {
         "mpg123-1.32.3/AUTHORS": "bfa5dab0ed3b3ea7a9c76961fcf76df5a5d8e5107cb05d31cf6c5880919b89e5",
         "mpg123-1.32.3/COPYING": "c22482728a634a8dfdb4ff72a96d4c1ed64cd8f3e79335c401751ac591609366",
         "mpg123-1.32.3/doc/LICENSE": "cca79ea6fc0a7715e52450df2d86311f990e85067dd13f4d7f5a88d4fd23a07c"
       },
-      "retainedInventorySHA256": "94ea2e71ca51e6345193a7c8ec585a3205d46f19f017dbc722c8e405659c6761",
-      "redactedComments": [],
+      "retainedInventorySHA256": "66a633253e360e1aef7c62c47572aaeda41ee1206c67b90d612c220c33bce77d",
+      "relative": "ASR-audio/CorrespondingSource/mpg123-1.32.3.tar.bz2",
+      "originalBytes": 1111054,
+      "bundledBytes": 1096250,
       "privacyStatus": "passed",
-      "omittedCount": 56
+      "omittedCount": 2,
+      "omissionReasons": {
+        "optional-binary-regression-or-legacy-ide-input": 1,
+        "optional-upstream-history": 1
+      },
+      "omittedInventorySHA256": "8a572cac3a957d8bdc318a6043479fac6fe1b6a0b085283ca1dee5b13871eb2c"
     },
     {
       "package": "libsndfile",
       "version": "1.2.2",
       "originalSHA256": "3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e",
-      "preparedSHA256": "dc9ebdd9cf55b181d7bcad78dc64d6692b77938bfcb3e5d1aa63c6440f8a8ffe",
-      "retainedFiles": 256,
+      "preparedSHA256": "944309d677c7fa4fac6f886be39b254c846001cb1f173483fbdfec1650900d3a",
+      "retainedFiles": 352,
+      "redactedComments": [],
+      "modified": [],
+      "modificationNotice": "libsndfile-1.2.2/MODIFICATIONS.json",
       "originalLicenseHashes": {
         "libsndfile-1.2.2/src/GSM610/COPYRIGHT": "1bbe7119b1bcd1489e0f36cb95b8902f7f0ceec9a2f3a67394bc9f4709a4e0a7",
         "libsndfile-1.2.2/AUTHORS": "373fb9abaa154db5da8ab692853da32ced8977b817a713913953c63e50eb4499",
         "libsndfile-1.2.2/COPYING": "ad01ea5cd2755f6048383c8d54c88459cd6fcb17757c5c8892f8c5ea060f6140"
       },
-      "retainedInventorySHA256": "91de1fa561aecb2df3538c0a4ecc7962027edd5a95e7afb21efe00e3916b876b",
-      "redactedComments": [],
+      "retainedInventorySHA256": "b6118cd81645a243c034914183396218fe3dd5495925a9e8ce2eae5a7283ce15",
+      "relative": "ASR-audio/CorrespondingSource/libsndfile-1.2.2.tar.xz",
+      "originalBytes": 730760,
+      "bundledBytes": 1038112,
       "privacyStatus": "passed",
-      "omittedCount": 98
+      "omittedCount": 3,
+      "omissionReasons": {
+        "optional-upstream-history": 3
+      },
+      "omittedInventorySHA256": "7ee865ad6b5ec37d14feddb5e2c00f3c82abdbc05989a9897182a1938020a9e5"
     },
     {
       "package": "lame",
       "version": "3.100",
       "originalSHA256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
-      "preparedSHA256": "c07145e35be54c7dfcdbb58de11545d536a6e641b83e9387de4ba078373d513b",
-      "retainedFiles": 205,
+      "preparedSHA256": "c528e2cfbd4d50825132bd11b83fe0919b9d06119a4c21e2091d21bb7030bec2",
+      "retainedFiles": 319,
+      "redactedComments": [],
+      "modified": [],
+      "modificationNotice": "lame-3.100/MODIFICATIONS.json",
       "originalLicenseHashes": {
         "lame-3.100/COPYING": "bfe4a52dc4645385f356a8e83cc54216a293e3b6f1cb4f79f5fc0277abf937fd",
         "lame-3.100/LICENSE": "7a40cbd8818c57e5285e83c772a459a996d1662c824a879836b97b473c07cae4",
         "lame-3.100/mpglib/AUTHORS": "d8ecf9556aafa8c653796d6be3dc43deea374257680e21c30109a5c3c4484263",
         "lame-3.100/debian/copyright": "1f27f9f698183275bd615c1140b7bf6e498750e9280597c6eb39790e54ae809b"
       },
-      "retainedInventorySHA256": "93aae4e8fe873567a030d0200a2597a0fab829de0b27b0b0fbf4ed202bde5563",
-      "redactedComments": [],
+      "retainedInventorySHA256": "55e473dafd7db1657af7d42c21ab6193ab72c37ff9ddff5cc9b9258c11d6b610",
+      "relative": "ASR-audio/CorrespondingSource/lame-3.100.tar.gz",
+      "originalBytes": 1524133,
+      "bundledBytes": 1150149,
       "privacyStatus": "passed",
-      "omittedCount": 121
+      "omittedCount": 8,
+      "omissionReasons": {
+        "optional-upstream-history": 1,
+        "optional-binary-regression-or-legacy-ide-input": 3,
+        "upstream-platform-or-ci-metadata": 1,
+        "optional-platform-icon": 3
+      },
+      "omittedInventorySHA256": "fa929fe8c3cccaa6a0a969691d9322e012771776e77222bb274fe868027cd248"
     },
     {
       "package": "colored",
       "version": "3.1.1",
       "originalSHA256": "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34",
-      "preparedSHA256": "3b708de9867926bf175bd49c9f3cdd4acaf397a81a1f48e7d51cf51cf94f3104",
-      "retainedFiles": 19,
+      "preparedSHA256": "0c7ecb2f3900c4687a23b3965f6dc491b37e8c9a2b96e7011e06780af221d21f",
+      "retainedFiles": 30,
+      "redactedComments": [],
+      "modified": [],
+      "modificationNotice": "colored-3.1.1/MODIFICATIONS.json",
       "originalLicenseHashes": {
         "colored-3.1.1/LICENSE": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
       },
-      "retainedInventorySHA256": "4e90fb672fd863d8ef190604104a2d7c226047296867d54f944b51f3db5ec7c7",
-      "redactedComments": [],
+      "retainedInventorySHA256": "994b2da61f2b5e403602f451c2db8f023fc0d25a9767e4bb92d43116e1b76e64",
+      "relative": "native-cargo-notices/CorrespondingSource/colored-3.1.1.crate",
+      "originalBytes": 36216,
+      "bundledBytes": 35280,
       "privacyStatus": "passed",
-      "omittedCount": 13
+      "omittedCount": 3,
+      "omissionReasons": {
+        "upstream-platform-or-ci-metadata": 3
+      },
+      "omittedInventorySHA256": "671e45735340237232b9b6da9df5270f56da5a1ec4017d6e1a616deabebcb126"
     },
     {
       "package": "inferno",
       "version": "0.11.21",
       "originalSHA256": "232929e1d75fe899576a3d5c7416ad0d88dbfbb3c3d6aa00873a7408a50ddb88",
-      "preparedSHA256": "be0b729029ed92ec8bab138c571b1fa2860623be86d90d67b4b0be7b1745adc5",
-      "retainedFiles": 45,
-      "omitted": [
-        {
-          "path": "inferno-0.11.21/.codecov.yml",
-          "reason": "upstream-platform-or-ci-metadata"
-        },
-        {
-          "path": "inferno-0.11.21/.github/codecov.yml",
-          "reason": "upstream-tests-docs-examples-ci"
-        },
-        {
-          "path": "inferno-0.11.21/.github/dependabot.yml",
-          "reason": "upstream-tests-docs-examples-ci"
-        },
-        {
-          "path": "inferno-0.11.21/.github/workflows/check.yml",
-          "reason": "upstream-tests-docs-examples-ci"
-        },
-        {
-          "path": "inferno-0.11.21/.github/workflows/scheduled.yml",
-          "reason": "upstream-tests-docs-examples-ci"
-        },
-        {
-          "path": "inferno-0.11.21/.github/workflows/test.yml",
-          "reason": "upstream-tests-docs-examples-ci"
-        },
-        {
-          "path": "inferno-0.11.21/README.md",
-          "reason": "upstream-maintenance-or-documentation"
-        },
-        {
-          "path": "inferno-0.11.21/src/bin/flamegraph.rs",
-          "reason": "trailing-cfg-test-module-only"
-        },
-        {
-          "path": "inferno-0.11.21/src/collapse/common.rs",
-          "reason": "trailing-cfg-test-module-only"
-        },
-        {
-          "path": "inferno-0.11.21/src/collapse/dtrace.rs",
-          "reason": "trailing-cfg-test-module-only"
-        },
-        {
-          "path": "inferno-0.11.21/src/collapse/matcher.rs",
-          "reason": "trailing-cfg-test-module-only"
-        },
-        {
-          "path": "inferno-0.11.21/src/collapse/perf.rs",
-          "reason": "trailing-cfg-test-module-only"
-        },
-        {
-          "path": "inferno-0.11.21/src/collapse/vsprof.rs",
-          "reason": "trailing-cfg-test-module-only"
-        },
-        {
-          "path": "inferno-0.11.21/src/flamegraph/color/mod.rs",
-          "reason": "trailing-cfg-test-module-only"
-        },
-        {
-          "path": "inferno-0.11.21/src/flamegraph/color/palette_map.rs",
-          "reason": "trailing-cfg-test-module-only"
-        },
+      "preparedSHA256": "0b3561bfdb5b7d4c273ff7d4c2a3f493bbd1a5c7584324bcab6dbed4d871f7d5",
+      "retainedFiles": 47,
+      "redactedComments": [
         {
           "path": "inferno-0.11.21/src/flamegraph/color/palettes.rs",
-          "reason": "trailing-cfg-test-module-only"
-        },
-        {
-          "path": "inferno-0.11.21/src/flamegraph/mod.rs",
-          "reason": "trailing-cfg-test-module-only"
+          "commentExamples": 1,
+          "originalSHA256": "8ceb22801e5c86b796f8e1f4ea8e2a474dfcbcd51aaca1f65afab3d9694b8172"
         }
       ],
-      "redactedComments": [],
+      "modified": [
+        {
+          "path": "inferno-0.11.21/src/flamegraph/color/palettes.rs",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "8ceb22801e5c86b796f8e1f4ea8e2a474dfcbcd51aaca1f65afab3d9694b8172",
+          "preparedSHA256": "ee9b2c0b706720bff3b01ba194b5fefcb2b7443cdf0f9402d5e0eca155f6065b"
+        }
+      ],
+      "modificationNotice": "inferno-0.11.21/MODIFICATIONS.json",
       "originalLicenseHashes": {
         "inferno-0.11.21/LICENSE": "1ffb70c33c4f79f04e947facc5c7851f289609256aacb47fc115f700427d9520"
       },
-      "retainedInventorySHA256": "6152cfd1f66a3679ac04fbd6f8909c2fa8b1624a9e8d1f2ae1c3976843c58176",
-      "privacyStatus": "passed"
+      "retainedInventorySHA256": "0d48e45d121a22e01a64aebb474ba25d49e6426af210b5fcc3e54d850f34426d",
+      "relative": "native-cargo-notices/CorrespondingSource/inferno-0.11.21.crate",
+      "originalBytes": 102615,
+      "bundledBytes": 101128,
+      "privacyStatus": "passed",
+      "omittedCount": 6,
+      "omissionReasons": {
+        "upstream-platform-or-ci-metadata": 6
+      },
+      "omittedInventorySHA256": "29c1b018009de40db74207f3e563c8095442ab879767142a705e2f45b84197d6"
     },
     {
       "package": "option-ext",
       "version": "0.2.0",
       "originalSHA256": "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d",
-      "preparedSHA256": "98db8d44c96295b9bfa85a4aacfedd6690c3155123b10b3090e74fea0cab5925",
-      "retainedFiles": 8,
+      "preparedSHA256": "a0a3d07d4eb134e39373e1bcd5563db67ed0765bc339ab7a24b4b8def28c8af8",
+      "retainedFiles": 9,
+      "redactedComments": [],
+      "modified": [],
+      "modificationNotice": "option-ext-0.2.0/MODIFICATIONS.json",
       "originalLicenseHashes": {
         "option-ext-0.2.0/LICENSE.txt": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172"
       },
-      "retainedInventorySHA256": "42c20255f401bd533a32d302368a14fe4f2f4ce4824f04920f33ef643df45dbe",
-      "redactedComments": [],
+      "retainedInventorySHA256": "2d69e47ace51b3364aabcda80073d912f95fc90e4d744f891c268c1f62851b7b",
+      "relative": "native-cargo-notices/CorrespondingSource/option-ext-0.2.0.crate",
+      "originalBytes": 7345,
+      "bundledBytes": 7624,
       "privacyStatus": "passed",
-      "omittedCount": 0
+      "omittedCount": 0,
+      "omissionReasons": {},
+      "omittedInventorySHA256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
     },
     {
       "package": "gcc",
       "version": "13.4.0",
       "originalSHA256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
-      "preparedSHA256": "0b31a2cb846da4e906dbe1bad01234cbd8b5ba6786b0da51ffa2069caa1892a6",
-      "retainedFiles": 10013,
+      "preparedSHA256": "ffdace83e1264e703a269f04aa15ddcaea27e57c03b69d339031253767c1bb9c",
+      "retainedFiles": 10508,
+      "redactedComments": [
+        {
+          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/darwin/ctype_base.h",
+          "commentExamples": 1,
+          "originalSHA256": "3606252ed945445ee1606af2a16e761166961c59eb1656b969b9a5147a017f6d"
+        },
+        {
+          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/freebsd/ctype_base.h",
+          "commentExamples": 1,
+          "originalSHA256": "39c32696cb15ae577c099c4e7da61470436296f414c018179093bd216fcfeffc"
+        },
+        {
+          "path": "gcc-13.4.0/libstdc++-v3/doc/html/manual/documentation_hacking.html",
+          "commentExamples": 1,
+          "originalSHA256": "634455369b57b1754cd21548fe5c4d95cabe4b72a7bdc0160d7db6cf1cc2d2da"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/diagnostic.h",
+          "commentExamples": 1,
+          "originalSHA256": "94781ae0ab138d083f6679a1521071723de43930ad8ee077d58b2c165bbf4242"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/doc/gcov.1",
+          "commentExamples": 3,
+          "originalSHA256": "400cc70c9cdbfdbe2650f2d64af4d10b67d61cdd6a31f4b14771783ff823e07b"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/doc/gnat_ugn.info",
+          "commentExamples": 25,
+          "originalSHA256": "b54344089d47772da0afcd6ce9cbbb6ec78bba3d45197691ab459aa7dc481985"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/doc/gcc.info",
+          "commentExamples": 3,
+          "originalSHA256": "3afc169acf51e94bead14ee5e6a8da40842e1759bcf5404f600a0c4c12c7a8be"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/doc/gcov.texi",
+          "commentExamples": 3,
+          "originalSHA256": "7f908be2c6f420f7aea47424c6c7bbfaa0e9f43d5026ef2972873d6e1ecee188"
+        }
+      ],
+      "modified": [
+        {
+          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/darwin/ctype_base.h",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "3606252ed945445ee1606af2a16e761166961c59eb1656b969b9a5147a017f6d",
+          "preparedSHA256": "72a1928fa5002190fd963a75174b89ef54c4c89bde0885863239c29f5dfc2719"
+        },
+        {
+          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/freebsd/ctype_base.h",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "39c32696cb15ae577c099c4e7da61470436296f414c018179093bd216fcfeffc",
+          "preparedSHA256": "93b729e6fe2f9016a8d4cc1ef71b9ae30d044fdfa18de2b5ab2d5e8afa18727f"
+        },
+        {
+          "path": "gcc-13.4.0/libstdc++-v3/doc/html/manual/documentation_hacking.html",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "634455369b57b1754cd21548fe5c4d95cabe4b72a7bdc0160d7db6cf1cc2d2da",
+          "preparedSHA256": "17b61bfe5a2b1fa9dbb144d0556a94b553bb42bbfccb72df268f55caea3bad48"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/diagnostic.h",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "94781ae0ab138d083f6679a1521071723de43930ad8ee077d58b2c165bbf4242",
+          "preparedSHA256": "25c66b852ba1779c9ebaa7d3ceb262bc8dc602fb3e5e3abf498e2f08ac6a10b8"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/doc/gcov.1",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "400cc70c9cdbfdbe2650f2d64af4d10b67d61cdd6a31f4b14771783ff823e07b",
+          "preparedSHA256": "2007646490a19d9a27b1c72357bbc00ffb047fa15af2c48de898d6daa8830efe"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/doc/gnat_ugn.info",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "b54344089d47772da0afcd6ce9cbbb6ec78bba3d45197691ab459aa7dc481985",
+          "preparedSHA256": "b1ddba20226e979c5e861995760461aae04ac400dfb0148bee74f3d041c7b230"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/doc/gcc.info",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "3afc169acf51e94bead14ee5e6a8da40842e1759bcf5404f600a0c4c12c7a8be",
+          "preparedSHA256": "c5c67511cc972c24ef553a478d07823364777b6b55b4045109c991ea43358517"
+        },
+        {
+          "path": "gcc-13.4.0/gcc/doc/gcov.texi",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "7f908be2c6f420f7aea47424c6c7bbfaa0e9f43d5026ef2972873d6e1ecee188",
+          "preparedSHA256": "14a3f16e4c7f4f62725a1577ba9769433bc8a2646212b80128b02956455ab139"
+        }
+      ],
+      "modificationNotice": "gcc-13.4.0/MODIFICATIONS.json",
       "originalLicenseHashes": {
         "gcc-13.4.0/COPYING.LIB": "a9bdde5616ecdd1e980b44f360600ee8783b1f99b8cc83a2beb163a0a390e861",
         "gcc-13.4.0/libquadmath/COPYING.LIB": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
@@ -209,26 +345,149 @@
         "gcc-13.4.0/libffi/LICENSE": "a61d06e8f7be57928e71e800eb9273b05cb8868c484108afe41e4305bb320dde",
         "gcc-13.4.0/libffi/LICENSE-BUILDTOOLS": "e67978cd18816c0cb7d29aaaacde7b7447402c2fb321a051698890a8eaedda94"
       },
-      "retainedInventorySHA256": "7a094c896bd4b386054d91c85aeedd293ea9a42f84fb93cd2866a2e7bd46c080",
+      "retainedInventorySHA256": "e0adbf1a2796dd6281d43e412db97ba273c6ab9114691c95d7b55b6820151f3a",
+      "relative": "GCC-runtime-13.4.0/gcc-13.4.0.tar.xz",
+      "originalBytes": 88530720,
+      "bundledBytes": 72303984,
+      "privacyStatus": "passed",
+      "omittedCount": 114879,
+      "omissionReasons": {
+        "optional-upstream-history": 188,
+        "unbundled-language-components": 9562,
+        "optional-upstream-release-or-regression-maintenance": 192,
+        "optional-compiler-regression-input": 104680,
+        "optional-libstdcxx-supplementary-docbook-publication": 109,
+        "optional-zlib-contributed-programs": 148
+      },
+      "omittedInventorySHA256": "293525b0067c95e502d233d4c505a19bfe7e91f5c419b5f309d6a899b73a5af2"
+    },
+    {
+      "package": "libogg",
+      "version": "1.3.5",
+      "originalSHA256": "0eb4b4b9420a0f51db142ba3f9c64b333f826532dc0f48c6410ae51f4799b664",
+      "preparedSHA256": "1154a499953e52739fc0d2bf47dbbc89d987903902f4a46bbd5ebc00942e05a7",
+      "retainedFiles": 135,
+      "redactedComments": [],
+      "modified": [],
+      "modificationNotice": "libogg-1.3.5/MODIFICATIONS.json",
+      "originalLicenseHashes": {
+        "libogg-1.3.5/COPYING": "d2ab5758336489da61c12cc5bb757da5339c4ae9001f9bb0562b4370249af814",
+        "libogg-1.3.5/AUTHORS": "6fcb33d0cdd60b5054e7df820916388b590427514288c2bab01c626bb8ae9506"
+      },
+      "retainedInventorySHA256": "f05e370380469a5066816197ae27a74ba2c2c2bc52a63a25d56d860c63c4877a",
+      "relative": "ASR-audio/CorrespondingSource/libogg-1.3.5.tar.gz",
+      "originalBytes": 593071,
+      "bundledBytes": 593137,
+      "privacyStatus": "passed",
+      "omittedCount": 0,
+      "omissionReasons": {},
+      "omittedInventorySHA256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "package": "libvorbis",
+      "version": "1.3.7",
+      "originalSHA256": "0e982409a9c3fc82ee06e08205b1355e5c6aa4c36bca58146ef399621b0ce5ab",
+      "preparedSHA256": "d23f23eb84dd0b4758f95dad63870b2ff1b41d519f2f11dc1b888fdef9d0df5f",
+      "retainedFiles": 428,
+      "redactedComments": [],
+      "modified": [],
+      "modificationNotice": "libvorbis-1.3.7/MODIFICATIONS.json",
+      "originalLicenseHashes": {
+        "libvorbis-1.3.7/COPYING": "ec1815db59fcd302846df949d7424876cb2e2dc5ed1606c5fb0b36787b1cf43a",
+        "libvorbis-1.3.7/AUTHORS": "f5cab9f16035f770f50299f85cf2938c06dc3a9a30425961067788102ec896d3"
+      },
+      "retainedInventorySHA256": "27994a90c6e0b42930e7d8226568865c4f96225d1576ea68a023b09390720ef8",
+      "relative": "ASR-audio/CorrespondingSource/libvorbis-1.3.7.tar.gz",
+      "originalBytes": 1658963,
+      "bundledBytes": 1250163,
+      "privacyStatus": "passed",
+      "omittedCount": 1,
+      "omissionReasons": {
+        "optional-prerendered-specification": 1
+      },
+      "omittedInventorySHA256": "c265cd20da4376a1b6492f8e543ec30918a6f6406b1bb73f89e1052b43452ed8"
+    },
+    {
+      "package": "flac",
+      "version": "1.4.3",
+      "originalSHA256": "6c58e69cd22348f441b861092b825e591d0b822e106de6eb0ee4d05d27205b70",
+      "preparedSHA256": "714bd0783fee2d4f8b1886044bf540b3d1d35a4ae83959f29feab14030f3bfbc",
+      "retainedFiles": 801,
       "redactedComments": [
         {
-          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/darwin/ctype_base.h",
-          "commentExamples": 1,
-          "originalSHA256": "3606252ed945445ee1606af2a16e761166961c59eb1656b969b9a5147a017f6d"
+          "path": "flac-1.4.3/doc/FLAC.tag",
+          "commentExamples": 10,
+          "originalSHA256": "a7474959764d503d8934417b10e1bc7c5362e818081ebbdc1cdef4e7bb81b080"
         },
         {
-          "path": "gcc-13.4.0/libstdc++-v3/config/os/bsd/freebsd/ctype_base.h",
+          "path": "flac-1.4.3/doc/images/logo.svg",
           "commentExamples": 1,
-          "originalSHA256": "39c32696cb15ae577c099c4e7da61470436296f414c018179093bd216fcfeffc"
-        },
-        {
-          "path": "gcc-13.4.0/gcc/diagnostic.h",
-          "commentExamples": 1,
-          "originalSHA256": "94781ae0ab138d083f6679a1521071723de43930ad8ee077d58b2c165bbf4242"
+          "originalSHA256": "ee6c4bb1202576a7ec339bed17fa7f05e0452c9d2244976ef0b6ec273177c590"
         }
       ],
+      "modified": [
+        {
+          "path": "flac-1.4.3/doc/FLAC.tag",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "a7474959764d503d8934417b10e1bc7c5362e818081ebbdc1cdef4e7bb81b080",
+          "preparedSHA256": "fd659ee12489ff2799d52cdae135ab7e7fae82cdda0d7dbd9a560641d4ce1282"
+        },
+        {
+          "path": "flac-1.4.3/doc/images/logo.svg",
+          "date": "2026-10-11",
+          "contributor": "Li",
+          "change": "Neutralize public upstream home-path examples; retain code and inline test modules.",
+          "reason": "Distribution privacy policy; no build-machine locations in source copies.",
+          "originalSHA256": "ee6c4bb1202576a7ec339bed17fa7f05e0452c9d2244976ef0b6ec273177c590",
+          "preparedSHA256": "fb275b818b31de0708a2e20a482925c58e91d3fe26ebeb1cf231cd66f387602a"
+        }
+      ],
+      "modificationNotice": "flac-1.4.3/MODIFICATIONS.json",
+      "originalLicenseHashes": {
+        "flac-1.4.3/AUTHORS": "ac4e8005a9725bcbd532f163250eac193266113c90075e6728370e3d3f5e81e0",
+        "flac-1.4.3/COPYING.FDL": "f45cc81b400a048b56c9edbd4c3317f7a8958463dfd55aa96f268ecfd6baa12c",
+        "flac-1.4.3/COPYING.GPL": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+        "flac-1.4.3/COPYING.LGPL": "5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739a452af62a",
+        "flac-1.4.3/COPYING.Xiph": "12600ea1a7affcbf469bd0d8b2cd725e4167114a2ee834b88f5d2857bfd7ddbf"
+      },
+      "retainedInventorySHA256": "73d8d65db3499aac74f94cf2e7d79854dcc4aa8756d350ef04d910bce3d7c539",
+      "relative": "ASR-audio/CorrespondingSource/flac-1.4.3.tar.xz",
+      "originalBytes": 1006728,
+      "bundledBytes": 1597828,
       "privacyStatus": "passed",
-      "omittedCount": 115373
+      "omittedCount": 35,
+      "omissionReasons": {
+        "optional-binary-regression-or-legacy-ide-input": 3,
+        "optional-audio-regression-fixture": 32
+      },
+      "omittedInventorySHA256": "b1c7fc851392414c7b70b36f48f36a09f6bb958b6f2dfe0ed9104a60329dd70b"
+    },
+    {
+      "package": "opus",
+      "version": "1.4",
+      "originalSHA256": "c9b32b4253be5ae63d1ff16eea06b94b5f0f2951b7a02aceef58e3a3ce49c51f",
+      "preparedSHA256": "fa8a62c1d947b10cd5840433fc8895713639ed02fa8fe80d6bc702b8f587c0d6",
+      "retainedFiles": 401,
+      "redactedComments": [],
+      "modified": [],
+      "modificationNotice": "opus-1.4/MODIFICATIONS.json",
+      "originalLicenseHashes": {
+        "opus-1.4/COPYING": "8338ce8d922bb4416ce3dd1e5680173332435e3f0755007ac7801ccd674fe682",
+        "opus-1.4/AUTHORS": "f9fd849e652219ce98e008303370b352d37663d0ffb27b8dc514ad93c9c7438b"
+      },
+      "retainedInventorySHA256": "f56c2987b07446cef5ad8835c3f0299c42b2d3243555ab55d29d6fc9ffd76b03",
+      "relative": "ASR-audio/CorrespondingSource/opus-1.4.tar.gz",
+      "originalBytes": 1063408,
+      "bundledBytes": 1060971,
+      "privacyStatus": "passed",
+      "omittedCount": 1,
+      "omissionReasons": {
+        "optional-upstream-history": 1
+      },
+      "omittedInventorySHA256": "96a2b35990419f0e5b8bfd66f5a79bb0db9bf533ea50cbd8a9a99d44ebc8c584"
     }
   ]
 }

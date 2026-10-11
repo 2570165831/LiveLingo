@@ -32,7 +32,7 @@ class RuntimePreparationTests(unittest.TestCase):
         })
         packaging = self.repo / "Packaging"
         packaging.mkdir(parents=True)
-        (packaging / "MLXRuntime.lock.json").write_text(json.dumps({"fixture": "1.0"}))
+        (packaging / "MLXRuntime.lock.json").write_text(json.dumps({"python": "3.13.7", "fixture": "1.0"}))
         (packaging / "ASRRuntime.lock.json").write_text(json.dumps({"python": "3.13.7", "packages": [{"name": "fixture", "version": "1.0"}]}))
         notices = packaging / "MLXLicenses"
         notices.mkdir()
@@ -105,6 +105,12 @@ class RuntimePreparationTests(unittest.TestCase):
                 runtime.prepare(self.base, self.output, mode="asr", repo=self.repo, clone=False)
         self.assertFalse(self.output.exists())
 
+    def test_python_patch_version_is_checked_for_language(self):
+        with patch.object(runtime, "python_version", return_value="3.13.8"):
+            with self.assertRaisesRegex(privacy.PrivacyError, "input-python-version-lock-mismatch"):
+                runtime.prepare(self.base, self.output, mode="language", repo=self.repo, clone=False)
+        self.assertFalse(self.output.exists())
+
     def test_python_version_is_read_without_launching_or_loading_the_interpreter(self):
         self.write("lib/libpython3.13.dylib", b"synthetic library\x003.13.7\x00")
         self.assertEqual(runtime.python_version(self.base), "3.13.7")
@@ -164,6 +170,8 @@ class RuntimePreparationTests(unittest.TestCase):
         for relative in selected:
             self.assertIsNone(runtime.removal_reason(self.stdlib / "site-packages" / relative, self.stdlib, selected))
         css = Path("sklearn/utils/_repr_html/estimator.css")
+        self.assertIsNone(runtime.removal_reason(self.stdlib / "site-packages" / css, self.stdlib, {css}))
+        css = Path("tokenizers/tools/visualizer-styles.css")
         self.assertIsNone(runtime.removal_reason(self.stdlib / "site-packages" / css, self.stdlib, {css}))
 
     def test_distribution_metadata_symlink_is_rejected_before_reading(self):
@@ -255,6 +263,15 @@ class RuntimePreparationTests(unittest.TestCase):
         runtime.copy_runtime_file(source, target, clone=False)
         self.assertEqual(target.read_bytes(), original.split(b"\n", 1)[1])
         self.assertEqual(source.read_bytes(), original)
+
+    def test_normalization_notice_preserves_multiline_docstrings_and_encoding_cookies(self):
+        for data in ['"""Module\ndocumentation with soft\u00adhyphen\n"""\nvalue = 1\n'.encode(),
+                     '#!/usr/bin/python3\n# coding: latin-1\n"""caf\xe9"""\n'.encode('latin-1')]:
+            source = self.write("lib/python3.13/site-packages/fixture/module.py", data)
+            target = self.root / "normalized.py"
+            runtime.copy_runtime_file(source, target, clone=False)
+            self.assertEqual(ast.dump(ast.parse(data)), ast.dump(ast.parse(target.read_bytes())))
+            self.assertIn(b"Modified by Li on 2026-10-11", target.read_bytes())
 
 
 class LegalNoticePolicyTests(unittest.TestCase):

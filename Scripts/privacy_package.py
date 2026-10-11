@@ -529,6 +529,11 @@ def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, appr
             raise PrivacyError("unsupported-package-metadata-format")
         if not kind:
             if known_binary(path, prefix, size):
+                if __package__:
+                    from .macho_paths import inspect_load_paths
+                else:
+                    from macho_paths import inspect_load_paths
+                inspect_load_paths(path, counts)
                 counts["opaque_binary_files"] += 1
                 return
             if size > JSON_LIMIT:

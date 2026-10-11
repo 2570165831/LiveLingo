@@ -48,7 +48,8 @@ def canonical_name(name):
 
 
 def locked_distributions(site, lock, mode):
-    expected = lock if mode == "language" else {p["name"]: p["version"] for p in lock["packages"]}
+    expected = ({name: version for name, version in lock.items() if name != "python"}
+                if mode == "language" else {p["name"]: p["version"] for p in lock["packages"]})
     expected = {canonical_name(name): version for name, version in expected.items()}
     installed = {}
     for info in site.iterdir():
@@ -137,6 +138,8 @@ def removal_reason(relative, stdlib, selected_files):
         # Read only by optional notebook display/manual APIs, not app inference.
         if (package_file.parent == Path("sklearn/utils/_repr_html") and package_file.suffix == ".css"):
             return None  # sklearn reads its CSS eagerly during import.
+        if package_file == Path("tokenizers/tools/visualizer-styles.css"):
+            return None  # tokenizers.tools reads its CSS eagerly during import.
         if package_file.suffix.lower() in (".css", ".html", ".js", ".cc", ".1") or package_file.name == "port.yaml":
             return "presentation-manual-resources"
     elif tail.suffix.lower() in DEVELOPMENT_SUFFIXES or tail.suffix.lower() in (".css", ".bat", ".ctypes"):
@@ -172,6 +175,15 @@ def copy_runtime_file(source, destination, *, clone):
         original = source.read_bytes()
         normalized = normalized_python(original)
         if original != normalized:
+            lines = normalized.splitlines(keepends=True)
+            insertion = 1 if normalized.startswith(b"#!") else 0
+            for index, line in enumerate(lines[:2]):
+                if re.match(rb"\s*#.*?coding[:=]\s*[-\w.]+", line):
+                    insertion = index + 1
+            lines.insert(insertion, b"# Modified by Li on 2026-10-11: normalize source encoding without changing its AST; see MODIFICATIONS.json.\n")
+            normalized = b"".join(lines)
+            if ast.dump(ast.parse(original), include_attributes=False) != ast.dump(ast.parse(normalized), include_attributes=False):
+                raise PrivacyError("source-modification-notice-changes-ast")
             data, change = normalized, "python-encoding-ast-verified"
     elif source.name == "METADATA" and source.parent.name.endswith(".dist-info"):
         original = source.read_bytes()
@@ -213,7 +225,7 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
     lock = json.loads(lock_path.read_text())
     selected = locked_distributions(site, lock, mode)
     version = python_version(base)
-    if not re.fullmatch(r"3\.13\.\d+", version) or (mode == "asr" and version != lock["python"]):
+    if not re.fullmatch(r"3\.13\.\d+", version) or version != lock.get("python"):
         raise PrivacyError("input-python-version-lock-mismatch")
     owners = {}
     declared_licenses = set()
@@ -261,7 +273,7 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
     python = output / "python" if mode == "language" else output
     python.mkdir(exist_ok=True)
     notice_root = output / "Licenses"
-    removed, changed = Counter(), Counter()
+    removed, changed, modifications = Counter(), Counter(), []
     for path in entries:
         relative = path.relative_to(base)
         reason = removal_reason(relative, stdlib, owners)
@@ -270,8 +282,22 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
             continue
         if path.is_symlink():
             validate_link(path, base)
-        changed[copy_runtime_file(path, python / relative,
-                                 clone=clone and path.stat().st_dev == python.stat().st_dev)] += 1
+        target = python / relative
+        action = copy_runtime_file(path, target,
+                                   clone=clone and path.stat().st_dev == python.stat().st_dev)
+        if not target.is_symlink():
+            if __package__:
+                from .macho_paths import make_portable
+            else:
+                from macho_paths import make_portable
+            native_changes = make_portable(target, python)
+            if action != "copied" or native_changes:
+                modifications.append({"file": str(relative), "contributor": "Li",
+                                      "date": "2026-10-11", "action": action,
+                                      "loadCommands": native_changes,
+                                      "originalSHA256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                                      "preparedSHA256": hashlib.sha256(target.read_bytes()).hexdigest()})
+        changed[action] += 1
     inventory = []
     component_licenses = {name: [] for name in selected}
     for path in licenses:
@@ -313,6 +339,11 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
                 and (destination_site / p).is_file()]
         with (destination_site / record).open("w", newline="") as stream:
             csv.writer(stream).writerows(rows)
+        modifications.append({"file": str(stdlib / "site-packages" / record), "contributor": "Li",
+                              "date": "2026-10-11", "action": "record-rebuilt-for-staged-files",
+                              "reason": "Removed paths and pre-modification hashes must not describe the prepared copy.",
+                              "originalSHA256": hashlib.sha256((site / record).read_bytes()).hexdigest(),
+                              "preparedSHA256": hashlib.sha256((destination_site / record).read_bytes()).hexdigest()})
     if mode == "language":
         for name in RUNTIME_MODULES:
             source = repo / "Scripts/mlx_runtime" / name
@@ -340,6 +371,9 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
               "before": dict(before), "afterPython": {"files": len(after_files), "bytes": sum(p.stat().st_size for p in after_files)},
               "removed": dict(removed), "changed": dict(changed), "licenses": inventory, "missingLicenseFiles": missing}
     (output / "runtime-preparation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    (output / "MODIFICATIONS.json").write_text(json.dumps({"contributor": "Li", "date": "2026-10-11",
+        "scope": "Prepared third-party runtime copies; originals unchanged. Python normalization preserves the AST; metadata descriptions and certificate labels are omitted; certificate blocks are unchanged. Native load paths are made portable without signing.",
+        "files": modifications}, ensure_ascii=False, indent=2) + "\n")
     if missing:
         raise PrivacyError("runtime-license-files-missing")
     inspect_tree(output)

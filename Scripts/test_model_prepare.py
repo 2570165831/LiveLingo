@@ -65,6 +65,24 @@ class ModelPreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(PrivacyError, "classroom-content-metadata"):
             prepare.prepare(self.base, self.output)
 
+    def test_changed_model_files_have_dated_hash_bound_notices(self):
+        (self.base / prepare.PARAKEET / ".cache").mkdir()
+        prepare.prepare(self.base, self.output)
+        for identifier in prepare.REQUIRED_MODEL_FILES:
+            model = self.output / identifier
+            notice = json.loads((model / "MODIFICATIONS.json").read_text())
+            self.assertEqual(notice["date"], "2026-10-11")
+            self.assertEqual(notice["contributor"], "Li")
+            for change in notice["changes"]:
+                self.assertTrue(change["reason"])
+                if change["file"] == ".cache":
+                    self.assertIn("cache", change["reason"])
+                if change["action"] == "omitted-unused-metadata":
+                    self.assertEqual(change["preparedSHA256"],
+                                     hashlib.sha256((model / change["file"]).read_bytes()).hexdigest())
+                    self.assertEqual(change["sourceSHA256"],
+                                     hashlib.sha256((self.base / identifier / change["file"]).read_bytes()).hexdigest())
+
     def test_unknown_file_is_rejected(self):
         (self.base / prepare.PARAKEET / "unexpected.bin").write_bytes(b"unknown")
         with self.assertRaisesRegex(PrivacyError, "unreviewed-model-input-entry"):

@@ -12,8 +12,8 @@
     "audioSourceArchivesVerified": 7
   },
   "reviewedResources": "Packaging/PrivacyResources.json",
-  "correspondingSourceAudit": "Packaging/SourceArchiveAudit.json",
+  "correspondingSourceAudit": "source-preparation/SourceArchiveAudit.json",
   "filteredNonNoticeSourceFiles": 13,
-  "optionalBsdSourceArchivesOmitted": 4,
-  "requiredCorrespondingSourceArchives": 7
+  "staticallyLinkedCodecSourceArchivesIncluded": 4,
+  "requiredCorrespondingSourceArchives": 11
 }

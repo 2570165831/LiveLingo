@@ -31,13 +31,94 @@ def source_text(data, name):
             text = data.decode(encoding)
         except UnicodeError:
             continue
-        allowed = "\x07\x08\x1b" if (Path(name).suffix in (".rs", ".sh", ".in", ".nas", ".c", ".cc", ".cpp", ".h", ".hpp")
+        allowed = "\x07\x08\x1b" if (Path(name).suffix in (".rs", ".sh", ".in", ".nas", ".c", ".cc", ".cpp", ".h", ".hpp", ".snap")
                                   or Path(name).name in ("configure", "test-driver")) else ""
-        if Path(name).suffix == ".info":
-            allowed += "\x1f"
+        if (re.search(r"\.info(?:-[0-9]+)?$", name) and
+                (text.startswith("This is ") or text.startswith("\x1f")) and "\x1f\n" in text):
+            allowed += "\x00\x08\x1f\x7f"  # GNU Info node/index separators.
         if all(c.isprintable() or c.isspace() or c in allowed or unicodedata.category(c) == "Cf" for c in text):
             return text
     return None
+
+
+def source_catalog(data, name):
+    """Decode bounded GNU gettext catalogs, including every msgid/msgstr."""
+    import struct
+    if Path(name).suffix not in (".mo", ".gmo") or len(data) < 28:
+        return False
+    magic = data[:4]
+    endian = {b"\xde\x12\x04\x95": "<", b"\x95\x04\x12\xde": ">"}.get(magic)
+    if endian is None:
+        raise PrivacyError("invalid-source-catalog")
+    revision, count, original, translated, hashes, hash_offset = struct.unpack_from(endian + "6I", data, 4)
+    if revision != 0 or count > 100000 or hash_offset + hashes * 4 > len(data):
+        raise PrivacyError("invalid-source-catalog")
+    for table in (original, translated):
+        if table < 28 or table + count * 8 > len(data):
+            raise PrivacyError("invalid-source-catalog")
+        for index in range(count):
+            length, offset = struct.unpack_from(endian + "II", data, table + index * 8)
+            if offset + length >= len(data) or data[offset + length] != 0:
+                raise PrivacyError("invalid-source-catalog")
+            scan_host_paths(data[offset:offset + length], source_code=True)
+    return True
+
+
+def inspect_source_xml(data):
+    """Inspect XML source/build markup without resolving DTDs or entities online.
+
+    Source substitutions and C++ header references are relative build syntax.
+    All other attributes, text, comments and literal entity declarations retain
+    the metadata policy. External declarations are inspected, never fetched.
+    """
+    from xml.parsers.expat import ParserCreate, ExpatError
+    def value(text, field=None):
+        if text is None:
+            return
+        scan_host_paths(text.encode(), source_code=True)
+        kind = metadata_kind(text.encode())
+        if kind:
+            try:
+                parsed = parse_metadata(text.encode(), kind)
+            except PrivacyError as error:
+                # XML documentation uses bracketed standard citations, ranges
+                # and Tcl examples. They are prose/code, not JSON documents.
+                # Complete JSON and all attributes retain the normal policy.
+                if kind != "json" or field or error.args[0] != "invalid-package-json":
+                    raise
+            else:
+                validate_metadata(parsed)
+        text = re.sub(r"(?:\$\([A-Za-z_][A-Za-z0-9_]*\)|@[A-Za-z_][A-Za-z0-9_]*@)/",
+                      "RELATIVE_BUILD_DIR/", text)
+        text = re.sub(r"([A-Za-z0-9_-]+)\+\+/", r"\1CPP/", text)
+        text = text.replace("+/", "%2B/")  # e.g. the relative gtk+/gdk build path.
+        if field:
+            validate_metadata({field: text})
+    parser = ParserCreate(namespace_separator="}")
+    parser.buffer_text = True
+    stack = []
+    def start(name, attrs):
+        local = name.split("}")[-1]
+        validate_metadata({local: None})
+        stack.append(local)
+        for field, text in attrs.items():
+            if field in ("select", "match", "test") and "www.w3.org/1999/XSL/Transform" in name:
+                scan_host_paths(text.encode(), source_code=True)
+            else:
+                value(text, field)
+    parser.StartElementHandler = start
+    parser.EndElementHandler = lambda name: stack.pop()
+    parser.CharacterDataHandler = lambda text: value(text, stack[-1] if stack and stack[-1] in
+        ("path", "dir", "directory", "file", "filename", "uri", "url") else None)
+    parser.CommentHandler = value
+    parser.ProcessingInstructionHandler = lambda name, text: value(text)
+    parser.EntityDeclHandler = lambda name, parameter, literal, base, system, public, notation: [value(x) for x in (literal, system, public)]
+    parser.StartDoctypeDeclHandler = lambda name, system, public, internal: [value(x) for x in (system, public)]
+    parser.ExternalEntityRefHandler = lambda *args: 1
+    try:
+        parser.Parse(data, True)
+    except ExpatError:
+        raise PrivacyError("invalid-source-archive-metadata") from None
 
 
 def cargo_source_view(value):
@@ -73,6 +154,8 @@ def inspect_source_archive(path, item, counts):
                         or name.parts[0] != item["package"] + "-" + item["version"]):
                     raise PrivacyError("invalid-source-archive-path")
                 seen.add(member.name)
+                if member.uname or member.gname or member.uid != 0 or member.gid != 0 or member.mtime != 0:
+                    raise PrivacyError("nonpublic-source-archive-header")
                 validate_metadata(member.pax_headers)
                 if member.isdir():
                     continue
@@ -92,18 +175,10 @@ def inspect_source_archive(path, item, counts):
                 kind = metadata_kind(data)
                 if name.suffix.lower() in (".yaml", ".yml"):
                     raise PrivacyError("unsupported-source-archive-metadata")
-                if name.suffix.lower() == ".xml" and kind != "plist":
-                    import xml.etree.ElementTree as xml
-                    if re.search(rb"<!DOCTYPE|<!ENTITY", data, re.I):
-                        raise PrivacyError("invalid-source-archive-metadata")
-                    try:
-                        document = xml.fromstring(data)
-                    except xml.ParseError:
-                        raise PrivacyError("invalid-source-archive-metadata") from None
-                    for node in document.iter():
-                        validate_metadata(node.attrib)
-                        validate_metadata(node.text or "")
-                        validate_metadata(node.tail or "")
+                xml_source = (data.lstrip().startswith(b"<?xml") and b"<plist" not in data[:1024]
+                              or (kind != "plist" and name.suffix.lower() in (".xml", ".vcproj", ".vsprops", ".svg", ".tag")))
+                if xml_source:
+                    inspect_source_xml(data)
                 elif name.suffix == ".toml" or name.name == "Cargo.lock":
                     import tomllib
                     try:
@@ -114,6 +189,10 @@ def inspect_source_archive(path, item, counts):
                 elif kind:
                     validate_metadata(parse_metadata(data, kind))
                 elif text is None:
+                    if source_catalog(data, member.name):
+                        counts["source_catalog_files"] = counts.get("source_catalog_files", 0) + 1
+                        counts["source_archive_members"] = counts.get("source_archive_members", 0) + 1
+                        continue
                     if not known_binary(Path(member.name), data[:4096], len(data)):
                         raise PrivacyError("unreviewed-source-archive-binary")
                     counts["opaque_binary_files"] += 1

@@ -9,16 +9,19 @@
       "sha256": "15181e7363dca9aed78b79bebebc7fde7f1814b8bd311ea3b87ae8ccadfc185b"
     },
     {
-      "path": "Tests/fonts/DejaVuSans/LICENSE.txt",
-      "sha256": "ba4aee7ef5b2ebc285e76df2497953d8a6e7480bc249f4e0a55f1199a3396622"
+      "path": "test-notices/fonts/DejaVuSans/LICENSE.txt",
+      "sha256": "ba4aee7ef5b2ebc285e76df2497953d8a6e7480bc249f4e0a55f1199a3396622",
+      "upstreamPath": "Tests/fonts/DejaVuSans/LICENSE.txt"
     },
     {
-      "path": "Tests/fonts/LICENSE.txt",
-      "sha256": "b79f6f6a2fc060b2e0a6e7a6946c446ae199bec07b92a3df1295975e25c4d96b"
+      "path": "test-notices/fonts/LICENSE.txt",
+      "sha256": "b79f6f6a2fc060b2e0a6e7a6946c446ae199bec07b92a3df1295975e25c4d96b",
+      "upstreamPath": "Tests/fonts/LICENSE.txt"
     },
     {
-      "path": "Tests/icc/LICENSE.txt",
-      "sha256": "09e62757edb34e284bc11c54e3429b438d9db37f46c9cb36bd57b1b25ae36184"
+      "path": "test-notices/icc/LICENSE.txt",
+      "sha256": "09e62757edb34e284bc11c54e3429b438d9db37f46c9cb36bd57b1b25ae36184",
+      "upstreamPath": "Tests/icc/LICENSE.txt"
     },
     {
       "path": "docs/COPYING",

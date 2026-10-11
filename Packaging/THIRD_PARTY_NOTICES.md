@@ -47,6 +47,26 @@ The App carries offline direct and transitive notices at `Contents/Resources/Lan
 
 Compatibility, signing, notarization and runtime acceptance are recorded separately; this notice is not a release test certificate.
 
+## Prepared third-party copies (Li, 2026-10-11)
+
+The project modifies distribution copies only. File names, changes, dates,
+reasons and before/after hashes are bundled in the following relative notices:
+
+During assembly, Li's packaging step on 2026-10-11 also changes
+`ASRRuntime/python/lib/python3.13/site-packages/numba/np/ufunc/omppool.cpython-313-darwin.so`:
+its `@rpath/libomp.dylib` dependency becomes
+`@loader_path/../../../sklearn/.dylibs/libomp.dylib`, resolving the OpenMP library
+already shipped in the app. The upstream library implementation is unchanged;
+this is a native load-command change, without signing.
+
+- `LanguageRuntime/Licenses/source-preparation/SourceArchiveAudit.json` and each source archive's `MODIFICATIONS.json`: home-directory examples are neutralized in GCC/libstdc++ headers and upstream documentation. Inferno's complete inline test modules are restored; one Windows home-directory fixture is neutralized. The selected GCC compiler/library sources, configure inputs and generated manuals are retained. Optional regression data, unrelated frontends and publication assets are omitted as recorded. Original copyright/license bytes are preserved.
+- `LanguageRuntime/MODIFICATIONS.json` and `ASRRuntime/python/MODIFICATIONS.json`: Python source encoding is normalized with the AST unchanged; modified Python files carry a dated comment. Optional package descriptions, installation records and certificate labels are prepared for distribution; certificate blocks are unchanged. Native library IDs/dependencies use portable load paths. This does not change their upstream copyright or license.
+- Each `Models/<publisher>/<model>/MODIFICATIONS.json`: unused Qwen3.5 translation chat-template metadata is removed because LiveLingo supplies its prompts; Parakeet's unused training tokenizer directory metadata is removed because the loader uses its retained joint vocabulary. Weights and vocabulary data are unchanged; publisher attribution and the Apache-2.0 / CC BY 4.0 license notices remain applicable.
+
+The original publisher libsndfile build recipe is retained, and an additional
+`LanguageRuntime/Licenses/ASR-audio/offline-rebuild.sh` uses all bundled static
+codec sources. Its path is resolved independently of the caller's directory.
+
 ## OpenCC Chinese variant dictionaries
 
 Unmodified data/configuration and conversion test fixtures from

@@ -238,8 +238,8 @@ class ReviewedResourceTests(unittest.TestCase):
         output = self.root / "prepared.tar.gz"
         report = prepare_source.prepare(original, output, "fixture", "1.0")
         self.assertEqual(original.read_bytes(), data)
-        self.assertEqual(report["retainedFiles"], 2)
-        self.assertEqual(len(report["omitted"]), 1)
+        self.assertEqual(report["retainedFiles"], 4)  # Includes the in-archive notice.
+        self.assertEqual(len(report["omitted"]), 0)
 
     def test_rust_test_module_trimming_never_removes_later_production_code(self):
         module = b'pub fn value() {}\n#[cfg(test)]\nmod tests { fn check() { let s = "}"; } }\n'
