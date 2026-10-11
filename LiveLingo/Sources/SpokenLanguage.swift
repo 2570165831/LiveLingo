@@ -96,6 +96,13 @@ struct ASRTranscription: Equatable, Sendable {
     var generatedTokens = 0
     var truncated = false
     var policy: Int?
+    var parakeetMeanProbability: Double?
+    var parakeetMinProbability: Double?
+
+    private struct ConfidenceResponse: Decodable {
+        let pk_mean_probability: Double?
+        let pk_min_probability: Double?
+    }
 
     private struct AutoResponse: Decodable {
         let language_mode: String
@@ -111,7 +118,17 @@ struct ASRTranscription: Equatable, Sendable {
 
     static func validated(text: String, data: Data, requestedLanguage: ASRLanguageMode) throws -> Self {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard requestedLanguage == .auto else { return Self(text: trimmed) }
+        guard requestedLanguage == .auto else {
+            var result = Self(text: trimmed)
+            if let confidence = try? JSONDecoder().decode(ConfidenceResponse.self, from: data),
+               [confidence.pk_mean_probability, confidence.pk_min_probability].allSatisfy({
+                   $0.map { $0.isFinite && (0...1).contains($0) } ?? true
+               }) {
+                result.parakeetMeanProbability = confidence.pk_mean_probability
+                result.parakeetMinProbability = confidence.pk_min_probability
+            }
+            return result
+        }
         guard let response = try? JSONDecoder().decode(AutoResponse.self, from: data),
               response.language_mode == "auto", response.policy == 1,
               (0...256).contains(response.generated_tokens) else { throw QwenRuntimeError.invalidResponse }

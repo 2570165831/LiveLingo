@@ -10,6 +10,7 @@ import time
 import weakref
 import socket
 import io
+import math
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
@@ -148,7 +149,7 @@ class AutoLanguageTests(unittest.TestCase):
 
     def test_english_none_and_low_confidence_force_legacy_english(self):
         for label, p, p_en in [('English', .95, .95), ('None', .95, .02), ('Chinese', .8999, .02),
-                               ('Chinese', .95, .0501), ('Spanish', .969, .01)]:
+                               ('Chinese', .95, .0501), ('Spanish', .549, .01)]:
             with self.subTest(label=label, p=p, p_en=p_en):
                 model = self.model(label, p, p_en)
                 self.assert_forced(model, self.auto(model))
@@ -156,8 +157,9 @@ class AutoLanguageTests(unittest.TestCase):
     def test_switch_probability_boundaries(self):
         for label, p, p_en, expected in [
             ('Chinese', .8999, .05, False), ('Chinese', .90, .05, True),
-            ('Chinese', .90, .0501, False), ('Spanish', .969, .01, False),
-            ('Spanish', .97, .01, True), ('Spanish', .97, .0101, False),
+            ('Chinese', .90, .0501, False), ('Spanish', .549, .01, False),
+            ('Spanish', .55, .01, True), ('Spanish', .55, .0101, False),
+            ('Filipino', .55, .01, False), ('Filipino', .90, .05, True),
             ('English', 1, 0, False), ('None', 1, 0, False),
         ]:
             with self.subTest(label=label, p=p, p_en=p_en):
@@ -237,6 +239,15 @@ class AutoLanguageTests(unittest.TestCase):
         self.assertEqual(result['generated_tokens'], 256)
         self.assertTrue(result['truncated'])
 
+    def test_body_generation_failure_keeps_successful_probe_for_confirmation(self):
+        model = self.model('Spanish', .95, .001)
+        self.generate_step.side_effect = RuntimeError('synthetic body failure')
+        result = self.auto(model)
+        self.assert_forced(model, result)
+        self.assertEqual(result['detected_label'], 'Spanish')
+        self.assertGreaterEqual(result['language_probability'], .55)
+        self.assertLessEqual(result['english_probability'], .01)
+
     def test_swift_probability_constants_and_language_table_match_server(self):
         source = Path(__file__).resolve().parents[1] / 'LiveLingo' / 'Sources'
         policy = (source / 'SourceLanguagePolicy.swift').read_text()
@@ -252,8 +263,69 @@ class AutoLanguageTests(unittest.TestCase):
         table = (source / 'SpokenLanguage.swift').read_text()
         matches = service.re.findall(r'code: "([a-z]+)", qwenLabel: "([A-Za-z]+)", writingSystem: \.([a-z]+)', table)
         self.assertEqual({label: code for code, label, _ in matches}, service.LANGUAGE_CODES)
-        self.assertEqual({code for code, _, script in matches if script == 'latin' and code != 'en'},
-                         service.LATIN_LANGUAGE_CODES)
+        fixture = Path(__file__).resolve().parents[1] / 'Fixtures/source-language-trigger-parameters.json'
+        frozen = json.loads(fixture.read_text())
+        self.assertEqual(set(frozen['latin_languages']), service.LATIN_LANGUAGE_CODES)
+        self.assertEqual({code for code, _, script in matches if script == 'latin' and code != 'fil'},
+                         service.LATIN_LANGUAGE_CODES & set(service.LANGUAGE_CODES.values()))
+
+
+class ParakeetConfidenceTests(unittest.TestCase):
+    """CPU/numpy-only joint fixtures; no model files or decoder invocation."""
+    def setUp(self):
+        self.mx = SimpleNamespace(float32=np.float32, argmax=np.argmax,
+            logsumexp=lambda values: np.logaddexp.reduce(values))
+
+    def logits(self, values):
+        return np.asarray(values, dtype=np.float32).reshape(1, 1, 1, -1)
+
+    def test_arithmetic_mean_min_excludes_blank_and_preserves_logits(self):
+        original = Mock()
+        recorder = service.ParakeetConfidenceRecorder(original, 2, self.mx)
+        expected = []
+        for values in ([2., 0., -1., 17.], [0., 0., 3., 17.], [0., 1., 0., 17.]):
+            logits = self.logits(values)
+            original.return_value = logits
+            self.assertIs(recorder(), logits)
+            token_logits = np.asarray(values[:3], dtype=np.float32)
+            if np.argmax(token_logits) != 2:
+                expected.append(float(np.exp(np.max(token_logits) - np.logaddexp.reduce(token_logits))))
+        stats = recorder.statistics(2)
+        self.assertAlmostEqual(stats['pk_mean_probability'], sum(expected) / 2, places=7)
+        self.assertAlmostEqual(stats['pk_min_probability'], min(expected), places=7)
+        self.assertNotAlmostEqual(stats['pk_mean_probability'], math.sqrt(expected[0] * expected[1]), places=5)
+        self.assertEqual(original.call_count, 3)
+        self.assertEqual(recorder.statistics(3), {'pk_mean_probability': None, 'pk_min_probability': None})
+
+    def test_observer_failure_and_empty_stream_return_unknown_without_changing_logits(self):
+        for values in ([float('nan'), 0., 0.], [0., 0., 4.]):
+            logits = self.logits(values)
+            recorder = service.ParakeetConfidenceRecorder(lambda: logits, 2, self.mx)
+            self.assertIs(recorder(), logits)
+            self.assertEqual(recorder.statistics(0), {'pk_mean_probability': None, 'pk_min_probability': None})
+
+    def test_joint_is_restored_on_success_and_generation_exception(self):
+        original = Mock(return_value=self.logits([2., 0., -1., 8.]))
+        model = SimpleNamespace(joint=original, vocabulary=['a', 'b'])
+        def generate(path, verbose):
+            self.assertEqual((path, verbose), ('synthetic.wav', False))
+            model.joint()
+            return SimpleNamespace(text=' x ', sentences=[SimpleNamespace(tokens=[object()])])
+        model.generate = generate
+        with patch.dict(sys.modules, {'mlx': SimpleNamespace(core=self.mx), 'mlx.core': self.mx}):
+            result = service.transcribe_parakeet(model, 'synthetic.wav')
+            self.assertEqual(result['text'], 'x')
+            self.assertIsNotNone(result['pk_mean_probability'])
+            self.assertIs(model.joint, original)
+            model.generate = Mock(side_effect=RuntimeError('synthetic'))
+            with self.assertRaises(RuntimeError): service.transcribe_parakeet(model, 'synthetic.wav')
+            self.assertIs(model.joint, original)
+
+    def test_unavailable_confidence_api_keeps_english_text(self):
+        model = SimpleNamespace(generate=Mock(return_value=SimpleNamespace(text=' x ')))
+        self.assertEqual(service.transcribe_parakeet(model, 'synthetic.wav'),
+            {'text': 'x', 'pk_mean_probability': None, 'pk_min_probability': None})
+        model.generate.assert_called_once_with('synthetic.wav', verbose=False)
 
 
 class ProbePrecisionTests(unittest.TestCase):

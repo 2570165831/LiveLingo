@@ -1332,6 +1332,68 @@ private struct MultilingualASRCall: Sendable {
 }
 
 extension AudioRemediationTests {
+    private func runFewSequence(means: [Double?], failingProbe: Int? = nil, pauseAfterFirst: Bool = false) async throws
+        -> ([TranscriptionWorkRecord], [ASRLanguageMode]) {
+        let root = try directory(), session = UUID(), calls = AudioTestBox<[ASRLanguageMode]>([])
+        var source = detectedSource("a b c d", language: "es")
+        source.languageProbability = 0.55; source.englishProbability = 0.01
+        let detected = source
+        let queue = DurableTranscriptionQueue { url, model, _, mode in
+            calls.update { $0.append(mode) }
+            let index = Int(url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "chunk", with: ""))!
+            if model == "primary" {
+                var primary = ASRTranscription(text: "The blue cart stops beside the metal gate.")
+                primary.parakeetMeanProbability = means[index]; primary.parakeetMinProbability = 0.2
+                return primary
+            }
+            XCTAssertEqual(mode, .auto)
+            if index == failingProbe { throw URLError(.timedOut) }
+            return detected
+        }
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+                                  startPaused: true, handler: { _ in })
+        for index in means.indices {
+            queue.submit(.init(audioURL: try audio(root, name: "chunk\(index).wav"), modelKey: "primary",
+                fallbackModelKey: "fallback", start: Double(index), end: Double(index + 1),
+                appleEvidence: "", recordingURL: nil, sessionID: session), handler: { _ in })
+            if pauseAfterFirst && index == 0 {
+                try queue.resume(); await queue.finish()
+                try await queue.pause()
+            }
+        }
+        try queue.resume(); await queue.finish()
+        XCTAssertEqual(queue.records.map(\.status), Array(repeating: .completed, count: means.count))
+        return (queue.records, calls.value)
+    }
+
+    func testFewAcceptedEnglishLowConfidenceProbesAndLatinConfirmsOnlyCurrentSegment() async throws {
+        let (records, calls) = try await runFewSequence(means: [0.8, 0.99, 0.99])
+        XCTAssertEqual(calls, [.english, .auto, .english, .auto, .english, .auto])
+        XCTAssertEqual(records.map(\.textLanguage), [nil, "es", "es"])
+        XCTAssertEqual(records.first?.text, "The blue cart stops beside the metal gate.")
+        XCTAssertTrue(records.allSatisfy { $0.candidateText == nil })
+    }
+
+    func testFewProbeFailureKeepsEnglishAndBreaksNextHighConfidenceFollowup() async throws {
+        let (records, calls) = try await runFewSequence(means: [0.8, 0.99, 0.99, 0.8, 0.99], failingProbe: 1)
+        XCTAssertEqual(calls.filter { $0 == .auto }.count, 4)
+        XCTAssertEqual(records.map(\.textLanguage), [nil, nil, nil, nil, "es"])
+        XCTAssertTrue(records.allSatisfy { $0.candidateText == nil && $0.failure == nil })
+    }
+
+    func testFewPauseResumePreservesAdjacentCandidateInTheSameSession() async throws {
+        let (records, calls) = try await runFewSequence(means: [0.8, 0.99], pauseAfterFirst: true)
+        XCTAssertEqual(calls, [.english, .auto, .english, .auto])
+        XCTAssertEqual(records.map(\.textLanguage), [nil, "es"])
+    }
+
+    func testFewHighConfidenceAndLegacyMissingConfidenceKeepEnglishWithoutProbe() async throws {
+        let (records, calls) = try await runFewSequence(means: [0.90, 0.99, nil])
+        XCTAssertEqual(calls, [.english, .english, .english])
+        XCTAssertEqual(records.map(\.textLanguage), [nil, nil, nil])
+        XCTAssertTrue(records.allSatisfy { $0.text == "The blue cart stops beside the metal gate." && $0.candidateText == nil })
+    }
+
     private func detectedSource(_ text: String = "蓝色小车停在门边。", language: String = "zh") -> ASRTranscription {
         ASRTranscription(text: text, languageMode: .auto, language: language, decode: .detected,
             detectedLabel: SpokenLanguage.find(language)?.qwenLabel, languageProbability: 0.99,
@@ -1883,8 +1945,10 @@ extension AudioRemediationTests {
         }
         try queue.resume(); await queue.finish()
         XCTAssertEqual(queue.records.map(\.status), Array(repeating: .completed, count: names.count))
-        XCTAssertEqual(calls.value.filter { $0 == "tail.wav:fallback:english" }.count, priorEnglish ? 1 : 0)
-        XCTAssertEqual(calls.value.filter { $0.hasSuffix(":auto") }, ["han.wav:fallback:auto"])
+        // Every qualified candidate, including non-Latin, requests a followup.
+        // Formula repair still runs, but this adjacent request now uses auto.
+        XCTAssertEqual(calls.value.filter { $0 == "tail.wav:fallback:english" }.count, 0)
+        XCTAssertEqual(calls.value.filter { $0.hasSuffix(":auto") }, ["han.wav:fallback:auto", "tail.wav:fallback:auto"])
     }
 
     func testMultilingualChineseCannotEstablishFormulaContext() async throws {

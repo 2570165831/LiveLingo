@@ -13,6 +13,7 @@ import time
 import uuid
 import gc
 import re
+import math
 import stat
 from contextlib import contextmanager
 import queue
@@ -87,7 +88,7 @@ ASR_EOS_TOKENS = {151645, 151643}
 SOURCE_POLICY = 1
 NON_LATIN_MIN_PROBABILITY = 0.90
 NON_LATIN_MAX_ENGLISH_PROBABILITY = 0.05
-LATIN_MIN_PROBABILITY = 0.97
+LATIN_MIN_PROBABILITY = 0.55
 LATIN_MAX_ENGLISH_PROBABILITY = 0.01
 LANGUAGE_CODES = {
     "Chinese": "zh", "English": "en", "Cantonese": "yue", "Arabic": "ar",
@@ -100,8 +101,10 @@ LANGUAGE_CODES = {
     "Hungarian": "hu", "Macedonian": "mk",
 }
 LATIN_LANGUAGE_CODES = frozenset({
-    "de", "fr", "es", "pt", "id", "it", "vi", "tr", "ms", "nl", "sv",
-    "da", "fi", "pl", "cs", "fil", "ro", "hu",
+    "af", "bs", "ca", "cs", "cy", "da", "de", "en", "es", "et", "eu",
+    "fi", "fr", "ga", "gl", "hr", "hu", "id", "is", "it", "la", "lt",
+    "lv", "ms", "mt", "nb", "nl", "nn", "no", "pl", "pt", "ro", "sk",
+    "sl", "sq", "sv", "sw", "tr", "vi", "zu",
 })
 
 
@@ -476,12 +479,14 @@ def transcribe_auto(model, model_input_path, probe_input_path, model_key):
                 "detected_label": None, "language_probability": None,
                 "english_probability": None, "generated_tokens": 0,
                 "truncated": False, "policy": SOURCE_POLICY}
+    probe_succeeded = False
     try:
         check = auto_self_check(model, model_key)
         if check is not None:
             probe = probe_language(model, probe_input_path, check)
             metadata.update({key: probe[key] for key in (
                 "detected_label", "language_probability", "english_probability")})
+            probe_succeeded = True
             if should_decode_detected(probe["detected_label"], probe["language_probability"], probe["english_probability"]):
                 import mlx.core as mx
                 from mlx_lm.generate import generate_step
@@ -504,13 +509,76 @@ def transcribe_auto(model, model_input_path, probe_input_path, model_key):
             del probe  # English never reuses probe state.
     except Exception:
         probe = None
-        metadata.update(detected_label=None, language_probability=None, english_probability=None)
+        # A body-generation failure is not a language-probe failure. Retain a
+        # successful head for Swift's causal confirmation, while using the
+        # legacy English decoder for this segment's usable text.
+        if not probe_succeeded:
+            metadata.update(detected_label=None, language_probability=None, english_probability=None)
     result = model.generate(
         model_input_path, language="English", max_tokens=256,
         temperature=0.0, verbose=False,
     )
     return {**metadata, "text": result.text.strip(),
             "generated_tokens": getattr(result, "generation_tokens", 0)}
+
+
+class ParakeetConfidenceRecorder:
+    """Observe emitted nonblank TDT posteriors without changing greedy decoding.
+
+    Same statistic as trigger_eval.collect.JointRecorder: arithmetic mean/min
+    of conditional token probabilities, not exp(mean(log probability)). No text,
+    token IDs, audio or tensor is retained by the observer.
+    """
+    def __init__(self, original, vocabulary_size, mx):
+        self.original, self.vocabulary_size, self.mx = original, vocabulary_size, mx
+        self.count, self.total, self.minimum = 0, 0.0, None
+        self.valid = True
+
+    def __call__(self, *args, **kwargs):
+        logits = self.original(*args, **kwargs)
+        try:
+            values = logits[0, 0, :, :self.vocabulary_size + 1].reshape(-1).astype(self.mx.float32)
+            selected = int(self.mx.argmax(values).item())
+            if selected != self.vocabulary_size:
+                log_probability = float((values[selected] - self.mx.logsumexp(values)).item())
+                if not math.isfinite(log_probability):
+                    self.valid = False
+                else:
+                    probability = math.exp(min(0.0, log_probability))
+                    self.count += 1
+                    self.total += probability
+                    self.minimum = probability if self.minimum is None else min(self.minimum, probability)
+        except Exception:
+            # A changed observation API must not change the English transcript.
+            self.valid = False
+        return logits
+
+    def statistics(self, expected_count):
+        known = self.valid and self.count == expected_count and self.count > 0
+        return {"pk_mean_probability": self.total / self.count if known else None,
+                "pk_min_probability": self.minimum if known else None}
+
+
+def transcribe_parakeet(model, model_input_path):
+    unknown = {"pk_mean_probability": None, "pk_min_probability": None}
+    # Older runtimes and synthetic protocol fixtures may not expose TDT joint.
+    if not hasattr(model, "joint") or not hasattr(model, "vocabulary"):
+        result = model.generate(model_input_path, verbose=False)
+        return {"text": result.text.strip(), **unknown}
+    import mlx.core as mx
+    original = model.joint
+    recorder = ParakeetConfidenceRecorder(original, len(model.vocabulary), mx)
+    model.joint = recorder
+    try:
+        result = model.generate(model_input_path, verbose=False)
+        try:
+            expected = sum(len(sentence.tokens) for sentence in result.sentences)
+            statistics = recorder.statistics(expected)
+        except (AttributeError, TypeError):
+            statistics = unknown
+        return {"text": result.text.strip(), **statistics}
+    finally:
+        model.joint = original
 
 
 def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, probe_input_path=None):
@@ -522,7 +590,7 @@ def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, 
                 if language_mode == "auto":
                     return transcribe_auto(model, model_input_path, probe_input_path or model_input_path, model_key)
                 if model_key == "parakeet":
-                    result = model.generate(model_input_path, verbose=False)
+                    return transcribe_parakeet(model, model_input_path)
                 else:
                     result = model.generate(
                         model_input_path, language="English", max_tokens=256,
@@ -875,8 +943,9 @@ class Handler(BaseHTTPRequestHandler):
             RequestLog.emit(f"ASR completed id={log_id} model={model_key} seconds={time.monotonic() - started:.3f}")
             payload = {"text": text, "model": model_key, "request_id": request_id,
                        "audio_enhancement": enhancement}
-            if language_mode == "auto":
+            if isinstance(text, dict):
                 payload.update(text)
+            if language_mode == "auto":
                 label = text['detected_label'] if text['detected_label'] in LANGUAGE_CODES else 'unknown'
                 RequestLog.emit(f"ASR language id={log_id} label={label} "
                       f"p={text['language_probability']} p_en={text['english_probability']} "
