@@ -590,6 +590,28 @@ struct SessionExporterTests {
         #expect(AcademicInputNormalizer.normalize(source) == source)
     }
 
+    @Test(arguments: [
+        "SCN-dependent rhythms regulate sleep.",
+        "The SCN-containing ligand binds iron.",
+        "SCN-lesioned rats lose circadian rhythms.",
+        "scn-dependent firing",
+        "SCN\u{2212}dependent rhythms",
+        "SCN-2 cells"
+    ])
+    func academicInputNormalizerKeepsSCNCompoundHyphens(_ source: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == source)
+    }
+
+    @Test(arguments: [
+        ("Add SCN- ions to Fe³⁺.", "Add SCN⁻ ions to Fe³⁺."),
+        ("The ligand is SCN-.", "The ligand is SCN⁻."),
+        ("Fe³⁺ + SCN\u{2212}, then heat.", "Fe³⁺ + SCN⁻, then heat.")
+    ])
+    func academicInputNormalizerStillMarksStandaloneSCNCharge(_ source: String, _ expected: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == expected)
+        #expect(AcademicInputNormalizer.normalize(expected) == expected)
+    }
+
     @Test func academicInputNormalizerKeepsSingularWhenCorrectingDirectChargeLabel() {
         #expect(
             AcademicInputNormalizer.normalize("A ferrous ion Fe 3 + interacts with SCN -.")

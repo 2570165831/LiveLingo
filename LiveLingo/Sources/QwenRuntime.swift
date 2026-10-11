@@ -2887,8 +2887,11 @@ enum AcademicInputNormalizer {
                 in: normalized,
                 with: "Fe³⁺"
             )
+            // A hyphen that continues a word ("SCN-dependent", "SCN-2") is a
+            // compound, not a charge. A spaced dash ("SCN - the ...") still
+            // matches because it looks the same as the spaced ASR anion form.
             normalized = replacing(
-                pattern: #"\bSCN\s*[−-]"#,
+                pattern: #"\bSCN\s*[−-](?![\p{L}\p{N}_])"#,
                 in: normalized,
                 with: "SCN⁻"
             )
