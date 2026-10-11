@@ -63,6 +63,33 @@ class InstallerTokenPrivacyTests(unittest.TestCase):
             stream.write(payload)
         return path
 
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin absolute directory binding")
+    def test_directory_binds_only_the_permitted_parent(self):
+        original = os.open
+        calls = []
+
+        def opened(name, flags, *args, **kwargs):
+            calls.append(str(name))
+            self.assertEqual(Path(name), self.directory)
+            self.assertTrue(flags & 0x20000000)
+            self.assertIsNone(kwargs.get("dir_fd"))
+            return original(name, flags, *args, **kwargs)
+
+        with patch.object(helper.os, "open", side_effect=opened):
+            with helper._directory(self.directory) as fd:
+                self.assertEqual(os.fstat(fd).st_uid, os.getuid())
+        self.assertEqual(calls, [str(self.directory)])
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin absolute directory binding")
+    def test_directory_rejects_ancestor_symlink_and_missing_tail(self):
+        link = self.directory / "link"
+        link.symlink_to(self.copies, target_is_directory=True)
+        for path in (link, link / "missing", link / "missing" / "nested"):
+            with self.subTest(path=path.name), self.assertRaises(OSError):
+                with helper._directory(path):
+                    pass
+        self.assertEqual(list(self.copies.iterdir()), [])
+
     def assert_private(self, path):
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertFalse(any(" allow " in line for line in acl(path)),

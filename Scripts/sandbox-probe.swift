@@ -49,6 +49,93 @@ enum SandboxProbe {
         try require(ancestor < 0 && code == EPERM, "ancestor access was not denied by sandbox")
     }
 
+    /// Mirror checkpoints._state_fd's Darwin calls without starting Python.
+    /// The bound is an existing container directory; every absolute attempt
+    /// must stay at or below it, even when the checkpoint tail is absent.
+    static func checkpointDirectory(_ url: URL, create: Bool, bound: URL) throws -> Int32 {
+        let components = url.path.split(separator: "/").map(String.init)
+        var existing = components.count
+        var fd: Int32
+        while true {
+            let prefix = "/" + components.prefix(existing).joined(separator: "/")
+            try require(prefix == bound.path || prefix.hasPrefix(bound.path + "/"),
+                        "checkpoint attempted an ancestor above its grant")
+            fd = Darwin.open(prefix, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW_ANY)
+            if fd >= 0 { break }
+            let code = errno
+            guard create, code == ENOENT, existing > 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
+            existing -= 1
+        }
+        do {
+            for component in components.dropFirst(existing) {
+                var claimed: stat?
+                let flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW
+                var child = openat(fd, component, flags)
+                if child < 0, errno == ENOENT, create {
+                    if mkdirat(fd, component, 0o700) == 0 {
+                        var value = stat()
+                        guard fstatat(fd, component, &value, AT_SYMLINK_NOFOLLOW) == 0 else {
+                            throw POSIXError(.EIO)
+                        }
+                        claimed = value
+                    } else if errno != EEXIST { throw POSIXError(.EIO) }
+                    child = openat(fd, component, flags)
+                }
+                guard child >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                _ = Darwin.close(fd)
+                fd = child
+                if let claimed {
+                    var current = stat()
+                    try require(fstat(fd, &current) == 0 && current.st_mode & S_IFMT == S_IFDIR
+                                && current.st_uid == getuid()
+                                && current.st_dev == claimed.st_dev && current.st_ino == claimed.st_ino,
+                                "checkpoint creation identity or owner changed")
+                    try require(fchmod(fd, 0o700) == 0, "checkpoint mode failed")
+                    try checkpointStripAllows(fd)
+                }
+            }
+            var final = stat()
+            try require(fstat(fd, &final) == 0 && final.st_mode & S_IFMT == S_IFDIR && final.st_uid == getuid(),
+                        "checkpoint directory owner or type invalid")
+            return fd
+        } catch {
+            _ = Darwin.close(fd)
+            throw error
+        }
+    }
+
+    static func checkpointStripAllows(_ fd: Int32) throws {
+        errno = 0
+        guard let acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED) else {
+            let code = errno
+            try require([ENOENT, ENOTSUP, EOPNOTSUPP, ENOSYS, EINVAL].contains(code), "checkpoint ACL read failed")
+            return
+        }
+        defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
+        var changed = false
+        while true {
+            var selector = Int32(ACL_FIRST_ENTRY.rawValue)
+            var allow: acl_entry_t?
+            while true {
+                var entry: acl_entry_t?
+                errno = 0
+                let result = acl_get_entry(acl, selector, &entry)
+                if entry == nil, result >= 0 || (result == -1 && errno == EINVAL) { break }
+                try require(result >= 0 && entry != nil, "checkpoint ACL enumeration failed")
+                var tag = ACL_UNDEFINED_TAG
+                try require(acl_get_tag_type(entry!, &tag) == 0, "checkpoint ACL tag failed")
+                if tag == ACL_EXTENDED_ALLOW { allow = entry; break }
+                selector = Int32(ACL_NEXT_ENTRY.rawValue)
+            }
+            guard let allow else { break }
+            try require(acl_delete_entry(acl, allow) == 0, "checkpoint ACL deletion failed")
+            changed = true
+        }
+        if changed { try require(acl_set_fd_np(fd, acl, ACL_TYPE_EXTENDED) == 0, "checkpoint ACL update failed") }
+    }
+
     static func detail(_ error: Error) -> String {
         switch error {
         case SensitiveFileIO.Failure.system(let operation, let code): return "\(operation): errno=\(code)"
@@ -67,7 +154,18 @@ enum SandboxProbe {
     }
 
     @MainActor
-    static func main() async throws {
+    static func main() async {
+        do { try await run() }
+        catch {
+            // A setup denial is a failed probe, never an uncaught Swift error
+            // that generates a system crash report/dialog.
+            FileHandle.standardError.write(Data((redacted(detail(error)) + "\n").utf8))
+            _exit(1)
+        }
+    }
+
+    @MainActor
+    static func run() async throws {
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--seed-recovery" {
             try sandboxIdentity()
             let destination = root(CommandLine.arguments[2]).appendingPathComponent("recovery", isDirectory: true)
@@ -113,6 +211,39 @@ enum SandboxProbe {
             test("open_existing") {
                 let directory = try SensitiveFileIO.Directory.open(at: base, create: false, tighten: false)
                 try directory.assertStillAtOriginalPath()
+            }
+            // These run in the signed probe's own sandbox, using the Python
+            // directory syscall sequence rather than an inherited interpreter.
+            let checkpointRoot = base.resolvingSymlinksInPath()
+            test("checkpoint_python_existing") {
+                let fd = try checkpointDirectory(checkpointRoot, create: false, bound: checkpointRoot)
+                _ = Darwin.close(fd)
+            }
+            test("checkpoint_python_create") {
+                let target = checkpointRoot.appendingPathComponent("checkpoints/translation/new")
+                let fd = try checkpointDirectory(target, create: true, bound: checkpointRoot)
+                defer { _ = Darwin.close(fd) }
+                let directory = try SensitiveFileIO.Directory.open(at: target, create: false, tighten: false)
+                try directory.assertPrivate()
+            }
+            test("checkpoint_python_missing_read") {
+                do {
+                    let fd = try checkpointDirectory(checkpointRoot.appendingPathComponent("absent-checkpoint"),
+                                                     create: false, bound: checkpointRoot)
+                    _ = Darwin.close(fd)
+                } catch let error as POSIXError where error.code == .ENOENT { return }
+                throw ProbeError.assertion("missing read checkpoint was accepted")
+            }
+            test("checkpoint_python_symlink") {
+                let link = checkpointRoot.appendingPathComponent("checkpoint-link")
+                try fm.createSymbolicLink(at: link, withDestinationURL: checkpointRoot)
+                for target in [link, link.appendingPathComponent("missing/deep")] {
+                    do {
+                        let fd = try checkpointDirectory(target, create: true, bound: checkpointRoot)
+                        _ = Darwin.close(fd)
+                    } catch let error as POSIXError where error.code == .ELOOP || error.code == .ENOTDIR { continue }
+                    throw ProbeError.assertion("checkpoint symlink was accepted")
+                }
             }
             test("missing_without_create") {
                 do { _ = try SensitiveFileIO.Directory.open(at: base.appendingPathComponent("absent/deep"), create: false, tighten: false) }

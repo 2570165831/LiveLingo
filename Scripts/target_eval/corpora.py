@@ -21,10 +21,10 @@ if not __package__:
 
 from .reference_annotations import apply_reference_annotations
 if __package__ == "target_eval":
-    from private_files import create_private_file
+    from private_files import create_private_file, absolute_path, open_directory, validate_file_path
     from privacy_cli import PrivateArgumentParser
 else:
-    from ..private_files import create_private_file
+    from ..private_files import create_private_file, absolute_path, open_directory, validate_file_path
     from ..privacy_cli import PrivateArgumentParser
 
 UN_LOCALES = ("ar", "zh", "en", "fr", "ru", "es")
@@ -60,7 +60,7 @@ class SubtitleAlignment:
 
 
 def repository_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return absolute_path(__file__).parents[2]
 
 
 def output_root() -> Path:
@@ -72,12 +72,16 @@ def output_root() -> Path:
     root = Path(configured)
     if not root.is_absolute():
         raise ValueError(f"{OUTPUT_ROOT_ENV} must be an absolute directory path")
-    if root.resolve() != root:
-        raise ValueError(f"{OUTPUT_ROOT_ENV} must not use symlinks or '..' components")
+    root = absolute_path(root)
     if root.is_relative_to(repository_root()):
         raise ValueError(f"{OUTPUT_ROOT_ENV} must be outside the repository")
-    if not root.is_dir():
-        raise ValueError(f"{OUTPUT_ROOT_ENV} directory must already exist")
+    try:
+        with open_directory(root):
+            pass
+    except (FileNotFoundError, NotADirectoryError):
+        raise ValueError(f"{OUTPUT_ROOT_ENV} directory must already exist") from None
+    except OSError:
+        raise ValueError(f"{OUTPUT_ROOT_ENV} must be an existing non-symlink directory") from None
     return root
 
 
@@ -86,21 +90,16 @@ def validate_output_path(path: str | Path) -> Path:
 
     Check the environment root and destination before creating any directory.
     """
-    destination = Path(os.path.abspath(path))
+    destination = absolute_path(path)
     root = output_root()
-    resolved = destination.resolve()
-    if resolved.is_relative_to(repository_root()):
+    if destination.is_relative_to(repository_root()):
         raise ValueError("evaluation output must not be written inside the repository")
     if destination == root or not destination.is_relative_to(root):
         raise ValueError("evaluation output must be a file inside the configured output root")
-    if not resolved.is_relative_to(root):
-        raise ValueError("evaluation output resolves outside the configured output root")
-    for ancestor in (destination, *destination.parents):
-        if ancestor == root.parent:
-            break
-        if ancestor.is_symlink():
-            raise ValueError("evaluation output must not use symlinks")
-    return destination
+    try:
+        return validate_file_path(destination)
+    except OSError:
+        raise ValueError("evaluation output must not use symlinks or inaccessible ancestors") from None
 
 
 def _write_text(path: str | Path, content: str) -> Path:

@@ -21,7 +21,7 @@ except ImportError:
     import importlib.util
     try:
         _timing_spec = importlib.util.spec_from_file_location(
-            'scoreboard_timing', Path(__file__).resolve().parent.parent / 'scoreboard_timing.py')
+            'scoreboard_timing', Path(__file__).absolute().parent.parent / 'scoreboard_timing.py')
         _timing_module = importlib.util.module_from_spec(_timing_spec)
         _timing_spec.loader.exec_module(_timing_module)
         generation_stage, measure = _timing_module.generation_stage, _timing_module.measure

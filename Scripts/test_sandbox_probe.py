@@ -28,6 +28,7 @@ BUNDLE_ID = "com.jianhongli.LiveLingo.sandboxprobe." + "0123456789abcdef" * 2
 # Independent contract: a missing case in the implementation must not shrink fixtures.
 CASE_NAMES = (
     "open_existing", "missing_without_create", "create_private_components",
+    "checkpoint_python_existing", "checkpoint_python_create", "checkpoint_python_missing_read", "checkpoint_python_symlink",
     "reject_leaf_symlink", "reject_ancestor_symlink", "reject_missing_below_symlink",
     "reject_non_directory", "atomic_write_read", "atomic_replace_permissions",
     "append_read", "reject_file_symlink", "assert_path_identity", "move_remove_directory",
@@ -272,6 +273,10 @@ class StorageSourcesTests(unittest.TestCase):
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
+        self.checkpoint_source = b'# Synthetic Python syscall sequence, never executed.\n'
+        checkpoint = self.repo / "Scripts/mlx_runtime/checkpoints.py"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(self.checkpoint_source)
         (self.repo / "LiveLingo/Sources/README.md").write_text("not Swift\n", encoding="utf-8")
         original_repo = PROBE.REPO
         self.addCleanup(setattr, PROBE, "REPO", original_repo)
@@ -310,6 +315,8 @@ class StorageSourcesTests(unittest.TestCase):
             name: digest(text) for name, text in self.sources.items()
         })
         self.assertEqual(manifest["entry_source_sha256"], digest(EXPECTED_ENTRY))
+        self.assertEqual(manifest["checkpoint_sequence_source_sha256"],
+                         hashlib.sha256(self.checkpoint_source).hexdigest())
 
     def test_changed_missing_or_duplicate_entry_attribute_fails_before_output(self):
         name = "LiveLingo/Sources/LiveLingoApp.swift"

@@ -18,7 +18,86 @@ def absolute_path(path: str | Path) -> Path:
     # Do not normalize a symlink/../ component away before inspecting ancestors.
     if ".." in value.parts:
         raise ValueError("parent traversal is not allowed")
-    return value.absolute()
+    return system_alias_path(value.absolute())
+
+
+def system_alias_path(path: Path) -> Path:
+    """Only accept Darwin's root-owned, fixed /private system aliases.
+
+    Never use realpath/resolve: an arbitrary symlink must remain a refusal.
+    These three root entries are the sole explicit ancestor-inspection exception.
+    """
+    if sys.platform == "darwin":
+        for alias in (Path("/var"), Path("/tmp"), Path("/etc")):
+            if path == alias or alias in path.parents:
+                info = alias.lstat()
+                if stat.S_ISDIR(info.st_mode):
+                    return path
+                expected = "/private" + str(alias)
+                if (info.st_uid != 0 or not stat.S_ISLNK(info.st_mode)
+                        or os.readlink(alias) not in (expected, expected[1:])):
+                    raise PermissionError("untrusted system alias")
+                return Path(expected) / path.relative_to(alias)
+    return path
+
+
+def _relative_directory_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+
+
+def _absolute_directory_flags() -> int:
+    # Darwin rejects combining O_NOFOLLOW_ANY and O_NOFOLLOW with EINVAL.
+    # Python need not expose the SDK constant (sys/fcntl.h, macOS 11.0.1+).
+    return (os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NONBLOCK
+            | getattr(os, "O_NOFOLLOW_ANY", 0x20000000))
+
+
+def _bind_existing_prefix(destination: Path) -> list[tuple[Path, int]]:
+    """No explicit syscall above the deepest existing prefix on Darwin.
+
+    Only ENOENT permits moving toward the parent. Symlinks, permissions,
+    unsupported kernel flags and non-directory components fail closed.
+    Portable POSIX keeps the original descriptor-relative root walk.
+    """
+    if sys.platform == "darwin":
+        prefix = destination
+        while True:
+            try:
+                return [(prefix, os.open(prefix, _absolute_directory_flags()))]
+            except FileNotFoundError:
+                if prefix == prefix.parent:
+                    raise
+                prefix = prefix.parent
+    descriptors = []
+    try:
+        prefix = Path(destination.anchor)
+        fd = os.open(prefix, _relative_directory_flags())
+        descriptors.append((prefix, fd))
+        for name in destination.parts[1:]:
+            try:
+                fd = os.open(name, _relative_directory_flags(), dir_fd=fd)
+            except FileNotFoundError:
+                break
+            prefix = prefix / name
+            descriptors.append((prefix, fd))
+        return descriptors
+    except BaseException:
+        for _, fd in reversed(descriptors):
+            os.close(fd)
+        raise
+
+
+def _reopen_directory(path: Path) -> int:
+    if sys.platform == "darwin":
+        return os.open(path, _absolute_directory_flags())
+    descriptors = _bind_existing_prefix(path)
+    try:
+        if descriptors[-1][0] != path:
+            raise FileNotFoundError(errno.ENOENT, "bound directory no longer exists")
+        return os.dup(descriptors[-1][1])
+    finally:
+        for _, fd in reversed(descriptors):
+            os.close(fd)
 
 
 def _acl_library():
@@ -125,10 +204,14 @@ class BoundDirectory:
     def require_bound(self):
         """Detect ancestor replacement; actual I/O still uses the held fd."""
         for path, descriptor in self._descriptors:
-            current, opened = path.lstat(), os.fstat(descriptor)
-            if (not stat.S_ISDIR(current.st_mode)
-                    or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
-                raise OSError("directory path was replaced")
+            current_fd = _reopen_directory(path)
+            try:
+                current, opened = os.fstat(current_fd), os.fstat(descriptor)
+                if (not stat.S_ISDIR(current.st_mode)
+                        or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
+                    raise OSError("directory path was replaced")
+            finally:
+                os.close(current_fd)
 
     def create_file(self, name: str, flags: int = os.O_WRONLY) -> int:
         if Path(name).name != name or name in ("", ".", ".."):
@@ -144,22 +227,51 @@ class BoundDirectory:
             # Keep the empty failed artifact for diagnosis; never write content.
             raise
 
+    def create_directory(self, name: str) -> "BoundDirectory":
+        """Reserve a new child exclusively in this held directory."""
+        if Path(name).name != name or name in ("", ".", ".."):
+            raise ValueError("output requires a single directory name")
+        self.require_bound()
+        os.mkdir(name, 0o700, dir_fd=self.fd)
+        claimed = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        descriptor = os.open(name, _relative_directory_flags(), dir_fd=self.fd)
+        descriptors = [(self.path / name, descriptor)]
+        try:
+            opened = os.fstat(descriptor)
+            if ((opened.st_dev, opened.st_ino) != (claimed.st_dev, claimed.st_ino)
+                    or opened.st_uid != os.getuid()):
+                raise PermissionError("new directory was replaced before binding")
+            privatize_new(descriptor, 0o700)
+            inherited = []
+            for path, fd in self._descriptors:
+                inherited.append((path, os.dup(fd)))
+                descriptors.insert(-1, inherited[-1])
+            child = BoundDirectory(self.path / name, descriptors)
+            child.require_bound()
+            return child
+        except BaseException:
+            for _, fd in reversed(descriptors):
+                os.close(fd)
+            raise
+
 
 def open_directory(path: str | Path, *, create: bool = False,
                    private: bool = False, exclusive: bool = False) -> BoundDirectory:
     destination = absolute_path(path)
     descriptors = []
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags = _relative_directory_flags()
     try:
-        root = Path(destination.anchor)
-        descriptor = os.open(root, flags)
-        descriptors.append((root, descriptor))
-        if exclusive and len(destination.parts) == 1:
+        if exclusive and destination == destination.parent:
             raise FileExistsError("directory already exists")
-        for index, name in enumerate(destination.parts[1:], start=1):
+        descriptors = _bind_existing_prefix(destination.parent if exclusive else destination)
+        root, descriptor = descriptors[-1]
+        names = destination.relative_to(root).parts
+        if names and not create and not (exclusive and len(names) == 1):
+            raise FileNotFoundError(errno.ENOENT, "directory does not exist")
+        for index, name in enumerate(names):
             parent = descriptor
             created = False
-            if exclusive and index == len(destination.parts) - 1:
+            if exclusive and index == len(names) - 1:
                 os.mkdir(name, 0o700, dir_fd=parent)
                 created = True
                 claimed = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -201,18 +313,34 @@ def prepare_private_directory(path: str | Path) -> BoundDirectory:
 def validate_ancestors(path: str | Path) -> Path:
     """Allow a missing leaf/tree, but reject symlinks in every existing prefix."""
     destination = absolute_path(path)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    descriptor = os.open(destination.anchor, flags)
+    descriptors = _bind_existing_prefix(destination)
     try:
-        for name in destination.parts[1:]:
-            try:
-                child = os.open(name, flags, dir_fd=descriptor)
-            except FileNotFoundError:
-                break
-            os.close(descriptor)
-            descriptor = child
+        BoundDirectory(descriptors[-1][0], descriptors).require_bound()
     finally:
-        os.close(descriptor)
+        for _, descriptor in reversed(descriptors):
+            os.close(descriptor)
+    return destination
+
+
+def validate_file_path(path: str | Path) -> Path:
+    """Check a possibly missing output file without following its leaf.
+
+    Directory ancestors are bound in the kernel; only a leaf beneath the held
+    deepest existing parent is explicitly statted. Existing files are untouched.
+    Creation callers must still use exclusive, descriptor-relative creation.
+    """
+    destination = absolute_path(path)
+    descriptors = _bind_existing_prefix(destination.parent)
+    with BoundDirectory(descriptors[-1][0], descriptors) as parent:
+        parent.require_bound()
+        if parent.path == destination.parent:
+            try:
+                state = os.stat(destination.name, dir_fd=parent.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if stat.S_ISLNK(state.st_mode):
+                    raise PermissionError("symlink output is not allowed")
     return destination
 
 

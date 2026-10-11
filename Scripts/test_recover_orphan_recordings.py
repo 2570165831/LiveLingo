@@ -87,6 +87,28 @@ class RecoverOrphanRecordingsTests(unittest.TestCase):
 
     # ---- 解析与恢复 ----
 
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin directory binding")
+    def test_source_open_never_opens_ancestors_above_recording_parent(self) -> None:
+        source = self.put(orphan_wav(pcm_bytes(600))).resolve()
+        parent = source.parent
+        original = os.open
+        calls = []
+
+        def permitted(name, flags, *args, **kwargs):
+            if kwargs.get("dir_fd") is None:
+                self.assertEqual(Path(name), parent)
+                self.assertTrue(flags & 0x20000000)
+            else:
+                self.assertEqual(str(name), source.name)
+                self.assertTrue(flags & os.O_NOFOLLOW)
+            calls.append(str(name))
+            return original(name, flags, *args, **kwargs)
+
+        with patch.object(recover.os, "open", side_effect=permitted):
+            fd = recover.open_source_fd(source)
+            os.close(fd)
+        self.assertEqual(calls[-1], source.name)
+
     def test_recovers_unfinalized_wav_and_leaves_source_untouched(self) -> None:
         audio = pcm_bytes(4_800)
         source = self.put(orphan_wav(audio))
@@ -392,7 +414,7 @@ class RecoverOrphanRecordingsTests(unittest.TestCase):
                 args = ["--root", str(self.directory / "tmp")]
                 if sensitive:
                     args.append("--include-sensitive-diagnostics")
-                with patch.object(Path, "resolve", side_effect=ValueError(marker)), \
+                with patch.object(recover, "validate_ancestors", side_effect=ValueError(marker)), \
                         patch.object(recover, "candidates") as scan:
                     code, stdout, stderr = self.run_main(*args)
                 self.assertEqual(code, 2)

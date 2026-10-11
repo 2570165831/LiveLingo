@@ -12,9 +12,19 @@ from dataclasses import dataclass
 from fractions import Fraction
 import hashlib
 import json
+import os
 from pathlib import Path
+import sys
 from typing import Sequence
 import unicodedata
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).absolute().parents[2]))
+    __package__ = "Scripts.target_eval"
+if __package__ == "target_eval":
+    from private_files import absolute_path, open_directory, validate_file_path
+else:
+    from ..private_files import absolute_path, open_directory, validate_file_path
 
 
 LOCALES = ("ar", "zh", "en", "fr", "ru", "es")
@@ -245,17 +255,21 @@ def recompute(un_root: Path) -> dict:
 
 
 def write_report(report: dict, output: Path, output_root: Path) -> None:
-    for path in (output, output_root):
-        if any(part.is_symlink() for part in (path, *path.parents)):
-            raise ValueError("report paths must not traverse symlinks")
-    root, destination = output_root.resolve(), output.resolve()
-    repository = Path(__file__).resolve().parents[2]
-    if (not root.is_dir() or repository == root or repository in root.parents
-            or destination.parent != root):
+    root, destination = absolute_path(output_root), absolute_path(output)
+    repository = absolute_path(__file__).parents[2]
+    if root.is_relative_to(repository) or destination.parent != root:
         raise ValueError("report must be directly inside its existing external output root")
-    content = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
-    with destination.open("x", encoding="utf-8") as handle:
-        handle.write(content)
+    try:
+        validate_file_path(destination)
+        directory = open_directory(root)
+    except OSError:
+        raise ValueError("report paths must be existing non-symlink directories") from None
+    with directory:
+        content = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        descriptor = directory.create_file(destination.name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        directory.require_bound()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

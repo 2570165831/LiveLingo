@@ -17,6 +17,7 @@ PREFIX = "com.jianhongli.LiveLingo.sandboxprobe."
 USER_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 CASES = (
     "open_existing", "missing_without_create", "create_private_components",
+    "checkpoint_python_existing", "checkpoint_python_create", "checkpoint_python_missing_read", "checkpoint_python_symlink",
     "reject_leaf_symlink", "reject_ancestor_symlink", "reject_missing_below_symlink",
     "reject_non_directory", "atomic_write_read", "atomic_replace_permissions",
     "append_read", "reject_file_symlink", "assert_path_identity", "move_remove_directory",
@@ -76,6 +77,7 @@ def storage_sources(output):
         "whole_sources": {str(path.relative_to(REPO)): hashlib.sha256(path.read_bytes()).hexdigest()
                           for path in app_sources + [probe]},
         "entry_source_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
+        "checkpoint_sequence_source_sha256": hashlib.sha256((REPO / "Scripts/mlx_runtime/checkpoints.py").read_bytes()).hexdigest(),
         "removed_entry_attribute": f"LiveLingo/Sources/{APP_ENTRY}: @main",
     }
 

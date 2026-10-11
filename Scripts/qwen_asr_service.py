@@ -41,7 +41,8 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import butter, sosfilt, sosfiltfilt
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+# Keep the granted bundle path; realpath explicitly stats ungranted ancestors.
+SCRIPT_DIR = Path(__file__).absolute().parent
 # Real installations keep the service script in <Resources>/ASRRuntime and the
 # models in <Resources>/Models, so the parent directory is the default root.
 # Nothing here depends on the user home directory or an LM Studio install.
