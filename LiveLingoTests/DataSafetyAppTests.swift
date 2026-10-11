@@ -229,6 +229,59 @@ final class DataSafetyAppTests: XCTestCase {
         await queue.shutdownForTesting()
     }
 
+    /// The legacy and unreachable notices ask the user to re-choose the save
+    /// folder; picking the same folder again must still store a fresh grant.
+    func testRechoosingTheSameFolderForALegacyRecoveryStoresAGrant() async throws {
+        let root = try DataSafetyFixtures.make("recovery-legacy-rechoose"); defer { DataSafetyFixtures.preserve(root) }
+        let suite = "LiveLingo-Test-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+        let (record, output) = try await interruptedConvertedRecording(root, defaults: defaults)
+        var legacy = record
+        legacy.outputRootBookmark = nil
+        try SessionWorkspace.saveRecordingRecoveries([legacy], in: root, expected: [record])
+        let (model, queue) = relaunchedModel(root, defaults: defaults)
+        await model.recoverRecording(legacy)
+        XCTAssertNil(model.archiveError)
+        XCTAssertTrue(model.archiveNotice?.contains("保存位置") == true, "\(String(describing: model.archiveNotice))")
+        model.useOutputDirectory(output)
+        try assertStoredGrant(for: record.id, resolvesTo: output, in: root)
+        await queue.shutdownForTesting()
+    }
+
+    func testRechoosingTheSameFolderAfterItsGrantFailedStoresAFreshGrant() async throws {
+        let root = try DataSafetyFixtures.make("recovery-dead-grant-rechoose"); defer { DataSafetyFixtures.preserve(root) }
+        let suite = "LiveLingo-Test-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+        let (record, output) = try await interruptedConvertedRecording(root, defaults: defaults)
+        var dead = record
+        dead.outputRootBookmark = Data("not a bookmark".utf8)
+        try SessionWorkspace.saveRecordingRecoveries([dead], in: root, expected: [record])
+        let (model, queue) = relaunchedModel(root, defaults: defaults)
+        await model.recoverRecording(dead)
+        XCTAssertNil(model.archiveError)
+        XCTAssertNil(model.outputDirectory, "a grant that did not resolve must not be reused silently")
+        XCTAssertTrue(model.archiveNotice?.contains("保存位置") == true, "\(String(describing: model.archiveNotice))")
+        model.useOutputDirectory(output)
+        XCTAssertEqual(model.outputDirectory, output)
+        try assertStoredGrant(for: record.id, resolvesTo: output, in: root)
+        await queue.shutdownForTesting()
+    }
+
+    private func assertStoredGrant(for id: UUID, resolvesTo folder: URL, in root: URL,
+                                   file: StaticString = #filePath, line: UInt = #line) throws {
+        let stored = try XCTUnwrap(SessionWorkspace.recordingRecoveries(in: root).first { $0.id == id }, file: file, line: line)
+        XCTAssertEqual(stored.outputRoot, folder, file: file, line: line)
+        let bookmark = try XCTUnwrap(stored.outputRootBookmark, "re-choosing the folder must store a grant",
+                                     file: file, line: line)
+        let access = try SessionWorkspace.ScopedFolderAccess(bookmark: bookmark)
+        defer { access.stop() }
+        XCTAssertTrue(samePath(access.url, folder), "\(access.url)", file: file, line: line)
+    }
+
     func testRecoveryOpensThePromotedCourseThroughItsBookmark() async throws {
         let root = try DataSafetyFixtures.make("recovery-promoted"); defer { DataSafetyFixtures.preserve(root) }
         let suite = "LiveLingo-Test-\(UUID())"

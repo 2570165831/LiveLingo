@@ -1466,12 +1466,20 @@ final class AppModel: ObservableObject {
     /// Adopts a folder the user just selected in an open panel. A recovered,
     /// not yet promoted recording records it with a fresh grant, so a later
     /// relaunch saves there instead of the folder it could no longer reach.
+    /// Re-choosing the same folder also stores a fresh grant: that is what the
+    /// legacy and unreachable-folder notices ask for.
     func useOutputDirectory(_ directory: URL) {
         outputDirectory = directory
         guard let staging = temporarySessionDirectory,
               let recovery = recoverableRecordings.first(where: { $0.id == sessionID && $0.needsPromotion }),
-              recovery.directory == staging, recovery.outputRoot != directory else { return }
-        do { try storeRecordingRecovery(recovery.withOutputRoot(directory)) }
+              recovery.directory == staging else { return }
+        var updated = recovery.withOutputRoot(directory)
+        // Never drop an existing grant for this folder when a new one cannot be made.
+        if updated.outputRootBookmark == nil, recovery.outputRoot == directory {
+            updated.outputRootBookmark = recovery.outputRootBookmark
+        }
+        guard updated != recovery else { return }
+        do { try storeRecordingRecovery(updated) }
         catch {
             archiveNotice = "保存位置已更换；恢复记录尚未更新：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
         }
