@@ -281,6 +281,9 @@ def numeric_mentions(text: str, preserving_count_scalars: bool = False) -> list[
 def numeric_report(claim: str, cited: list[str], segment_texts: list[str],
                    batch_texts: list[str], *, target: str = CAPTION_TRANSLATION_TARGET,
                    language_groups: list[tuple[str, str]] = ()) -> tuple[bool, str | None]:
+    if target in ("es", "fr"):
+        from latin_learning import numeric_report as latin_numeric_report
+        return latin_numeric_report(claim, cited, segment_texts, batch_texts, target, language_groups, UNIT_ALIASES)
     def parse(text, source=False):
         if target not in ("es", "fr"):
             return numeric_mentions(text, preserving_count_scalars=source)
