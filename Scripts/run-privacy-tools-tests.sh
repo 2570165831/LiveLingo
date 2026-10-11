@@ -24,6 +24,8 @@ export LIVELINGO_IDLE_TEST_OUTPUT="$task_gate_root/idle-tests"
 export LIVELINGO_CLI_TEST_OUTPUT_ROOT="$task_gate_root"
 export PYTHONPATH="$task_source_root/Scripts:$task_source_root/Scripts/mlx_runtime:/Applications/LiveLingo.app/Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages:/Applications/LiveLingo.app/Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages"
 cd "$task_source_root"
+# Unsigned Xcode tests cannot detect ancestor-open failures in App Sandbox.
+python3 -B Scripts/run-sandbox-probe.py --output-root "$task_gate_root/sandbox-probe" --name storage
 task_sources=()
 for task_source in "$task_source_root"/LiveLingo/Sources/*.swift; do
     case "$(basename "$task_source")" in
