@@ -33,6 +33,8 @@ CASE_NAMES = (
     "append_read", "reject_file_symlink", "assert_path_identity", "move_remove_directory",
     "recovery_scan", "temporary_session_cleanup", "pending_cleanup_retry",
     "recording_recovery_index", "recording_recovery_bookmark",
+    "session_store_roundtrip", "temporary_session_copy", "temporary_session_promote",
+    "review_queue_journal", "export_subfolder",
 )
 CHECK_NAMES = ("sandbox_identity", "container_parent_tracking") + tuple(
     f"{root}.{case}" for root in ("tmp", "support") for case in CASE_NAMES
@@ -243,43 +245,11 @@ class ValidateResultTests(unittest.TestCase):
                              "probe did not establish a real isolated sandbox", 1)
 
 
-WORKSPACE_BEFORE = """enum SessionWorkspaceError: Error { case synthetic }
-enum SessionWorkspace {
-    static func persist() { SensitiveFileIO.keepOriginalCall() }
-"""
-PROMOTE_METHOD = """    static func promoteTemporarySession(
-    ) { Migration.promoteOnly() }
-"""
-WORKSPACE_MIDDLE = """    static func discardTemporarySession(
-    ) { SensitiveFileIO.discardOriginalCall() }
-"""
-COPY_METHOD = """    static func copyTemporarySession(
-    ) { Migration.copyOnly() }
-"""
-WORKSPACE_AFTER = """    private static func validateTemporarySession(
-    ) { SensitiveFileIO.validateOriginalCall() }
-}
-"""
-STORE_ERRORS = "enum SessionStoreError: Error { case synthetic }\n"
-ARCHIVE_CODING = """enum SessionArchiveCoding {
-    static func encode() { SensitiveFileIO.encodeOriginalCall() }
-}
-"""
-EXPORTER_SOURCE = (
-    "import Foundation\nstruct UnrelatedExporterModel {}\n"
-    + WORKSPACE_BEFORE + PROMOTE_METHOD + WORKSPACE_MIDDLE + COPY_METHOD + WORKSPACE_AFTER
-    + "enum SessionExporter { static func unrelatedExport() {} }\n"
-)
-ARCHIVE_SOURCE = (
-    "struct UnrelatedArchiveModel {}\n" + STORE_ERRORS
-    + "struct SessionLoadResult: Codable {}\n" + ARCHIVE_CODING
-    + "/// A grammar check distinguishes unrelated UI/model declarations.\n"
-    + "struct UnrelatedArchiveUI {}\n"
-)
-EXPECTED_DECLARATIONS = (
-    "import Foundation\nimport Darwin\nimport CryptoKit\n"
-    + WORKSPACE_BEFORE + WORKSPACE_MIDDLE + WORKSPACE_AFTER + STORE_ERRORS + ARCHIVE_CODING
-)
+APP_ENTRY_BEFORE = "import SwiftUI\n\nstruct AppSupport {}\n\n"
+APP_ENTRY_AFTER = "struct SyntheticApp: App {\n    var body: some Scene { WindowGroup {} }\n}\n"
+APP_ENTRY_SOURCE = APP_ENTRY_BEFORE + "@main\n" + APP_ENTRY_AFTER
+# The attribute line becomes empty so diagnostics keep their line numbers.
+EXPECTED_ENTRY = APP_ENTRY_BEFORE + "\n" + APP_ENTRY_AFTER
 
 
 class StorageSourcesTests(unittest.TestCase):
@@ -290,17 +260,19 @@ class StorageSourcesTests(unittest.TestCase):
         self.repo = self.root / "repo"
         self.output = self.root / "output"
         self.output.mkdir()
+        # Every App source is compiled; names are deliberately unsorted on disk.
         self.sources = {
-            "LiveLingo/Sources/SessionExporter.swift": EXPORTER_SOURCE,
-            "LiveLingo/Sources/SessionArchive.swift": ARCHIVE_SOURCE,
-            "LiveLingo/Sources/SensitiveFileIO.swift": "enum SensitiveFileIO {}\n",
-            "LiveLingo/Sources/ExitDeadline.swift": "enum ExitDeadline {}\n",
+            "LiveLingo/Sources/SessionExporter.swift": "enum SessionExporter {}\n",
+            "LiveLingo/Sources/LiveLingoApp.swift": APP_ENTRY_SOURCE,
+            "LiveLingo/Sources/AppModel.swift": "final class AppModel {}\n",
+            "LiveLingo/Sources/SessionArchive.swift": "final class SessionStore {}\n",
             "Scripts/sandbox-probe.swift": "// Synthetic probe source; never compiled.\n",
         }
         for name, text in self.sources.items():
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
+        (self.repo / "LiveLingo/Sources/README.md").write_text("not Swift\n", encoding="utf-8")
         original_repo = PROBE.REPO
         self.addCleanup(setattr, PROBE, "REPO", original_repo)
         PROBE.REPO = self.repo
@@ -311,70 +283,58 @@ class StorageSourcesTests(unittest.TestCase):
         self.assertEqual(self.repo.parent, self.root)
         self.assertEqual(self.output.parent, self.root)
 
-    def test_extract_verbatim_declarations_without_mocks_or_migration_methods(self):
+    def test_compile_every_app_source_verbatim_except_the_entry_attribute(self):
         paths, manifest = PROBE.storage_sources(self.output)
-        selected = self.output / "StorageDeclarations.swift"
-        self.assertEqual(selected.read_bytes(), EXPECTED_DECLARATIONS.encode("utf-8"))
+        entry = self.output / "LiveLingoApp.swift"
         self.assertEqual(paths, [
-            self.repo / "LiveLingo/Sources/SensitiveFileIO.swift",
-            self.repo / "LiveLingo/Sources/ExitDeadline.swift",
-            selected,
+            self.repo / "LiveLingo/Sources/AppModel.swift",
+            self.repo / "LiveLingo/Sources/SessionArchive.swift",
+            self.repo / "LiveLingo/Sources/SessionExporter.swift",
+            entry,
             self.repo / "Scripts/sandbox-probe.swift",
         ])
-        self.assertEqual(manifest["omitted_workspace_methods"],
-                         ["promoteTemporarySession", "copyTemporarySession"])
-        for excluded in (PROMOTE_METHOD, COPY_METHOD, "Migration.", "Unrelated", "Mock", "Stub"):
-            with self.subTest(excluded=excluded):
-                self.assertNotIn(excluded, selected.read_text(encoding="utf-8"))
+        self.assertEqual(entry.read_bytes(), EXPECTED_ENTRY.encode("utf-8"))
+        self.assertNotIn("@main", entry.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["removed_entry_attribute"], "LiveLingo/Sources/LiveLingoApp.swift: @main")
         for name, text in self.sources.items():
             with self.subTest(source=name):
                 self.assertEqual((self.repo / name).read_bytes(), text.encode("utf-8"))
 
-    def test_manifest_hashes_bind_whole_and_selected_sources(self):
+    def test_manifest_hashes_bind_whole_and_entry_sources(self):
         _, manifest = PROBE.storage_sources(self.output)
 
         def digest(text):
             return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         self.assertEqual(manifest["whole_sources"], {
-            name: digest(self.sources[name]) for name in (
-                "LiveLingo/Sources/SensitiveFileIO.swift",
-                "LiveLingo/Sources/ExitDeadline.swift",
-                "Scripts/sandbox-probe.swift",
-            )
+            name: digest(text) for name, text in self.sources.items()
         })
-        self.assertEqual(manifest["declaration_sources"], {
-            name: digest(self.sources[name]) for name in (
-                "LiveLingo/Sources/SessionExporter.swift",
-                "LiveLingo/Sources/SessionArchive.swift",
-            )
-        })
-        self.assertEqual(manifest["selected_declarations_sha256"], digest(EXPECTED_DECLARATIONS))
+        self.assertEqual(manifest["entry_source_sha256"], digest(EXPECTED_ENTRY))
 
-    def test_changed_or_duplicate_declaration_boundaries_fail_before_output(self):
-        for name, marker in (
-            ("LiveLingo/Sources/SessionExporter.swift", "enum SessionWorkspaceError:"),
-            ("LiveLingo/Sources/SessionExporter.swift", "enum SessionExporter {"),
-            ("LiveLingo/Sources/SessionExporter.swift", "    static func promoteTemporarySession("),
-            ("LiveLingo/Sources/SessionExporter.swift", "    static func copyTemporarySession("),
-            ("LiveLingo/Sources/SessionArchive.swift", "enum SessionStoreError:"),
-            ("LiveLingo/Sources/SessionArchive.swift", "struct SessionLoadResult:"),
-            ("LiveLingo/Sources/SessionArchive.swift", "enum SessionArchiveCoding {"),
-            ("LiveLingo/Sources/SessionArchive.swift", "/// A grammar check distinguishes"),
+    def test_changed_missing_or_duplicate_entry_attribute_fails_before_output(self):
+        name = "LiveLingo/Sources/LiveLingoApp.swift"
+        path = self.repo / name
+        for changed in (
+            APP_ENTRY_BEFORE + APP_ENTRY_AFTER,
+            APP_ENTRY_SOURCE + "@main\n",
+            APP_ENTRY_BEFORE + "@main struct Inline {}\n" + APP_ENTRY_AFTER,
+            APP_ENTRY_BEFORE + "  @main\n" + APP_ENTRY_AFTER,
+            APP_ENTRY_SOURCE.replace("@main\n", "@main"),
         ):
-            for duplicate in (False, True):
-                with self.subTest(source=name, marker=marker, duplicate=duplicate):
-                    path = self.repo / name
-                    original = self.sources[name]
-                    changed = (original.replace(marker, marker + marker, 1) if duplicate
-                               else original.replace(marker, "CHANGED_DECLARATION", 1))
-                    path.write_text(changed, encoding="utf-8")
-                    try:
-                        with self.assertRaisesRegex(ValueError, "declaration boundaries changed"):
-                            PROBE.storage_sources(self.output)
-                        self.assertFalse((self.output / "StorageDeclarations.swift").exists())
-                    finally:
-                        path.write_text(original, encoding="utf-8")
+            with self.subTest(changed=changed):
+                path.write_text(changed, encoding="utf-8")
+                try:
+                    with self.assertRaisesRegex(ValueError, "App entry point changed"):
+                        PROBE.storage_sources(self.output)
+                    self.assertFalse((self.output / "LiveLingoApp.swift").exists())
+                finally:
+                    path.write_text(APP_ENTRY_SOURCE, encoding="utf-8")
+
+    def test_missing_entry_source_fails_before_output(self):
+        (self.repo / "LiveLingo/Sources/LiveLingoApp.swift").unlink()
+        with self.assertRaisesRegex(ValueError, "App entry point changed"):
+            PROBE.storage_sources(self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
 
 
 if __name__ == "__main__":
