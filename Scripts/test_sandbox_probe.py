@@ -280,13 +280,11 @@ EXPECTED_DECLARATIONS = (
     "import Foundation\nimport Darwin\nimport CryptoKit\n"
     + WORKSPACE_BEFORE + WORKSPACE_MIDDLE + WORKSPACE_AFTER + STORE_ERRORS + ARCHIVE_CODING
 )
-ARTIFACT_ROOT = SCRIPT.parent.parent.parent / "work" / "sandboxfix" / "parser-tests"
 
 
 class StorageSourcesTests(unittest.TestCase):
     def setUp(self):
-        ARTIFACT_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
-        temporary = tempfile.TemporaryDirectory(prefix="synthetic-", dir=ARTIFACT_ROOT)
+        temporary = tempfile.TemporaryDirectory(prefix="sandbox-probe-parser-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.repo = self.root / "repo"
@@ -306,6 +304,12 @@ class StorageSourcesTests(unittest.TestCase):
         original_repo = PROBE.REPO
         self.addCleanup(setattr, PROBE, "REPO", original_repo)
         PROBE.REPO = self.repo
+
+    def test_fixtures_follow_the_callers_temporary_directory(self):
+        self.assertEqual(self.root.parent, Path(tempfile.gettempdir()))
+        self.assertFalse(self.root.is_relative_to(SCRIPT.parent.parent))
+        self.assertEqual(self.repo.parent, self.root)
+        self.assertEqual(self.output.parent, self.root)
 
     def test_extract_verbatim_declarations_without_mocks_or_migration_methods(self):
         paths, manifest = PROBE.storage_sources(self.output)
