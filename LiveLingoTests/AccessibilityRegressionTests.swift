@@ -406,6 +406,17 @@ final class AccessibilityRegressionTests: XCTestCase {
         }
     }
 
+    /// Issue #27: notes render line by line, so a fenced code line has no
+    /// backticks of its own; its `$` and those in inline code must survive.
+    func testA04NotesKeepDollarSignsInsideCode() async throws {
+        let text = "jQuery 写 `$(document)` 和 `$(window)`。\n```sh\necho $HOME $PATH\n```\n速度 $v^2$"
+        let controller = try await host(SummaryMarkdownView(text: text).padding(16).background(Color.white),
+                                        width: 500, height: 320)
+        _ = try textNode("jQuery 写 $(document) 和 $(window)。", in: controller.view)
+        _ = try textNode("echo $HOME $PATH", in: controller.view)
+        _ = try textNode("速度 v2", in: controller.view)
+    }
+
     func testA05MarkdownHeadingExposesARealHeadingRole() async throws {
         let controller = try await host(SummaryMarkdownView(text: "## 合成课程要点\n正文保持可读。")
             .padding(16).background(Color.white))

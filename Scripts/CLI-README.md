@@ -137,6 +137,10 @@ The regional regression covers both `zh-Hant-TW` and `zh-Hant-HK`:
 - Verify hand-authored legacy regional exports with no snapshot,
   `sourceLanguages` or `converterVersion`, retaining their two-line SRT layout.
   Reject a substituted one-line layout and preserve files on every rejection.
+- SRT cue text never contains a blank line: the exporter splits caption text
+  on line breaks and drops empty or whitespace-only lines, while JSONL and
+  transcripts keep the original text. `--verify-saved` also accepts the older
+  raw-join SRT that exports written before this change contain.
 - Reject a changed `converterVersion` through both the direct verifier and the
   actual binary. Missing dictionaries must still report `converterUnavailable`
   before renderer/version validation. Existing frozen Hans/Latin bytes remain exact.

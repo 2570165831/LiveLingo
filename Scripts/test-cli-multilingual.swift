@@ -261,6 +261,34 @@ import Foundation
             try Data(legacySRT.utf8).write(to: legacyDirectory.appendingPathComponent("bilingual.srt"))
             passed.append("frozen_legacy_traditional_chinese_and_double_line_srt")
 
+            // Blank lines inside caption text must not end an SRT cue early.
+            // New exports drop them; exports written before that keep verifying.
+            let blankLineSegments = [
+                TranscriptSegment(startTime: 0, endTime: 1, english: "Heat moves.", chinese: "第一句。\n\n第二句。"),
+                TranscriptSegment(startTime: 1, endTime: 2, english: "El agua\r\n\r\nfluye.", chinese: "水。\n \n流动。", sourceLanguage: "es")
+            ]
+            let blankLineCourse = try fixture(root, name: "blank-line-cues", segments: blankLineSegments)
+            try expect(try fileBytes(blankLineCourse)["bilingual.srt"] == Data(("1\n00:00:00,000 --> 00:00:01,000\nHeat moves.\n第一句。\n第二句。\n\n"
+                + "2\n00:00:01,000 --> 00:00:02,000\nEl agua\nfluye.\n水。\n流动。\n").utf8), "blank_line_cues_stay_in_one_block")
+            try expect(try LiveLingoCLI.verifySaved(blankLineCourse, emit: false) == 2, "blank_line_new_export_verify")
+            let blankJSON = #"{"id":"00000000-0000-0000-0000-000000000231","startTime":0,"endTime":1,"english":"Heat moves.","chinese":"第一句。\n\n第二句。"}"#
+            let rawBlankSRT = "1\n00:00:00,000 --> 00:00:01,000\nHeat moves.\n第一句。\n\n第二句。\n"
+            let oldBlankLine = try frozenFixture(root, name: "blank-line-old-export", files: [
+                "manifest.json": #"{"createdAt":"1970-01-01T00:00:00Z","recordingFile":"recording.wav","segmentCount":1,"sourceLocale":"en-US","targetLocale":"zh-Hans"}"#,
+                "bilingual.jsonl": blankJSON + "\n",
+                "transcript-en.txt": "Heat moves.\n",
+                "transcript-zh-Hans.txt": "第一句。\n\n第二句。\n",
+                "bilingual.srt": rawBlankSRT
+            ])
+            try expect(try LiveLingoCLI.verifySaved(oldBlankLine, emit: false) == 1, "blank_line_old_raw_export_verify")
+            let srtURL = oldBlankLine.appendingPathComponent("bilingual.srt")
+            try Data("1\n00:00:00,000 --> 00:00:01,000\nHeat moves.\n第一句。\n第二句。\n".utf8).write(to: srtURL)
+            try expect(try LiveLingoCLI.verifySaved(oldBlankLine, emit: false) == 1, "blank_line_new_layout_verify")
+            try Data("1\n00:00:00,000 --> 00:00:01,000\nHeat moves.\n第一句。\n".utf8).write(to: srtURL)
+            try rejects("blank_line_truncated_cue_rejected") { try LiveLingoCLI.verifySaved(oldBlankLine, emit: false) }
+            try Data(rawBlankSRT.utf8).write(to: srtURL)
+            passed.append("srt_blank_lines_new_and_old_exports")
+
             let inferredDirectory = try fixture(root, name: "inferred-new-export", segments: [legacy])
             let inferredBytes = try fileBytes(inferredDirectory)
             let inferredManifest = try JSONSerialization.jsonObject(with: inferredBytes["manifest.json"]!) as! [String: Any]

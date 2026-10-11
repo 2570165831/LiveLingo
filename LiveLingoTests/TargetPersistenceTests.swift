@@ -82,6 +82,29 @@ struct TargetPersistenceTests {
         #expect(try SessionArchiveCoding.encode(stamped) == Data(Self.oldSnapshotJSON.utf8))
     }
 
+    @Test func captureStartRoundTripsWithoutGatingOldReadersOrInputs() throws {
+        let original = try baselineSnapshot()
+        #expect(original.captureStart == nil)
+        var stamped = original
+        let start = try #require(SessionCaptureStart(date: Date(timeIntervalSince1970: 1_791_474_600),
+                                                     utcOffsetSeconds: 8 * 3_600))
+        stamped.captureStart = start
+        try stamped.validate()
+        let bytes = try SessionArchiveCoding.encode(stamped)
+        let loaded = try SessionArchiveCoding.decode(SessionSnapshot.self, from: bytes)
+        #expect(loaded == stamped)
+        #expect(loaded.captureStart == start)
+        #expect(try SessionArchiveCoding.minimumReaderVersion(for: bytes) == 1)
+        #expect(try loaded.inputFingerprint() == Self.oldInputFingerprint)
+        try SessionStore.validatePreservation(from: original, to: loaded)
+        var cleared = loaded
+        cleared.captureStart = nil
+        #expect(try SessionArchiveCoding.encode(cleared) == Data(Self.oldSnapshotJSON.utf8))
+        var malformed = stamped
+        malformed.captureUTCOffsetSeconds = 99 * 3_600
+        #expect(malformed.captureStart == nil)
+    }
+
     @Test func oldJobOmitsNilTargetAndRetainsItsPromptBytes() throws {
         let bytes = Data(Self.oldJobJSON.utf8)
         var job = try JSONDecoder().decode(LearningReviewQueue.Job.self, from: bytes)

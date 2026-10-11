@@ -2816,7 +2816,7 @@ enum LectureSummaryInput {
     }
 
     private static func clock(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds))
+        let total = TimestampClock.truncatedSeconds(seconds)
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
 }
@@ -2887,8 +2887,11 @@ enum AcademicInputNormalizer {
                 in: normalized,
                 with: "Fe³⁺"
             )
+            // A hyphen that continues a word ("SCN-dependent", "SCN-2") is a
+            // compound, not a charge. A spaced dash ("SCN - the ...") still
+            // matches because it looks the same as the spaced ASR anion form.
             normalized = replacing(
-                pattern: #"\bSCN\s*[−-]"#,
+                pattern: #"\bSCN\s*[−-](?![\p{L}\p{N}_])"#,
                 in: normalized,
                 with: "SCN⁻"
             )
@@ -3433,24 +3436,71 @@ struct FormulaDisplayRun: Equatable {
     let text: String
     let script: Int // -1 subscript, +1 superscript, 0 baseline
     let math: Bool
+    /// A script inside `script` (the `a` in `e^{-E_{a}}`): -1 subscript, +1 superscript, 0 none.
+    var nested = 0
 }
 enum FormulaDisplay {
-    static func runs(_ source: String) -> [FormulaDisplayRun] {
+    /// Splits `source` into plain text and `$…$` / `\(…)` math. Code is literal:
+    /// a match that touches inline code or a code block, or whose `$` is
+    /// escaped as `\$`, stays plain text. `codeProtected` marks a line the
+    /// caller knows lies inside a code block of the surrounding document.
+    static func runs(_ source: String, codeProtected: Bool = false) -> [FormulaDisplayRun] {
+        if codeProtected { return source.isEmpty ? [] : [.init(text: source, script: 0, math: false)] }
         let expression = try! NSRegularExpression(pattern: #"\$([^$\n]+)\$|\\\((.+?)\\\)"#)
         let ns = source as NSString
-        var result: [FormulaDisplayRun] = [], offset = 0
-        for match in expression.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
+        var result: [FormulaDisplayRun] = [], offset = 0, cursor = 0
+        var codeMask: [Bool]?
+        func touchesCode(_ range: NSRange) -> Bool {
+            // Code blocks only exist across lines; a lone line is scanned for inline code.
+            let mask = codeMask ?? ChineseScriptConverter.RenderText.codeMask(source, blocks: source.utf8.contains(10))
+            codeMask = mask
+            guard let bounds = Range(range, in: source) else { return false }
+            let lower = source.utf8.distance(from: source.startIndex, to: bounds.lowerBound)
+            let upper = source.utf8.distance(from: source.startIndex, to: bounds.upperBound)
+            return mask[lower..<upper].contains(true)
+        }
+        func escaped(_ location: Int) -> Bool {
+            var start = location
+            while start > 0, ns.character(at: start - 1) == 92 { start -= 1 }
+            return (location - start) % 2 != 0
+        }
+        while cursor < ns.length,
+              let match = expression.firstMatch(in: source, range: NSRange(location: cursor, length: ns.length - cursor)) {
             // A dollar amount followed by another amount is not inline math.
             if NSMaxRange(match.range) < ns.length,
                let next = UnicodeScalar(ns.character(at: NSMaxRange(match.range))),
-               CharacterSet.decimalDigits.contains(next) { continue }
+               CharacterSet.decimalDigits.contains(next) { cursor = NSMaxRange(match.range); continue }
+            let dollar = match.range(at: 1).location != NSNotFound
+            if touchesCode(match.range)
+                || (dollar && (escaped(match.range.location) || escaped(NSMaxRange(match.range) - 1))) {
+                // The opener was not a real one; a later delimiter may still start math.
+                cursor = match.range.location + 1
+                continue
+            }
             if match.range.location > offset { result.append(.init(text: ns.substring(with: NSRange(location: offset, length: match.range.location-offset)), script: 0, math: false)) }
-            let range = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
+            let range = dollar ? match.range(at: 1) : match.range(at: 2)
             result += mathRuns(ns.substring(with: range))
             offset = NSMaxRange(match.range)
+            cursor = offset
         }
         if offset < ns.length { result.append(.init(text: ns.substring(from: offset), script: 0, math: false)) }
         return result
+    }
+
+    /// For each line, whether it lies inside a fenced or indented code block of
+    /// the whole text. Callers that render notes line by line pass this as
+    /// `codeProtected`, because a single line has lost that context.
+    static func codeBlockLines(_ lines: [String]) -> [Bool] {
+        guard lines.contains(where: { $0.contains("$") || $0.contains(#"\("#) }) else {
+            return Array(repeating: false, count: lines.count)
+        }
+        let mask = ChineseScriptConverter.RenderText.codeMask(lines.joined(separator: "\n"), inline: false)
+        var start = 0
+        return lines.map { line in
+            let count = line.utf8.count
+            defer { start += count + 1 }
+            return count > 0 && !mask[start..<(start + count)].contains(false)
+        }
     }
     static func mathRuns(_ source: String) -> [FormulaDisplayRun] {
         var text = source
@@ -3460,18 +3510,33 @@ enum FormulaDisplay {
             let ns = text as NSString, command = ns.substring(with: match.range(at:1))
             if let symbol = symbols[command] { text = ns.replacingCharacters(in: match.range, with: symbol) }
         }
-        let characters = Array(text); var index = 0; var plain = ""; var result: [FormulaDisplayRun] = []
-        func flush() { if !plain.isEmpty { result.append(.init(text:plain,script:0,math:true));plain="" } }
+        return scriptRuns(Array(text), levels: [])
+    }
+    /// `levels` holds the directions of the enclosing script groups. A group
+    /// ends at its matching `}` (escaped `\{` `\}` are literal). Only two
+    /// levels can be drawn, so `^`/`_` deeper than that stay as raw text.
+    private static func scriptRuns(_ characters: [Character], levels: [Int]) -> [FormulaDisplayRun] {
+        var index = 0; var plain = ""; var result: [FormulaDisplayRun] = []
+        func flush() {
+            if !plain.isEmpty { result.append(.init(text: plain, script: levels.first ?? 0, math: true, nested: levels.count > 1 ? levels[1] : 0)); plain = "" }
+        }
         while index < characters.count {
             let c = characters[index]
-            if (c == "_" || c == "^"), index+1 < characters.count {
-                flush(); index += 1; var value = ""
+            if (c == "_" || c == "^"), index+1 < characters.count, levels.count < 2 {
+                flush(); index += 1; var value: [Character] = []
                 if characters[index] == "{" {
-                    index += 1
-                    while index < characters.count && characters[index] != "}" { value.append(characters[index]);index += 1 }
+                    index += 1; var depth = 1
+                    while index < characters.count {
+                        let next = characters[index]
+                        if next == "\\", index+1 < characters.count, characters[index+1] == "{" || characters[index+1] == "}" {
+                            value += characters[index...index+1]; index += 2; continue
+                        }
+                        if next == "{" { depth += 1 } else if next == "}" { depth -= 1; if depth == 0 { break } }
+                        value.append(next); index += 1
+                    }
                     if index < characters.count { index += 1 }
                 } else { value.append(characters[index]);index += 1 }
-                result.append(.init(text:value,script:c == "_" ? -1 : 1,math:true))
+                result += scriptRuns(value, levels: levels + [c == "_" ? -1 : 1])
             } else { plain.append(c);index += 1 }
         }
         flush(); return result

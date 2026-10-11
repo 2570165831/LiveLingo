@@ -12,6 +12,55 @@ enum SessionDirectoryLocation {
     }
 }
 
+/// The moment live capture started, in the UTC offset in force where it
+/// started. Labels never depend on the zone of the machine that renders them.
+struct SessionCaptureStart: Equatable, Sendable {
+    let date: Date
+    let utcOffsetSeconds: Int
+
+    init?(date: Date, utcOffsetSeconds: Int) {
+        guard date.timeIntervalSince1970.isFinite, abs(utcOffsetSeconds) <= 18 * 3_600,
+              utcOffsetSeconds % 60 == 0 else { return nil }
+        self.date = date
+        self.utcOffsetSeconds = utcOffsetSeconds
+    }
+
+    static func now(in timeZone: TimeZone = .current) -> SessionCaptureStart? {
+        let date = Date()
+        return SessionCaptureStart(date: date, utcOffsetSeconds: timeZone.secondsFromGMT(for: date))
+    }
+
+    var timeZone: TimeZone { TimeZone(secondsFromGMT: utcOffsetSeconds) ?? TimeZone(secondsFromGMT: 0)! }
+
+    /// "UTC+8", "UTC+5:30", "UTC-5", "UTC+0".
+    var utcOffsetLabel: String {
+        let minutes = abs(utcOffsetSeconds) / 60
+        let hours = "UTC\(utcOffsetSeconds < 0 ? "-" : "+")\(minutes / 60)"
+        return minutes % 60 == 0 ? hours : hours + String(format: ":%02d", minutes % 60)
+    }
+
+    func formatted(_ format: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = format
+        return formatter.string(from: date)
+    }
+
+    /// "2026-10-09 14:30（UTC+8）" for Han targets, "2026-10-09 14:30 (UTC+8)" otherwise.
+    func displayLabel(hanPunctuation: Bool = true) -> String {
+        let time = formatted("yyyy-MM-dd HH:mm")
+        return hanPunctuation ? "\(time)（\(utcOffsetLabel)）" : "\(time) (\(utcOffsetLabel))"
+    }
+
+    /// "2026-10-09_1430_UTC+8"; a half-hour zone becomes "UTC+5.30" because
+    /// Finder shows ":" in a file name as "/".
+    var fileNameLabel: String {
+        "\(formatted("yyyy-MM-dd_HHmm"))_\(utcOffsetLabel.replacingOccurrences(of: ":", with: "."))"
+    }
+}
+
 /// Disk data deliberately does not depend on LearningNotebook's private state.
 /// Loading this value never starts capture, transcription, or a model.
 struct SessionSnapshot: Codable, Equatable, Sendable {
@@ -38,6 +87,11 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
     var revisionHistory: [SessionInputRevision]
     var createdAt: Date
     var updatedAt: Date
+    /// When live capture started and the UTC offset in force there. Nil for
+    /// imports and older courses; omitted by Codable and kept out of the
+    /// reader-version gate so older readers still open the course.
+    var captureStartedAt: Date? = nil
+    var captureUTCOffsetSeconds: Int? = nil
     /// Optimistic concurrency token. Keep the value returned by save/append.
     var storageRevision: Int = 0
     var lastJournalSequence: Int = 0
@@ -66,6 +120,18 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
         self.audioFiles = audioFiles; self.audioRanges = audioRanges
         self.transcriptionJournalPath = transcriptionJournalPath; self.revisionHistory = revisionHistory
         self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt
+    }
+
+    /// A malformed stored pair is ignored, falling back to the legacy class date.
+    var captureStart: SessionCaptureStart? {
+        get {
+            guard let captureStartedAt, let captureUTCOffsetSeconds else { return nil }
+            return SessionCaptureStart(date: captureStartedAt, utcOffsetSeconds: captureUTCOffsetSeconds)
+        }
+        set {
+            captureStartedAt = newValue?.date
+            captureUTCOffsetSeconds = newValue?.utcOffsetSeconds
+        }
     }
 
     static func normalizedTargetLocale(_ locale: String?) -> String? {
@@ -123,6 +189,7 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
         for segment in segments + batches.flatMap(\.evidence) {
             guard segment.startTime.isFinite, segment.endTime.isFinite,
                   segment.startTime >= 0, segment.endTime >= segment.startTime,
+                  segment.endTime <= TranscriptSegment.maximumTimestamp,
                   segment.inputRevision >= 0, segment.inputRevision <= inputRevision,
                   segment.sessionID == nil || segment.sessionID == sessionID else {
                 throw SessionStoreError.invalidState("字幕的会话、时间或修订号不一致")
@@ -175,6 +242,7 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
             for segment in [change.previousSegment, change.replacementSegment] + change.retainedBatches.flatMap(\.evidence) {
                 guard segment.startTime.isFinite, segment.endTime.isFinite,
                       segment.startTime >= 0, segment.endTime >= segment.startTime,
+                      segment.endTime <= TranscriptSegment.maximumTimestamp,
                       segment.inputRevision >= 0, segment.inputRevision <= inputRevision,
                       segment.sessionID == nil || segment.sessionID == sessionID else {
                     throw SessionStoreError.invalidState("修订历史含无效或其他课程的字幕")
@@ -279,7 +347,7 @@ struct SessionProcessingState: Codable, Equatable, Sendable {
               Set(pendingBatchIDs).count == pendingBatchIDs.count,
               Set((pendingCaptionRepairs ?? []).map { $0.current.id }).count == (pendingCaptionRepairs ?? []).count,
               lastErrorSource == nil || lastError != nil,
-              lastCapturedTime.map({ $0.isFinite && $0 >= 0 }) ?? true else {
+              lastCapturedTime.map({ $0.isFinite && $0 >= 0 && $0 <= TranscriptSegment.maximumTimestamp }) ?? true else {
             throw SessionStoreError.invalidState("待处理任务或采集进度无效")
         }
     }
@@ -394,7 +462,9 @@ struct SessionAudioRange: Codable, Equatable, Sendable {
     func validate() throws {
         try SessionArchiveCoding.validateRelativePath(filePath)
         guard startFrame >= 0, frameCount >= 0, startFrame <= Int64.max - frameCount,
-              captureStart.isFinite, captureEnd.isFinite, captureStart >= 0, captureEnd >= captureStart else {
+              captureStart.isFinite, captureEnd.isFinite, captureStart >= 0, captureEnd >= captureStart,
+              // Session-relative or system-uptime seconds; both stay far below the caption bound.
+              captureEnd <= TranscriptSegment.maximumTimestamp else {
             throw SessionStoreError.invalidState("音频帧范围或采集时间无效")
         }
     }

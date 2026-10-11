@@ -1308,7 +1308,7 @@ struct LearningNoteBatch: Codable, Equatable, Sendable {
 /// 自己判断；没有时间范围的"待核实"提示等于让用户全课重听 ✗。
 enum LearningTimeLabel {
     static func stamp(_ interval: TimeInterval) -> String {
-        let total = max(0, Int(interval.rounded()))
+        let total = TimestampClock.roundedSeconds(interval)
         let hours = total / 3_600
         let minutes = (total / 60) % 60
         let seconds = total % 60
@@ -2056,7 +2056,7 @@ struct LearningNotebook: Sendable {
                 let text = LearningSourceUnit.textGroups(for: segment, target: target).first?.text
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !text.isEmpty, Self.isScheduleStatement(text), seen.insert(text).inserted else { return nil }
-                let total = max(0, Int(segment.startTime))
+                let total = TimestampClock.truncatedSeconds(segment.startTime)
                 return "- [\(String(format: "%02d:%02d", total / 60, total % 60))] \(text)"
             }
             return lines.isEmpty ? "" : "## \(ClassroomFixedText.logisticsHeading.noteText(target: target))\n" + lines.joined(separator: "\n")
@@ -2071,7 +2071,7 @@ struct LearningNotebook: Sendable {
             let key = english + "\u{0}" + chinese
             guard !seen.contains(key) else { continue }
             seen.insert(key)
-            let total = max(0, Int(segment.startTime))
+            let total = TimestampClock.truncatedSeconds(segment.startTime)
             lines.append("- [\(String(format: "%02d:%02d", total / 60, total % 60))] \(english) — \(chinese)")
         }
         guard !lines.isEmpty else { return "" }

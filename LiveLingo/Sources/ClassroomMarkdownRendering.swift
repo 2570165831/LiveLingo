@@ -57,7 +57,7 @@ enum ClassroomMarkdownRendering {
         for segment in evidence {
             let source = segment.english.trimmingCharacters(in: .whitespacesAndNewlines)
             let target = segment.chinese.trimmingCharacters(in: .whitespacesAndNewlines)
-            let total = max(0, Int(segment.startTime))
+            let total = TimestampClock.truncatedSeconds(segment.startTime)
             let prefix = "- [\(String(format: "%02d:%02d", total / 60, total % 60))] \(source) — "
             // String equality permits canonically equivalent Unicode with
             // different UTF-8 lengths. Byte slices need the exact archive bytes.

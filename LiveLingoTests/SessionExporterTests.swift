@@ -287,6 +287,42 @@ struct SessionExporterTests {
         #expect(SessionExporter.srtTimestamp(-1) == "00:00:00,000")
     }
 
+    /// Corrupt times must format without trapping; 1e9 s is the stored-time
+    /// bound. Valid times keep their existing truncation and rounding.
+    @Test func timestampFormattersClampImplausibleTimes() {
+        for time: TimeInterval in [1e20, .infinity] {
+            #expect(SessionExporter.srtTimestamp(time) == "277777:46:40,000")
+            #expect(NotesExportDocument.timestamp(time) == "277777:46:40")
+            #expect(LearningTimeLabel.stamp(time) == "277777:46:40")
+        }
+        #expect(SessionExporter.srtTimestamp(1e17) == "277777:46:40,000")
+        for time: TimeInterval in [-.infinity, .nan, -1] {
+            #expect(SessionExporter.srtTimestamp(time) == "00:00:00,000")
+            #expect(NotesExportDocument.timestamp(time) == "00:00")
+            #expect(LearningTimeLabel.stamp(time) == "00:00")
+        }
+        #expect(NotesExportDocument.timestamp(3_661.5) == "01:01:02")
+        #expect(LearningTimeLabel.stamp(59.5) == "01:00")
+
+        let caption = TranscriptSegment(startTime: 59.9, endTime: 61, english: "Synthetic source.", chinese: "合成译文。")
+        #expect(ClassroomMarkdownRendering.scheduleFields("- [00:59] Synthetic source. — 合成译文。",
+                                                          evidence: [caption])?.prefix == "- [00:59] Synthetic source. — ")
+        let huge = TranscriptSegment(startTime: 1e20, endTime: 1e20, english: "Synthetic source.", chinese: "合成译文。")
+        #expect(ClassroomMarkdownRendering.scheduleFields("- [16666666:40] Synthetic source. — 合成译文。",
+                                                          evidence: [huge])?.prefix == "- [16666666:40] Synthetic source. — ")
+    }
+
+    /// The recording strip shows a restored course's last capture time; a
+    /// corrupt value must clamp instead of trapping in `Int(_:)`.
+    @Test func recordingClockClampsImplausibleTimes() {
+        #expect(RecordingElapsedText.label(1e20) == "277777:46:40")
+        #expect(RecordingElapsedText.label(.infinity) == "277777:46:40")
+        for time: TimeInterval in [-.infinity, .nan, -1] {
+            #expect(RecordingElapsedText.label(time) == "00:00:00")
+        }
+        #expect(RecordingElapsedText.label(3_661.9) == "01:01:01")
+    }
+
     @Test func exportWritesAllTextFormats() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -563,6 +599,28 @@ struct SessionExporterTests {
     ])
     func academicInputNormalizerPreservesOtherIonNames(_ source: String) {
         #expect(AcademicInputNormalizer.normalize(source) == source)
+    }
+
+    @Test(arguments: [
+        "SCN-dependent rhythms regulate sleep.",
+        "The SCN-containing ligand binds iron.",
+        "SCN-lesioned rats lose circadian rhythms.",
+        "scn-dependent firing",
+        "SCN\u{2212}dependent rhythms",
+        "SCN-2 cells"
+    ])
+    func academicInputNormalizerKeepsSCNCompoundHyphens(_ source: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == source)
+    }
+
+    @Test(arguments: [
+        ("Add SCN- ions to Fe³⁺.", "Add SCN⁻ ions to Fe³⁺."),
+        ("The ligand is SCN-.", "The ligand is SCN⁻."),
+        ("Fe³⁺ + SCN\u{2212}, then heat.", "Fe³⁺ + SCN⁻, then heat.")
+    ])
+    func academicInputNormalizerStillMarksStandaloneSCNCharge(_ source: String, _ expected: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == expected)
+        #expect(AcademicInputNormalizer.normalize(expected) == expected)
     }
 
     @Test func academicInputNormalizerKeepsSingularWhenCorrectingDirectChargeLabel() {
