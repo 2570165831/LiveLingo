@@ -58,6 +58,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         // Runtime-only causal metadata; preserve legacy Outcome/archive bytes.
         var sourceDecision: SourceLanguagePolicy.Decision?
         var sourceInput: SourceLanguagePolicy.ProbeInput?
+        var sourceDeferred = false
         private enum CodingKeys: String, CodingKey {
             case text, language, silent, candidate, origin, failureReason, otherLanguage
         }
@@ -165,9 +166,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 }
                 try context.journal.put(record)
                 try context.journal.clearCaptureMarker(id: record.id)
-                // An optional head/body cannot hold the foreground pump. Its
-                // request keeps its coordinator lease until actual service exit.
-                sourceActive?.cancel()
+                // Keep an already submitted source response: cancelling the
+                // caller cannot preempt its tensor call and would lose the result.
+                // The independent formal pump starts immediately; new optional
+                // requests are gated against pending formal work under this lock.
                 // Captions arriving during an optional repair take precedence.
                 // Cancellation is joined by the existing worker before its next claim.
                 if let activeRecord, activeRecord.attempt != .initial {
@@ -619,24 +621,59 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             guard storageFailure == nil, let context, !context.journal.isPaused else { return }
             let records = context.journal.records
             if worker == nil, records.contains(where: {
-                $0.status == .pending || (($0.sourceProbeInput == nil || $0.sourceProbeFinished == true)
+                $0.status == .pending || ($0.sourceTriggerPendingBoundary != true
+                    && ($0.sourceProbeInput == nil || $0.sourceProbeFinished == true)
                     && [.retryWaiting, .manualPending].contains($0.status))
             }) {
                 worker = Task { [weak self] in await self?.run(generation: context.generation) }
             }
             if sourceWorker == nil, worker == nil,
-               records.contains(where: { $0.sourceProbeInput != nil && $0.sourceProbeFinished != true }) {
+               records.contains(where: { $0.sourceTriggerPendingBoundary == true
+                   || ($0.sourceProbeInput != nil && $0.sourceProbeFinished != true) }) {
                 sourceWorker = Task { [weak self] in await self?.runSources(generation: context.generation) }
             }
         }
     }
 
     static func restoredSourceTrigger(_ records: [TranscriptionWorkRecord]) -> SourceLanguagePolicy.TriggerState {
-        // A legacy or interrupted newer ordinal is a causal boundary. Never
-        // skip it to resurrect an older candidate, or infer from saved bodies.
-        let processed = records.filter { $0.sourceTriggerAfter != nil
-            || ($0.sourceProbeInput == nil && $0.status != .pending && $0.status != .manualPending) }
-        return processed.max(by: { $0.ordinal < $1.ordinal })?.sourceTriggerAfter ?? .init()
+        var progress = SourceLanguagePolicy.TriggerState()
+        for record in records.sorted(by: { $0.ordinal < $1.ordinal }) {
+            if let after = record.sourceTriggerAfter { progress = after }
+            else if record.sourceProbeInput != nil || record.sourceTriggerPendingBoundary == true
+                || record.status == .pending || record.status == .active {
+                break // An unresolved older ordinal cannot be overtaken.
+            } else { progress = .init() } // Legacy records contribute no head evidence.
+        }
+        return progress
+    }
+
+    /// Formal failures are causal boundaries, but only after every older head
+    /// has resolved. Persist their first predecessor then, before a repair can
+    /// use it. Never advance the live chain from a repair's current evidence.
+    private func refreshInitialProgress(_ owner: Context) throws {
+        var progress = SourceLanguagePolicy.TriggerState()
+        for var record in owner.journal.records.sorted(by: { $0.ordinal < $1.ordinal }) {
+            if let after = record.sourceTriggerAfter { progress = after; continue }
+            guard record.sourceProbeInput == nil, record.status != .pending, record.status != .active else { break }
+            if record.attempt == .initial {
+                record.sourceTriggerPredecessor = record.sourceTriggerPredecessor ?? progress
+                var after = record.sourceTriggerPredecessor ?? .init()
+                after.advance(index: record.ordinal, decision: record.sourceTriggerDecision)
+                record.sourceTriggerAfter = after
+                record.sourceTriggerPendingBoundary = nil
+                try owner.journal.put(record)
+                progress = after
+            } else { progress = .init() }
+        }
+        context?.sourceTrigger = progress
+    }
+
+    private func canStartSource(generation: UUID) -> Bool {
+        lock.withLock {
+            guard let owner = context, owner.generation == generation,
+                  !owner.journal.isPaused, storageFailure == nil, worker == nil else { return false }
+            return !owner.journal.records.contains { $0.status == .pending }
+        }
     }
 
     private func commitEnglishBeforeProbe(_ output: Outcome, record claimed: TranscriptionWorkRecord,
@@ -646,6 +683,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                   var record = owner.journal.record(id: claimed.id), !output.text.isEmpty,
                   record.text?.isEmpty != false else { return }
             record.text = output.text; record.textLanguage = nil
+            if claimed.attempt == .initial {
+                record.sourceRevisionAllowed = record.sourceRevisionAllowed != false
+                record.sourceInitialEnglishDigest = TranscriptionWorkRecord.englishDigest(output.text)
+            }
             try owner.journal.put(record)
             recentFormulaContext = String(output.text.suffix(1000))
             emitCommit(record, text: output.text, repair: claimed.attempt != .initial)
@@ -655,11 +696,18 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     private func preserveInitialDecision(_ decision: SourceLanguagePolicy.Decision?,
                                          record: inout TranscriptionWorkRecord, owner: Context) throws {
         guard record.attempt == .initial, record.sourceTriggerAfter == nil else { return }
-        var progress = record.sourceTriggerPredecessor ?? .init()
+        record.sourceTriggerDecision = decision
+        // A foreground failure may complete ahead of older deferred heads.
+        // Its predecessor is supplied by the ordered progress drain instead.
+        guard let predecessor = record.sourceTriggerPredecessor else {
+            record.sourceTriggerPendingBoundary = true
+            return
+        }
+        var progress = predecessor
         progress.advance(index: record.ordinal, decision: decision)
         record.sourceTriggerDecision = decision; record.sourceTriggerAfter = progress
         try owner.journal.put(record)
-        context?.sourceTrigger = progress
+        try refreshInitialProgress(owner)
     }
     private func run(generation token: UUID) async {
         while true {
@@ -744,7 +792,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         if let input = output.sourceInput {
                             record.sourceProbeInput = input; record.sourceProbeFinished = false
                             record.sourceRevisionAllowed = record.sourceRevisionAllowed != false
-                                && claimed.text?.isEmpty != false
+                                && (claimed.text?.isEmpty != false || record.hasProvisionalInitialEnglish)
                         } else { try preserveInitialDecision(output.sourceDecision, record: &record, owner: owner) }
                         let alreadyDelivered = record.text?.isEmpty == false
                         if let candidate = output.candidate {
@@ -780,10 +828,11 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         }
                         if record.candidateText != nil { emitCandidate(record) }
                     case .failure(let error):
-                        try preserveInitialDecision(nil, record: &record, owner: owner)
                         markFailure(&record, message: "本机转写失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))；音频已保留。", reason: .error)
+                        try preserveInitialDecision(nil, record: &record, owner: owner)
                         try owner.journal.put(record)
                     }
+                    try refreshInitialProgress(owner)
                     if let failure = record.failure {
                         let recording = record.recordingFile.map { owner.journal.directory.deletingLastPathComponent().appendingPathComponent($0) }
                         RecordingDiagnostics.append(recordingURL: recording,
@@ -806,8 +855,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             let lease: (Context, TranscriptionWorkRecord, Task<Outcome, Error>)?
             do {
                 lease = try lock.withLock {
+                    if let owner = context, owner.generation == token { try refreshInitialProgress(owner) }
                     guard storageFailure == nil, let owner = context, owner.generation == token,
                           !owner.journal.isPaused, worker == nil,
+                          !owner.journal.records.contains(where: { $0.status == .pending }),
                           var record = owner.journal.records.filter({
                               $0.sourceProbeInput != nil && $0.sourceProbeFinished != true
                           }).min(by: { $0.ordinal < $1.ordinal }), let input = record.sourceProbeInput else {
@@ -817,7 +868,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     // Resolve causality in ordinal order, never from the most
                     // recently delivered foreground caption or a repair.
                     if record.sourceTriggerPredecessor == nil {
-                        record.sourceTriggerPredecessor = owner.sourceTrigger
+                        try refreshInitialProgress(owner)
+                        record.sourceTriggerPredecessor = owner.journal.records.first {
+                            $0.ordinal == record.ordinal - 1
+                        }?.sourceTriggerAfter ?? .init()
                         try owner.journal.put(record)
                     }
                     let claimed = record
@@ -826,7 +880,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         try await Self.recognize(claimed, audioURL: url, recordingURL: nil,
                             formulaContext: "", attempts: owner.attempts,
                             sourceTrigger: claimed.sourceTriggerPredecessor ?? .init(), sourceOnly: input,
-                            transcriber: transcriber, preserveDecision: { decision in
+                            transcriber: transcriber,
+                            canStartSource: { self.canStartSource(generation: token) }, preserveDecision: { decision in
                                 try self.lock.withLock {
                                     guard self.context?.generation == token,
                                           var current = owner.journal.record(id: claimed.id) else { return }
@@ -851,9 +906,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     // A successful persisted head may resume body-only work.
                     guard !task.isCancelled else { return }
                     guard var record = owner.journal.record(id: claimed.id) else { return }
-                    record.sourceProbeFinished = true
                     switch result {
                     case .success(let output):
+                        if output.sourceDeferred { return }
+                        record.sourceProbeFinished = true
                         try preserveInitialDecision(output.sourceDecision, record: &record, owner: owner)
                         if !output.text.isEmpty, let language = output.language {
                             let previous = record.text
@@ -882,6 +938,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             try owner.journal.put(record)
                         }
                     case .failure:
+                        record.sourceProbeFinished = true
                         try preserveInitialDecision(nil, record: &record, owner: owner)
                         if record.text?.isEmpty != false, record.status != .silent {
                             markFailure(&record, message: "本机转写失败；音频已保留。", reason: .error)
@@ -959,6 +1016,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                                   sourceOnly: SourceLanguagePolicy.ProbeInput? = nil,
                                   transcriber: Transcriber,
                                   commitEnglish: @Sendable (Outcome) throws -> Void = { _ in },
+                                  canStartSource: @Sendable () -> Bool = { true },
                                   preserveDecision: @Sendable (SourceLanguagePolicy.Decision) throws -> Void = { _ in }) async throws -> Outcome {
         try Task.checkCancellation()
         if sourceOnly == nil, try DigitalSilenceGate.isSilent(audioURL) {
@@ -986,10 +1044,12 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 try await transcriber(url, model, enhance, mode)
             }
             try Task.checkCancellation()
-            if let key, result.text.utf8.count <= TranscriptionAttemptCache.maximumTextBytes,
+            let failedConfirmedBody = mode == .auto && ASRRequestContext.confirmedSourceLanguage != nil
+                && (result.decode == .forced || result.text.isEmpty)
+            if let key, !failedConfirmedBody, result.text.utf8.count <= TranscriptionAttemptCache.maximumTextBytes,
                (try? TranscriptionAttemptCache.fingerprint(url)) == key.audio {
                 attempts.store(result, for: key)
-                if mode == .auto, result.decode == .forced {
+                if mode == .auto, result.decode == .forced, ASRRequestContext.confirmedSourceLanguage == nil {
                     // Forced auto decoding is the same English generation on
                     // this waveform. Strip probe metadata to match an English
                     // reply exactly; detected replies stay in their own mode.
@@ -1017,7 +1077,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         let formula = FormulaASRReview.needsReview(primary, context: formulaContext)
         let needsFallback = sourceOnly == nil && (primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)
             || ASRQualityGate.fallbackReason(for: primary, audioDuration: record.duration) != nil)
-        let input = sourceOnly ?? SourceLanguagePolicy.ProbeInput(parakeetAccepted: !usable.isEmpty,
+        let input = sourceOnly ?? SourceLanguagePolicy.ProbeInput(parakeetAccepted: !usable.isEmpty
+            && primaryResult?.parakeetConfidenceValid != false,
             mean: primaryResult?.parakeetMeanProbability.flatMap { $0.isFinite ? $0 : nil },
             minimum: primaryResult?.parakeetMinProbability.flatMap { $0.isFinite ? $0 : nil })
         let plan = sourceTrigger.plan(index: record.ordinal, parakeetAccepted: input.parakeetAccepted,
@@ -1054,6 +1115,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             return output
         }
         if plan.selected, let model = record.fallbackModelKey, record.status != .silent {
+            if !canStartSource() { return Outcome(sourceDeferred: true) }
             if !output.text.isEmpty { try commitEnglish(output) }
             do {
                 let decision: SourceLanguagePolicy.Decision
@@ -1069,6 +1131,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 // Persist the head independently of optional body success.
                 try preserveDecision(decision)
                 if let language = decision.language {
+                    if !canStartSource() { return Outcome(sourceDecision: decision, sourceDeferred: true) }
                     let result = try await ASRRequestContext.$confirmedSourceLanguage.withValue(language) {
                         try await recognizeStage(audioURL, model: model, enhance: true, stage: "confirmedSource", mode: .auto)
                     }

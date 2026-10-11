@@ -3131,8 +3131,9 @@ final class AppModel: ObservableObject {
         guard let snapshot = sessionSnapshot, snapshot.sessionID == sessionID,
               pipeline.transcriptionState()?.sessionID == sessionID else { return }
         for record in pipeline.transcriptionWork() {
+            let pendingSourceProbe = record.sourceProbeInput != nil && record.sourceProbeFinished != true
             guard record.sessionID == sessionID, record.attempt == .initial,
-                  record.sourceProbeInput != nil, record.sourceProbeFinished != true,
+                  pendingSourceProbe || record.hasProvisionalInitialEnglish,
                   record.sourceRevisionAllowed == true, record.textLanguage == nil,
                   let archived = snapshot.segments.first(where: { $0.id == record.id }),
                   let current = segments.first(where: { $0.id == record.id }),
@@ -3344,7 +3345,8 @@ final class AppModel: ObservableObject {
                         sourceLanguage: result.language)
                     translationHints.removeValue(forKey: existing.id)
                     replaceExistingSegment(at: index, with: replacement, reason: "首轮原语确认修订")
-                    volatileEnglish = ""
+                    // This older range can finish while the next range is
+                    // already producing a live preview. It does not own that preview.
                     markCaptionActivity()
                     updateReviewAvailability()
                     yieldSummaryToCaptions()

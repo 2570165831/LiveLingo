@@ -229,7 +229,11 @@ actor ASRRequestCoordinator {
         guard let url = components?.url else { throw QwenRuntimeError.invalidResponse }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = language == .probe ? 10 : 120
+        // The service drops heads that wait eight seconds before starting.
+        // Once started, a cold load may still need its 120-second server
+        // deadline. Wait for that matching receipt instead of detaching early
+        // and leaving an unknown lease that rejects foreground captions.
+        request.timeoutInterval = language == .probe ? 130 : 120
         request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
         request.setValue(requestID, forHTTPHeaderField: "X-LiveLingo-Request-ID")
         Self.authorize(&request, endpoint)

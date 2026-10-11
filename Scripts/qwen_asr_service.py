@@ -58,6 +58,7 @@ BEARER_PREFIX = "bearer "
 MAX_AUDIO_BYTES = 64 * 1024 * 1024
 BODY_TIMEOUT_SECONDS = 30.0
 INFERENCE_TIMEOUT_SECONDS = 120.0
+PROBE_QUEUE_TIMEOUT_SECONDS = 8.0
 SPEECH_BAND_LOW_HZ = 120.0
 SPEECH_BAND_HIGH_HZ = 7_200.0
 TARGET_ACTIVE_RMS_DBFS = -23.0
@@ -571,9 +572,11 @@ class ParakeetConfidenceRecorder:
         return logits
 
     def statistics(self, expected_count):
-        known = self.valid and self.count == expected_count and self.count > 0
+        valid = self.valid and self.count == expected_count
+        known = valid and self.count > 0
         return {"pk_mean_probability": self.total / self.count if known else None,
-                "pk_min_probability": self.minimum if known else None}
+                "pk_min_probability": self.minimum if known else None,
+                "pk_confidence_valid": valid}
 
 
 def transcribe_parakeet(model, model_input_path):
@@ -592,7 +595,7 @@ def transcribe_parakeet(model, model_input_path):
             expected = sum(len(sentence.tokens) for sentence in result.sentences)
             statistics = recorder.statistics(expected)
         except (AttributeError, TypeError):
-            statistics = unknown
+            statistics = {**unknown, "pk_confidence_valid": False}
         return {"text": result.text.strip(), **statistics}
     finally:
         model.joint = original
@@ -625,7 +628,18 @@ def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, 
                 signal_idle_maintenance()
 
 
-def run_registered_transcription(request_id, model_input_path, model_key, language_mode=None, probe_input_path=None, confirmed_language=None):
+class ProbeQueueDeadlineExceeded(TimeoutError):
+    """Optional head expired before model loading or tensor execution began."""
+
+
+def run_registered_transcription(request_id, model_input_path, model_key, language_mode=None, probe_input_path=None, confirmed_language=None, *, inference_started=None, queue_deadline=None):
+    # Recheck on the inference thread too: a handler may wake just after its
+    # deadline while the executor is claiming the queued Future. Never load or
+    # execute an expired head in that race.
+    if queue_deadline is not None and time.monotonic() >= queue_deadline:
+        raise ProbeQueueDeadlineExceeded('ASR queue deadline exceeded')
+    if inference_started is not None:
+        inference_started.set()
     with MODEL_STATE_LOCK:
         REQUEST_STATES[request_id] = {'model': model_key, 'state': 'running'}
         signal_idle_maintenance()
@@ -661,10 +675,12 @@ def finish_request(request_id, model_key):
         signal_idle_maintenance()
 
 
-def request_input_identity(audio, model_key, should_enhance, language_mode):
-    """Bind raw bytes and effective output parameters, never temporary paths."""
+def request_input_identity(audio, model_key, should_enhance, language_mode, confirmed_language=None):
+    """Use the same parameters while uploading and after raw bytes are bound."""
     from hashlib import sha256
-    return (sha256(audio).digest(), model_key, should_enhance, language_mode)
+    identity = (sha256(audio).digest() if audio is not None else None,
+                model_key, should_enhance, language_mode)
+    return identity + (confirmed_language,) if confirmed_language is not None else identity
 
 
 def duplicate_request_payload(request_id, identity):
@@ -964,7 +980,8 @@ class Handler(BaseHTTPRequestHandler):
                 duplicate = True
             else:
                 REQUEST_STATES[request_id] = {'model': model_key, 'state': 'waiting'}
-                _REQUEST_IDENTITIES[request_id] = (None, model_key, should_enhance, language_mode)
+                _REQUEST_IDENTITIES[request_id] = request_input_identity(
+                    None, model_key, should_enhance, language_mode, confirmed_language)
                 duplicate = False
                 signal_idle_maintenance()
         temporary_path = None
@@ -988,9 +1005,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             audio = self.read_audio_body(size)
             receiving_audio = False
-            identity = request_input_identity(audio, model_key, should_enhance, language_mode)
-            if confirmed_language is not None:
-                identity += (confirmed_language,)
+            identity = request_input_identity(audio, model_key, should_enhance, language_mode, confirmed_language)
             with MODEL_STATE_LOCK:
                 if duplicate:
                     duplicate_payload = duplicate_request_payload(request_id, identity)
@@ -1003,7 +1018,10 @@ class Handler(BaseHTTPRequestHandler):
                 temporary_path = temporary.name
                 temporary.write(audio)
             model_input_path = temporary_path
-            if should_enhance and language_mode != "probe":
+            if should_enhance and confirmed_language is not None:
+                # Confirmed bodies continue a head cache built from raw audio.
+                enhancement = {"applied": False, "reason": "not_used"}
+            elif should_enhance and language_mode != "probe":
                 model_input_path, enhancement = speech_band_enhance(temporary_path)
             started = time.monotonic()
             log_id = uuid.uuid4().hex
@@ -1014,8 +1032,22 @@ class Handler(BaseHTTPRequestHandler):
             arguments = (request_id, model_input_path, model_key, language_mode, temporary_path)
             if confirmed_language is not None:
                 arguments += (confirmed_language,)
-            future = submit(run_registered_transcription, *arguments)
+            if language_mode == "probe":
+                inference_started = threading.Event()
+                queue_deadline = time.monotonic() + PROBE_QUEUE_TIMEOUT_SECONDS
+                future = submit(run_registered_transcription, *arguments,
+                                inference_started=inference_started, queue_deadline=queue_deadline)
+            else:
+                future = submit(run_registered_transcription, *arguments)
             try:
+                if language_mode == "probe" and not inference_started.wait(
+                    timeout=max(0.0, queue_deadline - time.monotonic())
+                ) and future.cancel():
+                    self.send_json(504, {"error": "ASR queue deadline exceeded", "request_id": request_id,
+                                         "model": model_key, "retryable": True})
+                    return
+                # For a probe this budget begins after the execution-start
+                # event, so cold loading gets the full running allowance.
                 text = future.result(timeout=INFERENCE_TIMEOUT_SECONDS)
             except TimeoutError:
                 if future.done():
@@ -1055,6 +1087,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Never answer with the owner's identity: a matched request_id
                 # and model would release the client's lease for the owner.
                 self.send_json(409, {"error": "Request ID is already in use"})
+            elif isinstance(error, ProbeQueueDeadlineExceeded):
+                self.send_json(504, {"error": "ASR queue deadline exceeded", "request_id": request_id,
+                                     "model": model_key, "retryable": True})
             elif isinstance(error, TimeoutError):
                 self.send_json(408 if receiving_audio else 500,
                                {"error": safe_exception_code(error), "request_id": request_id, "model": model_key})

@@ -94,7 +94,7 @@ final class ResourceSchedulingTests: XCTestCase {
                                "generated_tokens": 4, "truncated": false]) { _, new in new }
             } else {
                 XCTAssertEqual(mode, "probe")
-                XCTAssertEqual(request.timeoutInterval, 10, "Optional language heads have their own short deadline")
+                XCTAssertEqual(request.timeoutInterval, 130, "Wait for the server's matching queue or inference deadline receipt")
                 XCTAssertNil(query.first { $0.name == "confirmed_language" })
             }
             return .init(data: try JSONSerialization.data(withJSONObject: payload), status: 200)
@@ -122,6 +122,17 @@ final class ResourceSchedulingTests: XCTestCase {
         }
         XCTAssertThrowsError(try ASRTranscription.validated(text: "unexpected body",
             data: JSONSerialization.data(withJSONObject: valid), requestedLanguage: .probe))
+    }
+
+    func testInvalidParakeetConfidenceIsExplicitAndOldRepliesRemainCompatible() throws {
+        let invalid = try ASRTranscription.validated(text: "The blue cart waits by the gate.",
+            data: JSONSerialization.data(withJSONObject: ["pk_mean_probability": NSNull(),
+                "pk_min_probability": NSNull(), "pk_confidence_valid": false]), requestedLanguage: .english)
+        XCTAssertEqual(invalid.parakeetConfidenceValid, false)
+        XCTAssertNil(invalid.parakeetMeanProbability)
+        let legacy = try ASRTranscription.validated(text: invalid.text,
+            data: JSONSerialization.data(withJSONObject: ["text": invalid.text]), requestedLanguage: .english)
+        XCTAssertNil(legacy.parakeetConfidenceValid)
     }
 
     func testEnglishRequestURLIsByteIdenticalAndAutoIsExplicit() async throws {

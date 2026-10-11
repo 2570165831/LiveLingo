@@ -98,10 +98,14 @@ struct ASRTranscription: Equatable, Sendable {
     var policy: Int?
     var parakeetMeanProbability: Double?
     var parakeetMinProbability: Double?
+    /// Missing in old services; explicit false makes an invalid observation
+    /// follow the collector's rejected-Parakeet probe path.
+    var parakeetConfidenceValid: Bool?
 
     private struct ConfidenceResponse: Decodable {
         let pk_mean_probability: Double?
         let pk_min_probability: Double?
+        let pk_confidence_valid: Bool?
     }
 
     private struct AutoResponse: Decodable {
@@ -152,6 +156,7 @@ struct ASRTranscription: Equatable, Sendable {
                }) {
                 result.parakeetMeanProbability = confidence.pk_mean_probability
                 result.parakeetMinProbability = confidence.pk_min_probability
+                result.parakeetConfidenceValid = confidence.pk_confidence_valid
             }
             return result
         }

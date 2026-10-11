@@ -91,11 +91,24 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
     /// including when body generation or a later repair has not finished.
     var sourceTriggerDecision: SourceLanguagePolicy.Decision?
     var sourceTriggerAfter: SourceLanguagePolicy.TriggerState?
+    /// A failed initial formal pass waits for older heads before repairs start.
+    var sourceTriggerPendingBoundary: Bool?
     /// First-pass confidence only. Pending heads/bodies survive a pause or crash.
     var sourceProbeInput: SourceLanguagePolicy.ProbeInput?
     var sourceProbeFinished: Bool?
     /// Explicit edits revoke automatic replacement, even an edit back to the same text.
     var sourceRevisionAllowed: Bool?
+    /// Proof that this initial pass wrote the provisional English itself.
+    /// A digest avoids retaining another copy of the caption body.
+    var sourceInitialEnglishDigest: String?
+    var hasProvisionalInitialEnglish: Bool {
+        guard attempt == .initial, sourceRevisionAllowed == true, textLanguage == nil,
+              let text, !text.isEmpty, let sourceInitialEnglishDigest else { return false }
+        return Self.englishDigest(text) == sourceInitialEnglishDigest
+    }
+    static func englishDigest(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
     var duration: TimeInterval { max(0, end - start) }
     var needsWork: Bool { [.pending, .active, .retryWaiting, .manualPending].contains(status) }
     /// An unfinished manual retry of non-English speech heard nothing new, so
@@ -117,7 +130,8 @@ extension TranscriptionWorkRecord {
         case status, extendedStatus, attempt, automaticRetryCount, manualRetryCount
         case text, textLanguage, candidateText, candidateLanguage, candidateOrigin, failure, failureReason
         case sourceTriggerPredecessor, sourceTriggerDecision, sourceTriggerAfter
-        case sourceProbeInput, sourceProbeFinished, sourceRevisionAllowed
+        case sourceTriggerPendingBoundary
+        case sourceProbeInput, sourceProbeFinished, sourceRevisionAllowed, sourceInitialEnglishDigest
     }
 
     init(from decoder: Decoder) throws {
@@ -152,9 +166,11 @@ extension TranscriptionWorkRecord {
         sourceTriggerPredecessor = try c.decodeIfPresent(SourceLanguagePolicy.TriggerState.self, forKey: .sourceTriggerPredecessor)
         sourceTriggerDecision = try c.decodeIfPresent(SourceLanguagePolicy.Decision.self, forKey: .sourceTriggerDecision)
         sourceTriggerAfter = try c.decodeIfPresent(SourceLanguagePolicy.TriggerState.self, forKey: .sourceTriggerAfter)
+        sourceTriggerPendingBoundary = try c.decodeIfPresent(Bool.self, forKey: .sourceTriggerPendingBoundary)
         sourceProbeInput = try c.decodeIfPresent(SourceLanguagePolicy.ProbeInput.self, forKey: .sourceProbeInput)
         sourceProbeFinished = try c.decodeIfPresent(Bool.self, forKey: .sourceProbeFinished)
         sourceRevisionAllowed = try c.decodeIfPresent(Bool.self, forKey: .sourceRevisionAllowed)
+        sourceInitialEnglishDigest = try c.decodeIfPresent(String.self, forKey: .sourceInitialEnglishDigest)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -179,9 +195,11 @@ extension TranscriptionWorkRecord {
         try c.encodeIfPresent(sourceTriggerPredecessor, forKey: .sourceTriggerPredecessor)
         try c.encodeIfPresent(sourceTriggerDecision, forKey: .sourceTriggerDecision)
         try c.encodeIfPresent(sourceTriggerAfter, forKey: .sourceTriggerAfter)
+        try c.encodeIfPresent(sourceTriggerPendingBoundary, forKey: .sourceTriggerPendingBoundary)
         try c.encodeIfPresent(sourceProbeInput, forKey: .sourceProbeInput)
         try c.encodeIfPresent(sourceProbeFinished, forKey: .sourceProbeFinished)
         try c.encodeIfPresent(sourceRevisionAllowed, forKey: .sourceRevisionAllowed)
+        try c.encodeIfPresent(sourceInitialEnglishDigest, forKey: .sourceInitialEnglishDigest)
     }
 }
 
@@ -363,6 +381,10 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
         if state.capturing { try setCapturing(false) }
         for var record in state.records where record.status == .active {
             if record.sourceProbeInput != nil, record.sourceProbeFinished != true { continue }
+            if record.hasProvisionalInitialEnglish, record.sourceProbeInput == nil {
+                record.status = .pending; record.failure = nil; record.failureReason = nil
+                try put(record); continue
+            }
             if record.interruptedRetryStaysOtherLanguage { record.status = .otherLanguage; try put(record); continue }
             record.status = record.attempt == .automaticRetry
                 ? (record.automaticRetryCount < Self.maximumAutomaticRetries ? .retryWaiting : .failed)
@@ -596,7 +618,8 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             // indefinitely overtake an older automatic retry with budget left.
             let candidate = state.records.first { $0.status == .pending }
                 ?? state.records.first {
-                    ($0.sourceProbeInput == nil || $0.sourceProbeFinished == true) && ($0.status == .manualPending
+                    $0.sourceTriggerPendingBoundary != true
+                    && ($0.sourceProbeInput == nil || $0.sourceProbeFinished == true) && ($0.status == .manualPending
                         || ($0.status == .retryWaiting && $0.automaticRetryCount < Self.maximumAutomaticRetries)
                     )
                 }
