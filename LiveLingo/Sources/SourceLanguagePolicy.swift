@@ -63,6 +63,12 @@ enum SourceLanguagePolicy {
         var selected: Bool { baseEligible || followup }
     }
 
+    struct ProbeInput: Equatable, Codable, Sendable {
+        let parakeetAccepted: Bool
+        let mean: Double?
+        let minimum: Double?
+    }
+
     struct Decision: Equatable, Codable, Sendable {
         let selected: Bool
         let baseEligible: Bool

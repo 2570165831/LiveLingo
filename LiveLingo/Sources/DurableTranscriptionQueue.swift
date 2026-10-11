@@ -14,6 +14,8 @@ struct TranscriptionCommit: Sendable {
     let hints: [AuxiliaryTranslationHint]
     let isRepair: Bool
     var language: String? = nil
+    /// Only the first pass may revise its own provisional English caption.
+    var replacingInitialText: String? = nil
 }
 
 struct TranscriptionCandidate: Sendable {
@@ -29,7 +31,7 @@ struct TranscriptionCandidate: Sendable {
     var language: String? = nil
 }
 
-/// Disk-backed work with one serial pump and at most one active ASR task.
+/// Disk-backed formal work plus one ordered, yielding language-refinement pump.
 /// The capture consumer persists a descriptor synchronously, then wakes this
 /// pump. No Task or decoded PCM is retained for waiting chunks.
 final class DurableTranscriptionQueue: @unchecked Sendable {
@@ -55,6 +57,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         var otherLanguage = false
         // Runtime-only causal metadata; preserve legacy Outcome/archive bytes.
         var sourceDecision: SourceLanguagePolicy.Decision?
+        var sourceInput: SourceLanguagePolicy.ProbeInput?
         private enum CodingKeys: String, CodingKey {
             case text, language, silent, candidate, origin, failureReason, otherLanguage
         }
@@ -66,6 +69,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     private var active: Task<Outcome, Error>?
     private var activeRecord: TranscriptionWorkRecord?
     private var activeWasPreempted = false
+    private var sourceWorker: Task<Void, Never>?
+    private var sourceActive: Task<Outcome, Error>?
     private var recentFormulaContext = ""
     private var storageFailure: String?
 
@@ -160,6 +165,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 }
                 try context.journal.put(record)
                 try context.journal.clearCaptureMarker(id: record.id)
+                // An optional head/body cannot hold the foreground pump. Its
+                // request keeps its coordinator lease until actual service exit.
+                sourceActive?.cancel()
                 // Captions arriving during an optional repair take precedence.
                 // Cancellation is joined by the existing worker before its next claim.
                 if let activeRecord, activeRecord.attempt != .initial {
@@ -206,9 +214,11 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     }
     func pause() async throws {
         try requestPause()
-        let tasks = lock.withLock { (worker, active) }
+        let tasks = lock.withLock { (worker, active, sourceWorker, sourceActive) }
         _ = await tasks.1?.result
+        _ = await tasks.3?.result
         await tasks.0?.value
+        await tasks.2?.value
         publishState()
     }
     func requestPause() throws {
@@ -218,6 +228,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                                    identified: context.identified, handler: context.handler,
                                    sourceTrigger: context.sourceTrigger)
             active?.cancel()
+            sourceActive?.cancel()
             do {
                 try context.journal.setPaused(true)
                 try context.journal.requeueActive()
@@ -244,6 +255,11 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 throw DurableTranscriptionJournal.JournalError.corrupt("只实时会话已结束，不能重试。")
             }
             try context?.journal.retry(id: id)
+            if let context, var record = context.journal.record(id: id),
+               record.sourceProbeInput != nil, record.sourceProbeFinished != true {
+                record.sourceRevisionAllowed = false
+                try context.journal.put(record)
+            }
             context?.attempts.remove(id: id)
         }
         publishState(); wake()
@@ -251,8 +267,16 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     func finish(sessionID: UUID? = nil) async {
         guard let owner = lock.withLock({ context }),
               sessionID == nil || sessionID == owner.journal.sessionID else { return }
-        while let task = lock.withLock({ context?.generation == owner.generation ? worker : nil }) {
-            await task.value
+        while let tasks = lock.withLock({ () -> (Task<Void, Never>?, Task<Void, Never>?)? in
+            guard context?.generation == owner.generation else { return nil }
+            // A completed worker hands off to the other lane. Schedule and
+            // observe that handoff under one lock before deciding to return.
+            wake()
+            guard worker != nil || sourceWorker != nil else { return nil }
+            return (worker, sourceWorker)
+        }) {
+            await tasks.0?.value
+            await tasks.1?.value
         }
         // A generation switch may already have started another worker. Only
         // checkpoint the original journal; never wait for or fail the new one.
@@ -279,7 +303,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     /// volatile sessions release their in-memory transcript and candidate copy.
     func discardVolatileContentAfterCancellation() {
         lock.withLock {
-            guard context?.persistent == false, worker == nil, active == nil else { return }
+            guard context?.persistent == false, worker == nil, active == nil,
+                  sourceWorker == nil, sourceActive == nil else { return }
             context = nil
             activeRecord = nil
             recentFormulaContext = ""
@@ -292,6 +317,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         try lock.withLock {
             guard let context, var record = context.journal.record(id: id) else { return }
             record.text = text
+            record.sourceRevisionAllowed = false
             try context.journal.put(record)
         }
     }
@@ -312,6 +338,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             }
             record.text = originalText
             record.textLanguage = originalLanguage
+            record.sourceRevisionAllowed = false
             record.candidateText = candidateText
             record.candidateLanguage = candidateLanguage
             record.candidateOrigin = "sameRangeRevision"
@@ -510,7 +537,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     private func retireCompletedAudio(_ journal: DurableTranscriptionJournal) throws {
         guard !journal.processingState.isCapturing else { return }
         for var record in journal.records where (record.status == .completed || record.status == .silent)
-            && record.candidateText == nil && record.audioRetired != true {
+            && record.candidateText == nil && record.audioRetired != true
+            && (record.sourceProbeInput == nil || record.sourceProbeFinished == true) {
             guard let recording = try journal.recordingURL(for: record) else { continue }
             let chunk = try journal.audioURL(for: record)
             guard FileManager.default.fileExists(atPath: chunk.path),
@@ -588,11 +616,17 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     }
     private func wake() {
         lock.withLock {
-            guard worker == nil, storageFailure == nil,
-                  let context, !context.journal.isPaused, context.journal.records.contains(where: \.needsWork) else { return }
-            worker = Task { [weak self] in
-                guard let self else { return }
-                await self.run(generation: context.generation)
+            guard storageFailure == nil, let context, !context.journal.isPaused else { return }
+            let records = context.journal.records
+            if worker == nil, records.contains(where: {
+                $0.status == .pending || (($0.sourceProbeInput == nil || $0.sourceProbeFinished == true)
+                    && [.retryWaiting, .manualPending].contains($0.status))
+            }) {
+                worker = Task { [weak self] in await self?.run(generation: context.generation) }
+            }
+            if sourceWorker == nil, worker == nil,
+               records.contains(where: { $0.sourceProbeInput != nil && $0.sourceProbeFinished != true }) {
+                sourceWorker = Task { [weak self] in await self?.runSources(generation: context.generation) }
             }
         }
     }
@@ -600,7 +634,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     static func restoredSourceTrigger(_ records: [TranscriptionWorkRecord]) -> SourceLanguagePolicy.TriggerState {
         // A legacy or interrupted newer ordinal is a causal boundary. Never
         // skip it to resurrect an older candidate, or infer from saved bodies.
-        let processed = records.filter { $0.sourceTriggerAfter != nil || ($0.status != .pending && $0.status != .manualPending) }
+        let processed = records.filter { $0.sourceTriggerAfter != nil
+            || ($0.sourceProbeInput == nil && $0.status != .pending && $0.status != .manualPending) }
         return processed.max(by: { $0.ordinal < $1.ordinal })?.sourceTriggerAfter ?? .init()
     }
 
@@ -636,8 +671,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         worker = nil; active = nil; activeRecord = nil
                         return nil
                     }
-                    if record.sourceTriggerPredecessor == nil {
-                        record.sourceTriggerPredecessor = record.attempt == .initial ? context.sourceTrigger : .init()
+                    if record.attempt != .initial, record.sourceTriggerPredecessor == nil {
+                        record.sourceTriggerPredecessor = .init()
                         try context.journal.put(record)
                     }
                     let claimed = record
@@ -648,6 +683,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         try await Self.recognize(claimed, audioURL: url, recordingURL: recording,
                                                  formulaContext: formulaContext, attempts: context.attempts,
                                                  sourceTrigger: claimed.sourceTriggerPredecessor ?? .init(),
+                                                 deferSource: claimed.attempt == .initial,
                                                  transcriber: transcriber,
                                                  commitEnglish: { output in
                                                      try self.commitEnglishBeforeProbe(output, record: claimed, generation: token)
@@ -705,7 +741,11 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         // Only completed initial passes advance the live stream.
                         // Repeated repairs of one ordinal must not confirm itself
                         // or disrupt the next live segment's causal predecessor.
-                        try preserveInitialDecision(output.sourceDecision, record: &record, owner: owner)
+                        if let input = output.sourceInput {
+                            record.sourceProbeInput = input; record.sourceProbeFinished = false
+                            record.sourceRevisionAllowed = record.sourceRevisionAllowed != false
+                                && claimed.text?.isEmpty != false
+                        } else { try preserveInitialDecision(output.sourceDecision, record: &record, owner: owner) }
                         let alreadyDelivered = record.text?.isEmpty == false
                         if let candidate = output.candidate {
                             record.candidateText = candidate; record.candidateOrigin = output.origin
@@ -723,6 +763,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             } else { record.text = output.text; record.textLanguage = output.language }
                             record.status = .completed; record.failure = nil; record.failureReason = nil
                             if output.language == nil { recentFormulaContext = String(output.text.suffix(1000)) }
+                        } else if output.sourceInput != nil {
+                            // No usable English yet. The optional source pass
+                            // owns this range; do not spend repair budget early.
+                            record.status = .active; record.failureReason = output.failureReason
                         } else if output.otherLanguage {
                             record.status = .otherLanguage
                             record.failure = "此处为\(SavedProcessingPresentation.untranscribedSpeech)，音频已保留，可手动重试。"
@@ -757,13 +801,116 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             publishState()
         }
     }
+    private func runSources(generation token: UUID) async {
+        while true {
+            let lease: (Context, TranscriptionWorkRecord, Task<Outcome, Error>)?
+            do {
+                lease = try lock.withLock {
+                    guard storageFailure == nil, let owner = context, owner.generation == token,
+                          !owner.journal.isPaused, worker == nil,
+                          var record = owner.journal.records.filter({
+                              $0.sourceProbeInput != nil && $0.sourceProbeFinished != true
+                          }).min(by: { $0.ordinal < $1.ordinal }), let input = record.sourceProbeInput else {
+                        sourceWorker = nil; sourceActive = nil
+                        return nil
+                    }
+                    // Resolve causality in ordinal order, never from the most
+                    // recently delivered foreground caption or a repair.
+                    if record.sourceTriggerPredecessor == nil {
+                        record.sourceTriggerPredecessor = owner.sourceTrigger
+                        try owner.journal.put(record)
+                    }
+                    let claimed = record
+                    let url = try Self.materializeAudio(record, journal: owner.journal)
+                    let task = Task { [transcriber] in
+                        try await Self.recognize(claimed, audioURL: url, recordingURL: nil,
+                            formulaContext: "", attempts: owner.attempts,
+                            sourceTrigger: claimed.sourceTriggerPredecessor ?? .init(), sourceOnly: input,
+                            transcriber: transcriber, preserveDecision: { decision in
+                                try self.lock.withLock {
+                                    guard self.context?.generation == token,
+                                          var current = owner.journal.record(id: claimed.id) else { return }
+                                    try self.preserveInitialDecision(decision, record: &current, owner: owner)
+                                }
+                            })
+                    }
+                    sourceActive = task
+                    return (owner, claimed, task)
+                }
+            } catch {
+                lock.withLock { sourceWorker = nil; sourceActive = nil }
+                failStorage(error, generation: token); return
+            }
+            guard let (owner, claimed, task) = lease else { wake(); return }
+            let result = await task.result
+            do {
+                try lock.withLock {
+                    sourceActive = nil
+                    guard context?.generation == token else { return }
+                    // Yielding is not a failed head and must not clear the chain.
+                    // A successful persisted head may resume body-only work.
+                    guard !task.isCancelled else { return }
+                    guard var record = owner.journal.record(id: claimed.id) else { return }
+                    record.sourceProbeFinished = true
+                    switch result {
+                    case .success(let output):
+                        try preserveInitialDecision(output.sourceDecision, record: &record, owner: owner)
+                        if !output.text.isEmpty, let language = output.language {
+                            let previous = record.text
+                            let canReplace = record.sourceRevisionAllowed == true
+                                && record.text == claimed.text && record.textLanguage == nil
+                            if previous?.isEmpty != false || canReplace {
+                                record.text = output.text; record.textLanguage = language
+                                record.status = .completed; record.failure = nil; record.failureReason = nil
+                                // Alternate English suggestions from this first
+                                // pass are superseded by the confirmed source.
+                                if record.candidateOrigin == "alternateModel" {
+                                    record.candidateText = nil; record.candidateLanguage = nil; record.candidateOrigin = nil
+                                }
+                                try owner.journal.put(record)
+                                emitCommit(record, text: output.text, repair: false,
+                                    replacingInitialText: canReplace ? previous : nil)
+                            } else {
+                                record.candidateText = output.text; record.candidateLanguage = language
+                                record.candidateOrigin = "sameRangeRevision"
+                                try owner.journal.put(record); emitCandidate(record)
+                            }
+                        } else {
+                            if record.text?.isEmpty != false, record.status != .silent {
+                                markFailure(&record, message: "此处尚未得到可靠的转写，音频已保留。", reason: output.failureReason)
+                            }
+                            try owner.journal.put(record)
+                        }
+                    case .failure:
+                        try preserveInitialDecision(nil, record: &record, owner: owner)
+                        if record.text?.isEmpty != false, record.status != .silent {
+                            markFailure(&record, message: "本机转写失败；音频已保留。", reason: .error)
+                        }
+                        try owner.journal.put(record)
+                    }
+                    if !record.needsWork { owner.attempts.remove(id: record.id) }
+                    if let failure = record.failure {
+                        let recording = record.recordingFile.map {
+                            owner.journal.directory.deletingLastPathComponent().appendingPathComponent($0)
+                        }
+                        RecordingDiagnostics.append(recordingURL: recording, event: "transcription_missing",
+                            start: record.start, end: record.end, detail: failure, reason: record.failureReason)
+                        owner.handler(.transcriptionIssue(start: record.start, end: record.end, message: failure))
+                    }
+                }
+            } catch { failStorage(error, generation: token) }
+            publishState()
+        }
+    }
+
     private func markFailure(_ record: inout TranscriptionWorkRecord, message: String,
                              reason: TranscriptionWorkRecord.FailureReason?) {
         record.failure = message
         record.failureReason = reason
         record.status = record.automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries ? .retryWaiting : .failed
     }
-    private func emitCommit(_ record: TranscriptionWorkRecord, text: String, repair: Bool) {
+    private func emitCommit(_ record: TranscriptionWorkRecord, text: String, repair: Bool,
+                            replacingInitialText: String? = nil) {
         lock.withLock {
             guard let context, context.journal.sessionID == record.sessionID else { return }
             let hints = record.textLanguage == nil
@@ -772,7 +919,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 context.handler(.identifiedFinal(TranscriptionCommit(id: record.id, sessionID: record.sessionID,
                     text: text, start: record.start, end: record.end, startFrame: record.startFrame,
                     endFrame: record.endFrame, sampleRate: record.sampleRate, hints: hints, isRepair: repair,
-                    language: record.textLanguage)))
+                    language: record.textLanguage, replacingInitialText: replacingInitialText)))
             } else { context.handler(.final(text: text, start: record.start, end: record.end, hints: hints,
                                            language: record.textLanguage)) }
         }
@@ -801,17 +948,23 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             guard storageFailure == nil else { return }
             storageFailure = "转写工作记录无法保存（\(LearningFailureCode.code(for: error))）"
             active?.cancel()
+            sourceActive?.cancel()
             (context?.handler ?? fallbackHandler)?(.failure("转写工作记录无法保存：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"))
         }
     }
     static func recognize(_ record: TranscriptionWorkRecord, audioURL: URL, recordingURL: URL?,
                                   formulaContext: String, attempts: TranscriptionAttemptCache,
                                   sourceTrigger: SourceLanguagePolicy.TriggerState = .init(),
+                                  deferSource: Bool = false,
+                                  sourceOnly: SourceLanguagePolicy.ProbeInput? = nil,
                                   transcriber: Transcriber,
                                   commitEnglish: @Sendable (Outcome) throws -> Void = { _ in },
                                   preserveDecision: @Sendable (SourceLanguagePolicy.Decision) throws -> Void = { _ in }) async throws -> Outcome {
         try Task.checkCancellation()
-        if try DigitalSilenceGate.isSilent(audioURL) { return Outcome(silent: true) }
+        if sourceOnly == nil, try DigitalSilenceGate.isSilent(audioURL) {
+            return Outcome(silent: true, sourceInput: deferSource
+                ? .init(parakeetAccepted: true, mean: nil, minimum: nil) : nil)
+        }
         let attemptNonce = UUID()
         func recognizeStage(_ url: URL, model: String, enhance: Bool, stage: String,
                             mode: ASRLanguageMode = .english) async throws -> ASRTranscription {
@@ -850,25 +1003,30 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         var primary = ""
         var primaryResult: ASRTranscription?
         var primaryError: Error?
-        do {
+        if sourceOnly != nil { primary = record.text ?? "" }
+        else { do {
             primaryResult = try await recognizeStage(audioURL, model: record.modelKey,
                 enhance: record.attempt != .initial, stage: "primary")
             primary = primaryResult?.text ?? ""
         }
         catch is CancellationError { throw CancellationError() }
         catch { primaryError = error }
+        }
         try Task.checkCancellation()
         let usable = SpeechPipeline.preferredTranscript(primary: primary, fallback: "", audioDuration: record.duration)
         let formula = FormulaASRReview.needsReview(primary, context: formulaContext)
-        let needsFallback = primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)
-            || ASRQualityGate.fallbackReason(for: primary, audioDuration: record.duration) != nil
-        let plan = sourceTrigger.plan(index: record.ordinal, parakeetAccepted: !usable.isEmpty,
-            mean: primaryResult?.parakeetMeanProbability, minimum: primaryResult?.parakeetMinProbability)
+        let needsFallback = sourceOnly == nil && (primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)
+            || ASRQualityGate.fallbackReason(for: primary, audioDuration: record.duration) != nil)
+        let input = sourceOnly ?? SourceLanguagePolicy.ProbeInput(parakeetAccepted: !usable.isEmpty,
+            mean: primaryResult?.parakeetMeanProbability.flatMap { $0.isFinite ? $0 : nil },
+            minimum: primaryResult?.parakeetMinProbability.flatMap { $0.isFinite ? $0 : nil })
+        let plan = sourceTrigger.plan(index: record.ordinal, parakeetAccepted: input.parakeetAccepted,
+            mean: input.mean, minimum: input.minimum)
         var output = Outcome(text: usable)
         output.sourceDecision = SourceLanguagePolicy.decide(plan, language: nil, probability: nil,
             englishProbability: nil, probeFailed: plan.selected)
         if usable.isEmpty {
-            output.failureReason = primaryError == nil
+            output.failureReason = sourceOnly != nil ? record.failureReason : primaryError == nil
                 ? .rejection(of: primary, audioDuration: record.duration) : .error
         }
         var fallbackVerdict: EnglishTranscriptGate.Verdict?
@@ -891,14 +1049,22 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 if output.text.isEmpty { primaryError = error; output.failureReason = .error }
             }
         }
-        if plan.selected, let model = record.fallbackModelKey {
+        if deferSource {
+            output.sourceDecision = nil; output.sourceInput = input
+            return output
+        }
+        if plan.selected, let model = record.fallbackModelKey, record.status != .silent {
             if !output.text.isEmpty { try commitEnglish(output) }
             do {
-                let head = try await recognizeStage(audioURL, model: model, enhance: false, stage: "languageProbe", mode: .probe)
-                let decision = SourceLanguagePolicy.decide(plan,
+                let decision: SourceLanguagePolicy.Decision
+                if sourceOnly != nil, let saved = record.sourceTriggerDecision { decision = saved }
+                else {
+                    let head = try await recognizeStage(audioURL, model: model, enhance: false, stage: "languageProbe", mode: .probe)
+                    decision = SourceLanguagePolicy.decide(plan,
                     language: SpokenLanguage.all.first { $0.qwenLabel == head.detectedLabel }?.code,
                     probability: head.languageProbability, englishProbability: head.englishProbability,
                     probeFailed: head.languageMode != .probe || head.policy != 1 || head.detectedLabel == nil)
+                }
                 output.sourceDecision = decision
                 // Persist the head independently of optional body success.
                 try preserveDecision(decision)

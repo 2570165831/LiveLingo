@@ -1008,7 +1008,9 @@ class Handler(BaseHTTPRequestHandler):
             started = time.monotonic()
             log_id = uuid.uuid4().hex
             RequestLog.emit(f"ASR request id={log_id} model={model_key} bytes={size}")
-            submit = INFERENCE_WORKER.submit_probe if language_mode == "probe" else INFERENCE_WORKER.submit
+            # Confirmed source bodies are optional refinements of an already
+            # delivered caption. Fresh formal ASR also overtakes queued bodies.
+            submit = INFERENCE_WORKER.submit_probe if language_mode == "probe" or confirmed_language is not None else INFERENCE_WORKER.submit
             arguments = (request_id, model_input_path, model_key, language_mode, temporary_path)
             if confirmed_language is not None:
                 arguments += (confirmed_language,)

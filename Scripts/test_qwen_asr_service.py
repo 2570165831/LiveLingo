@@ -657,6 +657,69 @@ class ServiceResponsivenessTests(unittest.TestCase):
         self.assertEqual(args[0], args[3])
         self.assertEqual(args[2], 'probe')
 
+    def test_confirmed_source_body_http_yields_to_new_formal_transcription(self):
+        executor = service.PriorityInferenceExecutor()
+        self.addCleanup(executor.shutdown, wait=True, cancel_futures=True)
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        queued = {'confirmed-body': threading.Event(), 'new-formal': threading.Event()}
+        routes, order = {}, []
+        body = self.synthetic_handler('model=1.7b&language=auto&confirmed_language=es')
+        body.headers['X-LiveLingo-Request-ID'] = 'confirmed-body'
+        formal = self.synthetic_handler('model=parakeet')
+        formal.headers['X-LiveLingo-Request-ID'] = 'new-formal'
+
+        def blocker():
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('synthetic inference blocker was not released')
+
+        def track(submit, priority):
+            def enqueue(function, *args, **kwargs):
+                future = submit(function, *args, **kwargs)
+                if function is service.run_registered_transcription:
+                    routes[args[0]] = priority
+                    queued[args[0]].set()
+                return future
+            return enqueue
+
+        def transcribe(path, model, language_mode=None, raw_path=None, confirmed=None):
+            if confirmed is not None:
+                self.assertEqual((model, language_mode, confirmed), ('1.7b', 'auto', 'es'))
+                order.append('confirmed-body')
+                return {'text': 'synthetic source body', 'language_mode': 'auto',
+                        'language': 'es', 'decode': 'detected', 'detected_label': 'Spanish',
+                        'language_probability': .99, 'english_probability': .001,
+                        'generated_tokens': 1, 'truncated': False, 'policy': 1}
+            self.assertEqual((model, language_mode), ('parakeet', None))
+            order.append('new-formal')
+            return 'synthetic formal body'
+
+        with patch.object(service, 'INFERENCE_WORKER', executor), \
+             patch.object(service, 'transcribe_audio', side_effect=transcribe), \
+             patch.object(executor, 'submit', side_effect=track(executor.submit, 'formal')), \
+             patch.object(executor, 'submit_probe', side_effect=track(executor.submit_probe, 'optional')):
+            active = executor.submit(blocker)
+            self.assertTrue(entered.wait(1))
+            with ThreadPoolExecutor(max_workers=2) as requests:
+                try:
+                    body_request = requests.submit(body.do_POST)
+                    self.assertTrue(queued['confirmed-body'].wait(2), 'body was not admitted')
+                    with service.MODEL_STATE_LOCK:
+                        self.assertEqual(service.REQUEST_STATES['confirmed-body']['state'], 'waiting')
+                    formal_request = requests.submit(formal.do_POST)
+                    self.assertTrue(queued['new-formal'].wait(2), 'formal was not admitted')
+                finally:
+                    release.set()
+                active.result(timeout=2)
+                body_request.result(timeout=2)
+                formal_request.result(timeout=2)
+        self.assertEqual(order, ['new-formal', 'confirmed-body'])
+        self.assertEqual(routes, {'confirmed-body': 'optional', 'new-formal': 'formal'})
+        for handler in (body, formal):
+            self.assertEqual(handler.send_json.call_args.args[0], 200)
+        self.assertEqual(body.send_json.call_args.args[1]['language'], 'es')
+
     def test_idle_unload_keeps_active_and_waiting_model_owners(self):
         class FakeModel: pass
         unused = FakeModel()

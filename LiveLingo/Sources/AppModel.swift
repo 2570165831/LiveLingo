@@ -1023,6 +1023,9 @@ final class AppModel: ObservableObject {
     private var releasedOutputLanguage: (String) -> OutputLanguage? = OutputLanguage.releasedLanguage
     private var translationWorkerID: UUID?
     private var translationQueue: [UUID] = []
+    // Runtime proof of an untouched first delivery. Restored pending source
+    // work needs separate durable provenance; edit-back revokes permission.
+    private var initialSourceRevisionInputs: [UUID: TranscriptSegment] = [:]
     private var pendingCaptionRepairs: [DeferredCaptionRepair] = []
     private var hasPendingTranslationWork: Bool { !translationQueue.isEmpty || !pendingCaptionRepairs.isEmpty }
     private var translationEnqueuedAt: [UUID: TimeInterval] = [:]
@@ -2036,6 +2039,7 @@ final class AppModel: ObservableObject {
         translatingSegmentID = nil
         clearTranslationPreview()
         segments = []
+        initialSourceRevisionInputs = [:]
         resetLearningNotes()
         lectureSummary = ""
         latestSummaryUpdate = ""
@@ -2410,6 +2414,7 @@ final class AppModel: ObservableObject {
                         }
                     }
                 transcriptionProcessing = pipeline.transcriptionState()
+                restoreInitialSourceRevisionInputs()
             } catch {
                 archiveError = "课程正文已打开；补转队列恢复失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
@@ -2479,6 +2484,16 @@ final class AppModel: ObservableObject {
             translationHints.removeValue(forKey: next.id)
         }
         next.inputRevision = nextRevision
+        if previous.english != next.english || previous.sourceLanguage != next.sourceLanguage {
+            initialSourceRevisionInputs.removeValue(forKey: previous.id)
+        } else if var initial = initialSourceRevisionInputs[previous.id],
+                  initial.inputRevision == previous.inputRevision,
+                  initial.english == previous.english, initial.sourceLanguage == previous.sourceLanguage {
+            // Adjacent translation repairs revise the caption version, while
+            // leaving the original first-pass source permission intact.
+            initial.inputRevision = nextRevision
+            initialSourceRevisionInputs[previous.id] = initial
+        }
         let retained = learningNotebook.batches.filter { $0.ids.contains(previous.id) }
         let change = SessionInputRevision(fromRevision: nextRevision - 1, toRevision: nextRevision,
             previousSegment: previous, replacementSegment: next, retainedBatches: retained, reason: reason,
@@ -2546,6 +2561,7 @@ final class AppModel: ObservableObject {
         translatingSegmentID = nil
         clearTranslationPreview()
         segments = []
+        initialSourceRevisionInputs = [:]
         lectureSummary = ""
         latestSummaryUpdate = ""
         summaryCycleIDs = nil
@@ -2987,6 +3003,7 @@ final class AppModel: ObservableObject {
                             self.consume(event)
                         }
                     }
+                    restoreInitialSourceRevisionInputs()
                 }
                 guard sessionID == identity, generation == epoch else { return }
                 if let retryID { try pipeline.retryTranscription(id: retryID) }
@@ -3108,6 +3125,33 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Restore proof while the queue is still parked, before source work can
+    /// finish and change its comparison text. Legacy records cannot qualify.
+    private func restoreInitialSourceRevisionInputs() {
+        guard let snapshot = sessionSnapshot, snapshot.sessionID == sessionID,
+              pipeline.transcriptionState()?.sessionID == sessionID else { return }
+        for record in pipeline.transcriptionWork() {
+            guard record.sessionID == sessionID, record.attempt == .initial,
+                  record.sourceProbeInput != nil, record.sourceProbeFinished != true,
+                  record.sourceRevisionAllowed == true, record.textLanguage == nil,
+                  let archived = snapshot.segments.first(where: { $0.id == record.id }),
+                  let current = segments.first(where: { $0.id == record.id }),
+                  archived.sessionID == sessionID, current.sessionID == sessionID,
+                  archived.sourceLanguage == nil, current.sourceLanguage == nil,
+                  !current.english.isEmpty, record.text == current.english,
+                  archived.english == current.english, archived.inputRevision == current.inputRevision,
+                  archived.startTime == record.start, archived.endTime == record.end,
+                  current.startTime == record.start, current.endTime == record.end,
+                  !snapshot.revisionHistory.contains(where: {
+                      $0.previousSegment.id == record.id &&
+                          ($0.previousSegment.english != $0.replacementSegment.english
+                              || $0.previousSegment.sourceLanguage != $0.replacementSegment.sourceLanguage)
+                  }) else { continue }
+            initialSourceRevisionInputs[record.id] = current
+        }
+    }
+
+    /// Saved source edits revoke provisional replacement even after edit-back.
     /// An edited candidate keeps the archived source language. The queue's
     /// unedited-candidate reconciliation requires the candidate language, so
     /// retire explicit edits using its existing text and dismissal operations.
@@ -3122,6 +3166,37 @@ final class AppModel: ObservableObject {
             journal = try DurableTranscriptionJournal(sessionDirectory: directory, sessionID: snapshot.sessionID)
         } else { journal = nil }
         for record in journal?.records ?? pipeline.transcriptionWork() {
+            // Ordinary body revisions have no candidate-consent marker. Only
+            // an acknowledged snapshot may update the queue comparison text;
+            // an automatic language change already belongs to its source commit.
+            let changes = snapshot.revisionHistory.filter { $0.previousSegment.id == record.id }
+            if record.sessionID == snapshot.sessionID, let change = changes.last,
+               change.transcriptionCandidateText == nil,
+               let body = snapshot.segments.first(where: { $0.id == record.id }),
+               body.inputRevision == change.toRevision,
+               body.english == change.replacementSegment.english,
+               body.sourceLanguage == change.replacementSegment.sourceLanguage,
+               record.textLanguage == body.sourceLanguage,
+               // The saver may coalesce several edits, followed by translation
+               // repairs. Find the journal's source anchor across that history;
+               // the final revision still has to describe the saved body.
+               changes.contains(where: {
+                   $0.transcriptionCandidateText == nil
+                       && $0.previousSegment.english != $0.replacementSegment.english
+                       && $0.previousSegment.sourceLanguage == $0.replacementSegment.sourceLanguage
+                       && $0.previousSegment.sourceLanguage == record.textLanguage
+                       && (record.text == $0.previousSegment.english || record.text == $0.replacementSegment.english)
+               }),
+               record.text != body.english || record.sourceRevisionAllowed != false {
+                if let journal {
+                    var retained = record
+                    retained.text = body.english
+                    retained.sourceRevisionAllowed = false
+                    try journal.put(retained)
+                } else {
+                    try pipeline.retainExistingTranscript(id: record.id, text: body.english)
+                }
+            }
             guard record.sessionID == snapshot.sessionID, let candidate = record.candidateText,
                   let change = snapshot.revisionHistory.last(where: {
                       $0.previousSegment.id == record.id && $0.transcriptionCandidateText == candidate
@@ -3253,7 +3328,33 @@ final class AppModel: ObservableObject {
                 endTime: end, english: text, sessionID: sessionID, sourceLanguage: language), hints: hints)
         case .identifiedFinal(let result):
             guard result.sessionID == sessionID else { return }
-            if let existing = segments.first(where: { $0.id == result.id }) {
+            if let index = segments.firstIndex(where: { $0.id == result.id }) {
+                let existing = segments[index]
+                if let initialText = result.replacingInitialText, !result.isRepair,
+                   SpokenLanguage.nonEnglishCode(result.language) != nil,
+                   let initial = initialSourceRevisionInputs[result.id],
+                   initial.sessionID == result.sessionID, existing.sessionID == result.sessionID,
+                   initial.startTime == result.start, initial.endTime == result.end,
+                   existing.startTime == result.start, existing.endTime == result.end,
+                   initial.english == initialText, existing.english == initialText,
+                   initial.sourceLanguage == nil, existing.sourceLanguage == nil,
+                   initial.inputRevision == existing.inputRevision {
+                    let replacement = TranscriptSegment(id: existing.id, startTime: existing.startTime,
+                        endTime: existing.endTime, english: result.text, sessionID: existing.sessionID,
+                        sourceLanguage: result.language)
+                    translationHints.removeValue(forKey: existing.id)
+                    replaceExistingSegment(at: index, with: replacement, reason: "首轮原语确认修订")
+                    volatileEnglish = ""
+                    markCaptionActivity()
+                    updateReviewAvailability()
+                    yieldSummaryToCaptions()
+                    if !processingPaused { drainTranslationQueue() }
+                    if segments[index].hasUsableTranslation {
+                        liveChinese = segments[index].chinese
+                        scheduleSummaryRefresh(force: summaryRefreshRequested)
+                    }
+                    return
+                }
                 // A repeated delivery from the same disk range is idempotent.
                 // A conflicting result stays a candidate, never a silent edit.
                 if existing.english != result.text || existing.sourceLanguage != result.language {
@@ -3266,9 +3367,13 @@ final class AppModel: ObservableObject {
                 }
                 return
             }
-            appendConfirmedCaption(TranscriptSegment(id: result.id, startTime: result.start,
+            let initial = TranscriptSegment(id: result.id, startTime: result.start,
                 endTime: result.end, english: result.text, sessionID: result.sessionID,
-                inputRevision: sessionSnapshot?.inputRevision ?? 0, sourceLanguage: result.language), hints: result.hints)
+                inputRevision: sessionSnapshot?.inputRevision ?? 0, sourceLanguage: result.language)
+            if !result.isRepair, result.replacingInitialText == nil, result.language == nil {
+                initialSourceRevisionInputs[result.id] = initial
+            }
+            appendConfirmedCaption(initial, hints: result.hints)
         case .processing(let state):
             guard state.sessionID == sessionID else { return }
             transcriptionProcessing = state

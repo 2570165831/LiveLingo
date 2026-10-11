@@ -94,6 +94,7 @@ final class ResourceSchedulingTests: XCTestCase {
                                "generated_tokens": 4, "truncated": false]) { _, new in new }
             } else {
                 XCTAssertEqual(mode, "probe")
+                XCTAssertEqual(request.timeoutInterval, 10, "Optional language heads have their own short deadline")
                 XCTAssertNil(query.first { $0.name == "confirmed_language" })
             }
             return .init(data: try JSONSerialization.data(withJSONObject: payload), status: 200)

@@ -229,7 +229,7 @@ actor ASRRequestCoordinator {
         guard let url = components?.url else { throw QwenRuntimeError.invalidResponse }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 120
+        request.timeoutInterval = language == .probe ? 10 : 120
         request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
         request.setValue(requestID, forHTTPHeaderField: "X-LiveLingo-Request-ID")
         Self.authorize(&request, endpoint)
