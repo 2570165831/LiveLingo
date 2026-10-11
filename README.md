@@ -19,7 +19,9 @@
 
 ## 下载
 
-**[下载 0.2.0（GitHub 发布页）](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0)**：下载页面 Assets 里全部 8 个分卷，按页面上的合并说明合成一个约 14.3 GB 的 `.dmg`。单个分卷不能安装；发布页下方的 `Source code` 是源码，不是安装包。
+**[下载 0.2.0 完整安装包（Google Drive）](https://drive.google.com/file/d/1u3kZCPAO5diOuqnG5sNEwd8LJBudK1Gp/view)**：一个约 14.3 GB 的 `.dmg`，下载后直接打开安装。
+
+也可以从 [GitHub 发布页](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0) 下载：Assets 里全部 8 个分卷，按页面上的合并说明合成同一个 `.dmg`。单个分卷不能安装；发布页下方的 `Source code` 是源码，不是安装包。两种方式得到的安装包都可以用发布页上的 SHA-256 核对。
 
 **第一次打开时请保持联网。** 这是 macOS 自己的安全检查（Gatekeeper），不是 LiveLingo 在联网：从网上下载的 App 第一次打开时，系统会向苹果确认它经过了苹果的公证（即提交给苹果做过恶意软件扫描）。0.2.0 的公证记录只附在安装包上，拖进“应用程序”的 App 本身没带，所以系统要联网查一次；断网时会提示无法验证而拒绝打开。查过一次之后就不再需要。LiveLingo 本身不上传任何录音、文字或使用数据，转写、正式翻译和笔记都在本机运行。
 

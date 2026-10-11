@@ -19,7 +19,9 @@ The app's interface is currently in Chinese, and translations go from English in
 
 ## Download
 
-**[Download 0.2.0 (GitHub release page)](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0)**: download all 8 split files under Assets and merge them into one `.dmg` of about 14.3 GB, following the instructions on that page. A single split file cannot be installed, and the `Source code` archives at the bottom of the page are source code, not the installer.
+**[Download the complete 0.2.0 disk image (Google Drive)](https://drive.google.com/file/d/1u3kZCPAO5diOuqnG5sNEwd8LJBudK1Gp/view)**: one `.dmg` of about 14.3 GB that you can open and install directly.
+
+You can also use the [GitHub release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0): download all 8 split files under Assets and merge them into the same `.dmg`, following the instructions on that page. A single split file cannot be installed, and the `Source code` archives at the bottom of the page are source code, not the installer. Either way, you can check the disk image against the SHA-256 on the release page.
 
 **Keep your Mac online the first time you open the app.** This is macOS's own security check (Gatekeeper), not LiveLingo going online. The first time you open an app downloaded from the internet, macOS asks Apple to confirm that it was notarized, meaning it was submitted to Apple and scanned for malware. In 0.2.0 the notarization ticket is attached to the disk image but not to the app you drag into Applications, so macOS has to look it up online once; offline, it reports that the app cannot be verified and refuses to open it. After that first check no connection is needed. LiveLingo itself never uploads any recordings, text or usage data; transcription, the full translation and notes all run on your Mac.
 
