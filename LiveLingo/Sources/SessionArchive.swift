@@ -550,6 +550,7 @@ final class SessionStore: @unchecked Sendable {
     private let journalWrite: @Sendable (Data, URL) throws -> Void
     private let didRead: @Sendable () -> Void
     private let legacySessionID: UUID
+    private let recoveryClaim = NSLock()
     private var inspectedTemporaryItems = false
 
     init(directory: URL, legacySessionID: UUID = UUID(),
@@ -565,8 +566,26 @@ final class SessionStore: @unchecked Sendable {
 
     func load() throws -> SessionSnapshot? { try loadDetailed().snapshot }
 
+    /// Opening a course runs the best-effort temporary recovery scan, outside
+    /// both store locks. Write transactions and the no-scan reads below never
+    /// scan; anything that calls this still waits for the scan itself.
     func loadDetailed() throws -> SessionLoadResult {
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireSessionDirectory(directory)
+        #endif
+        inspectTemporaryItemsOnce()
+        return try locked(writing: false) { try read().result }
+    }
+
+    /// A read that never runs the recovery scan, for readers that are not
+    /// opening the course: a saver's readback and the review queue's storage.
+    func loadDetailedWithoutRecovery() throws -> SessionLoadResult {
         try locked(writing: false) { try read().result }
+    }
+
+    /// A saver's readback of its own committed state; it never scans.
+    func loadCommittedSnapshot() throws -> SessionSnapshot? {
+        try loadDetailedWithoutRecovery().snapshot
     }
 
     func loadDetailedAsync() async throws -> SessionLoadResult {
@@ -985,23 +1004,28 @@ final class SessionStore: @unchecked Sendable {
             fd = try parent.openRegularFile(named: ".session-store.lock",
                                             flags: writing ? O_RDWR : O_RDONLY, create: writing)
         } catch SensitiveFileIO.Failure.system(_, let code) where !writing && code == ENOENT {
-            inspectTemporaryItems()
             return try action()
         } catch {
             throw SessionStoreError.unsafePath(directory.path)
         }
         defer { _ = Darwin.close(fd) }
-        guard flock(fd, writing || !inspectedTemporaryItems ? LOCK_EX : LOCK_SH) == 0 else {
+        guard flock(fd, writing ? LOCK_EX : LOCK_SH) == 0 else {
             throw SessionStoreError.io(operation: "lock", code: errno)
         }
         defer { _ = flock(fd, LOCK_UN) }
-        inspectTemporaryItems()
         return try action()
     }
 
-    private func inspectTemporaryItems() {
-        guard !inspectedTemporaryItems else { return }
-        inspectedTemporaryItems = true
+    /// Runs outside the process and disk locks (DU-05). Each candidate is
+    /// protected by its own writer lease and creation receipt, never by the
+    /// store lock, so a slow or stuck open here cannot delay this or another
+    /// store's write transaction. It does delay the caller of loadDetailed.
+    private func inspectTemporaryItemsOnce() {
+        let first = recoveryClaim.withLock {
+            defer { inspectedTemporaryItems = true }
+            return !inspectedTemporaryItems
+        }
+        guard first else { return }
         // Recovery is best effort and must not turn a readable course into a
         // failed open. Each uncertain candidate is recorded without its content.
         do {

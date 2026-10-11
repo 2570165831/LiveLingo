@@ -66,12 +66,20 @@ enum SessionWorkspace {
         try makeTemporarySessionDirectory(in: recoverableRecordingRoot, identifier: UUID(), createRoot: true)
     }
 
+    /// The startup read: runs the best-effort temporary recovery scan
+    /// (DU-05) without any recovery lock, then reads the index.
     static func recordingRecoveries(in root: URL) throws -> [RecordingRecovery] {
         if FileManager.default.fileExists(atPath: root.path) {
             do {
                 try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false).recoverTemporaryItems()
             } catch { SensitiveFileIO.recordTemporaryRecoveryScanFailure() }
         }
+        return try readRecordingRecoveryIndex(in: root)
+    }
+
+    /// Reads the index without scanning, so a stalled open of a temporary
+    /// can never hold the recovery locks taken by saves.
+    private static func readRecordingRecoveryIndex(in root: URL) throws -> [RecordingRecovery] {
         let url = root.appendingPathComponent("pending-recordings.json")
         try SessionArchiveCoding.requireRegularFileIfPresent(url)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
@@ -111,7 +119,7 @@ enum SessionWorkspace {
         defer { _ = flock(fd, LOCK_UN) }
         // Load and validate under the same lock as merge/retirement. A read
         // failure blocks publication and leaves the original bytes intact.
-        var merged = try recordingRecoveries(in: root)
+        var merged = try readRecordingRecoveryIndex(in: root)
         guard Set(recordings.map(\.id)).count == recordings.count,
               recordings.allSatisfy({ $0.directory.isFileURL && $0.outputRoot.isFileURL }) else {
             throw SessionStoreError.invalidState("录音恢复记录无效")

@@ -17,6 +17,8 @@ enum SensitiveFileIO {
     @TaskLocal static var beforeTemporaryLease: (@Sendable (URL) throws -> Void)?
     @TaskLocal static var temporaryTrackingParentUnavailable = false
     @TaskLocal static var temporaryTrackingParentOpenError: Int32?
+    /// Runs immediately before recovery opens a candidate temporary object.
+    @TaskLocal static var beforeTemporaryInspection: (@Sendable (URL) -> Void)?
     #endif
 
     private static func perform(_ operation: OptionalOperation, _ call: () -> Int32) -> Int32 {
@@ -82,7 +84,7 @@ enum SensitiveFileIO {
         case system(operation: String, code: Int32)
     }
 
-    struct Identity: Codable, Equatable, Sendable {
+    struct Identity: Codable, Hashable, Sendable {
         let device: Int32
         let inode: UInt64
         let owner: UInt32
@@ -115,6 +117,10 @@ enum SensitiveFileIO {
         let replacement: TemporaryIdentity?
     }
     private static let temporaryAttribute = "com.jianhongli.LiveLingo.temporary-v1"
+    /// Temporaries this process's own writers currently lease. Recovery treats
+    /// them as active without opening them, so it never touches a file that
+    /// is still being written, synced or committed here.
+    private static let leasedTemporaries = OSAllocatedUnfairLock(initialState: Set<Identity>())
     private static let recoveryLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "TemporaryRecovery")
 
     struct TemporaryRecovery: Equatable {
@@ -457,6 +463,10 @@ enum SensitiveFileIO {
             try validateName(temporary)
             let item = try createPrivateFile(named: temporary)
             let pendingIdentity = Identity(try status(item))
+            // Forgotten last, after the lease is closed and any failed
+            // temporary is unlinked.
+            var leased = false
+            defer { if leased { _ = leasedTemporaries.withLock { $0.remove(pendingIdentity) } } }
             // Unlink only this invocation's exclusive temporary entry. This
             // also runs if writing, syncing, closing or replacing fails.
             var pending = true
@@ -479,6 +489,8 @@ enum SensitiveFileIO {
                     throw system("lock private temporary file")
                 }
             }
+            leasedTemporaries.withLock { _ = $0.insert(pendingIdentity) }
+            leased = true
             recordTemporary(item: lease, kind: "write", destination: name,
                             digest: SessionArchiveCoding.digest(data), replacement: nil)
             defer { if !pending { _ = fremovexattr(lease, temporaryAttribute, 0) } }
@@ -731,6 +743,10 @@ enum SensitiveFileIO {
             guard (write && kind == S_IFREG && (1...2).contains(before.st_nlink)) || (!write && kind == S_IFDIR) else {
                 return "unknown_identity"
             }
+            if leasedTemporaries.withLock({ $0.contains(Identity(before)) }) { return "active_or_unavailable" }
+            #if DEBUG
+            beforeTemporaryInspection?(url.appendingPathComponent(name))
+            #endif
             let item = openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | (write ? 0 : O_DIRECTORY))
             guard item >= 0 else { throw pathFailure("inspect temporary object") }
             defer { _ = Darwin.close(item) }

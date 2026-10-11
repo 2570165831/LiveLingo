@@ -124,6 +124,82 @@ def retire_workers(scratch, host_pids, previous_workers):
     return removed
 
 
+EVIDENCE_TIMEOUT_S = 10
+EVIDENCE_LIMIT = 1 << 20
+
+
+def bounded_output(command):
+    """Run one read-only diagnostic and never wait for it without a bound.
+
+    A process blocked in the kernel (the state being diagnosed) may ignore even
+    SIGKILL for a while. It is then abandoned instead of stalling the watchdog.
+    """
+    try:
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, errors='replace',
+                                 start_new_session=True)
+    except OSError:
+        return '', 'invocation failed'
+    error = None
+    try:
+        output, _ = child.communicate(timeout=EVIDENCE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        try:
+            output, _ = child.communicate(timeout=2)
+            error = 'timeout'
+        except subprocess.TimeoutExpired:
+            output, error = '', 'timeout; still running after SIGKILL, abandoned'
+    output = output or ''
+    if len(output) > EVIDENCE_LIMIT:
+        output = output[:EVIDENCE_LIMIT] + '\n[output truncated]\n'
+        error = error or 'truncated'
+    return output, error
+
+
+def host_workers(scratch, pid):
+    """This host's own worker directories, never a symlink or another host's."""
+    result = []
+    for worker in sorted(scratch.glob(f'worker-{pid}-*')):
+        match = WORKER.fullmatch(worker.name)
+        if not match or int(match[1]) != pid:
+            continue
+        status = worker.lstat()
+        if status.st_uid == os.getuid() and stat.S_ISDIR(status.st_mode):
+            result.append(worker)
+    return result
+
+
+def host_file_evidence(target, pid):
+    """Record the files a stuck host holds open and its worker directory's shape.
+
+    Listings carry names, types, link counts, sizes and extended-attribute
+    names only. No file content is read, and every command is time-bounded.
+    """
+    sections = [('open files of the host', ['/usr/sbin/lsof', '-n', '-P', '-p', str(pid)])]
+    try:
+        workers = host_workers(DD / 'tmp', pid)
+    except OSError:
+        workers = []
+    for worker in workers:
+        sections.append((f'listing of {worker.name}', ['/bin/ls', '-laiR@', '--', str(worker)]))
+        sections.append((f'open files under {worker.name}',
+                         ['/usr/sbin/lsof', '-n', '-P', '+D', str(worker)]))
+    errors = {}
+    try:
+        with target.open('x', encoding='utf-8') as output:
+            for title, command in sections:
+                text, error = bounded_output(command)
+                if error:
+                    errors[title] = error
+                output.write(f'## {title}\n')
+                output.writelines(redact.filtered(text.splitlines(keepends=True)))
+                output.write('\n')
+    except FileExistsError:
+        return {'files': None, 'files_error': 'file evidence already exists'}
+    return {'files': str(target), 'files_errors': errors}
+
+
 def sandboxed_host(app):
     """True unless the existing Debug host is readable and carries no sandbox entitlement."""
     if not (app / 'Contents/MacOS/LiveLingo').is_file():
@@ -254,6 +330,9 @@ def main():
                         output.writelines(redact.filtered(raw.splitlines(keepends=True)))
                 except FileExistsError:
                     record['error'] = 'sample evidence already exists'
+                if pid != process.pid:
+                    record.update(host_file_evidence(
+                        OUT / f'{args.name}-sample-{len(samples) + 1}-pid{pid}-files.txt', pid))
                 record['elapsed_s'] = round(time.monotonic() - started, 3)
                 samples.append(record)
 

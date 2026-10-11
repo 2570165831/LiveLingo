@@ -21,6 +21,17 @@ enum DataSafetyFixtures {
     }
 }
 
+/// Thread-safe record of recovery inspections and a background save's result.
+private final class RecoveryScanProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inspected: [String] = []
+    private var outcome: Result<Void, Error>?
+    var names: [String] { lock.withLock { inspected } }
+    var result: Result<Void, Error>? { lock.withLock { outcome } }
+    func record(_ url: URL) { lock.withLock { inspected.append(url.lastPathComponent) } }
+    func finish(_ value: Result<Void, Error>) { lock.withLock { outcome = value } }
+}
+
 final class DataSafetyStorageTests: XCTestCase {
     private func interruptedWrite(_ bytes: Data, to destination: URL, orphan: URL) throws {
         XCTAssertThrowsError(try SensitiveFileIO.$beforeTemporaryCommit.withValue({ pending in
@@ -131,6 +142,135 @@ final class DataSafetyStorageTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destination), bytes, "A brief scan lock must not fail an ordinary save")
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasSuffix(".tmp") }
         XCTAssertEqual(leftovers, [])
+    }
+
+    /// Saves `stored` on a background queue and reports whether it finished
+    /// within `limit`. An inspection that stalls models a kernel open that does
+    /// not return; it is released afterwards so a failing run cannot hang.
+    private func saveWhileInspectionStalls(_ stored: SessionSnapshot, in root: URL, probe: RecoveryScanProbe,
+                                           limit: TimeInterval = 10) -> Bool {
+        whileInspectionStalls(probe: probe, limit: limit) { _ = try SessionStore(directory: root).save(stored) }
+    }
+
+    private func whileInspectionStalls(probe: RecoveryScanProbe, limit: TimeInterval = 10,
+                                       _ work: @escaping @Sendable () throws -> Void) -> Bool {
+        let release = DispatchSemaphore(value: 0)
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            probe.finish(Result {
+                try SensitiveFileIO.$beforeTemporaryInspection.withValue({ url in
+                    probe.record(url)
+                    _ = release.wait(timeout: .now() + 60)
+                }) { try work() }
+            })
+            done.signal()
+        }
+        let finished = done.wait(timeout: .now() + limit) == .success
+        if !finished {
+            for _ in 0..<16 { release.signal() }
+            XCTAssertEqual(done.wait(timeout: .now() + 60), .success)
+        }
+        return finished
+    }
+
+    func testDU05SaveNeverWaitsOnAnotherInProcessWritersTemporary() throws {
+        let root = try DataSafetyFixtures.make("DU05-writer-in-flight")
+        defer { DataSafetyFixtures.preserve(root) }
+        let stored = try SessionStore(directory: root).save(SessionSnapshot())
+        // The review queue shares the course directory and writes under its
+        // own lock. Its writer pauses after leasing the temporary, mid-commit.
+        let queueFile = root.appendingPathComponent("queue.json")
+        let queueBytes = Data("synthetic queue body".utf8)
+        let paused = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        let writerDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            do {
+                try SensitiveFileIO.$beforeTemporaryCommit.withValue({ _ in
+                    paused.signal()
+                    _ = resume.wait(timeout: .now() + 60)
+                }) { try SensitiveFileIO.atomicWrite(queueBytes, to: queueFile) }
+            } catch { XCTFail("The synthetic queue write failed: \(error)") }
+            writerDone.signal()
+        }
+        XCTAssertEqual(paused.wait(timeout: .now() + 30), .success)
+        let probe = RecoveryScanProbe()
+        let finished = saveWhileInspectionStalls(stored, in: root, probe: probe)
+        resume.signal()
+        XCTAssertEqual(writerDone.wait(timeout: .now() + 30), .success)
+        XCTAssertTrue(finished, "A course save must not wait on another writer's in-flight temporary")
+        XCTAssertEqual(probe.names, [], "A save never inspects temporary items")
+        XCTAssertNoThrow(try XCTUnwrap(probe.result).get())
+        XCTAssertEqual(try Data(contentsOf: queueFile), queueBytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasSuffix(".tmp") }, [])
+    }
+
+    func testDU05StalledReopenScanHoldsNoStoreLockAgainstSaves() throws {
+        let root = try DataSafetyFixtures.make("DU05-stalled-reopen")
+        defer { DataSafetyFixtures.preserve(root) }
+        let stored = try SessionStore(directory: root).save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        let empty = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try interruptedWrite(Data(), to: destination, orphan: empty)
+        // Reopening the course starts the best-effort scan, which stalls on
+        // the abandoned temporary as if its open never returned.
+        let reached = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let reopened = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            do {
+                let loaded = try SensitiveFileIO.$beforeTemporaryInspection.withValue({ _ in
+                    reached.signal()
+                    _ = release.wait(timeout: .now() + 60)
+                }) { try SessionStore(directory: root).load() }
+                XCTAssertNotNil(loaded)
+            } catch { XCTFail("Reopening the synthetic course failed: \(error)") }
+            reopened.signal()
+        }
+        XCTAssertEqual(reached.wait(timeout: .now() + 30), .success)
+        let probe = RecoveryScanProbe()
+        let finished = saveWhileInspectionStalls(stored, in: root, probe: probe)
+        release.signal()
+        XCTAssertEqual(reopened.wait(timeout: .now() + 60), .success)
+        XCTAssertTrue(finished, "A stalled recovery scan must not hold the store locks")
+        XCTAssertNoThrow(try XCTUnwrap(probe.result).get())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: empty.path), "The released scan still retires the owned empty write")
+    }
+
+    func testDU05SavesAndSaverReadbackNeverScanButReopenStillRecovers() async throws {
+        let root = try DataSafetyFixtures.make("DU05-save-without-scan")
+        defer { DataSafetyFixtures.preserve(root) }
+        let stored = try SessionStore(directory: root).save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        let empty = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try interruptedWrite(Data(), to: destination, orphan: empty)
+        let probe = RecoveryScanProbe()
+        let saved = try SensitiveFileIO.$beforeTemporaryInspection.withValue({ probe.record($0) }) {
+            try SessionStore(directory: root).save(stored)
+        }
+        let writer = SessionArchiveWriter(directory: root)
+        let readback = try await SensitiveFileIO.$beforeTemporaryInspection.withValue({ probe.record($0) }) {
+            try await writer.readback()
+        }
+        XCTAssertEqual(readback, saved)
+        XCTAssertEqual(probe.names, [], "Neither a save nor its saver's readback runs the recovery scan")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: empty.path))
+        XCTAssertEqual(try SessionStore(directory: root).load(), saved)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: empty.path), "Reopening the course still retires it")
+    }
+
+    func testDU05RecoveryNeverOpensAnInProcessWritersLeasedTemporary() throws {
+        let root = try DataSafetyFixtures.make("DU05-in-process-lease")
+        defer { DataSafetyFixtures.preserve(root) }
+        let destination = root.appendingPathComponent("snapshot.json")
+        let probe = RecoveryScanProbe()
+        try SensitiveFileIO.$beforeTemporaryCommit.withValue({ pending in
+            let directory = try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false)
+            let results = try SensitiveFileIO.$beforeTemporaryInspection.withValue({ probe.record($0) }) {
+                try directory.recoverTemporaryItems()
+            }
+            XCTAssertEqual(results.first(where: { $0.name == pending.lastPathComponent })?.reason, "active_or_unavailable")
+            XCTAssertEqual(probe.names, [], "This process's own active writer is never opened by recovery")
+        }) { try SessionArchiveCoding.atomicWrite(Data("synthetic committed body".utf8), destination) }
+        XCTAssertEqual(try Data(contentsOf: destination), Data("synthetic committed body".utf8))
     }
 
     func testDU05KillBetweenLinkAndUnlinkLeavesAnOpenableCourse() throws {
@@ -267,6 +407,27 @@ final class DataSafetyStorageTests: XCTestCase {
             .filter { $0.lastPathComponent.hasPrefix(".course.initial-export-") }
         XCTAssertEqual(siblings.count, 1, "An unavailable trusted parent permits publication but preserves its residual")
         for sibling in siblings { XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: sibling.path).isEmpty) }
+    }
+
+    func testDU05StalledRecoveryScanNeverHoldsTheRecordingRecoveryIndexLocks() throws {
+        let root = try DataSafetyFixtures.make("DU05-recording-index")
+        defer { DataSafetyFixtures.preserve(root) }
+        let a = SessionWorkspace.RecordingRecovery(id: UUID(), directory: root.appendingPathComponent("a"), outputRoot: root)
+        let b = SessionWorkspace.RecordingRecovery(id: UUID(), directory: root.appendingPathComponent("b"), outputRoot: root)
+        try SessionWorkspace.saveRecordingRecoveries([a], in: root)
+        let index = root.appendingPathComponent("pending-recordings.json")
+        let empty = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try interruptedWrite(Data(), to: index, orphan: empty)
+        // A save holds the in-process recovery lock and the index flock; the
+        // recovery scan, whose open can stall, must not run under them.
+        let probe = RecoveryScanProbe()
+        let finished = whileInspectionStalls(probe: probe) { try SessionWorkspace.saveRecordingRecoveries([b], in: root) }
+        XCTAssertTrue(finished, "A stalled recovery scan must not hold the recording-recovery locks")
+        XCTAssertEqual(probe.names, [], "Saving the recovery index never runs the recovery scan")
+        XCTAssertNoThrow(try XCTUnwrap(probe.result).get())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: empty.path))
+        XCTAssertEqual(Set(try SessionWorkspace.recordingRecoveries(in: root).map(\.id)), Set([a.id, b.id]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: empty.path), "Reading the index at startup still retires it")
     }
 
     func testN02StaleRecoveryIndexSaveMergesAnotherRecording() throws {
