@@ -29,9 +29,11 @@ descriptors so it does not probe ancestors above a caller's filesystem grant.
 This is static release preparation. Candidate programs are not run. Host Python
 may import prepared extensions only after strict signature verification; modified
 extensions are ad-hoc signed first. No Developer ID signing, notarization,
-installation, VM acceptance or publication is included. After future signing,
-the complete native approval hashes must be reviewed and updated for the signed
-bytes, then the final package gate must run again.
+installation, VM acceptance or publication is included. Future signing uses the
+separate [RELPIPE6 signed-resource review](RELPIPE6_VALIDATION.md): capture the
+prepared native bytes to a new host receipt, verify signed non-signature content
+and source bindings before the outer seal, and explicitly select the signed
+phase at App/DMG gates. Keep the fixed preparation index unchanged.
 
 The offline GNU source check builds a current native arm64 compiler and three
 runtime libraries. It does not reproduce the historical publisher toolchain

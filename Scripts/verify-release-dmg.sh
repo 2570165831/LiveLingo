@@ -8,29 +8,32 @@ python_bin="${LIVELINGO_PYTHON:-/usr/bin/python3}"
 dmg=""
 mount_dir=""
 identity=""
+privacy_phase="final"
 detach_max_attempts=3
 detach_retry_delay=1
 dry_run=0
 while (( $# > 0 )); do
   case "$1" in
-    --dmg|--mount-point|--identity|--detach-max-attempts|--detach-retry-delay)
+    --dmg|--mount-point|--identity|--detach-max-attempts|--detach-retry-delay|--privacy-phase)
       (( $# >= 2 )) || fail "$1 缺少参数"
       case "$1" in
         --dmg) dmg="$2" ;;
         --mount-point) mount_dir="$2" ;;
         --identity) identity="$2" ;;
+        --privacy-phase) privacy_phase="$2" ;;
         --detach-max-attempts) detach_max_attempts="$2" ;;
         --detach-retry-delay) detach_retry_delay="$2" ;;
       esac
       shift 2 ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help)
-      print -r -- "用法：Scripts/verify-release-dmg.sh --dmg <DMG> [--identity <Authority>] [--mount-point <新目录>] [--detach-max-attempts <次数>] [--detach-retry-delay <秒>] [--dry-run]"
+      print -r -- "用法：Scripts/verify-release-dmg.sh --dmg <DMG> [--identity <Authority>] [--privacy-phase final|signed] [--mount-point <新目录>] [--detach-max-attempts <次数>] [--detach-retry-delay <秒>] [--dry-run]"
       print -r -- "无 DMG 或 dry-run 时明确跳过，不算发布验收。"
       exit 0 ;;
     *) fail "未知参数：$1" ;;
   esac
 done
+[[ "${privacy_phase}" == final || "${privacy_phase}" == signed ]] || fail "隐私阶段须为 final 或 signed"
 if [[ -z "${dmg}" ]] || (( dry_run )); then
   print -r -- "跳过真实发布自检：未提供真实产物或使用 --dry-run。"
   print -r -- "未挂载、未验证票据/签名、未评估 Gatekeeper；不能视为发布通过。"
@@ -128,7 +131,7 @@ fi
 (( attach_code == 0 )) || fail "attach 失败（exit ${attach_code}），清理已返回的设备 ${device}"
 mounted_app="${mount_dir}/LiveLingo.app"
 [[ -d "${mounted_app}" && ! -L "${mounted_app}" ]] || fail "DMG 内缺少真实 LiveLingo.app 目录"
-check_package_privacy "${mount_dir}" dmg
+"${python_bin}" "${project_root}/Scripts/privacy_package.py" check --root "${mount_dir}" --layout dmg --phase "${privacy_phase}"
 "${stapler_bin}" validate "${mounted_app}"
 "${codesign_bin}" --verify --deep --strict --verbose=2 "${mounted_app}"
 [[ -z "${identity}" ]] || check_authority "${mounted_app}" "${identity}"

@@ -63,6 +63,21 @@ if name == "python-verify-stub":
         record()
         if scenario == "preflight-failure": fail()
         assert (target / "Contents/.fake-signature").exists()
+    elif args and pathlib.Path(args[0]).name == "privacy_package.py":
+        # These fixtures use fake signatures. Keep the real metadata/entry and
+        # path scanners; only native-signature approvals/provenance are stubs.
+        target = owned(args[args.index("--root") + 1])
+        assert args[args.index("--phase") + 1] in ("final", "signed")
+        sys.path.insert(0, str(pathlib.Path(args[0]).parent))
+        import privacy_package, signed_resource_review, binary_provenance
+        def fake_approvals(app):
+            app = owned(app)
+            assert (app / "Contents/.fake-signature").exists()
+            return {}
+        signed_resource_review.approvals_for_app = fake_approvals
+        binary_provenance.verify_app_provenance = lambda app: {}
+        sys.argv = args
+        sys.exit(privacy_package.main())
     else:
         if args and pathlib.Path(args[0]).name == "notarize-artifact.py":
             if scenario == "resume-receipt-missing" and "--submission-id" in args:
@@ -743,16 +758,33 @@ class ReleaseFlowTests(unittest.TestCase):
                     if process.poll() is None: os.killpg(process.pid, signal.SIGKILL); process.communicate()
 
     def test_signing_arguments_without_real_signing(self):
+        try:
+            from Scripts import signed_resource_review, privacy_package, binary_provenance
+        except ModuleNotFoundError:
+            import signed_resource_review, privacy_package, binary_provenance
         signing = module("sign_offline_fixture", ROOT / "Scripts/sign-offline-app.py")
         case, app, env, unused = self.fixture("sign-arguments")
         main = app / "Contents/MacOS/LiveLingo"; main.parent.mkdir(); main.write_bytes(NATIVE_FIXTURE)
         helper = app / "Contents/MacOS/helper"; helper.write_bytes(NATIVE_FIXTURE)
         # Exercise the real signing command construction, intercept every tool call.
         commands = []
-        with patch.object(signing, "run", side_effect=lambda c, **kw: commands.append(c)), \
+        with patch.dict(sys.modules, signed_resource_review=signed_resource_review,
+                        privacy_package=privacy_package, binary_provenance=binary_provenance), \
+             patch.object(signed_resource_review, "capture_before_signing", return_value={}) as capture, \
+             patch.object(signed_resource_review, "write_capture_receipt") as write_capture, \
+             patch.object(signed_resource_review, "finalize_signed_review") as review_final, \
+             patch.object(privacy_package, "inspect_tree", return_value={}) as signed_gate, \
+             patch.object(binary_provenance, "verify_app_provenance", return_value={}), \
+             patch.object(binary_provenance, "finalize_app_provenance"), \
+             patch.object(signing, "run", side_effect=lambda c, **kw: commands.append(c)), \
              patch.object(signing.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
             signing.sign(app, IDENTITY, str(case / "fixture.keychain-db"), case / "app.plist", case / "inherit.plist",
-                         [(main, [{"filetype": signing.MH_EXECUTE}]), (helper, [{"filetype": signing.MH_EXECUTE}])])
+                         [(main, [{"filetype": signing.MH_EXECUTE}]), (helper, [{"filetype": signing.MH_EXECUTE}])],
+                         case / "before-sign.json")
+        capture.assert_called_once_with(app)
+        write_capture.assert_called_once_with(app, case / "before-sign.json", {})
+        review_final.assert_called_once_with(app, {})
+        signed_gate.assert_called_once_with(app, phase="signed")
         self.assertGreaterEqual(len(commands), 2)
         for command in commands:
             self.assertEqual(command[0], "/usr/bin/codesign")

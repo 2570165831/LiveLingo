@@ -171,6 +171,8 @@ class NestedSigningSafetyTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == 'darwin', 'native ad-hoc signing fixture requires macOS')
 class RealAdHocSigningTests(unittest.TestCase):
     def setUp(self):
+        if os.environ.get("LIVELINGO_TEST_DISABLE_SIGNING") == "1":
+            self.skipTest("signing disabled by the caller\'s explicit policy")
         for tool in ('/usr/bin/clang', '/usr/bin/codesign'):
             if not Path(tool).is_file() or not os.access(tool, os.X_OK):
                 self.skipTest('native signing fixture requires ' + Path(tool).name)

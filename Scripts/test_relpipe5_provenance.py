@@ -9,6 +9,7 @@ from unittest.mock import patch
 from Scripts import binary_provenance as provenance
 from Scripts import privacy_package as privacy
 from Scripts import reviewed_resources
+from Scripts import signed_resource_review as signed_review
 from Scripts.test_macho_paths import image
 
 
@@ -44,15 +45,22 @@ class FinalProvenanceTests(unittest.TestCase):
             native = app / "Contents/Resources/library.dylib"
             events = []
             result = type("Result", (), {"returncode": 0})()
-            with patch.dict(sys.modules, {"binary_provenance": provenance}), \
+            with patch.dict(sys.modules, {"binary_provenance": provenance, "signed_resource_review": signed_review,
+                                         "privacy_package": privacy}), \
+                 patch.object(signed_review, "capture_before_signing", side_effect=lambda _: events.append("capture") or {}), \
+                 patch.object(signed_review, "write_capture_receipt", side_effect=lambda *a: events.append("host-capture")), \
+                 patch.object(signed_review, "finalize_signed_review", side_effect=lambda *a: events.append("signed-review")), \
+                 patch.object(privacy, "inspect_tree", side_effect=lambda *a, **k: events.append("signed-gate-" + k["phase"]) or {}), \
                  patch.object(signing, "main_executable_path", return_value=main), \
                  patch.object(signing, "nested_bundles", return_value=[]), \
                  patch.object(provenance, "verify_app_provenance", side_effect=lambda _: events.append("verify-input") or {}), \
                  patch.object(provenance, "finalize_app_provenance", side_effect=lambda *a, **k: events.append("rebind-" + k["final_stage"])), \
                  patch.object(signing, "run", side_effect=lambda command: events.append("outer" if command[-1] == str(app) else "native")), \
                  patch.object(signing.subprocess, "run", return_value=result):
-                signing.sign(app, "fixture", "fixture", "fixture", "fixture", [(native, [{"filetype": 6}])])
-            self.assertEqual(events, ["verify-input", "native", "rebind-signed-candidate", "outer"])
+                signing.sign(app, "fixture", "fixture", "fixture", "fixture", [(native, [{"filetype": 6}])],
+                             Path(temporary) / "before-sign.json")
+            self.assertEqual(events, ["capture", "host-capture", "verify-input", "native",
+                                     "rebind-signed-candidate", "signed-review", "signed-gate-signed", "outer"])
 
     def test_final_gate_rejects_missing_pending_and_old_schema(self):
         with tempfile.TemporaryDirectory() as temporary:

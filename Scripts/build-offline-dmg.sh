@@ -6,6 +6,11 @@ project_root="${0:A:h:h}"
 fail() { print -u2 -r -- "错误：$*"; exit 1; }
 source "${project_root}/Scripts/release-tools.sh"
 python_bin="${LIVELINGO_PYTHON:-/usr/bin/python3}"
+check_package_privacy() {
+  # Signed-stage receipt is independently validated against the fixed index.
+  "${python_bin}" "${project_root}/Scripts/privacy_package.py" check \
+    --root "$1" --layout "${2:-tree}" --phase signed
+}
 [[ "${python_bin}" == /* && -x "${python_bin}" ]] || fail "请用 LIVELINGO_PYTHON 指定可执行的绝对 Python 路径"
 sign_script="${project_root}/Scripts/sign-offline-app.py"
 readme_source="${project_root}/Packaging/README-zh-Hans.txt"
@@ -326,7 +331,7 @@ if [[ -z "${verified_dmg}" ]]; then
 else
   "${python_bin}" "${state_script}" verify-artifact "${state_file}" stapledDMG
 fi
-/bin/zsh "${verify_script}" --dmg "${verified_dmg}" --identity "${sign_identity}" --mount-point "${stage_dir}/verify-mount"
+/bin/zsh "${verify_script}" --dmg "${verified_dmg}" --identity "${sign_identity}" --mount-point "${stage_dir}/verify-mount" --privacy-phase signed
 [[ ! -e "${output_dmg}" && ! -L "${output_dmg}" ]] || fail "自检期间正式输出被占用，拒绝覆盖"
 /bin/mv -n "${verified_dmg}" "${output_dmg}"
 [[ ! -e "${verified_dmg}" && -f "${output_dmg}" ]] || fail "正式输出移动未完成，未放行"

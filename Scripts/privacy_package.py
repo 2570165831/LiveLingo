@@ -584,7 +584,7 @@ def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, appr
 
 
 def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree", phase="final"):
-    if phase not in ("prepare", "final"):
+    if phase not in ("prepare", "final", "signed"):
         raise PrivacyError("invalid-package-inspection-phase")
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
@@ -593,7 +593,15 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree", 
         from .reviewed_resources import entries, tree_prefix
     else:
         from reviewed_resources import entries, tree_prefix
-    approvals = entries()
+    app = root if (root / "Contents").is_dir() else root / "LiveLingo.app"
+    if phase == "signed":
+        if __package__:
+            from .signed_resource_review import approvals_for_app
+        else:
+            from signed_resource_review import approvals_for_app
+        approvals = approvals_for_app(app)
+    else:
+        approvals = entries()
     prefix = tree_prefix(root)
     if layout in ("app-only", "dmg"):
         expected = {"LiveLingo.app"} if layout == "app-only" else {"LiveLingo.app", "Applications", "使用说明.txt"}
@@ -653,9 +661,8 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree", 
     # Preparation may carry a pending reference. A final app with an ASR runtime
     # must bind its actual shipped audio library, even if its notice was removed
     # or reverted to an old schema. Non-app input trees have no final App stage.
-    app = root if (root / "Contents").is_dir() else root / "LiveLingo.app"
     provenance = app / "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/soundfile-binary-provenance.json"
-    if phase == "final" and ((app / "Contents/Resources/ASRRuntime").exists()
+    if phase in ("final", "signed") and ((app / "Contents/Resources/ASRRuntime").exists()
                              or provenance.exists() or provenance.is_symlink()):
         if __package__:
             from .binary_provenance import verify_app_provenance
@@ -733,12 +740,13 @@ def main():
     check = sub.add_parser("check", help="read-only; rejects signed-package residues without editing them")
     check.add_argument("--root", type=Path, required=True)
     check.add_argument("--layout", choices=("tree", "app-only", "dmg"), default="tree")
+    check.add_argument("--phase", choices=("prepare", "final", "signed"), default="final")
     stage = sub.add_parser("copy", help="create a new unsigned distribution copy; preserve all sources")
     stage.add_argument("--source", type=Path, required=True)
     stage.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        counts = (inspect_tree(args.root, layout=args.layout) if args.command == "check"
+        counts = (inspect_tree(args.root, layout=args.layout, phase=args.phase) if args.command == "check"
                   else copy_distribution_tree(args.source, args.output))
     except PrivacyError as error:
         print("privacy-package: " + error.args[0] + "; rebuild an unsigned copy", file=sys.stderr)
