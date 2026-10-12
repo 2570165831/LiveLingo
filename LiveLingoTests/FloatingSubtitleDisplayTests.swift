@@ -407,6 +407,9 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         try await resizeAndSettle(window, view: controller.view)
         let pending = try bitmap(controller.view)
         let scale = CGFloat(pending.pixelsHigh) / controller.view.bounds.height
+        let pendingHeight = controller.view.bounds.height
+        let source = try XCTUnwrap(subtitleScrollViews(controller.view).first)
+        let sourceTop = controller.view.convert(source.bounds, from: source).minY
         XCTAssertTrue(hasVisibleText(pending, scale: scale, rows: 50..<130))
         XCTAssertFalse(hasVisibleText(pending, scale: scale, rows: 160..<280))
         try capture(controller.view, name: "floating-es-translationOnly-pending")
@@ -414,8 +417,14 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         model.loadPresentationForTesting(phase: .recording, evidence: [caption])
         try await settle(controller.view)
         let completed = try bitmap(controller.view)
-        XCTAssertFalse(hasVisibleText(completed, scale: scale, rows: 50..<130))
-        XCTAssertTrue(hasVisibleText(completed, scale: scale, rows: 160..<280))
+        XCTAssertTrue(hasVisibleText(completed, scale: scale, rows: 50..<130))
+        XCTAssertFalse(hasVisibleText(completed, scale: scale, rows: 160..<280))
+        let translation = try XCTUnwrap(subtitleScrollViews(controller.view).last)
+        XCTAssertEqual(controller.view.convert(translation.bounds, from: translation).minY, sourceTop, accuracy: 0.5,
+                       "Arrival of a translation must not move the single visible reading column")
+        XCTAssertEqual(controller.view.bounds.height, pendingHeight, accuracy: 0.5)
+        XCTAssertEqual(subtitleScrollViews(controller.view).first?.bounds.height, 0)
+        print("FLOATING_SINGLE_BODY pending/completed start_y=\(sourceTop) height=\(pendingHeight) stable")
     }
 
     func testLongSpanishCaptionStaysAtBottomWhenLanguageLabelMovesBetweenSlots() async throws {
@@ -729,12 +738,11 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                     XCTAssertEqual(window.frame.height, frameHeight, accuracy: 0.5)
                     let image = try bitmap(controller.view)
                     let scale = CGFloat(image.pixelsHigh) / controller.view.bounds.height
-                    let sourceVisible = mode == .sourceOnly || (mode == .bilingual && caption.sourceLanguage != "zh")
-                    let translationVisible = mode != .sourceOnly
-                    XCTAssertEqual(hasVisibleText(image, scale: scale, rows: 50..<130), sourceVisible,
-                                   "The mounted source slot must actually follow the display mode")
-                    XCTAssertEqual(hasVisibleText(image, scale: scale, rows: 160..<280), translationVisible,
-                                   "The mounted translation slot must actually follow the display mode")
+                    XCTAssertTrue(hasVisibleText(image, scale: scale, rows: 50..<130),
+                                  "Single-body modes must use the same top reading position")
+                    XCTAssertEqual(hasVisibleText(image, scale: scale, rows: 160..<280),
+                                   mode == .bilingual && caption.sourceLanguage != "zh",
+                                   "Only bilingual captions have a second occupied reading slot")
                     // Ignore the legacy native menu in the header. Caption bodies,
                     // including grey language metadata, must stay readable in either host appearance.
                     let bodyStart = Int(70 * scale) * image.bytesPerRow

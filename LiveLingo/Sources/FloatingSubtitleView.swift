@@ -35,6 +35,8 @@ private struct FloatingSubtitleContent: View {
         let translationMinimum = translationLineMetrics.fontSize == translationSize ? translationLineMetrics.firstLineHeight
             : FloatingSubtitleLineMetrics(fontSize: translationSize, weight: .medium, spacing: 5 * scale).firstLineHeight
         let sourceBudget = min(226 - translationMinimum, max(88, sourceMinimum))
+        let sourceHeight = presentation.source == nil ? 0 : presentation.translation == nil ? 226 : sourceBudget
+        let translationHeight = presentation.translation == nil ? 0 : presentation.source == nil ? 226 : 226 - sourceBudget
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
@@ -68,15 +70,18 @@ private struct FloatingSubtitleContent: View {
             }
             // Keep both scroll containers mounted across mode switches, including
             // source-only Chinese. Hidden bodies cannot be selected or accessed.
-            subtitle(presentation.source?.text ?? "",
-                     size: sourceSize, weight: .regular,
-                     color: Color(white: palette.sourceWhite), height: model.captionTarget == .english && presentation.source == nil ? 0 : sourceBudget,
-                     languageName: presentation.source?.languageName, languageWhite: palette.languageWhite,
-                     visible: presentation.source != nil)
-            subtitle(presentation.translation?.text ?? "", size: translationSize, weight: .medium,
-                     color: .white, height: model.captionTarget == .english && presentation.translation == nil ? 0 : 226 - sourceBudget, languageName: presentation.translation?.languageName,
-                     languageWhite: palette.languageWhite, visible: presentation.translation != nil,
-                     rendersTranslation: true)
+            VStack(alignment: .leading, spacing: presentation.source != nil && presentation.translation != nil ? 14 : 0) {
+                subtitle(presentation.source?.text ?? "",
+                         size: sourceSize, weight: .regular,
+                         color: Color(white: palette.sourceWhite), height: sourceHeight,
+                         languageName: presentation.source?.languageName, languageWhite: palette.languageWhite,
+                         visible: presentation.source != nil)
+                subtitle(presentation.translation?.text ?? "", size: translationSize, weight: .medium,
+                         color: .white, height: translationHeight, languageName: presentation.translation?.languageName,
+                         languageWhite: palette.languageWhite, visible: presentation.translation != nil,
+                         rendersTranslation: true)
+            }
+            .frame(height: 240, alignment: .top)
         }
         .padding(22)
         .frame(minWidth: 640, maxWidth: 640, alignment: .leading)
