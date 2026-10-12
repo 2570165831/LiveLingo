@@ -1614,11 +1614,11 @@
             },
             {
               "style": "posix",
-              "path": "home/me/sources\u2019"
+              "path": "home/me/sources’"
             },
             {
               "style": "posix",
-              "path": "home/me\u2019"
+              "path": "home/me’"
             }
           ],
           "reason": "Unmodified public GNU source examples or maintainer infrastructure paths; exact publisher member bytes and spelling retained. These are not our machine locations."
@@ -1642,7 +1642,7 @@
           "examples": [
             {
               "style": "windows",
-              "path": "Users\\\u0418\u0433\u043e\u0440\u044c\\"
+              "path": "Users\\Игорь\\"
             }
           ],
           "reason": "Unmodified public upstream Windows URI/syscall regression fixture; exact publisher member bytes and path spelling retained."
@@ -3095,7 +3095,7 @@
       "format": "macho-public-build-strings",
       "package": "CPython",
       "version": "locked-runtime-2026-10-12",
-      "reason": "Exact pinned runtime copy: public upstream CI build diagnostics, GCC wheel/bottle build locations, or generic upstream history/perf/default-path literals and readable-byte coincidences. Local user, volume and temporary Cython paths are not approved. Load commands remain strictly checked.",
+      "reason": "Exact pinned runtime copy: public upstream CI build diagnostics, GCC wheel/bottle build locations, or generic upstream history/perf/default-path literals and readable-byte coincidences. Local user, volume and temporary Cython paths are not approved. Load commands remain strictly checked. The exact doubled-backslash byte escape in the CPython bytes.fromhex and bytearray.fromhex docstrings is a public API example, not a UNC machine/share; approved only with this complete native hash.",
       "publicBuildPathsHex": [
         "2f746d702f6d79696d706f72742e7a6970",
         "2f746d702f6d79696d706f72742e7a69702f6d796469726563746f7279",
@@ -3104,7 +3104,8 @@
         "2f7573722f6c6f63616c2f6c69622f707974686f6e322e352f736974652d7061636b616765732f626172",
         "2f7573722f6c6f63616c2f6c69622f707974686f6e322e352f736974652d7061636b616765732f666f6f",
         "7e2f2e686973746f72792e",
-        "7e2f2e707974686f6e5f686973746f727920617320686973746f72792066696c652e"
+        "7e2f2e707974686f6e5f686973746f727920617320686973746f72792066696c652e",
+        "5c5c7862395c5c7830315c5c786566"
       ]
     },
     {
@@ -5421,7 +5422,7 @@
       "format": "macho-public-build-strings",
       "package": "CPython",
       "version": "locked-runtime-2026-10-12",
-      "reason": "Exact pinned runtime copy: public upstream CI build diagnostics, GCC wheel/bottle build locations, or generic upstream history/perf/default-path literals and readable-byte coincidences. Local user, volume and temporary Cython paths are not approved. Load commands remain strictly checked.",
+      "reason": "Exact pinned runtime copy: public upstream CI build diagnostics, GCC wheel/bottle build locations, or generic upstream history/perf/default-path literals and readable-byte coincidences. Local user, volume and temporary Cython paths are not approved. Load commands remain strictly checked. The exact doubled-backslash byte escape in the CPython bytes.fromhex and bytearray.fromhex docstrings is a public API example, not a UNC machine/share; approved only with this complete native hash.",
       "publicBuildPathsHex": [
         "2f746d702f6d79696d706f72742e7a6970",
         "2f746d702f6d79696d706f72742e7a69702f6d796469726563746f7279",
@@ -5430,7 +5431,8 @@
         "2f7573722f6c6f63616c2f6c69622f707974686f6e322e352f736974652d7061636b616765732f626172",
         "2f7573722f6c6f63616c2f6c69622f707974686f6e322e352f736974652d7061636b616765732f666f6f",
         "7e2f2e686973746f72792e",
-        "7e2f2e707974686f6e5f686973746f727920617320686973746f72792066696c652e"
+        "7e2f2e707974686f6e5f686973746f727920617320686973746f72792066696c652e",
+        "5c5c7862395c5c7830315c5c786566"
       ]
     },
     {

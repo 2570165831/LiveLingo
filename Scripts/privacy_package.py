@@ -26,8 +26,10 @@ from xml.parsers.expat import ExpatError, ParserCreate
 
 if __package__:
     from .private_files import absolute_path, open_directory, validate_file_path
+    from .privacy_roots import WINDOWS_PATH_PATTERN
 else:
     from private_files import absolute_path, open_directory, validate_file_path
+    from privacy_roots import WINDOWS_PATH_PATTERN
 
 
 class PrivacyError(ValueError):
@@ -76,7 +78,7 @@ APP_RESOURCES = frozenset({
 # URL provenance is allowed. Local absolute paths (including file URLs and
 # Windows paths) in structured metadata are not distribution provenance.
 URL = re.compile(r"https?://[^\s\"<>]+", re.IGNORECASE)
-LOCAL_PATH = re.compile(r"(?<![\w:/.])/[^\s\"<>]+|file://|~[/\\]|[A-Za-z]:[/\\]", re.IGNORECASE)
+LOCAL_PATH = re.compile(r"(?<![\w:/.])/[^\s\"<>]+|file://|~[/\\]|" + WINDOWS_PATH_PATTERN, re.IGNORECASE)
 
 
 def decode_metadata_text(data):

@@ -10,8 +10,10 @@ import subprocess
 
 try:
     from .privacy_package import PrivacyError
+    from .privacy_roots import PRIVATE_ROOTS, WINDOWS_PRIVATE_PATH_PATTERN
 except ImportError:
     from privacy_package import PrivacyError
+    from privacy_roots import PRIVATE_ROOTS, WINDOWS_PRIVATE_PATH_PATTERN
 
 
 THIN = {b"\xce\xfa\xed\xfe": ("<", 28), b"\xfe\xed\xfa\xce": (">", 28),
@@ -26,9 +28,6 @@ STRINGS = DYLIB | {RPATH, 0xE, 0xF, 0x12, 0x13, 0x14, 0x15, 0x27, 0x80000035}
 # loader.h describes these as framework/client/library names or fileset IDs,
 # not paths used by dyld to select a file.
 NAMES = {0x12, 0x13, 0x14, 0x15, 0x80000035}
-PRIVATE_ROOTS = ("/" + "Users/", "/home/", "/Volumes/", "/private/var/", "/private/tmp/",
-                 "/var/folders/", "/synthetic/", "/opt/homebrew/", "/usr/local/",
-                 "/opt/local/", "/tmp/")
 SYSTEM_ROOTS = ("/usr/lib", "/System/Library", "/Library/Apple/System/Library")
 LOADER_ANCHORS = ("@loader_path", "@executable_path", "@rpath")
 
@@ -183,7 +182,7 @@ def inspect_load_paths(path, counts):
 _READABLE_ROOT = re.compile(
     "|".join(re.escape(root.rstrip("/")).replace("/", "/+")
              + r"(?:/+|(?=$|\s))" for root in PRIVATE_ROOTS)
-    + r"|file:/+|~/+", re.IGNORECASE)
+    + r"|file:/+|~[\\/]+|" + WINDOWS_PRIVATE_PATH_PATTERN, re.IGNORECASE)
 _READABLE_BYTES = re.compile(rb"[\x20-\x7e\x80-\xff]{4,}")
 _UTF16_LE = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
 _UTF16_BE = re.compile(rb"(?:\x00[\x20-\x7e]){4,}")
@@ -195,7 +194,18 @@ def _effective_build_operand(value, context, start, has_string_edge):
     """Suppress generic roots and short/binary tilde coincidences, not formats."""
     if posixpath.normpath(value).lower() in _BARE_BUILD_ROOTS:
         return False
-    if value.startswith("~/"):
+    if value.startswith("\\\\"):
+        # A valid host/share spelling at an operand or binary string edge is
+        # UNC. Random instruction/table bytes and embedded regex fragments
+        # with no such edge are not readable host operands.
+        if not all(char.isprintable() for char in value):
+            return False
+        if (start and context[start - 1].isprintable()
+                and context[start - 1] not in " \t\"'=:(<"):
+            return False
+        if not start and not has_string_edge:
+            return False
+    if value.startswith(("~/", "~\\")):
         # A short ~/ byte sequence is common in instructions/tables. Require
         # a real operand boundary, a printable run and at least two suffix
         # characters. No section-wide exemption: absolute private roots are
@@ -270,6 +280,15 @@ def scan_readable_paths_bytes(data):
     """
     if data[:4] not in THIN and data[:4] not in FAT:
         return None
+    return scan_binary_paths_bytes(data)
+
+
+def scan_binary_paths_bytes(data):
+    """Scan complete binary bytes before any magic/suffix-based dispatch.
+
+    No container type, opaque-fixture hash or catalog string table narrows this
+    scan. Exact public approvals are applied by the hash-verifying caller.
+    """
     return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
             "matches": _readable_matches(data)}
 
