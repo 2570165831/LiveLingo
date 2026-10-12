@@ -128,6 +128,11 @@ def repair_portable_asr_dylib_links(python_root):
     replacement = "@loader_path/../../../sklearn/.dylibs/libomp.dylib"
     if (extension.parent / "../../../sklearn/.dylibs/libomp.dylib").resolve() != libomp.resolve():
         fail("portable ASR OpenMP loader path does not resolve within the bundle")
+    from macho_paths import load_paths, DEPENDENCIES
+    dependencies = [value for command, value in load_paths(extension)
+                    if command in DEPENDENCIES]
+    if replacement in dependencies and "@rpath/libomp.dylib" not in dependencies:
+        return  # Already prepared: keep native bytes and their signature intact.
     run(["/usr/bin/install_name_tool", "-change", "@rpath/libomp.dylib", replacement, extension])
 
 

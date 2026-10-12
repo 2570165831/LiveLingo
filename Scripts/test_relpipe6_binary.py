@@ -66,11 +66,49 @@ class BinaryPrivacyTests(unittest.TestCase):
         self.assertTrue(reviewed.inspect(self.fixture(blob), RESOURCE, {RESOURCE: item}, counts))
         return counts
 
+    def test_archive_all_binary_formats_and_encodings_reject_private_tails(self):
+        for name, prefix, opaque in (("probe.dylib", thin(), False), ("locale.mo", catalog(), False),
+                                      ("image.png", b"\x89PNG\r\n\x1a\n", False), ("fixture.bin", b"\0\1", True)):
+            for encoding in ENCODINGS:
+                with self.subTest(name=name, encoding=encoding):
+                    with self.assertRaises(PrivacyError):
+                        self.source(name, prefix + b"\0" + HOME.encode(encoding) + b"\0\0", opaque=opaque)
 
+    def test_archive_stale_hash_rejected_before_scan(self):
+        with self.assertRaisesRegex(PrivacyError, "reviewed-resource-hash-mismatch"):
+            self.source("probe.dylib", thin(HOME.encode("utf-16-le")), stale=True)
 
+    def test_archive_exact_public_binary_example_all_encodings(self):
+        value = "/home/upstream/public/example.c"
+        examples = [{"style": "posix", "path": value[1:]}]
+        for name, prefix in (("probe.dylib", thin()), ("locale.mo", catalog())):
+            for encoding in ENCODINGS:
+                with self.subTest(name=name, encoding=encoding):
+                    data = prefix + b"\0" + value.encode(encoding) + b"\0\0"
+                    self.source(name, data, examples=examples)
+                    with self.assertRaises(PrivacyError):
+                        self.source(name, data + HOME.encode(encoding) + b"\0\0", examples=examples)
 
+    def test_archive_approval_cannot_mask_a_longer_private_string(self):
+        value = "/home/upstream/public"
+        examples = [{"style": "posix", "path": value[1:]}]
+        with self.assertRaisesRegex(PrivacyError, "local-path-source-binary"):
+            self.source("probe.dylib", thin((value + "/private.c").encode("utf-16-be")), examples=examples)
 
+    def test_binary_readable_hex_binds_exact_spelling_in_all_encodings(self):
+        for value in ("/tmp//upstream.c", "//home/upstream/public.c%", r"\\upstream-host\share\public.c"):
+            examples = [{"style": "binary-readable-hex", "path": value.encode().hex()}]
+            for encoding in ENCODINGS:
+                with self.subTest(value=value, encoding=encoding):
+                    data = thin() + b"\0" + value.encode(encoding) + b"\0\0"
+                    self.source("probe.dylib", data, examples=examples)
+                    with self.assertRaises(PrivacyError):
+                        self.source("probe.dylib", thin((value + "/other.c").encode(encoding)), examples=examples)
 
+    def test_binary_readable_hex_is_not_a_pattern(self):
+        examples = [{"style": "binary-readable-hex", "path": b"/tmp/*".hex()}]
+        with self.assertRaisesRegex(PrivacyError, "local-path-source-binary"):
+            self.source("probe.dylib", thin(b"/tmp/private.c"), examples=examples)
 
     def test_macho_windows_all_encodings_and_offsets(self):
         for value in WINDOWS:
@@ -96,6 +134,12 @@ class BinaryPrivacyTests(unittest.TestCase):
         with self.assertRaisesRegex(PrivacyError, "reviewed-resource-hash-mismatch"):
             reviewed.inspect(path, resource, {resource: item}, Counter())
 
+    def test_generic_binary_clean_and_public_https_controls(self):
+        for value in ("https://example.org/source.c", "public syntax file:", "Cocoa"):
+            for encoding in ENCODINGS:
+                self.assertEqual(macho.scan_binary_paths_bytes(value.encode(encoding))["matches"], [])
+        for name, data in (("probe.dylib", thin()), ("locale.mo", catalog())):
+            self.source(name, data)
 
     def test_metadata_and_binary_share_windows_policy(self):
         for value in WINDOWS:
@@ -103,6 +147,24 @@ class BinaryPrivacyTests(unittest.TestCase):
             with self.assertRaises(PrivacyError):
                 validate_metadata({"path": value})
 
+    def test_assembler_preserves_already_portable_native_bytes(self):
+        from Scripts.test_privacy_package import load_script
+        bundle = load_script("bundle-mlx-app")
+        python = self.root / "asr-python"
+        packages = python / "lib/python3.13/site-packages"
+        libomp = packages / "sklearn/.dylibs/libomp.dylib"
+        extension = packages / "numba/np/ufunc/omppool.fixture.so"
+        libomp.parent.mkdir(parents=True)
+        extension.parent.mkdir(parents=True)
+        libomp.write_bytes(b"fixture")
+        extension.write_bytes(thin())
+        replacement = "@loader_path/../../../sklearn/.dylibs/libomp.dylib"
+        with patch.dict("sys.modules", macho_paths=macho), \
+             patch.object(macho, "load_paths", return_value=[(0xC, replacement)]), \
+             patch.object(bundle, "run") as run:
+            bundle.repair_portable_asr_dylib_links(python)
+            run.assert_not_called()
+        self.assertEqual(extension.read_bytes(), thin())
 
 
 if __name__ == "__main__":

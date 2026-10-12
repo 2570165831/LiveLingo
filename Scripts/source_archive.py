@@ -19,6 +19,7 @@ if __package__:
     from .reviewed_resources import scan_host_paths, public_example_spellings
     from .privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals
     from .privacy_text import scan_path_operands
+    from .macho_paths import scan_binary_paths_bytes
 else:
     from privacy_package import (PrivacyError, JSON_LIMIT, decode_metadata_text,
                                  metadata_kind, parse_metadata, validate_metadata, known_binary,
@@ -26,6 +27,7 @@ else:
     from reviewed_resources import scan_host_paths, public_example_spellings
     from privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals
     from privacy_text import scan_path_operands
+    from macho_paths import scan_binary_paths_bytes
 
 
 class PublicSourceTarInfo(tarfile.TarInfo):
@@ -560,6 +562,14 @@ def inspect_source_archive(path, item, counts):
                     if public != "/":
                         raw_view = raw_view.replace(public.encode("utf-8"), b"PUBLIC_UPSTREAM_EXAMPLE")
                 scan_host_paths(raw_view, source_code=True)
+                # Every binary member receives the same whole-file path scan,
+                # including unreferenced catalog tails and opaque fixtures.
+                # Approvals above bind this member's complete hash and reason;
+                # compare exact decoded paths rather than replacing prefixes.
+                if text is None or binary:
+                    matches = scan_binary_paths_bytes(data)["matches"]
+                    if any(match["path"] not in allowed for match in matches):
+                        raise PrivacyError("local-path-source-binary")
                 inspect_source_macho(data, counts)
                 if binary:
                     counts["opaque_binary_files"] += 1

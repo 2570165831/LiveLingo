@@ -124,6 +124,15 @@ def public_example_spellings(examples, *, source_only=False):
                 raise PrivacyError("invalid-reviewed-public-examples")
             scan_host_paths(spelling.encode(), source_code=True)
             allowed.append(spelling)
+        elif source_only and example["style"] == "binary-readable-hex" and re.fullmatch(r"(?:[0-9a-f]{2}){1,16384}", value):
+            if __package__:
+                from .macho_paths import _exact_build_path_approvals
+            else:
+                from macho_paths import _exact_build_path_approvals
+            # Source archives bind both complete archive and member hashes;
+            # binary-member callers also require a review reason. No root or
+            # prefix approval: this uses the native scanner's exact grammar.
+            allowed.extend(_exact_build_path_approvals([bytes.fromhex(value)]))
         else:
             raise PrivacyError("invalid-reviewed-public-examples")
     return allowed

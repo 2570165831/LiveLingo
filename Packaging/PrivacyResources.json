@@ -1993,9 +1993,41 @@
             {
               "style": "posix",
               "path": "home/austin/go.dev/src/testing/testing.go"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d616c6c6f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d67632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d67636d61726b2e676f2526"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f70726f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f73656d612e676f252c"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f736c6963652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652f74726163652e676f25"
             }
           ],
-          "reason": "Pinned GNU libgo Go trace stress/HTTP regression recording. Public upstream source filenames are trace string-table data used by parser regressions; approve only these exact member bytes and documented spellings."
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
         },
         "gcc-13.4.0/libgo/go/internal/trace/testdata/stress_start_stop_1_7_good": {
           "sha256": "532dd755defb5e4db641e5a92ef39d50bfa38b52ae469d92b7c5ab748935f6d2",
@@ -2055,9 +2087,25 @@
             {
               "style": "posix",
               "path": "home/austin/go.dev/src/testing/testing.go"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f756e69782e676f2526"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c655f756e69782e676f2528"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f7a73797363616c6c5f6c696e75785f616d6436342e676f2524"
             }
           ],
-          "reason": "Pinned GNU libgo Go trace stress/HTTP regression recording. Public upstream source filenames are trace string-table data used by parser regressions; approve only these exact member bytes and documented spellings."
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
         },
         "gcc-13.4.0/libgo/go/internal/trace/testdata/stress_1_9_good": {
           "sha256": "439de9dc3b154052f4d6b8d2c1c9fbde8b8964a8242342e99c224f461b91bf43",
@@ -2205,9 +2253,93 @@
             {
               "style": "posix",
               "path": "home/austin/go.dev/src/testing/testing.go"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f746370736f636b6f70745f706f7369782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f62797465732f6275666665722e676f2552"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f696e7465726e616c2f706f6c6c2f66645f6d757465782e676f2542"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f696e7465726e616c2f706f6c6c2f66645f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f696e7465726e616c2f706f6c6c2f736f636b6f70742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f66645f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f6970736f636b5f706f7369782e676f2529"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f736f636b5f706f7369782e676f2526"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f736f636b6f70745f6c696e75782e676f2523"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f746370736f636b2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f746370736f636b5f706f7369782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c655f756e69782e676f2545"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d616c6c6f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d67632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d67636d61726b2e676f2550"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f70726f632e676f2558"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f73656d612e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652e676f2532"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f6c696e75782e676f257a"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f7a73797363616c6c5f6c696e75785f616d6436342e676f25"
             }
           ],
-          "reason": "Pinned GNU libgo Go trace stress/HTTP regression recording. Public upstream source filenames are trace string-table data used by parser regressions; approve only these exact member bytes and documented spellings."
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
         },
         "gcc-13.4.0/libgo/go/internal/trace/testdata/http_1_9_good": {
           "sha256": "f03bfbaa31606b6248ff10a47f98f14949fb061cd25670e5af468bf4179e118c",
@@ -2267,9 +2399,45 @@
             {
               "style": "posix",
               "path": "home/austin/go.dev/src/testing/testing.go"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f666d742f7072696e742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f696e7465726e616c2f706f6c6c2f66645f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f687474702f6d61696e5f746573742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c655f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f7a73797363616c6c5f6c696e75785f616d6436342e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f74657374696e672f74657374696e672e676f25"
             }
           ],
-          "reason": "Pinned GNU libgo Go trace stress/HTTP regression recording. Public upstream source filenames are trace string-table data used by parser regressions; approve only these exact member bytes and documented spellings."
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
         },
         "gcc-13.4.0/libgo/go/internal/trace/testdata/stress_start_stop_1_9_good": {
           "sha256": "d7482f02b893ffb93e4ecb06d2e77db3f7830323626fed73f3f2e3d20454c84f",
@@ -2325,9 +2493,33 @@
             {
               "style": "posix",
               "path": "home/austin/go.dev/src/testing/testing.go"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f686173686d61705f666173742e676f2533"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d616c6c6f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d67632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d67636d61726b2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f736c6963652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652e676f25"
             }
           ],
-          "reason": "Pinned GNU libgo Go trace stress/HTTP regression recording. Public upstream source filenames are trace string-table data used by parser regressions; approve only these exact member bytes and documented spellings."
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
         },
         "gcc-13.4.0/libgo/go/internal/trace/testdata/http_1_10_good": {
           "sha256": "95a1cd0ccc352b523254715219af5d8acf438c2062bf68dd8b8595a9ae9d2485",
@@ -2387,9 +2579,41 @@
             {
               "style": "posix",
               "path": "home/austin/go.dev/src/testing/testing.go"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f696e7465726e616c2f706f6c6c2f66645f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f687474702f6d61696e5f746573742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c655f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6368616e2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f7a73797363616c6c5f6c696e75785f616d6436342e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f74657374696e672f74657374696e672e676f25"
             }
           ],
-          "reason": "Pinned GNU libgo Go trace stress/HTTP regression recording. Public upstream source filenames are trace string-table data used by parser regressions; approve only these exact member bytes and documented spellings."
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
         },
         "gcc-13.4.0/libgo/go/internal/trace/testdata/stress_1_7_good": {
           "sha256": "50fb7e557d495520d95a97539716638ca74af88e1ed361d0e9823b2d5e34db54",
@@ -2533,9 +2757,89 @@
             {
               "style": "posix",
               "path": "home/austin/go.dev/src/testing/testing.go"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f746370736f636b6f70745f706f7369782e676f2541"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f62797465732f6275666665722e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f6469616c2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f66645f6d757465782e676f255d"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f66645f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f6970736f636b5f706f7369782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f736f636b5f706f7369782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f746370736f636b2e676f2543"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f746370736f636b5f706f7369782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c652e676f252c2872756e74696d652f74726163655f746573742e5465737454726163655374726573732e66756e6336"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c655f756e69782e676f252a"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d616c6c6f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d67636d61726b2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f73656d612e676f257b"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f736c6963652e676f2520"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74696d652e676f252f2872756e74696d652f74726163655f746573742e5465737454726163655374726573732e66756e6337"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652e676f2533"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f6c696e75782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f7a73797363616c6c5f6c696e75785f616d6436342e676f25"
             }
           ],
-          "reason": "Pinned GNU libgo Go trace stress/HTTP regression recording. Public upstream source filenames are trace string-table data used by parser regressions; approve only these exact member bytes and documented spellings."
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
         },
         "gcc-13.4.0/libgo/go/internal/trace/testdata/stress_1_10_good": {
           "sha256": "0608236a31dadbff8a3f91dcc3c94399a3429ceeb30d7007fd9dbd0e85a85614",
@@ -2687,9 +2991,117 @@
             {
               "style": "posix",
               "path": "home/austin/go.dev/src/testing/testing.go"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f746370736f636b6f70745f706f7369782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f756e69782e676f2525"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f62797465732f6275666665722e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f696e7465726e616c2f706f6c6c2f66645f6d757465782e676f2565"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f696e7465726e616c2f706f6c6c2f66645f756e69782e676f254a"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f696e7465726e616c2f706f6c6c2f736f636b6f70742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f6469616c2e676f2531"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f66645f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f6970736f636b5f706f7369782e676f252c"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f736f636b5f706f7369782e676f2529"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f736f636b6f70745f6c696e75782e676f2576"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f746370736f636b5f706f7369782e676f252e"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c655f756e69782e676f2554"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f64656275672e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d616c6c6f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d67632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6d67636d61726b2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f70616e69632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f70726f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f73656c6563742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f73656d612e676f256d21696e7465726e616c2f706f6c6c2e282a66644d75746578292e7277756e6c6f636b256e"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f736c6963652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74696d652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652f74726163655f746573742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f6c696e75782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f7a73797363616c6c5f6c696e75785f616d6436342e676f2523"
             }
           ],
-          "reason": "Pinned GNU libgo Go trace stress/HTTP regression recording. Public upstream source filenames are trace string-table data used by parser regressions; approve only these exact member bytes and documented spellings."
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
         },
         "gcc-13.4.0/libgo/go/internal/trace/testdata/http_1_7_good": {
           "sha256": "415e1502c0066c17431ddb4d8458ad627ec4cd3d12db0efb61a2e593c7b23708",
@@ -2745,9 +3157,515 @@
             {
               "style": "posix",
               "path": "home/austin/go.dev/src/testing/testing.go"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f73797363616c6c5f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f666d742f7072696e742e676f2529"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6e65742f687474702f6d61696e5f746573742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f6f732f66696c655f756e69782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f6368616e2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f72756e74696d652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f686f6d652f61757374696e2f676f2e6465762f7372632f73797363616c6c2f7a73797363616c6c5f6c696e75785f616d6436342e676f25"
             }
           ],
-          "reason": "Pinned GNU libgo Go trace stress/HTTP regression recording. Public upstream source filenames are trace string-table data used by parser regressions; approve only these exact member bytes and documented spellings."
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/debug/xcoff/testdata/gcc-ppc32-aix-exec": {
+          "sha256": "f4f87b0e94c2e390d4b1e417aad692a528c958acad96a6bd6dad07ebe45c60cf",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f746d702f2f63634c78325a4a532e63"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/debug/xcoff/testdata/gcc-ppc32-aix-dwarf2-exec": {
+          "sha256": "3273989eb3df791d9dea293e1a3e1591de25a5b56481774f3a07d6fbc9213b4d",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f746d702f2f63634a6b534b78322e63"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/debug/xcoff/testdata/gcc-ppc64-aix-exec": {
+          "sha256": "6899ac8422f32cbbc61014a1bc6966dc7678441a212373bad8729f2b4816baeb",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f746d702f2f63636966617a32712e63"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/debug/xcoff/testdata/gcc-ppc64-aix-dwarf2-exec": {
+          "sha256": "adf84168e6ba2fc03fdb6d868b682807ff01cdfffeab2ad3cb413ebbc47c3469",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f746d702f2f63637a6b355973792e63"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/debug/dwarf/testdata/line-clang-dwarf5.elf": {
+          "sha256": "4b7f1b24dd43f75ac4f1017073f5057c31be554955accb960a27efc14a516463",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f69616e742f676f2f737263"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/debug/dwarf/testdata/rnglistx.elf": {
+          "sha256": "32e7f6a0adf60cad797aebfa205816c20842a8c6381efb5e65efab56b1b5b40e",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f69616e74"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/archive/zip/testdata/readme.zip": {
+          "sha256": "9ee76aa8a1c2ce04924b43424bf9d1b3138f812a80d6239f06f1133876f50d40",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f2c206f7220696620796f752072656275696c64"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/archive/zip/testdata/readme.notzip": {
+          "sha256": "33e24cff10c32ea3c68e2dee505a4aa22e8935e81f75bb87c49da1833e0f9693",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f2c206f7220696620796f752072656275696c64"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/regexp/testdata/re2-search.txt": {
+          "sha256": "b6876d87b65a31a3d909f58f7100d9f7b501dfd4c79c3e6a73c50868de434c9d",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "5c5c425c5c42"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "5c5c42666f6f5c5c42"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "5c5c42785c5c42"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "5c5c625c5c62"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "5c5c62666f6f5c5c62"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "5c5c62785c5c62"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/go/internal/gccgoimporter/testdata/libimportsar.a": {
+          "sha256": "6c174e63a8992d4de9de2d5aabf4f9179622f1c694cf8d07303fbd45f6984d49",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f746d702f782f7372632f696d706f727473"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f746d702f782f7372632f696d706f7274732f696d706f7274732e676f"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/internal/trace/testdata/stress_start_stop_1_11_good": {
+          "sha256": "bb52a43a3283037251deac978575ea75dab94e0f8cd7dcc101daede758018807",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d616c6c6f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d66696e616c2e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d67632e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d67636d61726b2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d676373776565702e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f70616e69632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f70726f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f736c6963652e676f25213172756e74696d652f74726163655f746573742e546573745472616365537472657373537461727453746f702e66756e6331"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74696d652e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652f74726163655f746573742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f74657374696e672f74657374696e672e676f"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/internal/trace/testdata/stress_1_11_good": {
+          "sha256": "9878383c755505fbd034e542490c7b9ce49e6d9c33432a725968a2df067a4f28",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f62797465732f6275666665722e676f2520"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f696e7465726e616c2f706f6c6c2f66645f6d757465782e676f2564"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f696e7465726e616c2f706f6c6c2f66645f756e69782e676f2543"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f696e7465726e616c2f706f6c6c2f736f636b5f636c6f657865632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f696e7465726e616c2f706f6c6c2f736f636b6f70742e676f2554"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f6469616c2e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f66645f756e69782e676f2567"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f6970736f636b5f706f7369782e676f2534"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f6e65742e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f736f636b5f706f7369782e676f2531"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f736f636b6f70745f6c696e75782e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f746370736f636b2e676f2538"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f746370736f636b5f706f7369782e676f2536"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f746370736f636b6f70745f706f7369782e676f2556"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6f732f66696c652e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6f732f66696c655f756e69782e676f2545"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6368616e2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f64656275672e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d616c6c6f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d66696e616c2e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d67632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d67636d61726b2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d676373776565702e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f70726f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f73656c6563742e676f257d2872756e74696d652f74726163655f746573742e5465737454726163655374726573732e66756e6339"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f73656d612e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f736c6963652e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74696d652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652f74726163652e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652f74726163655f746573742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f73796e632f7761697467726f75702e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f73797363616c6c2f73797363616c6c5f6c696e75782e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f73797363616c6c2f73797363616c6c5f756e69782e676f252f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f73797363616c6c2f7a73797363616c6c5f6c696e75785f616d6436342e676f252d"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f74657374696e672f74657374696e672e676f"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/internal/trace/testdata/http_1_11_good": {
+          "sha256": "6c8865769b67e9a5ea2730fbce0b4621fa5f3e2f075763964fe74b1e950bd4cc",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f666d742f7072696e742e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f696e7465726e616c2f706f6c6c2f66645f756e69782e676f252a"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6e65742f687474702f6d61696e5f746573742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6f732f66696c652e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6f732f66696c655f756e69782e676f252c"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f6f732f7369676e616c2f7369676e616c5f756e69782e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6368616e2e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d66696e616c2e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d676373776565702e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f70726f632e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652f74726163652e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f73796e632f6f6e63652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f73797363616c6c2f73797363616c6c5f756e69782e676f2528"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f73797363616c6c2f7a73797363616c6c5f6c696e75785f616d6436342e676f2526"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f74657374696e672f74657374696e672e676f25"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/internal/trace/testdata/user_task_span_1_11_good": {
+          "sha256": "0c425c55863d2adf9383d37058286f4c6b01621434c3a17be01752ccc3c8799d",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d66696e616c2e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f6d676373776565702e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f70726f632e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652f616e6e6f746174696f6e2e676f25202b72756e74696d652f74726163655f746573742e54657374557365725461736b5370616e2e66756e63312e3125212972756e74696d652f74726163655f746573742e54657374557365725461736b5370616e2e66756e6331"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652f616e6e6f746174696f6e5f746573742e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f72756e74696d652f74726163652f74726163652e676f25"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f73796e632f7761697467726f75702e676f"
+            },
+            {
+              "style": "binary-readable-hex",
+              "path": "2f7573722f6c6f63616c2f676f6f676c652f686f6d652f68616b696d2f676f6c616e672f676f2f7372632f74657374696e672f74657374696e672e676f"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/internal/xcoff/testdata/gcc-ppc32-aix-dwarf2-exec": {
+          "sha256": "3273989eb3df791d9dea293e1a3e1591de25a5b56481774f3a07d6fbc9213b4d",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f746d702f2f63634a6b534b78322e63"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/internal/xcoff/testdata/gcc-ppc64-aix-dwarf2-exec": {
+          "sha256": "adf84168e6ba2fc03fdb6d868b682807ff01cdfffeab2ad3cb413ebbc47c3469",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f746d702f2f63637a6b355973792e63"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/gcc/m2/gm2-libs/config-host": {
+          "sha256": "d6edbb594d64bf9fa2b65d86d2209e35443c66ba08fb511ff7be38c37fa347e9",
+          "examples": [
+            {
+              "style": "binary-readable-hex",
+              "path": "2f746d702063616e20736f6d6574696d65732063617573652070726f626c656d732e"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
         }
       },
       "opaqueSourceFixtures": {
