@@ -1032,7 +1032,7 @@ struct ClassroomSettingsView: View {
                                label: "\(Int(subtitles.translationTextSize)) pt")
                 subtitleSlider("背景不透明度", value: subtitles.backgroundOpacityBinding,
                                range: FloatingSubtitlePreferences.opacityRange, step: 0.05,
-                               label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
+                               label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%", keyboardStepping: true)
                 if let fullScreenMode {
                     SubtitleSpacesToggle(controller: fullScreenMode, selection: subtitles.showsAcrossSpacesBinding)
                 } else {
@@ -1062,7 +1062,7 @@ struct ClassroomSettingsView: View {
     }
 
     private func subtitleSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
-                                step: Double, label: String) -> some View {
+                                step: Double, label: String, keyboardStepping: Bool = false) -> some View {
         LabeledContent(title) {
             HStack {
                 Slider(value: Binding(get: { value.wrappedValue },
@@ -1070,6 +1070,13 @@ struct ClassroomSettingsView: View {
                     .accessibilityLabel(title)
                     .accessibilityValue(label)
                     .accessibilityIdentifier("floating-\(title)")
+                    .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { press in
+                        guard keyboardStepping, press.modifiers.isEmpty else { return .ignored }
+                        let increment = press.key == .rightArrow || press.key == .upArrow
+                        value.wrappedValue = min(range.upperBound, max(range.lowerBound,
+                            value.wrappedValue + (increment ? step : -step)))
+                        return .handled
+                    }
                 Text(label).monospacedDigit().foregroundStyle(ReadingAccessibility.secondaryText).frame(width: 48, alignment: .trailing)
                     .accessibilityHidden(true)
             }

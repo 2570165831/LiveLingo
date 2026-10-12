@@ -565,6 +565,50 @@ final class AccessibilityRegressionTests: XCTestCase {
         _ = try textNode("可在主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。", in: controller.view)
     }
 
+    func testOpacityArrowKeysMoveOneStepWhileMouseValueSnappingStaysUnchanged() async throws {
+        let (model, store) = try fixture()
+        let preferences = FloatingSubtitlePreferences(store: store)
+        preferences.backgroundOpacityBinding.wrappedValue = 0.85
+        let controller = try await host(ClassroomSettingsView().environmentObject(model).defaultAppStorage(store),
+                                        width: 520, height: 1500)
+        let slider = try node("floating-背景不透明度", in: controller.view)
+        XCTAssertEqual(slider.value("accessibilityRole") as? String, "AXSlider")
+        let window = try XCTUnwrap(controller.view.window)
+        window.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(window.makeFirstResponder(controller.view))
+        XCTAssertTrue(slider.object.responds(to: NSSelectorFromString("setAccessibilityFocused:")))
+        slider.object.setValue(true, forKey: "accessibilityFocused")
+        try await settle(controller.view)
+        func arrow(_ code: UInt16, _ characters: String) async throws {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
+            window.sendEvent(event)
+            try await settle(controller.view)
+        }
+        try await arrow(124, "\u{f703}")
+        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.90, accuracy: 0.0001)
+        try await arrow(123, "\u{f702}")
+        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.85, accuracy: 0.0001)
+        try await arrow(126, "\u{f700}")
+        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.90, accuracy: 0.0001)
+        try await arrow(125, "\u{f701}")
+        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.85, accuracy: 0.0001)
+        for (raw, expected) in [(0.873, 0.85), (0.878, 0.90), (0.712, 0.70), (0.992, 1.0)] {
+            slider.object.setValue(raw, forKey: "accessibilityValue")
+            try await settle(controller.view)
+            XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), expected, accuracy: 0.0001,
+                           "Slider value writes retain the existing nearest-step rounding")
+        }
+        try await arrow(124, "\u{f703}")
+        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 1.0, accuracy: 0.0001)
+        preferences.backgroundOpacityBinding.wrappedValue = 0.70
+        try await settle(controller.view)
+        try await arrow(123, "\u{f702}")
+        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.70, accuracy: 0.0001)
+        _ = try capture(controller.view, "uifix2-opacity-keyboard")
+    }
+
     func testFloatingLockBadgeReplacesTheSizeMenuInsideTheHeader() async throws {
         let (model, store) = try fixture()
         model.loadPresentationForTesting(phase: .recording, evidence: [], preview: "Synthetic caption.")
