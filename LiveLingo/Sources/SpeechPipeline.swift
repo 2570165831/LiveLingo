@@ -2607,10 +2607,15 @@ extension SpeechPipeline {
         // after this anchor, rather than starting at the first result itself.
         let replayClock = Logger(subsystem: "com.jianhongli.LiveLingo", category: "ReplayClock")
         replayClock.notice("replay event=start sample_rate=\(Int(audio.processingFormat.sampleRate)) frames=\(audio.length)")
+        #if LIVELINGO_DROP_PROBE
+        let replayBlockSeconds = PreviewDropProbe.shared.blockSeconds
+        #else
+        let replayBlockSeconds = 0.05
+        #endif
         while audio.framePosition < audio.length {
             try Task.checkCancellation()
             guard let buffer = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
-                frameCapacity: AVAudioFrameCount(audio.processingFormat.sampleRate * 0.05)) else {
+                frameCapacity: AVAudioFrameCount(audio.processingFormat.sampleRate * replayBlockSeconds)) else {
                 throw PipelineError.invalidInputFormat
             }
             try audio.read(into: buffer)

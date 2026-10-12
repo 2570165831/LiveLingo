@@ -6,6 +6,11 @@ import Speech
 final class PreviewDropProbe: @unchecked Sendable {
     static let shared = PreviewDropProbe()
     let lossless = CommandLine.arguments.contains("--lossless")
+    let blockSeconds: Double = {
+        let value = CommandLine.arguments.first { $0.hasPrefix("--block-ms=") }
+            .flatMap { Double($0.dropFirst("--block-ms=".count)) } ?? 50
+        return value > 0 && value <= 200 ? value / 1000 : 0.05
+    }()
     private let lock = NSLock()
     private var lines: [Data] = []
     private let origin = ProcessInfo.processInfo.systemUptime

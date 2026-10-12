@@ -51,9 +51,17 @@ actor ProbeASR {
 
 @main
 struct DropProbeCLI {
-    static func main() async throws {
+    static func main() async {
+        do { try await run() }
+        catch {
+            print("probe_failed: \(error.localizedDescription)")
+            Darwin.exit(1)
+        }
+    }
+
+    static func run() async throws {
         let args = CommandLine.arguments
-        guard args.count >= 5 else { fatalError("AUDIO NEW_OUTPUT WORKER MODEL [--lossless]") }
+        guard args.count >= 5 else { throw CocoaError(.validationMissingMandatoryProperty) }
         let root = URL(fileURLWithPath: args[2], isDirectory: true)
         guard !FileManager.default.fileExists(atPath: root.path) else { throw CocoaError(.fileWriteFileExists) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
