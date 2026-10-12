@@ -185,6 +185,9 @@ struct ContentView: View {
         let _ = SummaryRenderingDiagnostics.record(\.rootBodies)
         #endif
         VStack(spacing: 0) {
+            if let alarm = model.alarmBanner {
+                AlarmBanner(state: alarm, dismiss: model.dismissAlarmReminder)
+            }
             recordingStrip
             workspace
             statusBar
@@ -955,6 +958,17 @@ struct ClassroomSettingsView: View {
                     Button("选择保存位置…") { Task { await model.chooseOutputDirectory() } }
                         .disabled(model.phase.isBusy)
                 }
+            }
+            Section("警报提醒") {
+                Toggle("录音时检测警报声并提醒", isOn: $model.alarmDetectionEnabled)
+                Text(AlarmPolicy.explanation).font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("警报时自动保存本节并另开新录音", isOn: $model.alarmAutomaticSaveEnabled)
+                    .disabled(!model.alarmDetectionEnabled)
+                Text("检测到持续警报后倒计时 \(AlarmPolicy.countdownSeconds) 秒，可取消；保存模式会在同一位置开始带有“\(AlarmPolicy.postAlarmFolderSuffix)”后缀的新录音。暂停时取消倒计时，实时暂存模式只提醒。通知权限在首次开启检测并开始麦克风录音时由系统询问。")
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let notice = model.alarmDetectionNotice { Text(notice).font(.callout) }
             }
             Section("字幕与处理") {
                 if model.showsOutputLanguageSelector {

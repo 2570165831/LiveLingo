@@ -581,6 +581,7 @@ final class AppModel: ObservableObject {
             previewWake?.signal()
             updateReviewAvailability()
             applyIdleSleepAssertion()
+            alarmRecordingPhaseChanged()
             persistCurrentSession()
         }
     }
@@ -1070,6 +1071,42 @@ final class AppModel: ObservableObject {
         }
     }
 
+    static let alarmDetectionDefaultsKey = "alarmDetectionEnabled"
+    static let alarmAutomaticSaveDefaultsKey = "alarmAutomaticSaveEnabled"
+    @Published var alarmDetectionEnabled: Bool {
+        didSet {
+            preferences.set(alarmDetectionEnabled, forKey: Self.alarmDetectionDefaultsKey)
+            pipeline.setAlarmDetectionEnabled(alarmDetectionEnabled && activeInputMode == .microphone)
+            if !alarmDetectionEnabled { clearAlarmReminder() }
+            else if isRecording && activeInputMode == .microphone { prepareAlarmNotifications() }
+        }
+    }
+    @Published var alarmAutomaticSaveEnabled: Bool {
+        didSet {
+            preferences.set(alarmAutomaticSaveEnabled, forKey: Self.alarmAutomaticSaveDefaultsKey)
+            if !alarmAutomaticSaveEnabled {
+                alarmCountdown.cancel(); alarmBanner?.secondsRemaining = nil
+            }
+        }
+    }
+    @Published private(set) var alarmBanner: AlarmBannerState?
+    @Published private(set) var alarmDetectionNotice: String?
+    @Published private(set) var alarmSwitchMilliseconds: Double?
+    private var alarmRule = AlarmTriggerRule()
+    private var alarmCountdown = AlarmCountdown()
+    private var alarmCountdownTask: Task<Void, Never>?
+    private var alarmRolloverTask: Task<Void, Never>?
+    private var alarmRolloverInProgress = false
+    private var alarmStopRequested = false
+    private var alarmPreviousQueue: DurableTranscriptionQueue?
+    private var alarmArchivedModels: [AppModel] = []
+    private var alarmArchivedOpenTasks: [Task<Void, Never>] = []
+    private var alarmArchivedProcessingTask: Task<Void, Never>?
+    private weak var alarmForegroundModel: AppModel?
+    #if !LIVELINGO_CLI
+    private var alarmPresenter: AlarmReminderPresenter?
+    #endif
+
     @Published var exportFormat: NotesExportFormat = .markdown
     @Published var exportScope: NotesExportScope = .wholeLesson
     @Published var exportIncludesReviewAdvice = false
@@ -1348,6 +1385,8 @@ final class AppModel: ObservableObject {
         noteBatchCharacters = savedBatchCharacters ?? SummaryRefreshPolicy.automaticBatchCharacters
         let savedFocusMode = preferences.bool(forKey: Self.focusModeDefaultsKey)
         let savedPreventIdleSleep = (preferences.object(forKey: Self.preventIdleSleepDefaultsKey) as? Bool) ?? true
+        alarmDetectionEnabled = (preferences.object(forKey: Self.alarmDetectionDefaultsKey) as? Bool) ?? true
+        alarmAutomaticSaveEnabled = (preferences.object(forKey: Self.alarmAutomaticSaveDefaultsKey) as? Bool) ?? true
         previewTranslationEnabled = (preferences.object(forKey: Self.previewTranslationDefaultsKey) as? Bool) ?? true
         let onBattery = PowerSourceMonitor.isOnBattery()
         processingFocusEnabled = savedFocusMode
@@ -1647,6 +1686,300 @@ final class AppModel: ObservableObject {
         do { try storeRecordingRecovery(record) }
         catch { archiveNotice = notice + "恢复记录尚未更新：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
     }
+
+    private func alarmRecordingPhaseChanged() {
+        if phase == .paused {
+            alarmRule.clearEvidence()
+            alarmCountdown.cancel()
+            alarmBanner?.secondsRemaining = nil
+            alarmCountdownTask?.cancel(); alarmCountdownTask = nil
+        } else if phase == .recording {
+            if alarmDetectionEnabled && activeInputMode == .microphone { prepareAlarmNotifications() }
+        } else if !alarmRolloverInProgress { clearAlarmReminder() }
+    }
+
+    private func prepareAlarmNotifications() {
+        #if !LIVELINGO_CLI
+        guard backgroundServicesEnabled, !preparingApplicationExit else { return }
+        if alarmPresenter == nil { alarmPresenter = AlarmReminderPresenter() }
+        alarmPresenter?.prepareNotificationsAtRecordingStart()
+        #endif
+    }
+
+    func dismissAlarmReminder() {
+        alarmCountdown.cancel()
+        alarmCountdownTask?.cancel(); alarmCountdownTask = nil
+        alarmRule.dismiss(now: ProcessInfo.processInfo.systemUptime)
+        alarmBanner = nil
+        #if !LIVELINGO_CLI
+        alarmPresenter?.hide()
+        #endif
+    }
+
+    private func clearAlarmReminder() {
+        alarmCountdown.cancel()
+        alarmCountdownTask?.cancel(); alarmCountdownTask = nil
+        alarmRule.stop(); alarmBanner = nil
+        #if !LIVELINGO_CLI
+        alarmPresenter?.hide()
+        #endif
+    }
+
+    private func receiveAlarmSound(_ observation: AlarmSoundObservation,
+                                   now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard alarmDetectionEnabled, isRecording, activeInputMode == .microphone,
+              !isImportingFile, !alarmRolloverInProgress else { return }
+        guard alarmRule.observe(observation, now: now) else { return }
+        let automatic = alarmAutomaticSaveEnabled && activeStorageMode == .saveSession
+        alarmBanner = AlarmBannerState(secondsRemaining: automatic ? AlarmPolicy.countdownSeconds : nil,
+                                      liveOnly: activeStorageMode == .liveOnly)
+        #if !LIVELINGO_CLI
+        if backgroundServicesEnabled {
+            if alarmPresenter == nil { alarmPresenter = AlarmReminderPresenter() }
+            let body = activeStorageMode == .liveOnly
+                ? "检测到警报声。实时暂存模式只提醒，不自动保存或分段。请以现场广播和工作人员指示为准。"
+                : AlarmPolicy.notification
+            alarmPresenter?.show(dismiss: { [weak self] in self?.dismissAlarmReminder() }, notificationBody: body)
+        }
+        #endif
+        guard automatic else { return }
+        alarmCountdown.start(now: now)
+        // Tests drive the same tick explicitly, never wait thirty real seconds.
+        guard !AppRuntimeEnvironment.isUnitTesting else { return }
+        alarmCountdownTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled, let self, alarmCountdown.deadline != nil else { return }
+                alarmCountdownTick(now: ProcessInfo.processInfo.systemUptime)
+            }
+        }
+    }
+
+    private func alarmCountdownTick(now: TimeInterval) {
+        guard alarmCountdown.deadline != nil else { return }
+        let remaining = alarmCountdown.remaining(now: now)
+        if alarmBanner?.secondsRemaining != remaining { alarmBanner?.secondsRemaining = remaining }
+        let due = alarmCountdown.takeDue(now: now, recording: isRecording, paused: isPaused,
+            importing: isImportingFile, liveOnly: activeStorageMode == .liveOnly,
+            enabled: alarmAutomaticSaveEnabled && alarmDetectionEnabled)
+        if alarmCountdown.deadline == nil { alarmBanner?.secondsRemaining = nil }
+        if due {
+            alarmBanner?.secondsRemaining = nil
+            alarmRolloverTask = Task { @MainActor [weak self] in
+                await self?.performAlarmRollover()
+                self?.alarmRolloverTask = nil
+            }
+        }
+    }
+
+    private func performAlarmRollover() async {
+        guard isRecording, activeInputMode == .microphone, activeStorageMode == .saveSession,
+              !isImportingFile, !alarmRolloverInProgress, !preparingApplicationExit,
+              let previousDirectory = currentCourseDirectory else { return }
+        alarmRolloverInProgress = true
+        alarmStopRequested = false
+        alarmBanner?.saving = true
+        let priorID = sessionID, epoch = generation, revision = lifecycleRevision
+        let target = outputLanguage
+        let parent = previousDirectory.deletingLastPathComponent()
+        let nextID = UUID()
+        let nextDirectory = SessionWorkspace.uniqueFinalDirectory(in: parent,
+            preferredName: Self.sessionFolderName(startedAt: .now()) + AlarmPolicy.postAlarmFolderSuffix)
+        var boundary: SpeechPipeline.AlarmRolloverResult?
+        defer { alarmPreviousQueue = nil; alarmRolloverInProgress = false }
+        do {
+            // Cancel/join old generation work while microphone PCM continues to
+            // arrive. No model health probe or permission dialog occurs at split.
+            try await parkSavedProcessing()
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch, isRecording,
+                  !alarmStopRequested, !preparingApplicationExit else { throw CancellationError() }
+            try SensitiveFileIO.prepareDirectory(nextDirectory)
+            var initial = SessionSnapshot(sessionID: nextID,
+                audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)],
+                transcriptionJournalPath: DurableTranscriptionJournal.directoryName + "/work.jsonl",
+                targetLocale: target == .simplifiedChinese ? nil : target.rawValue)
+            initial.processing.paused = true
+            let initialSnapshot = try await Task.detached { [initial] in
+                try SessionStore(directory: nextDirectory).save(initial)
+            }.value
+            let nextEpoch = generation + 1
+            alarmPreviousQueue = pipeline.alarmQueueForArchive
+            let result = try await pipeline.rolloverForAlarm(
+                recordingURL: nextDirectory.appendingPathComponent(SessionWorkspace.recordingFileName),
+                sessionID: nextID) { [weak self] event in
+                    Task { @MainActor in
+                        guard let self, self.generation == nextEpoch, self.sessionID == nextID else { return }
+                        self.consume(event)
+                    }
+                }
+            boundary = result
+            alarmSwitchMilliseconds = result.switchMilliseconds
+            // The old queue is parked, so its immutable terminal ranges can be
+            // bound to the old snapshot even though capture already writes new PCM.
+            if var snapshot = sessionSnapshot {
+                let work = result.previousQueue.records
+                let gaps = snapshot.audioRanges.filter { $0.interruptionReason != nil }
+                snapshot.audioRanges = work.map { record in
+                    SessionAudioRange(id: record.id, segmentID: record.id,
+                        filePath: SessionWorkspace.recordingFileName, startFrame: record.startFrame,
+                        frameCount: record.endFrame - record.startFrame,
+                        captureStart: record.captureStart ?? record.start, captureEnd: record.captureEnd ?? record.end)
+                } + gaps
+                snapshot.processing.lastCapturedTime = result.previousDuration
+                if !snapshot.audioFiles.isEmpty {
+                    snapshot.audioFiles[0].frameCount = result.previousFrames
+                    snapshot.audioFiles[0].sampleRate = result.sampleRate
+                    snapshot.audioFiles[0].isFinalized = true
+                }
+                sessionSnapshot = snapshot
+            }
+            stopElapsedClock()
+            activeStorageMode = nil; activeInputMode = nil
+            phase = .saved(previousDirectory)
+            try await flushSessionArchive()
+            let captions = segments, notes = lectureSummary, legacy = summaryIsLegacyRendered
+            let evidence = notesScheduleEvidence, converter = chineseScriptConverter
+            try await Task.detached {
+                try SessionExporter.export(segments: captions, sessionDirectory: previousDirectory,
+                    summary: notes, target: target, summaryIsLegacyRendered: legacy,
+                    summaryEvidence: evidence, converter: converter)
+            }.value
+            // This reset never deletes saved content; old work was parked above.
+            guard resetSessionStateForNewRun(allowAlarmBindingDuringExit: true) else { throw AppError.sessionDirectoryMissing }
+            sessionID = nextID; outputLanguage = target
+            sessionDirectory = nextDirectory; currentCaptureStart = result.nextCaptureStart
+            activeStorageMode = .saveSession; activeInputMode = .microphone
+            var capturedSnapshot = initialSnapshot
+            capturedSnapshot.captureStart = result.nextCaptureStart
+            bindSessionArchive(to: nextDirectory, restored: capturedSnapshot)
+            try await flushSessionArchive()
+            guard pipeline.alarmCaptureIsActive else { throw SpeechPipeline.PipelineError.noActiveSession }
+            phase = .recording; beginElapsedClock()
+            processingPaused = false
+            try pipeline.resumeTranscription()
+            audioInputStatus = "麦克风已接入"
+            alarmBanner = AlarmBannerState(saved: true)
+            if !preparingApplicationExit { retainAlarmSavedCourse(previousDirectory, queue: result.previousQueue) }
+            if result.queueFinalizationFailed {
+                await stopSession(failure: "分段后的转写状态保存失败；前后两段录音均已保留。")
+            } else if alarmStopRequested || preparingApplicationExit { await stopSession() }
+        } catch {
+            // Preparation failure keeps writing the first course. A committed
+            // boundary failure keeps *both* trees and closes the new writer;
+            // neither recording is removed or overwritten.
+            if boundary != nil {
+                await pipeline.stopCapture(continueTranscribing: false)
+                phase = .failed("警报分段保存未完成；前后两段录音与课程文件均已保留。")
+            } else if isRecording {
+                processingPaused = false
+                try? pipeline.resumeTranscription()
+                restorePendingCaptionWork(); drainTranslationQueue()
+            }
+            if alarmStopRequested || preparingApplicationExit {
+                if boundary == nil { await stopSession() }
+                clearAlarmReminder()
+            } else if hasActiveSession {
+                alarmBanner = AlarmBannerState(failure: "自动分段未完成，现有录音与内容已保留。请按现场指示行动。")
+            } else {
+                clearAlarmReminder()
+                archiveNotice = "警报分段未完成；前后两段录音与课程文件均已保留。"
+            }
+        }
+    }
+
+    private func retainAlarmSavedCourse(_ directory: URL, queue: DurableTranscriptionQueue) {
+        let review = LearningReviewQueue(journalURL: directory.appendingPathComponent("alarm-review-queue.json"),
+            observeSleep: false, diagnostics: .disabled)
+        let saved = AppModel(reviewQueue: review, pipeline: SpeechPipeline(existingQueue: queue),
+            translation: captionTranslation, notes: learningGeneration, backgroundServices: false,
+            scheduledNotes: scheduledNotesEnabled, defaults: preferences,
+            chineseScriptConverter: chineseScriptConverter)
+        saved.alarmForegroundModel = self
+        alarmArchivedModels.append(saved)
+        let opening = Task { @MainActor [weak self] in
+            do {
+                try await saved.openSavedSession(directory, allowAutomaticProcessing: false)
+                self?.startAlarmSavedProcessingCoordinator()
+            } catch {
+                self?.archiveNotice = "警报前课程已保留；后台整理可在打开该课程后继续。"
+            }
+        }
+        alarmArchivedOpenTasks.append(opening)
+    }
+
+    private func startAlarmSavedProcessingCoordinator() {
+        guard !preparingApplicationExit, alarmArchivedProcessingTask == nil else { return }
+        alarmArchivedProcessingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                // Old ASR/translation/note requests yield to live caption work.
+                // The existing memory/latency gate must also allow concurrency.
+                let livePending = hasActiveSession && (captionWorkPending || hasCaptionBacklog
+                    || (transcriptionProcessing?.pendingCount ?? 0) > 0 || summaryTask != nil || !summaryConcurrencyAllowed)
+                for saved in alarmArchivedModels {
+                    saved.summaryConcurrencyAllowed = summaryConcurrencyAllowed
+                    saved.summaryMemoryPressureNormal = summaryMemoryPressureNormal
+                    saved.runtimeResources = runtimeResources
+                    if livePending && !saved.processingPaused {
+                        try? await saved.parkSavedProcessing()
+                    } else if !livePending && saved.processingPaused {
+                        saved.resumeSavedProcessing()
+                    }
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
+    #if DEBUG
+    func configureAlarmForTesting(input: AudioInputMode, storage: SessionStorageMode = .saveSession, importing: Bool = false) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        activeInputMode = input; activeStorageMode = storage; isImportingFile = importing
+    }
+    func beginAlarmMicrophoneCourseForTesting(directory: URL) async throws -> OwnedAudioCaptureBuffer {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        guard resetSessionStateForNewRun() else { throw AppError.sessionDirectoryMissing }
+        sessionDirectory = directory; outputDirectory = directory.deletingLastPathComponent()
+        activeInputMode = .microphone; activeStorageMode = .saveSession; currentCaptureStart = .now()
+        bindSessionArchive(to: directory)
+        try await flushSessionArchive()
+        let epoch = generation
+        let input = try await pipeline.startSyntheticCapture(format: MediaFileImport.storageFormat,
+            recordingURL: directory.appendingPathComponent(SessionWorkspace.recordingFileName),
+            sessionID: sessionID, inputMode: .microphone) { [weak self] event in
+                Task { @MainActor in
+                    guard let self, self.generation == epoch else { return }
+                    self.consume(event)
+                }
+            }
+        phase = .recording
+        return input
+    }
+    func replayParkedAlarmProcessingForTesting() {
+        guard let state = alarmPreviousQueue?.state else { return }
+        consume(.processing(state))
+    }
+    func receiveAlarmSoundForTesting(_ observation: AlarmSoundObservation, now: TimeInterval) {
+        receiveAlarmSound(observation, now: now)
+    }
+    func alarmCountdownTickForTesting(now: TimeInterval) { alarmCountdownTick(now: now) }
+    var alarmRolloverTaskForTesting: Task<Void, Never>? { alarmRolloverTask }
+    func presentAlarmBannerForTesting(_ state: AlarmBannerState) { alarmBanner = state }
+    func retireAlarmTasksForTesting() async {
+        clearAlarmReminder()
+        for opening in alarmArchivedOpenTasks { await opening.value }
+        alarmArchivedOpenTasks.removeAll()
+        alarmArchivedProcessingTask?.cancel()
+        await alarmArchivedProcessingTask?.value
+        alarmArchivedProcessingTask = nil
+        for saved in alarmArchivedModels {
+            try? await saved.parkSavedProcessing()
+            await saved.noteReviewQueue.shutdownForTesting()
+        }
+        alarmArchivedModels.removeAll()
+    }
+    #endif
 
     func start() {
         guard !preparingApplicationExit, !phase.isBusy, !archiveLoading, !isImportingFile,
@@ -1993,6 +2326,8 @@ final class AppModel: ObservableObject {
     func clearExportStatus() { exportStatus = nil }
 
     func stop() {
+        clearAlarmReminder()
+        if alarmRolloverInProgress { alarmStopRequested = true; return }
         guard !preparingApplicationExit,
               hasActiveSession || (activeStorageMode == .liveOnly && temporarySessionDirectory != nil) else { return }
         guard admitLifecycleRetry() else { return }
@@ -2021,6 +2356,9 @@ final class AppModel: ObservableObject {
         applicationExitDeadline = deadline
         exitStorageProgress.attach(deadline)
         preparingApplicationExit = true
+        clearAlarmReminder()
+        alarmStopRequested = true
+        alarmArchivedProcessingTask?.cancel()
         defer { preparingApplicationExit = false }
         return await ExitDeadline.$current.withValue(deadline) {
             cancelScheduledSummaryRefresh()
@@ -2031,6 +2369,8 @@ final class AppModel: ObservableObject {
             let translation = translationWorker, summary = summaryTask
             let processing = processingTask
             let finalization = sessionFinalizationTask
+            let alarmRollover = alarmRolloverTask
+            deadline.track(alarmRollover)
             for task in [translation, summary, processing, importing, starting, manual, refresh, readiness, power] {
                 deadline.track(task)
             }
@@ -2044,6 +2384,12 @@ final class AppModel: ObservableObject {
             let discardsContent = activeStorageMode == .liveOnly
                 || (temporarySessionDirectory != nil && sessionSaver == nil)
             do {
+                try await waitForLifecycle { await alarmRollover?.value }
+                for opening in alarmArchivedOpenTasks { try await waitForLifecycle { await opening.value } }
+                alarmArchivedOpenTasks.removeAll()
+                try await waitForLifecycle { [self] in await alarmArchivedProcessingTask?.value }
+                alarmArchivedProcessingTask = nil
+                for archived in alarmArchivedModels { try await archived.parkSavedProcessing() }
                 try await waitForLifecycle { [self] in
                     await finalization?.value
                     while finalizationInProgress {
@@ -2677,8 +3023,8 @@ final class AppModel: ObservableObject {
 
     /// 开始任意一次"课堂会话"前的状态重置：实时录音与文件导入共用。
     @discardableResult
-    private func resetSessionStateForNewRun() -> Bool {
-        guard !preparingApplicationExit, !finalizationInProgress, sessionFinalizationTask == nil,
+    private func resetSessionStateForNewRun(allowAlarmBindingDuringExit: Bool = false) -> Bool {
+        guard (!preparingApplicationExit || (allowAlarmBindingDuringExit && alarmRolloverInProgress)), !finalizationInProgress, sessionFinalizationTask == nil,
               applicationExitDeadline?.hasPendingOperations != true else {
             archiveError = "前一次停止仍有任务未结束，内容与文件已保留，新课堂未开始。"
             return false
@@ -2841,6 +3187,7 @@ final class AppModel: ObservableObject {
             try validateLifecycleCompletion(revision)
 
             do {
+                pipeline.setAlarmDetectionEnabled(alarmDetectionEnabled && inputMode == .microphone)
                 let eventGeneration = generation
                 try await pipeline.start(
                     inputMode: inputMode,
@@ -2900,6 +3247,7 @@ final class AppModel: ObservableObject {
     }
 
     private func stopSession(failure: String? = nil) async {
+        clearAlarmReminder()
         if let task = sessionFinalizationTask { await task.value; return }
         if !preparingApplicationExit, applicationExitDeadline?.isExpired == true {
             guard applicationExitDeadline?.hasPendingOperations != true else { return }
@@ -3581,11 +3929,21 @@ final class AppModel: ObservableObject {
                 initialSourceRevisionInputs[result.id] = initial
             }
             appendConfirmedCaption(initial, hints: result.hints)
+        case .alarmSound(let observation):
+            receiveAlarmSound(observation)
+        case .alarmAnalysisUnavailable:
+            alarmDetectionNotice = "警报声检测暂不可用；录音与字幕继续。请以现场安全设备和广播为准。"
+            alarmRule.clearEvidence()
         case .processing(let state):
             guard state.sessionID == sessionID else { return }
             transcriptionProcessing = state
             if var snapshot = sessionSnapshot {
-                let work = pipeline.transcriptionWork()
+                // An old processing event can already be enqueued on the main
+                // actor when capture switches. Read that course's parked queue,
+                // rather than borrowing the new recording's frame ranges.
+                let oldQueue = alarmPreviousQueue?.state?.sessionID == state.sessionID ? alarmPreviousQueue : nil
+                let work = oldQueue?.records ?? pipeline.transcriptionWork()
+                let capturing = oldQueue?.state?.isCapturing ?? state.isCapturing
                 let interruptions = snapshot.audioRanges.filter { $0.interruptionReason != nil }
                 snapshot.audioRanges = work.map { record in
                     SessionAudioRange(id: record.id, segmentID: record.id,
@@ -3599,7 +3957,7 @@ final class AppModel: ObservableObject {
                     if !snapshot.audioFiles.isEmpty {
                         snapshot.audioFiles[0].frameCount = last.endFrame
                         snapshot.audioFiles[0].sampleRate = last.sampleRate
-                        snapshot.audioFiles[0].isFinalized = !state.isCapturing
+                        snapshot.audioFiles[0].isFinalized = !capturing
                     }
                 }
                 sessionSnapshot = snapshot
@@ -4106,6 +4464,8 @@ final class AppModel: ObservableObject {
     }
 
     private func drainTranslationQueue() {
+        if let foreground = alarmForegroundModel, foreground.hasActiveSession,
+           foreground.captionWorkPending || foreground.hasCaptionBacklog { return }
         guard !preparingApplicationExit, applicationExitDeadline?.isExpired != true,
               !processingPaused, !manualRequestInFlight, !captionWorkerShouldYieldToManual,
               (summaryTask == nil || summaryConcurrencyAllowed),
@@ -4848,6 +5208,7 @@ final class AppModel: ObservableObject {
 
     private func updateReviewAvailability() {
         let recording = hasActiveSession || phase == .preparing || phase == .stopping
+            || (alarmForegroundModel?.hasActiveSession ?? false)
         if hasCaptionBacklog { reviewConcurrency.reset() }
         let capable = reviewConcurrency.allows(mode: selectedMode)
         let available = SummaryResourcePolicy.estimatedAvailableBytes() ?? 0
@@ -4879,8 +5240,9 @@ final class AppModel: ObservableObject {
     private func resourceContext(summaryRunning: Bool, continuingSummary: Bool,
                                  allowConcurrent: Bool? = nil) -> ResourceSchedulingPolicy.Context {
         .init(now: ProcessInfo.processInfo.systemUptime, memoryNormal: summaryMemoryPressureNormal,
-            captionBacklog: hasCaptionBacklog, captionPending: captionWorkPending,
-            recording: hasActiveSession || phase == .preparing || phase == .stopping,
+            captionBacklog: hasCaptionBacklog || (alarmForegroundModel?.hasCaptionBacklog ?? false),
+            captionPending: captionWorkPending || (alarmForegroundModel?.captionWorkPending ?? false),
+            recording: hasActiveSession || phase == .preparing || phase == .stopping || (alarmForegroundModel?.hasActiveSession ?? false),
             allowConcurrent: allowConcurrent ?? summaryConcurrencyAllowed, summaryRunning: summaryRunning,
             paused: processingPaused, lastSummaryStarted: lastSummaryCycleStartedUptime,
             continuingSummary: continuingSummary, lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,

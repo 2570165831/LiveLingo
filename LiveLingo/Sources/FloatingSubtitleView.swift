@@ -38,6 +38,9 @@ private struct FloatingSubtitleContent: View {
         let sourceHeight = presentation.source == nil ? 0 : presentation.translation == nil ? 226 : sourceBudget
         let translationHeight = presentation.translation == nil ? 0 : presentation.source == nil ? 226 : 226 - sourceBudget
         VStack(alignment: .leading, spacing: 14) {
+            if let alarm = model.alarmBanner {
+                AlarmBanner(state: alarm, dismiss: model.dismissAlarmReminder, compact: true)
+            }
             HStack {
                 Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
                 Text(model.floatingSubtitleHeader(for: presentation))

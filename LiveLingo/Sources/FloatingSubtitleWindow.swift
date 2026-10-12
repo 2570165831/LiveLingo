@@ -1,5 +1,6 @@
 #if !LIVELINGO_CLI
 import AppKit
+import Combine
 import SwiftUI
 
 struct FloatingSubtitleWindowSettings: Equatable {
@@ -163,6 +164,8 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     var panelFactoryForTesting: ((NSRect, NSWindow.StyleMask) -> NSPanel)?
     #endif
 
+    private var alarmBannerSubscription: AnyCancellable?
+
     var panel: NSPanel? { window as? NSPanel }
     var lockActionTitle: String { isLocked ? "解锁悬浮字幕" : "锁定悬浮字幕" }
 
@@ -231,6 +234,14 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         // Restore the old top-left position, keeping the content's fixed size.
         panel.setContentSize(size)
         window = panel
+        alarmBannerSubscription = model.$alarmBanner
+            .map { $0.map { $0.title + "|" + ($0.failure ?? "") } }
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                // Published values arrive before SwiftUI has laid out the new
+                // banner. Keep the existing top edge and refit on the next turn.
+                Task { @MainActor [weak self] in self?.refitForAlarmBanner() }
+            }
         configuration = panelConfiguration
         configuration?.apply(settings)
         keepClearOfMenuBar()
@@ -249,6 +260,21 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         if let panelFactoryForTesting { return panelFactoryForTesting(rect, style) }
         #endif
         return NSPanel(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
+    }
+
+    private func refitForAlarmBanner() {
+        guard let panel, let host = panel.contentView else { return }
+        let topLeft = NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+        panel.contentMinSize = .zero
+        panel.contentMaxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        host.invalidateIntrinsicContentSize()
+        host.layoutSubtreeIfNeeded()
+        let size = host.fittingSize
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return }
+        panel.setContentSize(size)
+        panel.contentMinSize = size; panel.contentMaxSize = size
+        panel.setFrameOrigin(NSPoint(x: topLeft.x, y: topLeft.y - panel.frame.height))
+        keepClearOfMenuBar()
     }
 
     func show(model: AppModel) {
@@ -328,6 +354,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         // The hosted view observes this controller. Release that content when
         // closing to break the controller -> panel -> view -> controller cycle.
         // Reopening creates a panel at the saved frame with the same runtime lock.
+        alarmBannerSubscription?.cancel(); alarmBannerSubscription = nil
         panel?.contentView = nil
         configuration = nil
         window = nil

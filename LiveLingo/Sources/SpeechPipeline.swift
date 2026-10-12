@@ -66,6 +66,15 @@ private final class LegacySpeechPreview: @unchecked Sendable {
         }
     }
 
+    func restartForCourseBoundary() {
+        lock.withLock {
+            generation = UUID()
+            request?.endAudio(); task?.cancel()
+            request = nil; task = nil
+            requestStart = elapsed
+        }
+    }
+
     func stop() {
         lock.withLock {
             stopped = true
@@ -130,6 +139,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     enum Event: Sendable {
         case audioLevel(Float)
+        case alarmSound(AlarmSoundObservation)
+        case alarmAnalysisUnavailable
         /// `observedAt` is this pipeline's uptime when the observation was
         /// emitted, so the receiver can measure its own main-thread queueing.
         case volatile(text: String, start: TimeInterval, end: TimeInterval, observedAt: TimeInterval)
@@ -224,7 +235,15 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private let stateLock = NSLock()
-    private let transcriptionQueue: TranscriptionQueue
+    private var queueStorage: TranscriptionQueue
+    private var transcriptionQueue: TranscriptionQueue { stateLock.withLock { queueStorage } }
+    private let transcriptionQueueFactory: @Sendable () -> TranscriptionQueue
+    private var alarmDetectionRequested = false
+    private var alarmAnalyzer: AlarmSoundAnalyzer?
+    private var alarmAnalysisID = UUID()
+    private var alarmWrittenFrames: AVAudioFramePosition = 0
+    private var activityAudioOffset: TimeInterval = 0
+    private var previewAudioOffset: TimeInterval = 0
     private let microphoneRecoveryQueue = DispatchQueue(label: "LiveLingo.MicrophoneRecovery")
     private let previewLocale = Locale(identifier: "en-US")
     private var audioEngine: (any MicrophoneCaptureEngine)?
@@ -361,6 +380,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     static let systemAudioRouteDebounce: TimeInterval = 0.75
 
     init(transcriber: TranscriptionQueue.Transcriber? = nil,
+         existingQueue: TranscriptionQueue? = nil,
          beforeAudioWrite: (@Sendable () throws -> Void)? = nil,
          beforeChunkOpen: (@Sendable () throws -> Void)? = nil,
          beforeChunkWrite: (@Sendable () throws -> Void)? = nil,
@@ -401,7 +421,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         self.beforeChunkWrite = beforeChunkWrite
         self.enableAudioAnalysis = enableAudioAnalysis
         self.captureSleepNotificationCenter = captureSleepNotificationCenter ?? NSWorkspace.shared.notificationCenter
-        transcriptionQueue = transcriber.map { TranscriptionQueue(transcriber: $0) } ?? TranscriptionQueue()
+        transcriptionQueueFactory = { transcriber.map { TranscriptionQueue(transcriber: $0) } ?? TranscriptionQueue() }
+        queueStorage = existingQueue ?? transcriptionQueueFactory()
         super.init()
         boundarySignal = DispatchSource.makeUserDataAddSource(queue: audioProcessingQueue)
         boundarySignal.setEventHandler { [weak self] in self?.rotateReadyChunk() }
@@ -632,6 +653,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             await stopCapture(continueTranscribing: false)
             throw error
         }
+        refreshAlarmAnalysis()
         if inputMode == .microphone { startMicrophoneHealthMonitoring() }
         else { startSystemAudioHealthMonitoring() }
         startCaptureSleepMonitoring()
@@ -807,6 +829,139 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         if !running { input.seal(); await source.stop(); throw CancellationError() }
     }
 
+    func setAlarmDetectionEnabled(_ enabled: Bool) {
+        stateLock.withLock { alarmDetectionRequested = enabled }
+        if enabled { refreshAlarmAnalysis() } else { retireAlarmAnalysis() }
+    }
+
+    private func retireAlarmAnalysis() {
+        let previous = stateLock.withLock { () -> AlarmSoundAnalyzer? in
+            alarmAnalysisID = UUID()
+            let value = alarmAnalyzer; alarmAnalyzer = nil; return value
+        }
+        previous?.stop()
+    }
+
+    private func refreshAlarmAnalysis() {
+        let context = stateLock.withLock { () -> (AVAudioFormat, UUID, UUID)? in
+            guard alarmDetectionRequested, inputMode == .microphone, captureConfigured,
+                  !capturePaused, !isStopping, alarmAnalyzer == nil, let format = inputFormat else { return nil }
+            return (format, generation, alarmAnalysisID)
+        }
+        guard let (format, token, id) = context else { return }
+        do {
+            let analyzer = try AlarmSoundAnalyzer(format: format, handler: { [weak self] observation in
+                let handler = self?.stateLock.withLock { () -> (@Sendable (Event) -> Void)? in
+                    guard let self, self.generation == token, self.alarmAnalysisID == id,
+                          self.inputMode == .microphone, !self.capturePaused, !self.isStopping else { return nil }
+                    return self.eventHandler
+                }
+                handler?(.alarmSound(observation))
+            }, failed: { [weak self] in
+                let handler = self?.stateLock.withLock { () -> (@Sendable (Event) -> Void)? in
+                    guard let self, self.generation == token, self.alarmAnalysisID == id else { return nil }
+                    return self.eventHandler
+                }
+                handler?(.alarmAnalysisUnavailable)
+                self?.retireAlarmAnalysis()
+            })
+            let accepted = stateLock.withLock { () -> Bool in
+                guard generation == token, alarmAnalysisID == id, alarmDetectionRequested,
+                      !capturePaused, !isStopping, alarmAnalyzer == nil else { return false }
+                alarmAnalyzer = analyzer; alarmWrittenFrames = 0
+                return true
+            }
+            if !accepted { analyzer.stop() }
+        } catch {
+            stateLock.withLock { eventHandler }?(.alarmAnalysisUnavailable)
+        }
+    }
+
+    var alarmQueueForArchive: DurableTranscriptionQueue { transcriptionQueue }
+    var alarmCaptureIsActive: Bool { stateLock.withLock { captureConfigured && !isStopping } }
+
+    struct AlarmRolloverResult: Sendable {
+        let previousQueue: TranscriptionQueue
+        let previousDuration: TimeInterval
+        let previousFrames: Int64
+        let sampleRate: Double
+        let switchMilliseconds: Double
+        let nextCaptureStart: SessionCaptureStart?
+        var queueFinalizationFailed = false
+    }
+
+    /// Switch two exclusive PCM writers on the capture consumer's serial lane.
+    /// The device and its tap never stop. Buffers before/after this barrier go
+    /// into exactly one course; the next ASR queue stays parked until UI binding.
+    func rolloverForAlarm(recordingURL: URL, sessionID nextID: UUID,
+                          eventHandler nextHandler: @escaping @Sendable (Event) -> Void) async throws -> AlarmRolloverResult {
+        let context = try stateLock.withLock { () throws -> (AVAudioFormat, UUID, TranscriptionQueue, QwenModelProfile) in
+            guard captureConfigured, inputMode == .microphone, !capturePaused, !isStopping,
+                  persistsSession, let format = inputFormat else { throw PipelineError.noActiveSession }
+            return (format, generation, queueStorage, profile)
+        }
+        let (format, token, previousQueue, preparedProfile) = context
+        try await previousQueue.pause()
+        let root = recordingURL.deletingLastPathComponent()
+        let nextQueue = transcriptionQueueFactory()
+        try await nextQueue.configure(directory: root, sessionID: nextID, persistent: true,
+            identified: true, startPaused: true, handler: nextHandler)
+        let chunks = root.appendingPathComponent(DurableTranscriptionJournal.directoryName, isDirectory: true)
+        let full = try SecureAudioWriter(forWriting: recordingURL, format: format)
+        let id = UUID()
+        let chunkURL = chunks.appendingPathComponent("chunk-" + id.uuidString + ".wav")
+        try beforeChunkOpen?()
+        try DurableTranscriptionJournal.stageCapture(CaptureChunkDescriptor(id: id, sessionID: nextID,
+            ordinal: 0, audioFile: chunkURL.lastPathComponent, recordingFile: recordingURL.lastPathComponent,
+            startFrame: 0, sampleRate: format.sampleRate, modelKey: preparedProfile.asrKey,
+            fallbackModelKey: preparedProfile.fallbackASRKey), directory: chunks)
+        let chunk = try SecureAudioWriter(forWriting: chunkURL, format: format)
+        return try await withCheckedThrowingContinuation { continuation in
+            audioProcessingQueue.async { [self] in
+                do {
+                    var result = try stateLock.withLock { () throws -> (FlushSnapshot, AlarmRolloverResult) in
+                        guard generation == token, captureConfigured, !capturePaused, !isStopping,
+                              queueStorage === previousQueue else { throw PipelineError.noActiveSession }
+                        let started = ProcessInfo.processInfo.systemUptime
+                        let elapsed = capturedAudioDuration, frames = writtenFrames
+                        _ = boundaryPolicy.finish(at: elapsed)
+                        let tail = rotateCurrentChunkLocked(elapsed: elapsed, openNext: false)
+                        try recordingFile?.close()
+                        activityAudioOffset += elapsed; previewAudioOffset += elapsed
+                        recordingFile = full; chunkFile = chunk; self.chunkURL = chunkURL
+                        chunkDirectory = chunks; sessionRecordingURL = recordingURL
+                        self.sessionID = nextID; identifiedEvents = true
+                        queueStorage = nextQueue; self.eventHandler = nextHandler
+                        writtenFrames = 0; capturedAudioDuration = 0; chunkStartedAt = 0; chunkStartFrame = 0
+                        chunkCaptureStart = nil; nextChunkIndex = 1; chunkID = id; chunkOpenFailure = nil
+                        previewObservations = []; boundaryPolicy = CausalBoundaryPolicy()
+                        firstAudioWriteUptime = nil; firstPreviewResultUptime = nil
+                        let result = AlarmRolloverResult(previousQueue: previousQueue, previousDuration: elapsed,
+                            previousFrames: frames, sampleRate: format.sampleRate,
+                            switchMilliseconds: (ProcessInfo.processInfo.systemUptime - started) * 1_000,
+                            nextCaptureStart: .now())
+                        return (tail, result)
+                    }
+                    stateLock.withLock { legacyPreview }?.restartForCourseBoundary()
+                    if let job = result.0.job, let handler = result.0.handler { previousQueue.submit(job, handler: handler) }
+                    do {
+                        try previousQueue.setCapturing(false)
+                        try previousQueue.recoverRecordingTail()
+                        try nextQueue.setCapturing(true)
+                    } catch { result.1.queueFinalizationFailed = true }
+                    continuation.resume(returning: result.1)
+                } catch {
+                    // Retain both trees; a failed post-boundary close is surfaced
+                    // through the capture failure path, never discard either audio.
+                    if stateLock.withLock({ chunkFile == nil }) {
+                        failCapture("警报分段未完成；现有录音已保留。", generation: token)
+                    }
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     static func systemAudioConfiguration() -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
         configuration.width = 2
@@ -822,6 +977,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     func pause() {
+        retireAlarmAnalysis()
         let engine = stateLock.withLock { () -> (any MicrophoneCaptureEngine)? in
             capturePaused = true
             ingress?.setPaused(true)
@@ -851,6 +1007,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             return (mode, generation, audioEngine, microphoneNeedsRecovery || !microphoneTapInstalled)
         }
         guard let (mode, token, engine, needsRecovery) = context else { throw PipelineError.noActiveSession }
+        refreshAlarmAnalysis()
         switch mode {
         case .microphone:
             guard let engine else { throw PipelineError.noActiveSession }
@@ -1005,6 +1162,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 guard stateLock.withLock({ generation == token }) else { continuation.resume(); return }
                 let detector = stateLock.withLock { let d = activityDetector; activityDetector = nil; return d }
                 detector?.finish()
+                setAlarmDetectionEnabled(false)
                 flushChunkOnConsumer(openNext: false, finishBoundary: true)
                 let recordingCloseError = stateLock.withLock { () -> Error? in
                     var closeError: Error?
@@ -1107,6 +1265,9 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         if firstAudioWriteUptime == nil { firstAudioWriteUptime = capturedSpan?.observedStart ?? now }
         let legacy = legacyPreview
         let detector = activityDetector
+        let alarm = alarmAnalyzer
+        let alarmPosition = alarmWrittenFrames
+        alarmWrittenFrames += AVAudioFramePosition(buffer.frameLength)
         let statistics = Self.audioStatistics(from: buffer)
         let level = waveformMeter.consume(sumSquares: statistics.sumSquares, count: statistics.count,
             peak: statistics.peak, duration: Double(buffer.frameLength) / buffer.format.sampleRate)
@@ -1140,6 +1301,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             waveformHandler(.audioLevel(level ?? 0))
         }
 
+        alarm?.submit(buffer, at: alarmPosition)
         if enableAudioAnalysis, let owned = Self.ownedAnalysisCopy(buffer) {
             detector?.analyze(owned)
             if #available(macOS 27, *) { writeModernPreview(owned, at: audioTime) }
@@ -1395,10 +1557,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             firstAudio: TimeInterval?
         ) in
             guard generation == token, !capturePaused, !isStopping else { return (nil, false, false, 0, 0, nil) }
+            guard start >= previewAudioOffset else { return (nil, false, false, 0, 0, nil) }
             let observation = AuxiliaryTranscriptObservation(
                 text: text,
-                start: max(0, start),
-                end: max(start, end)
+                start: max(0, start - previewAudioOffset),
+                end: max(start, end) - previewAudioOffset
             )
             if let replacementIndex = previewObservations.lastIndex(where: {
                 abs($0.start - observation.start) < 0.05
@@ -1439,7 +1602,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                     observedAt: observedAt
                 )
             }
-            handler(.volatile(text: text, start: start, end: end, observedAt: observedAt))
+            let offset = stateLock.withLock { previewAudioOffset }
+            handler(.volatile(text: text, start: max(0, start - offset), end: max(0, end - offset), observedAt: observedAt))
         }
         evaluateBoundaryAndRotate()
     }
@@ -2147,6 +2311,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 writtenFrames = 0; chunkStartFrame = 0
                 chunkCaptureStart = nil; lastCaptureEnd = nil
                 captureConfigured = true
+                activityAudioOffset = 0; previewAudioOffset = 0
                 firstAudioWriteUptime = nil
                 firstPreviewResultUptime = nil
                 lastPreviewResultLogUptime = 0
@@ -2223,11 +2388,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private func receiveSpeechActivity(_ observation: SpeechActivityObservation, generation token: UUID) {
         stateLock.withLock {
-            guard generation == token, !isStopping else { return }
+            guard generation == token, !isStopping, observation.start >= activityAudioOffset else { return }
             boundaryPolicy.observeActivity(
                 speech: observation.speech,
-                start: observation.start,
-                end: observation.end
+                start: max(0, observation.start - activityAudioOffset),
+                end: max(0, observation.end - activityAudioOffset)
             )
         }
         evaluateBoundaryAndRotate()
