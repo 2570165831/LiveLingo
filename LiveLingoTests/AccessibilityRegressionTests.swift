@@ -704,7 +704,15 @@ final class AccessibilityRegressionTests: XCTestCase {
                              backgroundServices: false, scheduledNotes: false, defaults: store)
         let manager = try await host(LearningReviewControls(model: model, showingQueueManager: .constant(true)),
                                      width: 700, height: 720)
+        XCTAssertEqual(queue.status, "2 项需要处理 · 已暂停")
+        _ = try textNode(queue.status, in: manager.view)
+        XCTAssertEqual(nodes(manager.view).filter { $0.strings.contains("复查失败") }.count, 2)
         for job in [first, second] {
+            _ = try textNode(try XCTUnwrap(job.failure), in: manager.view)
+            let path = try textNode(job.directory.path, in: manager.view)
+            XCTAssertEqual(path.value("accessibilityHelp") as? String, job.directory.path)
+            XCTAssertTrue(path.strings.contains(job.directory.lastPathComponent))
+            XCTAssertNotEqual(path.value("accessibilityValue") as? String, job.directory.path)
             for action in ["重试", "移到最后", "移出队列"] {
                 _ = try textNode(ContextualActionName.review(action, name: job.directory.lastPathComponent, scope: job.scope), in: manager.view)
             }

@@ -1696,14 +1696,22 @@ struct LearningReviewControls: View {
         let isLast = queue.items.last?.id == id
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: active ? "waveform" : "clock")
+                Image(systemName: failure != nil ? "exclamationmark.triangle.fill" : active ? "waveform" : "clock")
                     .font(.caption)
-                    .foregroundStyle(active ? Color.cyan : Color.secondary)
+                    .foregroundStyle(failure != nil ? ClassroomPalette.failure : active ? Color.cyan : Color.secondary)
+                    .accessibilityLabel(failure != nil ? "复查失败" : active ? "正在复查" : "等待处理")
                 Text(name)
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if active {
+                if failure != nil {
+                    Text("需要处理")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(ClassroomPalette.failure)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(ClassroomPalette.failure.opacity(0.12), in: Capsule())
+                } else if active {
                     Text("正在复查")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color.cyan)
@@ -1711,7 +1719,7 @@ struct LearningReviewControls: View {
                         .padding(.vertical, 2)
                         .background(Color.cyan.opacity(0.12), in: Capsule())
                 } else {
-                    Text(failure == nil ? "等待处理" : "需要处理")
+                    Text("等待处理")
                         .font(.caption2)
                         .foregroundStyle(ReadingAccessibility.secondaryText)
                 }
@@ -1760,7 +1768,7 @@ struct LearningReviewControls: View {
                 Image(systemName: available ? "folder" : "folder.badge.questionmark")
                     .font(.caption2)
                     .foregroundStyle(available ? Color.secondary : ClassroomPalette.attention)
-                Text(available ? directory.path : "录音文件夹已移动或不可用")
+                Text(available ? directory.lastPathComponent : "录音文件夹已移动或不可用")
                     .font(.caption2)
                     .foregroundStyle(ReadingAccessibility.secondaryText)
                     .lineLimit(1)
