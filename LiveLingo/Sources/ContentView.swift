@@ -229,17 +229,22 @@ struct ContentView: View {
         ToolbarItem(placement: .primaryAction) { moreMenu }
         ToolbarItem(placement: .primaryAction) {
             HStack(spacing: 8) {
-                Button {
-                    floatingWindow.show(model: model)
-                } label: {
+                Toggle(isOn: Binding(get: { floatingWindow.isVisible }, set: { visible in
+                    if visible { floatingWindow.show(model: model) } else { floatingWindow.hide() }
+                })) {
                     Label("悬浮字幕", systemImage: "pip")
                 }
-                .help("打开悬浮字幕")
+                .toggleStyle(.button)
+                .labelStyle(.iconOnly)
+                .help("显示/隐藏悬浮字幕（⇧⌘F）")
                 .accessibilityIdentifier("classroom-floating-subtitles")
-                Button { floatingWindow.toggleLock() } label: {
+                Toggle(isOn: Binding(get: { floatingWindow.isLocked }, set: { locked in
+                    if locked != floatingWindow.isLocked { floatingWindow.toggleLock() }
+                })) {
                     Label(floatingWindow.lockActionTitle,
                           systemImage: floatingWindow.isLocked ? "lock.fill" : "lock.open")
                 }
+                .toggleStyle(.button)
                 .labelStyle(.iconOnly)
                 .help(floatingWindow.lockActionTitle + "（⌘⇧L）；锁定后点击穿过字幕窗")
                 .accessibilityIdentifier("classroom-floating-lock")
@@ -1138,9 +1143,13 @@ struct RecordingMenuItems: View {
                     .disabled(!model.canImportMedia)
             }
             Divider()
-            Button("悬浮字幕") { floatingWindow.show(model: model) }
+            Toggle("显示悬浮字幕", isOn: Binding(get: { floatingWindow.isVisible }, set: { visible in
+                if visible { floatingWindow.show(model: model) } else { floatingWindow.hide() }
+            }))
                 .keyboardShortcut("f", modifiers: [.command, .shift])
-            Button(floatingWindow.lockActionTitle) { floatingWindow.toggleLock() }
+            Toggle("锁定悬浮字幕", isOn: Binding(get: { floatingWindow.isLocked }, set: { locked in
+                if locked != floatingWindow.isLocked { floatingWindow.toggleLock() }
+            }))
                 .keyboardShortcut("l", modifiers: [.command, .shift])
             Button("悬浮字幕移到屏幕底部") {
                 floatingWindow.moveToScreenBottom()

@@ -258,6 +258,13 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         configuration?.apply(settings)
     }
 
+    /// Follow AppKit's current visibility, including minimization and app hide.
+    /// If ⌘H made it invisible, this orders it front without activating the app;
+    /// AppKit still owns whether a hidden application can display its windows.
+    func toggle(model: AppModel) {
+        if isVisible { hide() } else { show(model: model) }
+    }
+
     override func close() {
         saveFrame()
         super.close()

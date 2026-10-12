@@ -7,6 +7,27 @@ import XCTest
 /// orderFront regression orders a panel, at zero alpha and without activation.
 @MainActor
 final class FloatingSubtitleWindowTests: XCTestCase {
+    func testVisibilityToggleShowsHidesAndPreservesRuntimeLock() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        let panel = controller.prepareWindow(model: fixture.model)
+        panel.alphaValue = 0
+        defer { controller.shutdown() }
+        controller.toggle(model: fixture.model)
+        XCTAssertTrue(controller.isVisible)
+        XCTAssertTrue(panel.isVisible)
+        controller.toggle(model: fixture.model)
+        XCTAssertFalse(controller.isVisible)
+        XCTAssertFalse(panel.isVisible)
+        controller.toggleLock()
+        controller.toggle(model: fixture.model)
+        controller.toggle(model: fixture.model)
+        XCTAssertFalse(controller.isVisible)
+        XCTAssertFalse(panel.isVisible)
+        XCTAssertTrue(controller.isLocked)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+    }
+
     func testFullScreenPanelAvoidsTheMenuBarRevealAreaEvenAfterDragging() throws {
         let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
         let screens = FloatingSubtitleWindowScreens(windowVisibleFrame: { _ in nil },
