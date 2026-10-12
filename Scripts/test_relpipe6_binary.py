@@ -150,6 +150,14 @@ class BinaryPrivacyTests(unittest.TestCase):
                 thin() + b"\0" + ("__symbol_" + value).encode(encoding) + b"\0\0")["matches"]
             self.assertTrue(any(match["path"] == value for match in matches))
 
+    def test_posix_label_suffix_is_not_a_forward_slash_drive(self):
+        value = "/" + "Users/reviewprobe/build/source.rs"
+        for encoding in ENCODINGS:
+            blob = thin() + b"\0" + ("prefix:" + value).encode(encoding) + b"\0\0"
+            matches = macho.scan_readable_paths_bytes(blob)["matches"]
+            self.assertTrue(any(match["path"] == value for match in matches))
+            self.assertFalse(any(match["path"].startswith("x:") for match in matches))
+
     def test_generic_binary_clean_and_public_https_controls(self):
         for value in ("https://example.org/source.c", "public syntax file:", "Cocoa"):
             for encoding in ENCODINGS:
