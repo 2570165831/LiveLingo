@@ -34,11 +34,8 @@ actor ProbeASR {
         let row = try JSONSerialization.jsonObject(with: Self.readLine(output.fileHandleForReading)) as! [String: Any]
         PreviewDropProbe.shared.record(row.merging(["event": "asr", "file": url.lastPathComponent,
             "enhance": enhance]) { _, new in new })
-        var result = ASRTranscription(text: row["text"] as? String ?? "")
-        result.parakeetMeanProbability = row["pk_mean_probability"] as? Double
-        result.parakeetMinProbability = row["pk_min_probability"] as? Double
-        result.parakeetConfidenceValid = row["pk_confidence_valid"] as? Bool
-        return result
+        return try ASRTranscription.validated(text: row["text"] as? String ?? "",
+            data: JSONSerialization.data(withJSONObject: row), requestedLanguage: .english)
     }
 
     func stop() throws {

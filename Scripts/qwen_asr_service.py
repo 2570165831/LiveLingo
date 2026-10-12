@@ -615,12 +615,44 @@ class ParakeetConfidenceRecorder:
                 "pk_confidence_valid": valid}
 
 
+def parakeet_word_spans(result):
+    """Reassemble whitespace-delimited words from timed decoder subwords.
+
+    Omit the optional field when timestamps cannot account for the full text;
+    legacy exact-range transcription must remain usable in that case.
+    """
+    try:
+        text, ranges = "", []
+        for sentence in result.sentences:
+            for token in sentence.tokens:
+                piece, start, end = token.text, float(token.start), float(token.end)
+                if not isinstance(piece, str) or not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+                    return {}
+                if ranges and start < ranges[-1][2]:
+                    return {}
+                first = len(text)
+                text += piece
+                ranges.append((first, len(text), start, end))
+        if " ".join(text.split()) != " ".join(result.text.split()):
+            return {}
+        words = []
+        for match in re.finditer(r"\S+", text):
+            overlap = [r for r in ranges if r[0] < match.end() and r[1] > match.start()]
+            if not overlap:
+                return {}
+            words.append({"text": match.group(), "start": min(r[2] for r in overlap),
+                          "end": max(r[3] for r in overlap)})
+        return {"pk_word_spans": words} if words else {}
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return {}
+
+
 def transcribe_parakeet(model, model_input_path):
     unknown = {"pk_mean_probability": None, "pk_min_probability": None}
     # Older runtimes and synthetic protocol fixtures may not expose TDT joint.
     if not hasattr(model, "joint") or not hasattr(model, "vocabulary"):
         result = model.generate(model_input_path, verbose=False)
-        return {"text": result.text.strip(), **unknown}
+        return {"text": result.text.strip(), **unknown, **parakeet_word_spans(result)}
     import mlx.core as mx
     original = model.joint
     recorder = ParakeetConfidenceRecorder(original, len(model.vocabulary), mx)
@@ -632,7 +664,7 @@ def transcribe_parakeet(model, model_input_path):
             statistics = recorder.statistics(expected)
         except (AttributeError, TypeError):
             statistics = {**unknown, "pk_confidence_valid": False}
-        return {"text": result.text.strip(), **statistics}
+        return {"text": result.text.strip(), **statistics, **parakeet_word_spans(result)}
     finally:
         model.joint = original
 

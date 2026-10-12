@@ -739,11 +739,20 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     }
                     let claimed = record
                     let formulaContext = recentFormulaContext
+                    // Only the immediately preceding completed range is evidence
+                    // that the added left audio has already entered the body.
+                    let previous = context.journal.records.first { $0.ordinal == claimed.ordinal - 1 }
+                    let previousText = previous.flatMap { prior in
+                        prior.status == .completed && prior.textLanguage == nil
+                            && prior.sessionID == claimed.sessionID && prior.sampleRate == claimed.sampleRate
+                            && prior.endFrame == claimed.startFrame ? prior.text : nil
+                    }
                     let url = try Self.materializeAudio(record, journal: context.journal)
                     let recording = try context.journal.recordingURL(for: record)
                     let task = Task { [transcriber] in
                         try await Self.recognize(claimed, audioURL: url, recordingURL: recording,
                                                  formulaContext: formulaContext, attempts: context.attempts,
+                                                 previousText: previousText,
                                                  sourceTrigger: claimed.sourceTriggerPredecessor ?? .init(),
                                                  deferSource: claimed.attempt == .initial,
                                                  transcriber: transcriber,
@@ -1037,8 +1046,31 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             (context?.handler ?? fallbackHandler)?(.failure("转写工作记录无法保存：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"))
         }
     }
+    /// Never deduplicate body words by spelling: two equal words can have
+    /// different starts. Removed left words need a direct predecessor suffix.
+    static func retainedParakeetText(_ result: ASRTranscription, offset: Double,
+                                    clipDuration: Double, previousText: String?) -> String? {
+        guard let spans = result.parakeetWordSpans, !spans.isEmpty,
+              spans.map(\.text).joined(separator: " ") == result.text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " "),
+              spans.allSatisfy({ !$0.text.isEmpty && $0.text.split(whereSeparator: { $0.isWhitespace }).count == 1
+                  && $0.start.isFinite && $0.end.isFinite && $0.start >= 0
+                  && $0.end >= $0.start && $0.start < clipDuration && $0.end <= clipDuration }),
+              zip(spans, spans.dropFirst()).allSatisfy({ $0.start <= $1.start }) else { return nil }
+        let left = spans.prefix { $0.start < offset }
+        if !left.isEmpty {
+            func words(_ text: String) -> [String] {
+                text.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "'" && $0 != "’" }.map(String.init)
+            }
+            let excluded = words(left.map(\.text).joined(separator: " "))
+            guard let previousText, !excluded.isEmpty,
+                  Array(words(previousText).suffix(excluded.count)) == excluded else { return nil }
+        }
+        return spans.dropFirst(left.count).map(\.text).joined(separator: " ")
+    }
+
     static func recognize(_ record: TranscriptionWorkRecord, audioURL: URL, recordingURL: URL?,
                                   formulaContext: String, attempts: TranscriptionAttemptCache,
+                                  previousText: String? = nil,
                                   sourceTrigger: SourceLanguagePolicy.TriggerState = .init(),
                                   deferSource: Bool = false,
                                   sourceOnly: SourceLanguagePolicy.ProbeInput? = nil,
@@ -1101,6 +1133,44 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         catch { primaryError = error }
         }
         try Task.checkCancellation()
+        var paddingCandidate: String?
+        if sourceOnly == nil, record.attempt == .initial, record.modelKey == "parakeet",
+           record.duration > 0, record.duration <= 3, record.start >= 0.25,
+           primaryError == nil,
+           SpeechPipeline.preferredTranscript(primary: primary, fallback: "", audioDuration: record.duration).isEmpty,
+           let recordingURL {
+            do {
+                let layout = try WAVContextClip.readLayout(at: recordingURL)
+                let leftFrames = Int64((0.25 * layout.sampleRate).rounded(.down))
+                guard layout.sampleRate == record.sampleRate, leftFrames > 0,
+                      record.startFrame >= leftFrames, record.endFrame <= Int64(layout.frameCount) else {
+                    throw WAVContextClip.ClipError.rangeNotWrittenYet
+                }
+                let first = record.startFrame - leftFrames
+                let clip = try WAVContextClip.extract(from: recordingURL, start: Double(first) / layout.sampleRate,
+                    end: record.end, padding: 0, destinationDirectory: audioURL.deletingLastPathComponent(),
+                    frameRange: Int(first)..<Int(record.endFrame))
+                #if !LIVELINGO_DROP_PROBE
+                defer { try? FileManager.default.removeItem(at: clip) }
+                #endif
+                guard Int64(try WAVContextClip.readLayout(at: clip).frameCount) == record.endFrame - first else {
+                    throw WAVContextClip.ClipError.rangeNotWrittenYet
+                }
+                let padded = try await recognizeStage(clip, model: "parakeet", enhance: false, stage: "leftContext")
+                let offset = Double(leftFrames) / layout.sampleRate
+                let retained = retainedParakeetText(padded, offset: offset,
+                    clipDuration: Double(record.endFrame - first) / layout.sampleRate, previousText: previousText)
+                if let retained,
+                   !SpeechPipeline.preferredTranscript(primary: retained, fallback: "", audioDuration: record.duration).isEmpty {
+                    primary = retained
+                    primaryResult = padded
+                } else if retained == nil, padded.parakeetWordSpans != nil,
+                          !SpeechPipeline.preferredTranscript(primary: padded.text, fallback: "", audioDuration: record.duration + offset).isEmpty {
+                    paddingCandidate = padded.text
+                }
+            } catch is CancellationError { throw CancellationError() }
+            catch { /* Optional left context never invalidates the exact-range pass. */ }
+        }
         let usable = SpeechPipeline.preferredTranscript(primary: primary, fallback: "", audioDuration: record.duration)
         let formula = FormulaASRReview.needsReview(primary, context: formulaContext)
         let needsFallback = sourceOnly == nil && (primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)
@@ -1112,6 +1182,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         let plan = sourceTrigger.plan(index: record.ordinal, parakeetAccepted: input.parakeetAccepted,
             mean: input.mean, minimum: input.minimum)
         var output = Outcome(text: usable)
+        if let paddingCandidate { output.candidate = paddingCandidate; output.origin = "context" }
         output.sourceDecision = SourceLanguagePolicy.decide(plan, language: nil, probability: nil,
             englishProbability: nil, probeFailed: plan.selected)
         if usable.isEmpty {

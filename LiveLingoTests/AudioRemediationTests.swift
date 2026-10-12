@@ -3307,3 +3307,126 @@ private final class Step5LegacyAttemptCache: @unchecked Sendable {
         return Data(digest.finalize())
     }
 }
+
+final class ParakeetLeftContextTests: XCTestCase, @unchecked Sendable {
+    private func padded(_ words: [(String, Double, Double)]) -> ASRTranscription {
+        var result = ASRTranscription(text: words.map { $0.0 }.joined(separator: " "))
+        result.parakeetWordSpans = words.map { .init(text: $0.0, start: $0.1, end: $0.2) }
+        return result
+    }
+
+    func testLeftContextARecoversBothWordsAndBDoesNotBecomeSilent() async throws {
+        let a = padded([("before", 0.16, 0.48), ("fresh", 0.48, 0.72), ("targets", 0.72, 1.68)])
+        XCTAssertEqual(DurableTranscriptionQueue.retainedParakeetText(a, offset: 0.25, clipDuration: 2.25,
+            previousText: "already before."), "fresh targets")
+        let result = try await recognizeFixture(a, previous: "already before.")
+        XCTAssertEqual(result.0.text, "fresh targets")
+        XCTAssertFalse(result.0.silent)
+        XCTAssertEqual(result.1, [32_000, 36_000])
+        let b = try await recognizeFixture(padded([("before", 0.16, 1.04)]), previous: "already before.")
+        XCTAssertTrue(b.0.text.isEmpty)
+        XCTAssertFalse(b.0.silent)
+        XCTAssertNotNil(b.0.failureReason)
+        XCTAssertNil(b.0.candidate)
+    }
+
+    func testLeftContextTrueRepeatedWordStartingInsideIsRetained() {
+        let result = padded([("go", 0.16, 0.48), ("go", 0.48, 0.72), ("go", 0.72, 1.68)])
+        XCTAssertEqual(DurableTranscriptionQueue.retainedParakeetText(result, offset: 0.25,
+            clipDuration: 2.25, previousText: "go"), "go go")
+    }
+
+    func testLeftContextMissingOrUnrelatedPredecessorCannotPromote() async throws {
+        let words = padded([("before", 0.16, 0.48), ("fresh", 0.48, 0.72), ("targets", 0.72, 1.68)])
+        for previous in [nil, "unrelated"] as [String?] {
+            let result = try await recognizeFixture(words, previous: previous)
+            XCTAssertTrue(result.0.text.isEmpty)
+            XCTAssertEqual(result.0.candidate, "before fresh targets")
+            XCTAssertFalse(result.0.silent)
+            XCTAssertNotNil(result.0.failureReason)
+        }
+    }
+
+    func testLeftContextLegacyOrInvalidSpansRetainExactFailure() async throws {
+        let legacy = try await recognizeFixture(ASRTranscription(text: "before fresh targets"), previous: "before")
+        XCTAssertTrue(legacy.0.text.isEmpty)
+        XCTAssertNil(legacy.0.candidate)
+        let invalid = try ASRTranscription.validated(text: "before fresh targets", data: Data(
+            #"{"pk_word_spans":[{"text":"before","start":-1,"end":0.48}]}"#.utf8), requestedLanguage: .english)
+        XCTAssertNil(invalid.parakeetWordSpans)
+        let result = try await recognizeFixture(invalid, previous: "before")
+        XCTAssertTrue(result.0.text.isEmpty)
+        XCTAssertNotNil(result.0.failureReason)
+    }
+
+    func testLeftContextDoesNotRunForUsableRawOrErrorsOrOtherRoutes() async throws {
+        let words = padded([("before", 0.16, 0.48), ("fresh", 0.48, 0.72), ("targets", 0.72, 1.68)])
+        for option in ["usable", "error", "other", "retry", "long", "early", "noRecording", "sourceOnly"] {
+            let result = try await recognizeFixture(words, previous: "before", option: option)
+            XCTAssertEqual(result.1.count, option == "sourceOnly" ? 0 : 1, option)
+        }
+    }
+
+    func testLeftContextDirectTranscriberCannotMisalignSpansAndText() {
+        var result = ASRTranscription(text: "entirely different")
+        result.parakeetWordSpans = [.init(text: "before", start: 0.16, end: 0.48),
+            .init(text: "fresh", start: 0.48, end: 0.72)]
+        XCTAssertNil(DurableTranscriptionQueue.retainedParakeetText(result, offset: 0.25,
+            clipDuration: 2.25, previousText: "before"))
+    }
+
+    func testLeftContextProtocolDecodesCompleteWordSpans() throws {
+        let result = try ASRTranscription.validated(text: "go go", data: Data(
+            #"{"pk_word_spans":[{"text":"go","start":0.16,"end":0.48},{"text":"go","start":0.48,"end":0.72}]}"#.utf8), requestedLanguage: .english)
+        XCTAssertEqual(result.parakeetWordSpans?.count, 2)
+        XCTAssertEqual(result.parakeetWordSpans?.last?.start, 0.48)
+    }
+
+    private func recognizeFixture(_ padded: ASRTranscription, previous: String?, option: String = "") async throws
+        -> (DurableTranscriptionQueue.Outcome, [Int]) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ParakeetLeftContext-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        func wav(_ name: String, frames: Int) throws -> URL {
+            let url = root.appendingPathComponent(name)
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
+            buffer.frameLength = AVAudioFrameCount(frames)
+            for i in 0..<frames { buffer.floatChannelData![0][i] = 0.05 }
+            try file.write(from: buffer)
+            return url
+        }
+        let frames = option == "long" ? 64_000 : 32_000
+        let raw = try wav("raw.wav", frames: frames), recording = try wav("recording.wav", frames: 80_000)
+        let start: Int64 = option == "early" ? 0 : 16_000
+        var record = TranscriptionWorkRecord(id: UUID(), sessionID: UUID(), ordinal: 1, audioFile: "raw.wav",
+            startFrame: start, endFrame: start + Int64(frames), sampleRate: 16_000,
+            start: Double(start) / 16_000, end: Double(start + Int64(frames)) / 16_000,
+            captureStart: nil, captureEnd: nil, modelKey: option == "other" ? "primary" : "parakeet",
+            fallbackModelKey: nil, appleEvidence: "")
+        if option == "retry" { record.attempt = .automaticRetry }
+        let calls = AudioTestBox<[Int]>([])
+        do {
+            let outcome = try await DurableTranscriptionQueue.recognize(record, audioURL: raw,
+                recordingURL: option == "noRecording" ? nil : recording, formulaContext: "before",
+                attempts: TranscriptionAttemptCache(), previousText: previous,
+                sourceOnly: option == "sourceOnly" ? .init(parakeetAccepted: false, mean: nil, minimum: nil) : nil,
+                transcriber: { url, model, enhanced, mode in
+                    let count = try WAVContextClip.readLayout(at: url).frameCount
+                    calls.update { $0.append(count) }
+                    if option == "error" { throw NSError(domain: "SyntheticServiceError", code: 1) }
+                    if url == raw { return ASRTranscription(text: option == "usable" ? "fresh targets" : "") }
+                    XCTAssertEqual(model, "parakeet"); XCTAssertFalse(enhanced); XCTAssertEqual(mode, .english)
+                    // Actual bounded audio ends at the original end; no future frames.
+                    XCTAssertEqual(count, frames + 4_000)
+                    return padded
+                })
+            return (outcome, calls.value)
+        } catch {
+            guard option == "error" else { throw error }
+            XCTAssertEqual((error as NSError).domain, "SyntheticServiceError")
+            return (.init(), calls.value)
+        }
+    }
+}
