@@ -913,10 +913,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                                           chinese: String(repeating: "这是用于检查滚动位置的长字幕。", count: 40))
         try await settle(controller.view)
         func scrollViews() -> [NSScrollView] {
-            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
-            return descendants(controller.view).compactMap { $0 as? NSScrollView }
-                .filter { [88.0, 138.0].contains(Double($0.bounds.height)) }
-                .sorted { $0.bounds.height < $1.bounds.height }
+            subtitleScrollViews(controller.view)
         }
         let original = scrollViews()
         XCTAssertEqual(original.count, 2, "Both real reading containers must be mounted")
@@ -930,6 +927,43 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                 XCTAssertTrue(scroll === original[index], "Mode switching must preserve each scroll container")
                 if (index == 0 && mode != .translationOnly) || (index == 1 && mode != .sourceOnly) {
                     try assertScrolledToBottom(scroll)
+                }
+            }
+        }
+    }
+
+    func testFloatingViewportFitsWholeRenderedLinesAtBothReadingScales() async throws {
+        let (model, store) = try fixture()
+        let preferences = FloatingSubtitlePreferences(store: store)
+        model.loadPresentationForTesting(phase: .recording, evidence: [])
+        let (window, controller) = host(floating(model, store: store))
+        defer { window.close() }
+        for readingScale in [1.0, 2.0] {
+            store.set(18 * readingScale, forKey: "transcriptTextSize")
+            for size in [16.0, 24.0, 40.0] {
+                preferences.sourceTextSize = size
+                preferences.translationTextSize = size
+                let text = Array(repeating: "Ag国", count: 20).joined(separator: "\n")
+                model.receiveLivePreviewForTesting(text, chinese: text)
+                try await resizeAndSettle(window, view: controller.view)
+                let scrolls = subtitleScrollViews(controller.view)
+                XCTAssertEqual(scrolls.count, 2)
+                for (index, scroll) in scrolls.enumerated() {
+                    func measure(_ lines: Int) -> CGFloat {
+                        let sample = NSHostingView(rootView: Text(Array(repeating: "Ag国", count: lines).joined(separator: "\n"))
+                            .font(.system(size: size * readingScale, weight: index == 0 ? .regular : .medium))
+                            .lineSpacing(5 * readingScale).fixedSize(horizontal: false, vertical: true))
+                        sample.frame.size.width = 640
+                        sample.layoutSubtreeIfNeeded()
+                        return sample.fittingSize.height
+                    }
+                    let first = measure(1), advance = measure(2) - first
+                    XCTAssertGreaterThanOrEqual(scroll.bounds.height, first - 0.5)
+                    let additionalLines = (scroll.bounds.height - first) / advance
+                    XCTAssertEqual(additionalLines, additionalLines.rounded(), accuracy: 0.02,
+                                   "Viewport must end after whole measured lines at size \(size), scale \(readingScale)")
+                    try assertScrolledToBottom(scroll)
+                    XCTAssertFalse(scroll.hasVerticalScroller)
                 }
             }
         }
@@ -1011,8 +1045,10 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
 
     private func subtitleScrollViews(_ view: NSView) -> [NSScrollView] {
         descendants(view).compactMap { $0 as? NSScrollView }
-            .filter { [88.0, 138.0].contains(Double($0.bounds.height)) }
-            .sorted { $0.bounds.height < $1.bounds.height }
+            .sorted {
+                let left = view.convert($0.bounds, from: $0), right = view.convert($1.bounds, from: $1)
+                return left.minY == right.minY ? left.height < right.height : left.minY < right.minY
+            }
     }
 
     private func assertScrolledToBottom(_ scroll: NSScrollView, file: StaticString = #filePath, line: UInt = #line) throws {

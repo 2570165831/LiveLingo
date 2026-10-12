@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct FloatingSubtitleView: View {
@@ -18,6 +19,8 @@ private struct FloatingSubtitleContent: View {
     @AppStorage("transcriptTextSize") private var readingTextSize = 18.0
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     private var scale: Double { ReadingTypography.scale(textSize: readingTextSize, dynamicType: dynamicTypeSize) }
+    @State private var sourceLineMetrics = FloatingSubtitleLineMetrics()
+    @State private var translationLineMetrics = FloatingSubtitleLineMetrics()
 
     var body: some View {
         #if DEBUG
@@ -25,6 +28,13 @@ private struct FloatingSubtitleContent: View {
         #endif
         let presentation = model.floatingSubtitlePresentation(mode: preferences.displayMode)
         let palette = FloatingSubtitlePalette(backgroundOpacity: preferences.backgroundOpacity)
+        let sourceSize = preferences.sourceTextSize * scale
+        let translationSize = preferences.translationTextSize * scale
+        let sourceMinimum = sourceLineMetrics.fontSize == sourceSize ? sourceLineMetrics.firstLineHeight
+            : FloatingSubtitleLineMetrics(fontSize: sourceSize, weight: .regular, spacing: 5 * scale).firstLineHeight
+        let translationMinimum = translationLineMetrics.fontSize == translationSize ? translationLineMetrics.firstLineHeight
+            : FloatingSubtitleLineMetrics(fontSize: translationSize, weight: .medium, spacing: 5 * scale).firstLineHeight
+        let sourceBudget = min(226 - translationMinimum, max(88, sourceMinimum))
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
@@ -59,12 +69,12 @@ private struct FloatingSubtitleContent: View {
             // Keep both scroll containers mounted across mode switches, including
             // source-only Chinese. Hidden bodies cannot be selected or accessed.
             subtitle(presentation.source?.text ?? "",
-                     size: preferences.sourceTextSize * scale, weight: .regular,
-                     color: Color(white: palette.sourceWhite), height: model.captionTarget == .english && presentation.source == nil ? 0 : 88,
+                     size: sourceSize, weight: .regular,
+                     color: Color(white: palette.sourceWhite), height: model.captionTarget == .english && presentation.source == nil ? 0 : sourceBudget,
                      languageName: presentation.source?.languageName, languageWhite: palette.languageWhite,
                      visible: presentation.source != nil)
-            subtitle(presentation.translation?.text ?? "", size: preferences.translationTextSize * scale, weight: .medium,
-                     color: .white, height: model.captionTarget == .english && presentation.translation == nil ? 0 : 138, languageName: presentation.translation?.languageName,
+            subtitle(presentation.translation?.text ?? "", size: translationSize, weight: .medium,
+                     color: .white, height: model.captionTarget == .english && presentation.translation == nil ? 0 : 226 - sourceBudget, languageName: presentation.translation?.languageName,
                      languageWhite: palette.languageWhite, visible: presentation.translation != nil,
                      rendersTranslation: true)
         }
@@ -83,7 +93,12 @@ private struct FloatingSubtitleContent: View {
     private func subtitle(_ text: String, size: Double, weight: Font.Weight, color: Color, height: CGFloat,
                           languageName: String? = nil, languageWhite: Double, visible: Bool,
                           rendersTranslation: Bool = false) -> some View {
-        ScrollViewReader { proxy in
+        let storedMetrics = rendersTranslation ? translationLineMetrics : sourceLineMetrics
+        let metrics = storedMetrics.fontSize == size ? storedMetrics
+            : FloatingSubtitleLineMetrics(fontSize: size, weight: rendersTranslation ? .medium : .regular,
+                                          spacing: 5 * scale)
+        let viewportHeight = metrics.viewportHeight(maximum: height)
+        return ScrollViewReader { proxy in
             HStack(alignment: .top, spacing: 8 * scale) {
                 if let languageName {
                     CaptionLanguageLabel(name: languageName, subtitleSize: size, color: Color(white: languageWhite), scale: scale)
@@ -92,20 +107,46 @@ private struct FloatingSubtitleContent: View {
                     VStack(alignment: .leading, spacing: 0) {
                         subtitleText(text, size: size, weight: weight, color: color, selectable: visible,
                                      rendersTranslation: rendersTranslation)
-                        Color.clear.frame(height: 1).id("tail")
+                        Color.clear.frame(height: 0).id("tail")
                     }
                 }
-                .frame(height: height)
+                .scrollIndicators(.never)
+                .frame(height: viewportHeight)
             }
             .accessibilityElement(children: .contain)
-            .frame(height: height)
+            .frame(height: height, alignment: .top)
             .opacity(visible ? 1 : 0)
             .accessibilityHidden(!visible)
             .allowsHitTesting(visible)
-            .onChange(of: text) { proxy.scrollTo("tail", anchor: .bottom) }
+            .onChange(of: text, initial: true) { proxy.scrollTo("tail", anchor: .bottom) }
             .onChange(of: languageName) { proxy.scrollTo("tail", anchor: .bottom) }
             .onChange(of: visible) { if visible { proxy.scrollTo("tail", anchor: .bottom) } }
             .onChange(of: size) { proxy.scrollTo("tail", anchor: .bottom) }
+            .onChange(of: viewportHeight) { proxy.scrollTo("tail", anchor: .bottom) }
+        }
+        .background {
+            VStack(spacing: 0) {
+                ForEach(1...2, id: \.self) { lines in
+                    Text(Array(repeating: "Ag国", count: lines).joined(separator: "\n"))
+                        .font(.system(size: size, weight: weight))
+                        .lineSpacing(5 * scale)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .background(GeometryReader { geometry in
+                            Color.clear.preference(key: FloatingSubtitleLineMeasureKey.self,
+                                                   value: [lines: geometry.size.height])
+                        })
+                }
+            }
+            .hidden().accessibilityHidden(true)
+        }
+        .onPreferenceChange(FloatingSubtitleLineMeasureKey.self) { heights in
+            guard let first = heights[1], let two = heights[2], first > 0, two > first else { return }
+            let measured = FloatingSubtitleLineMetrics(fontSize: size, firstLineHeight: first, lineAdvance: two - first)
+            if rendersTranslation {
+                if translationLineMetrics != measured { translationLineMetrics = measured }
+            } else if sourceLineMetrics != measured {
+                sourceLineMetrics = measured
+            }
         }
     }
 
@@ -121,13 +162,43 @@ private struct FloatingSubtitleContent: View {
         }
             .font(.system(size: size, weight: weight))
             .foregroundStyle(color)
-            .lineSpacing(5)
+            .lineSpacing(5 * scale)
             .frame(maxWidth: .infinity, alignment: .leading)
         if selectable {
             body.textSelection(.enabled)
         } else {
             body.textSelection(.disabled)
         }
+    }
+}
+
+/// The viewport shows whole measured lines while the window keeps its reading budget.
+struct FloatingSubtitleLineMetrics: Equatable {
+    var fontSize: Double = 0
+    var firstLineHeight: CGFloat = 0
+    var lineAdvance: CGFloat = 0
+
+    init() {}
+    init(fontSize: Double, firstLineHeight: CGFloat, lineAdvance: CGFloat) {
+        self.fontSize = fontSize
+        self.firstLineHeight = firstLineHeight
+        self.lineAdvance = lineAdvance
+    }
+    init(fontSize: Double, weight: NSFont.Weight, spacing: CGFloat) {
+        self.fontSize = fontSize
+        firstLineHeight = NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: fontSize, weight: weight))
+        lineAdvance = firstLineHeight + spacing
+    }
+    func viewportHeight(maximum: CGFloat) -> CGFloat {
+        guard firstLineHeight > 0, lineAdvance > 0, maximum >= firstLineHeight else { return 0 }
+        return firstLineHeight + floor((maximum - firstLineHeight) / lineAdvance) * lineAdvance
+    }
+}
+
+private struct FloatingSubtitleLineMeasureKey: PreferenceKey {
+    static var defaultValue: [Int: CGFloat] { [:] }
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 
