@@ -455,6 +455,42 @@ final class AccessibilityRegressionTests: XCTestCase {
         }
     }
 
+    func testReadingScaleKeepsLiveStatusDividerAndNoteBulletsAligned() async throws {
+        let (model, store) = try fixture()
+        let caption = TranscriptSegment(startTime: 10, endTime: 20, english: "Synthetic lecture.", chinese: "合成课堂。")
+        model.loadPresentationForTesting(phase: .recording, evidence: [caption])
+        for size in [18.0, 36.0] {
+            store.set(size, forKey: "transcriptTextSize")
+            let controller = try await host(ContentView().environmentObject(model).defaultAppStorage(store),
+                                             width: 1440, height: 900)
+            let view = controller.view
+            func probe(_ id: String) throws -> NSRect {
+                let target = try XCTUnwrap(descendants(view).first { $0.identifier?.rawValue == id })
+                return view.convert(target.bounds, from: target)
+            }
+            let column = try probe("classroom-text-column-\(caption.id)")
+            let divider = try probe("classroom-divider-\(caption.id)")
+            XCTAssertEqual(divider.minX, column.minX, accuracy: 0.5)
+            let preview = try probe("classroom-live-preview")
+            let window = try XCTUnwrap(view.window)
+            let waiting = view.convert(window.convertFromScreen(try textNode("等待下一句", in: view).frame), from: nil)
+            XCTAssertEqual(waiting.minX, preview.minX + 16, accuracy: 0.5)
+            model.receiveLivePreviewForTesting("New speech.")
+            try await settle(view)
+            let recognizing = view.convert(window.convertFromScreen(try textNode("正在识别", in: view).frame), from: nil)
+            XCTAssertEqual(recognizing.minX, waiting.minX, accuracy: 0.5)
+            model.receiveLivePreviewForTesting("")
+
+            let notes = try await host(SummaryMarkdownView(text: "## 合成标题\n- 合成要点第一行。\n## 下一段标题\n正文。")
+                .environment(\.classroomReadingScale, size / 18).padding(16), width: 640, height: 320)
+            let bullet = try textNode("•", in: notes.view).frame
+            let firstLine = try textNode("合成要点第一行。", in: notes.view).frame
+            XCTAssertEqual(bullet.midY, firstLine.midY, accuracy: 2)
+            measurements.append(["size": size, "divider_x": divider.minX, "text_column_x": column.minX,
+                                 "bullet_center_delta_pt": abs(bullet.midY - firstLine.midY)])
+        }
+    }
+
     /// Issue #27: notes render line by line, so a fenced code line has no
     /// backticks of its own; its `$` and those in inline code must survive.
     func testA04NotesKeepDollarSignsInsideCode() async throws {

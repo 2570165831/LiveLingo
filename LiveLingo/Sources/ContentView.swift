@@ -476,7 +476,14 @@ struct ContentView: View {
                                 segmentRow(segment)
                                     .id(segment.id)
                                 Divider()
-                                    .padding(.leading, 84)
+                                    #if DEBUG
+                                    .background {
+                                        if AppRuntimeEnvironment.isUnitTesting {
+                                            CaptionFrameProbe(identifier: "classroom-divider-\(segment.id)")
+                                        }
+                                    }
+                                    #endif
+                                    .padding(.leading, 16 + 54 * readingSize / 18 + 14)
                             }
                         }
                         .scrollTargetLayout()
@@ -1821,13 +1828,13 @@ private struct ClassroomLivePreview: View {
         #endif
             if model.hasActiveSession || model.phase == .stopping || !stream.volatileEnglish.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .opacity(stream.volatileEnglish.isEmpty ? 0 : 1)
+                    HStack(spacing: 6) {
                         Text(stream.volatileEnglish.isEmpty ? "等待下一句" : "正在识别")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(ReadingAccessibility.secondaryText)
+                        if !stream.volatileEnglish.isEmpty {
+                            ProgressView().controlSize(.mini)
+                        }
                     }
                     // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
                     // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
@@ -1843,7 +1850,8 @@ private struct ClassroomLivePreview: View {
                                            size: textSize, weight: .regular, rendersTranslation: true)
                     }
                 }
-                .padding(14)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(nsColor: .controlBackgroundColor))
                 #if DEBUG
@@ -2048,6 +2056,13 @@ struct TranscriptCaptionRow: View, Equatable {
             }
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+            #if DEBUG
+            .background {
+                if AppRuntimeEnvironment.isUnitTesting {
+                    CaptionFrameProbe(identifier: "classroom-text-column-\(segment.id)")
+                }
+            }
+            #endif
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 18)
@@ -2141,7 +2156,7 @@ struct SummaryMarkdownView: View {
         let document = language.profile.renderer == .identity || isLegacyRendered
             ? nil : ChineseScriptConverter.RenderText(lines.joined(separator: "\n"))
         let codeLines = FormulaDisplay.codeBlockLines(lines)
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10 * scale) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, _ in
                 switch SummaryMarkdownLine.displayed(lines, at: index, language: language,
                     isLegacyRendered: isLegacyRendered, scheduleEvidence: scheduleEvidence,
@@ -2155,7 +2170,7 @@ struct SummaryMarkdownView: View {
                     Text(text)
                         .accessibilityHeading(.h2)
                         .font(.system(size: 18 * scale, weight: .semibold))
-                        .padding(.top, 5)
+                        .padding(.top, index > 0 ? 10 * scale : 5 * scale)
                         .accessibilityRepresentation {
                             // Selectable Text uses AppKitTextInteractionView,
                             // which exposes AXStaticText despite header traits.
@@ -2169,27 +2184,26 @@ struct SummaryMarkdownView: View {
                     DisclosureGroup(label) {
                         Text(markdown: text, bodySize: 15 * scale, baseBodySize: 15, codeProtected: codeLines[index])
                             .font(.system(size: 15 * scale))
-                            .lineSpacing(5)
+                            .lineSpacing(5 * scale)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .font(.system(size: 14 * scale))
-                    .padding(.leading, CGFloat(indentation) * 14)
+                    .padding(.leading, CGFloat(indentation) * 14 * scale)
                 case let .bullet(text, indentation):
-                    HStack(alignment: .top, spacing: 9) {
-                        Circle()
-                            .fill(Color.secondary)
-                            .frame(width: 6, height: 6)
-                            .padding(.top, 7)
+                    HStack(alignment: .firstTextBaseline, spacing: 9 * scale) {
+                        Text("•")
+                            .font(.system(size: 16 * scale))
+                            .foregroundStyle(.secondary)
                         Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16, codeProtected: codeLines[index])
                             .font(.system(size: 16 * scale))
-                            .lineSpacing(5)
+                            .lineSpacing(5 * scale)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.leading, CGFloat(indentation) * 14)
+                    .padding(.leading, CGFloat(indentation) * 14 * scale)
                 case let .paragraph(text):
                     Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16, codeProtected: codeLines[index])
                         .font(.system(size: 16 * scale))
-                        .lineSpacing(5)
+                        .lineSpacing(5 * scale)
                         .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -2240,14 +2254,14 @@ struct ReviewChangeView: View {
     var body: some View {
         let originalTokens = Self.tokens(original)
         let proposedTokens = Self.tokens(proposed)
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 8 * scale) {
             Text("原笔记").font(.system(size: 12 * scale, weight: .semibold)).foregroundStyle(ReadingAccessibility.secondaryText)
             marked(original, tokens: originalTokens, against: proposedTokens, removed: true)
             Text("核对意见 · 待核对").font(.system(size: 12 * scale, weight: .semibold)).foregroundStyle(ReadingAccessibility.secondaryText)
             marked(proposed, tokens: proposedTokens, against: originalTokens, removed: false)
         }
         .font(.system(size: 16 * scale))
-        .lineSpacing(5)
+        .lineSpacing(5 * scale)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
