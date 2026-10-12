@@ -762,9 +762,9 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         updatePopupProtection()
         let state = recording.state()
         item(for: .showMainWindow)?.title = "显示主窗口"
-        item(for: .toggleSubtitles)?.title = subtitles.isVisible ? "隐藏浮动字幕" : "显示浮动字幕"
+        item(for: .toggleSubtitles)?.title = "显示悬浮字幕"
         item(for: .toggleSubtitles)?.state = subtitles.isVisible ? .on : .off
-        item(for: .toggleLock)?.title = subtitles.isLocked ? "解锁浮动字幕" : "锁定浮动字幕"
+        item(for: .toggleLock)?.title = "锁定悬浮字幕"
         item(for: .toggleLock)?.state = subtitles.isLocked ? .on : .off
         item(for: .moveSubtitlesToBottom)?.title = "浮动字幕移到屏幕底部"
         item(for: .toggleRecording)?.title = state.actionTitle

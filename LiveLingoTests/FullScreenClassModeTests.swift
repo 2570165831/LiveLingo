@@ -341,7 +341,7 @@ final class FullScreenClassModeTests: XCTestCase {
         f.controller.setEnabled(false)
         XCTAssertTrue(f.subtitles.isLocked)
         XCTAssertTrue(f.subtitles.surface.ignoresMouseEvents)
-        XCTAssertEqual(try item(.toggleLock, in: f).title, "解锁浮动字幕")
+        XCTAssertEqual(try item(.toggleLock, in: f).title, "锁定悬浮字幕")
         f.subtitles.setLockedExternally(false)
         f.scheduler.drain()
         XCTAssertFalse(f.subtitles.surface.ignoresMouseEvents)
@@ -639,7 +639,7 @@ final class FullScreenClassModeTests: XCTestCase {
         let actions = f.controller.menu.items.filter { !$0.isSeparatorItem }
         XCTAssertEqual(actions.count, 7)
         XCTAssertEqual(actions.compactMap { $0.identifier?.rawValue }, FullScreenMenuAction.allCases.map(\.rawValue))
-        XCTAssertEqual(actions.map(\.title), ["显示主窗口", "显示浮动字幕", "锁定浮动字幕",
+        XCTAssertEqual(actions.map(\.title), ["显示主窗口", "显示悬浮字幕", "锁定悬浮字幕",
             "浮动字幕移到屏幕底部", "开始记录", "关闭全屏网课模式", "退出 LiveLingo"])
         XCTAssertFalse(f.controller.menu.autoenablesItems)
         XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .off)
@@ -654,14 +654,29 @@ final class FullScreenClassModeTests: XCTestCase {
             f.controller.refresh()
             XCTAssertEqual(try item(.toggleRecording, in: f).title, "停止并保存")
             XCTAssertTrue(try item(.toggleRecording, in: f).isEnabled)
-            XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "隐藏浮动字幕")
+            XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "显示悬浮字幕")
             XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .on)
-            XCTAssertEqual(try item(.toggleLock, in: f).title, paused ? "解锁浮动字幕" : "锁定浮动字幕")
+            XCTAssertEqual(try item(.toggleLock, in: f).title, "锁定悬浮字幕")
             XCTAssertEqual(try item(.toggleLock, in: f).state, paused ? .on : .off)
             let appearance = try XCTUnwrap(f.status.appearance)
             XCTAssertEqual(appearance, FullScreenStatusAppearance(hasActiveSession: true, isPaused: paused))
             XCTAssertEqual(appearance.accessibilityLabel,
                            paused ? "LiveLingo，全屏网课模式，记录已暂停" : "LiveLingo，全屏网课模式，正在记录")
+        }
+    }
+
+    func testSubtitleMenuTitlesStayFixedWhileCheckmarksFollowIndependentStates() throws {
+        let f = try FSCFixture(testCase: self)
+        for visible in [false, true] {
+            for locked in [false, true] {
+                f.subtitles.setVisibleExternally(visible)
+                f.subtitles.setLockedExternally(locked)
+                f.scheduler.drain()
+                XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "显示悬浮字幕")
+                XCTAssertEqual(try item(.toggleSubtitles, in: f).state, visible ? .on : .off)
+                XCTAssertEqual(try item(.toggleLock, in: f).title, "锁定悬浮字幕")
+                XCTAssertEqual(try item(.toggleLock, in: f).state, locked ? .on : .off)
+            }
         }
     }
 
@@ -710,14 +725,14 @@ final class FullScreenClassModeTests: XCTestCase {
         f.controller.setEnabled(true)
         f.scheduler.drain()
         f.subtitles.setVisibleExternally(true)
-        XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "显示浮动字幕",
+        XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .off,
                        "The publisher fires before mutation; refresh must be scheduled")
         f.scheduler.drain()
-        XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "隐藏浮动字幕")
+        XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "显示悬浮字幕")
         XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .on)
         f.subtitles.setLockedExternally(true)
         f.scheduler.drain()
-        XCTAssertEqual(try item(.toggleLock, in: f).title, "解锁浮动字幕")
+        XCTAssertEqual(try item(.toggleLock, in: f).title, "锁定悬浮字幕")
         XCTAssertEqual(try item(.toggleLock, in: f).state, .on)
         f.subtitles.setVisibleExternally(false)
         f.subtitles.setLockedExternally(false)
