@@ -4,7 +4,8 @@ This change closes the preparation-index/signing-stage mismatch in review 4,
 F4. It does not perform or certify Developer ID signing, notarization,
 installation, runtime acceptance, VM acceptance or publication. All tests for
 this change use host Python and static reads; no candidate interpreter,
-extension, native executable or signing tool is run.
+extension or native executable is run. Read-only `codesign --verify` checks
+host/test dependencies before loading; no signing operation is performed.
 
 ## Stage contract
 
