@@ -41,7 +41,15 @@ for line in sys.stdin:
         enhanced_path, _ = service.speech_band_enhance(path)
         path = enhanced_path
     # Use the production confidence recorder and identical generation options.
-    result = service.transcribe_parakeet(model, path)
+    if request.get('timed_reference'):
+        generated = model.generate(path, verbose=False)
+        result = {'text': generated.text.strip(), 'sentences': [
+            {'text': sentence.text, 'start': sentence.start, 'end': sentence.end,
+             'tokens': [{'text': token.text, 'start': token.start, 'end': token.end}
+                        for token in sentence.tokens]}
+            for sentence in generated.sentences]}
+    else:
+        result = service.transcribe_parakeet(model, path)
     result['seconds'] = time.monotonic() - start
     result['gpu_active_bytes'] = mx.get_active_memory()
     result['gpu_peak_bytes'] = mx.get_peak_memory()
