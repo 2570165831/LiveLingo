@@ -625,6 +625,31 @@ final class AppModel: ObservableObject {
         volatileResolvedRanges = merged
         return merged.count == 1 && merged[0].lowerBound == previewStart && merged[0].upperBound == previewEnd
     }
+    /// Require an exact, nonempty token sequence, not fuzzy similarity or a
+    /// substring: Apple can attach genuinely new words to an old interval.
+    /// Fold case/width and Unicode composition, collapse whitespace and trim
+    /// sentence punctuation at token edges. Keep internal punctuation, signs,
+    /// digits, diacritics and word boundaries (1.5 != 15; re-sign != resign).
+    private static func previewComparisonTokens(_ text: String) -> [String] {
+        let normalized = text.folding(options: [.caseInsensitive, .widthInsensitive],
+                                      locale: Locale(identifier: "en_US_POSIX"))
+            .precomposedStringWithCanonicalMapping
+        let punctuation = CharacterSet(charactersIn: ".,!?;:…。？！、，；：\"“”")
+        return normalized.components(separatedBy: .whitespacesAndNewlines)
+            .map {
+                var token = $0[...]
+                while let first = token.unicodeScalars.first, punctuation.contains(first) {
+                    // A leading decimal separator belongs to the number (.5 != 5).
+                    if (first == "." || first == ","), token.dropFirst().first?.isNumber == true { break }
+                    token = token.dropFirst()
+                }
+                while let last = token.unicodeScalars.last, punctuation.contains(last) {
+                    token = token.dropLast()
+                }
+                return String(token)
+            }
+            .filter { !$0.isEmpty }
+    }
     /// A final that ends well before the shown preview belongs to an earlier
     /// chunk; it must not clear speech the preview has already moved on to.
     private func previewOutlivesFinal(endingAt finalEnd: TimeInterval) -> Bool {
@@ -3470,9 +3495,28 @@ final class AppModel: ObservableObject {
                 volatileRangeEnd = end
                 // Streaming windows can include an already confirmed prefix.
                 // Finals remain authoritative across deliveries; prior silence
-                // does not. Seed those finals without clearing a fresh preview.
-                for segment in segments where segment.endTime > start && segment.startTime < end {
-                    _ = resolveCurrentPreview(start: segment.startTime, end: segment.endTime)
+                // does not. Only matching text makes complete seeded coverage
+                // evidence of a late duplicate, for both main/floating readers.
+                let covering = segments.filter {
+                    $0.startTime.isFinite && $0.endTime.isFinite && $0.startTime >= 0
+                        && $0.endTime > $0.startTime && $0.endTime > start && $0.startTime < end
+                }
+                var fullyResolved = false
+                for segment in covering {
+                    if resolveCurrentPreview(start: segment.startTime, end: segment.endTime) {
+                        fullyResolved = true
+                    }
+                }
+                if fullyResolved {
+                    let previewTokens = Self.previewComparisonTokens(text)
+                    let finalTokens = Self.previewComparisonTokens(covering.map(\.english).joined(separator: " "))
+                    if !previewTokens.isEmpty && previewTokens == finalTokens {
+                        volatileEnglish = ""
+                    } else {
+                        // Conflicting full coverage cannot own this new text or
+                        // make a later partial silence look fully resolved.
+                        volatileResolvedRanges.removeAll(keepingCapacity: true)
+                    }
                 }
             }
             // Preview updates do not use the translation model. Let a summary

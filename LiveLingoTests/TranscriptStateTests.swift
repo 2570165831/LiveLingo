@@ -256,4 +256,112 @@ final class VolatilePreviewRangeTests: XCTestCase {
         model.receiveLivePreviewForTesting("", start: 10, end: 20)
         XCTAssertTrue(model.volatileEnglish.isEmpty)
     }
+
+    func testLateDuplicatePreviewIsRetiredFromBothCaptionReaders() throws {
+        let model = try fixture()
+        model.receiveIdentifiedCaptionForTesting(.init(startTime: 0, endTime: 10,
+            english: "The wind stops.", chinese: "风停了。"))
+        model.receiveLivePreviewForTesting("The wind stops", chinese: "旧初译。")
+        model.receiveLivePreviewForTesting("The wind stops.", start: 0, end: 10)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+        XCTAssertTrue(model.captionStream.volatileEnglish.isEmpty)
+        XCTAssertEqual(model.previewTranslationSource, "The wind stops.", "Keep the formal-caption fallback")
+        XCTAssertTrue(model.previewChinese.isEmpty)
+        model.previewTranslationEnabled = false
+        let floating = model.floatingSubtitlePresentation(mode: .translationOnly)
+        XCTAssertNil(floating.source)
+        XCTAssertEqual(floating.translation?.text, "风停了。")
+        XCTAssertEqual(model.segments.count, 1)
+    }
+
+    func testLateDuplicateIgnoresCaseWidthWhitespaceAndEdgePunctuation() throws {
+        let model = try fixture()
+        model.receiveCaptionForTesting("The wind, stops.", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("  ＴＨＥ\nｗｉｎｄ　ＳＴＯＰＳ！  ", start: 0, end: 10)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+        // Every duplicate delivery must be suppressed, not just the first one.
+        model.receiveLivePreviewForTesting("the wind stops", start: 0, end: 10)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+    }
+
+    func testLateDuplicateCanMatchMultipleTouchingFinals() throws {
+        let model = try fixture()
+        model.receiveCaptionForTesting("The wind stops.", start: 10, end: 20)
+        model.receiveCaptionForTesting("A bell rings.", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("A bell rings. The wind stops.", start: 0, end: 20)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+        XCTAssertEqual(model.segments.count, 2)
+    }
+
+    func testNewTextWithOldFullyCoveredTimingRemainsVisible() throws {
+        let model = try fixture()
+        model.receiveCaptionForTesting("The wind stops.", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("A bell rings.", start: 0, end: 10, chinese: "铃响了。")
+        XCTAssertEqual(model.volatileEnglish, "A bell rings.")
+        XCTAssertEqual(model.captionStream.volatileEnglish, "A bell rings.")
+        XCTAssertEqual(model.previewChinese, "铃响了。")
+        XCTAssertEqual(model.previewTranslationSource, "A bell rings.")
+        XCTAssertEqual(model.floatingSubtitlePresentation(mode: .bilingual).source?.text, "A bell rings.")
+        // The conflicting old finals must not make a partial silent event
+        // appear to cover this entire new delivery.
+        model.receiveLivePreviewForTesting("", start: 0, end: 5)
+        XCTAssertEqual(model.volatileEnglish, "A bell rings.")
+        XCTAssertEqual(model.previewChinese, "铃响了。")
+        model.receiveLivePreviewForTesting("", start: 5, end: 10)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+    }
+
+    func testLatePreviewComparisonPreservesMeaningfulTextDifferences() throws {
+        let model = try fixture()
+        let pairs = [
+            ("The wind stops.", "The wind never stops."),
+            ("The wind stops.", "Stops the wind."),
+            ("Now here.", "Nowhere."),
+            ("The value is 1.5.", "The value is 15."),
+            ("The value is .5.", "The value is 5."),
+            ("The value is ,5.", "The value is 5."),
+            ("The value is -1.", "The value is 1."),
+            ("A resume.", "A résumé."),
+            ("We re-sign.", "We resign."),
+            ("We can't stop.", "We can stop.")
+        ]
+        for (final, preview) in pairs {
+            model.resetTranslationSessionForTesting()
+            model.receiveCaptionForTesting(final, start: 0, end: 10)
+            model.receiveLivePreviewForTesting(preview, start: 0, end: 10)
+            XCTAssertEqual(model.volatileEnglish, preview)
+        }
+    }
+
+    func testMatchingWordsWithUncoveredTimeOrGapRemainVisible() throws {
+        let model = try fixture()
+        model.receiveCaptionForTesting("A bell rings.", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("A bell rings.", start: 0, end: 20)
+        XCTAssertEqual(model.volatileEnglish, "A bell rings.")
+        model.receiveLivePreviewForTesting("A bell rings.", start: 10, end: 20)
+        XCTAssertEqual(model.volatileEnglish, "A bell rings.")
+        model.receiveCaptionForTesting("The wind stops.", start: 10.001, end: 20)
+        model.receiveLivePreviewForTesting("A bell rings. The wind stops.", start: 0, end: 20)
+        XCTAssertEqual(model.volatileEnglish, "A bell rings. The wind stops.")
+    }
+
+    func testLatePreviewWithUnknownOrInvalidTimingRemainsVisible() throws {
+        let model = try fixture()
+        model.receiveCaptionForTesting("The wind stops.", start: 0, end: 10)
+        for (start, end) in [(0.0, 0.0), (-1.0, 10.0), (10.0, 0.0), (.nan, 10.0), (0.0, .infinity)] {
+            model.receiveLivePreviewForTesting("The wind stops.", start: start, end: end)
+            XCTAssertEqual(model.volatileEnglish, "The wind stops.")
+        }
+    }
+
+    func testSubsetAndPunctuationOnlyAreInsufficientEvidenceOfDuplicate() throws {
+        let model = try fixture()
+        model.receiveCaptionForTesting("The wind stops and a bell rings.", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("A bell rings.", start: 0, end: 10)
+        XCTAssertEqual(model.volatileEnglish, "A bell rings.")
+        model.resetTranslationSessionForTesting()
+        model.receiveCaptionForTesting("...", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("...", start: 0, end: 10)
+        XCTAssertEqual(model.volatileEnglish, "...")
+    }
 }
