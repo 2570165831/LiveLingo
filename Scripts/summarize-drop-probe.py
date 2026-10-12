@@ -99,6 +99,8 @@ def summarize(path, reference, resources, timing):
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     converts = [row for row in rows if row['event'] == 'convert']
     dropped = [row for row in rows if row['event'] == 'dropped']
+    if not converts:
+        return {'invalid': True, 'reason': 'No modern preview input; excluded from queue comparisons'}
     source_seconds = sum(row['sourceFrames'] / row['sourceRate'] for row in converts)
     previews = latest_results(rows)
     finals = [row for row in rows if row['event'] == 'final' and not row['repair']]
@@ -168,7 +170,8 @@ def main():
         speaker = name.split('-')[0]
         reference_path = args.root / (speaker + '-reference.json')
         reference = json.loads(reference_path.read_text()) if reference_path.exists() else {}
-        resources = json.loads((args.root / (name + '.resources.json')).read_text())
+        resource_path = args.root / (name + '.resources.json')
+        resources = json.loads(resource_path.read_text()) if resource_path.exists() else []
         timing = (args.root / (name + '.stderr')).read_text()
         summaries[name] = summarize(path, reference, resources, timing)
     args.output.write_text(json.dumps(summaries, indent=2, ensure_ascii=False))
