@@ -33,11 +33,13 @@ enum CaptionLanguageNames {
 /// Translation status and streamed text retain their existing dedicated views.
 struct CaptionPresentation: Equatable {
     let languageName: String?
+    let sourceLanguage: String?
     let isSourceOnly: Bool
     let primaryText: String
 
     init(sourceOnlyText: String) {
         languageName = nil
+        sourceLanguage = nil
         isSourceOnly = true
         primaryText = sourceOnlyText
     }
@@ -45,6 +47,7 @@ struct CaptionPresentation: Equatable {
     init(_ segment: TranscriptSegment, locale: Locale = CaptionLanguageNames.interfaceLocale,
          target: CaptionTranslationTarget = .simplifiedChinese) {
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
+        sourceLanguage = segment.sourceLanguage
         isSourceOnly = target.keepsSourceAsCaption(language: segment.sourceLanguage)
         if isSourceOnly {
             primaryText = segment.hasUsableTranslation
@@ -58,6 +61,7 @@ struct CaptionPresentation: Equatable {
          locale: Locale = CaptionLanguageNames.interfaceLocale,
          converter: ChineseScriptConverter = .shared) {
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
+        sourceLanguage = segment.sourceLanguage
         isSourceOnly = outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
         primaryText = isSourceOnly
             ? outputLanguage.renderForDisplay(SessionExporter.targetLine(segment, outputLanguage: outputLanguage), converter: converter)

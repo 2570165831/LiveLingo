@@ -152,8 +152,8 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             let presentation = select(model, mode: mode)
             let lines = [presentation.source, presentation.translation].compactMap { $0 }
             XCTAssertEqual(lines, [.init(text: "这本书放在桌上。", languageName: "中文")])
-            XCTAssertEqual(presentation.source == nil, mode != .sourceOnly)
-            XCTAssertEqual(presentation.translation == nil, mode == .sourceOnly)
+            XCTAssertNil(presentation.source)
+            XCTAssertEqual(presentation.translation, .init(text: "这本书放在桌上。", languageName: "中文"))
         }
         XCTAssertEqual(model.segments.first?.english, "這本書放在桌上。")
         XCTAssertEqual(model.segments.first?.chinese, "这本书在桌上。")
@@ -176,6 +176,39 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                 XCTAssertEqual([presentation.source, presentation.translation].compactMap { $0?.text }, ["这里很冷。"])
             }
         }
+    }
+
+    func testChineseModesHaveIdenticalRenderedTextPositionAndStyle() async throws {
+        try enableHostAccessibility()
+        let (model, store) = try fixture()
+        let preferences = FloatingSubtitlePreferences(store: store)
+        preferences.sourceTextSize = 16
+        preferences.translationTextSize = 32
+        model.loadPresentationForTesting(phase: .recording, evidence: [
+            TranscriptSegment(startTime: 0, endTime: 2, english: "這本書放在桌上。", sourceLanguage: "zh")])
+        let (window, controller) = host(floating(model, store: store))
+        defer { window.close() }
+        var referenceFrame: NSRect?
+        var referenceBody: Data?
+        for mode in FloatingSubtitleDisplayMode.allCases {
+            preferences.displayMode = mode
+            try await resizeAndSettle(window, view: controller.view)
+            let text = try XCTUnwrap(accessibleNodes(in: controller.view).first {
+                $0.value("accessibilityValue") as? String == "这本书放在桌上。"
+                    || $0.value("accessibilityLabel") as? String == "这本书放在桌上。"
+            })
+            let frame = try XCTUnwrap(text.value("accessibilityFrame") as? NSValue).rectValue
+            let image = try bitmap(controller.view)
+            let body = try rowPixels(image, view: controller.view, rows: 70..<300)
+            if let referenceFrame, let referenceBody {
+                XCTAssertEqual(frame, referenceFrame, "Every mode must use the same font and reading origin")
+                XCTAssertEqual(body, referenceBody, "Chinese-source body pixels must match in all modes")
+            } else {
+                referenceFrame = frame
+                referenceBody = body
+            }
+        }
+        print("FLOATING_CHINESE_MODES identical origin/font/body pixels across all three modes")
     }
 
     func testEnglishTranslationOnlyFallsBackUntilPreviewOrFormalTranslationIsUsable() throws {

@@ -126,6 +126,11 @@ struct FloatingSubtitlePresentation: Equatable {
          isPreviewTranslation: Bool = false) {
         let language = caption?.languageName
         let sourceOnlyChinese = caption?.isSourceOnly == true
+        if sourceOnlyChinese && caption?.sourceLanguage == "zh" {
+            source = nil
+            translation = Line(text: translatedText, languageName: language)
+            return
+        }
         if mode == .translationOnly && !sourceOnlyChinese && !hasUsableTranslation {
             source = Line(text: sourceText, languageName: language)
             translation = nil
