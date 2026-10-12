@@ -4,9 +4,11 @@ import SwiftUI
 struct FloatingSubtitleView: View {
     @EnvironmentObject private var model: AppModel
     var windowController: FloatingSubtitleWindowController = .shared
+    var classModeController: FullScreenClassModeController = .shared
 
     var body: some View {
-        FloatingSubtitleContent(model: model, stream: model.captionStream, windowController: windowController)
+        FloatingSubtitleContent(model: model, stream: model.captionStream, windowController: windowController,
+                                classModeController: classModeController)
     }
 }
 
@@ -14,6 +16,7 @@ private struct FloatingSubtitleContent: View {
     @ObservedObject var model: AppModel
     @ObservedObject var stream: LiveCaptionState
     @ObservedObject var windowController: FloatingSubtitleWindowController
+    @ObservedObject var classModeController: FullScreenClassModeController
 
     private var preferences = FloatingSubtitlePreferences()
     @AppStorage("transcriptTextSize") private var readingTextSize = 18.0
@@ -21,6 +24,11 @@ private struct FloatingSubtitleContent: View {
     private var scale: Double { ReadingTypography.scale(textSize: readingTextSize, dynamicType: dynamicTypeSize) }
     @State private var sourceLineMetrics = FloatingSubtitleLineMetrics()
     @State private var translationLineMetrics = FloatingSubtitleLineMetrics()
+
+    private var unlockHint: String {
+        let menuBar = classModeController.statusInstalled ? "菜单栏图标、" : ""
+        return "可用\(menuBar)主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）"
+    }
 
     var body: some View {
         #if DEBUG
@@ -75,7 +83,7 @@ private struct FloatingSubtitleContent: View {
                         .font(.system(size: 12 * scale))
                         .foregroundStyle(Color(white: palette.headerWhite))
                         .allowsHitTesting(false)
-                        .accessibilityLabel("字幕窗已锁定，点击穿透；可用菜单栏图标、主窗口或 ⇧⌘L 解锁")
+                        .accessibilityLabel("字幕窗已锁定，点击穿透；" + unlockHint)
                 } else {
                     Button { windowController.toggleLock() } label: {
                         Image(systemName: "lock.open")
@@ -85,7 +93,7 @@ private struct FloatingSubtitleContent: View {
                     .foregroundStyle(Color(white: palette.headerWhite))
                     .accessibilityLabel("锁定悬浮字幕")
                     .accessibilityIdentifier("floating-lock")
-                    .help("锁定后点击穿过；用菜单栏图标、主窗口或 ⇧⌘L 解锁")
+                    .help("锁定后点击穿过；" + unlockHint)
                     Menu {
                         if preferences.sizePreset == nil {
                             Button("自定义") {}.disabled(true)

@@ -597,7 +597,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     private var recordingObserver: AnyCancellable?
     private var generation = 0
     private var started = false
-    private var statusInstalled = false
+    @Published private(set) var statusInstalled = false
     private var terminated = false
     private var needsMainWindow = false
     private weak var registeredMainWindow: NSWindow?

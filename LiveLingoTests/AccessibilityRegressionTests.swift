@@ -551,6 +551,7 @@ final class AccessibilityRegressionTests: XCTestCase {
         let (model, store) = try fixture()
         let controller = try await host(ClassroomSettingsView().environmentObject(model).defaultAppStorage(store),
                                          width: 520, height: 1500)
+        _ = try capture(controller.view, "uifix2-settings")
         let mode = try node("floating-display-mode", in: controller.view).frame
         for title in ["原文字号", "译文字号", "背景不透明度"] {
             let slider = try node("floating-\(title)", in: controller.view).frame
@@ -561,6 +562,7 @@ final class AccessibilityRegressionTests: XCTestCase {
         }
         XCTAssertFalse(nodes(controller.view).flatMap(\.strings).contains { $0.contains("浮动字幕") })
         _ = try textNode("阅读字号", in: controller.view)
+        _ = try textNode("可在主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。", in: controller.view)
     }
 
     func testFloatingLockBadgeReplacesTheSizeMenuInsideTheHeader() async throws {
@@ -570,9 +572,11 @@ final class AccessibilityRegressionTests: XCTestCase {
         let controller = try await host(FloatingSubtitleView(windowController: windowController)
             .environmentObject(model).defaultAppStorage(store), dark: true)
         _ = try node("floating-size-menu", in: controller.view)
+        _ = try capture(controller.view, "uifix2-floating-unlocked")
         windowController.toggleLock()
         try await settle(controller.view)
-        let badge = try textNode("字幕窗已锁定，点击穿透；可用菜单栏图标、主窗口或 ⇧⌘L 解锁", in: controller.view).frame
+        _ = try capture(controller.view, "uifix2-floating-locked")
+        let badge = try textNode("字幕窗已锁定，点击穿透；可用主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）", in: controller.view).frame
         let header = try textNode(model.floatingSubtitleHeader, in: controller.view).frame
         XCTAssertEqual(badge.midY, header.midY, accuracy: 2)
         XCTAssertFalse(nodes(controller.view).contains { $0.id == "floating-size-menu" })

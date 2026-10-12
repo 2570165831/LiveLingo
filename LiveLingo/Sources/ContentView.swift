@@ -1017,6 +1017,9 @@ struct ClassroomSettingsView: View {
                 Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
                     .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                Text("可在主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
                 if !model.previewTranslationEnabled || !model.supportsPreviewTranslation {
                     Text("“仅中文译文”在译文可用前显示原文。")
                         .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)

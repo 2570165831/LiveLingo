@@ -63,6 +63,27 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertEqual(f.status.removeCount, 0)
     }
 
+    func testUnlockHintAvailabilityTracksSuccessfulStatusInstallationAndRemoval() throws {
+        let f = try FSCFixture(testCase: self, menuBarIcon: true)
+        XCTAssertTrue(f.controller.menuBarIconEnabled)
+        XCTAssertFalse(f.controller.statusInstalled, "A saved preference alone does not install the icon")
+        f.status.installSucceeds = false
+        f.controller.start()
+        XCTAssertFalse(f.controller.statusInstalled)
+        f.status.installSucceeds = true
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertTrue(f.controller.statusInstalled)
+        f.controller.setEnabled(true)
+        f.controller.setMenuBarIconEnabled(false)
+        XCTAssertTrue(f.controller.statusInstalled, "Class mode still owns the icon")
+        f.controller.setEnabled(false)
+        XCTAssertFalse(f.controller.statusInstalled)
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertTrue(f.controller.statusInstalled)
+        f.controller.shutdown()
+        XCTAssertFalse(f.controller.statusInstalled)
+    }
+
     func testDisplayModeSubmenuWritesInjectedStoreAndMoveTopRoutesToPanel() throws {
         let f = try FSCFixture(testCase: self, menuBarIcon: true)
         f.controller.start()
