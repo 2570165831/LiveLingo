@@ -32,19 +32,29 @@ private struct FloatingSubtitleContent: View {
                     .font(.system(size: 12 * scale, weight: .semibold))
                     .foregroundStyle(Color(white: palette.headerWhite))
                 Spacer()
-                Menu {
-                    if preferences.sizePreset == nil {
-                        Button("自定义") {}.disabled(true)
+                if windowController.isLocked {
+                    Label("已锁定", systemImage: "lock.fill")
+                        .font(.system(size: 12 * scale))
+                        .foregroundStyle(Color(white: palette.headerWhite))
+                        .allowsHitTesting(false)
+                        .accessibilityLabel("字幕窗已锁定，点击穿透；可在主窗口或菜单解锁")
+                } else {
+                    Menu {
+                        if preferences.sizePreset == nil {
+                            Button("自定义") {}.disabled(true)
+                        }
+                        Picker("悬浮字幕字号", selection: preferences.sizePresetBinding) {
+                            Text("标准").tag(Optional(24.0))
+                            Text("大").tag(Optional(28.0))
+                            Text("特大").tag(Optional(32.0))
+                        }
                     }
-                    Picker("悬浮字幕字号", selection: preferences.sizePresetBinding) {
-                        Text("标准").tag(Optional(24.0))
-                        Text("大").tag(Optional(28.0))
-                        Text("特大").tag(Optional(32.0))
-                    }
-                } label: { Image(systemName: "textformat.size").foregroundStyle(.white) }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("悬浮字幕字号")
+                    label: { Image(systemName: "textformat.size").foregroundStyle(.white) }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("悬浮字幕字号")
+                    .accessibilityIdentifier("floating-size-menu")
+                }
             }
             // Keep both scroll containers mounted across mode switches, including
             // source-only Chinese. Hidden bodies cannot be selected or accessed.
@@ -62,16 +72,6 @@ private struct FloatingSubtitleContent: View {
         .frame(minWidth: 640, maxWidth: 640, alignment: .leading)
         .background(Color(white: FloatingSubtitlePalette.backgroundWhite).opacity(preferences.backgroundOpacity))
         .preferredColorScheme(.dark)
-        .overlay(alignment: .topTrailing) {
-            if windowController.isLocked {
-                Label("已锁定", systemImage: "lock.fill")
-                    .font(.system(size: 10 * scale))
-                    .foregroundStyle(Color(white: palette.headerWhite))
-                    .padding(.top, 4).padding(.trailing, 8)
-                    .allowsHitTesting(false)
-                    .accessibilityLabel("字幕窗已锁定，点击穿透；可在主窗口或菜单解锁")
-            }
-        }
         .onChange(of: FloatingSubtitleWindowSettings(showsAcrossSpaces: preferences.showsAcrossSpaces,
                                                      backgroundOpacity: preferences.backgroundOpacity),
                   initial: true) { _, settings in

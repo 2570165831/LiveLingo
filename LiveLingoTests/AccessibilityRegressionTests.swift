@@ -507,6 +507,21 @@ final class AccessibilityRegressionTests: XCTestCase {
         _ = try textNode("阅读字号", in: controller.view)
     }
 
+    func testFloatingLockBadgeReplacesTheSizeMenuInsideTheHeader() async throws {
+        let (model, store) = try fixture()
+        model.loadPresentationForTesting(phase: .recording, evidence: [], preview: "Synthetic caption.")
+        let windowController = FloatingSubtitleWindowController(defaults: store)
+        let controller = try await host(FloatingSubtitleView(windowController: windowController)
+            .environmentObject(model).defaultAppStorage(store), dark: true)
+        _ = try node("floating-size-menu", in: controller.view)
+        windowController.toggleLock()
+        try await settle(controller.view)
+        let badge = try textNode("字幕窗已锁定，点击穿透；可在主窗口或菜单解锁", in: controller.view).frame
+        let header = try textNode(model.floatingSubtitleHeader, in: controller.view).frame
+        XCTAssertEqual(badge.midY, header.midY, accuracy: 2)
+        XCTAssertFalse(nodes(controller.view).contains { $0.id == "floating-size-menu" })
+    }
+
     /// Issue #27: notes render line by line, so a fenced code line has no
     /// backticks of its own; its `$` and those in inline code must survive.
     func testA04NotesKeepDollarSignsInsideCode() async throws {
