@@ -519,8 +519,10 @@ struct ContentView: View {
                 Spacer()
                 Button { showSummaryDetails = true } label: {
                     Image(systemName: "info.circle")
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
+                .foregroundStyle(.primary)
                 .accessibilityLabel("查看笔记整理状态")
                 .help("查看完整的整理进度与导出结果")
                 .popover(isPresented: $showSummaryDetails) {
@@ -608,9 +610,12 @@ struct ContentView: View {
                         model.exportScope = wholeLessonNotes ? .wholeLesson : .latest
                         showExportOptions.toggle()
                     } label: {
-                        Label("导出", systemImage: "square.and.arrow.up")
+                        Label { Text("导出") } icon: {
+                            Image(systemName: "square.and.arrow.up").foregroundStyle(.secondary)
+                        }
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .disabled(model.segments.isEmpty || model.isExporting)
                     .help("导出 Markdown、纯文本、Word 或 PDF")
                     .accessibilityIdentifier("classroom-export-notes")
@@ -619,9 +624,12 @@ struct ContentView: View {
                     Button {
                         model.requestSummaryRefresh()
                     } label: {
-                        Label("更新", systemImage: "arrow.clockwise")
+                        Label { Text("更新") } icon: {
+                            Image(systemName: "arrow.clockwise").foregroundStyle(.secondary)
+                        }
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .disabled(model.segments.isEmpty)
                     .help(model.legacyProvenanceUnavailable ? "旧课程需先在“录音处理”中重建笔记"
                         : model.savedProcessingIsPaused ? "处理已暂停：在“录音处理”中继续后可更新笔记"
@@ -663,17 +671,20 @@ struct ContentView: View {
             if !model.translationReady {
                 Button("重新检查模型") { model.retryRuntimePreparation() }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
             }
             Button("状态详情") { showStatusDetails = true }
                 .buttonStyle(.borderless)
+                .foregroundStyle(.primary)
                 .accessibilityIdentifier("classroom-status-details")
                 .popover(isPresented: $showStatusDetails, arrowEdge: .top) { statusDetails.protectFullScreenPopover() }
             Group {
                 if let notice = model.sessionNotice, notice == model.errorMessage {
                     Button(action: model.dismissSessionNotice) {
-                        Image(systemName: "xmark").frame(width: 24, height: 24)
+                        Image(systemName: "xmark").foregroundStyle(.secondary).frame(width: 24, height: 24)
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .help("关闭这条提示")
                     .accessibilityLabel("关闭这条提示")
                 } else {
@@ -806,6 +817,7 @@ private struct ReviewEntryButton: View {
             }
         }
         .buttonStyle(.borderless)
+        .foregroundStyle(.primary)
         .help("选择本课复查范围，或管理历史复查任务")
         .accessibilityIdentifier("classroom-review-notes")
     }
@@ -1126,6 +1138,7 @@ struct TypedTranslationView: View {
                 Spacer()
                 Button("快捷键") { showingKeyboardShortcuts.toggle() }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .controlSize(.small)
                     .font(.caption2)
                     .help("查看全部翻译快捷键")
@@ -1407,7 +1420,7 @@ struct LearningReviewControls: View {
                         Image(systemName: "chevron.down").imageScale(.small)
                     }
                     .font(.caption.weight(.regular))
-                    .foregroundStyle(ReadingAccessibility.secondaryText)
+                    .foregroundStyle(.primary)
                 }
                 // The plain button style draws the label as written, matching
                 // 管理队列…; the borderless menu style ignores label fonts.
@@ -1423,9 +1436,10 @@ struct LearningReviewControls: View {
                 // hidden behind the history disclosure or tied to the current recording.
                 Button("管理队列…") { showingQueueManager = true }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .controlSize(.small)
                     .font(.caption.weight(.regular))
-                    .foregroundStyle(ReadingAccessibility.secondaryText)
+                    .foregroundStyle(.primary)
                     .help("查看复查任务、重试失败项、调整顺序或重新定位录音文件夹；任何操作都不会删除文件")
             }
 
@@ -1503,10 +1517,12 @@ struct LearningReviewControls: View {
                   HStack {
                     Button(queue.userPaused ? "开始复查" : queue.actionTitle) { queue.performPrimaryAction() }
                         .buttonStyle(.borderless)
+                        .foregroundStyle(.primary)
                         .font(.caption)
                     if queue.canRemoveFailedJob {
                         Button("移出复查队列") { removalTarget = queue.failedRemovalTarget }
                             .buttonStyle(.borderless)
+                            .foregroundStyle(.primary)
                             .font(.caption)
                     }
                   }
@@ -1730,12 +1746,14 @@ struct LearningReviewControls: View {
                     Button("重试") { queue.retryJob(id) }
                     .accessibilityLabel(ContextualActionName.review("重试", name: name, scope: scope))
                         .buttonStyle(.borderless)
+                        .foregroundStyle(.primary)
                         .font(.caption)
                         .help("重新处理这项复查；已经完成的批次不会重复。")
                 }
                 Button("移到最后") { queue.moveJobToEnd(id) }
                     .accessibilityLabel(ContextualActionName.review("移到最后", name: name, scope: scope))
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .font(.caption)
                     .disabled(isLast)
                     .help(isLast ? "已经在队列末尾" : "调整复查顺序；正在运行的任务会先安全取消当前批次。")
@@ -1743,6 +1761,7 @@ struct LearningReviewControls: View {
                     Button("重新定位文件夹…") { relocateRecording(id: id, from: directory, name: name) }
                     .accessibilityLabel(ContextualActionName.review("重新定位文件夹", name: name, scope: scope))
                         .buttonStyle(.borderless)
+                        .foregroundStyle(.primary)
                         .font(.caption)
                         .help("选择录音文件夹的新位置；LiveLingo 会检查原笔记是否一致。")
                 }
@@ -1750,6 +1769,7 @@ struct LearningReviewControls: View {
                 Button("移出队列…") { pendingQueueRemoval = id }
                     .accessibilityLabel(ContextualActionName.review("移出队列", name: name, scope: scope))
                     .buttonStyle(.borderless)
+                    .foregroundStyle(.primary)
                     .font(.caption)
                     .help("只从复查队列移除这项任务，不会删除任何文件。")
             }

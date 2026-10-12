@@ -434,6 +434,27 @@ final class AccessibilityRegressionTests: XCTestCase {
         XCTAssertFalse(nodes(row.view).contains { $0.strings.contains(caption.chinese) })
     }
 
+    func testDarkClassroomTextButtonsMeetAAAgainstTheirActualSurface() async throws {
+        let (model, store) = try fixture()
+        let caption = TranscriptSegment(startTime: 0, endTime: 2, english: "Synthetic lecture.", chinese: "合成课堂。")
+        model.loadPresentationForTesting(phase: .recording, evidence: [caption])
+        let controller = try await host(ContentView().environmentObject(model).defaultAppStorage(store),
+                                         width: 1440, height: 900, dark: true)
+        let view = controller.view
+        for id in ["classroom-review-notes", "classroom-export-notes", "classroom-refresh-notes", "classroom-status-details"] {
+            let button = try node(id, in: view)
+            XCTAssertEqual(button.value("accessibilityEnabled") as? Bool, true)
+            let window = try XCTUnwrap(view.window)
+            let rect = view.convert(window.convertFromScreen(button.frame), from: nil).intersection(view.bounds)
+            XCTAssertGreaterThan(rect.width, 10)
+            let image = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: rect))
+            view.cacheDisplay(in: rect, to: image)
+            try assertContrast(histogram(image), name: id, minimum: 4.5,
+                foreground: { $0.a > 250 && $0.r >= 165 && abs($0.r - $0.g) < 8 && abs($0.r - $0.b) < 8 },
+                background: { $0.a > 250 && $0.r < 65 && abs($0.r - $0.g) < 8 && abs($0.r - $0.b) < 8 })
+        }
+    }
+
     /// Issue #27: notes render line by line, so a fenced code line has no
     /// backticks of its own; its `$` and those in inline code must survive.
     func testA04NotesKeepDollarSignsInsideCode() async throws {
