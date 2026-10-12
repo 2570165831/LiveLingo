@@ -1170,10 +1170,24 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         let (converter, continuation) = stateLock.withLock { (previewConverter, previewInputContinuation) }
         guard let converter, let continuation else { return }
         do {
-            for input in try converter.convert(buffer, at: audioTime) {
+            let inputs = try converter.convert(buffer, at: audioTime)
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.convert(inputs, sourceFrames: Int(buffer.frameLength),
+                sourceRate: buffer.format.sampleRate, sourceEnd: stateLock.withLock { capturedAudioDuration })
+            #endif
+            for input in inputs {
+                #if LIVELINGO_DROP_PROBE
+                let result = continuation.yield(input)
+                if case .dropped(let dropped) = result { PreviewDropProbe.shared.input("dropped", dropped) }
+                if case .terminated = result { PreviewDropProbe.shared.input("terminated", input) }
+                #else
                 continuation.yield(input)
+                #endif
             }
         } catch {
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.record(["event": "converter_error", "error": String(describing: error)])
+            #endif
             stateLock.withLock {
                 previewConverter = nil
                 previewInputContinuation = nil
@@ -1310,7 +1324,12 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             try requireStartup(token)
             try await analyzer.prepareToAnalyze(in: nil)
             try requireStartup(token)
+            #if LIVELINGO_DROP_PROBE
+            let input = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy:
+                PreviewDropProbe.shared.lossless ? .unbounded : .bufferingNewest(2))
+            #else
             let input = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(2))
+            #endif
             let stream = input.stream
             let inputContinuation = input.continuation
 
@@ -1328,6 +1347,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                         let duration = result.range.duration.seconds.isFinite
                             ? result.range.duration.seconds
                             : 0
+                        #if LIVELINGO_DROP_PROBE
+                        PreviewDropProbe.shared.record(["event": "apple_result", "text": text,
+                            "start": start, "end": start + duration, "final": result.isFinal])
+                        #endif
                         self?.emitStreamingPreview(
                             text: text,
                             start: start,
@@ -1343,8 +1366,18 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             let analysisTask = Task { [weak self] in
                 guard self?.ownsPreview(token) == true else { return }
                 do {
+                    #if LIVELINGO_DROP_PROBE
+                    try await analyzer.start(inputSequence: stream.map { value in
+                        PreviewDropProbe.shared.input("consumed", value)
+                        return value
+                    })
+                    #else
                     try await analyzer.start(inputSequence: stream)
+                    #endif
                 } catch {
+                    #if LIVELINGO_DROP_PROBE
+                    PreviewDropProbe.shared.record(["event": "analyzer_error", "error": String(describing: error)])
+                    #endif
                     return
                 }
             }
@@ -1400,6 +1433,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 start: max(0, start),
                 end: max(start, end)
             )
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.record(["event": "preview", "text": text, "start": start,
+                "end": end, "sourceEnd": capturedAudioDuration])
+            #endif
             if let replacementIndex = previewObservations.lastIndex(where: {
                 abs($0.start - observation.start) < 0.05
             }) {
@@ -2108,7 +2145,12 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private func flushChunkOnConsumer(openNext: Bool, finishBoundary: Bool = false) {
         let snapshot = stateLock.withLock { () -> FlushSnapshot in
-            if finishBoundary { _ = boundaryPolicy.finish(at: capturedAudioDuration) }
+            if finishBoundary {
+                let decision = boundaryPolicy.finish(at: capturedAudioDuration)
+                #if LIVELINGO_DROP_PROBE
+                PreviewDropProbe.shared.boundary(decision)
+                #endif
+            }
             return rotateCurrentChunkLocked(elapsed: capturedAudioDuration, openNext: openNext)
         }
         if let job = snapshot.job, let handler = snapshot.handler { transcriptionQueue.submit(job, handler: handler) }
@@ -2238,7 +2280,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private func rotateReadyChunk() {
         let snapshot = stateLock.withLock { () -> FlushSnapshot? in
             guard captureConfigured, !isStopping,
-                  boundaryPolicy.decision(at: capturedAudioDuration) != nil else { return nil }
+                  let decision = boundaryPolicy.decision(at: capturedAudioDuration) else { return nil }
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.boundary(decision)
+            #endif
             return rotateCurrentChunkLocked(elapsed: capturedAudioDuration, openNext: true)
         }
         if let snapshot, let job = snapshot.job, let handler = snapshot.handler {
@@ -2540,6 +2585,9 @@ extension SpeechPipeline {
 
 #if LIVELINGO_CLI
 extension SpeechPipeline {
+    #if LIVELINGO_DROP_PROBE
+    func cliProbePrepare() async -> Bool { await prepareStreamingPreviewModel() }
+    #endif
     /// Feeds the same post-capture PCM path without opening an output device.
     func cliReplay(file: URL, recordingURL: URL, sessionID: UUID,
                    eventHandler: @escaping @Sendable (Event) -> Void) async throws {

@@ -537,6 +537,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     }
 
     private func retireCompletedAudio(_ journal: DurableTranscriptionJournal) throws {
+        #if LIVELINGO_DROP_PROBE
+        // Retain generated evidence: this experiment forbids file cleanup.
+        return
+        #else
         guard !journal.processingState.isCapturing else { return }
         for var record in journal.records where (record.status == .completed || record.status == .silent)
             && record.candidateText == nil && record.audioRetired != true
@@ -568,6 +572,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             try journal.put(record)
             try FileManager.default.removeItem(at: chunk)
         }
+        #endif
     }
 
     private static func materializeAudio(_ record: TranscriptionWorkRecord, journal: DurableTranscriptionJournal) throws -> URL {
@@ -1195,7 +1200,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
            record.automaticRetryCount >= DurableTranscriptionJournal.maximumAutomaticRetries,
            let recordingURL {
             let clip = try RecordingDiagnostics.contextAudio(recordingURL: recordingURL, start: record.start, end: record.end)
+            #if !LIVELINGO_DROP_PROBE
             defer { try? FileManager.default.removeItem(at: clip) }
+            #endif
             let text = try await recognizeStage(clip, model: record.fallbackModelKey ?? record.modelKey,
                                                 enhance: true, stage: "context", mode: .english).text
             try Task.checkCancellation()
