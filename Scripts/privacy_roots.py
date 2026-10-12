@@ -6,7 +6,7 @@ PRIVATE_ROOTS = ("/" + "Users/", "/home/", "/Volumes/", "/private/var/", "/priva
 # Repeated separators include escaped source spellings. Full text metadata
 # rejects every drive-rooted operand; binary bytes use distinctive home roots
 # so instruction bytes and regex flags such as (?i:\b...) are not drive paths.
-WINDOWS_HOME_PATTERN = r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/]+(?:Users|Documents and Settings)(?:[\\/]+|(?=$|\s))"
+WINDOWS_HOME_PATTERN = r"[A-Za-z]:[\\/]+(?:Users|Documents and Settings)(?:[\\/]+|(?=$|\s))"
 WINDOWS_UNC_PATTERN = (r"\\\\(?:[?.][\\/]+UNC[\\/]+)?"
                        r"[A-Za-z0-9][A-Za-z0-9._-]*[\\/]+"
                        r"[A-Za-z0-9_$][A-Za-z0-9_. $-]*(?:[\\/]+|(?=$|[\s\"'<>|;]))")

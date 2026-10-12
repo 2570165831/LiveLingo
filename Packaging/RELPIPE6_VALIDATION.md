@@ -127,6 +127,9 @@ and metadata policies share Windows home/UNC grammar; the binary scanner uses
 distinctive home roots and valid UNC host/share operands to avoid interpreting
 instruction bytes or regex flags as generic drive paths. Text metadata retains
 its broader rejection of all drive-rooted paths.
+Distinctive Windows home roots remain detectable after compiler flags and
+symbol prefixes. UNC operands also recognize the established include/library
+compiler flag boundaries, without treating arbitrary regex fragments as hosts.
 
 File URI scanning parses arbitrary authorities and percent-decodes components
 once, also checking overlapping URIs in lists. A concrete remote authority

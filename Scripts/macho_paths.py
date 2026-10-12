@@ -188,6 +188,9 @@ _UTF16_LE = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
 _UTF16_BE = re.compile(rb"(?:\x00[\x20-\x7e]){4,}")
 _PATH_END = frozenset("\"'<>`|;")
 _BARE_BUILD_ROOTS = frozenset(root.rstrip("/").lower() for root in PRIVATE_ROOTS)
+_COMPILER_BOUNDARY = re.compile(
+    r"(?<![\w.-])(?:-isystem|-iquote|-idirafter|-iframework|-isysroot|-include|-imacros|-I|-L|-F)"
+    r"(?:[ \t]+|=)?$")
 
 
 def _effective_build_operand(value, context, start, has_string_edge):
@@ -201,7 +204,8 @@ def _effective_build_operand(value, context, start, has_string_edge):
         if not all(char.isprintable() for char in value):
             return False
         if (start and context[start - 1].isprintable()
-                and context[start - 1] not in " \t\"'=:(<"):
+                and context[start - 1] not in " \t\"'=:(<"
+                and not _COMPILER_BOUNDARY.search(context[:start])):
             return False
         if not start and not has_string_edge:
             return False

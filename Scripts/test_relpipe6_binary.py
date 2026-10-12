@@ -134,6 +134,22 @@ class BinaryPrivacyTests(unittest.TestCase):
         with self.assertRaisesRegex(PrivacyError, "reviewed-resource-hash-mismatch"):
             reviewed.inspect(path, resource, {resource: item}, Counter())
 
+    def test_macho_windows_home_and_unc_compiler_operands(self):
+        for value in WINDOWS:
+            for prefix in ("-I", "-L", "-isystem", "-isystem=", "-iquote "):
+                for encoding in ENCODINGS:
+                    with self.subTest(value=value, prefix=prefix, encoding=encoding):
+                        blob = thin() + b"\0" + (prefix + value).encode(encoding) + b"\0\0"
+                        matches = macho.scan_readable_paths_bytes(blob)["matches"]
+                        self.assertTrue(any(match["path"] == value for match in matches))
+                        with self.assertRaises(PrivacyError):
+                            macho.inspect_build_paths(self.fixture(blob), {})
+        for encoding in ENCODINGS:
+            value = WINDOWS[0]
+            matches = macho.scan_readable_paths_bytes(
+                thin() + b"\0" + ("__symbol_" + value).encode(encoding) + b"\0\0")["matches"]
+            self.assertTrue(any(match["path"] == value for match in matches))
+
     def test_generic_binary_clean_and_public_https_controls(self):
         for value in ("https://example.org/source.c", "public syntax file:", "Cocoa"):
             for encoding in ENCODINGS:
