@@ -55,7 +55,8 @@ private struct FloatingSubtitleContent: View {
                      visible: presentation.source != nil)
             subtitle(presentation.translation?.text ?? "", size: preferences.translationTextSize * scale, weight: .medium,
                      color: .white, height: model.captionTarget == .english && presentation.translation == nil ? 0 : 138, languageName: presentation.translation?.languageName,
-                     languageWhite: palette.languageWhite, visible: presentation.translation != nil)
+                     languageWhite: palette.languageWhite, visible: presentation.translation != nil,
+                     rendersTranslation: true)
         }
         .padding(22)
         .frame(minWidth: 640, maxWidth: 640, alignment: .leading)
@@ -80,18 +81,21 @@ private struct FloatingSubtitleContent: View {
     }
 
     private func subtitle(_ text: String, size: Double, weight: Font.Weight, color: Color, height: CGFloat,
-                          languageName: String? = nil, languageWhite: Double, visible: Bool) -> some View {
+                          languageName: String? = nil, languageWhite: Double, visible: Bool,
+                          rendersTranslation: Bool = false) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if let languageName {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             CaptionLanguageLabel(name: languageName, subtitleSize: size, color: Color(white: languageWhite), scale: scale)
-                            subtitleText(text, size: size, weight: weight, color: color, selectable: visible)
+                            subtitleText(text, size: size, weight: weight, color: color, selectable: visible,
+                                         rendersTranslation: rendersTranslation)
                         }
                         .accessibilityElement(children: .contain)
                     } else {
-                        subtitleText(text, size: size, weight: weight, color: color, selectable: visible)
+                        subtitleText(text, size: size, weight: weight, color: color, selectable: visible,
+                                     rendersTranslation: rendersTranslation)
                     }
                     Color.clear.frame(height: 1).id("tail")
                 }
@@ -109,8 +113,14 @@ private struct FloatingSubtitleContent: View {
 
     @ViewBuilder
     private func subtitleText(_ text: String, size: Double, weight: Font.Weight, color: Color,
-                              selectable: Bool) -> some View {
-        let body = Text(text)
+                              selectable: Bool, rendersTranslation: Bool) -> some View {
+        let body = Group {
+            if rendersTranslation {
+                LiveFormulaText(text: text, bodySize: size).equatable()
+            } else {
+                Text(text)
+            }
+        }
             .font(.system(size: size, weight: weight))
             .foregroundStyle(color)
             .lineSpacing(5)

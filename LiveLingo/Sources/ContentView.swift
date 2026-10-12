@@ -107,6 +107,7 @@ enum SummaryRenderingDiagnostics {
         var summaryBodies = 0
         var lineSplits = 0
         var inlineParses = 0
+        var liveInlineParses = 0
         var reviewDifferences = 0
         var reviewTokenizations = 0
         var previewBodies = 0
@@ -1813,13 +1814,13 @@ private struct ClassroomLivePreview: View {
                     if let caption = model.nonEnglishPreviewPresentation, caption.isSourceOnly {
                         previewSlotMeasure(size: textSize * 16 / 18, weight: .regular)
                         previewReadingSlot(model.previewChineseDisplay, size: textSize, weight: .regular,
-                                           languageName: caption.languageName)
+                                           languageName: caption.languageName, rendersTranslation: true)
                     } else {
                         previewReadingSlot(model.previewEnglishDisplay,
                                            size: textSize * 16 / 18, weight: .regular,
                                            languageName: model.nonEnglishPreviewPresentation?.languageName)
                         previewReadingSlot(model.previewChineseDisplay,
-                                           size: textSize, weight: .regular)
+                                           size: textSize, weight: .regular, rendersTranslation: true)
                     }
                 }
                 .padding(14)
@@ -1848,7 +1849,7 @@ private struct ClassroomLivePreview: View {
     }
 
     private func previewReadingSlot(_ text: String, size: Double, weight: Font.Weight,
-                                    languageName: String? = nil) -> some View {
+                                    languageName: String? = nil, rendersTranslation: Bool = false) -> some View {
         previewSlotMeasure(size: size, weight: weight)
             .overlay {
                 ScrollViewReader { proxy in
@@ -1857,11 +1858,11 @@ private struct ClassroomLivePreview: View {
                             if let languageName {
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                                     CaptionLanguageLabel(name: languageName, subtitleSize: size, scale: textSize / 18)
-                                    previewText(text, size: size, weight: weight)
+                                    previewText(text, size: size, weight: weight, rendersTranslation: rendersTranslation)
                                 }
                                 .accessibilityElement(children: .contain)
                             } else {
-                                previewText(text, size: size, weight: weight)
+                                previewText(text, size: size, weight: weight, rendersTranslation: rendersTranslation)
                             }
                             Color.clear.frame(height: 1).id("preview-tail")
                         }
@@ -1871,8 +1872,15 @@ private struct ClassroomLivePreview: View {
             }
     }
 
-    private func previewText(_ text: String, size: Double, weight: Font.Weight) -> some View {
-        Text(text)
+    private func previewText(_ text: String, size: Double, weight: Font.Weight,
+                             rendersTranslation: Bool) -> some View {
+        Group {
+            if rendersTranslation {
+                LiveFormulaText(text: text, bodySize: size).equatable()
+            } else {
+                Text(text)
+            }
+        }
             .font(.system(size: size, weight: weight))
             .lineSpacing(7)
             .foregroundStyle(.primary)
@@ -1948,7 +1956,7 @@ private struct ActiveCaptionTranslation: View {
         #endif
         // Membership delivery and view removal need not happen in the same pass.
         if stream.translatingSegmentID == segmentID, !stream.streamingChinese.isEmpty {
-            Text(target.renderForDisplay(stream.streamingChinese, converter: converter))
+            LiveFormulaText(text: target.renderForDisplay(stream.streamingChinese, converter: converter), bodySize: textSize).equatable()
                 .font(.system(size: textSize))
                 .lineSpacing(7)
                 .foregroundStyle(.primary)
@@ -2226,7 +2234,20 @@ struct ReviewChangeView: View {
     }
 }
 
-private extension Text {
+/// Reuse parsed live text on unrelated app updates, while new tokens still render.
+struct LiveFormulaText: View, Equatable {
+    let text: String
+    let bodySize: Double
+
+    var body: some View {
+        #if DEBUG
+        let _ = SummaryRenderingDiagnostics.record(\.liveInlineParses)
+        #endif
+        Text(markdown: text, bodySize: bodySize)
+    }
+}
+
+extension Text {
     @MainActor
     init(markdown source: String, bodySize: Double = 18, baseBodySize: Double = 18, codeProtected: Bool = false) {
         #if DEBUG

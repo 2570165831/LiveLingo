@@ -248,6 +248,14 @@ final class LiveCaptionState: ObservableObject {
 final class FinalCaptionState: ObservableObject {
     @Published fileprivate(set) var translatingSegmentID: UUID?
     @Published fileprivate(set) var streamingChinese = ""
+
+    #if DEBUG
+    func loadPresentationForTesting(segmentID: UUID, text: String) {
+        precondition(AppRuntimeEnvironment.isUnitTesting)
+        translatingSegmentID = segmentID
+        streamingChinese = text
+    }
+    #endif
 }
 
 @MainActor

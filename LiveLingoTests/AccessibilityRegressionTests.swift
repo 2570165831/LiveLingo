@@ -406,6 +406,34 @@ final class AccessibilityRegressionTests: XCTestCase {
         }
     }
 
+    func testLiveAndFloatingTranslationsRenderFormulaWhileSourceRemainsLiteral() async throws {
+        let (model, store) = try fixture()
+        let caption = TranscriptSegment(startTime: 10, endTime: 20, english: "Source $x^2$ stays literal.",
+            chinese: "合成公式：$x^2 + H_2O$", sourceLanguage: "es")
+        model.loadPresentationForTesting(phase: .recording, evidence: [caption])
+        let classroom = try await host(ContentView().environmentObject(model).defaultAppStorage(store),
+                                       width: 1440, height: 900)
+        let rendered = nodes(classroom.view).filter { $0.strings.contains("合成公式：x2 + H2O") }
+        XCTAssertGreaterThanOrEqual(rendered.count, 2, "Both live and finalized translations must render math")
+        _ = try textNode(caption.english, in: classroom.view)
+        XCTAssertFalse(nodes(classroom.view).contains { $0.strings.contains(caption.chinese) })
+
+        let floating = try await host(FloatingSubtitleView(windowController: .init(defaults: store))
+            .environmentObject(model).defaultAppStorage(store), height: 360, dark: true)
+        _ = try textNode("合成公式：x2 + H2O", in: floating.view)
+        _ = try textNode(caption.english, in: floating.view)
+        XCTAssertFalse(nodes(floating.view).contains { $0.strings.contains(caption.chinese) })
+
+        var pending = TranscriptSegment(startTime: 0, endTime: 2, english: "Streaming math.")
+        pending.beginTranslation()
+        let stream = FinalCaptionState()
+        stream.loadPresentationForTesting(segmentID: pending.id, text: caption.chinese)
+        let row = try await host(TranscriptCaptionRow(segment: pending, textSize: 18, stream: stream),
+                                 width: 820, height: 220)
+        _ = try textNode("合成公式：x2 + H2O", in: row.view)
+        XCTAssertFalse(nodes(row.view).contains { $0.strings.contains(caption.chinese) })
+    }
+
     /// Issue #27: notes render line by line, so a fenced code line has no
     /// backticks of its own; its `$` and those in inline code must survive.
     func testA04NotesKeepDollarSignsInsideCode() async throws {
