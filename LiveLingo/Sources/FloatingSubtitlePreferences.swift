@@ -109,13 +109,21 @@ struct FloatingSubtitlePresentation: Equatable {
     struct Line: Equatable {
         let text: String
         let languageName: String?
+        let isPreview: Bool
+
+        init(text: String, languageName: String?, isPreview: Bool = false) {
+            self.text = text
+            self.languageName = languageName
+            self.isPreview = isPreview
+        }
     }
 
     let source: Line?
     let translation: Line?
 
     init(sourceText: String, translatedText: String, caption: CaptionPresentation?,
-         mode: FloatingSubtitleDisplayMode, hasUsableTranslation: Bool = true) {
+         mode: FloatingSubtitleDisplayMode, hasUsableTranslation: Bool = true,
+         isPreviewTranslation: Bool = false) {
         let language = caption?.languageName
         let sourceOnlyChinese = caption?.isSourceOnly == true
         if mode == .translationOnly && !sourceOnlyChinese && !hasUsableTranslation {
@@ -127,7 +135,8 @@ struct FloatingSubtitlePresentation: Equatable {
             ? nil : Line(text: sourceOnlyChinese ? translatedText : sourceText, languageName: language)
         translation = mode == .sourceOnly ? nil
             : Line(text: translatedText,
-                   languageName: mode == .translationOnly || sourceOnlyChinese ? language : nil)
+                   languageName: mode == .translationOnly || sourceOnlyChinese ? language : nil,
+                   isPreview: !sourceOnlyChinese && isPreviewTranslation)
     }
 }
 

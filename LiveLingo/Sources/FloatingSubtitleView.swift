@@ -40,7 +40,7 @@ private struct FloatingSubtitleContent: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
-                Text(model.floatingSubtitleHeader)
+                Text(model.floatingSubtitleHeader(for: presentation))
                     .font(.system(size: 12 * scale, weight: .semibold))
                     .foregroundStyle(Color(white: palette.headerWhite))
                 Spacer()
@@ -209,15 +209,21 @@ private struct FloatingSubtitleLineMeasureKey: PreferenceKey {
 
 /// Preview wording shared by the classroom window and floating captions.
 extension AppModel {
-    /// "初译" names the live preview translation, so it is shown only while that
-    /// preview can actually run; otherwise the Chinese line is the formal translation.
+    /// The title describes the displayed line, including single-language modes.
     var floatingSubtitleHeader: String {
+        floatingSubtitleHeader(for: floatingSubtitlePresentation(mode: .bilingual))
+    }
+
+    func floatingSubtitleHeader(for presentation: FloatingSubtitlePresentation) -> String {
         guard isRecording else { return phaseLabel }
-        return previewTranslationEnabled && supportsPreviewTranslation ? "实时字幕 · 初译" : "实时字幕"
+        return presentation.translation?.isPreview == true ? "实时字幕 · 初译" : "实时字幕"
     }
 
     func floatingSubtitlePresentation(mode: FloatingSubtitleDisplayMode) -> FloatingSubtitlePresentation {
-        var translatedText = floatingTranslationWithoutPreview ?? previewChineseDisplay
+        let preview = previewChinesePresentation
+        let formal = floatingTranslationWithoutPreview
+        var translatedText = formal ?? preview.text
+        var isPreview = formal == nil && preview.isPreview
         var hasTranslation = true
         if mode == .translationOnly {
             if let caption = confirmedNonEnglishCaption {
@@ -228,13 +234,14 @@ extension AppModel {
                 hasTranslation = true
             } else if volatileEnglish.isEmpty, let caption = segments.last, caption.hasUsableTranslation {
                 translatedText = captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter)
+                isPreview = false
             } else {
                 hasTranslation = false
             }
         }
         return FloatingSubtitlePresentation(sourceText: previewEnglishDisplay, translatedText: translatedText,
                                             caption: nonEnglishPreviewPresentation, mode: mode,
-                                            hasUsableTranslation: hasTranslation)
+                                            hasUsableTranslation: hasTranslation, isPreviewTranslation: isPreview)
     }
 
     /// Without live preview (turned off, or macOS 14) the floating window shows
@@ -275,22 +282,26 @@ extension AppModel {
     }
 
     var previewChineseDisplay: String {
-        if captionTarget == .english, !volatileEnglish.isEmpty { return volatileEnglish }
+        previewChinesePresentation.text
+    }
+
+    private var previewChinesePresentation: (text: String, isPreview: Bool) {
+        if captionTarget == .english, !volatileEnglish.isEmpty { return (volatileEnglish, false) }
         if let caption = confirmedNonEnglishCaption {
             let target = captionTarget
             if target.keepsSourceAsCaption(language: caption.sourceLanguage) {
-                return captionDisplayLanguage.renderForDisplay(target.renderPassThrough(caption.english), converter: chineseScriptConverter)
+                return (captionDisplayLanguage.renderForDisplay(target.renderPassThrough(caption.english), converter: chineseScriptConverter), false)
             }
             if caption.hasUsableTranslation {
-                return captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter)
+                return (captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter), false)
             }
-            return caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…"
+            return (caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…", false)
         }
-        guard previewTranslationEnabled else { return "初译已关闭" }
-        guard supportsPreviewTranslation else { return "当前系统不支持初译；正式译文随后显示" }
+        guard previewTranslationEnabled else { return ("初译已关闭", false) }
+        guard supportsPreviewTranslation else { return ("当前系统不支持初译；正式译文随后显示", false) }
         if !previewChinese.isEmpty {
-            return "初译 · \(captionDisplayLanguage.renderForDisplay(previewChinese, converter: chineseScriptConverter))"
+            return ("初译 · \(captionDisplayLanguage.renderForDisplay(previewChinese, converter: chineseScriptConverter))", true)
         }
-        return previewTranslationSource.isEmpty ? "等待语音…" : "等待初译…"
+        return (previewTranslationSource.isEmpty ? "等待语音…" : "等待初译…", false)
     }
 }

@@ -516,7 +516,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
     }
 
-    func testRecordingHeaderNamesPreviewTranslationOnlyWhenItCanRun() async throws {
+    func testRecordingHeaderNamesOnlyTheActuallyDisplayedPreviewTranslation() async throws {
         try enableHostAccessibility()
         for (supported, enabled, header, absent) in [(true, true, "实时字幕 · 初译", "实时字幕"),
                                                      (true, false, "实时字幕", "实时字幕 · 初译"),
@@ -526,7 +526,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             model.previewTranslationEnabled = enabled
             model.loadPresentationForTesting(phase: .recording, evidence: [
                 TranscriptSegment(startTime: 0, endTime: 2, english: "The water is cold.", chinese: "水很冷。")
-            ])
+            ], preview: "The water is cold.")
             let (window, controller) = host(floating(model, store: store))
             defer { window.close() }
             try await resizeAndSettle(window, view: controller.view)
@@ -536,6 +536,28 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             XCTAssertTrue(text.contains(header), "supported=\(supported) enabled=\(enabled); actual=\(text)")
             XCTAssertFalse(text.contains(absent), "supported=\(supported) enabled=\(enabled); actual=\(text)")
         }
+    }
+
+    func testConfirmedChineseAndSourceOnlyLinesNeverClaimToBeInitialTranslation() throws {
+        let (model, _) = try fixture()
+        model.previewTranslationSupportForTesting = true
+        model.previewTranslationEnabled = true
+        for caption in [
+            TranscriptSegment(startTime: 0, endTime: 2, english: "The water is cold.", chinese: "水很冷。"),
+            TranscriptSegment(startTime: 0, endTime: 2, english: "El agua está fría.", chinese: "水很冷。", sourceLanguage: "es"),
+            TranscriptSegment(startTime: 0, endTime: 2, english: "這裡很冷。", sourceLanguage: "zh")
+        ] {
+            model.loadPresentationForTesting(phase: .recording, evidence: [caption])
+            for mode in FloatingSubtitleDisplayMode.allCases {
+                let presentation = select(model, mode: mode)
+                XCTAssertFalse(presentation.translation?.isPreview ?? false)
+                XCTAssertEqual(model.floatingSubtitleHeader(for: presentation), "实时字幕")
+            }
+        }
+        model.loadPresentationForTesting(phase: .recording, evidence: [], preview: "Live speech.")
+        XCTAssertTrue(select(model, mode: .bilingual).translation?.isPreview == true)
+        XCTAssertEqual(model.floatingSubtitleHeader(for: select(model, mode: .sourceOnly)), "实时字幕")
+        XCTAssertTrue(model.previewChineseDisplay.hasPrefix("初译 · "), "Keep the user's existing inline wording")
     }
 
     func testNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset() async throws {
