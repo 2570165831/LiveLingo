@@ -355,6 +355,9 @@ struct LiveLingoApp: App {
             CommandGroup(replacing: .newItem) {
                 OpenLessonMenuItem(model: holder.model)
             }
+            CommandGroup(after: .toolbar) {
+                ReadingSizeMenuItems()
+            }
             CommandMenu("录音") {
                 RecordingMenuItems(model: holder.model)
             }
@@ -367,5 +370,38 @@ struct LiveLingoApp: App {
                 EmptyView()
             }
         }
+    }
+}
+
+private struct ReadingSizeMenuItems: View {
+    @AppStorage("transcriptTextSize") private var textSize = ReadingTypography.defaultTextSize
+
+    private var largerSize: Double? {
+        ReadingTypography.steppedTextSize(textSize, direction: .increase)
+    }
+    private var smallerSize: Double? {
+        ReadingTypography.steppedTextSize(textSize, direction: .decrease)
+    }
+
+    var body: some View {
+        Button("放大字号") {
+            if let largerSize { textSize = largerSize }
+        }
+        .keyboardShortcut("=", modifiers: .command)
+        .disabled(largerSize == nil)
+        .help("也会缩放悬浮字幕")
+
+        Button("缩小字号") {
+            if let smallerSize { textSize = smallerSize }
+        }
+        .keyboardShortcut("-", modifiers: .command)
+        .disabled(smallerSize == nil)
+        .help("也会缩放悬浮字幕")
+
+        Button("默认字号") {
+            textSize = ReadingTypography.defaultTextSize
+        }
+        .keyboardShortcut("0", modifiers: .command)
+        .help("也会缩放悬浮字幕")
     }
 }

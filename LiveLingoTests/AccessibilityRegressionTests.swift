@@ -306,6 +306,55 @@ final class AccessibilityRegressionTests: XCTestCase {
         return try XCTUnwrap(ys.max()) - XCTUnwrap(ys.min()) + 1
     }
 
+    func testReadingSizeStepTraversesPresetsInBothDirections() {
+        XCTAssertEqual(ReadingTypography.defaultTextSize, 18)
+        for (current, larger) in [(18.0, 21.0), (21.0, 24.0), (24.0, 36.0)] {
+            XCTAssertEqual(ReadingTypography.steppedTextSize(current, direction: .increase), larger)
+            XCTAssertEqual(ReadingTypography.steppedTextSize(larger, direction: .decrease), current)
+        }
+    }
+
+    func testReadingSizeStepSnapsToNearestPresetBeforeMoving() {
+        for (current, smaller, larger) in [(20.0, 18.0, 24.0), (23.0, 21.0, 36.0), (29.0, 21.0, 36.0)] {
+            XCTAssertEqual(ReadingTypography.steppedTextSize(current, direction: .increase), larger)
+            XCTAssertEqual(ReadingTypography.steppedTextSize(current, direction: .decrease), smaller)
+        }
+    }
+
+    func testReadingSizeStepUsesSmallerPresetWhenEquidistant() {
+        XCTAssertEqual(ReadingTypography.steppedTextSize(19.5, direction: .increase), 21)
+        XCTAssertNil(ReadingTypography.steppedTextSize(19.5, direction: .decrease))
+        XCTAssertEqual(ReadingTypography.steppedTextSize(22.5, direction: .increase), 24)
+        XCTAssertEqual(ReadingTypography.steppedTextSize(22.5, direction: .decrease), 18)
+        XCTAssertEqual(ReadingTypography.steppedTextSize(30, direction: .increase), 36)
+        XCTAssertEqual(ReadingTypography.steppedTextSize(30, direction: .decrease), 21)
+    }
+
+    func testReadingSizeStepHasNoMoveAtPresetEndpoints() {
+        XCTAssertNil(ReadingTypography.steppedTextSize(18, direction: .decrease))
+        XCTAssertNil(ReadingTypography.steppedTextSize(36, direction: .increase))
+        XCTAssertEqual(ReadingTypography.steppedTextSize(18, direction: .increase), 21)
+        XCTAssertEqual(ReadingTypography.steppedTextSize(36, direction: .decrease), 24)
+    }
+
+    func testReadingSizeStepTreatsNearestEndpointAsDisabled() {
+        for size in [19.0, 0, -Double.greatestFiniteMagnitude] {
+            XCTAssertNil(ReadingTypography.steppedTextSize(size, direction: .decrease))
+            XCTAssertEqual(ReadingTypography.steppedTextSize(size, direction: .increase), 21)
+        }
+        for size in [31.0, 100, Double.greatestFiniteMagnitude] {
+            XCTAssertNil(ReadingTypography.steppedTextSize(size, direction: .increase))
+            XCTAssertEqual(ReadingTypography.steppedTextSize(size, direction: .decrease), 24)
+        }
+    }
+
+    func testReadingSizeStepFallsBackToDefaultForNonFiniteValues() {
+        for size in [Double.nan, Double.infinity, -Double.infinity] {
+            XCTAssertEqual(ReadingTypography.steppedTextSize(size, direction: .increase), 21)
+            XCTAssertNil(ReadingTypography.steppedTextSize(size, direction: .decrease))
+        }
+    }
+
     func testA04ReadingScaleCoversNotesTimestampLanguageAndFormulaScripts() async throws {
         let formula = "$x^{2222}$"
         XCTAssertEqual(FormulaDisplay.runs(formula), [

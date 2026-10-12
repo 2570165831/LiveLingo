@@ -29,6 +29,30 @@ extension EnvironmentValues {
 }
 
 enum ReadingTypography {
+    static let defaultTextSize = 18.0
+    static let textSizePresets = [18.0, 21.0, 24.0, 36.0]
+
+    enum TextSizeStep {
+        case increase, decrease
+    }
+
+    /// Snap first, then move one preset. Equal distances choose the smaller
+    /// preset; nil means the menu command is disabled at that endpoint.
+    static func steppedTextSize(_ textSize: Double, direction: TextSizeStep) -> Double? {
+        let size = textSize.isFinite
+            ? min(textSizePresets[textSizePresets.count - 1], max(defaultTextSize, textSize))
+            : defaultTextSize
+        var nearestIndex = 0
+        for index in textSizePresets.indices.dropFirst() {
+            if abs(textSizePresets[index] - size) < abs(textSizePresets[nearestIndex] - size) {
+                nearestIndex = index
+            }
+        }
+        let nextIndex = nearestIndex + (direction == .increase ? 1 : -1)
+        guard textSizePresets.indices.contains(nextIndex) else { return nil }
+        return textSizePresets[nextIndex]
+    }
+
     static func scale(textSize: Double, dynamicType: DynamicTypeSize = .large) -> Double {
         max(textSize.isFinite ? min(2, max(1, textSize / 18)) : 1, dynamicScale(dynamicType))
     }
