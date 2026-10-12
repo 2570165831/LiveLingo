@@ -619,6 +619,12 @@ final class AccessibilityRegressionTests: XCTestCase {
             _ = try textNode(NotesExportDisclosure.fileHelp, in: controller.view)
             let toggle = try node("notes-export-review", in: controller.view)
             XCTAssertEqual(toggle.value("accessibilityHelp") as? String, NotesExportDisclosure.reviewHelp)
+            let format = try node("notes-export-format", in: controller.view).frame
+            let scope = try node("notes-export-scope", in: controller.view).frame
+            let transcript = try node("notes-export-transcript", in: controller.view).frame
+            XCTAssertEqual(format.minX, scope.minX, accuracy: 1)
+            XCTAssertEqual(transcript.minX, toggle.frame.minX, accuracy: 1)
+            XCTAssertEqual(format.minX, transcript.minX, accuracy: 1)
             XCTAssertFalse(nodes(controller.view).flatMap(\.strings).contains { $0.contains("不改动录音或已保存文件") })
             try press(node("notes-export-save", in: controller.view))
             try await settle(controller.view)

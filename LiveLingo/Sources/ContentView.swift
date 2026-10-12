@@ -838,33 +838,60 @@ struct NotesExportOptions: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("导出课堂笔记").font(.headline).accessibilityAddTraits(.isHeader)
 
-            Picker("格式", selection: $model.exportFormat) {
-                ForEach(NotesExportFormat.allCases) { format in
-                    Text(format.title).tag(format)
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                GridRow {
+                    Text("格式")
+                    Picker("格式", selection: $model.exportFormat) {
+                        ForEach(NotesExportFormat.allCases) { format in
+                            Text(format.title).tag(format)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 236, alignment: .leading)
+                    .accessibilityIdentifier("notes-export-format")
+                }
+                GridRow {
+                    Text(NotesExportDisclosure.scopeTitle)
+                    Picker(NotesExportDisclosure.scopeTitle, selection: $model.exportScope) {
+                        ForEach(NotesExportScope.allCases) { scope in
+                            Text(scope.title).tag(scope)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 236, alignment: .leading)
+                    .accessibilityIdentifier("notes-export-scope")
+                }
+                GridRow {
+                    Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                    Text(model.exportScope == .wholeLesson ? model.summaryCoverageStatus : model.latestSummaryScope)
+                        .font(.caption2)
+                        .foregroundStyle(ReadingAccessibility.secondaryText)
+                }
+                GridRow {
+                    Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 0) {
+                            Toggle(model.outputLanguage == .english ? ClassroomFixedText.exportTranscriptToggle.text(targetCode: "en") : "附带双语字幕与时间戳（按所选范围）", isOn: $model.exportIncludesTranscript)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .accessibilityIdentifier("notes-export-transcript")
+                            Spacer(minLength: 0)
+                        }
+                        HStack(spacing: 0) {
+                            Toggle("附带核对意见（独立章节）", isOn: $model.exportIncludesReviewAdvice)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .accessibilityHint(NotesExportDisclosure.reviewHelp)
+                                .help(NotesExportDisclosure.reviewHelp)
+                                .accessibilityIdentifier("notes-export-review")
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .frame(width: 236, alignment: .leading)
                 }
             }
-            .pickerStyle(.segmented)
-
-            Picker(NotesExportDisclosure.scopeTitle, selection: $model.exportScope) {
-                ForEach(NotesExportScope.allCases) { scope in
-                    Text(scope.title).tag(scope)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Text(model.exportScope == .wholeLesson ? model.summaryCoverageStatus : model.latestSummaryScope)
-                .font(.caption2)
-                .foregroundStyle(ReadingAccessibility.secondaryText)
-
-            Toggle(model.outputLanguage == .english ? ClassroomFixedText.exportTranscriptToggle.text(targetCode: "en") : "附带双语字幕与时间戳（按所选范围）", isOn: $model.exportIncludesTranscript)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            Toggle("附带核对意见（独立章节）", isOn: $model.exportIncludesReviewAdvice)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .accessibilityHint(NotesExportDisclosure.reviewHelp)
-                .help(NotesExportDisclosure.reviewHelp)
-                .accessibilityIdentifier("notes-export-review")
             Text(NotesExportDisclosure.reviewHelp)
                 .font(.caption2)
                 .foregroundStyle(ReadingAccessibility.secondaryText)
