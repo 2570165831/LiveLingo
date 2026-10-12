@@ -57,10 +57,10 @@ final class AccessibilityRegressionTests: XCTestCase {
     }
 
     private func host<V: View>(_ root: V, width: CGFloat = 640, height: CGFloat = 360,
-                               dark: Bool = false) async throws -> NSHostingController<AnyView> {
+                               dark: Bool = false, titled: Bool = false) async throws -> NSHostingController<AnyView> {
         let controller = NSHostingController(rootView: AnyView(root.environment(\.colorScheme, dark ? .dark : .light)))
         let window = NSWindow(contentRect: .init(x: 0, y: 0, width: width, height: height),
-                              styleMask: [.borderless], backing: .buffered, defer: false)
+                              styleMask: titled ? [.titled, .resizable] : [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -628,6 +628,27 @@ final class AccessibilityRegressionTests: XCTestCase {
 
     /// Issue #27: notes render line by line, so a fenced code line has no
     /// backticks of its own; its `$` and those in inline code must survive.
+    func testToolbarLockHasStableAccessibleNameAndAnIndependentToggleValue() async throws {
+        let (model, store) = try fixture()
+        let floating = FloatingSubtitleWindowController.shared
+        let initiallyLocked = floating.isLocked
+        if initiallyLocked { floating.toggleLock() }
+        defer { if floating.isLocked != initiallyLocked { floating.toggleLock() } }
+        let controller = try await host(ContentView().environmentObject(model).defaultAppStorage(store),
+                                        width: 1260, height: 780, titled: true)
+        for locked in [false, true] {
+            if floating.isLocked != locked { floating.toggleLock() }
+            try await settle(controller.view)
+            let control = try node("classroom-floating-lock", in: controller.view)
+            XCTAssertEqual(control.value("accessibilityLabel") as? String, "锁定悬浮字幕")
+            XCTAssertEqual((control.value("accessibilityValue") as? NSNumber)?.boolValue, locked)
+            XCTAssertEqual(control.value("accessibilityHelp") as? String,
+                           floating.lockActionTitle + "（⌘⇧L）；锁定后点击穿过字幕窗")
+            let frame = try XCTUnwrap(controller.view.window?.contentView?.superview)
+            _ = try capture(frame, "uifix2-toolbar-\(locked ? "locked" : "unlocked")")
+        }
+    }
+
     func testQueuedPersistenceFailuresRenderTheirCategoryWithoutInventingFailedTasks() async throws {
         for reportFailure in [false, true] {
             let root = TestFixtureDirectory.root.appendingPathComponent("uifix2-persistence-\(UUID())", isDirectory: true)

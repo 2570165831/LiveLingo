@@ -241,12 +241,13 @@ struct ContentView: View {
                 Toggle(isOn: Binding(get: { floatingWindow.isLocked }, set: { locked in
                     if locked != floatingWindow.isLocked { floatingWindow.toggleLock() }
                 })) {
-                    Label(floatingWindow.lockActionTitle,
+                    Label("锁定悬浮字幕",
                           systemImage: floatingWindow.isLocked ? "lock.fill" : "lock.open")
                 }
                 .toggleStyle(.button)
                 .labelStyle(.iconOnly)
                 .help(floatingWindow.lockActionTitle + "（⌘⇧L）；锁定后点击穿过字幕窗")
+                .accessibilityLabel("锁定悬浮字幕")
                 .accessibilityIdentifier("classroom-floating-lock")
             }
         }
