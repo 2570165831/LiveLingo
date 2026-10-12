@@ -368,6 +368,13 @@ final class AccessibilityRegressionTests: XCTestCase {
         let current = descendants(controller.view).compactMap { $0 as? NSScrollView }
         XCTAssertEqual(current.count, scrolls.count)
         for (index, scroll) in current.enumerated() where scrolls.indices.contains(index) { XCTAssertTrue(scroll === scrolls[index]) }
+        for id in ["floating-pause", "floating-display-mode", "floating-lock", "floating-size-menu"] {
+            let control = try XCTUnwrap(nodes(controller.view).first { $0.id == id }, id)
+            XCTAssertGreaterThan(control.frame.width, 0, id)
+            XCTAssertGreaterThan(control.frame.height, 0, id)
+            XCTAssertGreaterThanOrEqual(control.frame.minX, 0, id)
+            XCTAssertLessThanOrEqual(control.frame.maxX, 640, id)
+        }
         _ = try capture(controller.view, "A04-floating-twofold")
         store.set(18.0, forKey: "transcriptTextSize")
         controller.rootView = root(.accessibility5)
@@ -516,7 +523,7 @@ final class AccessibilityRegressionTests: XCTestCase {
         _ = try node("floating-size-menu", in: controller.view)
         windowController.toggleLock()
         try await settle(controller.view)
-        let badge = try textNode("字幕窗已锁定，点击穿透；可在主窗口或菜单解锁", in: controller.view).frame
+        let badge = try textNode("字幕窗已锁定，点击穿透；可用菜单栏图标、主窗口或 ⇧⌘L 解锁", in: controller.view).frame
         let header = try textNode(model.floatingSubtitleHeader, in: controller.view).frame
         XCTAssertEqual(badge.midY, header.midY, accuracy: 2)
         XCTAssertFalse(nodes(controller.view).contains { $0.id == "floating-size-menu" })

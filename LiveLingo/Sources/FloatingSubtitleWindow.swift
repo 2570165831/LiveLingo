@@ -97,6 +97,12 @@ final class FloatingSubtitleWindowConfiguration {
 }
 
 enum FloatingSubtitleWindowPlacement {
+    static func topFrame(windowSize: NSSize, visibleFrame: NSRect, topInset: CGFloat = 20) -> NSRect {
+        let inset = min(max(0, topInset), max(0, visibleFrame.height - windowSize.height))
+        return NSRect(x: visibleFrame.midX - windowSize.width / 2,
+                      y: visibleFrame.maxY - windowSize.height - inset,
+                      width: windowSize.width, height: windowSize.height)
+    }
     /// AppKit coordinates grow upwards. visibleFrame already excludes the Dock
     /// and menu bar, including on displays with negative or vertical origins.
     /// Preserve subtitle layout even if a display is smaller than the window.
@@ -148,7 +154,8 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     private let notificationCenter: NotificationCenter
     private var configuration: FloatingSubtitleWindowConfiguration?
     private var settings = FloatingSubtitleWindowSettings()
-    private var pendingBottomPlacement = false
+    private enum Placement { case top, bottom }
+    private var pendingPlacement: Placement?
     private var adjustingMenuBarClearance = false
 
     #if DEBUG
@@ -228,9 +235,9 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         configuration?.apply(settings)
         keepClearOfMenuBar()
         panel.delegate = self
-        if pendingBottomPlacement {
-            pendingBottomPlacement = false
-            moveToScreenBottom()
+        if let placement = pendingPlacement {
+            pendingPlacement = nil
+            move(to: placement)
         }
         return panel
     }
@@ -303,7 +310,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         isVisible = false
         isLocked = false
         settings = FloatingSubtitleWindowSettings()
-        pendingBottomPlacement = false
+        pendingPlacement = nil
     }
 
     @objc private func applicationVisibilityChanged(_ notification: Notification) {
@@ -347,13 +354,24 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     }
 
     func moveToScreenBottom() {
+        move(to: .bottom)
+    }
+
+    func moveToScreenTop() {
+        move(to: .top)
+    }
+
+    private func move(to placement: Placement) {
         guard let panel else {
-            pendingBottomPlacement = true
+            pendingPlacement = placement
             return
         }
         guard let visibleFrame = screens.visibleFrame(for: panel) else { return }
-        panel.setFrame(FloatingSubtitleWindowPlacement.bottomFrame(windowSize: panel.frame.size,
-                                                                   visibleFrame: visibleFrame), display: false)
+        let frame = placement == .top
+            ? FloatingSubtitleWindowPlacement.topFrame(windowSize: panel.frame.size, visibleFrame: visibleFrame)
+            : FloatingSubtitleWindowPlacement.bottomFrame(windowSize: panel.frame.size, visibleFrame: visibleFrame)
+        panel.setFrame(frame, display: false)
+        keepClearOfMenuBar()
         saveFrame()
     }
 }

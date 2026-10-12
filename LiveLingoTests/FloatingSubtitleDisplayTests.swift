@@ -826,7 +826,50 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         print("FLOATING_DISPLAY_GEOMETRY content=\(contentHeight) frame=\(frameHeight) modes/languages/font-extremes stable")
     }
 
-    func testEnglishDefaultPixelsMatchFrozenLegacyViewAtEveryPresetInBothAppearances() async throws {
+    func testHeaderControlsWritePreferencesPauseAndLockWithoutOpeningMenus() async throws {
+        try enableHostAccessibility()
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let model = fixture.model
+        let store = fixture.defaults
+        let floatingWindow = FloatingSubtitleWindowController(defaults: store)
+        let panel = floatingWindow.prepareWindow(model: model)
+        defer { floatingWindow.shutdown() }
+        let view = try XCTUnwrap(panel.contentView)
+        try await settle(view)
+        func control(_ id: String) -> AccessibleNode? {
+            accessibleNodes(in: view).first { $0.value("accessibilityIdentifier") as? String == id }
+        }
+        XCTAssertNil(control("floating-pause"), "Idle panels cannot pause a nonexistent course")
+        model.loadPresentationForTesting(phase: .recording, evidence: [], preview: "Synthetic speech.")
+        try await settle(view)
+        let pause = try XCTUnwrap(control("floating-pause"))
+        XCTAssertEqual(pause.value("accessibilityLabel") as? String, "暂停录音")
+        let segments = try XCTUnwrap(descendants(view).compactMap { $0 as? NSSegmentedControl }.first)
+        XCTAssertEqual(segments.segmentCount, 3)
+        XCTAssertEqual((0..<3).map { segments.label(forSegment: $0) ?? "" }, ["双语", "译文", "原文"])
+        segments.selectedSegment = 1
+        XCTAssertTrue(segments.sendAction(segments.action, to: segments.target))
+        try await settle(view)
+        XCTAssertEqual(store.string(forKey: "floatingDisplayMode"), "translationOnly")
+        let press = NSSelectorFromString("accessibilityPerformPress")
+        XCTAssertTrue(pause.object.responds(to: press))
+        _ = pause.object.perform(press)
+        try await settle(view)
+        XCTAssertTrue(model.isPaused)
+        XCTAssertEqual(control("floating-pause")?.value("accessibilityLabel") as? String, "继续录音")
+        let lock = try XCTUnwrap(control("floating-lock"))
+        XCTAssertTrue(lock.object.responds(to: press))
+        _ = lock.object.perform(press)
+        try await settle(view)
+        XCTAssertTrue(floatingWindow.isLocked)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        XCTAssertNil(control("floating-lock"))
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await settle(view)
+        XCTAssertNil(control("floating-pause"))
+    }
+
+    func testEnglishDefaultBodyPixelsMatchFrozenLegacyViewAtEveryPresetInBothAppearances() async throws {
         let (model, store) = try fixture()
         model.loadPresentationForTesting(phase: .recording, evidence: [],
                                         preview: "Compare the quantities and keep the stated conditions with the formula.")
@@ -840,22 +883,26 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                     .defaultAppStorage(store).environment(\.colorScheme, dark ? .dark : .light))
                 try await resizeAndSettle(window, view: controller.view)
                 let legacy = try bitmap(controller.view)
-                let legacyPixels = try pixels(legacy)
-                let legacySize = controller.view.bounds.size
+                // Align the unchanged 240pt caption body and 22pt bottom padding,
+                // independently of the new direct-control header's height.
+                let legacyStart = Int((controller.view.bounds.height - 262)
+                    * CGFloat(legacy.pixelsHigh) / controller.view.bounds.height) * legacy.bytesPerRow
+                let legacyBody = try pixels(legacy).dropFirst(legacyStart)
                 let originalIsOpaque = window.isOpaque
                 let originalBackground = window.backgroundColor
                 controller.rootView = floating(model, store: store, dark: dark)
                 try await resizeAndSettle(window, view: controller.view)
                 let current = try bitmap(controller.view)
-                XCTAssertEqual(controller.view.bounds.size, legacySize)
                 XCTAssertEqual(window.isOpaque, originalIsOpaque)
                 XCTAssertEqual(window.backgroundColor, originalBackground)
                 XCTAssertEqual(current.pixelsWide, legacy.pixelsWide)
-                XCTAssertEqual(current.pixelsHigh, legacy.pixelsHigh)
-                XCTAssertTrue(try pixels(current) == legacyPixels,
-                              "Every rendered pixel must match 1a59adc's English view: \(preset) / dark=\(dark)")
+                let currentStart = Int((controller.view.bounds.height - 262)
+                    * CGFloat(current.pixelsHigh) / controller.view.bounds.height) * current.bytesPerRow
+                let identical = try pixels(current).dropFirst(currentStart) == legacyBody
+                XCTAssertTrue(identical,
+                              "Caption body pixels must match 1a59adc's English view: \(preset) / dark=\(dark)")
                 try capture(controller.view, name: "english-default-\(Int(preset))-\(dark ? "dark" : "light")")
-                print("FLOATING_ENGLISH_PIXELS preset=\(preset) dark=\(dark) identical=\(try pixels(current) == legacyPixels) size=\(current.pixelsWide)x\(current.pixelsHigh)")
+                print("FLOATING_ENGLISH_BODY_PIXELS preset=\(preset) dark=\(dark) identical=\(identical) size=\(current.pixelsWide)x\(current.pixelsHigh)")
             }
         }
     }

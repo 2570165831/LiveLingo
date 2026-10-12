@@ -7,6 +7,52 @@ import XCTest
 /// orderFront regression orders a panel, at zero alpha and without activation.
 @MainActor
 final class FloatingSubtitleWindowTests: XCTestCase {
+    func testTopPlacementHandlesScreenOriginsShortScreensAndMargins() {
+        let size = NSSize(width: 640, height: 350)
+        for visible in [NSRect(x: 0, y: 40, width: 1440, height: 900),
+                        NSRect(x: -1920, y: -1080, width: 1920, height: 1015),
+                        NSRect(x: 1440, y: 100, width: 2560, height: 1415)] {
+            let frame = FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: visible)
+            XCTAssertEqual(frame.size, size)
+            XCTAssertEqual(frame.midX, visible.midX)
+            XCTAssertEqual(visible.maxY - frame.maxY, 20)
+            XCTAssertTrue(visible.contains(frame))
+        }
+        let short = NSRect(x: -1280, y: 64, width: 1280, height: 365)
+        XCTAssertEqual(FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: short).minY, short.minY)
+        let undersized = NSRect(x: -500, y: -400, width: 500, height: 300)
+        let frame = FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: undersized)
+        XCTAssertEqual(frame.size, size)
+        XCTAssertEqual(frame.maxY, undersized.maxY)
+        let visible = NSRect(x: 100, y: 40, width: 1200, height: 800)
+        XCTAssertEqual(FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: visible, topInset: -20).maxY,
+                       visible.maxY)
+        XCTAssertEqual(FloatingSubtitleWindowPlacement.topFrame(windowSize: size, visibleFrame: visible, topInset: 1000).minY,
+                       visible.minY)
+    }
+
+    func testTopPlacementBeforePreparingWinsAndRespectsMenuBarClearance() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let visible = NSRect(x: -1920, y: 42, width: 1920, height: 1015)
+        let screens = FloatingSubtitleWindowScreens(windowVisibleFrame: { _ in visible },
+                                                   mainVisibleFrame: { nil }, firstVisibleFrame: { nil },
+                                                   menuBarSafeMaxY: { _ in 900 })
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults, screens: screens)
+        controller.moveToScreenBottom()
+        controller.moveToScreenTop()
+        XCTAssertNil(controller.panel)
+        let panel = controller.prepareWindow(model: fixture.model)
+        defer { controller.shutdown() }
+        XCTAssertEqual(panel.frame.midX, visible.midX, accuracy: 1)
+        XCTAssertEqual(panel.frame.maxY, visible.maxY - 20, accuracy: 1)
+        XCTAssertFalse(panel.isVisible)
+        controller.setFullScreenClassMode(true)
+        controller.moveToScreenTop()
+        XCTAssertEqual(panel.frame.maxY, 900, accuracy: 1)
+        XCTAssertFalse(panel.isVisible)
+        XCTAssertNotNil(fixture.defaults.string(forKey: FloatingSubtitleWindowController.frameDefaultsKey))
+    }
+
     func testVisibilityToggleShowsHidesAndPreservesRuntimeLock() throws {
         let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
         let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)

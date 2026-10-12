@@ -43,14 +43,49 @@ private struct FloatingSubtitleContent: View {
                 Text(model.floatingSubtitleHeader(for: presentation))
                     .font(.system(size: 12 * scale, weight: .semibold))
                     .foregroundStyle(Color(white: palette.headerWhite))
+                    .lineLimit(1)
+                    .layoutPriority(-1)
                 Spacer()
+                if model.hasActiveSession {
+                    Button { model.togglePause() } label: {
+                        Image(systemName: model.isPaused ? "play.fill" : "pause.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .foregroundStyle(Color(white: palette.headerWhite))
+                    .help(model.isPaused ? "继续录音" : "暂停录音")
+                    .accessibilityLabel(model.isPaused ? "继续录音" : "暂停录音")
+                    .accessibilityIdentifier("floating-pause")
+                    .disabled(windowController.isLocked)
+                }
+                Picker("悬浮字幕显示", selection: preferences.displayModeBinding) {
+                    ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
+                        Text(mode.segmentTitle).tag(mode).accessibilityLabel(mode.title)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
+                .foregroundStyle(Color(white: palette.headerWhite))
+                .accessibilityIdentifier("floating-display-mode")
+                .disabled(windowController.isLocked)
                 if windowController.isLocked {
                     Label("已锁定", systemImage: "lock.fill")
                         .font(.system(size: 12 * scale))
                         .foregroundStyle(Color(white: palette.headerWhite))
                         .allowsHitTesting(false)
-                        .accessibilityLabel("字幕窗已锁定，点击穿透；可在主窗口或菜单解锁")
+                        .accessibilityLabel("字幕窗已锁定，点击穿透；可用菜单栏图标、主窗口或 ⇧⌘L 解锁")
                 } else {
+                    Button { windowController.toggleLock() } label: {
+                        Image(systemName: "lock.open")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .foregroundStyle(Color(white: palette.headerWhite))
+                    .accessibilityLabel("锁定悬浮字幕")
+                    .accessibilityIdentifier("floating-lock")
+                    .help("锁定后点击穿过；用菜单栏图标、主窗口或 ⇧⌘L 解锁")
                     Menu {
                         if preferences.sizePreset == nil {
                             Button("自定义") {}.disabled(true)
@@ -60,14 +95,19 @@ private struct FloatingSubtitleContent: View {
                             Text("大").tag(Optional(28.0))
                             Text("特大").tag(Optional(32.0))
                         }
+                        Divider()
+                        Button("移到屏幕顶部") { windowController.moveToScreenTop() }
+                        Button("移到屏幕底部") { windowController.moveToScreenBottom() }
                     }
                     label: { Image(systemName: "textformat.size").foregroundStyle(.white) }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
-                    .help("悬浮字幕字号")
+                    .controlSize(.small)
+                    .help("字号与位置")
                     .accessibilityIdentifier("floating-size-menu")
                 }
             }
+            .frame(height: max(22, 15 * scale))
             // Keep both scroll containers mounted across mode switches, including
             // source-only Chinese. Hidden bodies cannot be selected or accessed.
             VStack(alignment: .leading, spacing: presentation.source != nil && presentation.translation != nil ? 14 : 0) {

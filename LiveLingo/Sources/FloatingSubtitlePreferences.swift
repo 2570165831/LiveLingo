@@ -14,6 +14,14 @@ enum FloatingSubtitleDisplayMode: String, CaseIterable, Identifiable {
         case .sourceOnly: "仅原文"
         }
     }
+
+    var segmentTitle: String {
+        switch self {
+        case .bilingual: "双语"
+        case .translationOnly: "译文"
+        case .sourceOnly: "原文"
+        }
+    }
 }
 
 /// Additive preferences: old apps still read their original size preset.
