@@ -140,6 +140,7 @@
 		E80500000000000000000001 /* PrivacyPermissionFailureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E80500000000000000000002 /* PrivacyPermissionFailureTests.swift */; };
 		AA1100000000000000000001 /* ReadingAccessibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1100000000000000000002 /* ReadingAccessibility.swift */; };
 		AA1200000000000000000001 /* AccessibilityRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1200000000000000000002 /* AccessibilityRegressionTests.swift */; };
+		AA1212000000000000000001 /* SavedProcessingViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1212000000000000000002 /* SavedProcessingViewTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -291,6 +292,7 @@
 		E80500000000000000000002 /* PrivacyPermissionFailureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyPermissionFailureTests.swift; sourceTree = "<group>"; };
 		AA1100000000000000000002 /* ReadingAccessibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingAccessibility.swift; sourceTree = "<group>"; };
 		AA1200000000000000000002 /* AccessibilityRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityRegressionTests.swift; sourceTree = "<group>"; };
+		AA1212000000000000000002 /* SavedProcessingViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedProcessingViewTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -379,6 +381,7 @@
 			isa = PBXGroup;
 			children = (
 				AA1200000000000000000002 /* AccessibilityRegressionTests.swift */,
+				AA1212000000000000000002 /* SavedProcessingViewTests.swift */,
 				C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */,
 				C70900000000000000000004 /* TraditionalMarkdownRenderingTests.swift */,
 				C71000000000000000000002 /* TraditionalSessionExporterTests.swift */,
@@ -578,6 +581,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA1200000000000000000001 /* AccessibilityRegressionTests.swift in Sources */,
+				AA1212000000000000000001 /* SavedProcessingViewTests.swift in Sources */,
 				D8BA39AA5D7459C24D85E6DE /* PrivacyExitTests.swift in Sources */,
 				A7D951F0B2D483A5B585DC18 /* PrivacyAudioTests.swift in Sources */,
 				8D49BE0052E8A8509EFF8CB7 /* PrivacyFollowupStorageTests.swift in Sources */,
