@@ -140,6 +140,7 @@
 		E80500000000000000000001 /* PrivacyPermissionFailureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E80500000000000000000002 /* PrivacyPermissionFailureTests.swift */; };
 		AA1100000000000000000001 /* ReadingAccessibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1100000000000000000002 /* ReadingAccessibility.swift */; };
 		AA1200000000000000000001 /* AccessibilityRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1200000000000000000002 /* AccessibilityRegressionTests.swift */; };
+		D09000000000000000000001 /* SpeechPreviewInputQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = D09000000000000000000002 /* SpeechPreviewInputQueue.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -291,6 +292,7 @@
 		E80500000000000000000002 /* PrivacyPermissionFailureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyPermissionFailureTests.swift; sourceTree = "<group>"; };
 		AA1100000000000000000002 /* ReadingAccessibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingAccessibility.swift; sourceTree = "<group>"; };
 		AA1200000000000000000002 /* AccessibilityRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityRegressionTests.swift; sourceTree = "<group>"; };
+		D09000000000000000000002 /* SpeechPreviewInputQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPreviewInputQueue.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -357,6 +359,7 @@
 				A20000000000000000000018 /* ASRRuntime.swift */,
 				A20000000000000000000011 /* SpeechActivityDetector.swift */,
 				A20000000000000000000026 /* SpeechPreviewAssets.swift */,
+				D09000000000000000000002 /* SpeechPreviewInputQueue.swift */,
 				CA5F00F22FE54B509A3AB67B /* WaveformFreshness.swift */,
 				A20000000000000000000010 /* CausalBoundary.swift */,
 				A20000000000000000000014 /* AcademicDomain.swift */,
@@ -567,6 +570,7 @@
 				A10000000000000000000018 /* ASRRuntime.swift in Sources */,
 				A10000000000000000000011 /* SpeechActivityDetector.swift in Sources */,
 				A10000000000000000000026 /* SpeechPreviewAssets.swift in Sources */,
+				D09000000000000000000001 /* SpeechPreviewInputQueue.swift in Sources */,
 				4B1F01A936444537B3A68D72 /* WaveformFreshness.swift in Sources */,
 				A10000000000000000000010 /* CausalBoundary.swift in Sources */,
 				A10000000000000000000014 /* AcademicDomain.swift in Sources */,

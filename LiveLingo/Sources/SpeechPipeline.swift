@@ -322,6 +322,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
     private var previewAnalysisTask: Task<Void, Never>?
     private var previewResultTask: Task<Void, Never>?
+    private var endedModernPreviewInputGeneration: UUID?
     private var previewObservations: [AuxiliaryTranscriptObservation] = []
     private var activityDetector: SpeechActivityDetector?
     private var boundaryPolicy = CausalBoundaryPolicy()
@@ -1325,10 +1326,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             try await analyzer.prepareToAnalyze(in: nil)
             try requireStartup(token)
             #if LIVELINGO_DROP_PROBE
-            let input = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy:
-                PreviewDropProbe.shared.lossless ? .unbounded : .bufferingNewest(2))
+            let input = PreviewDropProbe.shared.lossless
+                ? SpeechPreviewInputQueue.makeStream(of: AnalyzerInput.self)
+                : AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(2))
             #else
-            let input = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(2))
+            let input = SpeechPreviewInputQueue.makeStream(of: AnalyzerInput.self)
             #endif
             let stream = input.stream
             let inputContinuation = input.continuation
@@ -1375,6 +1377,9 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                     try await analyzer.start(inputSequence: stream)
                     #endif
                 } catch {
+                    // start() can return while the analyzer keeps consuming.
+                    // Close input on failure, not on a normal start return.
+                    self?.endModernPreviewInput(generation: token)
                     #if LIVELINGO_DROP_PROBE
                     PreviewDropProbe.shared.record(["event": "analyzer_error", "error": String(describing: error)])
                     #endif
@@ -1404,7 +1409,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private func publishPreviewTasks(result: Task<Void, Never>, analysis: Task<Void, Never>, generation token: UUID,
                                       install: (() -> Void)? = nil) -> Bool {
         let published = stateLock.withLock { () -> Bool in
-            guard generation == token, !isStopping, !Task.isCancelled else { return false }
+            guard generation == token, !isStopping, !Task.isCancelled,
+                  endedModernPreviewInputGeneration != token else { return false }
             install?()
             previewResultTask = result
             previewAnalysisTask = analysis
@@ -1415,6 +1421,20 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
     private func ownsPreview(_ token: UUID) -> Bool {
         stateLock.withLock { generation == token && !isStopping }
+    }
+
+    @available(macOS 27, *)
+    private func endModernPreviewInput(generation token: UUID) {
+        let continuation = stateLock.withLock { () -> AsyncStream<AnalyzerInput>.Continuation? in
+            guard generation == token else { return nil }
+            // Remember an early exit even when it races task publication.
+            endedModernPreviewInputGeneration = token
+            let value = previewInputContinuation
+            previewInputContinuation = nil
+            previewConverter = nil
+            return value
+        }
+        continuation?.finish()
     }
 
     private func emitStreamingPreview(text: String, start: TimeInterval, end: TimeInterval, generation token: UUID) {
