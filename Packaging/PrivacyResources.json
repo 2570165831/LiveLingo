@@ -1633,9 +1633,65 @@
             {
               "style": "source-literal-hex",
               "path": "66696c653a2f2f2f433a2f446f63756d656e7473253230616e6425323053657474696e67732f6461767269732f46696c65536368656d65555249732e646f63"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2f2f2f686f73742e6578616d706c652e636f6d2f706174682f746f2f66696c65602c"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2f2f6170706c69622f70726f64756374732f61253244622f616263253546392f343134382e393230612f6d656469612f73746172742e737766602c"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2f2f686f73742e6578616d706c652e636f6d2f706174682f746f2f66696c65602c"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f443a2f50726f6772616d"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f443a5c50726f6772616d"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f6170706c69622f70726f64756374732f612d622f6162635f392f343134382e393230612f6d656469612f73746172742e737766602c"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f686f73742e6578616d706c652e636f6d2f53686172652f706174682f746f2f66696c652e747874602c"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f6c6170746f702f4d79253230446f63756d656e74732f46696c65536368656d65555249732e646f63602c"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2f2f2f686f73742e6578616d706c652e636f6d2f706174682f746f2f66696c65"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2f2f6170706c69622f70726f64756374732f61253244622f616263253546392f343134382e393230612f6d656469612f73746172742e737766"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2f2f686f73742e6578616d706c652e636f6d2f706174682f746f2f66696c65"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f6170706c69622f70726f64756374732f612d622f6162635f392f343134382e393230612f6d656469612f73746172742e737766"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f686f73742e6578616d706c652e636f6d2f53686172652f706174682f746f2f66696c652e747874"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f6c6170746f702f4d79253230446f63756d656e74732f46696c65536368656d65555249732e646f63"
             }
           ],
-          "reason": "Unmodified public upstream Windows URI/syscall regression fixture; exact publisher member bytes and path spelling retained. Exact percent-encoded spelling of the same public upstream Windows file URI regression is included."
+          "reason": "Exact unmodified GNU GCC 13.4.0 Go URI/parser/transport and Autoconf test examples; complete member bytes verified against the fixed GNU release archive. Whole raw and decoded source URL spellings are reviewed, including public example authorities and syntax. Complete member hash and exact spellings required; no authority, path prefix or directory exemption."
         },
         "gcc-13.4.0/libgo/go/syscall/exec_windows_test.go": {
           "sha256": "fe25d02ed90ca826a6f90d3f94912abafd3950a3c213a404e0d471b4bd3e218e",
@@ -3666,6 +3722,88 @@
             }
           ],
           "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/cmd/go/testdata/script/mod_sumdb_file_path.txt": {
+          "sha256": "e5eca585aa3d87ecb1f1b4c04dbdfb18a175d4d2430cde108e256fff221da73e",
+          "examples": [
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2e2a2f73756d64622f73756d2e676f6c616e672e6f72672f6c6f6f6b75702f676f6c616e672e6f72672f782f746578744076302e332e323a"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 Go URL/parser/transport and Autoconf regression examples, verified against the retained GNU release archive with fixed full SHA-256. These public test hostnames, malformed URI and sed/regex syntax are approved only as these complete source spellings and this entire member hash; a different authority or added URL is not covered."
+        },
+        "gcc-13.4.0/libgo/go/cmd/go/testdata/script/mod_query_empty.txt": {
+          "sha256": "ef3ead45850808b1fdb7377c6b1263ce89c67732c48ab00d4babc9b40db430d0",
+          "examples": [
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2e2a2f676174656b65657065722f6578616d706c652e636f6d2f6a6f696e2f737562706b672f406c61746573743a"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 Go URL/parser/transport and Autoconf regression examples, verified against the retained GNU release archive with fixed full SHA-256. These public test hostnames, malformed URI and sed/regex syntax are approved only as these complete source spellings and this entire member hash; a different authority or added URL is not covered."
+        },
+        "gcc-13.4.0/libgo/go/cmd/go/internal/web/url_other_test.go": {
+          "sha256": "f25648e9ad747c47f724c8e07c952e38ef4035bb17cff03f47705331ea716c5d",
+          "examples": [
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f686f73742e6578616d706c652e636f6d2f706174682f746f2f66696c65602c"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f686f73742e6578616d706c652e636f6d2f706174682f746f2f66696c65"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 Go URI/parser/transport and Autoconf test examples; complete member bytes verified against the fixed GNU release archive. Whole raw and decoded source URL spellings are reviewed, including public example authorities and syntax. Complete member hash and exact spellings required; no authority, path prefix or directory exemption."
+        },
+        "gcc-13.4.0/libgo/go/cmd/go/internal/web/url.go": {
+          "sha256": "f78e8ad929c482a22ac7e7fa3c25b2657d55321d53c04b4407d1236c172d0f98",
+          "examples": [
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f686f73742e6578616d706c652e636f6d2f"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f686f73742e6578616d706c652e636f6d2f53686172652f706174682f746f2f66696c65"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 Go URL/parser/transport and Autoconf regression examples, verified against the retained GNU release archive with fixed full SHA-256. These public test hostnames, malformed URI and sed/regex syntax are approved only as these complete source spellings and this entire member hash; a different authority or added URL is not covered."
+        },
+        "gcc-13.4.0/libgo/go/net/http/filetransport_test.go": {
+          "sha256": "4206a8270da71259cc7e56f798be9fbbbfa6e39053d7fc44317b706b88a60840",
+          "examples": [
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2e2e2f666f6f2e747874"
+            },
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f2e2e2f6e6f2d65786973742e747874"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 Go URL/parser/transport and Autoconf regression examples, verified against the retained GNU release archive with fixed full SHA-256. These public test hostnames, malformed URI and sed/regex syntax are approved only as these complete source spellings and this entire member hash; a different authority or added URL is not covered."
+        },
+        "gcc-13.4.0/libstdc++-v3/configure": {
+          "sha256": "ba8e903d14f5624f9704bf82d69d9f13a268320349cccdf1e837a64d1c9b328c",
+          "examples": [
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f3b3b70"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 Go URL/parser/transport and Autoconf regression examples, verified against the retained GNU release archive with fixed full SHA-256. These public test hostnames, malformed URI and sed/regex syntax are approved only as these complete source spellings and this entire member hash; a different authority or added URL is not covered."
+        },
+        "gcc-13.4.0/libstdc++-v3/acinclude.m4": {
+          "sha256": "8edc29e513aadcb79dc9a79c4d3a94ba83a95261500de94f47775530c67016bd",
+          "examples": [
+            {
+              "style": "source-literal-hex",
+              "path": "66696c653a2f2f3b3b70"
+            }
+          ],
+          "reason": "Exact unmodified GNU GCC 13.4.0 Go URL/parser/transport and Autoconf regression examples, verified against the retained GNU release archive with fixed full SHA-256. These public test hostnames, malformed URI and sed/regex syntax are approved only as these complete source spellings and this entire member hash; a different authority or added URL is not covered."
         }
       },
       "opaqueSourceFixtures": {
@@ -9476,6 +9614,90 @@
         "2f55736572732f72756e6e65722f776f726b2f6c6c766d6c6974652f6c6c766d6c6974652f6666692f6d656d6f72796d616e616765722e637070",
         "2f55736572732f72756e6e65722f776f726b2f6c6c766d6c6974652f6c6c766d6c6974652f6666692f6e6577706173736d616e61676572732e637070",
         "7e2f7d2f"
+      ]
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/pathlib/_local.py",
+      "sha256": "0530b4186ec5845e000bedf5817ff1ac970b9a39a6891ba6789a1776abdea42b",
+      "format": "python-public-examples",
+      "package": "CPython",
+      "version": "3.13.7",
+      "reason": "Exact retained runtime source bytes: public pathlib network-URI comment or fsspec test/CLI documentation example, reviewed in context. Only these complete URI spellings and this whole source hash are approved; a different hostname, URI suffix or new URL is not covered.",
+      "publicHostPathExamples": [
+        {
+          "style": "file-url-hex",
+          "path": "66696c653a2f2f686f73742f73686172652f612f62"
+        }
+      ]
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/fsspec/conftest.py",
+      "sha256": "b967e6fd0b396a53d1c4e851a437d0d3ed63a92279e299e2e32f7a2313911173",
+      "format": "python-public-examples",
+      "package": "fsspec",
+      "version": "2026.7.0",
+      "reason": "Exact retained runtime source bytes: public pathlib network-URI comment or fsspec test/CLI documentation example, reviewed in context. Only these complete URI spellings and this whole source hash are approved; a different hostname, URI suffix or new URL is not covered.",
+      "publicHostPathExamples": [
+        {
+          "style": "file-url-hex",
+          "path": "66696c653a2f2f616263"
+        }
+      ]
+    },
+    {
+      "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/fsspec/fuse.py",
+      "sha256": "43edcd38ec8ba817d86b80dbe44d7dcff658dfacf3607b48b3598e51ab08b414",
+      "format": "python-public-examples",
+      "package": "fsspec",
+      "version": "2026.7.0",
+      "reason": "Exact retained runtime source bytes: public pathlib network-URI comment or fsspec test/CLI documentation example, reviewed in context. Only these complete URI spellings and this whole source hash are approved; a different hostname, URI suffix or new URL is not covered.",
+      "publicHostPathExamples": [
+        {
+          "style": "file-url-hex",
+          "path": "66696c653a2f2f646174612e7a6970"
+        }
+      ]
+    },
+    {
+      "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/pathlib/_local.py",
+      "sha256": "0530b4186ec5845e000bedf5817ff1ac970b9a39a6891ba6789a1776abdea42b",
+      "format": "python-public-examples",
+      "package": "CPython",
+      "version": "3.13.7",
+      "reason": "Exact retained runtime source bytes: public pathlib network-URI comment or fsspec test/CLI documentation example, reviewed in context. Only these complete URI spellings and this whole source hash are approved; a different hostname, URI suffix or new URL is not covered.",
+      "publicHostPathExamples": [
+        {
+          "style": "file-url-hex",
+          "path": "66696c653a2f2f686f73742f73686172652f612f62"
+        }
+      ]
+    },
+    {
+      "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/fsspec/conftest.py",
+      "sha256": "b967e6fd0b396a53d1c4e851a437d0d3ed63a92279e299e2e32f7a2313911173",
+      "format": "python-public-examples",
+      "package": "fsspec",
+      "version": "2026.7.0",
+      "reason": "Exact retained runtime source bytes: public pathlib network-URI comment or fsspec test/CLI documentation example, reviewed in context. Only these complete URI spellings and this whole source hash are approved; a different hostname, URI suffix or new URL is not covered.",
+      "publicHostPathExamples": [
+        {
+          "style": "file-url-hex",
+          "path": "66696c653a2f2f616263"
+        }
+      ]
+    },
+    {
+      "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/fsspec/fuse.py",
+      "sha256": "43edcd38ec8ba817d86b80dbe44d7dcff658dfacf3607b48b3598e51ab08b414",
+      "format": "python-public-examples",
+      "package": "fsspec",
+      "version": "2026.7.0",
+      "reason": "Exact retained runtime source bytes: public pathlib network-URI comment or fsspec test/CLI documentation example, reviewed in context. Only these complete URI spellings and this whole source hash are approved; a different hostname, URI suffix or new URL is not covered.",
+      "publicHostPathExamples": [
+        {
+          "style": "file-url-hex",
+          "path": "66696c653a2f2f646174612e7a6970"
+        }
       ]
     }
   ]

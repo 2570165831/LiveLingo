@@ -111,6 +111,14 @@ def public_example_spellings(examples, *, source_only=False):
             allowed.extend(["C:\\" + value, "C:\\\\" + value.replace("\\", "\\\\")])
         elif example["style"] == "windows-url" and value.startswith("Users/"):
             allowed.append("/C:/" + value)
+        elif example["style"] == "file-url-hex" and re.fullmatch(r"(?:[0-9a-f]{2}){1,4096}", value):
+            try:
+                spelling = bytes.fromhex(value).decode("utf-8")
+            except UnicodeError:
+                raise PrivacyError("invalid-reviewed-public-examples") from None
+            if not re.fullmatch(r'file://[^\s"\'<>]+', spelling, re.I):
+                raise PrivacyError("invalid-reviewed-public-examples")
+            allowed.append(spelling)
         elif source_only and example["style"] == "rooted-package" and re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", value):
             spelling = "/" + value
             scan_host_paths(spelling.encode(), source_code=True)

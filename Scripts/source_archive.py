@@ -18,7 +18,7 @@ if __package__:
                                   CONTENT_NAMES, CONTENT_SUFFIXES)
     from .reviewed_resources import scan_host_paths, public_example_spellings
     from .privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals
-    from .privacy_text import scan_path_operands
+    from .privacy_text import scan_path_operands, replace_public_spelling
     from .macho_paths import scan_binary_paths_bytes
 else:
     from privacy_package import (PrivacyError, JSON_LIMIT, decode_metadata_text,
@@ -26,7 +26,7 @@ else:
                                  CONTENT_NAMES, CONTENT_SUFFIXES)
     from reviewed_resources import scan_host_paths, public_example_spellings
     from privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals
-    from privacy_text import scan_path_operands
+    from privacy_text import scan_path_operands, replace_public_spelling
     from macho_paths import scan_binary_paths_bytes
 
 
@@ -299,7 +299,15 @@ def source_public_view(value, allowed):
                 if value == public:
                     value = "PUBLIC_UPSTREAM_EXAMPLE"
                 continue  # A documentation root token must not mask other paths.
-            value = value.replace(public, "PUBLIC_UPSTREAM_EXAMPLE")
+            # Removing the leading slash of an approved local URI path would
+            # turn its empty authority into an invented hostname. Neutralize
+            # only the complete URI for that exact approved path, never a
+            # remote authority or a longer path that merely shares its prefix.
+            if public.startswith("/"):
+                value = re.sub(r'(?<![\w+.-])(?i:file://(?:localhost)?)' + re.escape(public)
+                               + r'(?=$|[\s"\'<>`,])',
+                               "PUBLIC_UPSTREAM_EXAMPLE", value)
+            value = replace_public_spelling(value, public)
     elif isinstance(value, dict):
         result = {}
         for key, item in value.items():
