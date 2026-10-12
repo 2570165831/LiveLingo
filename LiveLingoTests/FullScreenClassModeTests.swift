@@ -640,7 +640,7 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertEqual(actions.count, 8)
         XCTAssertEqual(actions.compactMap { $0.identifier?.rawValue }, FullScreenMenuAction.allCases.map(\.rawValue))
         XCTAssertEqual(actions.map(\.title), ["显示主窗口", "显示悬浮字幕", "锁定悬浮字幕",
-            "浮动字幕移到屏幕底部", "暂停记录", "开始记录", "关闭全屏网课模式", "退出 LiveLingo"])
+            "悬浮字幕移到屏幕底部", "暂停记录", "开始记录", "关闭全屏网课模式", "退出 LiveLingo"])
         XCTAssertFalse(f.controller.menu.autoenablesItems)
         XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .off)
         XCTAssertEqual(try item(.toggleLock, in: f).state, .off)
@@ -848,6 +848,11 @@ final class FullScreenClassModeTests: XCTestCase {
 
     func testSettingsPageRendersOffscreenWithTheInjectedController() async throws {
         let f = try FSCFixture(testCase: self)
+        f.defaults.set(false, forKey: "floatingShowsAcrossSpaces")
+        let app = NSApplication.shared
+        let previous = app.value(forKey: "accessibilityEnhancedUserInterface")
+        app.setValue(true, forKey: "accessibilityEnhancedUserInterface")
+        defer { app.setValue(previous, forKey: "accessibilityEnhancedUserInterface") }
         let host = NSHostingView(rootView: AnyView(ClassroomSettingsView(fullScreenMode: f.controller)
             .environmentObject(f.model).defaultAppStorage(f.defaults).environment(\.colorScheme, .light)))
         let window = hiddenWindow(size: NSSize(width: 520, height: 1600))
@@ -856,6 +861,20 @@ final class FullScreenClassModeTests: XCTestCase {
         defer { window.close() }
         let before = domain(f)
         try await settle(host)
+        func spacesControl() throws -> NSObject {
+            var visited = Set<ObjectIdentifier>()
+            func walk(_ object: NSObject) -> [NSObject] {
+                guard visited.insert(ObjectIdentifier(object)).inserted else { return [] }
+                let children = object.responds(to: NSSelectorFromString("accessibilityChildren"))
+                    ? object.value(forKey: "accessibilityChildren") as? [NSObject] ?? [] : []
+                return [object] + children.flatMap(walk)
+            }
+            return try XCTUnwrap(walk(host).first { object in
+                object.responds(to: NSSelectorFromString("accessibilityIdentifier"))
+                    && object.value(forKey: "accessibilityIdentifier") as? String == "floating-all-spaces"
+            })
+        }
+        XCTAssertEqual(try spacesControl().value(forKey: "accessibilityEnabled") as? Bool, true)
         let off = try bitmap(host)
         try saveScreenshot(off, name: "fullscreen-settings-off", fixture: f)
         XCTAssertTrue(NSDictionary(dictionary: domain(f)).isEqual(to: before),
@@ -863,6 +882,8 @@ final class FullScreenClassModeTests: XCTestCase {
         f.controller.binding.wrappedValue = true
         f.scheduler.drain()
         try await settle(host)
+        XCTAssertEqual(try spacesControl().value(forKey: "accessibilityEnabled") as? Bool, false)
+        XCTAssertFalse(f.defaults.bool(forKey: "floatingShowsAcrossSpaces"), "Forcing all spaces must preserve the user's stored setting")
         let on = try bitmap(host)
         try saveScreenshot(on, name: "fullscreen-settings-on", fixture: f)
         XCTAssertNotEqual(try pixels(off), try pixels(on), "The actual observed settings toggle must redraw")
@@ -872,6 +893,10 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertEqual(f.model.phase, .idle)
         XCTAssertFalse(window.isVisible)
         XCTAssertFalse(window.isKeyWindow)
+        f.controller.setEnabled(false)
+        try await settle(host)
+        XCTAssertEqual(try spacesControl().value(forKey: "accessibilityEnabled") as? Bool, true)
+        XCTAssertFalse(f.defaults.bool(forKey: "floatingShowsAcrossSpaces"))
     }
 
     func testRealMenuItemCellsRenderIdleRecordingAndPausedLockedStatesOffscreen() async throws {

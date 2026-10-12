@@ -776,7 +776,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         item(for: .toggleSubtitles)?.state = subtitles.isVisible ? .on : .off
         item(for: .toggleLock)?.title = "锁定悬浮字幕"
         item(for: .toggleLock)?.state = subtitles.isLocked ? .on : .off
-        item(for: .moveSubtitlesToBottom)?.title = "浮动字幕移到屏幕底部"
+        item(for: .moveSubtitlesToBottom)?.title = "悬浮字幕移到屏幕底部"
         item(for: .togglePause)?.title = state.isPaused ? "继续记录" : "暂停记录"
         item(for: .togglePause)?.isEnabled = state.hasActiveSession
         item(for: .toggleRecording)?.title = state.actionTitle
@@ -942,7 +942,7 @@ struct FullScreenClassModeSettings: View {
         if let controller { Control(controller: controller) }
         else { Toggle("全屏网课模式", isOn: .constant(false)).disabled(true) }
         Text(FullScreenClassModeController.explanation)
-            .font(.callout).foregroundStyle(.secondary)
+            .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -952,7 +952,7 @@ struct FullScreenClassModeSettings: View {
             Toggle("全屏网课模式", isOn: controller.binding)
                 .accessibilityIdentifier("floating-fullscreen-class-mode")
             if let error = controller.errorMessage {
-                Text(error).font(.callout).foregroundStyle(.red)
+                Text(error).font(.callout).foregroundStyle(ClassroomPalette.failure)
             }
         }
     }

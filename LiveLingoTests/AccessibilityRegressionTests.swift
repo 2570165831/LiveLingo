@@ -491,6 +491,22 @@ final class AccessibilityRegressionTests: XCTestCase {
         }
     }
 
+    func testSettingsSubtitleControlsShareALeftEdgeWithoutSliderTicks() async throws {
+        let (model, store) = try fixture()
+        let controller = try await host(ClassroomSettingsView().environmentObject(model).defaultAppStorage(store),
+                                         width: 520, height: 1500)
+        let mode = try node("floating-display-mode", in: controller.view).frame
+        for title in ["原文字号", "译文字号", "背景不透明度"] {
+            let slider = try node("floating-\(title)", in: controller.view).frame
+            XCTAssertEqual(slider.minX, mode.minX, accuracy: 1, title)
+        }
+        for slider in descendants(controller.view).compactMap({ $0 as? NSSlider }) {
+            XCTAssertEqual(slider.numberOfTickMarks, 0)
+        }
+        XCTAssertFalse(nodes(controller.view).flatMap(\.strings).contains { $0.contains("浮动字幕") })
+        _ = try textNode("阅读字号", in: controller.view)
+    }
+
     /// Issue #27: notes render line by line, so a fenced code line has no
     /// backticks of its own; its `$` and those in inline code must survive.
     func testA04NotesKeepDollarSignsInsideCode() async throws {

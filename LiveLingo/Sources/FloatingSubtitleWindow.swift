@@ -157,7 +157,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     #endif
 
     var panel: NSPanel? { window as? NSPanel }
-    var lockActionTitle: String { isLocked ? "解锁浮动字幕" : "锁定浮动字幕" }
+    var lockActionTitle: String { isLocked ? "解锁悬浮字幕" : "锁定悬浮字幕" }
 
     init(defaults: UserDefaults = .standard, screens: FloatingSubtitleWindowScreens = .live,
          notificationCenter: NotificationCenter = .default) {
@@ -188,7 +188,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         // Setting isFloatingPanel can change the level itself. Capture factory
         // values before any owned policy so shutdown restores the real original.
         let panelConfiguration = FloatingSubtitleWindowConfiguration(window: panel)
-        panel.title = "浮动字幕"
+        panel.title = "悬浮字幕"
         panel.identifier = NSUserInterfaceItemIdentifier(Self.frameAutosaveName)
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false

@@ -273,11 +273,11 @@ final class FloatingSubtitleWindowTests: XCTestCase {
         let panel = controller.prepareWindow(model: fixture.model)
         defer { controller.close() }
         try await settle(try XCTUnwrap(panel.contentView))
-        XCTAssertEqual(controller.lockActionTitle, "锁定浮动字幕")
+        XCTAssertEqual(controller.lockActionTitle, "锁定悬浮字幕")
         controller.toggleLock()
         XCTAssertTrue(controller.isLocked)
         XCTAssertTrue(panel.ignoresMouseEvents)
-        XCTAssertEqual(controller.lockActionTitle, "解锁浮动字幕")
+        XCTAssertEqual(controller.lockActionTitle, "解锁悬浮字幕")
         controller.toggleLock()
         XCTAssertFalse(controller.isLocked)
         XCTAssertFalse(panel.ignoresMouseEvents)
@@ -682,7 +682,7 @@ final class FloatingSubtitleWindowTests: XCTestCase {
         XCTAssertNil(controller.window)
         XCTAssertNil(controller.panel)
         XCTAssertFalse(controller.isLocked)
-        XCTAssertEqual(controller.lockActionTitle, "锁定浮动字幕")
+        XCTAssertEqual(controller.lockActionTitle, "锁定悬浮字幕")
         XCTAssertTrue(NSDictionary(dictionary: before).isEqual(
             to: try XCTUnwrap(store.persistentDomain(forName: suite))))
     }

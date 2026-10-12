@@ -232,9 +232,9 @@ struct ContentView: View {
                 Button {
                     floatingWindow.show(model: model)
                 } label: {
-                    Label("浮动字幕", systemImage: "pip")
+                    Label("悬浮字幕", systemImage: "pip")
                 }
-                .help("打开浮动字幕")
+                .help("打开悬浮字幕")
                 .accessibilityIdentifier("classroom-floating-subtitles")
                 Button { floatingWindow.toggleLock() } label: {
                     Label(floatingWindow.lockActionTitle,
@@ -304,7 +304,7 @@ struct ContentView: View {
                 Label(model.isManualTranslating ? "文字翻译中…" : "文字翻译…", systemImage: "character.bubble")
             }
             .accessibilityIdentifier("classroom-typed-translation")
-            ReadingSizePicker(size: $transcriptTextSize, title: "字幕字号")
+            ReadingSizePicker(size: $transcriptTextSize, title: "阅读字号")
                 .accessibilityIdentifier("classroom-caption-size")
             Divider()
             if !model.isLiveOnly {
@@ -897,6 +897,7 @@ struct ClassroomSettingsView: View {
     private var subtitles = FloatingSubtitlePreferences()
     @AppStorage("transcriptTextSize") private var readingTextSize = 18.0
     var fullScreenMode: FullScreenClassModeController? = nil
+    private let subtitleControlWidth: CGFloat = 272
 
     var body: some View {
         Form {
@@ -962,18 +963,26 @@ struct ClassroomSettingsView: View {
             }
             Section("阅读字号") {
                 ReadingSizePicker(size: $readingTextSize)
+                    .labelStyle(.titleOnly)
                 Text("同时放大字幕、笔记、时间戳和公式；悬浮字幕在独立字号基础上缩放。")
                     .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section("悬浮字幕") {
-                Picker("显示模式", selection: subtitles.displayModeBinding) {
-                    ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                LabeledContent("显示模式") {
+                    Picker("显示模式", selection: subtitles.displayModeBinding) {
+                        ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: subtitleControlWidth, alignment: .leading)
+                    .accessibilityIdentifier("floating-display-mode")
                 }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("floating-display-mode")
+                Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
                 if !model.previewTranslationEnabled || !model.supportsPreviewTranslation {
                     Text("“仅中文译文”在译文可用前显示原文。")
                         .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
@@ -987,18 +996,16 @@ struct ClassroomSettingsView: View {
                 subtitleSlider("背景不透明度", value: subtitles.backgroundOpacityBinding,
                                range: FloatingSubtitlePreferences.opacityRange, step: 0.05,
                                label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
-                Toggle("在所有桌面显示", isOn: subtitles.showsAcrossSpacesBinding)
-                    .accessibilityIdentifier("floating-all-spaces")
+                if let fullScreenMode {
+                    SubtitleSpacesToggle(controller: fullScreenMode, selection: subtitles.showsAcrossSpacesBinding)
+                } else {
+                    Toggle("在所有桌面显示", isOn: subtitles.showsAcrossSpacesBinding)
+                        .accessibilityIdentifier("floating-all-spaces")
+                }
                 Text("在所有普通桌面（含切换桌面时）保持显示。全屏网课模式开启时，字幕会强制加入所有桌面；关闭后恢复此开关的设置。")
                     .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 FullScreenClassModeSettings(controller: fullScreenMode)
-                Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
-                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("锁定后点击会穿过字幕窗；可在主窗口或“录音”菜单解锁（⌘⇧L，仅 App 在前台时有效）。全屏网课模式下也可用顶部菜单栏图标解锁。每次启动默认未锁定。")
-                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("笔记整理") {
                 Picker("每次整理的内容量", selection: $model.noteBatchCharacters) {
@@ -1021,14 +1028,27 @@ struct ClassroomSettingsView: View {
                                 step: Double, label: String) -> some View {
         LabeledContent(title) {
             HStack {
-                Slider(value: value, in: range, step: step)
+                Slider(value: Binding(get: { value.wrappedValue },
+                                      set: { value.wrappedValue = ($0 / step).rounded() * step }), in: range)
                     .accessibilityLabel(title)
                     .accessibilityValue(label)
                     .accessibilityIdentifier("floating-\(title)")
                 Text(label).monospacedDigit().foregroundStyle(ReadingAccessibility.secondaryText).frame(width: 48, alignment: .trailing)
                     .accessibilityHidden(true)
             }
+            .frame(width: subtitleControlWidth)
         }
+    }
+}
+
+private struct SubtitleSpacesToggle: View {
+    @ObservedObject var controller: FullScreenClassModeController
+    let selection: Binding<Bool>
+    var body: some View {
+        Toggle("在所有桌面显示", isOn: controller.isEnabled ? .constant(true) : selection)
+            .disabled(controller.isEnabled)
+            .help(controller.isEnabled ? "全屏网课模式已强制在所有桌面显示；关闭后恢复原设置。" : "在所有普通桌面保持显示")
+            .accessibilityIdentifier("floating-all-spaces")
     }
 }
 
@@ -1091,11 +1111,11 @@ struct RecordingMenuItems: View {
                     .disabled(!model.canImportMedia)
             }
             Divider()
-            Button("浮动字幕") { floatingWindow.show(model: model) }
+            Button("悬浮字幕") { floatingWindow.show(model: model) }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
             Button(floatingWindow.lockActionTitle) { floatingWindow.toggleLock() }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
-            Button("浮动字幕移到屏幕底部") {
+            Button("悬浮字幕移到屏幕底部") {
                 floatingWindow.moveToScreenBottom()
                 floatingWindow.show(model: model)
             }
@@ -1836,7 +1856,7 @@ private struct ClassroomLivePreview: View {
                             ProgressView().controlSize(.mini)
                         }
                     }
-                    // 与浮动字幕同源：没有逐词预览（系统语音资源未安装）时回退到
+                    // 与悬浮字幕同源：没有逐词预览（系统语音资源未安装）时回退到
                     // 最近一条定稿英文字幕，初译不再被流式英文是否为空卡住。
                     if let caption = model.nonEnglishPreviewPresentation, caption.isSourceOnly {
                         previewSlotMeasure(size: textSize * 16 / 18, weight: .regular)
