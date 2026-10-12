@@ -1157,6 +1157,15 @@ struct RecordingMenuItems: View {
                 floatingWindow.moveToScreenBottom()
                 floatingWindow.show(model: model)
             }
+            Button("悬浮字幕移到屏幕顶部") {
+                floatingWindow.moveToScreenTop()
+                floatingWindow.show(model: model)
+            }
+            Picker("悬浮字幕显示", selection: FloatingSubtitlePreferences().displayModeBinding) {
+                ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
         }
     }
 }

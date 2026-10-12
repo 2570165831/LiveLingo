@@ -8,6 +8,87 @@ import XCTest
 /// injected. The only native windows created here are never ordered onscreen.
 @MainActor
 final class FullScreenClassModeTests: XCTestCase {
+    func testMenuBarIconDefaultsOffAndNormalModePreferenceInstallsWithoutActivation() throws {
+        let fresh = try FSCFixture(testCase: self)
+        XCTAssertFalse(fresh.controller.menuBarIconEnabled)
+        XCTAssertNil(fresh.defaults.object(forKey: FullScreenClassModeController.menuBarIconPreferenceKey))
+        fresh.controller.start()
+        XCTAssertEqual(fresh.status.installCount, 0)
+        let f = try FSCFixture(testCase: self, menuBarIcon: true)
+        f.controller.start()
+        XCTAssertTrue(f.controller.menuBarIconEnabled)
+        XCTAssertFalse(f.controller.isEnabled)
+        XCTAssertEqual(f.status.installCount, 1)
+        XCTAssertTrue(f.application.policies.isEmpty)
+        XCTAssertEqual(f.status.appearance?.accessibilityLabel, "LiveLingo，未记录")
+        XCTAssertEqual(try item(.disableMode, in: f).title, "开启全屏网课模式")
+        try dispatch(.disableMode, in: f)
+        XCTAssertTrue(f.controller.isEnabled)
+        XCTAssertEqual(try item(.disableMode, in: f).title, "关闭全屏网课模式")
+        try dispatch(.disableMode, in: f)
+        XCTAssertFalse(f.controller.isEnabled)
+        XCTAssertEqual(f.status.installCount, 1)
+        XCTAssertEqual(f.status.removeCount, 0)
+        XCTAssertEqual(f.status.appearance?.accessibilityLabel, "LiveLingo，未记录")
+    }
+
+    func testMenuBarPreferenceBindingIsForcedOnOnlyDuringClassMode() throws {
+        let f = try FSCFixture(testCase: self)
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertTrue(f.controller.menuBarIconBinding.wrappedValue)
+        XCTAssertTrue(f.defaults.bool(forKey: FullScreenClassModeController.menuBarIconPreferenceKey))
+        f.controller.setMenuBarIconEnabled(false)
+        XCTAssertFalse(f.controller.menuBarIconBinding.wrappedValue)
+        f.controller.setEnabled(true)
+        XCTAssertTrue(f.controller.menuBarIconBinding.wrappedValue)
+        XCTAssertFalse(f.controller.menuBarIconEnabled)
+        XCTAssertFalse(f.defaults.bool(forKey: FullScreenClassModeController.menuBarIconPreferenceKey))
+        f.controller.setEnabled(false)
+        XCTAssertFalse(f.controller.menuBarIconBinding.wrappedValue)
+        XCTAssertEqual(f.status.removeCount, 2)
+    }
+
+    func testMenuBarInstallFailureDoesNotPersistPreferenceAndExistingIconSurvivesPolicyFailure() throws {
+        let f = try FSCFixture(testCase: self)
+        f.status.installSucceeds = false
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertFalse(f.controller.menuBarIconEnabled)
+        XCTAssertNil(f.defaults.object(forKey: FullScreenClassModeController.menuBarIconPreferenceKey))
+        f.status.installSucceeds = true
+        f.controller.setMenuBarIconEnabled(true)
+        f.application.rejectedPolicy = .accessory
+        f.controller.setEnabled(true)
+        XCTAssertFalse(f.controller.isEnabled)
+        XCTAssertTrue(f.controller.menuBarIconEnabled)
+        XCTAssertEqual(f.status.removeCount, 0)
+    }
+
+    func testDisplayModeSubmenuWritesInjectedStoreAndMoveTopRoutesToPanel() throws {
+        let f = try FSCFixture(testCase: self, menuBarIcon: true)
+        f.controller.start()
+        for mode in FloatingSubtitleDisplayMode.allCases {
+            let choice = try XCTUnwrap(f.controller.displayModeItem(for: mode))
+            XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(choice.action), to: choice.target, from: choice))
+            XCTAssertEqual(f.defaults.string(forKey: "floatingDisplayMode"), mode.rawValue)
+            for current in FloatingSubtitleDisplayMode.allCases {
+                XCTAssertEqual(f.controller.displayModeItem(for: current)?.state, current == mode ? .on : .off)
+            }
+        }
+        try dispatch(.moveSubtitlesToTop, in: f)
+        XCTAssertEqual(f.subtitles.moveTopCount, 1)
+        XCTAssertTrue(f.subtitles.shownModel === f.model)
+    }
+
+    func testLiveSubtitleBridgeUsesExplicitStoreRatherThanModelStore() throws {
+        let f = try FSCFixture(testCase: self)
+        let panelController = FloatingSubtitleWindowController(defaults: f.defaults)
+        let bridge = LiveFullScreenSubtitles(controller: panelController, defaults: f.defaults)
+        bridge.setDisplayMode(.sourceOnly)
+        XCTAssertEqual(bridge.displayMode, .sourceOnly)
+        XCTAssertEqual(f.defaults.string(forKey: "floatingDisplayMode"), "sourceOnly")
+        XCTAssertNil(panelController.window)
+    }
+
     func testDestroyedNativePopupsReleaseProtectionWithoutCloseNotifications() throws {
         for isPopover in [false, true] {
             let f = try FSCFixture(testCase: self)
@@ -230,7 +311,7 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertEqual(f.status.installCount, 0)
         XCTAssertTrue(f.subtitles.modeChanges.isEmpty)
         XCTAssertEqual(f.scheduler.pendingCount, 0)
-        XCTAssertFalse(try item(.disableMode, in: f).isEnabled)
+        XCTAssertTrue(try item(.disableMode, in: f).isEnabled)
         XCTAssertEqual(f.model.phase, .idle)
     }
 
@@ -634,13 +715,13 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertFalse(window.isVisible)
     }
 
-    func testMenuHasEightIdentifiedActionsAndCorrectRecordingPausedAndLockStates() throws {
+    func testMenuHasTenIdentifiedActionsAndCorrectRecordingPausedAndLockStates() throws {
         let f = try FSCFixture(testCase: self)
         let actions = f.controller.menu.items.filter { $0.action != nil }
-        XCTAssertEqual(actions.count, 8)
+        XCTAssertEqual(actions.count, 10)
         XCTAssertEqual(actions.compactMap { $0.identifier?.rawValue }, FullScreenMenuAction.allCases.map(\.rawValue))
-        XCTAssertEqual(actions.map(\.title), ["显示主窗口", "显示悬浮字幕", "锁定悬浮字幕",
-            "悬浮字幕移到屏幕底部", "暂停记录", "开始记录", "关闭全屏网课模式", "退出 LiveLingo"])
+        XCTAssertEqual(actions.map(\.title), ["显示主窗口", "显示悬浮字幕", "锁定悬浮字幕", "悬浮字幕显示",
+            "悬浮字幕移到屏幕底部", "悬浮字幕移到屏幕顶部", "暂停记录", "开始记录", "开启全屏网课模式", "退出 LiveLingo"])
         XCTAssertFalse(f.controller.menu.autoenablesItems)
         XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .off)
         XCTAssertEqual(try item(.toggleLock, in: f).state, .off)
@@ -1611,7 +1692,7 @@ private final class FSCFixture {
     let notifications = NotificationCenter()
     let popupLifetimeChecks = PassthroughSubject<Void, Never>()
 
-    init(testCase: XCTestCase, savedEnabled: Bool? = nil,
+    init(testCase: XCTestCase, savedEnabled: Bool? = nil, menuBarIcon: Bool = false,
          policy: NSApplication.ActivationPolicy = .regular) throws {
         let base = try FloatingSubtitleWindowTestFixture(testCase: testCase)
         model = base.model
@@ -1623,11 +1704,12 @@ private final class FSCFixture {
         let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         testCase.addTeardownBlock { try cleanup.remove() }
         if let savedEnabled { defaults.set(savedEnabled, forKey: FullScreenClassModeController.preferenceKey) }
+        if menuBarIcon { defaults.set(true, forKey: FullScreenClassModeController.menuBarIconPreferenceKey) }
         self.suite = suite
         self.defaults = defaults
         let application = FSCApplication(policy: policy)
         let status = FSCStatusItem()
-        let subtitles = FSCSubtitles()
+        let subtitles = FSCSubtitles(defaults: defaults)
         let recording = FSCRecording()
         let scheduler = FSCScheduler()
         let controller = FullScreenClassModeController(defaults: defaults, application: application,
@@ -1776,6 +1858,16 @@ private struct FSCWindowValues {
 
 @MainActor
 private final class FSCSubtitles: FullScreenSubtitleControlling {
+    private let defaults: UserDefaults?
+    private var selectedDisplayMode: FloatingSubtitleDisplayMode = .bilingual
+    var displayMode: FloatingSubtitleDisplayMode {
+        defaults.map { FloatingSubtitlePreferences(store: $0).displayMode } ?? selectedDisplayMode
+    }
+    func setDisplayMode(_ mode: FloatingSubtitleDisplayMode) {
+        selectedDisplayMode = mode
+        if let defaults { FloatingSubtitlePreferences(store: defaults).displayMode = mode }
+        changes.send(())
+    }
     let surface = FSCSurface()
     let original: FSCWindowValues
     private let configuration: FloatingSubtitleWindowConfiguration
@@ -1788,9 +1880,11 @@ private final class FSCSubtitles: FullScreenSubtitleControlling {
     private(set) var menuTrackingChanges: [Bool] = []
     private(set) var hideCount = 0
     private(set) var moveCount = 0
+    private(set) var moveTopCount = 0
     private(set) var shutdownCount = 0
     private(set) weak var shownModel: AppModel?
-    init() {
+    init(defaults: UserDefaults? = nil) {
+        self.defaults = defaults
         original = FSCWindowValues(surface)
         configuration = FloatingSubtitleWindowConfiguration(window: surface)
     }
@@ -1808,6 +1902,7 @@ private final class FSCSubtitles: FullScreenSubtitleControlling {
     func hide() { hideCount += 1; setVisibleExternally(false) }
     func toggleLock() { setLockedExternally(!isLocked) }
     func moveToScreenBottom() { moveCount += 1 }
+    func moveToScreenTop() { moveTopCount += 1 }
     func shutdown() {
         shutdownCount += 1
         configuration.restore()

@@ -421,18 +421,46 @@ private final class FullScreenWindowRestoration {
 protocol FullScreenSubtitleControlling: AnyObject {
     var isLocked: Bool { get }
     var isVisible: Bool { get }
+    var displayMode: FloatingSubtitleDisplayMode { get }
     var stateChanges: AnyPublisher<Void, Never> { get }
     func setFullScreenClassMode(_ enabled: Bool)
     func setPopupIsOpen(_ open: Bool)
     func show(model: AppModel)
     func hide()
     func toggleLock()
+    func setDisplayMode(_ mode: FloatingSubtitleDisplayMode)
     func moveToScreenBottom()
+    func moveToScreenTop()
     func shutdown()
 }
 
-extension FloatingSubtitleWindowController: FullScreenSubtitleControlling {
-    var stateChanges: AnyPublisher<Void, Never> { objectWillChange.eraseToAnyPublisher() }
+/// Keep the menu and panel on the same explicitly supplied preference store.
+/// The AppModel's runtime store may belong to a different suite.
+@MainActor
+final class LiveFullScreenSubtitles: FullScreenSubtitleControlling {
+    private let controller: FloatingSubtitleWindowController
+    private let defaults: UserDefaults
+
+    init(controller: FloatingSubtitleWindowController, defaults: UserDefaults) {
+        self.controller = controller
+        self.defaults = defaults
+    }
+
+    var isLocked: Bool { controller.isLocked }
+    var isVisible: Bool { controller.isVisible }
+    var displayMode: FloatingSubtitleDisplayMode { FloatingSubtitlePreferences(store: defaults).displayMode }
+    var stateChanges: AnyPublisher<Void, Never> { controller.objectWillChange.eraseToAnyPublisher() }
+    func setFullScreenClassMode(_ enabled: Bool) { controller.setFullScreenClassMode(enabled) }
+    func setPopupIsOpen(_ open: Bool) { controller.setPopupIsOpen(open) }
+    func show(model: AppModel) { controller.show(model: model) }
+    func hide() { controller.hide() }
+    func toggleLock() { controller.toggleLock() }
+    func setDisplayMode(_ mode: FloatingSubtitleDisplayMode) {
+        FloatingSubtitlePreferences(store: defaults).displayMode = mode
+    }
+    func moveToScreenBottom() { controller.moveToScreenBottom() }
+    func moveToScreenTop() { controller.moveToScreenTop() }
+    func shutdown() { controller.shutdown() }
 }
 
 struct FullScreenRecordingState: Equatable {
@@ -460,10 +488,13 @@ struct FullScreenRecordingCommands {
 struct FullScreenStatusAppearance: Equatable {
     var hasActiveSession: Bool
     var isPaused: Bool
+    var classMode: Bool = true
 
     var stateTitle: String { hasActiveSession ? (isPaused ? "记录已暂停" : "正在记录") : "未记录" }
 
-    var accessibilityLabel: String { "LiveLingo，全屏网课模式，\(stateTitle)" }
+    var accessibilityLabel: String {
+        classMode ? "LiveLingo，全屏网课模式，\(stateTitle)" : "LiveLingo，\(stateTitle)"
+    }
 
     @MainActor
     func configure(_ button: NSButton) {
@@ -528,7 +559,7 @@ final class LiveFullScreenStatusItem: FullScreenStatusItemPresenting {
 }
 
 enum FullScreenMenuAction: String, CaseIterable {
-    case showMainWindow, toggleSubtitles, toggleLock, moveSubtitlesToBottom
+    case showMainWindow, toggleSubtitles, toggleLock, displayMode, moveSubtitlesToBottom, moveSubtitlesToTop
     case togglePause, toggleRecording, disableMode, quit
 }
 
@@ -540,13 +571,16 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         weak var object: AnyObject?
     }
     static let preferenceKey = "fullScreenClassModeEnabled"
+    static let menuBarIconPreferenceKey = "menuBarIconEnabled"
     static let explanation = "开启后 Dock 图标和 App 菜单栏消失，⌘Tab 中不再出现；用顶部菜单栏的 LiveLingo 图标操作。用于尝试在其他 App 的原生全屏中显示字幕，真机效果以实际为准。字幕可能遮挡系统菜单或通知，可移到底部或隐藏。"
 
     static let shared = FullScreenClassModeController(
         defaults: AppRuntimeEnvironment.preferences, application: LiveFullScreenApplication(),
-        statusItem: LiveFullScreenStatusItem(), subtitles: FloatingSubtitleWindowController.shared)
+        statusItem: LiveFullScreenStatusItem(),
+        subtitles: LiveFullScreenSubtitles(controller: .shared, defaults: .standard))
 
     @Published private(set) var isEnabled = false
+    @Published private(set) var menuBarIconEnabled: Bool
     @Published private(set) var errorMessage: String?
     let menu = NSMenu(title: "LiveLingo")
     private let recordingStatusItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -563,6 +597,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     private var recordingObserver: AnyCancellable?
     private var generation = 0
     private var started = false
+    private var statusInstalled = false
     private var terminated = false
     private var needsMainWindow = false
     private weak var registeredMainWindow: NSWindow?
@@ -586,6 +621,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
              DispatchQueue.main.async { action() }
          }) {
         self.defaults = defaults
+        menuBarIconEnabled = defaults.bool(forKey: Self.menuBarIconPreferenceKey)
         self.application = application
         self.statusItem = statusItem
         self.subtitles = subtitles
@@ -603,10 +639,24 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
             if action == .togglePause || action == .toggleRecording || action == .disableMode {
                 menu.addItem(.separator())
             }
-            let item = NSMenuItem(title: "", action: #selector(menuAction(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: "", action: action == .displayMode ? nil : #selector(menuAction(_:)),
+                                  keyEquivalent: "")
             item.identifier = NSUserInterfaceItemIdentifier(action.rawValue)
             item.representedObject = action.rawValue
             item.target = self
+            if action == .displayMode {
+                let submenu = NSMenu(title: "悬浮字幕显示")
+                submenu.autoenablesItems = false
+                submenu.delegate = self
+                for mode in FloatingSubtitleDisplayMode.allCases {
+                    let choice = NSMenuItem(title: mode.title, action: #selector(displayModeAction(_:)), keyEquivalent: "")
+                    choice.identifier = NSUserInterfaceItemIdentifier("displayMode.\(mode.rawValue)")
+                    choice.representedObject = mode.rawValue
+                    choice.target = self
+                    submenu.addItem(choice)
+                }
+                item.submenu = submenu
+            }
             menu.addItem(item)
         }
         observers.append(subtitles.stateChanges.sink { [weak self] in
@@ -630,6 +680,9 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     }
 
     var binding: Binding<Bool> { Binding(get: { self.isEnabled }, set: { self.setEnabled($0) }) }
+    var menuBarIconBinding: Binding<Bool> {
+        Binding(get: { self.isEnabled || self.menuBarIconEnabled }, set: { self.setMenuBarIconEnabled($0) })
+    }
     var actionTitle: String { isEnabled ? "关闭全屏网课模式" : "开启全屏网课模式" }
 
     func connect(model: AppModel, recording: FullScreenRecordingCommands? = nil) {
@@ -647,6 +700,9 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         if defaults.bool(forKey: Self.preferenceKey) {
             setEnabled(true, persist: false)
             needsMainWindow = isEnabled
+        } else if menuBarIconEnabled {
+            if !installStatusItem() { errorMessage = "菜单栏图标未能显示，请重试。" }
+            refresh()
         }
     }
 
@@ -679,17 +735,34 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
 
     func toggle() { setEnabled(!isEnabled) }
 
+    func setMenuBarIconEnabled(_ enabled: Bool) {
+        guard !terminated else { return }
+        guard enabled != menuBarIconEnabled || enabled && !statusInstalled else { return }
+        if enabled && !installStatusItem() {
+            errorMessage = "菜单栏图标未能显示，请重试。"
+            return
+        }
+        menuBarIconEnabled = enabled
+        defaults.set(enabled, forKey: Self.menuBarIconPreferenceKey)
+        if !enabled && !isEnabled { removeStatusItem() }
+        errorMessage = nil
+        refresh()
+    }
+
     func setEnabled(_ enabled: Bool, persist: Bool = true) {
         guard !terminated, enabled != isEnabled else { return }
         let snapshot = application.windowSnapshot()
-        if enabled && !statusItem.install(menu: menu, appearance: appearance) {
+        let hadStatusItem = statusInstalled
+        if enabled && !installStatusItem() {
             snapshot.cancel()
             errorMessage = "菜单栏图标未能显示，全屏网课模式未开启。"
             return
         }
         guard application.setActivationPolicy(enabled ? .accessory : .regular) else {
             snapshot.cancel()
-            if enabled { statusItem.remove() }
+            // Only roll back an item acquired solely for this failed switch.
+            // An existing normal-mode icon and its recovery menu must survive.
+            if enabled && !hadStatusItem && !menuBarIconEnabled { removeStatusItem() }
             errorMessage = "macOS 未能切换 App 显示方式，请重试。"
             return
         }
@@ -708,8 +781,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         updatePopupProtection()
         if !enabled {
             needsMainWindow = false
-            statusItem.remove()
-            lastAppearance = nil
+            if !menuBarIconEnabled { removeStatusItem() }
         }
         if persist { defaults.set(enabled, forKey: Self.preferenceKey) }
         // Restore every captured window now. The second pass handles delayed
@@ -744,8 +816,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         openPresentedPopups.removeAll()
         popupProtectionIsActive = false
         subtitles.shutdown()
-        statusItem.remove()
-        lastAppearance = nil
+        removeStatusItem()
         if application.activationPolicy != originalActivationPolicy {
             _ = application.setActivationPolicy(originalActivationPolicy)
         }
@@ -757,18 +828,40 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
 
     private var appearance: FullScreenStatusAppearance {
         let state = recording.state()
-        return FullScreenStatusAppearance(hasActiveSession: state.hasActiveSession, isPaused: state.isPaused)
+        return FullScreenStatusAppearance(hasActiveSession: state.hasActiveSession, isPaused: state.isPaused,
+                                          classMode: isEnabled)
+    }
+
+    private func installStatusItem() -> Bool {
+        guard !statusInstalled else { return true }
+        let currentAppearance = appearance
+        guard statusItem.install(menu: menu, appearance: currentAppearance) else { return false }
+        statusInstalled = true
+        lastAppearance = currentAppearance
+        return true
+    }
+
+    private func removeStatusItem() {
+        guard statusInstalled else { return }
+        statusItem.remove()
+        statusInstalled = false
+        lastAppearance = nil
     }
 
     func item(for action: FullScreenMenuAction) -> NSMenuItem? {
         menu.items.first { $0.identifier?.rawValue == action.rawValue }
     }
 
+    func displayModeItem(for mode: FloatingSubtitleDisplayMode) -> NSMenuItem? {
+        item(for: .displayMode)?.submenu?.items.first { $0.representedObject as? String == mode.rawValue }
+    }
+
     func refresh() {
         guard !terminated else { return }
         updatePopupProtection()
         let state = recording.state()
-        let currentAppearance = FullScreenStatusAppearance(hasActiveSession: state.hasActiveSession, isPaused: state.isPaused)
+        let currentAppearance = FullScreenStatusAppearance(hasActiveSession: state.hasActiveSession, isPaused: state.isPaused,
+                                                          classMode: isEnabled)
         recordingStatusItem.title = "● \(currentAppearance.stateTitle)"
         recordingStatusItem.isEnabled = false
         item(for: .showMainWindow)?.title = "显示主窗口"
@@ -776,15 +869,20 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         item(for: .toggleSubtitles)?.state = subtitles.isVisible ? .on : .off
         item(for: .toggleLock)?.title = "锁定悬浮字幕"
         item(for: .toggleLock)?.state = subtitles.isLocked ? .on : .off
+        item(for: .displayMode)?.title = "悬浮字幕显示"
+        for mode in FloatingSubtitleDisplayMode.allCases {
+            displayModeItem(for: mode)?.state = subtitles.displayMode == mode ? .on : .off
+        }
         item(for: .moveSubtitlesToBottom)?.title = "悬浮字幕移到屏幕底部"
+        item(for: .moveSubtitlesToTop)?.title = "悬浮字幕移到屏幕顶部"
         item(for: .togglePause)?.title = state.isPaused ? "继续记录" : "暂停记录"
         item(for: .togglePause)?.isEnabled = state.hasActiveSession
         item(for: .toggleRecording)?.title = state.actionTitle
         item(for: .toggleRecording)?.isEnabled = state.canToggle
-        item(for: .disableMode)?.title = "关闭全屏网课模式"
-        item(for: .disableMode)?.isEnabled = isEnabled
+        item(for: .disableMode)?.title = actionTitle
+        item(for: .disableMode)?.isEnabled = true
         item(for: .quit)?.title = "退出 LiveLingo"
-        if isEnabled && currentAppearance != lastAppearance {
+        if statusInstalled && currentAppearance != lastAppearance {
             statusItem.update(appearance: currentAppearance)
             lastAppearance = currentAppearance
         }
@@ -793,6 +891,13 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     @objc private func menuAction(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let action = FullScreenMenuAction(rawValue: raw) else { return }
         perform(action)
+    }
+
+    @objc private func displayModeAction(_ sender: NSMenuItem) {
+        guard !terminated, let raw = sender.representedObject as? String,
+              let mode = FloatingSubtitleDisplayMode(rawValue: raw) else { return }
+        subtitles.setDisplayMode(mode)
+        refresh()
     }
 
     func perform(_ action: FullScreenMenuAction) {
@@ -806,14 +911,18 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
             if subtitles.isVisible { subtitles.hide() }
             else if let model { subtitles.show(model: model) }
         case .toggleLock: subtitles.toggleLock()
+        case .displayMode: break // The submenu's choices carry their own actions.
         case .moveSubtitlesToBottom:
             subtitles.moveToScreenBottom()
+            if let model { subtitles.show(model: model) }
+        case .moveSubtitlesToTop:
+            subtitles.moveToScreenTop()
             if let model { subtitles.show(model: model) }
         case .togglePause:
             if recording.state().hasActiveSession { recording.togglePause() }
         case .toggleRecording:
             if recording.state().canToggle { recording.toggle() }
-        case .disableMode: setEnabled(false)
+        case .disableMode: toggle()
         case .quit: application.requestTermination()
         }
         refresh()
@@ -940,7 +1049,11 @@ struct FullScreenClassModeSettings: View {
     var controller: FullScreenClassModeController?
     var body: some View {
         if let controller { Control(controller: controller) }
-        else { Toggle("全屏网课模式", isOn: .constant(false)).disabled(true) }
+        else {
+            Toggle("全屏网课模式", isOn: .constant(false)).disabled(true)
+            Toggle("在菜单栏显示 LiveLingo 图标", isOn: .constant(false))
+                .disabled(true).accessibilityIdentifier("menu-bar-icon")
+        }
         Text(FullScreenClassModeController.explanation)
             .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
             .fixedSize(horizontal: false, vertical: true)
@@ -951,6 +1064,9 @@ struct FullScreenClassModeSettings: View {
         var body: some View {
             Toggle("全屏网课模式", isOn: controller.binding)
                 .accessibilityIdentifier("floating-fullscreen-class-mode")
+            Toggle("在菜单栏显示 LiveLingo 图标", isOn: controller.menuBarIconBinding)
+                .disabled(controller.isEnabled)
+                .accessibilityIdentifier("menu-bar-icon")
             if let error = controller.errorMessage {
                 Text(error).font(.callout).foregroundStyle(ClassroomPalette.failure)
             }
