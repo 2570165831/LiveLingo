@@ -634,13 +634,13 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertFalse(window.isVisible)
     }
 
-    func testMenuHasSevenIdentifiedActionsAndCorrectRecordingPausedAndLockStates() throws {
+    func testMenuHasEightIdentifiedActionsAndCorrectRecordingPausedAndLockStates() throws {
         let f = try FSCFixture(testCase: self)
-        let actions = f.controller.menu.items.filter { !$0.isSeparatorItem }
-        XCTAssertEqual(actions.count, 7)
+        let actions = f.controller.menu.items.filter { $0.action != nil }
+        XCTAssertEqual(actions.count, 8)
         XCTAssertEqual(actions.compactMap { $0.identifier?.rawValue }, FullScreenMenuAction.allCases.map(\.rawValue))
         XCTAssertEqual(actions.map(\.title), ["显示主窗口", "显示悬浮字幕", "锁定悬浮字幕",
-            "浮动字幕移到屏幕底部", "开始记录", "关闭全屏网课模式", "退出 LiveLingo"])
+            "浮动字幕移到屏幕底部", "暂停记录", "开始记录", "关闭全屏网课模式", "退出 LiveLingo"])
         XCTAssertFalse(f.controller.menu.autoenablesItems)
         XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .off)
         XCTAssertEqual(try item(.toggleLock, in: f).state, .off)
@@ -654,6 +654,8 @@ final class FullScreenClassModeTests: XCTestCase {
             f.controller.refresh()
             XCTAssertEqual(try item(.toggleRecording, in: f).title, "停止并保存")
             XCTAssertTrue(try item(.toggleRecording, in: f).isEnabled)
+            XCTAssertEqual(try item(.togglePause, in: f).title, paused ? "继续记录" : "暂停记录")
+            XCTAssertTrue(try item(.togglePause, in: f).isEnabled)
             XCTAssertEqual(try item(.toggleSubtitles, in: f).title, "显示悬浮字幕")
             XCTAssertEqual(try item(.toggleSubtitles, in: f).state, .on)
             XCTAssertEqual(try item(.toggleLock, in: f).title, "锁定悬浮字幕")
@@ -680,7 +682,35 @@ final class FullScreenClassModeTests: XCTestCase {
         }
     }
 
-    func testNativeMenuActionAndTargetRouteAllSevenCommandsToFakes() throws {
+    func testRecordingStatusRowIsDisabledAndRecordingControlsAreSeparated() throws {
+        let f = try FSCFixture(testCase: self)
+        let status = try XCTUnwrap(f.controller.menu.items.first)
+        XCTAssertEqual(status.identifier?.rawValue, "recordingStatus")
+        XCTAssertNil(status.action)
+        XCTAssertNil(status.target)
+        XCTAssertNil(status.representedObject)
+        XCTAssertTrue(f.controller.menu.items[1].isSeparatorItem)
+        for action in [FullScreenMenuAction.togglePause, .toggleRecording, .disableMode] {
+            let nativeItem = try item(action, in: f)
+            let index = f.controller.menu.index(of: nativeItem)
+            XCTAssertGreaterThan(index, 0)
+            XCTAssertTrue(f.controller.menu.items[index - 1].isSeparatorItem)
+        }
+        let states: [(FullScreenRecordingState, String)] = [
+            (.init(), "● 未记录"),
+            (.init(hasActiveSession: true), "● 正在记录"),
+            (.init(hasActiveSession: true, isPaused: true), "● 记录已暂停")
+        ]
+        for (state, title) in states {
+            f.recording.state = state
+            f.controller.refresh()
+            XCTAssertEqual(status.title, title)
+            XCTAssertFalse(status.isEnabled)
+            XCTAssertEqual(status.state, .off)
+        }
+    }
+
+    func testNativeMenuActionAndTargetRouteAllEightCommandsToFakes() throws {
         let f = try FSCFixture(testCase: self)
         f.recording.state.canToggle = true
         f.controller.setEnabled(true)
@@ -702,6 +732,11 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertTrue(f.subtitles.isLocked)
         try dispatch(.toggleRecording, in: f)
         XCTAssertEqual(f.recording.toggleCount, 1)
+        f.recording.state.hasActiveSession = true
+        f.controller.refresh()
+        try dispatch(.togglePause, in: f)
+        XCTAssertEqual(f.recording.togglePauseCount, 1)
+        XCTAssertTrue(f.recording.state.isPaused)
         XCTAssertEqual(f.model.phase, .idle, "A menu command must never invoke live AppModel recording")
         try dispatch(.disableMode, in: f)
         XCTAssertFalse(f.controller.isEnabled)
@@ -718,6 +753,33 @@ final class FullScreenClassModeTests: XCTestCase {
         try dispatch(.toggleRecording, in: f)
         XCTAssertEqual(f.recording.toggleCount, 0)
         XCTAssertEqual(f.model.phase, .idle)
+    }
+
+    func testPauseActionTracksSessionStateAndCannotInvokeCommandsWhileIdle() throws {
+        let f = try FSCFixture(testCase: self)
+        f.recording.state.canToggle = true
+        f.controller.refresh()
+        XCTAssertFalse(try item(.togglePause, in: f).isEnabled)
+        XCTAssertEqual(try item(.togglePause, in: f).title, "暂停记录")
+        try dispatch(.togglePause, in: f)
+        XCTAssertEqual(f.recording.togglePauseCount, 0)
+        for paused in [false, true] {
+            f.recording.state = .init(hasActiveSession: true, isPaused: paused, canToggle: false)
+            f.controller.refresh()
+            XCTAssertTrue(try item(.togglePause, in: f).isEnabled)
+            XCTAssertEqual(try item(.togglePause, in: f).title, paused ? "继续记录" : "暂停记录")
+            let count = f.recording.togglePauseCount
+            try dispatch(.togglePause, in: f)
+            XCTAssertEqual(f.recording.togglePauseCount, count + 1)
+            XCTAssertEqual(f.recording.state.isPaused, !paused)
+            XCTAssertEqual(try item(.togglePause, in: f).title, paused ? "暂停记录" : "继续记录")
+        }
+        f.recording.state.hasActiveSession = false
+        // A stale enabled item must also respect the latest state at dispatch.
+        try dispatch(.togglePause, in: f)
+        XCTAssertEqual(f.recording.togglePauseCount, 2)
+        XCTAssertFalse(try item(.togglePause, in: f).isEnabled)
+        XCTAssertEqual(f.model.phase, .idle, "Pause commands must use the injected fake")
     }
 
     func testExternalSubtitleChangesRefreshMenuWithoutManualRefresh() throws {
@@ -748,7 +810,7 @@ final class FullScreenClassModeTests: XCTestCase {
         f.controller.connect(model: model, recording: FullScreenRecordingCommands(state: {
             FullScreenRecordingState(hasActiveSession: model.hasActiveSession, isPaused: model.isPaused,
                 actionTitle: model.hasActiveSession ? model.stopRecordingTitle : "开始记录", canToggle: true)
-        }, toggle: { recording.toggleCount += 1 }))
+        }, toggle: { recording.toggleCount += 1 }, togglePause: { recording.togglePauseCount += 1 }))
         f.controller.setEnabled(true)
         f.scheduler.drain()
         XCTAssertEqual(try item(.toggleRecording, in: f).title, "开始记录")
@@ -757,10 +819,15 @@ final class FullScreenClassModeTests: XCTestCase {
             f.scheduler.drain()
             XCTAssertEqual(try item(.toggleRecording, in: f).title,
                            model.hasActiveSession ? model.stopRecordingTitle : "开始记录")
+            XCTAssertEqual(try item(.togglePause, in: f).title, model.isPaused ? "继续记录" : "暂停记录")
+            XCTAssertEqual(try item(.togglePause, in: f).isEnabled, model.hasActiveSession)
+            XCTAssertEqual(f.controller.menu.items.first?.title,
+                           model.hasActiveSession ? (model.isPaused ? "● 记录已暂停" : "● 正在记录") : "● 未记录")
             XCTAssertEqual(f.status.appearance,
                 FullScreenStatusAppearance(hasActiveSession: model.hasActiveSession, isPaused: model.isPaused))
         }
         XCTAssertEqual(recording.toggleCount, 0)
+        XCTAssertEqual(recording.togglePauseCount, 0)
         XCTAssertEqual(model.phase, .idle)
     }
 
@@ -824,6 +891,11 @@ final class FullScreenClassModeTests: XCTestCase {
             f.scheduler.drain()
             f.controller.refresh()
             let view = FSCNativeMenuView(menu: f.controller.menu)
+            XCTAssertEqual(f.controller.menu.items.first?.title,
+                           "● \(FullScreenStatusAppearance(hasActiveSession: state.hasActiveSession, isPaused: state.isPaused).stateTitle)")
+            XCTAssertFalse(try XCTUnwrap(f.controller.menu.items.first).isEnabled)
+            XCTAssertEqual(try item(.togglePause, in: f).title, state.isPaused ? "继续记录" : "暂停记录")
+            XCTAssertEqual(try item(.togglePause, in: f).isEnabled, state.hasActiveSession)
             XCTAssertEqual(view.cells.count, f.controller.menu.items.count)
             for (cell, actualItem) in zip(view.cells, f.controller.menu.items) {
                 XCTAssertTrue(cell.menuItem === actualItem, "Render the controller's real native item, not copied text")
@@ -844,6 +916,7 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertNotEqual(captures[0], captures[1])
         XCTAssertNotEqual(captures[1], captures[2])
         XCTAssertEqual(f.recording.toggleCount, 0)
+        XCTAssertEqual(f.recording.togglePauseCount, 0)
         XCTAssertTrue(f.subtitles.menuTrackingChanges.isEmpty, "Offscreen cells must not open a real menu")
     }
 
@@ -1632,8 +1705,12 @@ private final class FSCStatusItem: FullScreenStatusItemPresenting {
 private final class FSCRecording {
     var state = FullScreenRecordingState()
     var toggleCount = 0
+    var togglePauseCount = 0
     var commands: FullScreenRecordingCommands {
-        FullScreenRecordingCommands(state: { self.state }, toggle: { self.toggleCount += 1 })
+        FullScreenRecordingCommands(state: { self.state }, toggle: { self.toggleCount += 1 }, togglePause: {
+            self.togglePauseCount += 1
+            self.state.isPaused.toggle()
+        })
     }
 }
 

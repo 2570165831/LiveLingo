@@ -446,13 +446,14 @@ struct FullScreenRecordingState: Equatable {
 struct FullScreenRecordingCommands {
     var state: () -> FullScreenRecordingState
     var toggle: () -> Void
+    var togglePause: () -> Void
 
     static func live(model: AppModel) -> Self {
         Self(state: {
             FullScreenRecordingState(hasActiveSession: model.hasActiveSession, isPaused: model.isPaused,
                                      actionTitle: model.hasActiveSession ? model.stopRecordingTitle : "开始记录",
                                      canToggle: model.canToggleRecording)
-        }, toggle: { model.toggleRecording() })
+        }, toggle: { model.toggleRecording() }, togglePause: { model.togglePause() })
     }
 }
 
@@ -460,10 +461,9 @@ struct FullScreenStatusAppearance: Equatable {
     var hasActiveSession: Bool
     var isPaused: Bool
 
-    var accessibilityLabel: String {
-        let state = hasActiveSession ? (isPaused ? "记录已暂停" : "正在记录") : "未记录"
-        return "LiveLingo，全屏网课模式，\(state)"
-    }
+    var stateTitle: String { hasActiveSession ? (isPaused ? "记录已暂停" : "正在记录") : "未记录" }
+
+    var accessibilityLabel: String { "LiveLingo，全屏网课模式，\(stateTitle)" }
 
     @MainActor
     func configure(_ button: NSButton) {
@@ -529,7 +529,7 @@ final class LiveFullScreenStatusItem: FullScreenStatusItemPresenting {
 
 enum FullScreenMenuAction: String, CaseIterable {
     case showMainWindow, toggleSubtitles, toggleLock, moveSubtitlesToBottom
-    case toggleRecording, disableMode, quit
+    case togglePause, toggleRecording, disableMode, quit
 }
 
 /// All three entry points (Settings, app menu, status menu) share this owner.
@@ -549,6 +549,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     @Published private(set) var isEnabled = false
     @Published private(set) var errorMessage: String?
     let menu = NSMenu(title: "LiveLingo")
+    private let recordingStatusItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let defaults: UserDefaults
     private let application: any FullScreenApplicationControlling
     private let statusItem: any FullScreenStatusItemPresenting
@@ -557,7 +558,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     private let observePopupLifetimes: (@escaping @MainActor () -> Void) -> AnyCancellable
     private let originalActivationPolicy: NSApplication.ActivationPolicy
     private var model: AppModel?
-    private var recording = FullScreenRecordingCommands(state: { FullScreenRecordingState() }, toggle: {})
+    private var recording = FullScreenRecordingCommands(state: { FullScreenRecordingState() }, toggle: {}, togglePause: {})
     private var observers: [AnyCancellable] = []
     private var recordingObserver: AnyCancellable?
     private var generation = 0
@@ -594,8 +595,14 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         super.init()
         menu.autoenablesItems = false
         menu.delegate = self
+        recordingStatusItem.identifier = NSUserInterfaceItemIdentifier("recordingStatus")
+        recordingStatusItem.isEnabled = false
+        menu.addItem(recordingStatusItem)
+        menu.addItem(.separator())
         for action in FullScreenMenuAction.allCases {
-            if action == .toggleRecording || action == .disableMode { menu.addItem(.separator()) }
+            if action == .togglePause || action == .toggleRecording || action == .disableMode {
+                menu.addItem(.separator())
+            }
             let item = NSMenuItem(title: "", action: #selector(menuAction(_:)), keyEquivalent: "")
             item.identifier = NSUserInterfaceItemIdentifier(action.rawValue)
             item.representedObject = action.rawValue
@@ -761,18 +768,22 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         guard !terminated else { return }
         updatePopupProtection()
         let state = recording.state()
+        let currentAppearance = FullScreenStatusAppearance(hasActiveSession: state.hasActiveSession, isPaused: state.isPaused)
+        recordingStatusItem.title = "● \(currentAppearance.stateTitle)"
+        recordingStatusItem.isEnabled = false
         item(for: .showMainWindow)?.title = "显示主窗口"
         item(for: .toggleSubtitles)?.title = "显示悬浮字幕"
         item(for: .toggleSubtitles)?.state = subtitles.isVisible ? .on : .off
         item(for: .toggleLock)?.title = "锁定悬浮字幕"
         item(for: .toggleLock)?.state = subtitles.isLocked ? .on : .off
         item(for: .moveSubtitlesToBottom)?.title = "浮动字幕移到屏幕底部"
+        item(for: .togglePause)?.title = state.isPaused ? "继续记录" : "暂停记录"
+        item(for: .togglePause)?.isEnabled = state.hasActiveSession
         item(for: .toggleRecording)?.title = state.actionTitle
         item(for: .toggleRecording)?.isEnabled = state.canToggle
         item(for: .disableMode)?.title = "关闭全屏网课模式"
         item(for: .disableMode)?.isEnabled = isEnabled
         item(for: .quit)?.title = "退出 LiveLingo"
-        let currentAppearance = appearance
         if isEnabled && currentAppearance != lastAppearance {
             statusItem.update(appearance: currentAppearance)
             lastAppearance = currentAppearance
@@ -798,6 +809,8 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         case .moveSubtitlesToBottom:
             subtitles.moveToScreenBottom()
             if let model { subtitles.show(model: model) }
+        case .togglePause:
+            if recording.state().hasActiveSession { recording.togglePause() }
         case .toggleRecording:
             if recording.state().canToggle { recording.toggle() }
         case .disableMode: setEnabled(false)
