@@ -419,6 +419,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
     }
 
     func testLongSpanishCaptionStaysAtBottomWhenLanguageLabelMovesBetweenSlots() async throws {
+        try enableHostAccessibility()
         let (model, store) = try fixture()
         let preferences = FloatingSubtitlePreferences(store: store)
         model.loadPresentationForTesting(phase: .recording, evidence: [])
@@ -442,6 +443,13 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             XCTAssertEqual(current.count, 2)
             XCTAssertTrue(current.last === translation)
             try assertScrolledToBottom(translation)
+            let label = try XCTUnwrap(accessibleNodes(in: controller.view).first {
+                $0.value("accessibilityLabel") as? String == "语种：西班牙语"
+                    || $0.value("accessibilityValue") as? String == "语种：西班牙语"
+            })
+            let screenFrame = try XCTUnwrap(label.value("accessibilityFrame") as? NSValue).rectValue
+            let labelFrame = controller.view.convert(window.convertFromScreen(screenFrame), from: nil)
+            XCTAssertTrue(controller.view.bounds.contains(labelFrame), "A genuinely scrolled caption must keep its language label visible")
             if mode == .translationOnly {
                 XCTAssertGreaterThan(try XCTUnwrap(translation.documentView).bounds.height, bilingualHeight,
                                      "The language label must reduce text width and actually exercise reflow")

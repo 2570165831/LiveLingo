@@ -84,22 +84,20 @@ private struct FloatingSubtitleContent: View {
                           languageName: String? = nil, languageWhite: Double, visible: Bool,
                           rendersTranslation: Bool = false) -> some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if let languageName {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            CaptionLanguageLabel(name: languageName, subtitleSize: size, color: Color(white: languageWhite), scale: scale)
-                            subtitleText(text, size: size, weight: weight, color: color, selectable: visible,
-                                         rendersTranslation: rendersTranslation)
-                        }
-                        .accessibilityElement(children: .contain)
-                    } else {
+            HStack(alignment: .top, spacing: 8 * scale) {
+                if let languageName {
+                    CaptionLanguageLabel(name: languageName, subtitleSize: size, color: Color(white: languageWhite), scale: scale)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
                         subtitleText(text, size: size, weight: weight, color: color, selectable: visible,
                                      rendersTranslation: rendersTranslation)
+                        Color.clear.frame(height: 1).id("tail")
                     }
-                    Color.clear.frame(height: 1).id("tail")
                 }
+                .frame(height: height)
             }
+            .accessibilityElement(children: .contain)
             .frame(height: height)
             .opacity(visible ? 1 : 0)
             .accessibilityHidden(!visible)

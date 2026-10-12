@@ -1936,20 +1936,18 @@ private struct ClassroomLivePreview: View {
         previewSlotMeasure(size: size, weight: weight)
             .overlay {
                 ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            if let languageName {
-                                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                    CaptionLanguageLabel(name: languageName, subtitleSize: size, scale: textSize / 18)
-                                    previewText(text, size: size, weight: weight, rendersTranslation: rendersTranslation)
-                                }
-                                .accessibilityElement(children: .contain)
-                            } else {
+                    HStack(alignment: .top, spacing: 8 * textSize / 18) {
+                        if let languageName {
+                            CaptionLanguageLabel(name: languageName, subtitleSize: size, scale: textSize / 18)
+                        }
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 0) {
                                 previewText(text, size: size, weight: weight, rendersTranslation: rendersTranslation)
+                                Color.clear.frame(height: 1).id("preview-tail")
                             }
-                            Color.clear.frame(height: 1).id("preview-tail")
                         }
                     }
+                    .accessibilityElement(children: .contain)
                     .onChange(of: text) { proxy.scrollTo("preview-tail", anchor: .bottom) }
                 }
             }
