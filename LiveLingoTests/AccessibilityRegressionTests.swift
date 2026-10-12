@@ -584,6 +584,61 @@ final class AccessibilityRegressionTests: XCTestCase {
 
     /// Issue #27: notes render line by line, so a fenced code line has no
     /// backticks of its own; its `$` and those in inline code must survive.
+    func testQueuedPersistenceFailuresRenderTheirCategoryWithoutInventingFailedTasks() async throws {
+        for reportFailure in [false, true] {
+            let root = TestFixtureDirectory.root.appendingPathComponent("uifix2-persistence-\(UUID())", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let journalParent = root.appendingPathComponent("journal", isDirectory: true)
+            let queue = LearningReviewQueue(journalURL: journalParent.appendingPathComponent("queue.json"),
+                observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
+                    XCTFail("A blocked persistence fixture must never generate notes")
+                    throw CancellationError()
+                }
+            addTeardownBlock { await queue.shutdownForTesting() }
+            var book = LearningNotebook()
+            try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Synthetic evidence", chinese: "合成证据")],
+                            note: .init(topic: "合成课程", points: [.init(kind: "核心结论", text: "合成要点。")]))
+            let (_, store) = try fixture()
+            let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
+                                 backgroundServices: false, scheduledNotes: false, defaults: store)
+            model.loadPresentationForTesting(phase: .saved(root), evidence: [], notebook: book)
+            queue.setContext(recording: true, concurrent: false, resourcesAvailable: true)
+            try queue.enqueue(directory: root, notebook: book)
+            // Admission has validated the empty recording directory. Block only
+            // the real asynchronous report writer before it gets a MainActor turn.
+            if reportFailure {
+                try FileManager.default.createDirectory(at: root.appendingPathComponent("summary-review.md"),
+                                                        withIntermediateDirectories: false)
+            }
+            if !reportFailure {
+                try await queue.waitForPendingStorage()
+                try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: journalParent.path)
+                queue.togglePause()
+            }
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: journalParent.path) }
+            do { try await queue.waitForPendingStorage(); XCTFail("The owned write must fail") }
+            catch { }
+            XCTAssertTrue(queue.hasWork)
+            XCTAssertFalse(queue.running)
+            XCTAssertEqual(queue.items.count, 1)
+            XCTAssertEqual(queue.items.filter { $0.failure != nil }.count, 0)
+            let failure = try XCTUnwrap(queue.currentFailure)
+            XCTAssertEqual(queue.status, failure)
+            XCTAssertFalse(queue.status.contains("1 项需要处理"))
+            if reportFailure { XCTAssertTrue(failure.hasPrefix("复查文件不可写，已暂停：")) }
+            else { XCTAssertTrue(failure.hasPrefix("复查进度保存失败，已暂停：")) }
+            let category = reportFailure ? "report" : "journal"
+            let overview = try await host(LearningReviewControls(model: model, showingQueueManager: .constant(false)),
+                                          width: 700, height: 480)
+            let manager = try await host(LearningReviewControls(model: model, showingQueueManager: .constant(true)),
+                                         width: 700, height: 480)
+            _ = try textNode(failure, in: overview.view)
+            _ = try textNode(failure, in: manager.view)
+            _ = try capture(overview.view, "uifix2-persistence-\(category)-overview")
+            _ = try capture(manager.view, "uifix2-persistence-\(category)-manager")
+        }
+    }
+
     func testA04NotesKeepDollarSignsInsideCode() async throws {
         let text = "jQuery 写 `$(document)` 和 `$(window)`。\n```sh\necho $HOME $PATH\n```\n速度 $v^2$"
         let controller = try await host(SummaryMarkdownView(text: text).padding(16).background(Color.white),
