@@ -6,19 +6,26 @@ import json
 import re
 import unicodedata
 import tarfile
+import bz2
+import gzip
+import lzma
+import struct
+from contextlib import ExitStack
 
 if __package__:
     from .privacy_package import (PrivacyError, JSON_LIMIT, decode_metadata_text,
                                   metadata_kind, parse_metadata, validate_metadata, known_binary,
                                   CONTENT_NAMES, CONTENT_SUFFIXES)
     from .reviewed_resources import scan_host_paths, public_example_spellings
-    from .privacy_literals import inspect_source_literals
+    from .privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals
+    from .privacy_text import scan_path_operands
 else:
     from privacy_package import (PrivacyError, JSON_LIMIT, decode_metadata_text,
                                  metadata_kind, parse_metadata, validate_metadata, known_binary,
                                  CONTENT_NAMES, CONTENT_SUFFIXES)
     from reviewed_resources import scan_host_paths, public_example_spellings
-    from privacy_literals import inspect_source_literals
+    from privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals
+    from privacy_text import scan_path_operands
 
 
 class PublicSourceTarInfo(tarfile.TarInfo):
@@ -52,6 +59,205 @@ class PublicSourceTarInfo(tarfile.TarInfo):
         if member.uname or member.gname or member.uid != 0 or member.gid != 0 or member.mtime != 0:
             raise PrivacyError("nonpublic-source-archive-header")
         return member
+
+
+def source_pax_records(data):
+    """Validate each raw record before tarfile can overwrite duplicate keys."""
+    result, offset = {}, 0
+    prefix = re.compile(rb"([1-9][0-9]*) ")
+    while offset < len(data):
+        match = prefix.match(data, offset)
+        if match is None or len(match[1]) > 10:
+            raise PrivacyError("invalid-source-pax-record")
+        length = int(match[1])
+        end = offset + length
+        if length <= match.end() - offset + 2 or end > len(data) or data[end - 1:end] != b"\n":
+            raise PrivacyError("invalid-source-pax-record")
+        raw_key, equals, raw_value = data[match.end():end - 1].partition(b"=")
+        if not raw_key or not equals or b"\0" in raw_key + raw_value:
+            raise PrivacyError("invalid-source-pax-record")
+        try:
+            key, value = raw_key.decode("utf-8"), raw_value.decode("utf-8")
+        except UnicodeError:
+            raise PrivacyError("invalid-source-pax-record") from None
+        if key in result:
+            raise PrivacyError("duplicate-source-pax-key")
+        scan_host_paths(raw_key + b"=" + raw_value, source_code=True)
+        validate_metadata({key: value})
+        if key.startswith("GNU.sparse."):
+            raise PrivacyError("unsupported-source-archive-member")
+        if key == "size" and not re.fullmatch(r"[0-9]{1,10}", value):
+            raise PrivacyError("invalid-source-pax-record")
+        result[key] = value
+        if len(result) > 100000:
+            raise PrivacyError("source-archive-expansion-limit")
+        offset = end
+    return result
+
+
+def inspect_source_envelope(path):
+    """Check the complete decompressed tar, including ignored extension bytes.
+
+    This second bounded stream never extracts or executes a member. tarfile's
+    semantic pass alone stops at the first zero block and discards padding.
+    """
+    with ExitStack() as stack:
+        raw = stack.enter_context(Path(path).open("rb"))
+        magic = raw.read(6)
+        raw.seek(0)
+        opener = (gzip.GzipFile if magic.startswith(b"\x1f\x8b") else
+                  bz2.BZ2File if magic.startswith(b"BZh") else
+                  lzma.LZMAFile if magic.startswith(b"\xfd7zXZ\0") else None)
+        stream = (stack.enter_context(gzip.GzipFile(fileobj=raw, mode="rb")) if opener is gzip.GzipFile
+                  else stack.enter_context(opener(raw, "rb")) if opener else raw)
+        expanded, headers = 0, 0
+        global_pax, local_pax = {}, {}
+        pending = False
+
+        def read(length):
+            nonlocal expanded
+            data = stream.read(length)
+            expanded += len(data)
+            if expanded > 1200 * 1024 * 1024:
+                raise PrivacyError("source-archive-expansion-limit")
+            if len(data) != length:
+                raise PrivacyError("invalid-source-archive")
+            return data
+
+        while True:
+            block = read(512)
+            if block == b"\0" * 512:
+                if pending or read(512) != b"\0" * 512:
+                    raise PrivacyError("invalid-source-archive")
+                while data := stream.read(65536):
+                    expanded += len(data)
+                    if expanded > 1200 * 1024 * 1024:
+                        raise PrivacyError("source-archive-expansion-limit")
+                    if any(data):
+                        raise PrivacyError("nonzero-source-archive-trailer")
+                return
+            member = PublicSourceTarInfo.frombuf(block, "utf-8", "surrogateescape")
+            headers += 1
+            if headers > 150000:
+                raise PrivacyError("source-archive-expansion-limit")
+            extension = member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
+                                       tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
+            if ((not extension and not (member.isfile() or member.isdir()))
+                    or member.sparse is not None):
+                raise PrivacyError("unsupported-source-archive-member")
+            size = member.size
+            if not extension:
+                effective = global_pax | local_pax
+                if "size" in effective:
+                    size = int(effective["size"])
+                local_pax, pending = {}, False
+                if member.isdir() and size:
+                    raise PrivacyError("unsupported-source-archive-member")
+            if size < 0 or size > JSON_LIMIT:
+                raise PrivacyError("unsupported-source-archive-member")
+            if extension:
+                data = read(size)
+                if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE):
+                    values = source_pax_records(data)
+                    target = global_pax if member.type == tarfile.XGLTYPE else local_pax
+                    if member.type != tarfile.XGLTYPE and target.keys() & values.keys():
+                        raise PrivacyError("duplicate-source-pax-key")
+                    target.update(values)
+                else:
+                    scan_host_paths(data, source_code=True)
+                    end = data.find(b"\0")
+                    if end < 0 or any(data[end + 1:]):
+                        raise PrivacyError("nonpublic-source-archive-header")
+                pending = True
+            else:
+                remaining = size
+                while remaining:
+                    amount = min(remaining, 65536)
+                    read(amount)
+                    remaining -= amount
+            if any(read(-size % 512)):
+                raise PrivacyError("nonzero-source-archive-padding")
+
+
+def inspect_source_macho(data, counts):
+    """Parse all native slices in memory; no filesystem loads or extraction."""
+    if __package__:
+        from .macho_paths import THIN, FAT, STRINGS, DYLIB, allowed_load_path, private_path
+    else:
+        from macho_paths import THIN, FAT, STRINGS, DYLIB, allowed_load_path, private_path
+    if data[:4] not in THIN and data[:4] not in FAT:
+        return False
+
+    def read(offset, length, start=0, span=None):
+        span = len(data) if span is None else span
+        if offset < start or length < 0 or offset + length > start + span:
+            raise PrivacyError("invalid-macho-load-commands")
+        return data[offset:offset + length]
+
+    slices = [(0, len(data))]
+    if data[:4] in FAT:
+        endian, wide = FAT[data[:4]]
+        count = struct.unpack(endian + "I", read(4, 4))[0]
+        if not 1 <= count <= 64:
+            raise PrivacyError("invalid-macho-load-commands")
+        width = 32 if wide else 20
+        table_end = 8 + count * width
+        slices = []
+        for index in range(count):
+            record = read(8 + index * width, width)
+            start, span = struct.unpack_from(endian + ("QQ" if wide else "II"), record, 8)
+            if (start < table_end or span < 28 or start + span > len(data)
+                    or any(start < other + length and other < start + span for other, length in slices)):
+                raise PrivacyError("invalid-macho-load-commands")
+            slices.append((start, span))
+    paths = 0
+    for start, span in slices:
+        magic = read(start, 4, start, span)
+        if magic not in THIN:
+            raise PrivacyError("invalid-macho-load-commands")
+        endian, header_size = THIN[magic]
+        header = read(start, header_size, start, span)
+        count, length = struct.unpack_from(endian + "II", header, 16)
+        if length > 16 * 1024 * 1024 or count > length // 8:
+            raise PrivacyError("invalid-macho-load-commands")
+        commands = read(start + header_size, length, start, span)
+        offset = 0
+        for _ in range(count):
+            if offset + 8 > length:
+                raise PrivacyError("invalid-macho-load-commands")
+            command, width = struct.unpack_from(endian + "II", commands, offset)
+            if width < 8 or width % (8 if header_size == 32 else 4) or offset + width > length:
+                raise PrivacyError("invalid-macho-load-commands")
+            payload = commands[offset + 8:offset + width]
+            if private_path(payload.decode("utf-8", errors="replace")):
+                raise PrivacyError("local-path-macho-load-command")
+            if command in STRINGS:
+                minimum = 24 if command in DYLIB else 32 if command == 0x80000035 else 12
+                field = 24 if command == 0x80000035 else 8
+                if width < minimum:
+                    raise PrivacyError("invalid-macho-load-commands")
+                string_offset = struct.unpack_from(endian + "I", commands, offset + field)[0]
+                if not minimum <= string_offset < width:
+                    raise PrivacyError("invalid-macho-load-commands")
+                raw_value = commands[offset + string_offset:offset + width]
+                end = raw_value.find(b"\0")
+                if end < 0:
+                    raise PrivacyError("invalid-macho-load-commands")
+                try:
+                    value = raw_value[:end].decode("utf-8")
+                except UnicodeError:
+                    raise PrivacyError("invalid-macho-load-commands") from None
+                if not value or any(not c.isprintable() for c in value):
+                    raise PrivacyError("invalid-macho-load-commands")
+                if not allowed_load_path(command, value):
+                    raise PrivacyError("nonportable-macho-load-command")
+                paths += 1
+            offset += width
+        if offset != length:
+            raise PrivacyError("invalid-macho-load-commands")
+    counts["macho_files"] = counts.get("macho_files", 0) + 1
+    counts["macho_load_paths"] = counts.get("macho_load_paths", 0) + paths
+    return True
 
 
 def source_member_approvals(item):
@@ -145,7 +351,15 @@ def source_json(data, name):
     except PrivacyError as error:
         if error.args[0] != "invalid-package-json":
             raise
-        if Path(name).suffix in (".c", ".cc", ".cpp", ".C", ".h", ".hpp", ".inc"):
+        # The shared parser wraps duplicate-key errors as invalid JSON. A
+        # complete JSON document must not enter the source-syntax fallback.
+        try:
+            json.loads(data)
+        except (ValueError, UnicodeError, RecursionError):
+            pass
+        else:
+            raise
+        if Path(name).suffix.lower() in C_SOURCE_SUFFIXES | {".inc"}:
             return None
         if Path(name).suffix != ".json":
             raise
@@ -319,7 +533,7 @@ def inspect_source_archive(path, item, counts):
                 validate_metadata(member.pax_headers)
                 if member.isdir():
                     continue
-                if not member.isfile() or member.size > JSON_LIMIT:
+                if not member.isfile() or not 0 <= member.size <= JSON_LIMIT:
                     raise PrivacyError("unsupported-source-archive-member")
                 if name.name.lower() in CONTENT_NAMES or name.name.lower().endswith(CONTENT_SUFFIXES):
                     raise PrivacyError("classroom-content-file")
@@ -334,16 +548,28 @@ def inspect_source_archive(path, item, counts):
                         raise PrivacyError("source-member-example-hash-mismatch")
                 if member.name in fixtures and hashlib.sha256(data).hexdigest() != fixtures[member.name]:
                     raise PrivacyError("opaque-source-fixture-hash-mismatch")
-                if known_binary(Path(member.name), data[:4096], len(data)):
+                text = source_text(data, member.name)
+                binary = known_binary(Path(member.name), data[:4096], len(data))
+                if allowed and (text is None or binary):
+                    reason = item["publicSourceHostPathExamples"][member.name].get("reason")
+                    if not isinstance(reason, str) or not reason.strip():
+                        raise PrivacyError("invalid-source-member-approval")
+                    validate_metadata(reason)
+                raw_view = data
+                for public in sorted(allowed, key=len, reverse=True):
+                    if public != "/":
+                        raw_view = raw_view.replace(public.encode("utf-8"), b"PUBLIC_UPSTREAM_EXAMPLE")
+                scan_host_paths(raw_view, source_code=True)
+                inspect_source_macho(data, counts)
+                if binary:
                     counts["opaque_binary_files"] += 1
                     counts["source_archive_members"] = counts.get("source_archive_members", 0) + 1
                     continue
-                text = source_text(data, member.name)
                 if text is not None:
                     plain = "".join(c for c in text if unicodedata.category(c) != "Cf")
                     def check(value):
                         value = "".join(c for c in value if unicodedata.category(c) != "Cf")
-                        scan_host_paths(source_public_view(value, allowed).encode("utf-8", errors="surrogatepass"), source_code=True)
+                        scan_path_operands(source_public_view(value, allowed))
                     check(plain)
                     inspect_source_literals(text, member.name, check)
                 kind = metadata_kind(data)
@@ -375,7 +601,8 @@ def inspect_source_archive(path, item, counts):
                         continue
                     raise PrivacyError("unreviewed-source-archive-binary")
                 counts["source_archive_members"] = counts.get("source_archive_members", 0) + 1
-    except (tarfile.TarError, OSError, EOFError):
+        inspect_source_envelope(path)
+    except (tarfile.TarError, OSError, EOFError, lzma.LZMAError, struct.error, RecursionError):
         raise PrivacyError("invalid-source-archive") from None
     if not seen:
         raise PrivacyError("empty-source-archive")

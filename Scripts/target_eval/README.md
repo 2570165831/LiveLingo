@@ -17,12 +17,13 @@ export LIVELINGO_TARGET_EVAL_OUTPUT_ROOT="<lab>/work/target-eval"
 
 `LIVELINGO_TARGET_EVAL_OUTPUT_ROOT` is the only source of the output root; an
 absent or empty variable rejects writing with an error naming the variable.
-Its value must be an existing absolute directory outside the repository, with
-no symlink or `..` components. Writers can create subdirectories only after
-validating the root and destination. Destinations outside that root, repository
-destinations, symlinks and existing output files are rejected. Moving or merging
-the checkout does not move the configured root; a checkout relocated to contain
-that root makes it invalid.
+Its value must be an existing absolute directory outside the repository or a
+dedicated subdirectory below the repository's ignored `work` directory. The
+checkout root, `work` root, source directories, symlinks and `..` components
+remain forbidden. Writers can create subdirectories only after validating the
+root and destination. Destinations outside the explicit grant and existing
+output files are rejected. Moving or merging the checkout does not change the
+configured root; the same source/work checks apply after relocation.
 
 Use the aggregate suite from the repository root:
 

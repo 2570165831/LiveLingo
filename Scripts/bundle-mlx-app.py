@@ -31,6 +31,10 @@ import shutil
 import subprocess
 from model_files import REQUIRED_MODEL_FILES, ModelFilesError, check_app_models, check_model_files
 from privacy_package import PrivacyError, copy_distribution_tree, distribution_manifest, inspect_tree
+try:
+    from binary_provenance import record_input_provenance, verify_input_provenance, finalize_app_provenance
+except ImportError:
+    from Scripts.binary_provenance import record_input_provenance, verify_input_provenance, finalize_app_provenance
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -275,6 +279,8 @@ def main():
     if not (args.runtime / "runtime-manifest.json").is_file():
         fail("--runtime is missing runtime-manifest.json: %s" % args.runtime)
     validate_asr_python(args.asr_python)
+    # Bind the real input before any candidate-only native edits. Keep this
+    # receipt in memory so copying the pending reference later cannot replace it.
     if not args.asr_service.is_file() or args.asr_service.is_symlink():
         fail("--asr-service is missing or is a symlink: %s" % args.asr_service)
     language_sources = [(relative, resolve_model_source(args.models, relative), notice)
@@ -297,6 +303,7 @@ def main():
     if (args.app / "Contents/Resources/ASRRuntime").exists():
         fail("source app already embeds ASRRuntime; use a fresh Release build")
 
+    input_provenance = record_input_provenance(args.asr_python)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     clone_tree(args.app, args.output)
     resources = args.output / "Contents/Resources"
@@ -393,6 +400,8 @@ def main():
     scan_forbidden(args.output, "assembled candidate")
     check_symlinks(args.output)
     try:
+        verify_input_provenance(args.asr_python, input_provenance)
+        finalize_app_provenance(args.output, input_provenance)
         inspect_tree(args.output)
     except (PrivacyError, OSError):
         fail("assembled candidate rejected by distribution privacy gate")

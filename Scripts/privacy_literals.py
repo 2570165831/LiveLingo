@@ -8,6 +8,7 @@ import ast
 import io
 from pathlib import PurePosixPath
 import re
+import shlex
 import tokenize
 import unicodedata
 import warnings
@@ -16,6 +17,66 @@ if __package__:
     from .privacy_package import PrivacyError
 else:
     from privacy_package import PrivacyError
+
+
+C_SOURCE_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".m", ".mm"})
+PYTHON_SOURCE_SUFFIXES = frozenset({".py", ".pyi"})
+SHELL_SOURCE_SUFFIXES = frozenset({".sh", ".bash", ".zsh"})
+SOURCE_SUFFIXES = (C_SOURCE_SUFFIXES | PYTHON_SOURCE_SUFFIXES | SHELL_SOURCE_SUFFIXES
+                   | {".rs", ".js", ".mjs", ".cjs", ".go", ".patch", ".diff", ".html", ".htm"})
+
+
+def source_suffix(name):
+    path = PurePosixPath(name)
+    suffix = path.suffix.lower()
+    return PurePosixPath(path.stem).suffix.lower() if suffix == ".in" else suffix
+
+
+def _shebang_suffix(text):
+    """Recognize a bounded interpreter declaration; never run env or a shell.
+
+    Only standard interpreter locations, env's optional -S, and flags without
+    operands are recognized. Assignments, wrappers, -c/code, substitutions and
+    arbitrary executable paths cannot select a source decoder.
+    """
+    line = text.partition("\n")[0].rstrip("\r")
+    if not line.startswith("#!") or len(line) > 512 or not line.isascii():
+        return ""
+    try:
+        words = shlex.split(line[2:], comments=False, posix=True)
+    except ValueError:
+        return ""
+    if not words:
+        return ""
+    interpreter, flags = words[0], words[1:]
+    if interpreter == "/usr/bin/env":
+        if flags[:1] == ["-S"]:
+            flags = flags[1:]
+        if not flags:
+            return ""
+        interpreter, flags = flags[0], flags[1:]
+        if "/" in interpreter:
+            return ""
+    elif PurePosixPath(interpreter).parent.as_posix() not in ("/bin", "/usr/bin"):
+        return ""
+    interpreter = PurePosixPath(interpreter).name
+    if re.fullmatch(r"python(?:[23](?:\.[0-9]+)*)?", interpreter):
+        if all(re.fullmatch(r"-[BEIOsSux]+", flag) for flag in flags):
+            return ".py"
+    elif interpreter in ("sh", "bash", "zsh", "dash", "ksh"):
+        if all(re.fullmatch(r"-[aefnuvx]+", flag) or flag in ("--noprofile", "--norc") for flag in flags):
+            return ".sh"
+    return ""
+
+
+def source_format(text, name):
+    """Use a known suffix first, then a finite shebang or upstream shell name."""
+    suffix = source_suffix(name)
+    if suffix in SOURCE_SUFFIXES:
+        return suffix
+    if PurePosixPath(name).name in ("configure", "test-driver"):
+        return ".sh"
+    return _shebang_suffix(text)
 
 
 def _scan(value, scan):
@@ -305,6 +366,91 @@ def _javascript_literals(text):
         offset += 1
 
 
+def _shell_literals(text):
+    """Lex constant shell word pieces, without expanding variables or commands.
+
+    ANSI-C escapes apply only outside ordinary quotes. Constant adjacent pieces
+    share a word; expansions break that group so names/calls are never resolved.
+    """
+    offset, pieces, boundary = 0, [], True
+    delimiters = " \t\r\n;|&()<>="
+    while offset < len(text):
+        char = text[offset]
+        if char in delimiters or char == "#" and boundary:
+            if pieces:
+                yield "".join(pieces)
+                pieces = []
+            if char == "#":
+                end = text.find("\n", offset)
+                offset = len(text) if end < 0 else end + 1
+            else:
+                offset += 1
+            boundary = char != "="
+            continue
+        boundary = False
+        if text.startswith("$'", offset):
+            start, end = offset + 2, offset + 2
+            while end < len(text) and text[end] != "'":
+                end += 2 if text[end] == "\\" else 1
+            value = _decode_escapes(text[start:end], "shell")
+            yield value
+            pieces.append(value)
+            offset = min(end + 1, len(text))
+            continue
+        if char == "'":
+            end = text.find("'", offset + 1)
+            end = len(text) if end < 0 else end
+            value = text[offset + 1:end]
+            yield value
+            pieces.append(value)
+            offset = min(end + 1, len(text))
+            continue
+        if char == '"':
+            offset += 1
+            value = []
+            while offset < len(text) and text[offset] != '"':
+                char = text[offset]
+                if char == "\\" and offset + 1 < len(text) and text[offset + 1] in '$`"\\\n':
+                    if text[offset + 1] != "\n":
+                        value.append(text[offset + 1])
+                    offset += 2
+                elif char == "`" or char == "$" and offset + 1 < len(text) and (text[offset + 1].isalnum() or text[offset + 1] in "_{("):
+                    if value:
+                        fragment = "".join(value)
+                        yield fragment
+                        pieces.append(fragment)
+                    if pieces:
+                        yield "".join(pieces)
+                    pieces, value = [], []
+                    # The expansion is an opaque separator, not a literal.
+                    match = re.match(r"\$(?:[A-Za-z_][A-Za-z_0-9]*|\{[^}]*\})", text[offset:])
+                    offset += len(match[0]) if match else 1
+                else:
+                    value.append(char)
+                    offset += 1
+            fragment = "".join(value)
+            yield fragment
+            pieces.append(fragment)
+            offset = min(offset + 1, len(text))
+            continue
+        if char == "$" or char == "`":
+            if pieces:
+                yield "".join(pieces)
+            pieces = []
+            match = re.match(r"\$(?:[A-Za-z_][A-Za-z_0-9]*|\{[^}]*\})", text[offset:])
+            offset += len(match[0]) if match else 1
+            continue
+        if char == "\\" and offset + 1 < len(text):
+            if text[offset + 1] != "\n":
+                pieces.append(text[offset + 1])
+            offset += 2
+        else:
+            pieces.append(char)
+            offset += 1
+    if pieces:
+        yield "".join(pieces)
+
+
 def _patch_literals(text, scan):
     """Inspect both sides of unified source hunks; never apply a patch."""
     target, before, after = None, [], []
@@ -347,15 +493,12 @@ def _patch_literals(text, scan):
 def inspect_source_literals(data, name, scan=None):
     """Apply bounded, format-specific decoding to an identified source member."""
     text, scan = _text(data), scan or _default_scan
-    path = PurePosixPath(name)
-    suffix = path.suffix.lower()
-    if suffix == ".in":
-        suffix = PurePosixPath(path.stem).suffix.lower()
-    if suffix in (".py", ".pyi"):
+    suffix = source_format(text, name)
+    if suffix in PYTHON_SOURCE_SUFFIXES:
         inspect_python_literals(text, scan)
     elif suffix in (".patch", ".diff"):
         _patch_literals(text, scan)
-    elif suffix in (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".m", ".mm", ".rs", ".js", ".mjs", ".cjs", ".go"):
+    elif suffix in C_SOURCE_SUFFIXES | {".rs", ".js", ".mjs", ".cjs", ".go"}:
         style = "rust" if suffix == ".rs" else "go" if suffix == ".go" else "javascript" if suffix in (".js", ".mjs", ".cjs") else "c"
         if style == "c":
             text = re.sub(r"\\\r?\n", "", text)
@@ -371,11 +514,9 @@ def inspect_source_literals(data, name, scan=None):
             if adjacent != value:
                 _scan(adjacent, scan)
             previous_end = end
-    elif suffix in (".sh", ".bash", ".zsh") or path.name in ("configure", "test-driver"):
-        # Ordinary shell quotes preserve backslashes; only ANSI-C quoting
-        # interprets octal/Unicode escapes. Never evaluate substitutions.
-        for match in re.finditer(r"\$'((?:\\.|[^'\\])*)'", text, flags=re.S):
-            _scan(_decode_escapes(match[1], "shell"), scan)
+    elif suffix in SHELL_SOURCE_SUFFIXES:
+        for value in _shell_literals(text):
+            _scan(value, scan)
     elif suffix in (".html", ".htm"):
         from html.parser import HTMLParser
         class SourceHTML(HTMLParser):

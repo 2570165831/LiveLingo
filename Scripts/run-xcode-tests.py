@@ -247,8 +247,15 @@ def main():
     OUT = args.output_root.resolve()
     if DD in (Path('/'), Path.home(), REPO) or OUT in (Path('/'), Path.home(), REPO):
         parser.error('choose dedicated work directories')
-    if DD.is_relative_to(REPO) or OUT.is_relative_to(REPO):
-        parser.error('build products and evidence must be outside the repository')
+    # A task may explicitly confine its products to the ignored work tree.
+    # Source directories remain protected, and symlink ancestors cannot redirect
+    # an allowed work path to another task or to production data.
+    for path in (args.derived_data, args.output_root):
+        if any(parent.is_symlink() for parent in (path, *path.parents)):
+            parser.error('work paths must not contain symbolic links')
+    for path in (DD, OUT):
+        if path.is_relative_to(REPO) and not path.is_relative_to(REPO / 'work'):
+            parser.error('in-repository products must stay under work')
     for path in (DD, DD / 'tmp', OUT):
         path.mkdir(parents=True, exist_ok=True)
     lock_file = (DD / '.test-run.lock').open('a')

@@ -6,17 +6,21 @@ The ordinary metadata and entry policies still apply to everything else.
 """
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path, PurePosixPath
 import re
 
 if __package__:
+    from .private_files import open_directory
     from .privacy_package import (PrivacyError, read_json, validate_metadata,
                                   decode_metadata_text, parse_metadata, metadata_kind,
-                                  decode_license_text)
+                                  decode_license_text, JSON_LIMIT)
 else:
+    from private_files import open_directory
     from privacy_package import (PrivacyError, read_json, validate_metadata,
                                  decode_metadata_text, parse_metadata, metadata_kind,
-                                 decode_license_text)
+                                 decode_license_text, JSON_LIMIT)
 
 
 MANIFEST = Path(__file__).resolve().parent.parent / "Packaging/PrivacyResources.json"
@@ -25,9 +29,26 @@ RESOURCE_ROOT = "Contents/Resources/"
 
 def entries():
     # Do not cache: an audit/packaging edit must immediately invalidate approval.
-    if MANIFEST.is_symlink() or not MANIFEST.is_file() or any(p.is_symlink() for p in MANIFEST.parents):
-        raise PrivacyError("invalid-reviewed-resource-manifest")
-    value = read_json(MANIFEST)
+    # Hold a symlink-free directory handle instead of probing ancestors above
+    # the caller's grant. Darwin checks every component in the kernel.
+    try:
+        with open_directory(MANIFEST.parent) as parent:
+            descriptor = os.open(MANIFEST.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 dir_fd=parent.fd)
+            with os.fdopen(descriptor, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode) or before.st_size > JSON_LIMIT:
+                    raise PrivacyError("invalid-reviewed-resource-manifest")
+                data = stream.read(JSON_LIMIT + 1)
+                after = os.fstat(stream.fileno())
+                if (len(data) > JSON_LIMIT or len(data) != before.st_size
+                        or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                        != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+                    raise PrivacyError("invalid-reviewed-resource-manifest")
+            parent.require_bound()
+        value = parse_metadata(data, "json")
+    except OSError:
+        raise PrivacyError("invalid-reviewed-resource-manifest") from None
     if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("resources"), list):
         raise PrivacyError("invalid-reviewed-resource-manifest")
     validate_metadata(value)
@@ -162,10 +183,14 @@ def inspect(path, relative, approvals, counts):
         if text is None:
             raise PrivacyError("invalid-reviewed-build-text")
         allowed = public_example_spellings(item["publicHostPathExamples"]) if "publicHostPathExamples" in item else []
+        if __package__:
+            from .privacy_text import scan_path_operands
+        else:
+            from privacy_text import scan_path_operands
         def scan(value):
             for public in allowed:
                 value = value.replace(public, "PUBLIC_UPSTREAM_EXAMPLE")
-            scan_host_paths(value.encode("utf-8", errors="surrogatepass"), source_code=True)
+            scan_path_operands(value)
         scan(text)
         inspect_source_literals(text, path.name, scan)
         counts["path_scanned_text_files"] = counts.get("path_scanned_text_files", 0) + 1
@@ -194,6 +219,24 @@ def inspect(path, relative, approvals, counts):
         else:
             from source_archive import inspect_source_archive
         inspect_source_archive(path, item, counts)
+    elif item["format"] == "macho-public-build-strings":
+        if __package__:
+            from .macho_paths import inspect_macho_paths
+        else:
+            from macho_paths import inspect_macho_paths
+        examples = item.get("publicBuildPathsHex")
+        if not isinstance(examples, list) or not examples:
+            raise PrivacyError("invalid-macho-build-path-approval")
+        allowed = []
+        for value in examples:
+            if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9a-f]{2}){1,16384}", value):
+                raise PrivacyError("invalid-macho-build-path-approval")
+            allowed.append(bytes.fromhex(value))
+        if not inspect_macho_paths(path, counts, allowed=allowed):
+            raise PrivacyError("reviewed-resource-format-mismatch")
+        with path.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != item["sha256"]:
+                raise PrivacyError("reviewed-resource-hash-mismatch")
     elif item["format"] == "notice-text":
         inspect_notice_text(path, data)
         counts["metadata_files"] += 1

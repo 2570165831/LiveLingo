@@ -257,8 +257,10 @@ def recompute(un_root: Path) -> dict:
 def write_report(report: dict, output: Path, output_root: Path) -> None:
     root, destination = absolute_path(output_root), absolute_path(output)
     repository = absolute_path(__file__).parents[2]
-    if root.is_relative_to(repository) or destination.parent != root:
-        raise ValueError("report must be directly inside its existing external output root")
+    work = repository / "work"
+    source_output = root.is_relative_to(repository) and (root == work or not root.is_relative_to(work))
+    if source_output or destination.parent != root:
+        raise ValueError("report must be directly inside an existing output grant outside source")
     try:
         validate_file_path(destination)
         directory = open_directory(root)

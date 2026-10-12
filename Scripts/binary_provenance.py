@@ -56,13 +56,19 @@ def _reference(document):
         raise PrivacyError("invalid-binary-provenance-reference")
     # Reconstruct the public fields rather than carrying forward old localSHA256
     # or exactMatch claims, arbitrary local paths, or stale final-stage fields.
-    return {"schemaVersion": 2, "component": "libsndfile-arm64", "source": document["source"],
+    result = {"schemaVersion": 2, "component": "libsndfile-arm64", "source": document["source"],
             "upstreamSHA256": document["upstreamSHA256"], "comparisonSemantics": COMPARISON,
             "inputStage": INPUT_STAGE, "inputPathBase": "asr-python-root", "inputPath": INPUT_PATH,
             "inputSHA256": None, "inputExactMatch": None, "finalStage": "pending-assembly",
             "finalPathBase": "app-root", "finalBundledPath": BUNDLED_PATH,
             "finalBundledSHA256": None, "exactMatch": None, "finalMatchesInput": None,
             "status": "awaiting-input-and-final-binding"}
+    comparison = document.get("publisherComparison")
+    if isinstance(comparison, dict) and comparison.get("publisherSHA256") == document["upstreamSHA256"]:
+        if not _digest(comparison.get("reviewedInputSHA256")):
+            raise PrivacyError("invalid-publisher-comparison")
+        result["publisherComparison"] = copy.deepcopy(comparison)
+    return result
 
 
 def _regular_under(root, relative):
@@ -105,6 +111,11 @@ def _input_document(document):
         raise PrivacyError("invalid-input-binary-provenance")
     reference["inputSHA256"] = document["inputSHA256"]
     reference["inputExactMatch"] = document["inputExactMatch"]
+    if "publisherComparison" in reference:
+        applicable = reference["publisherComparison"]["reviewedInputSHA256"] == document["inputSHA256"]
+        if document.get("publisherComparisonApplicableToInput") is not applicable:
+            raise PrivacyError("invalid-publisher-comparison-binding")
+        reference["publisherComparisonApplicableToInput"] = applicable
     reference["status"] = "input-bound-awaiting-final-binding"
     return reference
 
@@ -115,6 +126,8 @@ def record_input_provenance(input_python, reference=REFERENCE):
     digest = _hash_binary(_regular_under(input_python, INPUT_PATH))
     document["inputSHA256"] = digest
     document["inputExactMatch"] = digest == document["upstreamSHA256"]
+    if "publisherComparison" in document:
+        document["publisherComparisonApplicableToInput"] = digest == document["publisherComparison"]["reviewedInputSHA256"]
     document["status"] = "input-bound-awaiting-final-binding"
     return document
 
@@ -136,6 +149,8 @@ def bind_final_provenance(app_root, input_receipt, *, final_stage="assembled-can
     document.update(finalStage=final_stage, finalBundledSHA256=digest,
                     exactMatch=digest == document["upstreamSHA256"],
                     finalMatchesInput=digest == document["inputSHA256"], status="final-bound")
+    if "publisherComparison" in document:
+        document["publisherComparisonApplicableToFinal"] = digest == document["publisherComparison"]["reviewedInputSHA256"]
     return document
 
 
@@ -166,4 +181,8 @@ def verify_app_provenance(app_root):
     if (document.get("exactMatch") is not (digest == document["upstreamSHA256"])
             or document.get("finalMatchesInput") is not (digest == document["inputSHA256"])):
         raise PrivacyError("invalid-final-binary-provenance-comparison")
+    if "publisherComparison" in document:
+        applicable = digest == document["publisherComparison"]["reviewedInputSHA256"]
+        if document.get("publisherComparisonApplicableToFinal") is not applicable:
+            raise PrivacyError("invalid-publisher-comparison-binding")
     return document

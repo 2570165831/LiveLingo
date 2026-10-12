@@ -230,6 +230,35 @@ class ReviewedResourceTests(unittest.TestCase):
         with self.assertRaises(privacy.PrivacyError):
             self.check()
 
+    def test_manifest_rejects_leaf_and_ancestor_symlinks(self):
+        leaf = self.root / "linked.json"
+        leaf.symlink_to(self.manifest.name)
+        parent = self.root / "linked-directory"
+        parent.symlink_to(self.root, target_is_directory=True)
+        for target in (leaf, parent / self.manifest.name):
+            with self.subTest(target=target), patch.object(reviewed, "MANIFEST", target), \
+                    self.assertRaisesRegex(privacy.PrivacyError, "invalid-reviewed-resource-manifest"):
+                reviewed.entries()
+
+    def test_public_native_strings_require_exact_file_hash_and_exact_spelling(self):
+        from Scripts.test_macho_paths import image
+        relative = BASE + "fixture.dylib"
+        public = b"/home/public-ci/build/src.c"
+        data = image() + public + b"\0"
+        path = self.approve(relative, data, "macho-public-build-strings")
+        self.resources[-1]["publicBuildPathsHex"] = [public.hex()]
+        self.manifest.write_text(json.dumps({"version": 1, "resources": self.resources}))
+        self.assertEqual(self.check()["reviewed_resource_files"], 1)
+        path.write_bytes(data + b"changed")
+        with self.assertRaisesRegex(privacy.PrivacyError, "reviewed-resource-hash-mismatch"):
+            self.check()
+        changed = image() + public + b"/private\0"
+        path.write_bytes(changed)
+        self.resources[-1]["sha256"] = hashlib.sha256(changed).hexdigest()
+        self.manifest.write_text(json.dumps({"version": 1, "resources": self.resources}))
+        with self.assertRaises(privacy.PrivacyError):
+            self.check()
+
     def test_source_preparation_keeps_legal_bytes_and_library_source(self):
         data = self.tar({"fixture-1.0/src/lib.c": b'int value = 1;\n', "fixture-1.0/tests/data.bin": b'\x00',
                          "fixture-1.0/LICENSE": b'Copyright fixture. Permission granted.\n'})

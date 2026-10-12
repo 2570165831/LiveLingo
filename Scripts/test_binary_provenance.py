@@ -5,14 +5,19 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from Scripts import binary_provenance as provenance
+from Scripts import reviewed_resources
 from Scripts.privacy_package import PrivacyError, inspect_tree
 from Scripts.test_macho_paths import image
 
 
 class BinaryProvenanceTests(unittest.TestCase):
     def setUp(self):
+        approval = patch.object(reviewed_resources, "entries", return_value={})
+        approval.start()
+        self.addCleanup(approval.stop)
         self.temporary = tempfile.TemporaryDirectory(prefix="binary-provenance-")
         self.root = Path(self.temporary.name)
         self.python = self.root / "input-python"
@@ -56,8 +61,10 @@ class BinaryProvenanceTests(unittest.TestCase):
         self.assertEqual(self.input.read_bytes(), before_input)
         self.assertEqual(self.final.read_bytes(), before_final)
 
-    def test_real_tree_gate_counts_pending_then_rechecks_final_hash(self):
-        self.assertEqual(inspect_tree(self.app)["pending_binary_provenance"], 1)
+    def test_real_tree_gate_requires_final_binding_and_rechecks_final_hash(self):
+        self.assertEqual(inspect_tree(self.app, phase="prepare")["pending_binary_provenance"], 1)
+        with self.assertRaises(PrivacyError):
+            inspect_tree(self.app)
         provenance.finalize_app_provenance(self.app, self.record())
         self.assertEqual(inspect_tree(self.app)["bound_binary_provenance"], 1)
         self.final.write_bytes(image(value="@rpath/changed.dylib"))

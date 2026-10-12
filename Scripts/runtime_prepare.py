@@ -298,12 +298,19 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
             else:
                 from macho_paths import make_portable
             native_changes = make_portable(target, python)
-            if action != "copied" or native_changes:
+            if __package__:
+                from .native_build_paths import sanitize_build_paths
+            else:
+                from native_build_paths import sanitize_build_paths
+            build_paths = sanitize_build_paths(target, python)
+            if action != "copied" or native_changes or build_paths:
                 modifications.append({"file": str(relative), "contributor": "Li",
                                       "date": "2026-10-11", "action": action,
                                       "loadCommands": native_changes,
                                       "originalSHA256": hashlib.sha256(path.read_bytes()).hexdigest(),
                                       "preparedSHA256": hashlib.sha256(target.read_bytes()).hexdigest()})
+                if build_paths:
+                    modifications[-1]["buildPathChanges"] = build_paths
                 if action == "runtime-configuration-relocated":
                     modifications[-1]["reason"] = "Installed directories derive from the copied module location; build-machine paths and profile data are omitted from generated configuration. Other generated fields and executable code remain intact."
                     if __package__:

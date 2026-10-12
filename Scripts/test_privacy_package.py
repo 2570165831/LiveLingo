@@ -212,7 +212,10 @@ class PrivacyPackageTests(unittest.TestCase):
             self.write(name, text)
         (self.source / "bin/python3").symlink_to("python3.13")
         self.write("lib/python3.13/site-packages/scipy/io/tests/data/test.wav", "synthetic self-test fixture")
-        privacy.copy_distribution_tree(self.source, self.output)
+        # These deliberately synthetic native bytes do not carry the release
+        # index's hash-bound approval for the real CPython library at this path.
+        with patch.object(reviewed_resources, "entries", return_value={}):
+            privacy.copy_distribution_tree(self.source, self.output)
         for name in required:
             self.assertEqual((self.output / name).read_bytes(), (self.source / name).read_bytes())
         self.assertEqual(os.readlink(self.output / "bin/python3"), "python3.13")
@@ -442,6 +445,10 @@ class PrivacyPackageTests(unittest.TestCase):
             self.write("Packaging/ModelNotices/" + name, '[{"url":"https://example.invalid/LICENSE"}]', repo)
         self.write("Packaging/ASRRuntime.lock.json", "{}", repo)
         self.write("Packaging/MLXLicenses/AUDIT.json", '{"status":"fixture"}', repo)
+        from Scripts.binary_provenance import INPUT_PATH, REFERENCE
+        from Scripts.test_macho_paths import image
+        self.write("Packaging/MLXLicenses/ASR-audio/soundfile-binary-provenance.json",
+                   REFERENCE.read_bytes(), repo)
         app = self.root / "LiveLingo.app"
         info = app / "Contents/Info.plist"
         info.parent.mkdir(parents=True)
@@ -459,6 +466,7 @@ class PrivacyPackageTests(unittest.TestCase):
         asr = self.root / "asr-python"
         self.write("bin/python3", "synthetic interpreter", asr)
         (asr / "lib/python3.13").mkdir(parents=True)
+        self.write(INPUT_PATH, image(), asr)
         output = self.root / "candidate/LiveLingo.app"
         args = ["bundle-mlx-app.py", "--app", str(app), "--runtime", str(runtime), "--models", str(models),
                 "--asr-models", str(models), "--asr-python", str(asr), "--output", str(output),

@@ -61,7 +61,8 @@ PLIST_SUFFIXES = frozenset({".plist", ".stringsdict", ".entitlements", ".xcent"}
 UNSUPPORTED_METADATA_SUFFIXES = frozenset({".xml", ".yaml", ".yml", ".toml"})
 STRUCTURED_SUFFIXES = PLIST_SUFFIXES | UNSUPPORTED_METADATA_SUFFIXES | {".json", ".safetensors", ".strings", ".pth", ".pem"}
 TEXT_SUFFIXES = frozenset({".py", ".pyi", ".sh", ".bash", ".zsh", ".md", ".rst", ".txt",
-                           ".c", ".h", ".cpp", ".hpp", ".tcl"})
+                           ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+                           ".m", ".mm", ".tcl"})
 TEXT_NAMES = frozenset({"license", "licence", "copying", "notice", "copyright", "readme",
                         "authors", "changes", "changelog", "install", "thanks"})
 LICENSE_NAME = re.compile(r"(?:license[s]?|licence[s]?|copying[0-9]?|notice[s]?|copyright)"
@@ -535,10 +536,10 @@ def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, appr
         if not kind:
             if known_binary(path, prefix, size):
                 if __package__:
-                    from .macho_paths import inspect_load_paths
+                    from .macho_paths import inspect_macho_paths
                 else:
-                    from macho_paths import inspect_load_paths
-                inspect_load_paths(path, counts)
+                    from macho_paths import inspect_macho_paths
+                inspect_macho_paths(path, counts)
                 counts["opaque_binary_files"] += 1
                 return
             if size > JSON_LIMIT:
@@ -580,7 +581,9 @@ def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, appr
     counts["metadata_files"] += 1
 
 
-def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
+def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree", phase="final"):
+    if phase not in ("prepare", "final"):
+        raise PrivacyError("invalid-package-inspection-phase")
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise PrivacyError("package-root-not-real-directory")
@@ -645,12 +648,20 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                 raise PrivacyError("special-package-entry")
 
     walk(root)
-    # The unchanged assembler first copies a reference with explicitly pending
-    # stages. Once the caller binds it to the final dylib, later privacy checks
-    # also reject stale hashes. Pending stages are counted, never presented as
-    # evidence that a candidate matches a publisher binary.
+    # Preparation may carry a pending reference. A final app with an ASR runtime
+    # must bind its actual shipped audio library, even if its notice was removed
+    # or reverted to an old schema. Non-app input trees have no final App stage.
     app = root if (root / "Contents").is_dir() else root / "LiveLingo.app"
     provenance = app / "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/soundfile-binary-provenance.json"
+    if phase == "final" and ((app / "Contents/Resources/ASRRuntime").exists()
+                             or provenance.exists() or provenance.is_symlink()):
+        if __package__:
+            from .binary_provenance import verify_app_provenance
+        else:
+            from binary_provenance import verify_app_provenance
+        verify_app_provenance(app)
+        counts["bound_binary_provenance"] = 1
+        return counts
     if provenance.is_file() and not provenance.is_symlink():
         value = read_json(provenance)
         if value.get("schemaVersion") == 2:
@@ -693,7 +704,7 @@ def copy_distribution_tree(source, destination, *, clone_files=False):
         return str(dst)
 
     with open_directory(source) as source_bound:
-        counts = inspect_tree(source, omit_private=True, public_copy=True)
+        counts = inspect_tree(source, omit_private=True, public_copy=True, phase="prepare")
         source_bound.require_bound()
         # Rebind after validation, then reserve only beneath a held parent.
         # A replaced/symlinked output parent must not redirect the copy.
@@ -706,7 +717,7 @@ def copy_distribution_tree(source, destination, *, clone_files=False):
                                 ignore=lambda directory, names: [name for name in names if excluded(name)])
                 reserved.require_bound()
                 source_bound.require_bound()
-    inspect_tree(destination)
+    inspect_tree(destination, phase="prepare")
     return counts
 
 

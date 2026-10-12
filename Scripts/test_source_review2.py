@@ -8,6 +8,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -22,7 +23,8 @@ from Scripts import prepare_source_archive as prepare
 from Scripts import reviewed_resources as reviewed
 
 
-TASK = Path(__file__).resolve().parent.parent / "work/relpipe"
+TASK = Path(os.environ.get("LIVELINGO_RELPIPE_TEST_OUTPUT",
+                          Path(__file__).resolve().parent.parent / "work/relpipe"))
 HOST = "/" + "Users/synthetic/build"
 RESOURCE = "Contents/Resources/LanguageRuntime/Licenses/fixture/source.tar.gz"
 
@@ -287,11 +289,14 @@ class SourceReview2Tests(unittest.TestCase):
             self.approve(self.archive(name, text.encode()))
             self.assertEqual(self.check()["reviewed_resource_files"], 1)
 
-    def test_known_binary_source_member_is_opaque_and_not_scanned_as_literals(self):
+    def test_known_binary_source_member_retains_raw_path_checks(self):
         for name, signature in (("doc/example.png", b"\x89PNG\r\n\x1a\n\0"),
                                 ("doc/example.jpg", b"\xff\xd8\xff")):
             payload = signature + HOST.encode() + b' BUILD="\\u002f"'
             self.approve(self.archive(name, payload))
+            with self.assertRaisesRegex(privacy.PrivacyError, "local-path-metadata"):
+                self.check()
+            self.approve(self.archive(name, signature + b' public BUILD="\\u002f"'))
             self.assertEqual(self.check()["opaque_binary_files"], 1)
 
     def test_c_line_splicing_cannot_hide_an_adjacent_literal_path(self):
@@ -343,7 +348,7 @@ const publicString = "safe";
     def test_renamed_unidentified_binary_remains_rejected(self):
         payload = b"\0\x01\x02" + HOST.encode()
         self.approve(self.archive("build.py", payload))
-        with self.assertRaisesRegex(privacy.PrivacyError, "unreviewed-source-archive-binary"):
+        with self.assertRaisesRegex(privacy.PrivacyError, "local-path-metadata|unreviewed-source-archive-binary"):
             self.check()
 
     def test_python_source_is_parsed_without_running_calls(self):

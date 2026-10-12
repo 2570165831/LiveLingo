@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import re
@@ -18,6 +19,9 @@ from Scripts import source_build_check as build
 from Scripts.privacy_package import PrivacyError
 
 
+TASK = Path(os.environ.get("LIVELINGO_RELPIPE_TEST_OUTPUT", build.REPO / "work/relpipe"))
+
+
 class SourceBuildPolicyTests(unittest.TestCase):
     def test_complete_darwin_gcc_inputs_are_hash_bound(self):
         directory = build.REPO / "Packaging/MLXLicenses/GCC-runtime-13.4.0"
@@ -26,7 +30,7 @@ class SourceBuildPolicyTests(unittest.TestCase):
         self.assertNotIn("gcc-13.4.0.tar.xz", inputs)
 
     def test_gcc_input_tampering_is_rejected(self):
-        directory = build.REPO / "work/relpipe/gcc-review2" / ("input-fixture-" + str(time.time_ns()))
+        directory = TASK / "gcc-review2" / ("input-fixture-" + str(time.time_ns()))
         directory.mkdir(parents=True)
         inputs = {}
         for name in (build.GCC_FULL, build.GCC_PATCH, build.GCC_MAPPING):
@@ -36,10 +40,10 @@ class SourceBuildPolicyTests(unittest.TestCase):
         (directory / build.GCC_PATCH).write_bytes(b"changed input\n")
         with self.assertRaisesRegex(PrivacyError, "gcc-darwin-source-hash-mismatch"):
             build.gcc_source_inputs(directory)
-        directory.rename(build.REPO / "work/relpipe/superseded" / directory.name)
+        directory.rename(TASK / "superseded" / directory.name)
 
     def test_native_gcc_does_not_pass_when_only_compiler_configuration_succeeds(self):
-        root = build.REPO / "work/relpipe/gcc-review2" / ("native-fixture-" + str(time.time_ns()))
+        root = TASK / "gcc-review2" / ("native-fixture-" + str(time.time_ns()))
         root.mkdir(parents=True)
         source = root / "gcc-13.4.0"
         source.mkdir()
@@ -67,10 +71,10 @@ class SourceBuildPolicyTests(unittest.TestCase):
         for option in ("--build=", "--host=", "--target="):
             self.assertIn(option + "aarch64-apple-darwin27", configure)
         self.assertFalse(any("x86_64" in str(c) for c in commands))
-        root.rename(build.REPO / "work/relpipe/superseded" / root.name)
+        root.rename(TASK / "superseded" / root.name)
 
     def test_gcc_timeout_kills_descendants_after_make_parent_exits(self):
-        root = build.REPO / "work/relpipe/gcc-review2"
+        root = TASK / "gcc-review2"
         process = type("Process", (), {"pid": 12345})()
         process.wait = unittest.mock.Mock(side_effect=[subprocess.TimeoutExpired("make", 1), -15])
         with patch.object(build.subprocess, "Popen", return_value=process), patch.object(build.os, "killpg") as kill:
@@ -102,7 +106,7 @@ class SourceBuildPolicyTests(unittest.TestCase):
                         source.inspect_source_archive(Path("fixture"), {"package": "fixture", "version": "1.0"}, Counter())
 
     def test_configure_commands_are_always_network_isolated(self):
-        root = build.REPO / "work/relpipe"
+        root = TASK
         root.mkdir(parents=True, exist_ok=True)
         log = root / "sandbox-command-test.txt"
         def launch(command, **kwargs):
@@ -125,7 +129,7 @@ class BundledSourceBuildTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.archives = build.REPO / "Packaging/MLXLicenses"
-        cls.output = build.REPO / "work/relpipe" / ("source-build-tests-" + str(time.time_ns()))
+        cls.output = TASK / ("source-build-tests-" + str(time.time_ns()))
         cls.results = build.check(cls.archives, cls.output)
 
     def test_every_bundled_autotools_archive_configures_and_dry_runs_offline(self):

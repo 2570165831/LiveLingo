@@ -15,5 +15,29 @@
   "finalBundledSHA256": null,
   "exactMatch": null,
   "finalMatchesInput": null,
-  "status": "awaiting-input-and-final-binding"
+  "status": "awaiting-input-and-final-binding",
+  "publisherComparison": {
+    "status": "reviewed-local-material-static-comparison",
+    "comparisonDate": "2026-10-12",
+    "publisherSHA256": "e9fd4d76bc457dcfb956617e8d467df85087ce069747fccd78e1e702d8629c14",
+    "reviewedInputSHA256": "6ef1f1c0a4ccbc72210ff55e3df6addc682f873e68aff3e7218e92ccc294da93",
+    "architecture": "arm64",
+    "fileBackedSectionCount": 11,
+    "fileBackedSectionBytes": 2667648,
+    "allFileBackedSectionsEqual": true,
+    "loadCommandCount": 15,
+    "identicalLoadCommands": 13,
+    "signatureRelatedFieldDifferences": [
+      "LC_SEGMENT_64 __LINKEDIT filesize",
+      "LC_CODE_SIGNATURE datasize"
+    ],
+    "allOtherNonsignatureBytesEqual": true,
+    "wholeFileExactMatch": false,
+    "publisherSignature": "ad-hoc linker CodeDirectory; 739 SHA-256 code pages of 4096 bytes, including a partial final page",
+    "reviewedInputSignature": "CodeDirectory with hardened-runtime flag, requirements blob and opaque CMS blob; 185 SHA-256 code pages of 16384 bytes, including a partial final page",
+    "allCodeDirectoryPageHashesMatch": true,
+    "signerTrustVerified": false,
+    "sourceRebuildExactMatch": "unverified",
+    "limitations": "Static evidence applies only to the two hashes above. No certificate, CMS trust, signing history, platform acceptance or reproducible source build was verified. It does not set the pending input/final binding fields; any different input requires a new comparison."
+  }
 }

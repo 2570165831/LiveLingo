@@ -419,6 +419,13 @@ def nested_bundles(app_root):
 
 def sign(app_root, identity, keychain, entitlements, inherit_plist, found):
     """Sign inside-out: nested Mach-O files and bundles first, the outer app last."""
+    input_provenance = None
+    if (app_root / "Contents/Resources/ASRRuntime").exists():
+        try:
+            from binary_provenance import verify_app_provenance, finalize_app_provenance
+        except ImportError:
+            from Scripts.binary_provenance import verify_app_provenance, finalize_app_provenance
+        input_provenance = verify_app_provenance(app_root)
     main_executable = main_executable_path(app_root)
     entries = [(len(path.parts), 0, path, images, False)
                for path, images in found if path.resolve() != main_executable.resolve()]
@@ -439,6 +446,10 @@ def sign(app_root, identity, keychain, entitlements, inherit_plist, found):
             helpers += 1
         command.append(str(path))
         run(command)
+    if input_provenance is not None:
+        # Native signing changes the dylib's bytes. Update its actual final hash
+        # before the outer resource seal, keeping publisher/input claims separate.
+        finalize_app_provenance(app_root, input_provenance, final_stage="signed-candidate")
     result = subprocess.run(["/usr/bin/codesign", "--remove-signature", str(app_root)],
                             capture_output=True, text=True)
     if result.returncode != 0:
