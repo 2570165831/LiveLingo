@@ -482,6 +482,12 @@ class CheckpointPrivacyTests(unittest.TestCase):
         changed = []
         def replace_before_open(name, flags, *args, **kwargs):
             if name == 'created' and not changed:
+                # The new algorithm tries open before mkdir. Inject the race
+                # only after creation/claim, never into that missing probe.
+                try:
+                    os.stat(name, dir_fd=kwargs['dir_fd'], follow_symlinks=False)
+                except FileNotFoundError:
+                    return original_open(name, flags, *args, **kwargs)
                 changed.append(True)
                 fd = kwargs['dir_fd']
                 os.rename('created', 'unused-created', src_dir_fd=fd, dst_dir_fd=fd)

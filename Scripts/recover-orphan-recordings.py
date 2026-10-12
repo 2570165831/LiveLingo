@@ -45,7 +45,7 @@ import uuid
 from pathlib import Path
 from typing import Iterator, NamedTuple
 
-from private_files import BoundDirectory, open_directory, privatize_new, validate_ancestors
+from private_files import BoundDirectory, absolute_path, open_directory, privatize_new, validate_ancestors
 from privacy_cli import PrivateArgumentParser as FixedArgumentParser
 
 FMT_NAMES = {1: "PCM 整数", 3: "IEEE float", 6: "A-law", 7: "µ-law", 0xFFFE: "扩展格式"}
@@ -134,18 +134,12 @@ def follows_chunk_chain(handle, offset: int, size: int) -> bool:
 
 
 def open_source_fd(path: Path) -> int:
-    """Walk every ancestor through no-follow directory handles, then open leaf."""
-    path = Path(path).absolute()
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    directory = os.open(path.anchor, flags)
-    try:
-        for component in path.parts[1:-1]:
-            child = os.open(component, flags, dir_fd=directory)
-            os.close(directory)
-            directory = child
-        return os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
-    finally:
-        os.close(directory)
+    """Bind the granted parent directly without following any path symlink."""
+    path = absolute_path(path)
+    with open_directory(path.parent) as directory:
+        directory.require_bound()
+        return os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                       dir_fd=directory.fd)
 
 
 def inspect(path: Path) -> Layout:
@@ -434,13 +428,17 @@ def export_recording(source: Path, layout: Layout, target: Path, *,
 
 def candidates(roots: list[Path]) -> Iterator[Path]:
     for root in roots:
+        try:
+            root = validate_ancestors(root)
+        except (OSError, ValueError):
+            continue
         if root.is_symlink() or not root.is_dir():
             continue
         for directory in sorted(root.glob("LiveLingo-Live-*")):
-            if directory.is_symlink() or not directory.is_dir() or directory.resolve().parent != root.resolve():
+            if directory.is_symlink() or not directory.is_dir() or directory.parent != root:
                 continue
             recording = directory / "recording.wav"
-            if not recording.is_symlink() and recording.is_file() and recording.resolve().parent == directory.resolve():
+            if not recording.is_symlink() and recording.is_file() and recording.parent == directory:
                 yield recording
 
 
@@ -478,8 +476,8 @@ def _main(argv: list[str] | None, directories: ExitStack) -> int:
         roots = []
         for root in args.root:
             checked = validate_ancestors(root)
-            if checked.resolve() != checked:
-                raise ValueError("扫描目录在祖先校验后被重定向")
+            # validate_ancestors binds with no-follow kernel lookup; the held
+            # root below verifies identity without realpath's ancestor stats.
             roots.append(checked)
         # 不解析输出末级软链接；prepare_output_directory 会拒绝它，避免改动其目标。
         output = validate_ancestors(args.output) if args.output is not None else None

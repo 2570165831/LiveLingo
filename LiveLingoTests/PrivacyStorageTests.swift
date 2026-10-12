@@ -41,6 +41,74 @@ struct PrivacyStorageTests {
         try FileManager.default.createSymbolicLink(at: url, withDestinationURL: target)
     }
 
+    @Test func directoryOpenCreatesOnlyMissingPrivateComponents() throws {
+        let f = try Fixture(); defer { f.clean() }
+        let existing = try f.directory("existing", mode: 0o755)
+        let leaf = existing.appendingPathComponent("new/deep", isDirectory: true)
+        let opened = try SensitiveFileIO.Directory.open(at: leaf, create: true, tighten: true)
+        try opened.assertPrivate()
+        try opened.assertStillAtOriginalPath()
+        #expect(try mode(existing) == 0o755)
+        #expect(try mode(leaf.deletingLastPathComponent()) == 0o700)
+        #expect(try mode(leaf) == 0o700)
+        #expect(try opened.identity == SensitiveFileIO.Identity(statAt(leaf)))
+    }
+
+    @Test func directoryOpenWithoutCreateLeavesMissingPathAbsent() throws {
+        let f = try Fixture(); defer { f.clean() }
+        let missing = f.root.appendingPathComponent("missing/deep", isDirectory: true)
+        do {
+            _ = try SensitiveFileIO.Directory.open(at: missing, create: false, tighten: false)
+            Issue.record("Opening a missing directory unexpectedly succeeded")
+        } catch SensitiveFileIO.Failure.system(_, let code) {
+            #expect(code == ENOENT)
+        }
+        #expect(!FileManager.default.fileExists(atPath: missing.deletingLastPathComponent().path))
+    }
+
+    @Test func directoryOpenRejectsSymlinksAboveExistingAndMissingComponents() throws {
+        let f = try Fixture(); defer { f.clean() }
+        let outside = try f.directory("outside"), present = outside.appendingPathComponent("present")
+        try FileManager.default.createDirectory(at: present, withIntermediateDirectories: false)
+        let linked = f.root.appendingPathComponent("linked")
+        try link(linked, to: outside)
+        for path in [linked, linked.appendingPathComponent("present"), linked.appendingPathComponent("missing/deep")] {
+            do {
+                _ = try SensitiveFileIO.Directory.open(at: path, create: true, tighten: true)
+                Issue.record("Opening a symlink component unexpectedly succeeded")
+            } catch SensitiveFileIO.Failure.unsafePath { }
+        }
+        #expect(!FileManager.default.fileExists(atPath: outside.appendingPathComponent("missing").path))
+        #expect(try mode(outside) == 0o755)
+    }
+
+    private func statAt(_ url: URL) throws -> stat {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { throw POSIXError(.ENOENT) }
+        return info
+    }
+
+    @Test func optionalTemporaryParentPreservesItemsWhenAccessIsDenied() throws {
+        let f = try Fixture(); defer { f.clean() }
+        let directory = try SensitiveFileIO.Directory.open(at: f.root, create: false, tighten: false)
+        let file = f.root.appendingPathComponent("sentinel")
+        let bytes = Data("Synthetic optional-parent sentinel".utf8)
+        try seed(bytes, at: file)
+        for code in [EPERM, EACCES] {
+            let parent = try SensitiveFileIO.$temporaryTrackingParentOpenError.withValue(code) {
+                try directory.ownedParentForTemporaryRecovery()
+            }
+            #expect(parent == nil)
+        }
+        #expect(try Data(contentsOf: file) == bytes)
+        do {
+            _ = try SensitiveFileIO.$temporaryTrackingParentOpenError.withValue(EIO) {
+                try directory.ownedParentForTemporaryRecovery()
+            }
+            Issue.record("Unexpected parent I/O failure was ignored")
+        } catch SensitiveFileIO.Failure.system(_, let code) { #expect(code == EIO) }
+    }
+
     private func record(_ sessionID: UUID) -> TranscriptionWorkRecord {
         var value = TranscriptionWorkRecord(id: UUID(), sessionID: sessionID, ordinal: 0,
             audioFile: "chunk.wav", startFrame: 0, endFrame: 16_000, sampleRate: 16_000,

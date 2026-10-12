@@ -36,13 +36,13 @@ sys.dont_write_bytecode = True
 if __package__:
     from . import scoreboard_metrics as metrics, scoreboard_energy as energy
     from .private_files import (create_private_file, make_private_directory, open_directory,
-                                privatize_new, require_private_acl)
+                                privatize_new, require_private_acl, absolute_path, validate_file_path)
     from .privacy_cli import PrivateArgumentParser
 else:
     import scoreboard_metrics as metrics
     import scoreboard_energy as energy
     from private_files import (create_private_file, make_private_directory, open_directory,
-                               privatize_new, require_private_acl)
+                               privatize_new, require_private_acl, absolute_path, validate_file_path)
     from privacy_cli import PrivateArgumentParser
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,18 +109,17 @@ def numeric(value):
 
 def writable(path, *, derived=False):
     """Reject symlinks, including symlink parents, before creating anything."""
-    path = Path(os.path.abspath(path))
-    boundary = DERIVED if derived else WORK
+    try:
+        path = absolute_path(path)
+        boundary = absolute_path(DERIVED if derived else WORK)
+    except (OSError, ValueError):
+        raise Rejected("symlink_output") from None
     if not path.is_relative_to(boundary) or path == boundary:
         raise Rejected("output_outside_owned_work")
-    for component in [path, *path.parents]:
-        if component.is_symlink():
-            raise Rejected("symlink_output")
-        if component == ROOT.parent:
-            break
-    if not path.resolve().is_relative_to(boundary.resolve()):
-        raise Rejected("output_outside_owned_work")
-    return path
+    try:
+        return validate_file_path(path)
+    except (OSError, ValueError):
+        raise Rejected("symlink_output") from None
 
 
 def new_directory(path):

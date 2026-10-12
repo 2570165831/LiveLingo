@@ -116,7 +116,7 @@ actor SessionArchiveWriter {
         return saved
     }
 
-    func readback() throws -> SessionSnapshot? { try store.load() }
+    func readback() throws -> SessionSnapshot? { try store.loadCommittedSnapshot() }
 }
 
 /// At most one saving Task plus one replacement snapshot. Token updates never

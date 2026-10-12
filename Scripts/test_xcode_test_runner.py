@@ -109,6 +109,24 @@ class InlineReader:
         self.deliver()
 
 
+class FinishedChild:
+    """A diagnostic that completes at once with synthetic, unfiltered output."""
+
+    def __init__(self, command):
+        self.command = command
+        self.kill = Mock()
+
+    def communicate(self, timeout=None):
+        return FAILURE_OUTPUT, None
+
+
+class UnkillableChild(FinishedChild):
+    """A diagnostic stuck in the kernel: it ignores the timeout and SIGKILL."""
+
+    def communicate(self, timeout=None):
+        raise subprocess.TimeoutExpired(self.command, timeout)
+
+
 class RecordedWriter:
     """Record each chunk before the underlying file receives any bytes."""
 
@@ -156,6 +174,8 @@ class RunnerHarness:
             if timeout else exit_code
         self.guard_exit_code = 0
         self.guard_commands = []
+        # Read-only Trash listings in call order; the last one repeats.
+        self.trash = [{"existing-user-item"}]
         self.sandboxed = False
         self.now = 0.0
         self.launched = False
@@ -178,8 +198,11 @@ class RunnerHarness:
             getuid=Mock(return_value=SYNTHETIC_UID),
             getloadavg=Mock(return_value=(0.0, 0.0, 0.0)),
             kill=Mock(), killpg=Mock())
+        self.evidence_commands = []
+        self.evidence_children = []
+        self.evidence_child = FinishedChild
         self.subprocess = SimpleNamespace(
-            PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT,
+            PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT, DEVNULL=subprocess.DEVNULL,
             TimeoutExpired=subprocess.TimeoutExpired,
             Popen=Mock(side_effect=self.popen),
             run=Mock(side_effect=self.run_subprocess),
@@ -198,6 +221,7 @@ class RunnerHarness:
             ], ["synthetic preference audit"])),
             "retire_workers": Mock(return_value=["worker-810001-synthetic"]),
             "sandboxed_host": Mock(side_effect=lambda app: self.sandboxed),
+            "trash_entries": Mock(side_effect=self.trash_listing),
             "threading": SimpleNamespace(Thread=self.make_reader),
             "time": SimpleNamespace(
                 monotonic=lambda: self.now,
@@ -254,6 +278,14 @@ class RunnerHarness:
         return stream
 
     def popen(self, command, **kwargs):
+        if command[0] in ("/usr/sbin/lsof", "/bin/ls"):
+            # Host file evidence: read-only, bounded, and only for owned hosts.
+            self.case.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+            self.case.assertTrue(kwargs["start_new_session"])
+            self.evidence_commands.append(command)
+            child = self.evidence_child(command)
+            self.evidence_children.append(child)
+            return child
         self.case.assertEqual(command[0], "/usr/bin/xcodebuild")
         self.command = command
         self.case.assertEqual(kwargs["cwd"], REPO)
@@ -264,6 +296,9 @@ class RunnerHarness:
         })
         self.launched = True
         return self.process
+
+    def trash_listing(self):
+        return self.trash.pop(0) if len(self.trash) > 1 else self.trash[0]
 
     def make_reader(self, **kwargs):
         self.reader = InlineReader(**kwargs)
@@ -624,6 +659,50 @@ class GateAndCleanupTests(unittest.TestCase):
             self.assertEqual(command[command.index("CODE_SIGNING_ALLOWED=NO") + 1], "test-without-building")
             self.assertNotIn("clean", command)
 
+    def test_new_trash_entries_fail_an_otherwise_green_run_and_keep_workers(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.trash = [{"existing-user-item"},
+                             {"existing-user-item", "ASRDirectoryIdentity-synthetic"}]
+            self.assertEqual(harness.runner.main(), 1)
+            self.assertEqual(harness.runner.trash_entries.call_count, 2)
+            receipt = harness.receipt()
+            self.assertEqual(receipt["trash_added"], ["ASRDirectoryIdentity-synthetic"])
+            harness.runner.retire_workers.assert_not_called()
+            self.assertIn("ASRDirectoryIdentity-synthetic", str(harness.printed.call_args_list))
+
+    def test_unchanged_trash_passes_and_removed_entries_are_not_failures(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.trash = [{"existing-user-item", "emptied-by-user"}, {"existing-user-item"}]
+            self.assertEqual(harness.runner.main(), 0)
+            self.assertEqual(harness.receipt()["trash_added"], [])
+
+    def test_unreadable_trash_is_recorded_without_failing_the_run(self):
+        with RunnerHarness(self, exit_code=0) as harness:
+            harness.trash = [None]
+            self.assertEqual(harness.runner.main(), 0)
+            receipt = harness.receipt()
+            self.assertNotIn("trash_added", receipt)
+            self.assertEqual(receipt["trash_guard_error"], "could not list the user Trash")
+
+    def test_failed_xcodebuild_still_records_new_trash_entries(self):
+        with RunnerHarness(self, exit_code=65) as harness:
+            harness.trash = [set(), {"review-failure-synthetic.json"}]
+            self.assertEqual(harness.runner.main(), 65)
+            self.assertEqual(harness.receipt()["trash_added"], ["review-failure-synthetic.json"])
+
+
+class TrashListingTests(unittest.TestCase):
+    def test_lists_names_read_only_and_reports_unreadable_trash_as_none(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+            home = Path(temporary)
+            with patch.object(Path, "home", return_value=home):
+                self.assertIsNone(runner.trash_entries())
+                (home / ".Trash").mkdir()
+                (home / ".Trash" / "synthetic-entry").write_text("synthetic\n")
+                self.assertEqual(runner.trash_entries(), {"synthetic-entry"})
+            self.assertEqual((home / ".Trash" / "synthetic-entry").read_text(), "synthetic\n")
+
 
 class WorkerDirectoryTests(unittest.TestCase):
     def layout(self, scratch):
@@ -676,6 +755,80 @@ class WorkerDirectoryTests(unittest.TestCase):
             self.assertTrue((paths["old"] / "screenshots" / "synthetic.png").exists())
             self.assertTrue((paths["other"] / "screenshots" / "synthetic.png").exists())
             self.assertTrue((outside / "keep.txt").exists())
+
+
+class HostFileEvidenceTests(unittest.TestCase):
+    WORKER_NAME = "worker-810001-00000000-0000-0000-0000-000000000001"
+
+    def stuck_host(self, harness):
+        host = (RUNNER_PID, SYNTHETIC_UID, harness.executable())
+        harness.observed[810001] = host
+        harness.fresh[810001] = host
+        harness.sample_pids.add(810001)
+        return harness.dd / "tmp" / self.WORKER_NAME
+
+    def test_stuck_host_records_open_files_and_its_worker_metadata_only(self):
+        with RunnerHarness(self, timeout=True) as harness:
+            worker = self.stuck_host(harness)
+            with patch.object(harness.runner, "host_workers", Mock(return_value=[worker])) as workers:
+                self.assertEqual(harness.runner.main(), 124)
+            workers.assert_called_once_with(harness.dd / "tmp", 810001)
+            self.assertEqual(harness.evidence_commands, [
+                ["/usr/sbin/lsof", "-n", "-P", "-p", "810001"],
+                ["/bin/ls", "-laiR@", "--", str(worker)],
+                ["/usr/sbin/lsof", "-n", "-P", "+D", str(worker)],
+            ])
+            samples = {sample["pid"]: sample for sample in harness.receipt()["samples"]}
+            self.assertNotIn("files", samples[RUNNER_PID], "only test hosts get file evidence")
+            host = samples[810001]
+            self.assertEqual(host["files_errors"], {})
+            self.assertEqual(Path(host["files"]).name, f"synthetic-sample-2-pid810001-files.txt")
+            self.assertEqual(Path(host["files"]).read_text(), (
+                "## open files of the host\n" + FILTERED_FAILURE + "\n"
+                f"## listing of {self.WORKER_NAME}\n" + FILTERED_FAILURE + "\n"
+                f"## open files under {self.WORKER_NAME}\n" + FILTERED_FAILURE + "\n"))
+            harness.os.killpg.assert_called_once_with(RUNNER_PID, signal.SIGTERM)
+            harness.assert_filtered_writes()
+
+    def test_unkillable_diagnostic_is_abandoned_and_cleanup_still_runs(self):
+        with RunnerHarness(self, timeout=True) as harness:
+            self.stuck_host(harness)
+            harness.evidence_child = UnkillableChild
+            self.assertEqual(harness.runner.main(), 124)
+            self.assertEqual(len(harness.evidence_children), 1)
+            harness.evidence_children[0].kill.assert_called_once_with()
+            host = next(sample for sample in harness.receipt()["samples"] if sample["pid"] == 810001)
+            self.assertEqual(host["files_errors"],
+                             {"open files of the host": "timeout; still running after SIGKILL, abandoned"})
+            self.assertEqual(Path(host["files"]).read_text(), "## open files of the host\n\n")
+            harness.os.kill.assert_called_once_with(810001, signal.SIGTERM)
+            harness.os.killpg.assert_called_once_with(RUNNER_PID, signal.SIGTERM)
+            harness.assert_filtered_writes()
+
+    def test_existing_file_evidence_is_never_truncated(self):
+        with RunnerHarness(self, timeout=True) as harness:
+            self.stuck_host(harness)
+            existing = harness.output / "synthetic-sample-2-pid810001-files.txt"
+            existing.write_text("previous synthetic file evidence\n")
+            self.assertEqual(harness.runner.main(), 124)
+            self.assertEqual(existing.read_text(), "previous synthetic file evidence\n")
+            host = next(sample for sample in harness.receipt()["samples"] if sample["pid"] == 810001)
+            self.assertIsNone(host["files"])
+            self.assertEqual(host["files_error"], "file evidence already exists")
+            self.assertEqual(harness.evidence_commands, [])
+
+    def test_host_workers_lists_only_that_hosts_real_directories(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+            scratch = Path(temporary)
+            own = scratch / self.WORKER_NAME
+            own.mkdir()
+            (scratch / "worker-8100011-00000000-0000-0000-0000-000000000002").mkdir()
+            (scratch / "worker-810002-00000000-0000-0000-0000-000000000003").mkdir()
+            (scratch / "worker-810001-00000000-0000-0000-0000-000000000004").write_text("not a directory")
+            (scratch / "worker-810001-00000000-0000-0000-0000-000000000005").symlink_to(own)
+            (scratch / "worker-810001-not-a-uuid").mkdir()
+            self.assertEqual(runner.host_workers(scratch, 810001), [own])
 
 
 class TimeoutTerminationTests(unittest.TestCase):

@@ -124,6 +124,82 @@ def retire_workers(scratch, host_pids, previous_workers):
     return removed
 
 
+EVIDENCE_TIMEOUT_S = 10
+EVIDENCE_LIMIT = 1 << 20
+
+
+def bounded_output(command):
+    """Run one read-only diagnostic and never wait for it without a bound.
+
+    A process blocked in the kernel (the state being diagnosed) may ignore even
+    SIGKILL for a while. It is then abandoned instead of stalling the watchdog.
+    """
+    try:
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, errors='replace',
+                                 start_new_session=True)
+    except OSError:
+        return '', 'invocation failed'
+    error = None
+    try:
+        output, _ = child.communicate(timeout=EVIDENCE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        try:
+            output, _ = child.communicate(timeout=2)
+            error = 'timeout'
+        except subprocess.TimeoutExpired:
+            output, error = '', 'timeout; still running after SIGKILL, abandoned'
+    output = output or ''
+    if len(output) > EVIDENCE_LIMIT:
+        output = output[:EVIDENCE_LIMIT] + '\n[output truncated]\n'
+        error = error or 'truncated'
+    return output, error
+
+
+def host_workers(scratch, pid):
+    """This host's own worker directories, never a symlink or another host's."""
+    result = []
+    for worker in sorted(scratch.glob(f'worker-{pid}-*')):
+        match = WORKER.fullmatch(worker.name)
+        if not match or int(match[1]) != pid:
+            continue
+        status = worker.lstat()
+        if status.st_uid == os.getuid() and stat.S_ISDIR(status.st_mode):
+            result.append(worker)
+    return result
+
+
+def host_file_evidence(target, pid):
+    """Record the files a stuck host holds open and its worker directory's shape.
+
+    Listings carry names, types, link counts, sizes and extended-attribute
+    names only. No file content is read, and every command is time-bounded.
+    """
+    sections = [('open files of the host', ['/usr/sbin/lsof', '-n', '-P', '-p', str(pid)])]
+    try:
+        workers = host_workers(DD / 'tmp', pid)
+    except OSError:
+        workers = []
+    for worker in workers:
+        sections.append((f'listing of {worker.name}', ['/bin/ls', '-laiR@', '--', str(worker)]))
+        sections.append((f'open files under {worker.name}',
+                         ['/usr/sbin/lsof', '-n', '-P', '+D', str(worker)]))
+    errors = {}
+    try:
+        with target.open('x', encoding='utf-8') as output:
+            for title, command in sections:
+                text, error = bounded_output(command)
+                if error:
+                    errors[title] = error
+                output.write(f'## {title}\n')
+                output.writelines(redact.filtered(text.splitlines(keepends=True)))
+                output.write('\n')
+    except FileExistsError:
+        return {'files': None, 'files_error': 'file evidence already exists'}
+    return {'files': str(target), 'files_errors': errors}
+
+
 def sandboxed_host(app):
     """True unless the existing Debug host is readable and carries no sandbox entitlement."""
     if not (app / 'Contents/MacOS/LiveLingo').is_file():
@@ -134,6 +210,18 @@ def sandboxed_host(app):
     # An unsigned (linker-signed) host has no entitlements; codesign may report
     # "not signed" with a non-zero status, which is also safe here.
     return 'com.apple.security.app-sandbox' in shown.stdout
+
+
+def trash_entries():
+    """Names directly in the user's Trash, listed read-only; None if unreadable.
+
+    Tests must keep fixtures in their own temporary directories, so a run that
+    adds an entry here failed that contract. Nothing is ever removed from it.
+    """
+    try:
+        return set(os.listdir(Path.home() / '.Trash'))
+    except OSError:
+        return None
 
 
 def main():
@@ -195,6 +283,7 @@ def main():
     if args.parallel == 'YES':
         command += ['-parallel-testing-worker-count', str(args.workers)]
     command += ['-only-testing:' + name for name in args.only]
+    trash_before = trash_entries()
     load_before = os.getloadavg()
     started = time.monotonic()
     state = {'last_output': started, 'last_test': None, 'last_test_at': started}
@@ -254,6 +343,9 @@ def main():
                         output.writelines(redact.filtered(raw.splitlines(keepends=True)))
                 except FileExistsError:
                     record['error'] = 'sample evidence already exists'
+                if pid != process.pid:
+                    record.update(host_file_evidence(
+                        OUT / f'{args.name}-sample-{len(samples) + 1}-pid{pid}-files.txt', pid))
                 record['elapsed_s'] = round(time.monotonic() - started, 3)
                 samples.append(record)
 
@@ -298,6 +390,14 @@ def main():
                'exit_code': returncode, 'timed_out': timed_out, 'samples': samples,
                'host_identities': [{'pid': pid, 'identity': row} for pid, row in observed_hosts.items()],
                'log': str(log_path), 'xcresult': str(result_path), 'last_test': state['last_test']}
+    trash_after = trash_entries()
+    if trash_before is None or trash_after is None:
+        receipt['trash_guard_error'] = 'could not list the user Trash'
+        print(receipt['trash_guard_error'])
+    else:
+        receipt['trash_added'] = sorted(trash_after - trash_before)
+        if receipt['trash_added']:
+            print('tests added entries to the user Trash: ' + ', '.join(receipt['trash_added']))
     (OUT / (args.name + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps({key: receipt[key] for key in ('name', 'wall_s', 'exit_code', 'timed_out', 'last_test')}), flush=True)
     if timed_out or returncode != 0:
@@ -360,7 +460,7 @@ def main():
         guards.append({'guard': script, 'exit_code': checked.returncode})
         print(output.rstrip())
     receipt['guards'] = guards
-    passed = all(item['exit_code'] == 0 for item in guards)
+    passed = all(item['exit_code'] == 0 for item in guards) and not receipt.get('trash_added')
     # Keep worker directories (fixtures, screenshots) as evidence after a
     # failure; after a pass their events are already in the verification log.
     if passed and not args.keep_workers:

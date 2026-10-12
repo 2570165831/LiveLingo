@@ -89,8 +89,11 @@ enum ReviewInputBinding {
     }
 
     /// Loading a snapshot is read-only; old Markdown never invents batch IDs.
+    /// Review reads run on the queue's storage actor, which also serialises
+    /// journal saves and report writes, so they never run the course's
+    /// temporary recovery scan (DU-05); opening the course does that.
     static func snapshot(in directory: URL) throws -> SessionSnapshot? {
-        let result = try SessionStore(directory: directory).loadDetailed()
+        let result = try SessionStore(directory: directory).loadDetailedWithoutRecovery()
         return try snapshot(from: result)
     }
 
@@ -103,7 +106,8 @@ enum ReviewInputBinding {
     }
 
     static func snapshotAsync(in directory: URL) async throws -> SessionSnapshot? {
-        let result = try await SessionStore(directory: directory).loadDetailedAsync()
+        let store = SessionStore(directory: directory)
+        let result = try await Task.detached { try store.loadDetailedWithoutRecovery() }.value
         guard result.origin == .snapshot else { return nil }
         guard result.incompleteTailBytes == 0 else {
             throw SessionStoreError.incompleteJournalTail(bytes: result.incompleteTailBytes)
@@ -168,7 +172,7 @@ enum ReviewInputBinding {
             throw ReviewIdentityError.conflict("任务内的冻结输入与校验值不一致")
         }
         if let identity { try identity.validate(scope: scope, batches: batches) }
-        let archive = try SessionStore(directory: directory).loadDetailed()
+        let archive = try SessionStore(directory: directory).loadDetailedWithoutRecovery()
         if let snapshot = try snapshot(from: archive) {
             if let identity {
                 guard snapshot.sessionID == identity.sessionID else {

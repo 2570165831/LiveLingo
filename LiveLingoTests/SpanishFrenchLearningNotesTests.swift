@@ -7,6 +7,139 @@ import XCTest
 final class SpanishFrenchLearningNotesTests: XCTestCase {
     private let targets: [CaptionTranslationTarget] = [.spanish, .french]
 
+    private func numericReport(_ claim: String, _ source: String, target: CaptionTranslationTarget,
+                               elsewhere: Bool = false) -> LearningNumericProvenance.Report {
+        LearningNumericProvenance.report(claim: claim, cited: elsewhere ? [] : [source],
+            segmentTexts: [], batchTexts: [source], target: target)
+    }
+
+    func testMeasurementSignDifferencesUseTheSignConflictInBothScopes() {
+        for target in targets {
+            for (claim, source) in [("5 °C", "-5 °C"), ("-5 °C", "5 °C"), ("+5 °C", "−5 °C")]
+                + [("5 °C", target == .spanish ? "menos 5 grados Celsius" : "moins 5 degrés Celsius")] {
+                for elsewhere in [false, true] {
+                    let report = numericReport(claim, source, target: target, elsewhere: elsewhere)
+                    XCTAssertTrue(report.isDecidable, "\(target): \(claim) / \(source)")
+                    XCTAssertTrue(report.gaps.joined().contains("正负号"), "\(report.gaps)")
+                }
+            }
+            let source = TranscriptSegment(startTime: 0, endTime: 1, english: "The temperature is -5 °C.",
+                chinese: "5 °C", sourceLanguage: "en")
+            let note = LearningNote(topic: "Temperature", points: [.init(kind: "核心结论", text: "5 °C",
+                sourceIDs: ["en0s0"])], sourceVersion: 2, noNewKnowledge: false)
+            let point = note.binding(evidence: [source], target: target).points[0]
+            XCTAssertEqual(point.referenceState, .numericDifference)
+            XCTAssertTrue(point.numericGap?.contains("正负号") == true)
+        }
+    }
+
+    func testSpokenSignsAndSymbolVariantsMatchWithoutTreatingOperatorsAsSigns() {
+        for target in targets {
+            let minus = target == .spanish ? "menos" : "moins"
+            let uncertainty = target == .spanish ? "más o menos" : "plus ou moins"
+            let below = target == .spanish ? "5 grados Celsius bajo cero" : "5 degrés Celsius au-dessous de zéro"
+            for source in ["−5 °C", "－5 °C", "﹣5 °C", minus + " 5 °C", below, "-5e0 °C"] {
+                let report = numericReport("-5 °C", source, target: target)
+                XCTAssertFalse(report.isDecidable, "\(target): \(source): \(report.gaps)")
+                XCTAssertTrue(report.gaps.isEmpty, "\(source): \(report.gaps)")
+            }
+            for source in ["3-5 °C", "20 - 5 °C", "±5 °C", uncertainty + " 5 °C", "10 °C " + minus + " 5 °C"] {
+                XCTAssertTrue(numericReport("5 °C", source, target: target).gaps.isEmpty, source)
+            }
+            // Unitless values and counts keep magnitude-only comparison, as in the default path.
+            for noun in ["", target == .spanish ? " ejemplos" : " exemples"] {
+                XCTAssertTrue(numericReport("5" + noun, "-5" + noun, target: target).gaps.isEmpty)
+            }
+        }
+    }
+
+    func testCompleteUnitsRejectShorterPowersAndUnknownContinuations() {
+        for target in targets {
+            for (claim, source) in [("9,8 m/s", "9,8 m/s²"), ("5 m", "5 m²"),
+                ("2 kg", "2 kg/m³"), ("2 kg", "2 kg/ft³"), ("5 m", "5 m^q") ] {
+                let report = numericReport(claim, source, target: target)
+                XCTAssertTrue(report.isDecidable, "\(claim) / \(source)")
+                XCTAssertTrue(report.gaps.joined().contains("单位不同"), "\(report.gaps)")
+            }
+        }
+    }
+
+    func testLocalizedPoweredUnitsMatchSymbolsAndEnglishEvidence() {
+        for target in targets {
+            let cases: [(String, String)] = target == .spanish
+                ? [("9,8 metros por segundo cuadrado", "9,8 m/s²"),
+                   ("9,8 metros por segundo al cuadrado", "9,8 m/s^2"),
+                   ("2 kilogramos por metro cúbico", "2 kg/m³"),
+                   ("1,5 gramos por centímetro cúbico", "1,5 g/cm³"),
+                   ("5 metros cuadrados", "5 m2"), ("3 metros cúbicos", "3 m³")]
+                : [("9,8 mètres par seconde carrée", "9,8 m/s²"),
+                   ("2 kilogrammes par mètre cube", "2 kg/m³"),
+                   ("1,5 grammes par centimètre cube", "1,5 g/cm³"),
+                   ("5 mètres carrés", "5 m2"), ("3 mètres cubes", "3 m³")]
+            for (claim, source) in cases {
+                for (left, right) in [(claim, source), (source, claim)] {
+                    let report = numericReport(left, right, target: target)
+                    XCTAssertFalse(report.isDecidable, "\(left) / \(right): \(report.gaps)")
+                    XCTAssertTrue(report.gaps.isEmpty, "\(left) / \(right): \(report.gaps)")
+                }
+            }
+            let source = TranscriptSegment(startTime: 0, endTime: 1,
+                english: "The acceleration is 9.8 meters per second squared.",
+                chinese: cases[0].0, sourceLanguage: "en")
+            let note = LearningNote(topic: "Acceleration", points: [.init(kind: "核心结论", text: "9,8 m/s²",
+                sourceIDs: ["en0s0"])], sourceVersion: 2, noNewKnowledge: false)
+            XCTAssertNil(note.binding(evidence: [source], target: target).points[0].numericGap)
+        }
+    }
+
+    func testRepeatedDenominatorsFoldButDifferentDenominatorsStillConflict() {
+        for target in targets {
+            let spoken = target == .spanish ? "metros por segundo por segundo" : "mètres par seconde par seconde"
+            for source in ["9,8 " + spoken, "9,8 m/s/s", "9,8 m/s²/s"] {
+                let claim = source.hasSuffix("²/s") ? "9,8 m/s³" : "9,8 m/s²"
+                XCTAssertTrue(numericReport(claim, source, target: target).gaps.isEmpty, source)
+            }
+            XCTAssertTrue(numericReport("9,8 m/s²", "9,8 m/s/min", target: target).isDecidable)
+        }
+    }
+
+    func testScientificExpressionsAndUnitDigitsCannotSupportSeparateNumbers() {
+        for target in targets {
+            for (claim, source) in [("3000000 m/s", "3 × 10⁶ m/s"), ("3e6 m/s", "3 × 10^6 m/s"),
+                ("1000000 Hz", "10^6 Hz"), ("0,0015 m", "1,5×10⁻³ m"), ("-300 m/s", "-3 × 10² m/s")] {
+                XCTAssertTrue(numericReport(claim, source, target: target).gaps.isEmpty, "\(claim) / \(source)")
+            }
+            for source in ["2 kg/m3", "3 × 10^3 m", "2^3 m"] {
+                let report = numericReport("3", source, target: target)
+                XCTAssertFalse(report.gaps.isEmpty, source)
+            }
+            XCTAssertTrue(LatinLearningText.mentions(in: "K7 M2 V3", language: target.rawValue, excluding: [])
+                .allSatisfy { $0.role == .designator })
+        }
+    }
+
+    func testScientificZeroAndRawPowersPreserveMagnitudeAndSigns() {
+        for target in targets {
+            XCTAssertTrue(numericReport("0 m", "0 × 10² m", target: target).gaps.isEmpty)
+            let sign = numericReport("2^10 m", "-2^10 m", target: target)
+            XCTAssertTrue(sign.isDecidable)
+            XCTAssertTrue(sign.gaps.joined().contains("正负号"), "\(sign.gaps)")
+            for source in ["2^999999999999999999999999 m", "2^−9223372036854775808 m"] {
+                XCTAssertEqual(LatinLearningText.mentions(in: source, language: target.rawValue, excluding: []).count, 1)
+            }
+        }
+    }
+
+    func testScientificScaleOverflowKeepsTheWholeExpressionUnconverted() {
+        for target in targets {
+            let source = "3e9223372036854775807 × 10^2 m"
+            let mentions = LatinLearningText.mentions(in: source, language: target.rawValue, excluding: [])
+            XCTAssertEqual(mentions.count, 1)
+            XCTAssertEqual(mentions.first?.value, "3e9223372036854775807×10^2")
+            XCTAssertFalse(numericReport("100 m", source, target: target).gaps.isEmpty)
+        }
+    }
+
     func testDefaultReviewClientForwardsSpanishPromptAndNonemptyResumePrefixToWorker() async throws {
         try await assertDefaultReviewClient(target: .spanish)
     }
@@ -321,6 +454,50 @@ final class SpanishFrenchLearningNotesTests: XCTestCase {
             XCTAssertEqual(book.batches[1].followUps?.first?.state, .supplemented)
             XCTAssertTrue(book.pendingPoints.isEmpty)
             XCTAssertTrue(book.markdown().contains(LearningFollowUp.State.supplemented.label(target: target)))
+        }
+    }
+    /// issue #26: post-lecture review receives committed follow-up records, bound to the target-language text.
+    func testReviewReceivesTargetBoundFollowUpRecords() throws {
+        for target in targets {
+            for state in [LearningFollowUp.State.supplemented, .conflict] {
+                var book = LearningNotebook(target: target)
+                var first = note(target); first.points[0].kind = "待确认"; first.points[0].needsContext = "?"
+                try book.append(evidence: [foreign(target)], note: first)
+                let pending = try XCTUnwrap(book.pendingPoints.first)
+                var next = note(target)
+                next.followUps = [.init(alias: "q0", target: pending.id, state: state, sourceIDs: [target.rawValue + "0s0"], detail: "Δ")]
+                try book.append(evidence: [foreign(target, at: 3)], note: next)
+                let json = try LearningPrompts.reviewInput(book.batches[0], laterBatches: [book.batches[1]], target: target).json
+                let context = try XCTUnwrap(try object(json)["laterContext"] as? [[String: Any]])
+                XCTAssertEqual(context.count, 1, "\(target) \(state)")
+                XCTAssertEqual(context.first?["state"] as? String, state.rawValue)
+                XCTAssertEqual(context.first?["sources"] as? [String], [text(target)])
+                XCTAssertEqual(context.first?["text"] as? String, state == .supplemented ? text(target) : "Δ")
+                XCTAssertFalse(json.contains("质量为"), "source-language text stays out of a \(target) review")
+            }
+        }
+    }
+    /// issue #34: the latest-update view marks this batch's answer to an earlier question.
+    func testRecentUpdateMarksFollowUpAboutEarlierQuestion() throws {
+        for target in targets {
+            for state in [LearningFollowUp.State.supplemented, .conflict] {
+                var book = LearningNotebook(target: target)
+                var first = note(target); first.points[0].kind = "待确认"; first.points[0].needsContext = "?"
+                try book.append(evidence: [foreign(target)], note: first)
+                let pending = try XCTUnwrap(book.pendingPoints.first)
+                var next = note(target)
+                next.followUps = [.init(alias: "q0", target: pending.id, state: state, sourceIDs: [target.rawValue + "0s0"], detail: "Δ")]
+                try book.append(evidence: [foreign(target, at: 3)], note: next)
+                XCTAssertEqual(book.batches[1].followUps?.first?.state, state)
+                let latest = book.markdown(covering: book.batches[1].ids)
+                XCTAssertTrue(latest.contains("**\(state.label(target: target))（[00:03–00:04]）:**"), "\(target): \(latest)")
+                if state == .supplemented {
+                    XCTAssertTrue(latest.contains(ClassroomFixedText.followUpTargetLine.noteFormat(["?"], target: target)), latest)
+                    XCTAssertTrue(latest.contains(ClassroomFixedText.retiredExplanation.noteText(target: target)), latest)
+                } else {
+                    XCTAssertTrue(latest.contains("Δ"), latest)
+                }
+            }
         }
     }
     func testActualReviewQueueForwardsPromptInputAndPrefix() async throws {

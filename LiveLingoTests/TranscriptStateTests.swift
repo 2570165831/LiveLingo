@@ -51,3 +51,86 @@ final class TranscriptStateTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(TranscriptSegment.self, from: data))
     }
 }
+
+// P2c: synthetic preview events only; background services and model work disabled.
+@MainActor
+final class VolatilePreviewRangeTests: XCTestCase {
+    private func fixture() throws -> AppModel {
+        let root = TestFixtureDirectory.root.appendingPathComponent("LiveLingo-P2c-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let suite = "LiveLingo-Test-\(UUID())"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("queue.json"),
+            observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
+                XCTFail("Preview range tests must not start notes or models")
+                throw CancellationError()
+            }
+        let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
+            backgroundServices: false, scheduledNotes: false, defaults: defaults)
+        model.resetTranslationSessionForTesting()
+        addTeardownBlock { @MainActor in
+            try await TestTaskLifetime.stop(model, queue: queue)
+            try cleanup.remove()
+            // Fixture stays in the owned test worker directory for inspection.
+        }
+        return model
+    }
+
+    func testP2cOlderSilentChunkPreservesNewPreviewTranslationAndRange() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("A newer synthetic preview.", start: 10, end: 12, chinese: "新的初译。")
+        model.receiveLivePreviewForTesting("", start: 0, end: 10)
+        XCTAssertEqual(model.volatileEnglish, "A newer synthetic preview.")
+        XCTAssertEqual(model.previewTranslationSource, "A newer synthetic preview.")
+        XCTAssertEqual(model.previewChinese, "新的初译。")
+        // The ignored old event must also retain the range for its own later clear.
+        model.receiveLivePreviewForTesting("", start: 10, end: 14)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+        XCTAssertTrue(model.previewTranslationSource.isEmpty)
+        XCTAssertTrue(model.previewChinese.isEmpty)
+    }
+
+    func testP2cOlderSilenceCannotClearPreviewJustPastItsBoundary() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("New speech starts here.", start: 10, end: 10.1, chinese: "新语音。")
+        model.receiveLivePreviewForTesting("", start: 0, end: 10)
+        XCTAssertEqual(model.volatileEnglish, "New speech starts here.")
+        XCTAssertEqual(model.previewChinese, "新语音。",
+                       "Silence ownership has no tolerance that reaches into the next chunk")
+    }
+
+    func testP2cSilentChunkClearsOnlyFullyCoveredPreview() throws {
+        let model = try fixture()
+        let cases: [(start: Double, end: Double, clears: Bool)] = [
+            (10, 12, true), (9, 14, true), (0, 10, false), (12, 14, false),
+            (11, 14, false), (9, 11, false)
+        ]
+        for event in cases {
+            model.receiveLivePreviewForTesting("The synthetic current preview.", start: 10, end: 12, chinese: "当前初译。")
+            model.receiveLivePreviewForTesting("", start: event.start, end: event.end)
+            XCTAssertEqual(model.volatileEnglish, event.clears ? "" : "The synthetic current preview.")
+            XCTAssertEqual(model.previewChinese, event.clears ? "" : "当前初译。")
+        }
+    }
+
+    func testP2cUnknownOrInvalidSilentRangeKeepsKnownPreview() throws {
+        let model = try fixture()
+        let ranges: [(Double, Double)] = [(0, 0), (14, 10), (-1, 12), (.nan, 12), (0, .infinity)]
+        for (start, end) in ranges {
+            model.receiveLivePreviewForTesting("Keep this synthetic preview.", start: 10, end: 12, chinese: "保留初译。")
+            model.receiveLivePreviewForTesting("", start: start, end: end)
+            XCTAssertEqual(model.volatileEnglish, "Keep this synthetic preview.")
+            XCTAssertEqual(model.previewChinese, "保留初译。")
+        }
+    }
+
+    func testP2cUntimedReplacementDoesNotInheritPreviousPreviewRange() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("The old timed preview.", start: 0, end: 2)
+        model.receiveLivePreviewForTesting("A replacement with unknown timing.", chinese: "未知时间的初译。")
+        model.receiveLivePreviewForTesting("", start: 0, end: 2)
+        XCTAssertEqual(model.volatileEnglish, "A replacement with unknown timing.")
+        XCTAssertEqual(model.previewChinese, "未知时间的初译。")
+    }
+}

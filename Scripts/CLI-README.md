@@ -53,6 +53,14 @@ notes for private readback. Scoring those detailed artifacts with
 `--include-content` enables source meanings and point readback. A summary-only
 probe is insufficient for semantic or detailed structural scoring.
 
+`Scripts/build-learning-quality-cli.sh NEW_OUTPUT_DIRECTORY` writes
+`quality-build-manifest.json` next to the binary: the executable hash, the
+compiler exit code, purpose `production-quality-probe` and repo-relative
+source hashes checked before and after the compile (no manifest when the
+compile fails or a source changes meanwhile). `learning-quality-cli` checks it
+and copies it into the output with `--include-content`; the evaluator rejects a
+production-model result without it.
+
 `target-acceptance-cli judge` omits literal stable prefixes and number fragments;
 `judge --include-content` enables them. `target_eval.calibrate` and
 `benchmark-asr-chunking.py` require `--include-content` for detailed/content
@@ -137,6 +145,10 @@ The regional regression covers both `zh-Hant-TW` and `zh-Hant-HK`:
 - Verify hand-authored legacy regional exports with no snapshot,
   `sourceLanguages` or `converterVersion`, retaining their two-line SRT layout.
   Reject a substituted one-line layout and preserve files on every rejection.
+- SRT cue text never contains a blank line: the exporter splits caption text
+  on line breaks and drops empty or whitespace-only lines, while JSONL and
+  transcripts keep the original text. `--verify-saved` also accepts the older
+  raw-join SRT that exports written before this change contain.
 - Reject a changed `converterVersion` through both the direct verifier and the
   actual binary. Missing dictionaries must still report `converterUnavailable`
   before renderer/version validation. Existing frozen Hans/Latin bytes remain exact.
@@ -333,9 +345,26 @@ allowlisted; routine pauses, parks, restarts and actual worker cancellation do
 not write them as new translation failures. The CLI regression checks worker
 cancellation; saved-course pause/reopen coverage belongs to the app tests.
 
+`--resume-saved` waits only for work that can still move on its own: active or
+claimable transcription, translation and notes. Failed segments (including
+automatic retries that ran out) and candidates awaiting confirmation need a
+person, so the resume no longer waits out its 90-minute deadline on them. When
+any remain, it emits one count-only event and continues to the bounded notes,
+export and verification stages, where the run still fails as
+`processingIncomplete`:
+
+```json
+{"candidates":1,"elapsedSeconds":12.5,"event":"transcription_unresolved","failed":2,"failedWithCandidate":1,"sessionID":"…"}
+```
+
+A segment that is both failed and carries a candidate is counted in `failed`
+and in `candidates`; `failedWithCandidate` is that overlap. The three counts
+accept only nonnegative native Swift integers.
+
 For cleanup, first ensure the CLI has exited, keep the result/required logs,
-and move only its explicit test output/build paths to Trash. Never remove
-real session directories or the installed app as part of a CLI test.
+and leave its explicit test output/build paths inside the ignored `work/`
+directory. Never move test output to the user's Trash, and never remove real
+session directories or the installed app as part of a CLI test.
 
 ## Frozen scoreboard
 

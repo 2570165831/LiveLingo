@@ -24,6 +24,11 @@ import subprocess
 import sys
 from xml.parsers.expat import ExpatError, ParserCreate
 
+if __package__:
+    from .private_files import absolute_path, open_directory, validate_file_path
+else:
+    from private_files import absolute_path, open_directory, validate_file_path
+
 
 class PrivacyError(ValueError):
     """A fixed reason code; never include file contents or local paths."""
@@ -663,17 +668,17 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
 
 def copy_distribution_tree(source, destination, *, clone_files=False):
     """Only write a new disjoint tree; inputs and signed packages stay untouched."""
-    source, destination = Path(source), Path(destination)
+    try:
+        source, destination = absolute_path(source), validate_file_path(destination)
+        with open_directory(source):
+            pass
+    except (OSError, ValueError):
+        raise PrivacyError("symlink-or-inaccessible-package-path") from None
     if destination.exists() or destination.is_symlink():
         raise PrivacyError("destination-already-exists")
-    source_real, destination_real = source.resolve(), destination.resolve()
+    source_real, destination_real = source, destination
     if source_real == destination_real or source_real in destination_real.parents or destination_real in source_real.parents:
         raise PrivacyError("overlapping-package-trees")
-    # Reject destination symlink ancestors before creating anything.
-    if any(p.is_symlink() for p in [destination.parent, *destination.parent.parents]):
-        raise PrivacyError("symlink-destination-parent")
-    counts = inspect_tree(source, omit_private=True, public_copy=True)
-
     def copy_file(src, dst):
         src, dst = Path(src), Path(dst)
         if src.name == "runtime-manifest.json":
@@ -687,8 +692,20 @@ def copy_distribution_tree(source, destination, *, clone_files=False):
             shutil.copy2(src, dst)
         return str(dst)
 
-    shutil.copytree(source, destination, symlinks=True, copy_function=copy_file,
-                    ignore=lambda directory, names: [name for name in names if excluded(name)])
+    with open_directory(source) as source_bound:
+        counts = inspect_tree(source, omit_private=True, public_copy=True)
+        source_bound.require_bound()
+        # Rebind after validation, then reserve only beneath a held parent.
+        # A replaced/symlinked output parent must not redirect the copy.
+        with open_directory(destination.parent, create=True) as parent:
+            with parent.create_directory(destination.name) as reserved:
+                source_bound.require_bound()
+                reserved.require_bound()
+                shutil.copytree(source, destination, symlinks=True, copy_function=copy_file,
+                                dirs_exist_ok=True,
+                                ignore=lambda directory, names: [name for name in names if excluded(name)])
+                reserved.require_bound()
+                source_bound.require_bound()
     inspect_tree(destination)
     return counts
 

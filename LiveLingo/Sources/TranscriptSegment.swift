@@ -62,6 +62,11 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         }
     }
 
+    /// Largest caption time a course may store (about 31.7 years). Real
+    /// times are session-relative; anything above this is corrupt data, and
+    /// the bound keeps seconds and milliseconds far inside `Int`.
+    static let maximumTimestamp: TimeInterval = 1_000_000_000
+
     let id: UUID
     let sessionID: UUID?
     var inputRevision: Int
@@ -266,7 +271,8 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         inputRevision = try values.decodeIfPresent(Int.self, forKey: .inputRevision) ?? 0
         startTime = try values.decode(TimeInterval.self, forKey: .startTime)
         endTime = try values.decode(TimeInterval.self, forKey: .endTime)
-        guard startTime.isFinite, endTime.isFinite, startTime >= 0, endTime >= startTime, inputRevision >= 0 else {
+        guard startTime.isFinite, endTime.isFinite, startTime >= 0, endTime >= startTime,
+              endTime <= Self.maximumTimestamp, inputRevision >= 0 else {
             throw DecodingError.dataCorruptedError(forKey: .startTime, in: values,
                                                    debugDescription: "Invalid transcript time range or revision")
         }
@@ -368,5 +374,27 @@ enum AppPhase: Equatable {
         default:
             return false
         }
+    }
+}
+
+/// Converts caption times to whole display units without trapping. Each
+/// caller keeps its existing truncation or rounding; NaN and negative values
+/// become 0 and anything above the stored-time bound is clamped to it.
+enum TimestampClock {
+    static func truncatedSeconds(_ interval: TimeInterval) -> Int {
+        clamped(interval, limit: TranscriptSegment.maximumTimestamp)
+    }
+
+    static func roundedSeconds(_ interval: TimeInterval) -> Int {
+        clamped(interval.rounded(), limit: TranscriptSegment.maximumTimestamp)
+    }
+
+    static func roundedMilliseconds(_ interval: TimeInterval) -> Int {
+        clamped((interval * 1_000).rounded(), limit: TranscriptSegment.maximumTimestamp * 1_000)
+    }
+
+    private static func clamped(_ value: Double, limit: Double) -> Int {
+        guard value > 0 else { return 0 }
+        return Int(min(value, limit))
     }
 }

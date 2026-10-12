@@ -587,6 +587,9 @@ final class AppModel: ObservableObject {
         set {
             let oldValue = captionStream.volatileEnglish
             captionStream.volatileEnglish = newValue
+            // Only a timed preview event knows its range; it sets it right after.
+            volatileRangeStart = nil
+            volatileRangeEnd = nil
             // Preserve source identity, stale-result clearing and wake-up semantics.
             if newValue != oldValue { markPreviewSourceChanged() }
             if oldValue.isEmpty || newValue.isEmpty || !newValue.hasPrefix(oldValue) {
@@ -594,6 +597,22 @@ final class AppModel: ObservableObject {
             }
             previewWake?.signal()
         }
+    }
+    /// Shown preview interval on the session-audio timeline; nil when unknown.
+    private var volatileRangeStart: TimeInterval?
+    private var volatileRangeEnd: TimeInterval?
+    /// A silent chunk may clear only a preview entirely within its own range.
+    /// Unknown ranges and previews extending into another chunk are retained.
+    private func emptyPreviewOwnsCurrentRange(start: TimeInterval, end: TimeInterval) -> Bool {
+        guard start.isFinite, end.isFinite, start >= 0, end > start,
+              let previewStart = volatileRangeStart, let previewEnd = volatileRangeEnd else { return false }
+        return start <= previewStart && previewEnd <= end
+    }
+    /// A final that ends well before the shown preview belongs to an earlier
+    /// chunk; it must not clear speech the preview has already moved on to.
+    private func previewOutlivesFinal(endingAt finalEnd: TimeInterval) -> Bool {
+        guard let previewEnd = volatileRangeEnd, finalEnd > 0 else { return false }
+        return previewEnd > finalEnd + 0.25
     }
     /// On by default for new preferences. An explicit prior choice is retained.
     @Published var previewTranslationEnabled: Bool {
@@ -901,7 +920,7 @@ final class AppModel: ObservableObject {
             return ClassroomFixedText.noCompletedBatch.text(targetCode: targetCode)
         }
         func stamp(_ value: TimeInterval) -> String {
-            let seconds = max(0, Int(value))
+            let seconds = TimestampClock.truncatedSeconds(value)
             return String(format: "%02d:%02d", seconds / 60, seconds % 60)
         }
         return ClassroomFixedText.latestCompletedRange.format(args: [stamp(start), stamp(end)], targetCode: targetCode)
@@ -943,6 +962,8 @@ final class AppModel: ObservableObject {
     @Published var outputDirectory: URL?
     @Published private(set) var recoverableRecordings: [SessionWorkspace.RecordingRecovery] = []
     private var recordingRecoveryDirectory: URL?
+    /// Bookmark grants opened by the latest recovery; released on the next one.
+    private var recoveredFolderGrants: [SessionWorkspace.ScopedFolderAccess] = []
     @Published var selectedMode: ModelMode {
         didSet {
             guard selectedMode != oldValue else { return }
@@ -1023,6 +1044,9 @@ final class AppModel: ObservableObject {
     private var releasedOutputLanguage: (String) -> OutputLanguage? = OutputLanguage.releasedLanguage
     private var translationWorkerID: UUID?
     private var translationQueue: [UUID] = []
+    // Runtime proof of an untouched first delivery. Restored pending source
+    // work needs separate durable provenance; edit-back revokes permission.
+    private var initialSourceRevisionInputs: [UUID: TranscriptSegment] = [:]
     private var pendingCaptionRepairs: [DeferredCaptionRepair] = []
     private var hasPendingTranslationWork: Bool { !translationQueue.isEmpty || !pendingCaptionRepairs.isEmpty }
     private var translationEnqueuedAt: [UUID: TimeInterval] = [:]
@@ -1070,6 +1094,9 @@ final class AppModel: ObservableObject {
     private var generation = 0
     private var sessionID = UUID()
     private var sessionSnapshot: SessionSnapshot?
+    /// Set once when live capture starts; a live-only course has no archive
+    /// until it is converted, so this carries the start into it.
+    private var currentCaptureStart: SessionCaptureStart?
     private var sessionSaver: SessionSaveCoordinator?
     private var finalizationOwner: UUID?
     private var finalizationInProgress = false
@@ -1353,7 +1380,18 @@ final class AppModel: ObservableObject {
 
     var errorMessage: String? {
         if case .failed(let message) = phase { return message }
-        return (isRecording ? captureHealthNotice : nil) ?? sessionNotice ?? archiveError ?? setupError
+        return (isRecording ? captureHealthNotice : nil) ?? unresolvedSaveError ?? sessionNotice ?? archiveError ?? setupError
+    }
+
+    /// A save failure that is still unresolved outranks an informational notice,
+    /// so an earlier "saved" notice cannot hide it. Other archive errors keep
+    /// their lower rank; each of these clears itself on the next successful save.
+    private var unresolvedSaveError: String? {
+        guard let archiveError else { return nil }
+        if archiveError == archiveWriteError { return archiveError }
+        if let processing = sessionSnapshot?.processing, processing.lastErrorSource == .storage,
+           processing.lastError == archiveError { return archiveError }
+        return nil
     }
 
     func dismissSessionNotice() {
@@ -1377,8 +1415,24 @@ final class AppModel: ObservableObject {
         startRuntimeReadinessMonitor()
     }
 
+    /// Shown when the notes refresh is requested while saved processing is
+    /// parked; scheduling refuses that request, so the click must say why.
+    static let notesPausedStatus = "译文与笔记处理已暂停 · 继续处理后可更新笔记"
+    /// A legacy course cannot resume until its notes are explicitly rebuilt.
+    static let notesLegacyStatus = "旧课程笔记缺少来源批次 · 在“录音处理”中重建后可更新"
+
     func requestSummaryRefresh() {
         guard !segments.isEmpty else { return }
+        // Checked before the translation-worker branch: during a park the
+        // worker can still be set, and no refresh may be queued past a pause.
+        if case .saved = phase, legacyProvenanceUnavailable {
+            summaryStatus = Self.notesLegacyStatus
+            return
+        }
+        if processingPaused {
+            summaryStatus = Self.notesPausedStatus
+            return
+        }
         summaryRetryNotBefore = nil
         if translationWorker != nil && !summaryConcurrencyAllowed {
             summaryRefreshRequested = true
@@ -1413,12 +1467,34 @@ final class AppModel: ObservableObject {
                         continuation.resume(returning: nil)
                         return
                     }
-                    self.outputDirectory = directory
+                    self.useOutputDirectory(directory)
                     continuation.resume(returning: directory)
                 }
             }
         }
         #endif
+    }
+
+    /// Adopts a folder the user just selected in an open panel. A recovered,
+    /// not yet promoted recording records it with a fresh grant, so a later
+    /// relaunch saves there instead of the folder it could no longer reach.
+    /// Re-choosing the same folder also stores a fresh grant: that is what the
+    /// legacy and unreachable-folder notices ask for.
+    func useOutputDirectory(_ directory: URL) {
+        outputDirectory = directory
+        guard let staging = temporarySessionDirectory,
+              let recovery = recoverableRecordings.first(where: { $0.id == sessionID && $0.needsPromotion }),
+              recovery.directory == staging else { return }
+        var updated = recovery.withOutputRoot(directory)
+        // Never drop an existing grant for this folder when a new one cannot be made.
+        if updated.outputRootBookmark == nil, recovery.outputRoot == directory {
+            updated.outputRootBookmark = recovery.outputRootBookmark
+        }
+        guard updated != recovery else { return }
+        do { try storeRecordingRecovery(updated) }
+        catch {
+            archiveNotice = "保存位置已更换；恢复记录尚未更新：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+        }
     }
 
     func convertCurrentSessionToRecording() async {
@@ -1444,6 +1520,7 @@ final class AppModel: ObservableObject {
             try await flushSessionArchive()
             guard sessionID == identity, generation == epoch else { return }
             let recovery = SessionWorkspace.RecordingRecovery(id: identity, directory: source, outputRoot: directory)
+                .withOutputRoot(directory)
             try storeRecordingRecovery(recovery)
         } catch {
             archiveError = "录音继续保留；转换后的保存或恢复索引尚未确认：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
@@ -1468,17 +1545,57 @@ final class AppModel: ObservableObject {
         else { preferences.set(try SessionArchiveCoding.encode(remaining), forKey: "LiveLingo.pendingRecordingRecovery") }
     }
 
+    /// Sandbox grants from the open panel end with that process, so a
+    /// relaunched recovery reopens the selected folders through their
+    /// app-scoped bookmarks and keeps those grants while the course is open.
     func recoverRecording(_ recovery: SessionWorkspace.RecordingRecovery) async {
         guard !phase.isBusy, !archiveLoading else { return }
+        var record = recovery
+        var grants: [SessionWorkspace.ScopedFolderAccess] = []
+        var notice = "已恢复未完成录音；处理保持暂停，可重试保存到所选目录。"
+        // A promoted course lives in the user's folder; staging stays in the container.
+        if !recovery.needsPromotion, let bookmark = recovery.directoryBookmark {
+            guard let access = try? SessionWorkspace.ScopedFolderAccess(bookmark: bookmark) else {
+                archiveError = "录音恢复失败，原件已保留：课程文件夹已无法访问，请用“打开课程…”重新选择该文件夹。"
+                return
+            }
+            grants.append(access)
+            record.directory = access.url
+            if access.isStale { record.directoryBookmark = SessionWorkspace.securityBookmark(for: access.url) }
+        }
+        var outputRoot: URL? = recovery.outputRoot
+        if let bookmark = recovery.outputRootBookmark {
+            if let access = try? SessionWorkspace.ScopedFolderAccess(bookmark: bookmark) {
+                grants.append(access)
+                record.outputRoot = access.url
+                outputRoot = access.url
+                if access.isStale { record.outputRootBookmark = SessionWorkspace.securityBookmark(for: access.url) }
+            } else {
+                outputRoot = nil
+                notice = "已恢复未完成录音；原保存目录已无法访问，请用“保存位置…”重新选择后再重试保存。"
+            }
+        } else {
+            notice = "已恢复未完成录音；这条恢复记录来自旧版，没有保存目录的访问授权。若保存失败，请用“保存位置…”重新选择后重试。"
+        }
         do {
-            guard try await SessionStore(directory: recovery.directory).loadAsync()?.sessionID == recovery.id else {
+            guard try await SessionStore(directory: record.directory).loadAsync()?.sessionID == recovery.id else {
                 throw SessionStoreError.identityConflict("恢复位置属于另一课程，原件已保留")
             }
-            try await openSavedSession(recovery.directory, allowAutomaticProcessing: false)
-            outputDirectory = recovery.outputRoot
-            temporarySessionDirectory = recovery.needsPromotion ? recovery.directory : nil
-            archiveNotice = "已恢复未完成录音；处理保持暂停，可重试保存到所选目录。"
-        } catch { archiveError = "录音恢复失败，原件已保留：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
+            try await openSavedSession(record.directory, allowAutomaticProcessing: false)
+            recoveredFolderGrants = grants
+            outputDirectory = outputRoot
+            temporarySessionDirectory = record.needsPromotion ? record.directory : nil
+            archiveNotice = notice
+        } catch {
+            let hint = !recovery.needsPromotion && recovery.directoryBookmark == nil
+                ? "；如课程文件夹无法访问，请用“打开课程…”重新选择" : ""
+            archiveError = "录音恢复失败，原件已保留：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))\(hint)"
+            return
+        }
+        // Persist moved locations and refreshed stale bookmarks.
+        guard record != recovery else { return }
+        do { try storeRecordingRecovery(record) }
+        catch { archiveNotice = notice + "恢复记录尚未更新：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
     }
 
     func start() {
@@ -1753,7 +1870,8 @@ final class AppModel: ObservableObject {
             includesTranscript: exportIncludesTranscript && !transcript.isEmpty,
             target: outputLanguage,
             notesAreLegacyRendered: exportScope == .wholeLesson && summaryIsLegacyRendered,
-            scheduleEvidence: notesScheduleEvidence
+            scheduleEvidence: notesScheduleEvidence,
+            classStart: sessionSnapshot?.captureStart ?? currentCaptureStart
         )
     }
 
@@ -2036,6 +2154,7 @@ final class AppModel: ObservableObject {
         translatingSegmentID = nil
         clearTranslationPreview()
         segments = []
+        initialSourceRevisionInputs = [:]
         resetLearningNotes()
         lectureSummary = ""
         latestSummaryUpdate = ""
@@ -2107,6 +2226,7 @@ final class AppModel: ObservableObject {
             audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)],
             transcriptionJournalPath: DurableTranscriptionJournal.directoryName + "/work.jsonl",
             targetLocale: outputLanguage.persistedLocale)
+        if restored == nil { snapshot.captureStart = currentCaptureStart }
         snapshot.generation = generation
         sessionSnapshot = snapshot
         let saver = SessionSaveCoordinator(directory: directory, sessionID: sessionID, restored: restored,
@@ -2410,6 +2530,7 @@ final class AppModel: ObservableObject {
                         }
                     }
                 transcriptionProcessing = pipeline.transcriptionState()
+                restoreInitialSourceRevisionInputs()
             } catch {
                 archiveError = "课程正文已打开；补转队列恢复失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             }
@@ -2479,6 +2600,16 @@ final class AppModel: ObservableObject {
             translationHints.removeValue(forKey: next.id)
         }
         next.inputRevision = nextRevision
+        if previous.english != next.english || previous.sourceLanguage != next.sourceLanguage {
+            initialSourceRevisionInputs.removeValue(forKey: previous.id)
+        } else if var initial = initialSourceRevisionInputs[previous.id],
+                  initial.inputRevision == previous.inputRevision,
+                  initial.english == previous.english, initial.sourceLanguage == previous.sourceLanguage {
+            // Adjacent translation repairs revise the caption version, while
+            // leaving the original first-pass source permission intact.
+            initial.inputRevision = nextRevision
+            initialSourceRevisionInputs[previous.id] = initial
+        }
         let retained = learningNotebook.batches.filter { $0.ids.contains(previous.id) }
         let change = SessionInputRevision(fromRevision: nextRevision - 1, toRevision: nextRevision,
             previousSegment: previous, replacementSegment: next, retainedBatches: retained, reason: reason,
@@ -2527,6 +2658,7 @@ final class AppModel: ObservableObject {
         stopCandidatePlayback()
         sessionSaver = nil
         sessionSnapshot = nil
+        currentCaptureStart = nil
         sessionID = UUID()
         finalizationOwner = nil
         processingTask?.cancel()
@@ -2546,6 +2678,7 @@ final class AppModel: ObservableObject {
         translatingSegmentID = nil
         clearTranslationPreview()
         segments = []
+        initialSourceRevisionInputs = [:]
         lectureSummary = ""
         latestSummaryUpdate = ""
         summaryCycleIDs = nil
@@ -2625,7 +2758,9 @@ final class AppModel: ObservableObject {
             try validateLifecycleCompletion(revision)
             guard sessionID == startingSession, generation == startingEpoch, finalizationOwner == nil else { return }
 
-            let sessionName = Self.sessionFolderName()
+            let captureStart = SessionCaptureStart.now()
+            currentCaptureStart = captureStart
+            let sessionName = Self.sessionFolderName(startedAt: captureStart)
             let recordingURL: URL
             if storageMode.usesTemporaryRecording {
                 let temporaryDirectory = try SessionWorkspace.makeRecoverableTemporarySessionDirectory()
@@ -2987,6 +3122,7 @@ final class AppModel: ObservableObject {
                             self.consume(event)
                         }
                     }
+                    restoreInitialSourceRevisionInputs()
                 }
                 guard sessionID == identity, generation == epoch else { return }
                 if let retryID { try pipeline.retryTranscription(id: retryID) }
@@ -2997,6 +3133,10 @@ final class AppModel: ObservableObject {
                     resetCaptionRecoveryRound()
                 }
                 processingPaused = false
+                if summaryStatus == Self.notesPausedStatus || summaryStatus == Self.notesLegacyStatus {
+                    summaryStatus = lastSummarizedSegmentCount > 0
+                        ? "已整理 \(lastSummarizedSegmentCount) 段 · 本机生成" : "等待课堂内容"
+                }
                 restorePendingCaptionWork()
                 drainTranslationQueue()
                 startSavedDrain()
@@ -3108,6 +3248,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Restore proof while the queue is still parked, before source work can
+    /// finish and change its comparison text. Legacy records cannot qualify.
+    private func restoreInitialSourceRevisionInputs() {
+        guard let snapshot = sessionSnapshot, snapshot.sessionID == sessionID,
+              pipeline.transcriptionState()?.sessionID == sessionID else { return }
+        for record in pipeline.transcriptionWork() {
+            let pendingSourceProbe = record.sourceProbeInput != nil && record.sourceProbeFinished != true
+            guard record.sessionID == sessionID, record.attempt == .initial,
+                  pendingSourceProbe || record.hasProvisionalInitialEnglish,
+                  record.sourceRevisionAllowed == true, record.textLanguage == nil,
+                  let archived = snapshot.segments.first(where: { $0.id == record.id }),
+                  let current = segments.first(where: { $0.id == record.id }),
+                  archived.sessionID == sessionID, current.sessionID == sessionID,
+                  archived.sourceLanguage == nil, current.sourceLanguage == nil,
+                  !current.english.isEmpty, record.text == current.english,
+                  archived.english == current.english, archived.inputRevision == current.inputRevision,
+                  archived.startTime == record.start, archived.endTime == record.end,
+                  current.startTime == record.start, current.endTime == record.end,
+                  !snapshot.revisionHistory.contains(where: {
+                      $0.previousSegment.id == record.id &&
+                          ($0.previousSegment.english != $0.replacementSegment.english
+                              || $0.previousSegment.sourceLanguage != $0.replacementSegment.sourceLanguage)
+                  }) else { continue }
+            initialSourceRevisionInputs[record.id] = current
+        }
+    }
+
+    /// Saved source edits revoke provisional replacement even after edit-back.
     /// An edited candidate keeps the archived source language. The queue's
     /// unedited-candidate reconciliation requires the candidate language, so
     /// retire explicit edits using its existing text and dismissal operations.
@@ -3122,6 +3290,37 @@ final class AppModel: ObservableObject {
             journal = try DurableTranscriptionJournal(sessionDirectory: directory, sessionID: snapshot.sessionID)
         } else { journal = nil }
         for record in journal?.records ?? pipeline.transcriptionWork() {
+            // Ordinary body revisions have no candidate-consent marker. Only
+            // an acknowledged snapshot may update the queue comparison text;
+            // an automatic language change already belongs to its source commit.
+            let changes = snapshot.revisionHistory.filter { $0.previousSegment.id == record.id }
+            if record.sessionID == snapshot.sessionID, let change = changes.last,
+               change.transcriptionCandidateText == nil,
+               let body = snapshot.segments.first(where: { $0.id == record.id }),
+               body.inputRevision == change.toRevision,
+               body.english == change.replacementSegment.english,
+               body.sourceLanguage == change.replacementSegment.sourceLanguage,
+               record.textLanguage == body.sourceLanguage,
+               // The saver may coalesce several edits, followed by translation
+               // repairs. Find the journal's source anchor across that history;
+               // the final revision still has to describe the saved body.
+               changes.contains(where: {
+                   $0.transcriptionCandidateText == nil
+                       && $0.previousSegment.english != $0.replacementSegment.english
+                       && $0.previousSegment.sourceLanguage == $0.replacementSegment.sourceLanguage
+                       && $0.previousSegment.sourceLanguage == record.textLanguage
+                       && (record.text == $0.previousSegment.english || record.text == $0.replacementSegment.english)
+               }),
+               record.text != body.english || record.sourceRevisionAllowed != false {
+                if let journal {
+                    var retained = record
+                    retained.text = body.english
+                    retained.sourceRevisionAllowed = false
+                    try journal.put(retained)
+                } else {
+                    try pipeline.retainExistingTranscript(id: record.id, text: body.english)
+                }
+            }
             guard record.sessionID == snapshot.sessionID, let candidate = record.candidateText,
                   let change = snapshot.revisionHistory.last(where: {
                       $0.previousSegment.id == record.id && $0.transcriptionCandidateText == candidate
@@ -3243,9 +3442,16 @@ final class AppModel: ObservableObject {
             lastAudioLevelAt = Date()
             waveformSamples.removeFirst()
             waveformSamples.append(level)
-        case let .volatile(text, _, _, observedAt):
+        case let .volatile(text, start, end, observedAt):
             tracePreviewReceiveHop(ProcessInfo.processInfo.systemUptime - observedAt)
+            if text.isEmpty {
+                guard emptyPreviewOwnsCurrentRange(start: start, end: end) else { return }
+            }
             volatileEnglish = text
+            if !text.isEmpty, start.isFinite, end.isFinite, start >= 0, end > start {
+                volatileRangeStart = start
+                volatileRangeEnd = end
+            }
             // Preview updates do not use the translation model. Let a summary
             // finish unless caption backlog or memory pressure requires yielding.
         case let .final(text, start, end, hints, language):
@@ -3253,7 +3459,34 @@ final class AppModel: ObservableObject {
                 endTime: end, english: text, sessionID: sessionID, sourceLanguage: language), hints: hints)
         case .identifiedFinal(let result):
             guard result.sessionID == sessionID else { return }
-            if let existing = segments.first(where: { $0.id == result.id }) {
+            if let index = segments.firstIndex(where: { $0.id == result.id }) {
+                let existing = segments[index]
+                if let initialText = result.replacingInitialText, !result.isRepair,
+                   SpokenLanguage.nonEnglishCode(result.language) != nil,
+                   let initial = initialSourceRevisionInputs[result.id],
+                   initial.sessionID == result.sessionID, existing.sessionID == result.sessionID,
+                   initial.startTime == result.start, initial.endTime == result.end,
+                   existing.startTime == result.start, existing.endTime == result.end,
+                   initial.english == initialText, existing.english == initialText,
+                   initial.sourceLanguage == nil, existing.sourceLanguage == nil,
+                   initial.inputRevision == existing.inputRevision {
+                    let replacement = TranscriptSegment(id: existing.id, startTime: existing.startTime,
+                        endTime: existing.endTime, english: result.text, sessionID: existing.sessionID,
+                        sourceLanguage: result.language)
+                    translationHints.removeValue(forKey: existing.id)
+                    replaceExistingSegment(at: index, with: replacement, reason: "首轮原语确认修订")
+                    // This older range can finish while the next range is
+                    // already producing a live preview. It does not own that preview.
+                    markCaptionActivity()
+                    updateReviewAvailability()
+                    yieldSummaryToCaptions()
+                    if !processingPaused { drainTranslationQueue() }
+                    if segments[index].hasUsableTranslation {
+                        liveChinese = segments[index].chinese
+                        scheduleSummaryRefresh(force: summaryRefreshRequested)
+                    }
+                    return
+                }
                 // A repeated delivery from the same disk range is idempotent.
                 // A conflicting result stays a candidate, never a silent edit.
                 if existing.english != result.text || existing.sourceLanguage != result.language {
@@ -3266,9 +3499,13 @@ final class AppModel: ObservableObject {
                 }
                 return
             }
-            appendConfirmedCaption(TranscriptSegment(id: result.id, startTime: result.start,
+            let initial = TranscriptSegment(id: result.id, startTime: result.start,
                 endTime: result.end, english: result.text, sessionID: result.sessionID,
-                inputRevision: sessionSnapshot?.inputRevision ?? 0, sourceLanguage: result.language), hints: result.hints)
+                inputRevision: sessionSnapshot?.inputRevision ?? 0, sourceLanguage: result.language)
+            if !result.isRepair, result.replacingInitialText == nil, result.language == nil {
+                initialSourceRevisionInputs[result.id] = initial
+            }
+            appendConfirmedCaption(initial, hints: result.hints)
         case .processing(let state):
             guard state.sessionID == sessionID else { return }
             transcriptionProcessing = state
@@ -3347,7 +3584,7 @@ final class AppModel: ObservableObject {
             segment.updateCaptionAnnotation(targetCode: target.rawValue,
                 formulaUncertain: (segment.sourceLanguage == nil || segment.sourceLanguage == "en") && FormulaASRReview.uncertain(segment.english))
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
-            volatileEnglish = ""
+            if !previewOutlivesFinal(endingAt: segment.endTime) { volatileEnglish = "" }
             markCaptionActivity()
             segments.append(segment)
             segments.sort { $0.startTime == $1.startTime ? $0.id.uuidString < $1.id.uuidString : $0.startTime < $1.startTime }
@@ -3416,9 +3653,11 @@ final class AppModel: ObservableObject {
     func cancelTypedTranslation() { manualTranslationTask?.cancel() }
 
     #if DEBUG
-    func beginLiveCourseForTesting(directory: URL, outputRoot: URL) async throws {
+    func beginLiveCourseForTesting(directory: URL, outputRoot: URL,
+                                   captureStart: SessionCaptureStart? = nil) async throws {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         resetSessionStateForNewRun()
+        currentCaptureStart = captureStart
         sessionDirectory = directory
         temporarySessionDirectory = directory
         outputDirectory = outputRoot
@@ -3558,7 +3797,14 @@ final class AppModel: ObservableObject {
     }
     func receiveLivePreviewForTesting(_ text: String, chinese: String? = nil) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
-        consume(.volatile(text: text, start: 0, end: 0,
+        // Untimed presentation fixtures replace state directly; they are not
+        // silent audio events with an invented zero-length ownership range.
+        volatileEnglish = text
+        if let chinese { previewChinese = chinese }
+    }
+    func receiveLivePreviewForTesting(_ text: String, start: TimeInterval, end: TimeInterval, chinese: String? = nil) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        consume(.volatile(text: text, start: start, end: end,
                           observedAt: ProcessInfo.processInfo.systemUptime))
         if let chinese { previewChinese = chinese }
     }
@@ -3566,6 +3812,11 @@ final class AppModel: ObservableObject {
     func receiveTranscriptionNoticeForTesting(_ event: SpeechPipeline.Event) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         consume(event)
+    }
+    /// Runs the bound saver's real failure callback, as a failed autosave would.
+    func failBoundAutosaveForTesting(_ error: Error) {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        sessionSaver?.onFailure?(error)
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
     var translationQueueForTesting: [UUID] { translationQueue }
@@ -4910,7 +5161,8 @@ final class AppModel: ObservableObject {
             try await waitForLifecycle { await summary?.value }
             try await flushSessionArchive()
             try validateLifecycleCompletion(revision)
-            let preferredName = Self.sessionFolderName()
+            // Name the promoted folder for the capture start, not the stop time.
+            let preferredName = Self.sessionFolderName(startedAt: sessionSnapshot?.captureStart ?? currentCaptureStart)
             let identity = sessionID, epoch = generation
             let migration = try await waitForLifecycle { [self] in
                 try await noteReviewQueue.withCourseWritersPaused(sessionID: identity,
@@ -4928,10 +5180,8 @@ final class AppModel: ObservableObject {
                     }
                     try validateLifecycleCompletion(revision)
                     guard let snapshot else { throw SessionStoreError.missingSnapshot }
-                    if var recovery = recoverableRecordings.first(where: { $0.id == identity }) {
-                        recovery.directory = copied.destinationDirectory
-                        recovery.needsPromotion = false
-                        try storeRecordingRecovery(recovery)
+                    if let recovery = recoverableRecordings.first(where: { $0.id == identity }) {
+                        try storeRecordingRecovery(recovery.promoted(to: copied.destinationDirectory))
                         try validateLifecycleCompletion(revision)
                     }
                     try noteReviewQueue.relocatePausedCourse(sessionID: identity,
@@ -5004,11 +5254,14 @@ final class AppModel: ObservableObject {
         "⚠️ 录音已停止，**后面的内容不会再录**：\(message) 已自动保存当前录音和 \(segmentCount) 段字幕；要继续录制请重新点开始（会新建一次会话）。"
     }
 
-    private static func sessionFolderName() -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        return "LiveLingo \(formatter.string(from: Date()))"
+    nonisolated static func sessionFolderName(startedAt start: SessionCaptureStart? = nil) -> String {
+        guard let start else {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+            return "LiveLingo \(formatter.string(from: Date()))"
+        }
+        return "LiveLingo \(start.formatted("yyyy-MM-dd HH.mm.ss"))"
     }
 
     private static let modelModeDefaultsKey = "LiveLingo.modelMode"
@@ -5890,6 +6143,13 @@ extension AppModel {
                 guard sessionID == identity, generation == epoch else {
                     throw QwenRuntimeError.requestFailed("CLI resume changed the session identity")
                 }
+                if let state = transcriptionProcessing, state.failedCount + state.candidateCount > 0 {
+                    // Counts only. A segment can be both failed and awaiting a
+                    // candidate; the overlap says how many are in both counts.
+                    report("transcription_unresolved", ["sessionID": identity.uuidString,
+                        "failed": state.failedCount, "candidates": state.candidateCount,
+                        "failedWithCandidate": state.failedWithCandidateCount])
+                }
                 // Same bounded, admission-gated notes completion as a live run,
                 // plus an explicit stall guard: a blocked admission must fail the
                 // run instead of quietly waiting out the whole deadline.
@@ -6022,9 +6282,9 @@ extension AppModel {
     private var cliSavedWorkPending: Bool {
         processingTask != nil || translationWorker != nil || summaryTask != nil
             || hasPendingTranslationWork
-            || (transcriptionProcessing?.pendingCount ?? 0) > 0
-            || (transcriptionProcessing?.activeCount ?? 0) > 0
-            || (transcriptionProcessing?.unresolvedCount ?? 0) > 0
+            // Failed segments and unconfirmed candidates wait for a person, so
+            // the resume must not sit out its deadline on them.
+            || transcriptionProcessing?.hasAutomaticWork == true
     }
 }
 #endif

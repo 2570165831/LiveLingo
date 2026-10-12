@@ -622,6 +622,9 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(model.segments.isEmpty)
+                    .help(model.legacyProvenanceUnavailable ? "旧课程需先在“录音处理”中重建笔记"
+                        : model.savedProcessingIsPaused ? "处理已暂停：在“录音处理”中继续后可更新笔记"
+                        : "立即把新内容整理进笔记")
                     .accessibilityLabel("更新课堂笔记")
                     .accessibilityIdentifier("classroom-refresh-notes")
                 }
@@ -699,6 +702,7 @@ struct ContentView: View {
                     .font(.headline)
                 if let error = model.errorMessage {
                     Text(error)
+                    if let notice = model.sessionNotice, notice != error { Text(notice) }
                     Divider()
                 }
                 if let notice = model.chineseDisplayNotice { Text(notice) }
@@ -760,7 +764,7 @@ struct ContentView: View {
     }
 
     private static func duration(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds))
+        let total = TimestampClock.truncatedSeconds(seconds)
         return String(
             format: "%02d:%02d:%02d",
             total / 3_600,
@@ -2037,16 +2041,20 @@ struct TranscriptCaptionRow: View, Equatable {
     }
 
     private static func clock(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds))
+        let total = TimestampClock.truncatedSeconds(seconds)
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
 }
 
-private struct RecordingElapsedText: View {
+struct RecordingElapsedText: View {
     @ObservedObject var meter: CaptureMeterState
     var body: some View {
-        let seconds = max(0, Int(meter.elapsedSeconds))
-        Text(String(format: "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60))
+        Text(Self.label(meter.elapsedSeconds))
+    }
+
+    nonisolated static func label(_ elapsed: TimeInterval) -> String {
+        let seconds = TimestampClock.truncatedSeconds(elapsed)
+        return String(format: "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
     }
 }
 
@@ -2104,6 +2112,7 @@ struct SummaryMarkdownView: View {
         let lines = self.lines
         let document = language.profile.renderer == .identity || isLegacyRendered
             ? nil : ChineseScriptConverter.RenderText(lines.joined(separator: "\n"))
+        let codeLines = FormulaDisplay.codeBlockLines(lines)
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, _ in
                 switch SummaryMarkdownLine.displayed(lines, at: index, language: language,
@@ -2130,7 +2139,7 @@ struct SummaryMarkdownView: View {
                         }
                 case let .sourceEvidence(label, text, indentation):
                     DisclosureGroup(label) {
-                        Text(markdown: text, bodySize: 15 * scale, baseBodySize: 15)
+                        Text(markdown: text, bodySize: 15 * scale, baseBodySize: 15, codeProtected: codeLines[index])
                             .font(.system(size: 15 * scale))
                             .lineSpacing(5)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2143,14 +2152,14 @@ struct SummaryMarkdownView: View {
                             .fill(Color.secondary)
                             .frame(width: 6, height: 6)
                             .padding(.top, 7)
-                        Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16)
+                        Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16, codeProtected: codeLines[index])
                             .font(.system(size: 16 * scale))
                             .lineSpacing(5)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.leading, CGFloat(indentation) * 14)
                 case let .paragraph(text):
-                    Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16)
+                    Text(markdown: text, bodySize: 16 * scale, baseBodySize: 16, codeProtected: codeLines[index])
                         .font(.system(size: 16 * scale))
                         .lineSpacing(5)
                         .foregroundStyle(.primary)
@@ -2219,15 +2228,15 @@ struct ReviewChangeView: View {
 
 private extension Text {
     @MainActor
-    init(markdown source: String, bodySize: Double = 18, baseBodySize: Double = 18) {
+    init(markdown source: String, bodySize: Double = 18, baseBodySize: Double = 18, codeProtected: Bool = false) {
         #if DEBUG
         SummaryRenderingDiagnostics.record(\.inlineParses)
         #endif
-        self = FormulaDisplay.runs(source).reduce(Text("")) { result, run in
+        self = FormulaDisplay.runs(source, codeProtected: codeProtected).reduce(Text("")) { result, run in
             let part: Text
             if run.script != 0 {
-                part = Text(verbatim: run.text).font(.system(size: ReadingTypography.scriptSize(bodySize: bodySize, baseBodySize: baseBodySize)))
-                    .baselineOffset(ReadingTypography.scriptOffset(script: run.script, bodySize: bodySize, baseBodySize: baseBodySize))
+                part = Text(verbatim: run.text).font(.system(size: ReadingTypography.scriptSize(bodySize: bodySize, baseBodySize: baseBodySize, nested: run.nested)))
+                    .baselineOffset(ReadingTypography.scriptOffset(script: run.script, nested: run.nested, bodySize: bodySize, baseBodySize: baseBodySize))
             } else if run.math {
                 part = Text(verbatim: run.text)
             } else if let attributed = try? AttributedString(markdown: run.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {

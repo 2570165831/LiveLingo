@@ -82,4 +82,54 @@ final class TargetExportTests: XCTestCase {
         XCTAssertEqual(try SessionDirectoryIdentity.resolve(directory: root), before)
         XCTAssertEqual(SessionExporter.savedSummaryURL(in: root), summary)
     }
+
+    // SRT ends a cue at a blank line, so text with internal blank lines must not
+    // split one caption into a numbered cue plus an orphan block.
+    func testSRTCueTextKeepsEveryCaptionInsideItsNumberedCue() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SRTBlankLines-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let segments = [
+            TranscriptSegment(startTime: 0, endTime: 1, english: "Heat moves.", chinese: "第一句解释热传递。\n\n第二句讨论温度。"),
+            TranscriptSegment(startTime: 1, endTime: 2, english: "\nLine A.\r\n \r\nLine B.\n",
+                chinese: "\n甲。\u{2028}\u{2028}乙。\r\n\t\r丙。\r\n"),
+            TranscriptSegment(startTime: 2, endTime: 3, english: "Cold air.", chinese: "冷空气。")
+        ]
+        try SessionExporter.export(segments: segments, sessionDirectory: root, createdAt: Date(timeIntervalSince1970: 0))
+        let srt = try String(contentsOf: root.appendingPathComponent("bilingual.srt"), encoding: .utf8)
+        XCTAssertEqual(srt, "1\n00:00:00,000 --> 00:00:01,000\nHeat moves.\n第一句解释热传递。\n第二句讨论温度。\n\n"
+            + "2\n00:00:01,000 --> 00:00:02,000\nLine A.\nLine B.\n甲。\n乙。\n丙。\n\n"
+            + "3\n00:00:02,000 --> 00:00:03,000\nCold air.\n冷空气。\n")
+        let blocks = srt.dropLast().components(separatedBy: "\n\n")
+        XCTAssertEqual(blocks.count, segments.count)
+        for (offset, block) in blocks.enumerated() {
+            let lines = block.components(separatedBy: "\n")
+            XCTAssertEqual(lines.first, String(offset + 1))
+            XCTAssertTrue(lines.count > 2 && lines[1].contains(" --> "))
+        }
+        for (index, segment) in segments.enumerated() {
+            XCTAssertEqual(SessionExporter.srtCue(segment, index: index), blocks[index])
+            XCTAssertEqual(SessionExporter.srtCue(segment, index: index, outputLanguage: .simplifiedChinese), blocks[index])
+        }
+        // Only the SRT exit changes; saved text and the other formats keep raw text.
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("transcript-en.txt"), encoding: .utf8),
+            segments.map(\.english).joined(separator: "\n") + "\n")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("transcript-zh-Hans.txt"), encoding: .utf8),
+            segments.map(\.chinese).joined(separator: "\n") + "\n")
+        let rows = try String(contentsOf: root.appendingPathComponent("bilingual.jsonl"), encoding: .utf8)
+            .split(separator: "\n").map { try JSONDecoder().decode(TranscriptSegment.self, from: Data($0.utf8)) }
+        XCTAssertEqual(rows.map(\.english), segments.map(\.english))
+        XCTAssertEqual(rows.map(\.chinese), segments.map(\.chinese))
+    }
+
+    func testSourceOnlySRTCueDropsBlankLinesAndKeepsSingleBreaks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SRTSourceOnly-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let segment = TranscriptSegment(startTime: 0, endTime: 1, english: "Air is\n\n  \nclear.\nWater is wet.")
+        try SessionExporter.export(segments: [segment], sessionDirectory: root,
+            createdAt: Date(timeIntervalSince1970: 0), target: .english)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("bilingual.srt"), encoding: .utf8),
+            "1\n00:00:00,000 --> 00:00:01,000\nAir is\nclear.\nWater is wet.\n")
+        XCTAssertEqual(SessionExporter.srtCue(segment, index: 0, outputLanguage: .english),
+            "1\n00:00:00,000 --> 00:00:01,000\nAir is\nclear.\nWater is wet.")
+    }
 }

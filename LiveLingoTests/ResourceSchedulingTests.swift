@@ -80,6 +80,61 @@ private actor ASRTransportFixture {
 
 @MainActor
 final class ResourceSchedulingTests: XCTestCase {
+    func testLightweightProbeTransportHasNoBodyAndConfirmedDecodeBindsLanguage() async throws {
+        let audio = try file()
+        let coordinator = ASRRequestCoordinator(transport: { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+            let mode = query.first { $0.name == "language" }?.value
+            var payload: [String: Any] = ["request_id": request.value(forHTTPHeaderField: "X-LiveLingo-Request-ID")!,
+                "model": "1.7b", "language_mode": mode!, "detected_label": "Spanish",
+                "language_probability": 0.99, "english_probability": 0.001, "policy": 1]
+            if mode == "auto" {
+                XCTAssertEqual(query.first { $0.name == "confirmed_language" }?.value, "es")
+                payload.merge(["text": "a b c d", "language": "es", "decode": "detected",
+                               "generated_tokens": 4, "truncated": false]) { _, new in new }
+            } else {
+                XCTAssertEqual(mode, "probe")
+                XCTAssertEqual(request.timeoutInterval, 130, "Wait for the server's matching queue or inference deadline receipt")
+                XCTAssertNil(query.first { $0.name == "confirmed_language" })
+            }
+            return .init(data: try JSONSerialization.data(withJSONObject: payload), status: 200)
+        }, observeExit: { _ in false })
+        let probe = try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+            modelKey: "1.7b", language: .probe, requestID: "head")
+        XCTAssertEqual(probe.text, ""); XCTAssertEqual(probe.languageMode, .probe)
+        XCTAssertEqual(probe.detectedLabel, "Spanish"); XCTAssertEqual(probe.generatedTokens, 0)
+        let source = try await ASRRequestContext.$confirmedSourceLanguage.withValue("es") {
+            try await coordinator.transcribe(endpoint: endpoint, audioURL: audio,
+                modelKey: "1.7b", language: .auto, requestID: "body")
+        }
+        XCTAssertEqual(source.language, "es")
+    }
+
+    func testProbeResponseRejectsBodyWrongModeAndIncompleteOrInvalidProbabilities() throws {
+        let valid: [String: Any] = ["language_mode": "probe", "detected_label": "Spanish",
+            "language_probability": 0.99, "english_probability": 0.001, "policy": 1]
+        for (key, value) in [("language_mode", "auto" as Any), ("policy", 2),
+                             ("detected_label", "xx"), ("language_probability", NSNull()),
+                             ("english_probability", 1.1), ("english_probability", true)] {
+            var invalid = valid; invalid[key] = value
+            XCTAssertThrowsError(try ASRTranscription.validated(text: "", data: JSONSerialization.data(withJSONObject: invalid),
+                requestedLanguage: .probe), key)
+        }
+        XCTAssertThrowsError(try ASRTranscription.validated(text: "unexpected body",
+            data: JSONSerialization.data(withJSONObject: valid), requestedLanguage: .probe))
+    }
+
+    func testInvalidParakeetConfidenceIsExplicitAndOldRepliesRemainCompatible() throws {
+        let invalid = try ASRTranscription.validated(text: "The blue cart waits by the gate.",
+            data: JSONSerialization.data(withJSONObject: ["pk_mean_probability": NSNull(),
+                "pk_min_probability": NSNull(), "pk_confidence_valid": false]), requestedLanguage: .english)
+        XCTAssertEqual(invalid.parakeetConfidenceValid, false)
+        XCTAssertNil(invalid.parakeetMeanProbability)
+        let legacy = try ASRTranscription.validated(text: invalid.text,
+            data: JSONSerialization.data(withJSONObject: ["text": invalid.text]), requestedLanguage: .english)
+        XCTAssertNil(legacy.parakeetConfidenceValid)
+    }
+
     func testEnglishRequestURLIsByteIdenticalAndAutoIsExplicit() async throws {
         let audio = try file()
         for mode in [ASRLanguageMode.english, .auto] {
@@ -183,7 +238,7 @@ final class ResourceSchedulingTests: XCTestCase {
         let other = root.appendingPathComponent("Models-other", isDirectory: true)
         try manager.createDirectory(at: models, withIntermediateDirectories: true)
         try manager.createDirectory(at: other, withIntermediateDirectories: true)
-        addTeardownBlock { try? manager.trashItem(at: root, resultingItemURL: nil) }
+        addTeardownBlock { try manager.removeItem(at: root) }
         let link = root.appendingPathComponent("linked-models")
         try manager.createSymbolicLink(at: link, withDestinationURL: models)
         let wrongLink = root.appendingPathComponent("other-link")

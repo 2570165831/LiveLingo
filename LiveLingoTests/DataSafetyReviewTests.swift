@@ -59,6 +59,62 @@ struct DataSafetyReviewTests {
         return condition()
     }
 
+    /// Leaves an owned empty write beside the course snapshot, as a kill
+    /// before its commit does. Reopening the course retires it (DU-05).
+    private func abandonedTemporary(in directory: URL) throws -> URL {
+        let orphan = directory.appendingPathComponent(".session-write-\(UUID()).tmp")
+        let destination = directory.appendingPathComponent(SessionStore.snapshotFileName)
+        #expect(throws: SessionStoreError.self) {
+            try SensitiveFileIO.$beforeTemporaryCommit.withValue({ pending in
+                guard Darwin.rename(pending.path, orphan.path) == 0 else {
+                    throw SessionStoreError.io(operation: "stage synthetic interruption", code: errno)
+                }
+                throw SessionStoreError.io(operation: "synthetic process interruption", code: EIO)
+            }) { try SessionArchiveCoding.atomicWrite(Data(), destination) }
+        }
+        #expect(FileManager.default.fileExists(atPath: orphan.path))
+        return orphan
+    }
+
+    /// The review storage actor also serialises journal saves and report
+    /// writes, so its course reads must not run the best-effort recovery scan,
+    /// whose open of a temporary can stall in the kernel. The stall is modelled
+    /// by a bounded wait and released afterwards so a failing run cannot hang.
+    @Test func reviewStorageNeverRunsTheCourseRecoveryScan() async throws {
+        let root = try DataSafetyFixtures.make("review-stalled-recovery-scan")
+        defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let book = try notebook("scan")
+        let saved = try SessionStore(directory: directory).save(SessionSnapshot(
+            segments: book.batches.flatMap(\.evidence), batches: book.batches, notebookRevision: book.revision))
+        let orphan = try abandonedTemporary(in: directory)
+        let q = queue(root.appendingPathComponent("queue.json"))
+        q.setContext(recording: true, concurrent: false, resourcesAvailable: false)
+        let gate = StalledRecoveryInspection()
+        let admission = Task { @MainActor in
+            defer { gate.finish() }
+            try await SensitiveFileIO.$beforeTemporaryInspection.withValue({ gate.stall($0) }) {
+                try await q.enqueueAsync(directory: directory, notebook: book,
+                    sessionID: saved.sessionID, inputRevision: saved.inputRevision)
+                try await q.waitForPendingStorage()
+                _ = try ReviewInputBinding.snapshot(in: directory)
+                try ReviewInputBinding.validate(identity: nil, scope: .wholeLesson, batches: book.batches,
+                    digest: nil, original: book.markdown(), in: directory, allowHistorical: true)
+            }
+            _ = try await ReviewInputBinding.snapshotAsync(in: directory)
+        }
+        let finished = await waitFor({ gate.finished }, seconds: 10)
+        if !finished { gate.releaseAll() }
+        try await admission.value
+        await q.shutdownForTesting()
+        #expect(finished, "Review admission must not wait on a stalled recovery scan")
+        #expect(gate.names == [], "Review storage never inspects course temporaries")
+        #expect(q.items.count == 1)
+        #expect(FileManager.default.fileExists(atPath: orphan.path), "No review read ran the recovery scan")
+        #expect(try SessionStore(directory: directory).load() == saved)
+        #expect(!FileManager.default.fileExists(atPath: orphan.path), "Reopening the course still retires it")
+    }
+
     @Test func futureJournalIsRejectedWithoutRewritingItsBytes() async throws {
         let root = try DataSafetyFixtures.make("review-future")
         defer { DataSafetyFixtures.preserve(root) }
@@ -1034,4 +1090,21 @@ private final class ReviewSafetyStorageDelay: @unchecked Sendable {
     }
 
     func release() { semaphore.signal() }
+}
+
+/// Records recovery inspections and stalls each one, as a kernel open that
+/// does not return, until released or 60 seconds pass.
+private final class StalledRecoveryInspection: @unchecked Sendable {
+    private let lock = NSLock()
+    private let release = DispatchSemaphore(value: 0)
+    private var inspected: [String] = []
+    private var done = false
+    var names: [String] { lock.withLock { inspected } }
+    var finished: Bool { lock.withLock { done } }
+    func stall(_ url: URL) {
+        lock.withLock { inspected.append(url.lastPathComponent) }
+        _ = release.wait(timeout: .now() + 60)
+    }
+    func finish() { lock.withLock { done = true } }
+    func releaseAll() { for _ in 0..<16 { release.signal() } }
 }

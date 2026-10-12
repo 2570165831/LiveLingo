@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import XCTest
 @testable import LiveLingo
 
@@ -337,5 +338,273 @@ final class NumberLiteralIntegrityTests: XCTestCase {
         XCTAssertTrue(measurement.isDecidable, "Existing unit conflicts must remain independently decidable")
         XCTAssertEqual(measurement.gaps.count, 1)
         XCTAssertTrue(measurement.gaps.joined().contains("单位不同"))
+    }
+
+    // Issue #15: a measurement that differs from its source only by sign is a
+    // decidable conflict, like a unit mismatch. Ranges and designators keep no sign.
+    private func assertSignConflict(
+        _ result: LearningNumericProvenance.Report, claimed: String, source: String, context: String,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertTrue(result.isDecidable, "\(context): \(result.gaps)", file: file, line: line)
+        XCTAssertEqual(result.gaps.count, 1, "\(context): \(result.gaps)", file: file, line: line)
+        let gap = result.gaps.joined()
+        XCTAssertTrue(gap.contains("正负号"), "\(context): \(gap)", file: file, line: line)
+        XCTAssertTrue(gap.contains("“\(claimed)”"), "\(context): \(gap)", file: file, line: line)
+        XCTAssertTrue(gap.contains(source), "\(context): \(gap)", file: file, line: line)
+    }
+
+    func testDroppedOrAddedMinusSignOnAMeasurementIsADecidableConflict() {
+        assertSignConflict(report("温度为 5°C。", source: "The temperature is -5°C."),
+                           claimed: "5°C", source: "-5°C", context: "dropped sign")
+        assertSignConflict(report("温度为 -5°C。", source: "The temperature is 5°C."),
+                           claimed: "-5°C", source: "5°C", context: "added sign")
+        assertSignConflict(report("温度为零下5摄氏度。", source: "The temperature is 5°C."),
+                           claimed: "零下5摄氏度", source: "5°C", context: "Chinese sign word")
+        assertSignConflict(report("温度为 5°C。", source: "The temperature is minus 5 degrees celsius."),
+                           claimed: "5°C", source: "minus 5", context: "English sign word")
+        assertSignConflict(report("电压为 1.5e3 V。", source: "The voltage is -1.5e3 V."),
+                           claimed: "1.5e3V", source: "-1.5e3V", context: "scientific notation")
+        // The same value and unit only with the opposite sign elsewhere in the batch
+        // is not "cite that sentence too": it is still a sign conflict.
+        let batch = LearningNumericProvenance.report(
+            claim: "温度为 5°C。", cited: ["The tank is sealed."], segmentTexts: ["The tank is sealed."],
+            batchTexts: ["The tank is sealed.", "The temperature is -5°C."])
+        assertSignConflict(batch, claimed: "5°C", source: "-5°C", context: "batch-only opposite sign")
+    }
+
+    func testEquivalentNegativeSpellingsSupportEachOther() {
+        for claim in ["温度为 -5°C。", "温度为 −5°C。", "温度为－5℃。", "温度为零下5摄氏度。", "温度为零下 5 摄氏度。",
+                      "温度为负5摄氏度。", "温度为（-5°C）。", "温度为 minus 5°C。"] {
+            for source in ["The temperature is -5°C.", "The temperature is −5°C.",
+                           "The temperature is minus 5 degrees celsius.", "The temperature is Negative 5°C.",
+                           "温度为零下5摄氏度。", "The range is -5~-3°C, mostly -5°C."] {
+                assertSupported(report(claim, source: source), context: "\(source) -> \(claim)")
+            }
+        }
+        assertSupported(report("温度为 +5°C。", source: "The temperature is 5°C."), context: "explicit plus")
+        assertSupported(report("温度为 5°C。", source: "The temperature is positive 5°C."), context: "positive word")
+    }
+
+    func testHyphenRangesDesignatorsAndToleranceAreNotNegativeSigns() {
+        for (claim, source) in [
+            ("温度为20到25°C。", "The range is 20-25°C."),
+            ("温度为20到25°C。", "The range is 20 - 25°C."),
+            ("第3-5步的温度为5°C。", "Steps 3-5 run at 5°C."),
+            ("样品K-5的温度为5°C。", "Sample K-5 is held at 5°C."),
+            ("CO-2 的温度为 2°C。", "CO-2 is stored at 2°C."),
+            ("x-5处的温度为5°C。", "At x-5 the temperature is 5°C."),
+            ("温度为正负5°C。", "The tolerance is ±5°C."),
+            ("误差为5°C。", "The error is plus or minus 5°C."),
+            ("温度差为5°C。", "The difference is 10°C minus 5°C."),
+            ("温度差为5°C。", "Take 10 minus 5°C."),
+            ("people[-1] 的温度为 5°C。", "people[-1] is at 5°C.")
+        ] {
+            assertSupported(report(claim, source: source), context: "\(source) -> \(claim)")
+        }
+    }
+
+    func testBoundTranslationCannotMaskADroppedSign() throws {
+        let segment = TranscriptSegment(startTime: 0, endTime: 10, english: "The temperature is -5°C.",
+                                        chinese: "温度为零下5摄氏度。")
+        let wrong = LearningPoint(kind: "核心结论", text: "温度为5°C。", sourceIDs: ["en0s0"])
+        let right = LearningPoint(kind: "核心结论", text: "温度为零下5°C。", sourceIDs: ["en0s0"])
+        let note = LearningNote(topic: "温度", points: [wrong, right], sourceVersion: 2)
+        let bound = note.binding(evidence: [segment]).points
+        XCTAssertEqual(bound.map(\.referenceState), [.numericDifference, .linked])
+        let gap = try XCTUnwrap(bound.first?.numericGap)
+        XCTAssertTrue(gap.contains("正负号") && gap.contains("“5°C”"), gap)
+        XCTAssertNil(bound.last?.numericGap)
+        XCTAssertEqual(bound.map(\.text), [wrong.text, right.text], "Never rewrite the note body")
+    }
+}
+
+/// P2a: run only against the repaired source. Old crash cases have static red
+/// evidence in work/sbx2/p2a-red.json; never execute them on the old Swift code.
+/// Kept in this already registered numeric test file without project changes.
+final class LearningNumericBoundaryTests: XCTestCase {
+    private func superscript(_ value: String) -> String {
+        let characters: [Character: Character] = [
+            "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "-": "⁻", "+": "⁺"
+        ]
+        return String(value.map { characters[$0] ?? $0 })
+    }
+
+    private func report(_ claim: String, source: String) -> LearningNumericProvenance.Report {
+        LearningNumericProvenance.report(claim: claim, cited: [source], segmentTexts: [source], batchTexts: [source])
+    }
+
+    func testExtremeScientificExponentsStayOneRawMention() throws {
+        for exponent in ["-9223372036854775808", String(Int.max), "9223372036854775808",
+                         "-9223372036854775809", String(repeating: "9", count: 80), "-" + String(repeating: "9", count: 80)] {
+            let raw = "1e\(exponent)"
+            let text = "长度为\(raw) m。"
+            let mentions = LearningNumericProvenance.mentions(in: text, preservingCountScalars: true)
+            XCTAssertEqual(mentions.count, 1, raw)
+            let mention = try XCTUnwrap(mentions.first)
+            XCTAssertEqual(mention.value, raw)
+            XCTAssertEqual(mention.unit, "m")
+            XCTAssertEqual(mention.role, .measurement)
+            XCTAssertTrue(report(text, source: text).gaps.isEmpty, raw)
+            XCTAssertTrue(report("长度为1 m。", source: text).isDecidable, raw)
+        }
+    }
+
+    func testExtremeExponentSpellingsDoNotLeakExponentDigits() throws {
+        for raw in ["1 × 10^-9223372036854775808", "1×10" + superscript(String(Int.min)),
+                    "10^-9223372036854775808", "10" + superscript(String(Int.max)),
+                    "2^-9223372036854775808"] {
+            let mentions = LearningNumericProvenance.mentions(in: "读数为\(raw) Hz。", preservingCountScalars: true)
+            XCTAssertEqual(mentions.count, 1, raw)
+            XCTAssertEqual(try XCTUnwrap(mentions.first).value, raw.filter { !$0.isWhitespace })
+            XCTAssertEqual(mentions.first?.unit, "Hz")
+        }
+    }
+
+    func testScientificNormalizationIncludesBothClosedIntervalEndpoints() throws {
+        for (raw, decimal) in [
+            ("1e-30", "0.000000000000000000000000000001"),
+            ("1e30", "1000000000000000000000000000000")
+        ] {
+            let result = report("长度为\(decimal) m。", source: "The length is \(raw) m.")
+            XCTAssertFalse(result.isDecidable, raw)
+            XCTAssertTrue(result.gaps.isEmpty, "\(raw): \(result.gaps)")
+        }
+        for raw in ["1e-31", "1e31"] {
+            let mentions = LearningNumericProvenance.mentions(in: "长度为\(raw) m。")
+            XCTAssertEqual(try XCTUnwrap(mentions.first).value, raw)
+        }
+    }
+
+    func testIntMaxScalarAndSignedUnitPowersRemainReadable() throws {
+        let scalar = LearningNumericProvenance.mentions(in: "长度为\(Int.max) m。")
+        XCTAssertEqual(scalar.count, 1)
+        XCTAssertEqual(try XCTUnwrap(scalar.first).value, String(Int.max))
+        for value in [String(Int.min), String(Int.max)] {
+            let raw = "m" + superscript(value)
+            let unit = try XCTUnwrap(LearningNumericProvenance.provenanceUnit(after: raw))
+            XCTAssertEqual(unit.token, raw)
+            XCTAssertEqual(unit.family, raw, "Formatting Int.min must not take a signed absolute value")
+            let mentions = LearningNumericProvenance.mentions(in: "长度为5 \(raw)。")
+            XCTAssertEqual(mentions.count, 1)
+            XCTAssertEqual(mentions.first?.unit, raw)
+        }
+    }
+
+    func testOverflowingUnitPrefixProductsKeepAnUnreadablePower() throws {
+        for prefix in ["square ", "cubic ", "平方", "立方"] {
+            for exponent in [String(Int.min), String(Int.max)] {
+                let raw = prefix + "m" + superscript(exponent)
+                let unit = try XCTUnwrap(LearningNumericProvenance.provenanceUnit(after: raw))
+                XCTAssertEqual(unit.token, raw)
+                XCTAssertEqual(unit.family, "m…")
+                let result = report("长度为5 m。", source: "The length is 5 \(raw).")
+                XCTAssertTrue(result.isDecidable, raw)
+                XCTAssertFalse(result.gaps.isEmpty, raw)
+                let mentions = LearningNumericProvenance.mentions(in: "长度为5 \(raw)。")
+                XCTAssertEqual(mentions.count, 1, raw)
+                XCTAssertEqual(mentions.first?.unit, "m…", raw)
+            }
+        }
+    }
+
+    func testRepresentablePrefixProductsAtIntegerEdgesStillNormalize() throws {
+        for (raw, expected) in [
+            ("square m" + superscript(String(Int.min / 2)), "m" + superscript(String(Int.min))),
+            ("cubic m" + superscript(String(Int.max / 3)), "m" + superscript(String((Int.max / 3) * 3)))
+        ] {
+            let unit = try XCTUnwrap(LearningNumericProvenance.provenanceUnit(after: raw))
+            XCTAssertEqual(unit.token, raw)
+            XCTAssertEqual(unit.family, expected)
+        }
+    }
+
+    func testRepeatedDenominatorOverflowKeepsBothDenominators() throws {
+        let maximum = superscript(String(Int.max))
+        for raw in ["m/s\(maximum)/s", "m/s\(maximum)/s\(maximum)"] {
+            let unit = try XCTUnwrap(LearningNumericProvenance.provenanceUnit(after: raw))
+            XCTAssertEqual(unit.token, raw)
+            XCTAssertEqual(unit.family, raw, "Keep the unfused full unit when its power cannot fit in Int")
+            let result = report("速度为1 m/s。", source: "The speed is 1 \(raw).")
+            XCTAssertTrue(result.isDecidable, raw)
+            XCTAssertFalse(result.gaps.isEmpty, raw)
+        }
+        let raw = "m/s" + superscript(String(Int.max - 1)) + "/s"
+        let unit = try XCTUnwrap(LearningNumericProvenance.provenanceUnit(after: raw))
+        XCTAssertEqual(unit.token, raw)
+        XCTAssertEqual(unit.family, "m/s" + maximum, "A representable sum at Int.max still folds")
+        let negative = "m/s" + superscript(String(Int.min)) + "/s"
+        XCTAssertEqual(LearningNumericProvenance.provenanceUnit(after: negative)?.family, negative)
+    }
+
+    func testOverlongOrOutOfRangeUnitPowersCannotBecomeBareUnits() throws {
+        for exponent in ["9223372036854775808", "-9223372036854775809", String(repeating: "9", count: 80)] {
+            let raw = "m" + superscript(exponent)
+            let unit = try XCTUnwrap(LearningNumericProvenance.provenanceUnit(after: raw))
+            XCTAssertEqual(unit.token, raw)
+            XCTAssertEqual(unit.family, "m…")
+            let mentions = LearningNumericProvenance.mentions(in: "长度为5 \(raw)。")
+            XCTAssertEqual(mentions.count, 1, raw)
+            XCTAssertEqual(mentions.first?.unit, "m…", raw)
+            XCTAssertTrue(report("长度为5 m。", source: "The length is 5 \(raw).").isDecidable, raw)
+        }
+    }
+
+    func testSpokenCountArithmeticRetainsItsExistingBounds() {
+        for (claim, source) in [
+            ("共有1000000000个样品。", "There are one billion samples."),
+            ("共有999000000个样品。", "There are nine hundred and ninety-nine million samples."),
+            ("共有10000000个样品。", "共有一千万个样品。")
+        ] {
+            let result = report(claim, source: source)
+            XCTAssertFalse(result.isDecidable, source)
+            XCTAssertTrue(result.gaps.isEmpty, "\(source): \(result.gaps)")
+        }
+        for source in ["There are nine billion samples.",
+                       "共有" + String(repeating: "九", count: 80) + "个样品。",
+                       "共有" + String(repeating: "千万", count: 80) + "个样品。"] {
+            let result = report("共有1个样品。", source: source)
+            XCTAssertFalse(result.isDecidable, source)
+            XCTAssertFalse(result.gaps.isEmpty, source)
+        }
+    }
+
+    func testNormalChineseNumericNotePointMarkdownMatchesUTF8Fixture() throws {
+        // Source-derived pre-change fixture, not an executed old Swift snapshot.
+        // No trailing LF: compare Data, then verify the fixed SHA-256 as well.
+        let expected = """
+        - 加速度为9.8 m/s²。
+        - **例子**：面积为5平方米。
+        - **易错点**：长度为1.5×10⁻³ m。
+        - 密度为2 kg/m³。
+        - 共有523个样品。
+        """
+        let sources = [
+            "The acceleration is 9.8 meters per second per second.",
+            "The area is 5 square metres.",
+            "The length is 1.5e-3 m.",
+            "The density is 2 kilograms per cubic metre.",
+            "There are five hundred and twenty-three samples."
+        ]
+        let points = [
+            LearningPoint(kind: "核心结论", text: "加速度为9.8 m/s²。", sourceIDs: ["en0s0"]),
+            LearningPoint(kind: "例子", text: "面积为5平方米。", sourceIDs: ["en1s0"]),
+            LearningPoint(kind: "易错点", text: "长度为1.5×10⁻³ m。", sourceIDs: ["en2s0"]),
+            LearningPoint(kind: "核心结论", text: "密度为2 kg/m³。", sourceIDs: ["en3s0"]),
+            LearningPoint(kind: "核心结论", text: "共有523个样品。", sourceIDs: ["en4s0"])
+        ]
+        let evidence = sources.enumerated().map { index, source in
+            TranscriptSegment(startTime: Double(index * 10), endTime: Double(index * 10 + 9), english: source)
+        }
+        let note = LearningNote(topic: "数值核查基线", points: points, sourceVersion: 2)
+        let bound = note.binding(evidence: evidence)
+        XCTAssertTrue(bound.points.allSatisfy { $0.referenceState == .linked })
+        XCTAssertTrue(bound.points.allSatisfy { $0.numericGap == nil && $0.needsContext == nil })
+        XCTAssertEqual(bound.points.map(\.text), points.map(\.text))
+        XCTAssertEqual(note.points, points)
+        let rendered = bound.points.map { $0.markdown(target: .simplifiedChinese) }.joined(separator: "\n")
+        XCTAssertEqual(Data(rendered.utf8), Data(expected.utf8))
+        let hash = SHA256.hash(data: Data(rendered.utf8)).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(hash, "b2b8764605ee1ec45a5f473537df8d0438c28e378dee0d40fec70fd7745fca4d")
     }
 }

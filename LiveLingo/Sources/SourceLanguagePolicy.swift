@@ -1,5 +1,4 @@
 import Foundation
-import NaturalLanguage
 
 /// Decisions about a source belong to the generation target. The distinction
 /// between an implicit English segment and a raw "en" gate input is frozen.
@@ -30,24 +29,108 @@ enum SourceLanguagePolicy {
     // Mirrored by qwen_asr_service.py; the Python test reads these declarations.
     static let nonLatinMinProbability = 0.90
     static let nonLatinMaxEnglishProbability = 0.05
-    static let latinMinProbability = 0.97
+    static let latinMinProbability = 0.55
     static let latinMaxEnglishProbability = 0.01
+    static let triggerPolicy = "few"
+    static let fewMeanThreshold = 0.90
+    static let fewMinThreshold = 0.05
+    static let latinConsensus = true
+    static let nonLatinConsensus = false
+    // Frozen trigger-eval-v1 classification, including explicit script subtags.
+    // This is separate from the supported decoder table (e.g. fil is non-Latin
+    // in the frozen evaluator even though its usual writing system is Latin).
+    static let latinLanguages: Set<String> = [
+        "af", "bs", "ca", "cs", "cy", "da", "de", "en", "es", "et", "eu",
+        "fi", "fr", "ga", "gl", "hr", "hu", "id", "is", "it", "la", "lt",
+        "lv", "ms", "mt", "nb", "nl", "nn", "no", "pl", "pt", "ro", "sk",
+        "sl", "sq", "sv", "sw", "tr", "vi", "zu",
+    ]
     static let hanMinimum = 2
     static let kanaMinimum = 1
     static let hangulMinimum = 2
     static let eastAsianMinimumShare = 0.50
     static let otherScriptMinimumShare = 0.60
-    static let latinMinimumWords = 4
-    static let latinRecognitionMinimumConfidence = 0.80
+    static func languageAndScript(_ code: String) -> (code: String, latin: Bool) {
+        let parts = code.lowercased().split(separator: "-").map(String.init)
+        let script = parts.dropFirst().first { $0.count == 4 && $0.allSatisfy(\.isLetter) }
+        return (parts.first ?? "", script.map { $0 == "latn" } ?? latinLanguages.contains(parts.first ?? ""))
+    }
 
-    struct Recognition: Sendable {
-        let code: String
-        let confidence: Double
+    struct ProbePlan: Equatable, Sendable {
+        let baseEligible: Bool
+        let followup: Bool
+        let prior: String?
+        var selected: Bool { baseEligible || followup }
+    }
+
+    struct ProbeInput: Equatable, Codable, Sendable {
+        let parakeetAccepted: Bool
+        let mean: Double?
+        let minimum: Double?
+    }
+
+    struct Decision: Equatable, Codable, Sendable {
+        let selected: Bool
+        let baseEligible: Bool
+        let followup: Bool
+        let qualifiedLanguage: String?
+        let language: String?
+        let reason: String
+    }
+
+    /// One causal stream per configured session. Repairs cannot confirm themselves;
+    /// skips, failed probes and missing ordinals clear the previous candidate.
+    struct TriggerState: Equatable, Codable, Sendable {
+        private var previousIndex: Int?
+        private var previousLanguage: String?
+
+        func plan(index: Int, parakeetAccepted: Bool, mean: Double?, minimum: Double?) -> ProbePlan {
+            let prior = previousIndex.map { $0 + 1 == index } == true ? previousLanguage : nil
+            let lowConfidence = (mean.map { $0.isFinite && $0 < fewMeanThreshold } ?? false)
+                || (minimum.map { $0.isFinite && $0 < fewMinThreshold } ?? false)
+            return ProbePlan(baseEligible: !parakeetAccepted || lowConfidence, followup: prior != nil, prior: prior)
+        }
+
+        mutating func advance(index: Int, decision: Decision?) {
+            previousIndex = index
+            previousLanguage = decision?.qualifiedLanguage
+        }
+    }
+
+    static func decide(_ plan: ProbePlan, language: String?, probability: Double?,
+                       englishProbability: Double?, probeFailed: Bool = false) -> Decision {
+        var qualified: String?, switched: String?
+        var reason = "not_selected"
+        if plan.selected {
+            if probeFailed { reason = "probe_failed" }
+            else if let language {
+                let candidate = languageAndScript(language)
+                if candidate.code == "en" { reason = "probe_english" }
+                else if probability == nil { reason = "probe_label_probability_none" }
+                else if englishProbability == nil { reason = "probe_english_probability_none" }
+                else if let probability, let englishProbability {
+                    if !probability.isFinite || !englishProbability.isFinite
+                        || !(0...1).contains(probability) || !(0...1).contains(englishProbability) {
+                        reason = "probe_failed"
+                    } else if probability < (candidate.latin ? latinMinProbability : nonLatinMinProbability) {
+                        reason = "below_language_threshold"
+                    } else if englishProbability > (candidate.latin ? latinMaxEnglishProbability : nonLatinMaxEnglishProbability) {
+                        reason = "above_english_probability_limit"
+                    } else {
+                        qualified = candidate.code
+                        if (candidate.latin ? latinConsensus : nonLatinConsensus) && plan.prior != candidate.code {
+                            reason = "pending_consensus"
+                        } else { switched = candidate.code; reason = "confirmed" }
+                    }
+                }
+            } else { reason = "probe_language_none" }
+        }
+        return Decision(selected: plan.selected, baseEligible: plan.baseEligible, followup: plan.followup,
+                        qualifiedLanguage: qualified, language: switched, reason: reason)
     }
 
     static func accepts(_ result: ASRTranscription, audioDuration: TimeInterval,
-                        requestedMode: ASRLanguageMode = .auto,
-                        recognition: Recognition? = nil) -> Bool {
+                        requestedMode: ASRLanguageMode = .auto) -> Bool {
         guard requestedMode == .auto, result.languageMode == requestedMode,
               result.decode == .detected, !result.truncated, result.policy == 1,
               let language = SpokenLanguage.find(result.language), language.code != "en",
@@ -55,17 +138,17 @@ enum SourceLanguagePolicy {
               let probability = result.languageProbability, probability.isFinite,
               let englishProbability = result.englishProbability, englishProbability.isFinite,
               (0...1).contains(probability), (0...1).contains(englishProbability) else { return false }
-        let latin = language.writingSystem == .latin
+        let latin = languageAndScript(language.code).latin
         guard probability >= (latin ? latinMinProbability : nonLatinMinProbability),
               englishProbability <= (latin ? latinMaxEnglishProbability : nonLatinMaxEnglishProbability),
-              scriptAccepts(result.text, language: language, recognition: recognition) else { return false }
+              scriptAccepts(result.text, language: language) else { return false }
         switch SourceQualityGate.fallbackReason(for: result.text, language: language, audioDuration: audioDuration) {
         case nil, .implausiblyShort: return true
         default: return false
         }
     }
 
-    private static func scriptAccepts(_ text: String, language: SpokenLanguage, recognition: Recognition?) -> Bool {
+    private static func scriptAccepts(_ text: String, language: SpokenLanguage) -> Bool {
         let counts = ScriptCounts(text)
         switch language.writingSystem {
         case .han:
@@ -79,26 +162,14 @@ enum SourceLanguagePolicy {
         case .cyrillic, .arabic, .thai, .devanagari, .greek:
             return share(counts.count(language.writingSystem), counts.letters) >= otherScriptMinimumShare
         case .latin:
-            let words = text.split { !$0.isLetter && !$0.isNumber && $0 != "'" }
-            guard words.count >= latinMinimumWords, let detected = recognition ?? recognize(text),
-                  detected.code != "en", detected.confidence.isFinite,
-                  (latinRecognitionMinimumConfidence...1).contains(detected.confidence) else { return false }
-            return detected.code == language.code
-                || (["id", "ms"].contains(detected.code) && ["id", "ms"].contains(language.code))
+            // NL metadata is diagnostic in the frozen evaluator, never another
+            // switch gate. The causal two-segment confirmation supplies evidence.
+            return true
         }
     }
 
     private static func share(_ numerator: Int, _ denominator: Int) -> Double {
         denominator > 0 ? Double(numerator) / Double(denominator) : 0
-    }
-
-    private static func recognize(_ text: String) -> Recognition? {
-        let recognizer = NLLanguageRecognizer()
-        recognizer.processString(text)
-        guard let language = recognizer.dominantLanguage,
-              let confidence = recognizer.languageHypotheses(withMaximum: 1)[language] else { return nil }
-        let code = language.rawValue == "tl" ? "fil" : language.rawValue
-        return Recognition(code: code, confidence: confidence)
     }
 
     private struct ScriptCounts {

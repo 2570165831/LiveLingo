@@ -285,6 +285,86 @@ final class DataSafetyAudioTests: XCTestCase, @unchecked Sendable {
         try await assertRetiredChunkRebuilt(frames: 1_600, value: 0.75)
     }
 
+    // Issue #22: retiring a completed chunk compares it with the recording by its integer
+    // frames. Seconds such as 480256 / 44100 do not round-trip back to the same frame.
+    private static func ramp(_ frames: Int) -> [Float] {
+        (0..<frames).map { Float($0 % 4_093) / 8_192 - 0.25 }
+    }
+    private static func wave44k(_ url: URL, _ samples: ArraySlice<Float>) throws {
+        let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        for (offset, sample) in samples.enumerated() { buffer.floatChannelData![0][offset] = sample }
+        let writer = try AVAudioFile(forWriting: url, settings: format.settings,
+                                     commonFormat: .pcmFormatFloat32, interleaved: false)
+        try writer.write(from: buffer)
+    }
+    private static func pcmBytes(at url: URL) throws -> Data {
+        let layout = try WAVContextClip.readLayout(at: url)
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(layout.dataOffset))
+        return try handle.read(upToCount: layout.dataByteCount) ?? Data()
+    }
+    private func assertCompletedChunkRetirement(first: Int64, matchingPCM: Bool = true) async throws {
+        let root = try directory("retire-\(first)-\(matchingPCM)"), session = UUID()
+        let frames: Int64 = 441_000, rate = 44_100.0
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        let recording = root.appendingPathComponent("recording.wav")
+        let all = Self.ramp(Int(first + frames) + 4_410)
+        try Self.wave44k(recording, all[...])
+        let expected = Array(all[Int(first)..<Int(first + frames)])
+        let width = MemoryLayout<Float>.size
+        let expectedBytes = try Self.pcmBytes(at: recording)
+            .subdata(in: Int(first) * width..<Int(first + frames) * width)
+        let record = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 0,
+            audioFile: "synthetic-0.wav", startFrame: first, endFrame: first + frames,
+            sampleRate: rate, start: Double(first) / rate, end: Double(first + frames) / rate,
+            captureStart: nil, captureEnd: nil, modelKey: "synthetic-no-model",
+            fallbackModelKey: nil, appleEvidence: "", recordingFile: recording.lastPathComponent)
+        let chunk = journal.directory.appendingPathComponent(record.audioFile)
+        try Self.wave44k(chunk, (matchingPCM ? expected : expected.map { $0 + 0.5 })[...])
+        try journal.put(record)
+        let observed = DataSafetyAudioBox<[Data]>([])
+        // A manual retry may hand the model a processed copy; observe the chunk itself.
+        let q = DurableTranscriptionQueue { _, _, _ in
+            let pcm = try Self.pcmBytes(at: chunk)
+            observed.update { $0.append(pcm) }
+            return "A complete synthetic sentence."
+        }
+        try await q.configure(directory: root, sessionID: session, persistent: true, identified: true, handler: { _ in })
+        await q.finish()
+        let done = try XCTUnwrap(q.records.first)
+        XCTAssertEqual(done.status, .completed)
+        XCTAssertEqual(observed.value.count, 1)
+        if matchingPCM {
+            XCTAssertTrue(observed.value.first == expectedBytes, "The chunk matches the recording")
+            XCTAssertEqual(done.audioRetired, true, "A byte-identical completed chunk is retired")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: chunk.path))
+            // Rebuilding the retired chunk restores exactly its own frames.
+            try q.retry(id: record.id)
+            await q.finish()
+            XCTAssertEqual(observed.value.count, 2)
+            XCTAssertEqual(observed.value.last?.count, Int(frames) * width)
+            XCTAssertTrue(observed.value.last == expectedBytes, "The rebuilt chunk carries the original PCM")
+            XCTAssertEqual(q.records.first?.status, .completed)
+        } else {
+            XCTAssertNotEqual(done.audioRetired, true, "A chunk that differs from the recording is kept")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: chunk.path))
+        }
+        await q.cancel()
+    }
+    func testCompletedChunkWithNonRoundTrippingStartIsRetired() async throws {
+        XCTAssertLessThan(480_256.0 / 44_100 * 44_100, 480_256.0, "The start must not round-trip")
+        try await assertCompletedChunkRetirement(first: 480_256)
+    }
+    func testCompletedChunkWithRoundTrippingStartIsRetired() async throws {
+        try await assertCompletedChunkRetirement(first: 0)
+    }
+    func testCompletedChunkThatDiffersFromRecordingIsKept() async throws {
+        try await assertCompletedChunkRetirement(first: 480_256, matchingPCM: false)
+    }
+
     // A6: a damaged acceleration cache must not defeat an intact log.
     func testCorruptSnapshotFallsBackToCompleteJournal() throws {
         let root = try directory("corrupt-cache"), session = UUID()

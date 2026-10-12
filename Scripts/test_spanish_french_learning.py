@@ -7,6 +7,93 @@ from test_learning_quality_target import scorer
 
 
 class SpanishFrenchLearningTests(unittest.TestCase):
+    def report(self, claim, source, target, elsewhere=False):
+        return scorer.numeric_report(claim, [] if elsewhere else [source], [], [source], target=target)
+
+    def test_measurement_sign_conflicts_in_both_scopes(self):
+        for target in ('es', 'fr'):
+            for claim, source in [('5 °C', '-5 °C'), ('-5 °C', '5 °C'),
+                                  ('5 °C', 'menos 5 grados Celsius' if target == 'es' else 'moins 5 degrés Celsius')]:
+                for elsewhere in (False, True):
+                    with self.subTest(target=target, claim=claim, source=source, elsewhere=elsewhere):
+                        difference, gap = self.report(claim, source, target, elsewhere)
+                        self.assertTrue(difference)
+                        self.assertIn('正负号', gap)
+
+    def test_spoken_signs_preserve_operator_and_count_behavior(self):
+        for target in ('es', 'fr'):
+            minus = 'menos' if target == 'es' else 'moins'
+            below = '5 grados Celsius bajo cero' if target == 'es' else '5 degrés Celsius au-dessous de zéro'
+            for source in ['−5 °C', '－5 °C', '﹣5 °C', minus + ' 5 °C', below, '-5e0 °C']:
+                with self.subTest(target=target, source=source):
+                    self.assertEqual(self.report('-5 °C', source, target), (False, None))
+            for source in ['3-5 °C', '20 - 5 °C', '±5 °C',
+                           ('más o menos' if target == 'es' else 'plus ou moins') + ' 5 °C',
+                           '10 °C ' + minus + ' 5 °C']:
+                self.assertEqual(self.report('5 °C', source, target), (False, None))
+            for noun in ('', ' ejemplos' if target == 'es' else ' exemples'):
+                self.assertEqual(self.report('5' + noun, '-5' + noun, target), (False, None))
+
+    def test_complete_units_reject_shorter_and_unknown_forms(self):
+        for target in ('es', 'fr'):
+            for claim, source in [('9,8 m/s', '9,8 m/s²'), ('5 m', '5 m²'),
+                                  ('2 kg', '2 kg/m³'), ('2 kg', '2 kg/ft³'), ('5 m', '5 m^q')]:
+                with self.subTest(target=target, claim=claim, source=source):
+                    difference, gap = self.report(claim, source, target)
+                    self.assertTrue(difference)
+                    self.assertIn('单位不同', gap)
+
+    def test_localized_unit_powers_match_in_both_directions(self):
+        cases = {'es': [('9,8 metros por segundo cuadrado', '9,8 m/s²'),
+                        ('9,8 metros por segundo al cuadrado', '9,8 m/s^2'),
+                        ('2 kilogramos por metro cúbico', '2 kg/m³'),
+                        ('1,5 gramos por centímetro cúbico', '1,5 g/cm³'),
+                        ('5 metros cuadrados', '5 m2')],
+                 'fr': [('9,8 mètres par seconde carrée', '9,8 m/s²'),
+                        ('2 kilogrammes par mètre cube', '2 kg/m³'),
+                        ('1,5 grammes par centimètre cube', '1,5 g/cm³'),
+                        ('5 mètres carrés', '5 m2')]}
+        for target, pairs in cases.items():
+            for claim, source in pairs:
+                for left, right in ((claim, source), (source, claim)):
+                    with self.subTest(target=target, claim=left, source=right):
+                        self.assertEqual(self.report(left, right, target), (False, None))
+
+    def test_repeated_denominators_fold_only_matching_units(self):
+        for target in ('es', 'fr'):
+            spoken = 'metros por segundo por segundo' if target == 'es' else 'mètres par seconde par seconde'
+            for source in ['9,8 ' + spoken, '9,8 m/s/s']:
+                self.assertEqual(self.report('9,8 m/s²', source, target), (False, None))
+            self.assertEqual(self.report('9,8 m/s³', '9,8 m/s²/s', target), (False, None))
+            self.assertTrue(self.report('9,8 m/s²', '9,8 m/s/min', target)[0])
+
+    def test_scientific_notation_and_exponent_digits_are_one_mention(self):
+        for target in ('es', 'fr'):
+            for claim, source in [('3000000 m/s', '3 × 10⁶ m/s'), ('3e6 m/s', '3 × 10^6 m/s'),
+                                  ('1000000 Hz', '10^6 Hz'), ('0,0015 m', '1,5×10⁻³ m'),
+                                  ('-300 m/s', '-3 × 10² m/s')]:
+                with self.subTest(target=target, claim=claim, source=source):
+                    self.assertEqual(self.report(claim, source, target), (False, None))
+            for source in ['2 kg/m3', '3 × 10^3 m', '2^3 m', 'K3']:
+                self.assertIsNotNone(self.report('3', source, target)[1], source)
+
+    def test_scientific_zero_and_raw_powers_preserve_signs(self):
+        from latin_learning import signed_mentions
+        for target in ('es', 'fr'):
+            self.assertEqual(self.report('0 m', '0 × 10² m', target), (False, None))
+            difference, gap = self.report('2^10 m', '-2^10 m', target)
+            self.assertTrue(difference)
+            self.assertIn('正负号', gap)
+            for source in ['2^999999999999999999999999 m', '2^−9223372036854775808 m']:
+                self.assertEqual(len(list(signed_mentions(source, target, scorer.UNIT_ALIASES))), 1)
+
+    def test_scientific_scale_overflow_keeps_the_whole_expression(self):
+        from latin_learning import signed_mentions
+        for target in ('es', 'fr'):
+            mentions = list(signed_mentions('3e9223372036854775807 × 10^2 m', target, scorer.UNIT_ALIASES))
+            self.assertEqual(len(mentions), 1)
+            self.assertEqual(mentions[0][0], '3e9223372036854775807×10^2')
+
     def test_default_and_english_contracts_remain_explicit(self):
         self.assertEqual(scorer.CAPTION_TRANSLATION_TARGET, 'zh-Hans')
         self.assertEqual(scorer.source_text_groups({'english': 'Water.', 'chinese': '旧中文'}, target='en'), [('en', 'Water.')])

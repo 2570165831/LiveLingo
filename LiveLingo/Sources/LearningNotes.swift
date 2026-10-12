@@ -374,6 +374,9 @@ enum LearningNumericProvenance {
         let role: Role
         /// 出现在缺口说明里的短摘录（例如“293 开尔文”）✓。
         let excerpt: String
+        /// "-" for a stated negative sign (`-5`, `−5`, `零下5`, `minus 5`), otherwise "".
+        /// Only measurements with a unit compare it; other roles still compare magnitude.
+        var sign = ""
     }
 
     struct Report: Equatable, Sendable {
@@ -393,6 +396,40 @@ enum LearningNumericProvenance {
     static let designatorPrefixes = ["第", "编号", "序号", "图", "表", "式", "步骤", "阶段", "级别", "等级", "题号", "版本"]
 
     private static let numberExpression = try! NSRegularExpression(pattern: #"[0-9]+(?:\.[0-9]+)?"#)
+
+    private static let minusMarks: Set<Character> = ["-", "−", "－", "﹣"]
+    private static let signOpeners: Set<Character> = Set("([{（【=＝:：,，;；、。！？~～≈<>≤≥\"'“‘")
+    private static let signWord = try! NSRegularExpression(pattern: #"(?i)(?<![A-Za-z])(minus|negative)[ \t]+$"#)
+
+    /// The stated negative sign directly before the digits at `start`, as written
+    /// (`-`, `−`, `零下`, `minus `), or "" when there is none. A hyphen joined to a
+    /// preceding Latin letter, digit or closing bracket (`3-5`, `K-5`, `CO-2`, `x-5`), a
+    /// spaced operator (`20 - 25`), `±`/`正负`/`plus or minus`, and `minus` after a
+    /// number or unit (`10 minus 5`) are ranges, designators or arithmetic, not signs.
+    private static func negativeSign(in ns: NSString, before start: Int) -> String {
+        let lookback = min(start, 32)
+        let window = ns.substring(with: NSRange(location: start - lookback, length: lookback))
+        if let mark = window.last, minusMarks.contains(mark) {
+            guard let prior = window.dropLast().last else { return String(mark) }
+            let isHan = prior.unicodeScalars.first.map { (0x3400...0x9FFF).contains($0.value) } ?? false
+            return prior.isWhitespace || signOpeners.contains(prior) || isHan ? String(mark) : ""
+        }
+        let spoken = window.replacingOccurrences(of: #"[ \t]+$"#, with: "", options: .regularExpression)
+        if spoken.hasSuffix("零下") { return String(window.suffix(window.count - spoken.count + 2)) }
+        if spoken.hasSuffix("负"), !spoken.dropLast().hasSuffix("正") {
+            return String(window.suffix(window.count - spoken.count + 1))
+        }
+        let wns = window as NSString
+        guard let word = signWord.firstMatch(in: window, range: NSRange(location: 0, length: wns.length)) else { return "" }
+        let head = wns.substring(to: word.range.location)
+        if head.range(of: #"(?i)\bplus[ \t]+or[ \t]+$"#, options: .regularExpression) != nil { return "" }
+        let token = head.trimmingCharacters(in: .whitespaces).split(whereSeparator: \.isWhitespace).last.map(String.init) ?? ""
+        if token.contains(where: { $0.isNumber })
+            || unitAliases.contains(where: { $0.0 == token || ($0.0.count > 1 && $0.0.lowercased() == token.lowercased()) }) {
+            return ""
+        }
+        return wns.substring(from: word.range.location)
+    }
 
     /// A rooted subscript is a reference, not a measurement or a count. Matching
     /// it only establishes that the reference occurs, not its type or RHS value.
@@ -721,20 +758,212 @@ enum LearningNumericProvenance {
         numericMentions(in: text, preservingCountScalars: preservingCountScalars, indexes: codeIndexes(in: text))
     }
 
+    // MARK: Full units and scientific notation (numeric provenance only)
+    //
+    // The shared alias table and `unitToken(after:)` also serve translation
+    // acceptance, so they stay unchanged. Notes provenance continues past the
+    // matched alias: `m/s²`, `kg/m³` and `meters per second squared` must not
+    // be accepted as the shorter `m/s`, `kg` or `m/s`.
+
+    private static let superscriptCharacters: [Character: Character] = [
+        "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁻": "-", "⁺": "+"]
+    private static let powerPrefixes: [(String, Int)] = [("square ", 2), ("cubic ", 3), ("平方", 2), ("立方", 3), ("二次方", 2), ("三次方", 3)]
+    private static let powerSuffixes: [(String, Int)] = [(" squared", 2), (" cubed", 3)]
+    /// Table spellings that already carry a power use the same family as the parsed forms.
+    private static let poweredFamilies = ["kg/m3": "kg/m³", "g/cm3": "g/cm³"]
+    /// `m2`, `cm3`, `s2`: an ASCII power digit is accepted only after these symbols.
+    private static let digitPowerFamilies: Set<String> = ["m", "cm", "mm", "km", "s"]
+    private static let unitTerminators = Set(".,;:!?，。；：！？、)）]】」』\"'“”‘’")
+    private static let provenanceUnitLookahead = 64
+
+    private static func superscriptPower(_ power: Int) -> String {
+        let digits = Array("⁰¹²³⁴⁵⁶⁷⁸⁹")
+        return (power < 0 ? "⁻" : "") + String(String(power.magnitude).compactMap { $0.wholeNumberValue.map { digits[$0] } })
+    }
+
+    private enum UnitPower { case none, value(Int, length: Int), unreadable(length: Int) }
+
+    private static func unitPower(at text: Substring) -> UnitPower {
+        if let first = text.first, superscriptCharacters[first] != nil {
+            let run = text.prefix { superscriptCharacters[$0] != nil }
+            guard let power = Int(String(run.compactMap { superscriptCharacters[$0] })), power != 0 else {
+                return .unreadable(length: run.count)
+            }
+            return .value(power, length: run.count)
+        }
+        if text.first == "^" {
+            var rest = text.dropFirst()
+            var sign = ""
+            if let mark = rest.first, "+-−".contains(mark) { sign = mark == "+" ? "" : "-"; rest = rest.dropFirst() }
+            let digits = rest.prefix { $0.isASCII && $0.isNumber }
+            guard digits.count <= 2, let power = Int(sign + digits), power != 0 else { return .unreadable(length: 1) }
+            return .value(power, length: text.count - rest.count + digits.count)
+        }
+        for (word, power) in powerSuffixes where text.prefix(word.count).lowercased() == word {
+            if let next = text.dropFirst(word.count).first, next.isASCII, next.isLetter { continue }
+            return .value(power, length: word.count)
+        }
+        return .none
+    }
+
+    /// `m2`, `cm3`, `s2`: an ASCII power digit directly after a short symbol.
+    private static func digitPowerUnit(_ text: Substring) -> (length: Int, family: String)? {
+        for (alias, family) in unitAliases where digitPowerFamilies.contains(family)
+            && alias.allSatisfy({ $0.isASCII && $0.isLetter }) && text.hasPrefix(alias) {
+            let rest = text.dropFirst(alias.count)
+            guard let digit = rest.first, digit == "2" || digit == "3" else { continue }
+            if let next = rest.dropFirst().first, next.isASCII, next.isLetter || next.isNumber { continue }
+            return (alias.count + 1, family + superscriptPower(digit == "2" ? 2 : 3))
+        }
+        return nil
+    }
+
+    /// One unit with an optional power: `m`, `m²`, `s^-2`, `m2`, `square meters`, `平方米`.
+    /// Only the leading term may be a compound table spelling such as `m/s`.
+    private static func unitTerm(_ text: Substring, leading: Bool) -> (length: Int, family: String)? {
+        var prefixPower = 1, body = text
+        for (word, power) in powerPrefixes where text.prefix(word.count).lowercased() == word {
+            prefixPower = power; body = text.dropFirst(word.count); break
+        }
+        guard body.first.map({ $0 != " " }) == true else { return nil }
+        let prefixLength = text.count - body.count
+        guard let unit = unitToken(after: String(body)), leading || !unit.family.contains("/") else {
+            guard prefixPower == 1, let digit = digitPowerUnit(body) else { return nil }
+            return digit
+        }
+        if prefixPower != 1, unit.family.contains("/") { return nil }
+        let family = poweredFamilies[unit.family] ?? unit.family
+        var length = unit.token.count, power = prefixPower
+        switch unitPower(at: body.dropFirst(length)) {
+        case .none: break
+        case .value(let suffix, let suffixLength):
+            let product = power.multipliedReportingOverflow(by: suffix)
+            guard !product.overflow else {
+                // Consume the suffix without treating an overflowing power as the bare unit.
+                return (prefixLength + length + suffixLength, family + "…")
+            }
+            power = product.partialValue; length += suffixLength
+        case .unreadable(let suffixLength):
+            // Never accept the unit before an unreadable power as the same unit.
+            return (prefixLength + length + suffixLength, family + "…")
+        }
+        return (prefixLength + length, power == 1 ? family : family + superscriptPower(power))
+    }
+
+    /// `m/s/s`, `meters per second per second`, `米每秒每秒`: a denominator that
+    /// repeats the previous one is one powered denominator (`m/s²`), so the spoken
+    /// form of an acceleration matches the written `m/s²`.
+    private static func appendingDenominator(_ term: String, to family: String) -> String {
+        func split(_ unit: Substring) -> (base: Substring, power: Int) {
+            let count = unit.reversed().prefix { superscriptCharacters[$0] != nil }.count
+            guard count > 0 else { return (unit, 1) }
+            return (unit.dropLast(count), Int(String(unit.suffix(count).compactMap { superscriptCharacters[$0] })) ?? 0)
+        }
+        guard let slash = family.lastIndex(of: "/") else { return family + "/" + term }
+        let last = family[family.index(after: slash)...]
+        let previous = split(last), next = split(Substring(term))
+        guard !last.contains("·"), !last.hasSuffix("…"), !previous.base.isEmpty, previous.base == next.base,
+              previous.power > 0, next.power > 0 else { return family + "/" + term }
+        let sum = previous.power.addingReportingOverflow(next.power)
+        guard !sum.overflow else { return family + "/" + term }
+        return String(family[..<slash]) + "/" + String(previous.base) + superscriptPower(sum.partialValue)
+    }
+
+    /// The complete unit after a number, including powers and denominators.
+    /// An unreadable continuation after `/` or `^` keeps its own family (`kg/…`).
+    static func provenanceUnit(after text: String) -> (token: String, family: String)? {
+        let body = text.drop { $0 == " " }
+        guard let leading = unitTerm(body, leading: true) else { return nil }
+        var family = leading.family, length = leading.length
+        for _ in 0..<3 where !family.hasSuffix("…") {
+            let rest = body.dropFirst(length)
+            let separator: String, operatorLength: Int, explicit: Bool
+            if rest.first == "/" { separator = "/"; operatorLength = 1; explicit = true }
+            else if rest.first == "·" || rest.first == "⋅" { separator = "·"; operatorLength = 1; explicit = true }
+            else if rest.prefix(5).lowercased() == " per " { separator = "/"; operatorLength = 5; explicit = false }
+            else if rest.first == "每" { separator = "/"; operatorLength = 1; explicit = false }
+            else { break }
+            let operand = rest.dropFirst(operatorLength)
+            if let term = unitTerm(operand, leading: false) {
+                family = separator == "/" ? appendingDenominator(term.family, to: family) : family + separator + term.family
+                length += operatorLength + term.length
+                continue
+            }
+            // `kg/ft³`: an unknown denominator is not the bare numerator unit.
+            // A digit (`5 m/2`) or prose after `per`/`每` is left as before.
+            guard explicit, operand.first?.isLetter == true else { break }
+            family += separator + "…"
+            length += operatorLength + operand.prefix { !$0.isWhitespace && !unitTerminators.contains($0) }.count
+        }
+        return (String(body.prefix(length)), family)
+    }
+
+    /// `3e2`, `3 × 10⁶`, `10^6`: one value whose exponent digits are never
+    /// separate mentions. Another base (`2^10`) stays one raw, unconverted value.
+    private static let scientificExpression = try! NSRegularExpression(pattern:
+        #"(?<![A-Za-z0-9_.])([0-9]+(?:\.[0-9]+)?)(?:[eE]([+\-−]?[0-9]+)(?![A-Za-z0-9_])"#
+        + #"|[ \t]*[×xX*·⋅][ \t]*10[ \t]*(?:\^[ \t]*([+\-−]?[0-9]+)|([⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+))"#
+        + #"|[ \t]*\^[ \t]*([+\-−]?[0-9]+)|([⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+))"#)
+
+    /// Each entry's range covers the expression and its parsed unit.
+    private static func scientificMentions(in text: String, excluding: [NSRange]) -> [(NSRange, Mention)] {
+        let ns = text as NSString
+        return scientificExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+            guard !excluding.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { return nil }
+            func group(_ index: Int) -> String? {
+                let range = match.range(at: index)
+                return range.location == NSNotFound ? nil : ns.substring(with: range)
+            }
+            func plain(_ exponent: String) -> String {
+                String(exponent.map { superscriptCharacters[$0] ?? ($0 == "−" ? "-" : $0) })
+            }
+            let raw = ns.substring(with: match.range)
+            let base = group(1) ?? ""
+            var mantissa = base, exponent = (group(2) ?? group(3) ?? group(4)).map(plain)
+            if exponent == nil, base == "10" { mantissa = "1"; exponent = (group(5) ?? group(6)).map(plain) }
+            let value: String
+            if let exponent, let power = Int(exponent), (-30...30).contains(power),
+               let significand = Decimal(string: mantissa, locale: Locale(identifier: "en_US_POSIX")) {
+                value = NSDecimalNumber(decimal: Decimal(sign: .plus, exponent: power, significand: significand)).stringValue
+            } else {
+                value = raw.filter { !$0.isWhitespace }
+            }
+            let start = match.range.location, end = NSMaxRange(match.range)
+            let beforeStart = max(0, start - 8)
+            let before = ns.substring(with: NSRange(location: beforeStart, length: start - beforeStart))
+            var afterStart = end
+            while afterStart < ns.length, ns.character(at: afterStart) == 0x20 { afterStart += 1 }
+            let after = ns.substring(with: NSRange(location: afterStart, length: min(provenanceUnitLookahead, ns.length - afterStart)))
+            let unit = provenanceUnit(after: after)
+            let hasAttribute = attributeMarkers.contains(where: { before.hasSuffix($0) })
+            let role: Mention.Role = unit != nil || hasAttribute ? .measurement : .ambiguous
+            let sign = negativeSign(in: ns, before: start)
+            let excerpt = unit.map { "\(sign)\(raw)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(raw)" : sign + raw)
+            let covered = unit.map { afterStart + $0.token.utf16.count - start } ?? match.range.length
+            return (NSRange(location: start, length: covered), Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt,
+                                                                       sign: sign.isEmpty ? "" : "-"))
+        }
+    }
+
     private static func numericMentions(in text: String, preservingCountScalars: Bool,
                                         indexes: [CodeIndex]) -> [Mention] {
+        let scientific = scientificMentions(in: text, excluding: indexes.map(\.range))
         let counts = counts(in: text).filter { count in
             !indexes.contains { NSIntersectionRange($0.range, count.0).length > 0 }
+                && !scientific.contains { NSIntersectionRange($0.0, count.0).length > 0 }
         }
-        // Both regex result sets are ordered and non-overlapping. Advance once
-        // through exclusions instead of searching every count for every scalar.
+        // Both regex result sets are ordered. Advance once through exclusions
+        // instead of searching every count for every scalar.
         let scalarExclusions = (counts.compactMap { entry -> NSRange? in
             !preservingCountScalars || entry.1.role == .distributive ? entry.0 : nil
-        } + indexes.map(\.range)
+        } + indexes.map(\.range) + scientific.map(\.0)
             + (preservingCountScalars ? [] : numberLiterals(in: text).map(\.range))).sorted { $0.location < $1.location }
         var exclusionIndex = 0
+        // Digits inside a parsed unit (`kg/m3`, `m^2`) are not separate numbers.
+        var unitEnd = 0
         let ns = text as NSString
-        let other: [Mention] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+        let other: [(Int, Mention)] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+            guard match.range.location >= unitEnd else { return nil }
             while exclusionIndex < scalarExclusions.count,
                   NSMaxRange(scalarExclusions[exclusionIndex]) <= match.range.location { exclusionIndex += 1 }
             if exclusionIndex < scalarExclusions.count,
@@ -749,18 +978,22 @@ enum LearningNumericProvenance {
             // ten characters would truncate units such as "millilitres".
             let after = ns.substring(with: NSRange(location: afterStart, length: min(unitLookahead, ns.length - afterStart)))
             if isDesignator(value: value, before: before, after: after) {
-                return Mention(value: value, unit: nil, role: .designator, excerpt: "编号\(value)")
+                return (start, Mention(value: value, unit: nil, role: .designator, excerpt: "编号\(value)"))
             }
-            let unit = unitToken(after: after)
+            let unitText = ns.substring(with: NSRange(location: afterStart, length: min(provenanceUnitLookahead, ns.length - afterStart)))
+            let unit = provenanceUnit(after: unitText)
+            if let unit { unitEnd = afterStart + unit.token.utf16.count }
             let hasAttribute = attributeMarkers.contains(where: { before.hasSuffix($0) })
             let role: Mention.Role = unit != nil || hasAttribute ? .measurement : .ambiguous
-            let excerpt = unit.map { "\(value)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(value)" : value)
-            return Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt)
+            let sign = negativeSign(in: ns, before: start)
+            let excerpt = unit.map { "\(sign)\(value)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(value)" : sign + value)
+            return (start, Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt, sign: sign.isEmpty ? "" : "-"))
         }
         // A grammatical quantifier neither raises a numeric warning nor
         // supplies a count/scalar for another claim. Other numbers in the
         // sentence are still checked independently.
-        return other + counts.compactMap { $0.1.role == .distributive ? nil : $0.1 }
+        let scalars = (other + scientific.map { ($0.0.location, $0.1) }).sorted { $0.0 < $1.0 }.map(\.1)
+        return scalars + counts.compactMap { $0.1.role == .distributive ? nil : $0.1 }
     }
 
     /// Source-mode parses live only for one synchronous binding (or standalone report).
@@ -916,16 +1149,29 @@ enum LearningNumericProvenance {
             let inBatch = batch.filter { $0.value == mention.value && $0.role != .designator && $0.role != .count }
             let isMeasurement = mention.role == .measurement
             if isMeasurement, let unit = mention.unit {
-                if inOwn.contains(where: { $0.unit == unit }) { continue }
+                if inOwn.contains(where: { $0.unit == unit && $0.sign == mention.sign }) { continue }
+                // Same value and unit with only the opposite sign: decidable, like a unit conflict.
+                let ownSigned = inOwn.filter { $0.unit == unit }
+                if !ownSigned.isEmpty {
+                    report.isDecidable = true
+                    push(signConflict(mention, others: ownSigned, target: target), into: &report.gaps, seen: &seen)
+                    continue
+                }
                 if !inOwn.isEmpty {
                     report.isDecidable = true
                     push(unitConflict(mention, others: inOwn, target: target), into: &report.gaps, seen: &seen)
                     continue
                 }
-                if inBatch.contains(where: { $0.unit == unit }) {
+                if inBatch.contains(where: { $0.unit == unit && $0.sign == mention.sign }) {
                     // 数字出现在本次原文的其他句子：不判“数值不同” ✗，只指出具体缺口 ✓。
                     push(ClassroomFixedText.numericElsewhere.noteFormat([mention.excerpt], target: target),
                          into: &report.gaps, seen: &seen)
+                    continue
+                }
+                let batchSigned = inBatch.filter { $0.unit == unit }
+                if !batchSigned.isEmpty {
+                    report.isDecidable = true
+                    push(signConflict(mention, others: batchSigned, target: target), into: &report.gaps, seen: &seen)
                     continue
                 }
                 if !inBatch.isEmpty {
@@ -964,6 +1210,11 @@ enum LearningNumericProvenance {
     private static func unitConflict(_ mention: Mention, others: [Mention], target: CaptionTranslationTarget) -> String {
         let units = Set(others.compactMap(\.unit)).sorted().joined(separator: "、")
         return ClassroomFixedText.numericUnitConflict.noteFormat([mention.excerpt, units.isEmpty ? ClassroomFixedText.noUnit.noteText(target: target) : units], target: target)
+    }
+
+    /// 同一数字、同一单位族，只差正负号：明确可判 ✓（与单位冲突同级）。
+    private static func signConflict(_ mention: Mention, others: [Mention], target: CaptionTranslationTarget) -> String {
+        ClassroomFixedText.numericSignConflict.noteFormat([mention.excerpt, Set(others.map(\.excerpt)).sorted().joined(separator: "、")], target: target)
     }
 
     private static func push(_ line: String, into gaps: inout [String], seen: inout Set<String>) {
@@ -1064,7 +1315,7 @@ struct LearningNoteBatch: Codable, Equatable, Sendable {
 /// 自己判断；没有时间范围的"待核实"提示等于让用户全课重听 ✗。
 enum LearningTimeLabel {
     static func stamp(_ interval: TimeInterval) -> String {
-        let total = max(0, Int(interval.rounded()))
+        let total = TimestampClock.roundedSeconds(interval)
         let hours = total / 3_600
         let minutes = (total / 60) % 60
         let seconds = total % 60
@@ -1183,12 +1434,14 @@ struct LearningNotebook: Sendable {
     }
     static func reference(_ batch: LearningNoteBatch, _ index: Int) -> String { "\(batch.id.uuidString):\(index)" }
 
-    /// 每个旧要点最近一次的跟进记录（按批次顺序）✓：冲突/关系不明要给出具体时间和说明 ✓。
+    /// 每个旧要点最近一次**有信息**的跟进记录（按批次顺序）✓：冲突/关系不明要给出具体时间和说明 ✓。
+    /// "缺信息"只表示那一批没有新线索，不能覆盖仍然有效的冲突／关系不明说明（issue #33）✓；
+    /// 从来只有"缺信息"的问题没有条目，渲染时照旧不附说明 ✓。
     static func latestFollowUps(in batches: [LearningNoteBatch]) -> [String: (record: LearningFollowUp, batch: LearningNoteBatch)] {
         var result: [String: (record: LearningFollowUp, batch: LearningNoteBatch)] = [:]
         for batch in batches {
             for record in batch.followUps ?? [] {
-                guard let target = record.target else { continue }
+                guard let target = record.target, record.state != .missing else { continue }
                 result[target] = (record, batch)
             }
         }
@@ -1243,6 +1496,8 @@ struct LearningNotebook: Sendable {
                 let id = Self.reference(batch, index)
                 let semanticQuestion = point.referenceState == .pending || point.referenceState == .awaitingContext
                     || point.referenceState == .numericDifference || !(point.needsContext ?? "").isEmpty
+                    // Match hasOpenQuestion: a 待确认 point without question text is still open.
+                    || point.kind == "待确认"
                 let referenceCheck = !semanticQuestion && point.sourceHasPronoun == true && point.referenceState == .linked
                 guard semanticQuestion || referenceCheck else { return nil }
                 let sources = (point.sources ?? []).filter { source in
@@ -1355,6 +1610,7 @@ struct LearningNotebook: Sendable {
     ///   · 目标必须仍是当前等待跟进的旧问题 ✓（旧输入、已撤下的问题不能再被"消除" ✓）；
     ///   · "后文补充"必须绑定到本批次、同一次响应里的有效要点 ✓（`sourceIDs` 优先，
     ///     `pointIndex` 兜底 ✓），并且那条要点自己已经有原文依据、没有未解决的问题 ✓；
+    ///     来源同时对上多条要点、响应又没点名是哪一条时，不挑第一条 ✗（issue #20）；
     ///   · 对不上就降级成"关系不明" ✓ —— 宁可让旧问题继续挂着 ✗，也不能凭空撤下 ✗。
     ///   · 相同数字、词面重合、位置相邻都不参与判断 ✗。
     static func commit(followUps: [LearningFollowUp], evidence: [TranscriptSegment], note: LearningNote,
@@ -1373,15 +1629,18 @@ struct LearningNotebook: Sendable {
             if record.detail?.isEmpty == true { record.detail = nil }
             switch record.state {
             case .supplemented:
-                if let index = supportingPointIndex(for: record, note: note, units: units) {
+                let support = supportingPoint(for: record, note: note, units: units)
+                if case .point(let index) = support {
                     record.pointIndex = index
                     record.sourceIDs = note.points[index].sourceIDs ?? record.sourceIDs
                     if record.detail == nil { record.detail = ClassroomFixedText.supplementedDetail.noteText(target: outputTarget) }
                 } else {
+                    let ambiguous = support == .ambiguous
                     record.state = .unclear
                     record.sourceIDs = nil
                     record.pointIndex = nil
-                    record.detail = ClassroomFixedText.invalidSupplementDetail.noteText(target: outputTarget)
+                    record.detail = (ambiguous ? ClassroomFixedText.ambiguousSupplementDetail
+                                               : ClassroomFixedText.invalidSupplementDetail).noteText(target: outputTarget)
                 }
             case .conflict:
                 if record.detail == nil { record.detail = ClassroomFixedText.conflictDetail.noteText(target: outputTarget) }
@@ -1395,14 +1654,21 @@ struct LearningNotebook: Sendable {
         return records
     }
 
+    private enum SupportingPoint: Equatable { case none, ambiguous, point(Int) }
+
     /// "后文补充"绑定到本批次里**同一次响应**的有效要点 ✓。
-    private static func supportingPointIndex(for record: LearningFollowUp, note: LearningNote,
-                                             units: [String: LearningSourceUnit]) -> Int? {
+    ///
+    /// issue #20：同一句原文可以拆出好几条要点，它们引用的来源完全相同 ✓。
+    /// 响应用 `pointIndex` 点名其中一条时才采用（且必须落在来源匹配的候选里 ✓）；
+    /// 没点名又有多条匹配时不再自动挑第一条 ✗，返回 `.ambiguous`，旧问题继续挂着 ✓。
+    private static func supportingPoint(for record: LearningFollowUp, note: LearningNote,
+                                        units: [String: LearningSourceUnit]) -> SupportingPoint {
         let declared = record.sourceIDs ?? []
         if !declared.isEmpty {
             let named = declared.compactMap { units[$0] }
             // 明确给了来源 id 却对不上本次输入：不能撤下旧问题 ✗。
-            guard named.count == declared.count else { return nil }
+            guard named.count == declared.count else { return .none }
+            var candidates: [Int] = []
             for (index, point) in note.points.enumerated() where isEvidenceBacked(point) {
                 let sources = point.sources ?? []
                 func exact(_ unit: LearningSourceUnit) -> Bool {
@@ -1417,13 +1683,18 @@ struct LearningNotebook: Sendable {
                 // sentence cannot retire the old question.
                 if !matched.isEmpty && named.allSatisfy({ unit in
                     exact(unit) || matched.contains { $0.index == unit.index && $0.language != unit.language }
-                }) { return index }
+                }) { candidates.append(index) }
             }
-            return nil
+            if let chosen = record.pointIndex { return candidates.contains(chosen) ? .point(chosen) : .none }
+            switch candidates.count {
+            case 0: return .none
+            case 1: return .point(candidates[0])
+            default: return .ambiguous
+            }
         }
         guard let index = record.pointIndex, note.points.indices.contains(index),
-              isEvidenceBacked(note.points[index]) else { return nil }
-        return index
+              isEvidenceBacked(note.points[index]) else { return .none }
+        return .point(index)
     }
 
     /// 这条要点自己有原文依据、也没有未解决的问题 ✓（"后文补充"的支撑点必须满足 ✓）。
@@ -1478,6 +1749,11 @@ struct LearningNotebook: Sendable {
         /// "后文补充"撤下旧缺口 ✓；"前后冲突／关系不明"保留缺口并给出时间和说明 ✓。
         func followUpAnnotation(_ reference: String, indentation: String) -> String {
             guard let entry = followUpRecords[reference] else { return "" }
+            return followUpLines(entry, indentation: indentation)
+        }
+        /// `supplementText` 只给"最近更新"用：补充要点本身已经是正文那一行，这里改成指向旧问题 ✓（issue #34）。
+        func followUpLines(_ entry: (record: LearningFollowUp, batch: LearningNoteBatch), indentation: String,
+                           supplementText: String? = nil) -> String {
             let range = LearningTimeLabel.label(evidence: entry.batch.evidence)
             let head = range.map { "（[\($0)]）" } ?? ""
             func stateLine(_ text: String) -> String {
@@ -1486,7 +1762,7 @@ struct LearningNotebook: Sendable {
             switch entry.record.state {
             case .supplemented:
                 guard let index = entry.record.pointIndex, entry.batch.note.points.indices.contains(index) else { return "" }
-                let text = entry.batch.note.points[index].text
+                let text = supplementText ?? entry.batch.note.points[index].text
                 let line = self.target != .simplifiedChinese ? stateLine(text)
                     : "\n\(indentation)- " + ClassroomFixedText.followUpSupplementLine.noteFormat([head, text], target: self.target)
                 return line
@@ -1505,6 +1781,30 @@ struct LearningNotebook: Sendable {
                 return ""
             }
         }
+        /// issue #34：「最近更新」只渲染本批要点，跟进记录却挂在**更早**批次的旧要点上 ✗。
+        /// 这里直接取本批自己提交的记录（不用 `latestFollowUps`，各批显示自己当时的判断 ✓），
+        /// 旧要点不在可见范围时才补；"缺信息"照旧不显示 ✓。整课笔记（ids == nil）不受影响 ✓。
+        let earlierFollowUps: [(record: LearningFollowUp, batch: LearningNoteBatch)] = ids == nil ? [] : visible.flatMap { batch in
+            (batch.followUps ?? []).compactMap { record in
+                guard let target = record.target, record.state != .missing, !visibleIDs.contains(target) else { return nil }
+                return (record: record, batch: batch)
+            }
+        }
+        func earlierQuestion(_ original: LearningPoint) -> String {
+            let question = (original.needsContext ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return question.isEmpty ? original.text : question
+        }
+        /// "后文补充"：在本批那条支撑要点下面加一行指向旧问题，再说明原问题由此撤下 ✓。
+        func supplementAnnotation(_ reference: String, indentation: String) -> String {
+            earlierFollowUps.filter { entry in
+                entry.record.state == .supplemented && entry.record.pointIndex.map { Self.reference(entry.batch, $0) } == reference
+            }.map { entry in
+                let text = entry.record.target.flatMap { originals[$0] }.map {
+                    ClassroomFixedText.followUpTargetLine.noteFormat([earlierQuestion($0)], target: self.target)
+                }
+                return followUpLines(entry, indentation: indentation, supplementText: text)
+            }.joined()
+        }
         func appendRecord(_ line: String, topic: String, point: LearningPoint, reference: String) {
             if containsQuestion(point, reference) {
                 if !replayRecords.contains(line) { replayRecords.append(line) }
@@ -1522,6 +1822,7 @@ struct LearningNotebook: Sendable {
                 for source in candidate.point.sources ?? [] {
                     text += "\n\(indentation)  - " + ClassroomFixedText.sourceLine.noteFormat([source.quote.replacingOccurrences(of: "\n", with: " ")], target: self.target)
                 }
+                text += supplementAnnotation(candidate.id, indentation: indentation + "  ")
                 text += related(candidate.id, indentation: indentation + "  ")
             }
             return text
@@ -1543,6 +1844,7 @@ struct LearningNotebook: Sendable {
                     line += related(reference, indentation: "    ")
                 }
                 line += followUpAnnotation(reference, indentation: "  ")
+                line += supplementAnnotation(reference, indentation: "  ")
                 appendRecord(line, topic: topic, point: point, reference: reference)
             }
         }
@@ -1562,8 +1864,26 @@ struct LearningNotebook: Sendable {
                     line += related(reference, indentation: "    ")
                 }
                 line += followUpAnnotation(reference, indentation: "  ")
+                line += supplementAnnotation(reference, indentation: "  ")
                 appendRecord(line, topic: topic, point: point, reference: reference)
             }
+        }
+        // "前后冲突／关系不明"让旧问题重新待核对：放进本视图的 `## 需要回听`，带旧问题的时间、旧要点和本批说明 ✓。
+        // 旧批次已被来源修订撤掉时，只保留本批的说明，不隐藏记录 ✓。
+        for entry in earlierFollowUps where entry.record.state == .conflict || entry.record.state == .unclear {
+            let annotation = followUpLines(entry, indentation: "  ")
+            var line = String(followUpLines(entry, indentation: "").dropFirst())
+            if let target = entry.record.target, let original = originals[target],
+               let owner = batches.first(where: { batch in batch.note.points.indices.contains { Self.reference(batch, $0) == target } }) {
+                let range = LearningTimeLabel.label(sources: original.sources, evidence: owner.evidence)
+                    ?? LearningTimeLabel.label(evidence: owner.evidence)
+                let question = (original.needsContext ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                line = "- " + (range.map { "[\($0)] " } ?? "")
+                    + (question.isEmpty ? ClassroomFixedText.replayFallback.noteText(target: self.target) : question)
+                    + "\n  - " + ClassroomFixedText.earlierRecordLine.noteFormat([original.text], target: self.target)
+                    + annotation
+            }
+            if !replayRecords.contains(line) { replayRecords.append(line) }
         }
         let body = order.map { "## \($0)\n" + (grouped[$0] ?? []).joined(separator: "\n") }.joined(separator: "\n\n")
         // 2026-09-20：把"真正的缺口"和"来源校验风险"从正文里拆出来 ✓。
@@ -1688,11 +2008,29 @@ struct LearningNotebook: Sendable {
     ///    "mark it as absent" 误收 ✗ → 改成短语或去掉 ✓；
     /// ③ 2026-09-19：裸 `close/closes` 也去掉 ✗ —— 科学语境里的 "close to zero"、
     ///    "closes the gap" 不是课程安排 ✗；报名/预订窗口关闭改由**同句**规则收 ✓。
+    /// ④ 2026-10-09（issue #25）：`assignment`/`submit` 在编程课里也指"赋值""提交给线程池" ✗，
+    ///    改放进 `logisticsAmbiguousPatterns`，先剔除明显的代码写法再判 ✓。
     private static let logisticsPatterns = [
         #"\bdeadlines?\b"#, #"\bquiz(?:zes)?\b"#, #"\bexams?\b"#,
-        #"\bassignments?\b"#, #"\bsubmissions?\b"#, #"\bsubmit\b"#,
+        #"\bsubmissions?\b"#,
         #"\bmoodle\b"#, #"\bdue (?:date|by|on|in|at)\b"#, #"\b(?:is|are) due\b"#,
         #"\bhand (?:it|them) in\b"#,
+    ]
+
+    /// 有歧义的词：只有剔除代码写法后仍出现才算安排 ✓（不要求同句有截止日期，
+    /// 以免漏掉 "Please submit your lab report" 这类真实通知 ✓）。
+    private static let logisticsAmbiguousPatterns = [#"\bassignments?\b"#, #"\bsubmit\b"#]
+
+    /// 编程语境的写法（含 ASR 常见的 "dot submit"）✓；同句另有强安排词时不影响保留 ✓。
+    /// 句点只有**直接连着标识符**（`executor.submit`）才算成员访问 ✓；
+    /// "The lab is posted. Submit your report…" 里的句号是断句，不是代码 ✗。
+    /// "multiple assignments" 在课程通知里很常见（"There will be multiple assignments"），不算编程搭配 ✗。
+    private static let logisticsCodeFormPatterns = [
+        #"(?<=[a-z0-9_)\]])\.submit\b(?:\s*\([^)]*\))?"#,
+        #"\bdot\s+submit\b(?:\s*\([^)]*\))?"#,
+        #"\bsubmit\s*\("#,
+        #"\b(?:variable|value|attribute|tuple|chained|augmented|compound|destructuring|parallel|pointer|reference|array|list|object|default)\s+assignments?\b"#,
+        #"\bassignments?\s+(?:operators?|statements?|expressions?)\b"#,
     ]
 
     /// 报名/预订类词 —— 单独出现不算安排 ✓，必须与 `closing` 同句 ✓。
@@ -1704,6 +2042,12 @@ struct LearningNotebook: Sendable {
     static func isScheduleStatement(_ english: String) -> Bool {
         let lowered = english.lowercased()
         if Self.logisticsPatterns.contains(where: { lowered.range(of: $0, options: .regularExpression) != nil }) {
+            return true
+        }
+        let withoutCode = Self.logisticsCodeFormPatterns.reduce(lowered) {
+            $0.replacingOccurrences(of: $1, with: " ", options: .regularExpression)
+        }
+        if Self.logisticsAmbiguousPatterns.contains(where: { withoutCode.range(of: $0, options: .regularExpression) != nil }) {
             return true
         }
         return lowered.range(of: Self.logisticsRegistrationPattern, options: .regularExpression) != nil
@@ -1719,7 +2063,7 @@ struct LearningNotebook: Sendable {
                 let text = LearningSourceUnit.textGroups(for: segment, target: target).first?.text
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !text.isEmpty, Self.isScheduleStatement(text), seen.insert(text).inserted else { return nil }
-                let total = max(0, Int(segment.startTime))
+                let total = TimestampClock.truncatedSeconds(segment.startTime)
                 return "- [\(String(format: "%02d:%02d", total / 60, total % 60))] \(text)"
             }
             return lines.isEmpty ? "" : "## \(ClassroomFixedText.logisticsHeading.noteText(target: target))\n" + lines.joined(separator: "\n")
@@ -1734,7 +2078,7 @@ struct LearningNotebook: Sendable {
             let key = english + "\u{0}" + chinese
             guard !seen.contains(key) else { continue }
             seen.insert(key)
-            let total = max(0, Int(segment.startTime))
+            let total = TimestampClock.truncatedSeconds(segment.startTime)
             lines.append("- [\(String(format: "%02d:%02d", total / 60, total % 60))] \(english) — \(chinese)")
         }
         guard !lines.isEmpty else { return "" }
@@ -2241,6 +2585,9 @@ struct ReviewDiagnosticsStore: Sendable {
 
     let directory: URL
     let policy: ReviewDiagnosticsPolicy
+    /// How rotation discards an owned snapshot. The app moves it to the Trash so
+    /// it stays recoverable; tests inject a move into their own fixture folder.
+    var discard: @Sendable (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
 
     @discardableResult
     func write(_ snapshot: ReviewDiagnosticSnapshot) -> URL? {
@@ -2391,7 +2738,7 @@ struct ReviewDiagnosticsStore: Sendable {
         var removed = 0
         for entry in owned where entry.url != kept {
             guard count > policy.maximumFiles || total > policy.maximumTotalBytes else { break }
-            guard (try? manager.trashItem(at: entry.url, resultingItemURL: nil)) != nil else { continue }
+            guard (try? discard(entry.url)) != nil else { continue }
             count -= 1
             total -= entry.size
             removed += 1
@@ -3153,12 +3500,16 @@ enum LearningPrompts {
 
     /// 构造 v2 复查输入：`json`（根含 reviewVersion）+ 同次冻结的引用目录。
     /// 主证据只保留**原文片段**（不重复整段全文 ✓），中文警告走独立字段 ✓。
+    /// `followUpOnlyBatches`：排在 `laterBatches` 之间、自身没有要点的批次（`after` = 它前面有几个
+    /// `laterBatches`）。它们只给 laterContext 提供跟进记录 ✓，不进后文检索 laterEvidence ✓。
     static func reviewInput(_ batch: LearningNoteBatch, laterBatches: [LearningNoteBatch] = [],
+                            followUpOnlyBatches: [(after: Int, batch: LearningNoteBatch)] = [],
                             target: CaptionTranslationTarget = .simplifiedChinese) throws -> PreparedReviewInput {
         struct Point: Encodable { let index: Int; let kind: String; let text: String; let sources: [LearningPoint.Source]?; let referenceState: LearningPoint.ReferenceState?; let needsContext: String?; let sourceHasPronoun: Bool? }
         struct Note: Encodable { let topic: String; let points: [Point] }
         struct Evidence: Encodable { let index: Int; let quotes: [PreparedReviewInput.WireQuote]; let chineseWarning: String? }
-        struct FollowUp: Encodable { let pointIndex: Int; let text: String; let sources: [String] }
+        /// `state` 只出现在由跟进记录构造的条目上（内部中文状态码，不翻译 ✓）；旧 `clarifies` 条目不带它，JSON 保持原样 ✓。
+        struct FollowUp: Encodable { let pointIndex: Int; let text: String; let sources: [String]; var state: String? = nil }
         struct LaterEvidence: Encodable { let batchOffset: Int; let source: LearningSourceUnit }
         struct Input: Encodable { let reviewVersion: Int; let evidence: [Evidence]; let note: Note; let laterContext: [FollowUp]; let omittedEarlierCandidates: Int; let laterEvidence: [LaterEvidence]; let laterEvidenceOmittedCount: Int }
         let encoder = JSONEncoder()
@@ -3180,12 +3531,45 @@ enum LearningPrompts {
                                 sourceLanguage: item.sourceLanguage, target: target))
         }
         var later: [FollowUp] = []
-        for subsequent in laterBatches {
-            for point in subsequent.note.points {
-                guard let reference = point.clarifies, let index = batch.note.points.indices.first(where: { LearningNotebook.reference(batch, $0) == reference }) else { continue }
-                later.append(FollowUp(pointIndex: index, text: point.text, sources: (point.sources ?? []).filter { source in
+        func targetIndex(_ reference: String?) -> Int? {
+            reference.flatMap { reference in batch.note.points.indices.first { LearningNotebook.reference(batch, $0) == reference } }
+        }
+        // 跟进记录按时间顺序读取：没有要点的批次插回它在笔记里的位置 ✓（issue #26 复核）。
+        var ordered: [LearningNoteBatch] = []
+        for offset in 0...laterBatches.count {
+            ordered += followUpOnlyBatches.filter { min($0.after, laterBatches.count) == offset }.map(\.batch)
+            if offset < laterBatches.count { ordered.append(laterBatches[offset]) }
+        }
+        for subsequent in ordered {
+            func quotes(_ point: LearningPoint) -> [String] {
+                (point.sources ?? []).filter { source in
                     target == .simplifiedChinese || (subsequent.evidence.indices.contains(source.index) && LearningSourceUnit.bindingTexts(for: subsequent.evidence[source.index], target: target).contains { $0.contains(source.quote) })
-                }.map(\.quote)))
+                }.map(\.quote)
+            }
+            var linked = Set<[Int]>()
+            for (offset, point) in subsequent.note.points.enumerated() {
+                guard let index = targetIndex(point.clarifies) else { continue }
+                linked.insert([index, offset])
+                later.append(FollowUp(pointIndex: index, text: point.text, sources: quotes(point)))
+            }
+            // issue #26：当前版本把"后文补充／前后冲突／关系不明"存在批次的 `followUps` 里 ✓，
+            // 要点上不再有 `clarifies` ✗。这些记录同样交给复查，并带上状态 ✓；"缺信息"没有线索，不给 ✗。
+            // 记录只是待复查的线索，不是已核实结论 ✓（复查提示词本来就说明 laterContext 未经核实）。
+            let units = Dictionary(LearningSourceUnit.make(subsequent.evidence, target: target).map { ($0.id, $0.text) },
+                                   uniquingKeysWith: { first, _ in first })
+            for record in subsequent.followUps ?? [] where record.state != .missing {
+                guard let index = targetIndex(record.target) else { continue }
+                if record.state == .supplemented, let support = record.pointIndex, subsequent.note.points.indices.contains(support) {
+                    // 同一条旧版 `clarifies` 已经给过同一对（旧要点，支撑要点）时不重复 ✓。
+                    guard linked.insert([index, support]).inserted else { continue }
+                    later.append(FollowUp(pointIndex: index, text: subsequent.note.points[support].text,
+                                          sources: quotes(subsequent.note.points[support]), state: record.state.rawValue))
+                    continue
+                }
+                let text = record.detail ?? ""
+                let sources = (record.sourceIDs ?? []).compactMap { units[$0] }
+                guard !text.isEmpty || !sources.isEmpty else { continue }
+                later.append(FollowUp(pointIndex: index, text: text, sources: sources, state: record.state.rawValue))
             }
         }
         let terms = LearningNotebook.terms(batch.evidence.map {
@@ -3365,8 +3749,46 @@ final class LearningReviewQueue: ObservableObject {
         /// saved array order and are numbered, in that order, before the first
         /// reorder or save. New jobs are numbered after every existing one.
         var enqueueSequence: Int? = nil
+        /// issue #26 复核：整课复查时，夹在复查批次之间、自身没有要点（例如"无新增学习知识"）
+        /// 却带有指向复查批次的跟进记录的批次 ✓。只用于构造 laterContext ✓：不进 `batches`、
+        /// 不参与输入指纹与复查身份 ✓。旧 journal 没有这个字段 → nil → 输入与以前完全相同 ✓。
+        var followUpOnlyBatches: [FollowUpOnlyBatch]? = nil
 
         var resolvedScope: LearningReviewScope { scope ?? .wholeLesson }
+
+        /// `job.batches[index]` 之后的复查批次，以及插在它们之间的只含跟进记录的批次。
+        func laterInputs(after index: Int) -> (batches: [LearningNoteBatch], followUpOnly: [(after: Int, batch: LearningNoteBatch)]) {
+            (Array(batches.dropFirst(index + 1)),
+             (followUpOnlyBatches ?? []).filter { $0.after >= index }.map { (after: $0.after - index, batch: $0.batch) })
+        }
+    }
+
+    struct FollowUpOnlyBatch: Codable, Equatable, Sendable {
+        /// Index in `Job.batches` of the nearest reviewed batch before this one.
+        let after: Int
+        let batch: LearningNoteBatch
+    }
+
+    /// Batches without points that carry a non-missing follow-up about a point
+    /// of an earlier reviewed batch. Only a whole-lesson review reads them; a
+    /// single-batch review has no later batches. Nil when there are none.
+    nonisolated static func followUpOnlyContext(in all: [LearningNoteBatch], reviewed: [LearningNoteBatch],
+                                                scope: LearningReviewScope) -> [FollowUpOnlyBatch]? {
+        guard scope.isWholeLesson else { return nil }
+        let positions = Dictionary(reviewed.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        var references = Set<String>(), latest: Int?, result: [FollowUpOnlyBatch] = []
+        for batch in all {
+            if let position = positions[batch.id] {
+                latest = position
+                references.formUnion(batch.note.points.indices.map { LearningNotebook.reference(batch, $0) })
+                continue
+            }
+            guard let latest, batch.note.points.isEmpty, (batch.followUps ?? []).contains(where: { record in
+                record.state != .missing && record.target.map(references.contains) == true
+            }) else { continue }
+            result.append(.init(after: latest, batch: batch))
+        }
+        return result.isEmpty ? nil : result
     }
 
     /// Unreleased locales may be stored, but cannot borrow another target's
@@ -3394,12 +3816,14 @@ final class LearningReviewQueue: ObservableObject {
     // Preparation has no I/O and does not enqueue or release an output language.
     // The real worker uses this same entry, with the default release gate.
     static func prepareInput(_ batch: LearningNoteBatch, laterBatches: [LearningNoteBatch] = [],
+                             followUpOnlyBatches: [(after: Int, batch: LearningNoteBatch)] = [],
                              targetLocale: String? = nil, allowUnreleased: Bool = false) throws -> PreparedRequest {
         guard let prompt = reviewPrompt(for: targetLocale, allowUnreleased: allowUnreleased),
               let target = (try? OutputLanguage.storedLanguage(targetLocale))?.generationTarget else {
             throw ReviewFailure(stage: .input, code: "unsupported_target", detail: "当前输出语言尚无可用的复查提示词")
         }
-        let input = try LearningPrompts.reviewInput(batch, laterBatches: laterBatches, target: target)
+        let input = try LearningPrompts.reviewInput(batch, laterBatches: laterBatches,
+                                                    followUpOnlyBatches: followUpOnlyBatches, target: target)
         return .init(input: input, prompt: prompt,
                      prefixInputDigest: prefixDigest(json: input.json, prompt: prompt, targetLocale: targetLocale))
     }
@@ -3408,8 +3832,9 @@ final class LearningReviewQueue: ObservableObject {
         guard job.batches.indices.contains(job.next) else {
             throw ReviewFailure(stage: .input, code: "no_pending_batch", detail: "没有可准备的复查批次")
         }
+        let later = job.laterInputs(after: job.next)
         let request = try prepareInput(job.batches[job.next],
-            laterBatches: Array(job.batches.dropFirst(job.next + 1)),
+            laterBatches: later.batches, followUpOnlyBatches: later.followUpOnly,
             targetLocale: job.targetLocale, allowUnreleased: allowUnreleased)
         if let saved = job.prompt, saved != request.prompt {
             throw ReviewFailure(stage: .promptBinding, code: "unrecognized_saved_prompt",
@@ -3895,10 +4320,11 @@ final class LearningReviewQueue: ObservableObject {
 
     /// 任务"当前这一批"实际会用到的输入指纹；没有待跑批次时返回 nil。
     static func prefixDigest(for job: Job) -> String? {
+        let later = job.laterInputs(after: job.next)
         guard job.next < job.batches.count,
               let target = (try? OutputLanguage.storedLanguage(job.targetLocale))?.generationTarget,
               let prepared = try? LearningPrompts.reviewInput(job.batches[job.next],
-                  laterBatches: Array(job.batches.dropFirst(job.next + 1)), target: target)
+                  laterBatches: later.batches, followUpOnlyBatches: later.followUpOnly, target: target)
         else { return nil }
         let digest = prefixDigest(json: prepared.json, prompt: job.prompt, targetLocale: job.targetLocale)
         guard let identity = job.identity else { return digest }
@@ -4504,7 +4930,8 @@ final class LearningReviewQueue: ObservableObject {
             inputDigest: digest, courseInputDigest: courseDigest,
             courseBatchDigests: try Dictionary(uniqueKeysWithValues: reviewable.map {
                 ($0.id.uuidString, try ReviewInputBinding.digest([$0]))
-            }))
+            }),
+            followUpOnlyBatches: Self.followUpOnlyContext(in: notebook.batches, reviewed: batches, scope: resolvedScope))
         try validateLocation(candidate, at: directory, allowHistorical: false)
         // Validate saved reports before touching the queue. Reusing a UUID for
         // different content is an error even after the former job has finished.
@@ -4772,7 +5199,8 @@ final class LearningReviewQueue: ObservableObject {
             identity: identity, inputDigest: digest, courseInputDigest: courseDigest,
             courseBatchDigests: try Dictionary(uniqueKeysWithValues: reviewable.map {
                 ($0.id.uuidString, try ReviewInputBinding.digest([$0]))
-            }))
+            }),
+            followUpOnlyBatches: followUpOnlyContext(in: notebook.batches, reviewed: batches, scope: resolvedScope))
         let validated = try validatedSnapshot(candidate, at: directory, allowHistorical: false)
         _ = try ReviewReportCollection.render(try ReviewReportCollection.read(in: directory) + [reportEntry(for: candidate)])
         let target = SessionDirectoryLocation.canonical(directory)
@@ -4903,9 +5331,11 @@ final class LearningReviewQueue: ObservableObject {
         if jobs.first?.failure != nil { return "failure" }
         // 升级迁移后的任务等待用户明确开始：整课复查不再默认自动跑。
         if jobs.first?.awaitingManualStart == true { return "manual" }
+        // A manual pause outranks a backoff window, so pausing mid-countdown
+        // is recorded as a user pause.
+        if userPaused { return "user" }
         if let retry = jobs.first?.retryPending,
            retry.notBefore > now().timeIntervalSince1970 { return "retry_wait" }
-        if userPaused { return "user" }
         if sleeping { return "sleep" }
         if recordingBlocked { return "recording" }
         if resourceBlocked { return "resources" }
@@ -5175,8 +5605,15 @@ final class LearningReviewQueue: ObservableObject {
                 }
                 jobs[0].stats = stats
                 let details = (patch.corrections.map {
-                    "- " + ClassroomFixedText.reviewOriginalPoint.noteFormat([String($0.index + 1), $0.original], target: target)
+                    // applying(to:) has validated the index. The category line goes after the
+                    // suggestion so the original/suggestion pair stays adjacent for the UI diff.
+                    let originalKind = batch.note.points[$0.index].kind
+                    let kindChange = originalKind == $0.kind ? "" : "\n- " + ClassroomFixedText.reviewKindChange.noteFormat(
+                        [ClassroomFixedText.kindLabel(originalKind, target: target),
+                         ClassroomFixedText.kindLabel($0.kind, target: target)], target: target)
+                    return "- " + ClassroomFixedText.reviewOriginalPoint.noteFormat([String($0.index + 1), $0.original], target: target)
                     + "\n- " + ClassroomFixedText.reviewSuggestion.noteFormat([$0.text], target: target)
+                    + kindChange
                     + "\n- " + ClassroomFixedText.reviewReason.noteFormat([$0.reason], target: target)
                 } + patch.additions.map {
                     "- " + ClassroomFixedText.reviewAddition.noteFormat([ClassroomFixedText.kindLabel($0.kind, target: target), $0.text], target: target)
@@ -5587,13 +6024,15 @@ final class LearningReviewQueue: ObservableObject {
         // 实测（2026-09-18，本机）：9B 思考复查约 306 秒/批（255 秒素材 2 批的平均）。
         let progress = Self.reportProgress(next: job.next, total: job.batches.count, scope: job.scope)
         if let failure = persistenceFailure ?? job.failure { status = failure }
+        // A manual pause blocks the retry, so it must not read as "retrying";
+        // resuming clears the backoff and retries at once.
+        else if userPaused { status = "\(progress) · 已手动暂停" }
         else if let retry = job.retryPending, !running {
             let remaining = retry.remainingSeconds(now: now().timeIntervalSince1970)
             status = remaining > 0
                 ? "\(progress) · 第 \(retry.attempts) 次自动重试将在 \(remaining) 秒后开始"
                 : "\(progress) · 第 \(retry.attempts) 次自动重试进行中"
         }
-        else if userPaused { status = "\(progress) · 已手动暂停" }
         // 升级迁移后的旧任务：进度保留，但不再自动跑；用户点"开始复查"才继续。
         else if job.awaitingManualStart == true { status = "\(progress) · 已排队，等待开始（不会自动运行）" }
         else if sleeping { status = "\(progress) · 睡眠暂停" }

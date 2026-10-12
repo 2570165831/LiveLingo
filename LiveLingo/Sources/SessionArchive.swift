@@ -12,6 +12,62 @@ enum SessionDirectoryLocation {
     }
 }
 
+/// The moment live capture started, in the UTC offset in force where it
+/// started. Labels never depend on the zone of the machine that renders them.
+struct SessionCaptureStart: Equatable, Sendable {
+    let date: Date
+    let utcOffsetSeconds: Int
+
+    init?(date: Date, utcOffsetSeconds: Int) {
+        // Check the signed range before any magnitude calculation: abs(Int.min)
+        // traps, and stored metadata must never be able to crash a reader.
+        // The yyyy labels support Gregorian years 0001...9999, through the
+        // final millisecond. Reject finite but unrenderable dates as well.
+        guard (-62_135_596_800...253_402_300_799.999).contains(date.timeIntervalSince1970),
+              (-18 * 3_600...18 * 3_600).contains(utcOffsetSeconds),
+              utcOffsetSeconds % 60 == 0,
+              (-62_135_596_800...253_402_300_799.999).contains(
+                date.timeIntervalSince1970 + Double(utcOffsetSeconds)) else { return nil }
+        self.date = date
+        self.utcOffsetSeconds = utcOffsetSeconds
+    }
+
+    static func now(in timeZone: TimeZone = .current) -> SessionCaptureStart? {
+        let date = Date()
+        return SessionCaptureStart(date: date, utcOffsetSeconds: timeZone.secondsFromGMT(for: date))
+    }
+
+    var timeZone: TimeZone { TimeZone(secondsFromGMT: utcOffsetSeconds) ?? TimeZone(secondsFromGMT: 0)! }
+
+    /// "UTC+8", "UTC+5:30", "UTC-5", "UTC+0".
+    var utcOffsetLabel: String {
+        let minutes = abs(utcOffsetSeconds) / 60
+        let hours = "UTC\(utcOffsetSeconds < 0 ? "-" : "+")\(minutes / 60)"
+        return minutes % 60 == 0 ? hours : hours + String(format: ":%02d", minutes % 60)
+    }
+
+    func formatted(_ format: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = format
+        return formatter.string(from: date)
+    }
+
+    /// "2026-10-09 14:30（UTC+8）" for Han targets, "2026-10-09 14:30 (UTC+8)" otherwise.
+    func displayLabel(hanPunctuation: Bool = true) -> String {
+        let time = formatted("yyyy-MM-dd HH:mm")
+        return hanPunctuation ? "\(time)（\(utcOffsetLabel)）" : "\(time) (\(utcOffsetLabel))"
+    }
+
+    /// "2026-10-09_1430_UTC+8"; a half-hour zone becomes "UTC+5.30" because
+    /// Finder shows ":" in a file name as "/".
+    var fileNameLabel: String {
+        "\(formatted("yyyy-MM-dd_HHmm"))_\(utcOffsetLabel.replacingOccurrences(of: ":", with: "."))"
+    }
+}
+
 /// Disk data deliberately does not depend on LearningNotebook's private state.
 /// Loading this value never starts capture, transcription, or a model.
 struct SessionSnapshot: Codable, Equatable, Sendable {
@@ -38,6 +94,11 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
     var revisionHistory: [SessionInputRevision]
     var createdAt: Date
     var updatedAt: Date
+    /// When live capture started and the UTC offset in force there. Nil for
+    /// imports and older courses; omitted by Codable when absent. Either key
+    /// requires reader version 3, so older readers cannot silently discard it.
+    var captureStartedAt: Date? = nil
+    var captureUTCOffsetSeconds: Int? = nil
     /// Optimistic concurrency token. Keep the value returned by save/append.
     var storageRevision: Int = 0
     var lastJournalSequence: Int = 0
@@ -66,6 +127,18 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
         self.audioFiles = audioFiles; self.audioRanges = audioRanges
         self.transcriptionJournalPath = transcriptionJournalPath; self.revisionHistory = revisionHistory
         self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt
+    }
+
+    /// A malformed stored pair is ignored, falling back to the legacy class date.
+    var captureStart: SessionCaptureStart? {
+        get {
+            guard let captureStartedAt, let captureUTCOffsetSeconds else { return nil }
+            return SessionCaptureStart(date: captureStartedAt, utcOffsetSeconds: captureUTCOffsetSeconds)
+        }
+        set {
+            captureStartedAt = newValue?.date
+            captureUTCOffsetSeconds = newValue?.utcOffsetSeconds
+        }
     }
 
     static func normalizedTargetLocale(_ locale: String?) -> String? {
@@ -123,6 +196,7 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
         for segment in segments + batches.flatMap(\.evidence) {
             guard segment.startTime.isFinite, segment.endTime.isFinite,
                   segment.startTime >= 0, segment.endTime >= segment.startTime,
+                  segment.endTime <= TranscriptSegment.maximumTimestamp,
                   segment.inputRevision >= 0, segment.inputRevision <= inputRevision,
                   segment.sessionID == nil || segment.sessionID == sessionID else {
                 throw SessionStoreError.invalidState("字幕的会话、时间或修订号不一致")
@@ -175,6 +249,7 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
             for segment in [change.previousSegment, change.replacementSegment] + change.retainedBatches.flatMap(\.evidence) {
                 guard segment.startTime.isFinite, segment.endTime.isFinite,
                       segment.startTime >= 0, segment.endTime >= segment.startTime,
+                      segment.endTime <= TranscriptSegment.maximumTimestamp,
                       segment.inputRevision >= 0, segment.inputRevision <= inputRevision,
                       segment.sessionID == nil || segment.sessionID == sessionID else {
                     throw SessionStoreError.invalidState("修订历史含无效或其他课程的字幕")
@@ -279,7 +354,7 @@ struct SessionProcessingState: Codable, Equatable, Sendable {
               Set(pendingBatchIDs).count == pendingBatchIDs.count,
               Set((pendingCaptionRepairs ?? []).map { $0.current.id }).count == (pendingCaptionRepairs ?? []).count,
               lastErrorSource == nil || lastError != nil,
-              lastCapturedTime.map({ $0.isFinite && $0 >= 0 }) ?? true else {
+              lastCapturedTime.map({ $0.isFinite && $0 >= 0 && $0 <= TranscriptSegment.maximumTimestamp }) ?? true else {
             throw SessionStoreError.invalidState("待处理任务或采集进度无效")
         }
     }
@@ -394,7 +469,9 @@ struct SessionAudioRange: Codable, Equatable, Sendable {
     func validate() throws {
         try SessionArchiveCoding.validateRelativePath(filePath)
         guard startFrame >= 0, frameCount >= 0, startFrame <= Int64.max - frameCount,
-              captureStart.isFinite, captureEnd.isFinite, captureStart >= 0, captureEnd >= captureStart else {
+              captureStart.isFinite, captureEnd.isFinite, captureStart >= 0, captureEnd >= captureStart,
+              // Session-relative or system-uptime seconds; both stay far below the caption bound.
+              captureEnd <= TranscriptSegment.maximumTimestamp else {
             throw SessionStoreError.invalidState("音频帧范围或采集时间无效")
         }
     }
@@ -550,6 +627,7 @@ final class SessionStore: @unchecked Sendable {
     private let journalWrite: @Sendable (Data, URL) throws -> Void
     private let didRead: @Sendable () -> Void
     private let legacySessionID: UUID
+    private let recoveryClaim = NSLock()
     private var inspectedTemporaryItems = false
 
     init(directory: URL, legacySessionID: UUID = UUID(),
@@ -565,8 +643,26 @@ final class SessionStore: @unchecked Sendable {
 
     func load() throws -> SessionSnapshot? { try loadDetailed().snapshot }
 
+    /// Opening a course runs the best-effort temporary recovery scan, outside
+    /// both store locks. Write transactions and the no-scan reads below never
+    /// scan; anything that calls this still waits for the scan itself.
     func loadDetailed() throws -> SessionLoadResult {
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireSessionDirectory(directory)
+        #endif
+        inspectTemporaryItemsOnce()
+        return try locked(writing: false) { try read().result }
+    }
+
+    /// A read that never runs the recovery scan, for readers that are not
+    /// opening the course: a saver's readback and the review queue's storage.
+    func loadDetailedWithoutRecovery() throws -> SessionLoadResult {
         try locked(writing: false) { try read().result }
+    }
+
+    /// A saver's readback of its own committed state; it never scans.
+    func loadCommittedSnapshot() throws -> SessionSnapshot? {
+        try loadDetailedWithoutRecovery().snapshot
     }
 
     func loadDetailedAsync() async throws -> SessionLoadResult {
@@ -985,23 +1081,28 @@ final class SessionStore: @unchecked Sendable {
             fd = try parent.openRegularFile(named: ".session-store.lock",
                                             flags: writing ? O_RDWR : O_RDONLY, create: writing)
         } catch SensitiveFileIO.Failure.system(_, let code) where !writing && code == ENOENT {
-            inspectTemporaryItems()
             return try action()
         } catch {
             throw SessionStoreError.unsafePath(directory.path)
         }
         defer { _ = Darwin.close(fd) }
-        guard flock(fd, writing || !inspectedTemporaryItems ? LOCK_EX : LOCK_SH) == 0 else {
+        guard flock(fd, writing ? LOCK_EX : LOCK_SH) == 0 else {
             throw SessionStoreError.io(operation: "lock", code: errno)
         }
         defer { _ = flock(fd, LOCK_UN) }
-        inspectTemporaryItems()
         return try action()
     }
 
-    private func inspectTemporaryItems() {
-        guard !inspectedTemporaryItems else { return }
-        inspectedTemporaryItems = true
+    /// Runs outside the process and disk locks (DU-05). Each candidate is
+    /// protected by its own writer lease and creation receipt, never by the
+    /// store lock, so a slow or stuck open here cannot delay this or another
+    /// store's write transaction. It does delay the caller of loadDetailed.
+    private func inspectTemporaryItemsOnce() {
+        let first = recoveryClaim.withLock {
+            defer { inspectedTemporaryItems = true }
+            return !inspectedTemporaryItems
+        }
+        guard first else { return }
         // Recovery is best effort and must not turn a readable course into a
         // failed open. Each uncertain candidate is recorded without its content.
         do {
@@ -1016,20 +1117,24 @@ final class SessionStore: @unchecked Sendable {
 }
 
 enum SessionArchiveCoding {
-    static let currentReaderVersion = 2
+    static let currentReaderVersion = 3
     /// Keep the frozen schema-1 payload and input fingerprints unchanged. The
     /// envelope/row gates old readers before they can discard new semantics.
     static func minimumReaderVersion(for data: Data) throws -> Int {
+        let captureTimeKeys: Set<String> = ["captureStartedAt", "captureUTCOffsetSeconds"]
         let modernKeys: Set<String> = ["targetLocale", "sourceLanguage", "captionAnnotation", "translationFailures",
             "pendingCaptionRepairs", "lastErrorSource", "captureError", "retireGenerationCheckpoint"]
-        func containsModernField(_ value: Any) -> Bool {
+        func containsField(_ value: Any, keys: Set<String>) -> Bool {
             if let object = value as? [String: Any] {
-                return !modernKeys.isDisjoint(with: object.keys) || object.values.contains(where: containsModernField)
+                return !keys.isDisjoint(with: object.keys) || object.values.contains { containsField($0, keys: keys) }
             }
-            if let array = value as? [Any] { return array.contains(where: containsModernField) }
+            if let array = value as? [Any] { return array.contains { containsField($0, keys: keys) } }
             return false
         }
-        return containsModernField(try JSONSerialization.jsonObject(with: data)) ? currentReaderVersion : 1
+        let object = try JSONSerialization.jsonObject(with: data)
+        if containsField(object, keys: captureTimeKeys) { return 3 }
+        // Version-2 semantics remain version 2 even as newer gates are added.
+        return containsField(object, keys: modernKeys) ? 2 : 1
     }
     static let genesisDigest = String(repeating: "0", count: 64)
     static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }

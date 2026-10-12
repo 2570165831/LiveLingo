@@ -287,6 +287,42 @@ struct SessionExporterTests {
         #expect(SessionExporter.srtTimestamp(-1) == "00:00:00,000")
     }
 
+    /// Corrupt times must format without trapping; 1e9 s is the stored-time
+    /// bound. Valid times keep their existing truncation and rounding.
+    @Test func timestampFormattersClampImplausibleTimes() {
+        for time: TimeInterval in [1e20, .infinity] {
+            #expect(SessionExporter.srtTimestamp(time) == "277777:46:40,000")
+            #expect(NotesExportDocument.timestamp(time) == "277777:46:40")
+            #expect(LearningTimeLabel.stamp(time) == "277777:46:40")
+        }
+        #expect(SessionExporter.srtTimestamp(1e17) == "277777:46:40,000")
+        for time: TimeInterval in [-.infinity, .nan, -1] {
+            #expect(SessionExporter.srtTimestamp(time) == "00:00:00,000")
+            #expect(NotesExportDocument.timestamp(time) == "00:00")
+            #expect(LearningTimeLabel.stamp(time) == "00:00")
+        }
+        #expect(NotesExportDocument.timestamp(3_661.5) == "01:01:02")
+        #expect(LearningTimeLabel.stamp(59.5) == "01:00")
+
+        let caption = TranscriptSegment(startTime: 59.9, endTime: 61, english: "Synthetic source.", chinese: "合成译文。")
+        #expect(ClassroomMarkdownRendering.scheduleFields("- [00:59] Synthetic source. — 合成译文。",
+                                                          evidence: [caption])?.prefix == "- [00:59] Synthetic source. — ")
+        let huge = TranscriptSegment(startTime: 1e20, endTime: 1e20, english: "Synthetic source.", chinese: "合成译文。")
+        #expect(ClassroomMarkdownRendering.scheduleFields("- [16666666:40] Synthetic source. — 合成译文。",
+                                                          evidence: [huge])?.prefix == "- [16666666:40] Synthetic source. — ")
+    }
+
+    /// The recording strip shows a restored course's last capture time; a
+    /// corrupt value must clamp instead of trapping in `Int(_:)`.
+    @Test func recordingClockClampsImplausibleTimes() {
+        #expect(RecordingElapsedText.label(1e20) == "277777:46:40")
+        #expect(RecordingElapsedText.label(.infinity) == "277777:46:40")
+        for time: TimeInterval in [-.infinity, .nan, -1] {
+            #expect(RecordingElapsedText.label(time) == "00:00:00")
+        }
+        #expect(RecordingElapsedText.label(3_661.9) == "01:01:01")
+    }
+
     @Test func exportWritesAllTextFormats() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -563,6 +599,28 @@ struct SessionExporterTests {
     ])
     func academicInputNormalizerPreservesOtherIonNames(_ source: String) {
         #expect(AcademicInputNormalizer.normalize(source) == source)
+    }
+
+    @Test(arguments: [
+        "SCN-dependent rhythms regulate sleep.",
+        "The SCN-containing ligand binds iron.",
+        "SCN-lesioned rats lose circadian rhythms.",
+        "scn-dependent firing",
+        "SCN\u{2212}dependent rhythms",
+        "SCN-2 cells"
+    ])
+    func academicInputNormalizerKeepsSCNCompoundHyphens(_ source: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == source)
+    }
+
+    @Test(arguments: [
+        ("Add SCN- ions to Fe³⁺.", "Add SCN⁻ ions to Fe³⁺."),
+        ("The ligand is SCN-.", "The ligand is SCN⁻."),
+        ("Fe³⁺ + SCN\u{2212}, then heat.", "Fe³⁺ + SCN⁻, then heat.")
+    ])
+    func academicInputNormalizerStillMarksStandaloneSCNCharge(_ source: String, _ expected: String) {
+        #expect(AcademicInputNormalizer.normalize(source) == expected)
+        #expect(AcademicInputNormalizer.normalize(expected) == expected)
     }
 
     @Test func academicInputNormalizerKeepsSingularWhenCorrectingDirectChargeLabel() {
@@ -843,6 +901,59 @@ struct ASRRecoveryTests {
                              .init(kind: "核心结论", text: "电子位置用概率描述。")
                          ]))
         #expect(!book.markdown().contains("## 课程安排与待办"))
+    }
+
+    /// Issue #25: programming uses of "assignment"/"submit" are not course logistics,
+    /// but real notices (even ones that also mention code) must stay.
+    @Test func logisticsIgnoresProgrammingAssignmentAndSubmit() {
+        for code in [
+            "Variable assignment binds a name to a value.",
+            "Use executor.submit(task) to run the callable.",
+            "Use executor dot submit to run the callable.",
+            "The assignment operator returns the value.",
+        ] {
+            #expect(!LearningNotebook.isScheduleStatement(code), "programming usage is not a schedule item: \(code)")
+        }
+        for notice in [
+            "Assignment 2 is due on Friday.",
+            "Please submit your lab report by Friday.",
+            "Your first assignment will be released next week.",
+            "Submit assignment three by Friday, it uses executor.submit().",
+            "Unit registration closes on Friday",
+            // A sentence break before a sentence-initial "Submit" is not a method call.
+            "The lab is posted. Submit your report by next Monday.",
+            "Okay. Submit it before class on Friday.",
+            "There will be multiple assignments this term.",
+        ] {
+            #expect(LearningNotebook.isScheduleStatement(notice), "real notice must stay: \(notice)")
+        }
+        // Member access still counts as code when it directly joins an identifier.
+        #expect(!LearningNotebook.isScheduleStatement("Then call pool.submit(job) and wait."))
+    }
+
+    @Test func logisticsSectionDropsProgrammingAssignmentForBothTargets() {
+        let segments = [
+            TranscriptSegment(startTime: 10, endTime: 18,
+                              english: "Variable assignment binds a name to a value.",
+                              chinese: "变量赋值把名字绑定到一个值。"),
+            TranscriptSegment(startTime: 20, endTime: 28,
+                              english: "Assignment 2 is due on Friday.",
+                              chinese: "第二次作业周五截止。"),
+        ]
+        var book = LearningNotebook()
+        for segment in segments {
+            try? book.append(evidence: [segment], note: LearningNote(topic: "测试主题", points: [
+                .init(kind: "核心结论", text: "占位要点。")
+            ]))
+        }
+        let markdown = book.markdown()
+        #expect(markdown.contains("## 课程安排与待办"))
+        #expect(markdown.contains("- [00:20] Assignment 2 is due on Friday."))
+        #expect(!markdown.contains("- [00:10] Variable assignment binds a name to a value."))
+
+        let english = LearningNotebook.logisticsSection(from: segments, target: .english)
+        #expect(english.contains("Assignment 2 is due on Friday."))
+        #expect(!english.contains("Variable assignment binds a name to a value."))
     }
 
     @Test func humanReadableChineseHidesFailurePlaceholderFromExports() {

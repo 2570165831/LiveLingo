@@ -45,9 +45,71 @@ enum SessionWorkspace {
     struct RecordingRecovery: Codable, Equatable, Identifiable, Sendable {
         let id: UUID
         var directory: URL
-        let outputRoot: URL
+        var outputRoot: URL
         var needsPromotion: Bool = true
         var createdAt: Date = Date()
+        /// App-scoped security bookmarks. An open-panel grant lasts only for
+        /// the process that showed the panel, so a relaunch must resolve
+        /// these. Records written before they existed omit both keys and keep
+        /// the plain-URL behaviour.
+        var outputRootBookmark: Data? = nil
+        var directoryBookmark: Data? = nil
+
+        /// The folder the user selected for this recording, with its grant.
+        func withOutputRoot(_ url: URL) -> Self {
+            var copy = self
+            copy.outputRoot = url
+            copy.outputRootBookmark = SessionWorkspace.securityBookmark(for: url)
+            return copy
+        }
+
+        /// The copied course folder inside the selected output root.
+        func promoted(to destination: URL) -> Self {
+            var copy = self
+            copy.directory = destination
+            copy.needsPromotion = false
+            copy.directoryBookmark = SessionWorkspace.securityBookmark(for: destination)
+            return copy
+        }
+    }
+
+    /// Nil when the folder cannot be bookmarked; callers keep the plain URL.
+    static func securityBookmark(for url: URL) -> Data? {
+        try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+
+    /// A resolved app-scoped bookmark whose sandbox grant stays open until
+    /// `stop()` or deinit.
+    final class ScopedFolderAccess {
+        let url: URL
+        let isStale: Bool
+        private var accessing: Bool
+
+        /// Throws when the folder is gone, trashed or the bookmark is unreadable.
+        init(bookmark: Data) throws {
+            var stale = false
+            let resolved = try URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI, .withoutMounting],
+                                   relativeTo: nil, bookmarkDataIsStale: &stale)
+            accessing = resolved.startAccessingSecurityScopedResource()
+            url = resolved
+            isStale = stale
+            var isDirectory: ObjCBool = false
+            // A trashed folder still resolves; it must not receive the recording.
+            let trashed = resolved.pathComponents.contains { $0 == ".Trash" || $0 == ".Trashes" }
+            guard !trashed, FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                stop()
+                throw SessionStoreError.unsafePath(resolved.path)
+            }
+        }
+
+        func stop() {
+            guard accessing else { return }
+            url.stopAccessingSecurityScopedResource()
+            accessing = false
+        }
+
+        deinit { stop() }
     }
     private struct RecoveryIndex: Codable {
         var version = 1
@@ -66,12 +128,20 @@ enum SessionWorkspace {
         try makeTemporarySessionDirectory(in: recoverableRecordingRoot, identifier: UUID(), createRoot: true)
     }
 
+    /// The startup read: runs the best-effort temporary recovery scan
+    /// (DU-05) without any recovery lock, then reads the index.
     static func recordingRecoveries(in root: URL) throws -> [RecordingRecovery] {
         if FileManager.default.fileExists(atPath: root.path) {
             do {
                 try SensitiveFileIO.Directory.open(at: root, create: false, tighten: false).recoverTemporaryItems()
             } catch { SensitiveFileIO.recordTemporaryRecoveryScanFailure() }
         }
+        return try readRecordingRecoveryIndex(in: root)
+    }
+
+    /// Reads the index without scanning, so a stalled open of a temporary
+    /// can never hold the recovery locks taken by saves.
+    private static func readRecordingRecoveryIndex(in root: URL) throws -> [RecordingRecovery] {
         let url = root.appendingPathComponent("pending-recordings.json")
         try SessionArchiveCoding.requireRegularFileIfPresent(url)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
@@ -80,7 +150,8 @@ enum SessionWorkspace {
         guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               Set(object.keys) == Set(["version", "recordings"]),
               let records = object["recordings"] as? [[String: Any]],
-              records.allSatisfy({ Set($0.keys).isSubset(of: ["id", "directory", "outputRoot", "needsPromotion", "createdAt"]) }) else {
+              records.allSatisfy({ Set($0.keys).isSubset(of: ["id", "directory", "outputRoot", "needsPromotion", "createdAt",
+                                                                "outputRootBookmark", "directoryBookmark"]) }) else {
             throw SessionStoreError.invalidState("录音恢复索引含未知状态，原文件已保留")
         }
         let index = try SessionArchiveCoding.decode(RecoveryIndex.self, from: bytes)
@@ -111,7 +182,7 @@ enum SessionWorkspace {
         defer { _ = flock(fd, LOCK_UN) }
         // Load and validate under the same lock as merge/retirement. A read
         // failure blocks publication and leaves the original bytes intact.
-        var merged = try recordingRecoveries(in: root)
+        var merged = try readRecordingRecoveryIndex(in: root)
         guard Set(recordings.map(\.id)).count == recordings.count,
               recordings.allSatisfy({ $0.directory.isFileURL && $0.outputRoot.isFileURL }) else {
             throw SessionStoreError.invalidState("录音恢复记录无效")
@@ -952,8 +1023,25 @@ enum SessionExporter {
     }
 
     static func srtCue(_ segment: TranscriptSegment, index: Int, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
-        return "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
-            + captionLines(segment, target: target).joined(separator: "\n")
+        srtCueText(segment, index: index, lines: captionLines(segment, target: target))
+    }
+
+    static func srtCueHeader(_ segment: TranscriptSegment, index: Int) -> String {
+        "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
+    }
+
+    /// SRT ends a cue at the first blank line, so cue text must not contain one.
+    /// Split on every newline form, drop empty or whitespace-only lines and keep
+    /// the remaining lines unchanged. Only the SRT exit uses this; saved text,
+    /// JSONL and transcripts keep the original text.
+    static func srtBodyLines(_ lines: [String]) -> [String] {
+        lines.flatMap { $0.split(whereSeparator: \.isNewline) }
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .map(String.init)
+    }
+
+    static func srtCueText(_ segment: TranscriptSegment, index: Int, lines: [String]) -> String {
+        srtCueHeader(segment, index: index) + srtBodyLines(lines).joined(separator: "\n")
     }
 
     /// Saved text can be verified before its language is released for generation.
@@ -982,8 +1070,7 @@ enum SessionExporter {
     }
 
     static func srtCue(_ segment: TranscriptSegment, index: Int, outputLanguage: OutputLanguage) -> String {
-        "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
-            + captionLines(segment, outputLanguage: outputLanguage).joined(separator: "\n")
+        srtCueText(segment, index: index, lines: captionLines(segment, outputLanguage: outputLanguage))
     }
 
     /// The existing targetLine/captionLines/srtCue APIs remain generation text
@@ -1010,9 +1097,8 @@ enum SessionExporter {
 
     static func renderedSRTCue(_ segment: TranscriptSegment, index: Int, outputLanguage: OutputLanguage,
                                converter: ChineseScriptConverter = .shared) throws -> String {
-        "\(index + 1)\n\(srtTimestamp(segment.startTime)) --> \(srtTimestamp(segment.endTime))\n"
-            + (try renderedCaptionLines(segment, outputLanguage: outputLanguage, converter: converter))
-                .joined(separator: "\n")
+        srtCueText(segment, index: index,
+            lines: try renderedCaptionLines(segment, outputLanguage: outputLanguage, converter: converter))
     }
 
     static func export(
@@ -1085,7 +1171,7 @@ enum SessionExporter {
     }
 
     static func srtTimestamp(_ interval: TimeInterval) -> String {
-        let milliseconds = max(0, Int((interval * 1_000).rounded()))
+        let milliseconds = TimestampClock.roundedMilliseconds(interval)
         let hours = milliseconds / 3_600_000
         let minutes = (milliseconds / 60_000) % 60
         let seconds = (milliseconds / 1_000) % 60
@@ -1187,6 +1273,8 @@ struct NotesExportSnapshot: Equatable, Sendable {
     /// Nil preserves local-time export; a supplied zone makes a snapshot's
     /// date and timestamp independent of the machine rendering it.
     var exportTimeZone: TimeZone? = nil
+    /// Recorded capture start; nil keeps the legacy folder-name/export date.
+    var classStart: SessionCaptureStart? = nil
 
     var classDate: String { NotesExportDocument.classDate(of: self) }
 }
@@ -1308,7 +1396,11 @@ enum NotesExportDocument {
     static let disclaimer = "本文件由本机模型生成，未经人工逐句核对；正文按主题整理，“需要回听”和“来源检查”两节列出的内容仍需自行核对。"
 
     static func classDate(of snapshot: NotesExportSnapshot) -> String {
-        // Prefer the date inside the recording folder name (the class date).
+        // The recorded capture start wins, shown in the zone where it started.
+        if let start = snapshot.classStart {
+            return start.displayLabel(hanPunctuation: snapshot.target.profile.script == .han)
+        }
+        // Older courses: the date inside the recording folder name (the class date).
         if let name = snapshot.sessionName, let range = name.range(of: #"\d{4}-\d{2}-\d{2}"#, options: .regularExpression) {
             return String(name[range])
         }
@@ -1330,11 +1422,12 @@ enum NotesExportDocument {
     }
 
     static func defaultFileName(_ snapshot: NotesExportSnapshot, format: NotesExportFormat) -> String {
-        "\(snapshot.className) \(classDate(of: snapshot)) \(scopeLabel(snapshot)).\(format.fileExtension)"
+        let date = snapshot.classStart?.fileNameLabel ?? classDate(of: snapshot)
+        return "\(snapshot.className) \(date) \(scopeLabel(snapshot)).\(format.fileExtension)"
     }
 
     static func timestamp(_ interval: TimeInterval) -> String {
-        let total = max(0, Int(interval.rounded()))
+        let total = TimestampClock.roundedSeconds(interval)
         let hours = total / 3_600
         let minutes = (total / 60) % 60
         let seconds = total % 60
@@ -1432,6 +1525,71 @@ enum NotesExportDocument {
         return markdown ? "## \(heading)\n\n" + body : heading + "\n\n" + strippingMarkdown(body)
     }
 
+    /// Captions are plain text, not Markdown. Backslash-escape everything a
+    /// CommonMark/GFM preview could read as inline syntax or HTML, plus block
+    /// markers at the start of a physical line, so the caption shows literally.
+    /// `atLineStart` is false for text that follows the `[stamp] ` prefix.
+    static func markdownLiteral(_ text: String, atLineStart: Bool) -> String {
+        let characters = Array(text)
+        var output = ""
+        var lineStart = atLineStart
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            index += 1
+            if character.isNewline {
+                output.append(character)
+                lineStart = true
+                continue
+            }
+            if lineStart, character == " " || character == "\t" {
+                output.append(character)
+                continue
+            }
+            let blockStart = lineStart
+            lineStart = false
+            if blockStart, "#>-+=".contains(character) {
+                output += "\\" + String(character)
+                continue
+            }
+            if blockStart, character.isASCII, character.isNumber {
+                // `1.` / `1)` list markers: up to nine digits, then `.` or `)`.
+                var end = index
+                while end < characters.count, end - index < 8,
+                      characters[end].isASCII, characters[end].isNumber { end += 1 }
+                output += String(characters[(index - 1)..<end])
+                index = end
+                if index < characters.count, characters[index] == "." || characters[index] == ")" {
+                    output += "\\" + String(characters[index])
+                    index += 1
+                }
+                continue
+            }
+            if "\\`*_[]<>~|$".contains(character) {
+                output += "\\" + String(character)
+            } else if character == "&", isEntityReference(characters, from: index) {
+                output += "\\&"
+            } else {
+                output.append(character)
+            }
+        }
+        return output
+    }
+
+    /// `&name;`, `&#123;` or `&#x1F;` after the `&` at `start - 1`.
+    private static func isEntityReference(_ characters: [Character], from start: Int) -> Bool {
+        var index = start
+        while index < characters.count, index - start <= 32 {
+            let character = characters[index]
+            if character == ";" { return index > start }
+            guard character.isASCII, character.isLetter || character.isNumber || (character == "#" && index == start) else {
+                return false
+            }
+            index += 1
+        }
+        return false
+    }
+
     static func markdown(_ snapshot: NotesExportSnapshot, rendered: RenderedFields? = nil) -> String {
         var sections: [String] = [header(snapshot, markdown: true, rendered: rendered).joined(separator: "\n")]
         let notes = (rendered?.notesMarkdown ?? snapshot.notesMarkdown).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1443,7 +1601,11 @@ enum NotesExportDocument {
             let lines = snapshot.transcript.enumerated().map { index, segment -> String in
                 let stamp = "\(timestamp(segment.startTime))–\(timestamp(segment.endTime))"
                 let captions = rendered?.captionLines[index] ?? SessionExporter.captionLines(segment, outputLanguage: snapshot.target)
-                return "[\(stamp)] " + captions.joined(separator: "\n")
+                // Two trailing spaces make a hard break, so the source and the
+                // translation stay on separate lines in Markdown previews.
+                return "[\(stamp)] " + captions.enumerated()
+                    .map { markdownLiteral($1, atLineStart: $0 > 0) }
+                    .joined(separator: "  \n")
             }
             sections.append("## \(rendered?.transcriptHeading ?? transcriptHeading(for: snapshot.target))\n\n" + lines.joined(separator: "\n\n"))
         }
@@ -1601,8 +1763,15 @@ enum PDFNotesWriter {
     static func attributedDocument(_ snapshot: NotesExportSnapshot,
                                    rendered: NotesExportDocument.RenderedFields? = nil) -> NSAttributedString {
         let output = NSMutableAttributedString()
-        func append(_ text: String, style: Style) {
-            output.append(line(text, style: style))
+        func append(_ text: String, style: Style, codeProtected: Bool = false) {
+            output.append(line(text, style: style, codeProtected: codeProtected))
+        }
+        /// Markdown is laid out line by line, so code-block context is taken from the whole text.
+        func appendMarkdown(_ text: String) {
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            for (line, code) in zip(lines, FormulaDisplay.codeBlockLines(lines)) {
+                append(line, style: Style.markdown(line), codeProtected: code)
+            }
         }
 
         append("\(rendered?.className ?? snapshot.className) · \(NotesExportDocument.scopeLabel(snapshot, rendered: rendered)) · \(snapshot.classDate)", style: .title)
@@ -1620,16 +1789,12 @@ enum PDFNotesWriter {
         if notes.isEmpty {
             append(NotesExportDocument.fixed(.emptyNotes, target: snapshot.target, rendered: rendered), style: .body)
         } else {
-            for line in notes.split(separator: "\n", omittingEmptySubsequences: false) {
-                append(String(line), style: Style.markdown(String(line)))
-            }
+            appendMarkdown(notes)
         }
 
         if let review = NotesExportDocument.reviewBody(snapshot, rendered: rendered) {
             append(NotesExportDocument.reviewHeading(for: snapshot.target, rendered: rendered), style: .heading)
-            for line in review.split(separator: "\n", omittingEmptySubsequences: false) {
-                append(String(line), style: Style.markdown(String(line)))
-            }
+            appendMarkdown(review)
         }
 
         if snapshot.includesTranscript, !snapshot.transcript.isEmpty {
@@ -1675,7 +1840,7 @@ enum PDFNotesWriter {
         return trimmed
     }
 
-    static func line(_ source: String, style: Style) -> NSAttributedString {
+    static func line(_ source: String, style: Style, codeProtected: Bool = false) -> NSAttributedString {
         let text = text(of: style, line: source)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
@@ -1711,7 +1876,7 @@ enum PDFNotesWriter {
         }
 
         let result = NSMutableAttributedString()
-        for run in inlineRuns(text, size: size, bold: bold) {
+        for run in inlineRuns(text, size: size, bold: bold, codeProtected: codeProtected) {
             result.append(run)
         }
         result.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: result.length))
@@ -1726,18 +1891,21 @@ enum PDFNotesWriter {
 
     /// Inline runs: `**bold**` (paired by `MarkdownBold`) plus `$…$` / `\(…)`
     /// formulas, which are rendered with real sub/superscript baselines
-    /// instead of raw LaTeX-ish markers.
-    static func inlineRuns(_ source: String, size: CGFloat, bold: Bool) -> [NSAttributedString] {
+    /// instead of raw LaTeX-ish markers. `codeProtected` (a line inside a code
+    /// block) keeps every `$` literal.
+    static func inlineRuns(_ source: String, size: CGFloat, bold: Bool, codeProtected: Bool = false) -> [NSAttributedString] {
         var runs: [NSAttributedString] = []
 
         func appendPlain(_ piece: String, strong: Bool) {
             guard !piece.isEmpty else { return }
-            for run in FormulaDisplay.runs(piece) {
-                let fontSize = run.script == 0 ? size : size * 0.72
+            for run in FormulaDisplay.runs(piece, codeProtected: codeProtected) {
+                let nestedScale = run.nested == 0 ? 1 : CGFloat(ReadingTypography.nestedScriptScale)
+                let fontSize = run.script == 0 ? size : size * 0.72 * nestedScale
                 let font = font(size: fontSize, bold: strong || (run.math && !run.text.isEmpty))
                 var attributes: [NSAttributedString.Key: Any] = [.font: font]
                 if run.script != 0 {
-                    attributes[.baselineOffset] = run.script > 0 ? size * 0.34 : -size * 0.16
+                    func offset(_ script: Int) -> CGFloat { script > 0 ? size * 0.34 : -size * 0.16 }
+                    attributes[.baselineOffset] = offset(run.script) + (run.nested == 0 ? 0 : nestedScale * offset(run.nested))
                 }
                 if run.math {
                     attributes[.foregroundColor] = NSColor.labelColor

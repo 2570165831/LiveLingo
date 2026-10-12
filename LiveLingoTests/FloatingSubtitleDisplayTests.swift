@@ -200,6 +200,66 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         XCTAssertNil(select(model, mode: .translationOnly).translation, "The preceding formal translation must not replace new speech")
     }
 
+    func testAnOlderFinalKeepsTheNewerLivePreviewAndItsTranslation() throws {
+        let (model, _) = try fixture()
+        model.loadPresentationForTesting(phase: .recording, evidence: [])
+        let next = "Now integrate from zero to one."
+        model.receiveLivePreviewForTesting(next, start: 5, end: 7, chinese: "现在从零积分到一。")
+        model.receiveCaptionForTesting("The derivative is two x.", start: 0, end: 5)
+        XCTAssertEqual(model.segments.last?.english, "The derivative is two x.")
+        XCTAssertEqual(model.volatileEnglish, next, "A final for an earlier chunk must not clear a newer preview")
+        XCTAssertEqual(model.previewChinese, "现在从零积分到一。")
+        XCTAssertEqual(model.previewTranslationSource, next)
+        XCTAssertEqual(model.previewEnglishDisplay, next)
+        for mode in [FloatingSubtitleDisplayMode.bilingual, .sourceOnly] {
+            XCTAssertEqual(select(model, mode: mode).source?.text, next)
+        }
+        if model.supportsPreviewTranslation {
+            XCTAssertEqual(select(model, mode: .bilingual).translation?.text, "初译 · 现在从零积分到一。")
+        }
+        // The final that reaches the preview's end still clears it.
+        model.receiveCaptionForTesting(next, start: 5, end: 7)
+        XCTAssertEqual(model.volatileEnglish, "")
+        XCTAssertEqual(model.previewChinese, "")
+        XCTAssertEqual(model.previewTranslationSource, next)
+    }
+
+    func testAFinalCoveringOrWithoutAPreviewRangeStillClearsThePreview() throws {
+        let (model, _) = try fixture()
+        model.loadPresentationForTesting(phase: .recording, evidence: [])
+        model.receiveLivePreviewForTesting("The derivative is two", start: 0, end: 4.9, chinese: "导数是二")
+        model.receiveCaptionForTesting("The derivative is two x.", start: 0, end: 5)
+        XCTAssertEqual(model.volatileEnglish, "")
+        XCTAssertEqual(model.previewChinese, "")
+        XCTAssertEqual(model.previewTranslationSource, "The derivative is two x.")
+        // An unknown (zero) range keeps the established clear-on-final behaviour.
+        model.receiveLivePreviewForTesting("Now integrate from zero to one.", chinese: "现在从零积分到一。")
+        model.receiveCaptionForTesting("Now integrate from zero to one.", start: 5, end: 7)
+        XCTAssertEqual(model.volatileEnglish, "")
+        XCTAssertEqual(model.previewChinese, "")
+        // A preview cleared by another path forgets its range.
+        model.receiveLivePreviewForTesting("A later sentence.", start: 9, end: 12)
+        model.receiveLivePreviewForTesting("")
+        model.receiveLivePreviewForTesting("A later sentence.")
+        model.receiveCaptionForTesting("An earlier sentence.", start: 7, end: 9)
+        XCTAssertEqual(model.volatileEnglish, "")
+    }
+
+    func testAnOlderIdentifiedFinalKeepsTheNewerLivePreview() throws {
+        let (model, _) = try fixture()
+        model.loadPresentationForTesting(phase: .recording, evidence: [])
+        let next = "Now integrate from zero to one."
+        model.receiveLivePreviewForTesting(next, start: 5, end: 7, chinese: "现在从零积分到一。")
+        let commit = TranscriptionCommit(id: UUID(), sessionID: model.captureHealthSessionIDForTesting,
+            text: "The derivative is two x.", start: 0, end: 5, startFrame: 0, endFrame: 80000,
+            sampleRate: 16000, hints: [], isRepair: false)
+        model.receiveTranscriptionNoticeForTesting(.identifiedFinal(commit))
+        XCTAssertEqual(model.segments.last?.id, commit.id)
+        XCTAssertEqual(model.volatileEnglish, next)
+        XCTAssertEqual(model.previewChinese, "现在从零积分到一。")
+        XCTAssertEqual(select(model, mode: .bilingual).source?.text, next)
+    }
+
     func testBilingualShowsTheFinishedFormalTranslationAtPausesWhenPreviewIsUnavailable() throws {
         let (model, _) = try fixture()
         let formal = TranscriptSegment(startTime: 0, endTime: 2, english: "The water is cold.", chinese: "水很冷。")
@@ -436,6 +496,28 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             XCTAssertTrue(text.contains("语种：西班牙语"), "A separate nonselectable language element must be exposed; actual=\(text)")
             XCTAssertTrue(text.contains(visible), "The visible caption must be exposed independently")
             XCTAssertFalse(text.contains(hidden), "The hidden caption must not be exposed")
+        }
+    }
+
+    func testRecordingHeaderNamesPreviewTranslationOnlyWhenItCanRun() async throws {
+        try enableHostAccessibility()
+        for (supported, enabled, header, absent) in [(true, true, "实时字幕 · 初译", "实时字幕"),
+                                                     (true, false, "实时字幕", "实时字幕 · 初译"),
+                                                     (false, true, "实时字幕", "实时字幕 · 初译")] {
+            let (model, store) = try fixture()
+            model.previewTranslationSupportForTesting = supported
+            model.previewTranslationEnabled = enabled
+            model.loadPresentationForTesting(phase: .recording, evidence: [
+                TranscriptSegment(startTime: 0, endTime: 2, english: "The water is cold.", chinese: "水很冷。")
+            ])
+            let (window, controller) = host(floating(model, store: store))
+            defer { window.close() }
+            try await resizeAndSettle(window, view: controller.view)
+            let text = accessibleNodes(in: controller.view).flatMap { node in
+                [node.value("accessibilityLabel") as? String, node.value("accessibilityValue") as? String].compactMap { $0 }
+            }
+            XCTAssertTrue(text.contains(header), "supported=\(supported) enabled=\(enabled); actual=\(text)")
+            XCTAssertFalse(text.contains(absent), "supported=\(supported) enabled=\(enabled); actual=\(text)")
         }
     }
 

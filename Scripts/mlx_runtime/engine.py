@@ -128,7 +128,9 @@ def prefix_cache_for_model(model_path):
 
 class Engine:
     def __init__(self, model_path):
-        self.model_path = str(Path(model_path).resolve())
+        # Loading can use the granted path directly. Resolving every ancestor
+        # in Python is unnecessary and may leave the sandbox's grant.
+        self.model_path = str(Path(model_path).absolute())
         self.model, self.tokenizer = load(self.model_path)
         self.prefix_cache = prefix_cache_for_model(self.model_path)
         self.vocabulary = build_vocabulary(self.tokenizer)

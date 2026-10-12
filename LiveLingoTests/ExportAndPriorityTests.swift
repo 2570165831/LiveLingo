@@ -28,11 +28,12 @@ final class NotesExportTests: XCTestCase {
         """,
         withReview: Bool = false,
         withTranscript: Bool = true,
-        transcript: [TranscriptSegment]? = nil
+        transcript: [TranscriptSegment]? = nil,
+        sessionName: String? = "LiveLingo 2026-09-16 14.07.48"
     ) -> NotesExportSnapshot {
         NotesExportSnapshot(
             className: "实时课堂",
-            sessionName: "LiveLingo 2026-09-16 14.07.48",
+            sessionName: sessionName,
             scope: scope,
             scopeDetail: scope == .wholeLesson ? "已整理 24 / 26 段已翻译内容" : "最近完成：12:30–15:00",
             coverageLine: "已整理 24 / 26 段已翻译内容",
@@ -411,6 +412,58 @@ final class NotesExportTests: XCTestCase {
         )
     }
 
+    /// Issue #13: 2026-10-08 23:50 in UTC+8, exported on another day from a
+    /// machine in UTC, from a renamed folder or one named at a later stop.
+    func testRecordedCaptureStartWinsOverFolderAndExportDates() throws {
+        let start = try XCTUnwrap(SessionCaptureStart(date: Date(timeIntervalSince1970: 1_791_474_600),
+                                                      utcOffsetSeconds: 8 * 3_600))
+        for name in ["Physics lecture 3", "LiveLingo 2026-10-09 00.10.00", nil] {
+            var notes = snapshot(sessionName: name)
+            notes.exportTimeZone = TimeZone(secondsFromGMT: 0)
+            notes.classStart = start
+            XCTAssertEqual(notes.classDate, "2026-10-08 23:50（UTC+8）")
+            XCTAssertEqual(NotesExportDocument.defaultFileName(notes, format: .markdown),
+                           "实时课堂 2026-10-08_2350_UTC+8 整课笔记.md")
+            for format in NotesExportFormat.allCases {
+                let text = try plainText(of: notes, format: format)
+                XCTAssertTrue(text.contains("实时课堂 · 整课笔记 · 2026-10-08 23:50（UTC+8）"), "\(format)")
+            }
+        }
+    }
+
+    func testCaptureStartZoneLabelsUseShortOffsets() throws {
+        let instant = Date(timeIntervalSince1970: 1_791_474_600) // 2026-10-08 15:50 UTC
+        let cases: [(Int, String, String)] = [
+            (8 * 3_600, "2026-10-08 23:50（UTC+8）", "2026-10-08_2350_UTC+8"),
+            (19_800, "2026-10-08 21:20（UTC+5:30）", "2026-10-08_2120_UTC+5.30"),
+            (-5 * 3_600, "2026-10-08 10:50（UTC-5）", "2026-10-08_1050_UTC-5"),
+            (0, "2026-10-08 15:50（UTC+0）", "2026-10-08_1550_UTC+0"),
+            (-12_600, "2026-10-08 12:20（UTC-3:30）", "2026-10-08_1220_UTC-3.30"),
+        ]
+        for (offset, display, file) in cases {
+            let start = try XCTUnwrap(SessionCaptureStart(date: instant, utcOffsetSeconds: offset))
+            XCTAssertEqual(start.displayLabel(), display)
+            XCTAssertEqual(start.fileNameLabel, file)
+        }
+        let start = try XCTUnwrap(SessionCaptureStart(date: instant, utcOffsetSeconds: 8 * 3_600))
+        var english = snapshot()
+        english.target = .english
+        english.classStart = start
+        XCTAssertEqual(english.classDate, "2026-10-08 23:50 (UTC+8)")
+        XCTAssertNil(SessionCaptureStart(date: instant, utcOffsetSeconds: 19 * 3_600))
+        XCTAssertNil(SessionCaptureStart(date: instant, utcOffsetSeconds: 30))
+        XCTAssertEqual(AppModel.sessionFolderName(startedAt: start), "LiveLingo 2026-10-08 23.50.00")
+    }
+
+    /// Older courses without a recorded start keep a date-only label and never gain a zone.
+    func testCoursesWithoutCaptureStartKeepDateOnlyLabels() {
+        var notes = snapshot(sessionName: "Physics lecture 3")
+        notes.exportTimeZone = TimeZone(secondsFromGMT: 0)
+        XCTAssertEqual(notes.classDate, "2026-09-16")
+        XCTAssertEqual(NotesExportDocument.defaultFileName(notes, format: .plainText), "实时课堂 2026-09-16 整课笔记.txt")
+        XCTAssertEqual(snapshot().classDate, "2026-09-16")
+    }
+
     func testEmptyScopeIsMarkedInsteadOfWritingAnEmptyDocument() throws {
         let data = try NotesExportDocument.data(snapshot(notes: "   \n ", withTranscript: false), format: .markdown)
         let text = String(decoding: data, as: UTF8.self)
@@ -664,6 +717,205 @@ final class NotesExportTests: XCTestCase {
         XCTAssertTrue(text.contains("mc"), "公式基底必须保留")
         XCTAssertTrue(text.contains("2"), "上标数字必须留在文字层")
         XCTAssertTrue(text.contains("a") && text.contains("n"), "下标字符必须留在文字层")
+    }
+
+    /// Issue #14：`^{…}` / `_{…}` 要读到配对的 `}` 才结束；里面的一层上下标
+    /// 按嵌套上下标显示，再深的层级保留原文，不能有字符掉回基线。
+    func testNestedFormulaScriptsMatchTheirClosingBrace() {
+        XCTAssertEqual(FormulaDisplay.runs("$k = A e^{-E_{a}/RT}$"), [
+            .init(text: "k = A e", script: 0, math: true),
+            .init(text: "-E", script: 1, math: true),
+            .init(text: "a", script: 1, math: true, nested: -1),
+            .init(text: "/RT", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("$x^{n_{i}+1}$"), [
+            .init(text: "x", script: 0, math: true),
+            .init(text: "n", script: 1, math: true),
+            .init(text: "i", script: 1, math: true, nested: -1),
+            .init(text: "+1", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs(#"$10^{\mathrm{th}}$"#), [
+            .init(text: "10", script: 0, math: true), .init(text: #"\mathrm{th}"#, script: 1, math: true),
+        ])
+        let triple = FormulaDisplay.runs("$a^{b^{c^{d}}}$")
+        XCTAssertEqual(triple.first, .init(text: "a", script: 0, math: true))
+        XCTAssertEqual(triple.dropFirst().filter { $0.script == 0 }, [], "嵌套上标里的字符不能掉回基线")
+        XCTAssertEqual(triple.map(\.text).joined(), "abc^{d}", "第三层保留原文，不丢字符")
+        XCTAssertEqual(FormulaDisplay.runs(#"$x^{\{a\}}$"#), [
+            .init(text: "x", script: 0, math: true), .init(text: #"\{a\}"#, script: 1, math: true),
+        ], "转义的花括号不参与配对")
+        // 回归：未闭合的分组仍把余下内容作为上标；单层写法不变。
+        XCTAssertEqual(FormulaDisplay.runs("$x^{ab$"), [
+            .init(text: "x", script: 0, math: true), .init(text: "ab", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("$x^{2222}$"), [
+            .init(text: "x", script: 0, math: true), .init(text: "2222", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("$a_{i}^{2}$"), [
+            .init(text: "a", script: 0, math: true), .init(text: "i", script: -1, math: true),
+            .init(text: "2", script: 1, math: true),
+        ])
+        for source in ["$k = A e^{-E_{a}/RT}$", "$x^{n_{i}+1}$", #"$10^{\mathrm{th}}$"#, "$a^{b^{c^{d}}}$"] {
+            XCTAssertFalse(FormulaDisplay.runs(source).contains { $0.script == 0 && $0.text.contains("}") }, source)
+        }
+    }
+
+    /// Issue #27：行内代码、代码块和转义的 `\$` 里的 `$` 不是公式边界，必须原样保留。
+    func testFormulaDisplayKeepsDollarSignsInsideCode() {
+        for source in ["Run `echo $HOME $PATH`.", "Use `$(document)` and `$(window)`.",
+                       #"Use \$HOME and \$PATH"#, "``a ` $x$ ``", "🙂 `$x $y` 和 `$z`",
+                       "```sh\necho $HOME $PATH\n```"] {
+            let runs = FormulaDisplay.runs(source)
+            XCTAssertEqual(runs.map(\.text).joined(), source, source)
+            XCTAssertEqual(runs.filter(\.math), [], source)
+        }
+        // 代码之后的真公式仍然显示为公式；含中文时 UTF-16 与 UTF-8 偏移要对得上。
+        XCTAssertEqual(FormulaDisplay.runs("`$a` then $x^2$"), [
+            .init(text: "`$a` then ", script: 0, math: false),
+            .init(text: "x", script: 0, math: true), .init(text: "2", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("中文 `$x $y` 后 $a_1$"), [
+            .init(text: "中文 `$x $y` 后 ", script: 0, math: false),
+            .init(text: "a", script: 0, math: true), .init(text: "1", script: -1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("```sh\necho $HOME\n```\n速度 $v^2$"), [
+            .init(text: "```sh\necho $HOME\n```\n速度 ", script: 0, math: false),
+            .init(text: "v", script: 0, math: true), .init(text: "2", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs(#"`\(a\)` 与 \(b^2\)"#), [
+            .init(text: #"`\(a\)` 与 "#, script: 0, math: false),
+            .init(text: "b", script: 0, math: true), .init(text: "2", script: 1, math: true),
+        ])
+        // 回归：金额、代码外的公式写法不变。
+        XCTAssertEqual(FormulaDisplay.runs("price $5 and $10"), [.init(text: "price $5 and $10", script: 0, math: false)])
+        XCTAssertEqual(FormulaDisplay.runs("$5 and $10 and $x$"), [
+            .init(text: "$5 and $10 and ", script: 0, math: false), .init(text: "x", script: 0, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs(#"\(a^2\)"#), [
+            .init(text: "a", script: 0, math: true), .init(text: "2", script: 1, math: true),
+        ])
+        XCTAssertEqual(FormulaDisplay.runs("cost $a_1$ vs $x^2$").filter(\.math).map(\.text), ["a", "1", "x", "2"])
+        // 逐行显示时，调用方按整篇判断某行在代码块里，这一行整行原样保留。
+        XCTAssertEqual(FormulaDisplay.runs("echo $HOME $PATH", codeProtected: true),
+                       [.init(text: "echo $HOME $PATH", script: 0, math: false)])
+        XCTAssertEqual(FormulaDisplay.runs("", codeProtected: true), [])
+        XCTAssertEqual(FormulaDisplay.codeBlockLines(["说明 $x$", "```sh", "echo $HOME $PATH", "", "```", "速度 $v^2$"]),
+                       [false, true, true, false, true, false])
+        // 单独一行的缩进不算代码块：段落续行里的公式照常显示。
+        XCTAssertEqual(FormulaDisplay.codeBlockLines(["速度", "    $v^2$"]), [false, false])
+        XCTAssertEqual(FormulaDisplay.runs("    $v^2$").filter(\.math).map(\.text), ["v", "2"])
+    }
+
+    /// Issue #27：PDF/Word 导出逐行排版，代码块里的行（没有反引号）和行内代码都要保留 `$`。
+    func testExportKeepsDollarSignsInCode() throws {
+        let notes = """
+        ## Shell 与 jQuery
+        - 用 `echo $HOME $PATH` 查看变量，jQuery 写 `$(document)` 和 `$(window)`，速度 $v^2$。
+        ```sh
+        echo $HOME $PATH
+        ```
+        """
+        let snapshot = snapshot(notes: notes, review: nil, withTranscript: false)
+        let text = PDFNotesWriter.attributedDocument(snapshot).string
+        XCTAssertTrue(text.contains("用 `echo $HOME $PATH` 查看变量，jQuery 写 `$(document)` 和 `$(window)`，速度 v2。\n"), text)
+        XCTAssertTrue(text.contains("\necho $HOME $PATH\n"), text)
+        let word = try plainText(of: snapshot, format: .word)
+        XCTAssertTrue(word.contains("`$(document)` 和 `$(window)`"), word)
+        XCTAssertTrue(word.contains("echo $HOME $PATH"), word)
+    }
+
+    /// 导出（PDF/Word 共用）里嵌套下标比外层上标更小、位置仍在基线之上。
+    func testExportDrawsNestedScriptsSmallerInsideTheirParentScript() throws {
+        let size = PDFNotesWriter.bodySize
+        let runs = PDFNotesWriter.inlineRuns("$k = A e^{-E_{a}/RT}$", size: size, bold: false)
+        XCTAssertEqual(runs.map(\.string), ["k = A e", "-E", "a", "/RT"])
+        guard runs.count == 4 else { return }
+        func fontSize(_ index: Int) throws -> CGFloat {
+            try XCTUnwrap(runs[index].attribute(.font, at: 0, effectiveRange: nil) as? NSFont).pointSize
+        }
+        func offset(_ index: Int) -> CGFloat {
+            (runs[index].attribute(.baselineOffset, at: 0, effectiveRange: nil) as? CGFloat) ?? 0
+        }
+        XCTAssertLessThan(try fontSize(2), try fontSize(1))
+        XCTAssertEqual(try fontSize(3), try fontSize(1))
+        XCTAssertGreaterThan(offset(3), 0)
+        XCTAssertEqual(offset(3), offset(1))
+        XCTAssertGreaterThan(offset(2), 0, "上标里的下标仍在正文基线之上")
+        XCTAssertLessThan(offset(2), offset(1), "嵌套下标低于外层上标")
+        XCTAssertLessThan(ReadingTypography.scriptSize(bodySize: 18, nested: -1), ReadingTypography.scriptSize(bodySize: 18))
+        let nestedOffset = ReadingTypography.scriptOffset(script: 1, nested: -1, bodySize: 18)
+        XCTAssertGreaterThan(nestedOffset, 0)
+        XCTAssertLessThan(nestedOffset, ReadingTypography.scriptOffset(script: 1, bodySize: 18))
+        XCTAssertEqual(ReadingTypography.scriptOffset(script: 1, nested: 0, bodySize: 36),
+                       ReadingTypography.scriptOffset(script: 1, bodySize: 36))
+    }
+
+    /// Issue #31：字幕是纯文本，Markdown 导出要把其中的 Markdown/HTML 语法转义，
+    /// 预览里照原样显示；英文行和译文行之间用硬换行（行尾两个空格）真正分行。
+    private func markdownTranscriptFixture() -> NotesExportSnapshot {
+        snapshot(review: nil, transcript: [
+            segment(0, 5, "The tags are <em> and </em>.", "1. 首先 *args 和 `True`"),
+            segment(5, 9, "Write <code>x</code> in C:\\temp & keep &amp; [a](b) $5 ~~c~~ a|b __d__",
+                    "- 列表\n# 标题\n> 引用\n+ 加号\n2) 二\n===")
+        ])
+    }
+
+    private func transcriptSection(_ markdown: String) throws -> String {
+        let heading = "## " + NotesExportDocument.transcriptHeading(for: .simplifiedChinese) + "\n\n"
+        let range = try XCTUnwrap(markdown.range(of: heading))
+        return String(markdown[range.upperBound...])
+    }
+
+    func testMarkdownTranscriptEscapesCaptionSyntaxSoPreviewsShowItLiterally() throws {
+        let fixture = markdownTranscriptFixture()
+        let literal = [
+            "The tags are <em> and </em>.", "1. 首先 *args 和 `True`",
+            "Write <code>x</code> in C:\\temp & keep &amp; [a](b) $5 ~~c~~ a|b __d__",
+            "- 列表", "# 标题", "> 引用", "+ 加号", "2) 二", "==="
+        ]
+        for markdown in [NotesExportDocument.markdown(fixture),
+                         String(decoding: try NotesExportDocument.data(fixture, format: .markdown), as: UTF8.self)] {
+            let section = try transcriptSection(markdown)
+            XCTAssertTrue(section.hasPrefix(
+                "[00:00–00:05] The tags are \\<em\\> and \\</em\\>.  \n1\\. 首先 \\*args 和 \\`True\\`\n\n"), section)
+            XCTAssertTrue(section.contains("C:\\\\temp & keep \\&amp; \\[a\\](b) \\$5 \\~\\~c\\~\\~ a\\|b \\_\\_d\\_\\_  \n"), section)
+            XCTAssertTrue(section.hasSuffix("\\- 列表\n\\# 标题\n\\> 引用\n\\+ 加号\n2\\) 二\n\\===\n"), section)
+
+            let parsed = try AttributedString(markdown: section, options: .init(interpretedSyntax: .full))
+            let characters = String(parsed.characters)
+            for text in literal {
+                XCTAssertTrue(characters.contains(text), text)
+            }
+            for run in parsed.runs {
+                let kinds = run.presentationIntent?.components.map(\.kind) ?? []
+                XCTAssertTrue(kinds.allSatisfy { $0 == .paragraph }, "caption must stay a plain paragraph: \(kinds)")
+                let inline = run.inlinePresentationIntent ?? []
+                XCTAssertTrue(inline.subtracting([.lineBreak, .softBreak]).isEmpty,
+                              "caption must not render as emphasis, code, strike or HTML: \(inline.rawValue)")
+                XCTAssertNil(run.link)
+            }
+            let breaks = parsed.runs.filter { $0.inlinePresentationIntent == .lineBreak }
+            XCTAssertEqual(breaks.count, 2, "English and translation lines need a hard break each")
+        }
+    }
+
+    func testMarkdownCaptionEscapingLeavesNotesAndOtherFormatsUntouched() throws {
+        let fixture = markdownTranscriptFixture()
+        let markdown = NotesExportDocument.markdown(fixture)
+        XCTAssertTrue(markdown.contains("- **核心结论**：电子位置不确定"), "notes body stays Markdown")
+        XCTAssertTrue(markdown.contains("$v = \\frac{d}{t}$"), "notes formulas stay unescaped")
+        let notes = try AttributedString(markdown: markdown, options: .init(interpretedSyntax: .full))
+        XCTAssertTrue(notes.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true },
+                      "notes bold still renders")
+        let plain = try plainText(of: fixture, format: .plainText)
+        XCTAssertTrue(plain.contains("[00:00–00:05] The tags are <em> and </em>.\n1. 首先 *args 和 `True`\n"), plain)
+        XCTAssertTrue(plain.contains("C:\\temp & keep &amp; [a](b) $5 ~~c~~ a|b __d__\n- 列表\n# 标题"), plain)
+        for format in [NotesExportFormat.word, .pdf] {
+            let text = try plainText(of: fixture, format: format)
+            XCTAssertTrue(text.contains("The tags are <em> and </em>."), "\(format)")
+            XCTAssertFalse(text.contains("\\<em"), "\(format)")
+            XCTAssertFalse(text.contains("\\*args"), "\(format)")
+        }
     }
 
     func testPDFIncludesReviewSectionOnlyWhenRequested() throws {

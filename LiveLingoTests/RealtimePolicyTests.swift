@@ -644,6 +644,7 @@ final class RealtimePolicyTests: XCTestCase {
         let followUp = try XCTUnwrap((input["laterContext"] as? [[String: Any]])?.first)
         XCTAssertEqual(followUp["pointIndex"] as? Int, 0)
         XCTAssertEqual(followUp["sources"] as? [String], [later.english])
+        XCTAssertNil(followUp["state"], "legacy clarifies entries keep their original shape (issue #26)")
         _ = book.invalidate(later.id)
         XCTAssertEqual(book.pendingPoints.first?.id, target)
         XCTAssertEqual(book.batches[0], prior)
@@ -693,6 +694,47 @@ final class RealtimePolicyTests: XCTestCase {
         let report = try String(contentsOf: root.appendingPathComponent("summary-review.md"), encoding: .utf8)
         XCTAssertTrue(report.contains("遗漏补充建议"))
         XCTAssertTrue(report.contains("氧气是末端电子受体"))
+    }
+
+    @MainActor
+    func testReviewReportShowsSuggestedCategoryOnlyWhenItChanges() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingoLearningTests-\(UUID())")
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var book = LearningNotebook()
+        try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Oxygen is the terminal electron acceptor.")],
+                        note: .init(topic: "氧化磷酸化", points: [.init(kind: "待确认", text: "合成要点甲。"),
+                                                              .init(kind: "核心结论", text: "合成要点乙。")]))
+        let file = root.appendingPathComponent("summary-zh-Hans.md")
+        let original = book.markdown() + "\n"
+        try original.write(to: file, atomically: true, encoding: .utf8)
+        let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("journal.json"), observeSleep: false) { _, _, _, _, _ in
+            #"{"reviewVersion":2,"corrections":[{"index":0,"original":"合成要点甲。","kind":"补充理解","text":"合成要点甲。","reason":"合成理由甲。"},{"index":1,"original":"合成要点乙。","kind":"核心结论","text":"合成要点乙。","reason":"合成理由乙。"}],"additions":[]}"#
+        }
+        addTeardownBlock { await queue.shutdownForTesting() }
+        try queue.enqueue(directory: root, notebook: book)
+        for _ in 0..<100 where queue.hasWork { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(queue.hasWork)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), original)
+        let report = try String(contentsOf: root.appendingPathComponent("summary-review.md"), encoding: .utf8)
+        let lines = report.components(separatedBy: "\n")
+        let first = try XCTUnwrap(lines.firstIndex(of: "- **原笔记 · 要点 1**：合成要点甲。"), report)
+        XCTAssertEqual(Array(lines[first...].prefix(4)), [
+            "- **原笔记 · 要点 1**：合成要点甲。",
+            "- **9B 建议（待核对）**：合成要点甲。",
+            "- **建议类别**：待确认 → 补充理解",
+            "- **建议理由**：合成理由甲。"
+        ], report)
+        XCTAssertEqual(SummaryMarkdownLine.classify(lines, at: first), .reviewChange(original: "合成要点甲。", proposed: "合成要点甲。"))
+        XCTAssertEqual(SummaryMarkdownLine.classify(lines, at: first + 1), .hidden)
+        XCTAssertEqual(SummaryMarkdownLine.classify(lines, at: first + 2), .bullet(text: "**建议类别**：待确认 → 补充理解", indentation: 0))
+        let second = try XCTUnwrap(lines.firstIndex(of: "- **原笔记 · 要点 2**：合成要点乙。"), report)
+        XCTAssertEqual(Array(lines[second...].prefix(3)), [
+            "- **原笔记 · 要点 2**：合成要点乙。",
+            "- **9B 建议（待核对）**：合成要点乙。",
+            "- **建议理由**：合成理由乙。"
+        ], report)
+        XCTAssertEqual(report.components(separatedBy: "建议类别").count, 2, report)
     }
 
     @MainActor
@@ -1493,14 +1535,27 @@ final class RealtimePolicyTests: XCTestCase {
         try "保留的既有数据".write(to: userFile, atomically: true, encoding: .utf8)
         let lookalike = directory.appendingPathComponent("review-failure-notes.json")
         try "类似但非本地诊断".write(to: lookalike, atomically: true, encoding: .utf8)
+        // Rotation discards into this test's own directory, never the user's Trash.
+        let discarded = root.appendingPathComponent("Discarded")
+        try FileManager.default.createDirectory(at: discarded, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
         let store = ReviewDiagnosticsStore(directory: directory,
-                                           policy: .init(maximumFiles: 2, maximumFileBytes: 4_096, maximumTotalBytes: 16_384))
+                                           policy: .init(maximumFiles: 2, maximumFileBytes: 4_096, maximumTotalBytes: 16_384),
+                                           discard: { url in
+                                               try FileManager.default.moveItem(
+                                                   at: url, to: discarded.appendingPathComponent(url.lastPathComponent))
+                                           })
         var written: [URL] = []
         for index in 0..<4 {
             written.append(try XCTUnwrap(store.write(diagnosticSnapshot(index: index, input: "输入", response: "回答"))))
+            // Distinct modification times keep the oldest-first order deterministic.
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000 + Double(index))],
+                                                  ofItemAtPath: written[index].path)
         }
         let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         XCTAssertEqual(names.filter { ReviewDiagnosticsStore.isOwnedName($0) }.count, 2)
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: discarded.path)),
+                       Set(written[0..<2].map(\.lastPathComponent)))
         XCTAssertTrue(names.contains("用户笔记.json"))
         XCTAssertTrue(names.contains("review-failure-notes.json"))
         XCTAssertEqual(try String(contentsOf: userFile, encoding: .utf8), "保留的既有数据")

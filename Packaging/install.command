@@ -237,12 +237,22 @@ def _directory(path):
     path = Path(path).absolute()
     if ".." in path.parts:
         raise OSError("Private installer rejected parent traversal")
-    fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if sys.platform != 'darwin':
+        raise OSError(errno.ENOTSUP, "Safe absolute directory binding requires Darwin")
+    for alias in ('/var', '/tmp', '/etc'):
+        if str(path) == alias or str(path).startswith(alias + '/'):
+            info = os.lstat(alias)
+            if not stat.S_ISDIR(info.st_mode):
+                expected = '/private' + alias
+                if (not stat.S_ISLNK(info.st_mode) or info.st_uid != 0
+                        or os.readlink(alias) not in (expected, expected[1:])):
+                    raise OSError("Private installer rejected system alias")
+                path = Path(expected + str(path)[len(alias):])
+            break
+    # Sandbox access belongs to this directory, not its ancestors. Darwin
+    # rejects symlinks anywhere in this single absolute lookup.
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NONBLOCK | 0x20000000)
     try:
-        for component in path.parts[1:]:
-            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = next_fd
         if os.fstat(fd).st_uid != os.getuid():
             raise OSError("Private installer rejected directory owner")
         yield fd

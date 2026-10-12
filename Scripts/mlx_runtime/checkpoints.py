@@ -12,7 +12,7 @@ import sys
 
 _IDENTITY = re.compile(r'[0-9a-f]{64}')
 _RECORD = re.compile(r'[0-9a-f]{64}(?:\.(?:[0-9a-f]{32}\.)?pending)?\.safetensors')
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _ACL_API = None
 _UNSUPPORTED = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL}
 _OPTIONAL_PERMISSIONS = _UNSUPPORTED | {errno.EPERM}
@@ -239,23 +239,59 @@ class CheckpointSafetyError(ValueError):
     """A fixed classification, without paths or file contents."""
 
 
+def _system_alias_path(path):
+    """Accept only Darwin's verified, root-owned /private system aliases."""
+    for alias in ('/var', '/tmp', '/etc'):
+        if str(path) == alias or str(path).startswith(alias + '/'):
+            info = os.lstat(alias)
+            if stat.S_ISDIR(info.st_mode):
+                return path
+            expected = '/private' + alias
+            if (not stat.S_ISLNK(info.st_mode) or info.st_uid != 0
+                    or os.readlink(alias) not in (expected, expected[1:])):
+                raise CheckpointSafetyError('Invalid checkpoint system alias')
+            return Path(expected + str(path)[len(alias):])
+    return path
+
+
 @contextmanager
 def _state_fd(directory, create=True):
-    """Traverse by descriptor so no directory component follows a symlink."""
-    path = Path(os.path.abspath(directory))
-    if path == Path(path.anchor):
+    """Bind the deepest existing prefix, then create only its missing tail.
+
+    App Sandbox need not grant any ancestor of the permitted directory.
+    Darwin's O_NOFOLLOW_ANY protects every component in the absolute lookup;
+    O_NOFOLLOW alone protects only the last component and is insufficient.
+    """
+    path = Path(directory).absolute()
+    if path == Path(path.anchor) or '..' in path.parts:
         raise CheckpointSafetyError('Invalid checkpoint directory')
-    fd = os.open(path.anchor, _DIRECTORY_FLAGS)
+    if sys.platform != 'darwin':
+        raise OSError(errno.ENOTSUP, 'Safe absolute directory binding requires Darwin')
+    path = _system_alias_path(path)
+    existing = len(path.parts)
+    while True:
+        prefix = Path(*path.parts[:existing])
+        try:
+            fd = os.open(prefix, (_DIRECTORY_FLAGS & ~os.O_NOFOLLOW) | 0x20000000)  # O_NOFOLLOW_ANY.
+            break
+        except FileNotFoundError:
+            if not create or existing <= 1:
+                raise
+            existing -= 1
     try:
-        for component in path.parts[1:]:
+        for component in path.parts[existing:]:
             created = None
-            if create:
+            try:
+                child = os.open(component, _DIRECTORY_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
                 try:
                     os.mkdir(component, 0o700, dir_fd=fd)
                     created = os.stat(component, dir_fd=fd, follow_symlinks=False)
                 except FileExistsError:
                     pass
-            child = os.open(component, _DIRECTORY_FLAGS, dir_fd=fd)
+                child = os.open(component, _DIRECTORY_FLAGS, dir_fd=fd)
             os.close(fd)
             fd = child
             if created is not None:

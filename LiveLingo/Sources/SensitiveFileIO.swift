@@ -16,6 +16,9 @@ enum SensitiveFileIO {
     /// Runs between creating a write temporary and taking its writer lease.
     @TaskLocal static var beforeTemporaryLease: (@Sendable (URL) throws -> Void)?
     @TaskLocal static var temporaryTrackingParentUnavailable = false
+    @TaskLocal static var temporaryTrackingParentOpenError: Int32?
+    /// Runs immediately before recovery opens a candidate temporary object.
+    @TaskLocal static var beforeTemporaryInspection: (@Sendable (URL) -> Void)?
     #endif
 
     private static func perform(_ operation: OptionalOperation, _ call: () -> Int32) -> Int32 {
@@ -81,7 +84,7 @@ enum SensitiveFileIO {
         case system(operation: String, code: Int32)
     }
 
-    struct Identity: Codable, Equatable, Sendable {
+    struct Identity: Codable, Hashable, Sendable {
         let device: Int32
         let inode: UInt64
         let owner: UInt32
@@ -114,6 +117,10 @@ enum SensitiveFileIO {
         let replacement: TemporaryIdentity?
     }
     private static let temporaryAttribute = "com.jianhongli.LiveLingo.temporary-v1"
+    /// Temporaries this process's own writers currently lease. Recovery treats
+    /// them as active without opening them, so it never touches a file that
+    /// is still being written, synced or committed here.
+    private static let leasedTemporaries = OSAllocatedUnfairLock(initialState: Set<Identity>())
     private static let recoveryLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "TemporaryRecovery")
 
     struct TemporaryRecovery: Equatable {
@@ -187,10 +194,23 @@ enum SensitiveFileIO {
             let components = try systemAliasPath(url.path).split(separator: "/").map(String.init)
             guard !components.isEmpty,
                   components.allSatisfy({ $0 != "." && $0 != ".." }) else { throw Failure.unsafePath }
-            var current = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
-            guard current >= 0 else { throw system("open root") }
+            // App Sandbox grants the container/selected directory, not every
+            // ancestor. Bind the deepest existing prefix in one kernel lookup.
+            // O_NOFOLLOW_ANY (present in macOS 11.0.1) rejects ALL symlinks;
+            // O_NOFOLLOW alone would protect only the last component.
+            var existingCount = components.count
+            var current: Int32
+            while true {
+                let prefix = "/" + components.prefix(existingCount).joined(separator: "/")
+                current = Darwin.open(prefix, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY | O_NONBLOCK)
+                if current >= 0 { break }
+                guard create, errno == ENOENT, existingCount > 0 else { throw pathFailure("open directory") }
+                existingCount -= 1
+            }
             defer { if current >= 0 { _ = Darwin.close(current) } }
-            for (index, component) in components.enumerated() {
+            if existingCount == components.count { try requireOwner(status(current)) }
+            for index in existingCount..<components.count {
+                let component = components[index]
                 var created = false
                 var next = openat(current, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
                 if next < 0, errno == ENOENT, create {
@@ -266,8 +286,21 @@ enum SensitiveFileIO {
         /// Shared ancestors remain usable for export, but do not become a
         /// trusted cleanup namespace merely because this child is ours.
         func ownedParentForTemporaryRecovery() throws -> Directory? {
-            let parentFD = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
-            guard parentFD >= 0 else { throw system("bind temporary parent") }
+            let parentFD: Int32
+            #if DEBUG
+            if let code = temporaryTrackingParentOpenError { errno = code; parentFD = -1 }
+            else { parentFD = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) }
+            #else
+            parentFD = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            #endif
+            guard parentFD >= 0 else {
+                let code = errno
+                if code == EPERM || code == EACCES {
+                    recoveryLog.notice("temporary_recovery reason=unavailable_parent_preserved")
+                    return nil
+                }
+                throw Failure.system(operation: "bind temporary parent", code: code)
+            }
             var transferred = false
             defer { if !transferred { _ = Darwin.close(parentFD) } }
             let info = try status(parentFD)
@@ -282,7 +315,11 @@ enum SensitiveFileIO {
             }
             let parent = Directory(fd: parentFD, url: url.deletingLastPathComponent())
             transferred = true
-            try parent.assertStillAtOriginalPath()
+            do { try parent.assertStillAtOriginalPath() }
+            catch Failure.system(_, let code) where code == EPERM || code == EACCES {
+                recoveryLog.notice("temporary_recovery reason=unavailable_parent_preserved")
+                return nil
+            }
             return parent
         }
 
@@ -426,6 +463,10 @@ enum SensitiveFileIO {
             try validateName(temporary)
             let item = try createPrivateFile(named: temporary)
             let pendingIdentity = Identity(try status(item))
+            // Forgotten last, after the lease is closed and any failed
+            // temporary is unlinked.
+            var leased = false
+            defer { if leased { _ = leasedTemporaries.withLock { $0.remove(pendingIdentity) } } }
             // Unlink only this invocation's exclusive temporary entry. This
             // also runs if writing, syncing, closing or replacing fails.
             var pending = true
@@ -448,6 +489,8 @@ enum SensitiveFileIO {
                     throw system("lock private temporary file")
                 }
             }
+            leasedTemporaries.withLock { _ = $0.insert(pendingIdentity) }
+            leased = true
             recordTemporary(item: lease, kind: "write", destination: name,
                             digest: SessionArchiveCoding.digest(data), replacement: nil)
             defer { if !pending { _ = fremovexattr(lease, temporaryAttribute, 0) } }
@@ -700,6 +743,10 @@ enum SensitiveFileIO {
             guard (write && kind == S_IFREG && (1...2).contains(before.st_nlink)) || (!write && kind == S_IFDIR) else {
                 return "unknown_identity"
             }
+            if leasedTemporaries.withLock({ $0.contains(Identity(before)) }) { return "active_or_unavailable" }
+            #if DEBUG
+            beforeTemporaryInspection?(url.appendingPathComponent(name))
+            #endif
             let item = openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | (write ? 0 : O_DIRECTORY))
             guard item >= 0 else { throw pathFailure("inspect temporary object") }
             defer { _ = Darwin.close(item) }
