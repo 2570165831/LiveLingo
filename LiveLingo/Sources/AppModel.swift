@@ -2256,13 +2256,19 @@ final class AppModel: ObservableObject {
             return "录音已保存 · 译文与笔记处理已暂停"
         }
         if processingTask != nil { return "录音已保存 · 正在整理译文与笔记" }
-        if let state = transcriptionProcessing, state.unresolvedCount > 0 || state.otherLanguageCount > 0 {
-            var parts: [String] = []
+        var parts: [String] = []
+        if let state = transcriptionProcessing {
             if state.unresolvedCount > 0 { parts.append("\(state.unresolvedCount) 段缺少转写，可手动重试") }
             if state.otherLanguageCount > 0 { parts.append("\(state.otherLanguageCount) 段为\(SavedProcessingPresentation.untranscribedSpeech)") }
-            return "已保存 · " + parts.joined(separator: " · ")
         }
-        return nil
+        if let summary = SavedProcessingPresentation.noSpeechSummary(count: savedNoSpeechCount) {
+            parts.append(summary)
+        }
+        return parts.isEmpty ? nil : "已保存 · " + parts.joined(separator: " · ")
+    }
+
+    var savedNoSpeechCount: Int {
+        transcriptionProcessing?.noSpeechCount ?? sessionSnapshot?.processing.noSpeechCount ?? 0
     }
 
     var savedProcessingIsPaused: Bool { processingPaused }
@@ -2341,6 +2347,8 @@ final class AppModel: ObservableObject {
         snapshot.processing.pendingSegmentIDs = segments.filter { !$0.hasUsableTranslation }.map(\.id)
         snapshot.processing.pendingBatchIDs = learningDraft.map { [$0.id] } ?? []
         snapshot.processing.pendingCaptionRepairs = pendingCaptionRepairs.isEmpty ? nil : pendingCaptionRepairs
+        let noSpeechCount = transcriptionProcessing?.noSpeechCount ?? snapshot.processing.noSpeechCount ?? 0
+        snapshot.processing.noSpeechCount = noSpeechCount > 0 ? noSpeechCount : nil
         if isRecording || isPaused { snapshot.processing.phase = .capturing }
         else if processingPaused { snapshot.processing.phase = .paused }
         else if phase == .stopping || processingTask != nil || (transcriptionProcessing?.pendingCount ?? 0) > 0 {
@@ -5987,14 +5995,15 @@ extension AppModel {
         phase = .recording
         let poll = Task { @MainActor in
             while !Task.isCancelled, self.sessionID == identity, self.generation == epoch {
-                report("state", ["phase": self.phaseLabel, "sessionID": identity.uuidString,
+                report("state", TranscriptionProcessingState.addingNoSpeechStatistic([
+                    "phase": self.phaseLabel, "sessionID": identity.uuidString,
                     "segments": self.segments.count, "translated": self.completedTranslationCount,
                     "summarized": self.lastSummarizedSegmentCount,
                     "summaryRunning": self.summaryTask != nil, "concurrency": self.summaryConcurrencyAllowed,
                     "pendingTranscription": self.transcriptionProcessing?.pendingCount ?? 0,
                     "unresolvedTranscription": self.transcriptionProcessing?.unresolvedCount ?? 0,
                     "otherLanguageTranscription": self.transcriptionProcessing?.otherLanguageCount ?? 0,
-                    "summaryStatus": self.summaryStatus])
+                    "summaryStatus": self.summaryStatus], count: self.savedNoSpeechCount))
                 self.refreshSummaryConcurrency()
                 self.yieldSummaryToCaptions()
                 self.scheduleSummaryRefresh()
@@ -6113,12 +6122,13 @@ extension AppModel {
                 }
             }
             try await flushSessionArchive()
-            report("finished", ["phase": phaseLabel, "sessionID": identity.uuidString,
+            report("finished", TranscriptionProcessingState.addingNoSpeechStatistic([
+                "phase": phaseLabel, "sessionID": identity.uuidString,
                 "stopSeconds": ProcessInfo.processInfo.systemUptime - started, "segments": segments.count,
                 "translated": completedTranslationCount, "summarized": lastSummarizedSegmentCount,
                 "unresolvedTranscription": transcriptionProcessing?.unresolvedCount ?? 0,
                 "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0,
-                "summaryStatus": summaryStatus])
+                "summaryStatus": summaryStatus], count: savedNoSpeechCount))
         } catch {
             poll.cancel(); preview.cancel()
             await pipeline.cancel()
@@ -6182,14 +6192,16 @@ extension AppModel {
                         refreshSummaryConcurrency()
                         yieldSummaryToCaptions()
                         scheduleSummaryRefresh()
-                        report("state", ["phase": phaseLabel, "sessionID": identity.uuidString,
+                        report("state", TranscriptionProcessingState.addingNoSpeechStatistic([
+                                         "phase": phaseLabel, "sessionID": identity.uuidString,
                                          "segments": segments.count, "translated": completedTranslationCount,
                                          "summarized": lastSummarizedSegmentCount,
                                          "summaryRunning": summaryTask != nil,
                                          "concurrency": summaryConcurrencyAllowed,
                                          "pendingTranscription": transcriptionProcessing?.pendingCount ?? 0,
                                          "unresolvedTranscription": transcriptionProcessing?.unresolvedCount ?? 0,
-                                         "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0])
+                                         "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0],
+                                         count: savedNoSpeechCount))
                         do { try await Task.sleep(for: .seconds(1)) } catch { return }
                     }
                 }
@@ -6222,9 +6234,10 @@ extension AppModel {
                 if let state = transcriptionProcessing, state.failedCount + state.candidateCount > 0 {
                     // Counts only. A segment can be both failed and awaiting a
                     // candidate; the overlap says how many are in both counts.
-                    report("transcription_unresolved", ["sessionID": identity.uuidString,
+                    report("transcription_unresolved", TranscriptionProcessingState.addingNoSpeechStatistic([
+                        "sessionID": identity.uuidString,
                         "failed": state.failedCount, "candidates": state.candidateCount,
-                        "failedWithCandidate": state.failedWithCandidateCount])
+                        "failedWithCandidate": state.failedWithCandidateCount], count: state.noSpeechCount))
                 }
                 // Same bounded, admission-gated notes completion as a live run,
                 // plus an explicit stall guard: a blocked admission must fail the
@@ -6318,11 +6331,12 @@ extension AppModel {
             let loaded = try await Task.detached { try store.loadDetailed() }.value
             guard let disk = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
             let audio = try AVAudioFile(forReading: directory.appendingPathComponent(SessionWorkspace.recordingFileName))
-            report("finished", ["phase": phaseLabel, "sessionID": sessionID.uuidString, "segments": segments.count,
+            report("finished", TranscriptionProcessingState.addingNoSpeechStatistic([
+                                "phase": phaseLabel, "sessionID": sessionID.uuidString, "segments": segments.count,
                                 "translated": completedTranslationCount, "summarized": lastSummarizedSegmentCount,
                                 "revision": disk.inputRevision, "batches": disk.batches.count,
                                 "otherLanguageTranscription": transcriptionProcessing?.otherLanguageCount ?? 0,
-                                "paused": processingPaused, "capture": isRecording])
+                                "paused": processingPaused, "capture": isRecording], count: savedNoSpeechCount))
             return LiveLingoCLI.CLIObservedSession(
                 sessionID: sessionID,
                 snapshot: disk,

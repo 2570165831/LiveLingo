@@ -55,6 +55,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         /// Why the exact range has no accepted transcript; identifiers only.
         var failureReason: TranscriptionWorkRecord.FailureReason?
         var otherLanguage = false
+        /// Only suppressed chunks persist classifier evidence. Admitted speech
+        /// keeps the existing recognition outcome and stored bytes unchanged.
+        var noSpeech = false
+        var speechConfidence: Double?
         // Runtime-only causal metadata; preserve legacy Outcome/archive bytes.
         var sourceDecision: SourceLanguagePolicy.Decision?
         var sourceInput: SourceLanguagePolicy.ProbeInput?
@@ -65,6 +69,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     }
     private let lock = NSRecursiveLock()
     private let transcriber: Transcriber
+    private let speechAnalyzer: SpeechPresenceGate.Analyzer
     private var context: Context?
     private var worker: Task<Void, Never>?
     private var active: Task<Outcome, Error>?
@@ -75,9 +80,21 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
     private var recentFormulaContext = ""
     private var storageFailure: String?
 
-    init(transcriber: @escaping Transcriber = { url, model, enhance, mode in
-        try await QwenASRClient.transcribe(audioURL: url, modelKey: model, enhanceSpeech: enhance, language: mode)
-    }) { self.transcriber = transcriber }
+    /// Production entry point shared by live capture, import and CLI replay.
+    convenience init() {
+        self.init(transcriber: { url, model, enhance, mode in
+            try await QwenASRClient.transcribe(audioURL: url, modelKey: model, enhanceSpeech: enhance, language: mode)
+        }, speechAnalyzer: SpeechPresenceGate.maximumSpeechConfidence)
+    }
+
+    /// Inject both boundaries when using synthetic recognizer/audio doubles.
+    /// Existing recognition fixtures have no real speech and intentionally
+    /// exercise recognition without an external classifier.
+    init(transcriber: @escaping Transcriber,
+         speechAnalyzer: @escaping SpeechPresenceGate.Analyzer = { _ in nil }) {
+        self.transcriber = transcriber
+        self.speechAnalyzer = speechAnalyzer
+    }
 
     convenience init(transcriber: @escaping LegacyTranscriber) {
         self.init(transcriber: Self.englishOnly(transcriber))
@@ -736,12 +753,13 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     let formulaContext = recentFormulaContext
                     let url = try Self.materializeAudio(record, journal: context.journal)
                     let recording = try context.journal.recordingURL(for: record)
-                    let task = Task { [transcriber] in
+                    let task = Task { [transcriber, speechAnalyzer] in
                         try await Self.recognize(claimed, audioURL: url, recordingURL: recording,
                                                  formulaContext: formulaContext, attempts: context.attempts,
                                                  sourceTrigger: claimed.sourceTriggerPredecessor ?? .init(),
                                                  deferSource: claimed.attempt == .initial,
                                                  transcriber: transcriber,
+                                                 speechAnalyzer: speechAnalyzer,
                                                  commitEnglish: { output in
                                                      try self.commitEnglishBeforeProbe(output, record: claimed, generation: token)
                                                  }, preserveDecision: { decision in
@@ -808,7 +826,21 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             record.candidateText = candidate; record.candidateOrigin = output.origin
                             record.candidateLanguage = nil
                         }
-                        if output.silent {
+                        if output.noSpeech, let confidence = output.speechConfidence {
+                            record.status = .noSpeech
+                            record.text = nil; record.textLanguage = nil
+                            record.candidateText = nil; record.candidateLanguage = nil; record.candidateOrigin = nil
+                            record.sourceProbeInput = nil; record.sourceProbeFinished = nil
+                            record.sourceRevisionAllowed = nil; record.sourceInitialEnglishDigest = nil
+                            record.failure = "未识别到讲话，音频已保留，可手动重试。"
+                            record.failureReason = .noSpeech
+                            record.speechConfidence = confidence
+                            owner.handler(.volatile(text: "", start: record.start, end: record.end,
+                                                    observedAt: ProcessInfo.processInfo.systemUptime))
+                            RecordingDiagnostics.append(recordingURL: try? owner.journal.recordingURL(for: record),
+                                event: "transcription_no_speech", start: record.start, end: record.end,
+                                detail: "", reason: .noSpeech)
+                        } else if output.silent {
                             record.status = .silent; record.failure = nil; record.failureReason = nil
                             owner.handler(.volatile(text: "", start: record.start, end: record.end,
                                                     observedAt: ProcessInfo.processInfo.systemUptime))
@@ -1038,10 +1070,21 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                                   deferSource: Bool = false,
                                   sourceOnly: SourceLanguagePolicy.ProbeInput? = nil,
                                   transcriber: Transcriber,
+                                  speechAnalyzer: SpeechPresenceGate.Analyzer = { _ in nil },
                                   commitEnglish: @Sendable (Outcome) throws -> Void = { _ in },
                                   canStartSource: @Sendable () -> Bool = { true },
                                   preserveDecision: @Sendable (SourceLanguagePolicy.Decision) throws -> Void = { _ in }) async throws -> Outcome {
         try Task.checkCancellation()
+        // Never filter a manual retry or an already published/probed range.
+        // Classification failure is absence of evidence and must fail open.
+        if sourceOnly == nil, record.attempt != .manual, record.text?.isEmpty != false,
+           record.candidateText?.isEmpty != false {
+            let confidence = try? speechAnalyzer(audioURL)
+            try Task.checkCancellation()
+            if SpeechPresenceGate.shouldSuppress(confidence) {
+                return Outcome(failureReason: .noSpeech, noSpeech: true, speechConfidence: confidence)
+            }
+        }
         if sourceOnly == nil, try DigitalSilenceGate.isSilent(audioURL) {
             return Outcome(silent: true, sourceInput: deferSource
                 ? .init(parakeetAccepted: true, mean: nil, minimum: nil) : nil)
