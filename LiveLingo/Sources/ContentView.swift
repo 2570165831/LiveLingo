@@ -1001,6 +1001,8 @@ struct ClassroomSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section("悬浮字幕") {
+                Toggle("开始记录时自动显示悬浮字幕", isOn: subtitles.showsOnRecordStartBinding)
+                    .accessibilityIdentifier("floating-show-on-record")
                 LabeledContent("显示模式") {
                     Picker("显示模式", selection: subtitles.displayModeBinding) {
                         ForEach(FloatingSubtitleDisplayMode.allCases) { mode in

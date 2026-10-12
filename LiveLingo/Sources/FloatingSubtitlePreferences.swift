@@ -36,6 +36,7 @@ struct FloatingSubtitlePreferences: DynamicProperty {
     @AppStorage private var storedDisplayMode: String
     @AppStorage private var storedOpacity: Double
     @AppStorage private var storedShowsAcrossSpaces: Bool
+    @AppStorage private var storedShowsOnRecordStart: Bool
 
     init(store: UserDefaults? = nil) {
         _legacyTextSize = AppStorage(wrappedValue: 24, "floatingTextSize", store: store)
@@ -45,6 +46,7 @@ struct FloatingSubtitlePreferences: DynamicProperty {
                                        "floatingDisplayMode", store: store)
         _storedOpacity = AppStorage(wrappedValue: 1, "floatingBackgroundOpacity", store: store)
         _storedShowsAcrossSpaces = AppStorage(wrappedValue: true, "floatingShowsAcrossSpaces", store: store)
+        _storedShowsOnRecordStart = AppStorage(wrappedValue: false, "floatingShowOnRecordStart", store: store)
     }
 
     var displayMode: FloatingSubtitleDisplayMode {
@@ -72,6 +74,11 @@ struct FloatingSubtitlePreferences: DynamicProperty {
     var showsAcrossSpaces: Bool {
         get { storedShowsAcrossSpaces }
         nonmutating set { storedShowsAcrossSpaces = newValue }
+    }
+
+    var showsOnRecordStart: Bool {
+        get { storedShowsOnRecordStart }
+        nonmutating set { storedShowsOnRecordStart = newValue }
     }
 
     var sizePreset: Double? {
@@ -105,6 +112,9 @@ struct FloatingSubtitlePreferences: DynamicProperty {
     }
     var sizePresetBinding: Binding<Double?> {
         Binding(get: { sizePreset }, set: { sizePreset = $0 })
+    }
+    var showsOnRecordStartBinding: Binding<Bool> {
+        Binding(get: { showsOnRecordStart }, set: { showsOnRecordStart = $0 })
     }
 
     private func bounded(_ value: Double, to range: ClosedRange<Double>, fallback: Double) -> Double {

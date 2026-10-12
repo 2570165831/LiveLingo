@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import OSLog
 import SwiftUI
 #if DEBUG
@@ -276,16 +277,48 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Observe only recording-start transitions; resuming or refreshing a session
+/// cannot reopen a panel the user deliberately hid.
+@MainActor
+final class FloatingSubtitleRecordStartObserver {
+    private var subscription: AnyCancellable?
+    private var previousPhase: AppPhase
+
+    init(model: AppModel, windowController: FloatingSubtitleWindowController = .shared,
+         defaults: UserDefaults = .standard) {
+        previousPhase = model.phase
+        subscription = model.$phase.sink { [weak self, weak model, weak windowController] phase in
+            guard let self, let model, let windowController else { return }
+            let previous = previousPhase
+            previousPhase = phase
+            if Self.shouldShow(previous: previous, next: phase, importing: model.isImportingFile,
+                               enabled: FloatingSubtitlePreferences(store: defaults).showsOnRecordStart,
+                               visible: windowController.isVisible) {
+                windowController.show(model: model)
+            }
+        }
+    }
+
+    static func shouldShow(previous: AppPhase, next: AppPhase, importing: Bool,
+                           enabled: Bool, visible: Bool) -> Bool {
+        previous == .preparing && next == .recording && !importing && enabled && !visible
+    }
+}
+
 /// The test host owns no production model, queue, translation view or service.
 @MainActor
 private final class AppModelHolder: ObservableObject {
     let model: AppModel?
+    private var floatingRecordStart: FloatingSubtitleRecordStartObserver?
     init() {
         #if DEBUG
         UnitTestTemporaryDirectory.configure()
         #endif
         model = AppRuntimeEnvironment.isUnitTesting ? nil : AppModel()
-        if let model { FullScreenClassModeController.shared.connect(model: model) }
+        if let model {
+            FullScreenClassModeController.shared.connect(model: model)
+            floatingRecordStart = FloatingSubtitleRecordStartObserver(model: model)
+        }
         AppLifecycleDelegate.model = model
     }
 }

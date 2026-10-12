@@ -7,6 +7,58 @@ import XCTest
 /// orderFront regression orders a panel, at zero alpha and without activation.
 @MainActor
 final class FloatingSubtitleWindowTests: XCTestCase {
+    func testRecordStartPreferenceDefaultsOffAndBindingWritesOnlyItsKey() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let preferences = FloatingSubtitlePreferences(store: fixture.defaults)
+        XCTAssertFalse(preferences.showsOnRecordStart)
+        XCTAssertNil(fixture.defaults.object(forKey: "floatingShowOnRecordStart"))
+        preferences.showsOnRecordStartBinding.wrappedValue = true
+        XCTAssertTrue(fixture.defaults.bool(forKey: "floatingShowOnRecordStart"))
+        preferences.showsOnRecordStartBinding.wrappedValue = false
+        XCTAssertFalse(preferences.showsOnRecordStart)
+    }
+
+    func testRecordStartObserverShowsOnlyOncePerStartAndRespectsUserHiding() throws {
+        let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
+        let model = fixture.model
+        let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        let panel = controller.prepareWindow(model: model)
+        panel.alphaValue = 0
+        defer { controller.shutdown() }
+        let observer = FloatingSubtitleRecordStartObserver(model: model, windowController: controller,
+                                                          defaults: fixture.defaults)
+        withExtendedLifetime(observer) {
+            model.loadPresentationForTesting(phase: .preparing, evidence: [])
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertFalse(controller.isVisible, "The default must leave the panel closed")
+            FloatingSubtitlePreferences(store: fixture.defaults).showsOnRecordStart = true
+            model.loadPresentationForTesting(phase: .preparing, evidence: [])
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertTrue(controller.isVisible)
+            controller.hide()
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertFalse(controller.isVisible)
+            model.loadPresentationForTesting(phase: .paused, evidence: [])
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertFalse(controller.isVisible, "Resume cannot reopen a user-hidden panel")
+            model.loadPresentationForTesting(phase: .preparing, evidence: [])
+            model.loadPresentationForTesting(phase: .recording, evidence: [])
+            XCTAssertTrue(controller.isVisible, "A fresh recording may show it again")
+        }
+    }
+
+    func testRecordStartPolicyExcludesImportResumeDisabledAndAlreadyVisible() {
+        XCTAssertTrue(FloatingSubtitleRecordStartObserver.shouldShow(previous: .preparing, next: .recording,
+                                                                    importing: false, enabled: true, visible: false))
+        for (previous, importing, enabled, visible) in [(AppPhase.paused, false, true, false),
+                                                       (.preparing, true, true, false),
+                                                       (.preparing, false, false, false),
+                                                       (.preparing, false, true, true)] {
+            XCTAssertFalse(FloatingSubtitleRecordStartObserver.shouldShow(previous: previous, next: .recording,
+                                                                         importing: importing, enabled: enabled, visible: visible))
+        }
+    }
+
     func testTopPlacementHandlesScreenOriginsShortScreensAndMargins() {
         let size = NSSize(width: 640, height: 350)
         for visible in [NSRect(x: 0, y: 40, width: 1440, height: 900),
