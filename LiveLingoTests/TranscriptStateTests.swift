@@ -133,4 +133,127 @@ final class VolatilePreviewRangeTests: XCTestCase {
         XCTAssertEqual(model.volatileEnglish, "A replacement with unknown timing.")
         XCTAssertEqual(model.previewChinese, "未知时间的初译。")
     }
+
+    func testSilentBlocksTogetherRetireASpanningPreview() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("A preview spanning three blocks.", start: 0, end: 30, chinese: "跨块初译。")
+        for start in [0.0, 10.0] {
+            model.receiveLivePreviewForTesting("", start: start, end: start + 10)
+            XCTAssertEqual(model.volatileEnglish, "A preview spanning three blocks.")
+            XCTAssertEqual(model.previewChinese, "跨块初译。")
+        }
+        model.receiveLivePreviewForTesting("", start: 20, end: 30)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+        XCTAssertTrue(model.previewChinese.isEmpty)
+        XCTAssertTrue(model.previewTranslationSource.isEmpty)
+    }
+
+    func testFinalPrefixAndSilentSuffixRetireASpanningPreview() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("Speech followed by a silent tail.", start: 0, end: 20, chinese: "尾部静音。")
+        model.receiveCaptionForTesting("Confirmed speech.", start: 0, end: 10)
+        XCTAssertEqual(model.volatileEnglish, "Speech followed by a silent tail.")
+        model.receiveLivePreviewForTesting("", start: 10, end: 20)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+        XCTAssertTrue(model.previewChinese.isEmpty)
+        XCTAssertEqual(model.segments.last?.english, "Confirmed speech.")
+    }
+
+    func testSilentSuffixThenIdentifiedFinalPrefixAlsoRetirePreview() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("A preview with delayed confirmation.", start: 0, end: 20)
+        model.receiveLivePreviewForTesting("", start: 10, end: 20)
+        XCTAssertFalse(model.volatileEnglish.isEmpty)
+        let result = TranscriptionCommit(id: UUID(), sessionID: model.captureHealthSessionIDForTesting,
+            text: "Confirmed speech.", start: 0, end: 10, startFrame: 0, endFrame: 160_000,
+            sampleRate: 16_000, hints: [], isRepair: false)
+        model.receiveTranscriptionNoticeForTesting(.identifiedFinal(result))
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+        XCTAssertEqual(model.segments.last?.id, result.id)
+    }
+
+    func testOutOfOrderOverlappingCoverageMustFillEveryGap() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("Keep the uncovered middle.", start: 10, end: 30, chinese: "中间仍有缺口。")
+        for range in [(25.0, 35.0), (0.0, 15.0), (10.0, 15.0), (14.0, 20.0)] {
+            model.receiveLivePreviewForTesting("", start: range.0, end: range.1)
+            XCTAssertEqual(model.previewChinese, "中间仍有缺口。")
+        }
+        model.receiveLivePreviewForTesting("", start: 20, end: 25)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+        XCTAssertTrue(model.previewChinese.isEmpty)
+    }
+
+    func testEveryPreviewDeliveryResetsCoverageEvenWithIdenticalTextAndRange() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("The same preview.", start: 0, end: 20)
+        model.receiveLivePreviewForTesting("", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("The same preview.", start: 0, end: 20, chinese: "重新观察。")
+        model.receiveLivePreviewForTesting("", start: 10, end: 20)
+        XCTAssertEqual(model.volatileEnglish, "The same preview.")
+        XCTAssertEqual(model.previewChinese, "重新观察。")
+        model.receiveLivePreviewForTesting("", start: 0, end: 10)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+    }
+
+    func testNewerPreviewCannotBorrowEarlierCoverageOrOldSilentBlock() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("An old preview.", start: 0, end: 20)
+        model.receiveLivePreviewForTesting("", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("A newer preview.", start: 10, end: 30, chinese: "新的初译。")
+        model.receiveLivePreviewForTesting("", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("", start: 20, end: 30)
+        XCTAssertEqual(model.volatileEnglish, "A newer preview.")
+        XCTAssertEqual(model.previewChinese, "新的初译。")
+        model.receiveLivePreviewForTesting("", start: 10, end: 20)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+    }
+
+    func testInvalidCoverageAndEvenATinyGapCannotRetirePreview() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("An exact interval.", start: 0, end: 20)
+        model.receiveLivePreviewForTesting("", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("", start: 10.001, end: 20)
+        for range in [(-1.0, 20.0), (Double.nan, 20.0), (0.0, Double.infinity), (20.0, 0.0)] {
+            model.receiveLivePreviewForTesting("", start: range.0, end: range.1)
+            XCTAssertEqual(model.volatileEnglish, "An exact interval.")
+        }
+        model.receiveLivePreviewForTesting("", start: 10, end: 10.001)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+    }
+
+    func testSessionResetDoesNotCarryCoverageIntoAnotherPreview() throws {
+        let model = try fixture()
+        model.receiveLivePreviewForTesting("Old session preview.", start: 0, end: 20)
+        model.receiveLivePreviewForTesting("", start: 0, end: 10)
+        model.resetTranslationSessionForTesting()
+        model.receiveLivePreviewForTesting("New session preview.", start: 0, end: 20)
+        model.receiveLivePreviewForTesting("", start: 10, end: 20)
+        XCTAssertEqual(model.volatileEnglish, "New session preview.")
+        model.receiveLivePreviewForTesting("", start: 0, end: 10)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+    }
+
+    func testConfirmedPrefixBeforePreviewStillCountsWhenSilentTailArrives() throws {
+        let model = try fixture()
+        model.receiveCaptionForTesting("Already confirmed speech.", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("A window including confirmed speech.", start: 0, end: 20, chinese: "含已定稿前缀。")
+        model.receiveLivePreviewForTesting("", start: 10, end: 20)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+        XCTAssertTrue(model.previewChinese.isEmpty)
+        XCTAssertEqual(model.segments.last?.english, "Already confirmed speech.")
+    }
+
+    func testNewPreviewKeepsConfirmedPrefixButCannotReusePriorSilence() throws {
+        let model = try fixture()
+        model.receiveCaptionForTesting("Already confirmed speech.", start: 0, end: 10)
+        model.receiveLivePreviewForTesting("An overlapping window.", start: 0, end: 30)
+        model.receiveLivePreviewForTesting("", start: 10, end: 20)
+        model.receiveLivePreviewForTesting("An overlapping window.", start: 0, end: 30, chinese: "新的预览事件。")
+        model.receiveLivePreviewForTesting("", start: 20, end: 30)
+        XCTAssertEqual(model.volatileEnglish, "An overlapping window.")
+        XCTAssertEqual(model.previewChinese, "新的预览事件。")
+        model.receiveLivePreviewForTesting("", start: 10, end: 20)
+        XCTAssertTrue(model.volatileEnglish.isEmpty)
+    }
 }

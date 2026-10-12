@@ -590,6 +590,7 @@ final class AppModel: ObservableObject {
             // Only a timed preview event knows its range; it sets it right after.
             volatileRangeStart = nil
             volatileRangeEnd = nil
+            volatileResolvedRanges.removeAll(keepingCapacity: true)
             // Preserve source identity, stale-result clearing and wake-up semantics.
             if newValue != oldValue { markPreviewSourceChanged() }
             if oldValue.isEmpty || newValue.isEmpty || !newValue.hasPrefix(oldValue) {
@@ -601,12 +602,28 @@ final class AppModel: ObservableObject {
     /// Shown preview interval on the session-audio timeline; nil when unknown.
     private var volatileRangeStart: TimeInterval?
     private var volatileRangeEnd: TimeInterval?
-    /// A silent chunk may clear only a preview entirely within its own range.
-    /// Unknown ranges and previews extending into another chunk are retained.
-    private func emptyPreviewOwnsCurrentRange(start: TimeInterval, end: TimeInterval) -> Bool {
+    /// Disjoint resolved intervals for this preview delivery only. Every new
+    /// preview (even identical text/timing) and every state reset starts afresh.
+    private var volatileResolvedRanges: [ClosedRange<TimeInterval>] = []
+    /// Silence and finals can jointly resolve a cross-chunk preview. Clip to
+    /// its exact interval and merge only touching/overlapping ranges: an old
+    /// chunk ending at its start, a gap or unknown timing cannot own it.
+    private func resolveCurrentPreview(start: TimeInterval, end: TimeInterval) -> Bool {
         guard start.isFinite, end.isFinite, start >= 0, end > start,
               let previewStart = volatileRangeStart, let previewEnd = volatileRangeEnd else { return false }
-        return start <= previewStart && previewEnd <= end
+        let lower = max(start, previewStart), upper = min(end, previewEnd)
+        guard lower < upper else { return false }
+        let ranges = (volatileResolvedRanges + [lower...upper]).sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [ClosedRange<TimeInterval>] = []
+        for range in ranges {
+            if let last = merged.last, range.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
+            } else {
+                merged.append(range)
+            }
+        }
+        volatileResolvedRanges = merged
+        return merged.count == 1 && merged[0].lowerBound == previewStart && merged[0].upperBound == previewEnd
     }
     /// A final that ends well before the shown preview belongs to an earlier
     /// chunk; it must not clear speech the preview has already moved on to.
@@ -3445,12 +3462,18 @@ final class AppModel: ObservableObject {
         case let .volatile(text, start, end, observedAt):
             tracePreviewReceiveHop(ProcessInfo.processInfo.systemUptime - observedAt)
             if text.isEmpty {
-                guard emptyPreviewOwnsCurrentRange(start: start, end: end) else { return }
+                guard resolveCurrentPreview(start: start, end: end) else { return }
             }
             volatileEnglish = text
             if !text.isEmpty, start.isFinite, end.isFinite, start >= 0, end > start {
                 volatileRangeStart = start
                 volatileRangeEnd = end
+                // Streaming windows can include an already confirmed prefix.
+                // Finals remain authoritative across deliveries; prior silence
+                // does not. Seed those finals without clearing a fresh preview.
+                for segment in segments where segment.endTime > start && segment.startTime < end {
+                    _ = resolveCurrentPreview(start: segment.startTime, end: segment.endTime)
+                }
             }
             // Preview updates do not use the translation model. Let a summary
             // finish unless caption backlog or memory pressure requires yielding.
@@ -3584,7 +3607,8 @@ final class AppModel: ObservableObject {
             segment.updateCaptionAnnotation(targetCode: target.rawValue,
                 formulaUncertain: (segment.sourceLanguage == nil || segment.sourceLanguage == "en") && FormulaASRReview.uncertain(segment.english))
             if sessionNotice == Self.rejectedTranscriptNotice { sessionNotice = nil }
-            if !previewOutlivesFinal(endingAt: segment.endTime) { volatileEnglish = "" }
+            let previewResolved = resolveCurrentPreview(start: segment.startTime, end: segment.endTime)
+            if previewResolved || !previewOutlivesFinal(endingAt: segment.endTime) { volatileEnglish = "" }
             markCaptionActivity()
             segments.append(segment)
             segments.sort { $0.startTime == $1.startTime ? $0.id.uuidString < $1.id.uuidString : $0.startTime < $1.startTime }
