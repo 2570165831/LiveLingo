@@ -2,6 +2,44 @@ import Foundation
 import Testing
 @testable import LiveLingo
 
+struct ReviewFailureOrdinalTests {
+    @Test func workerMaximumIndexFormatsWithoutOverflow() throws {
+        let message = "review failure stage=additions code=empty_quote item=9223372036854775807 field=quote detail=synthetic"
+        let parsed = try #require(ReviewFailure.parseWorkerMessage(message))
+        #expect(parsed.itemIndex == Int.max)
+        #expect(parsed.description.contains("第 9223372036854775808 条补充建议"))
+        let classified = ReviewFailure.classify(QwenRuntimeError.requestFailed(message), defaultStage: .generation)
+        #expect(classified.errorDescription == parsed.description)
+        #expect(!parsed.description.contains("synthetic"))
+    }
+
+    @Test func everyOrdinalFieldHandlesSignedIntegerBoundaries() {
+        let cases: [(Int, String)] = [
+            (Int.min, "-9223372036854775807"), (Int.min + 1, "-9223372036854775806"),
+            (-1, "0"), (0, "1"), (1, "2"),
+            (Int.max - 1, "9223372036854775807"), (Int.max, "9223372036854775808")
+        ]
+        for (index, ordinal) in cases {
+            let failure = ReviewFailure(stage: .corrections, code: "empty_reason", detail: "synthetic",
+                batchIndex: index, batchCount: 3, itemIndex: index, pointIndex: index)
+            #expect(failure.description.contains("批次 \(ordinal)/3"))
+            #expect(failure.description.contains("第 \(ordinal) 条修正项"))
+            #expect(failure.description.contains("笔记要点 \(ordinal)"))
+            let withoutCount = ReviewFailure(stage: .input, code: "input_encode_failed", detail: "synthetic",
+                batchIndex: index, itemIndex: index)
+            #expect(withoutCount.description.contains("批次 \(ordinal)"))
+            #expect(withoutCount.description.contains("第 \(ordinal) 条项目"))
+        }
+    }
+
+    @Test func ordinaryDescriptionKeepsItsExactBytes() {
+        let failure = ReviewFailure(stage: .additions, code: "empty_quote", detail: "synthetic",
+            batchIndex: 1, batchCount: 3, itemIndex: 0, pointIndex: 2, field: "quote", responseBytes: 120)
+        let expected = "复查失败[核对补充建议]（批次 2/3 · 第 1 条补充建议 · 笔记要点 3 · 字段 quote）：补充建议缺少原文引用 · 响应 120 字节"
+        #expect(Array(failure.description.utf8) == Array(expected.utf8))
+    }
+}
+
 private actor C06ReviewGate {
     private var released = false
     private var waiter: CheckedContinuation<Void, Never>?

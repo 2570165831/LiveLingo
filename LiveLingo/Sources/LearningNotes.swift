@@ -2164,16 +2164,23 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
 
     var errorDescription: String? { description }
 
+    /// A nonnegative Int index fits in UInt with room for its one-based value.
+    /// Negative metadata retains its prior display without a trapping conversion.
+    private static func oneBasedIndex(_ index: Int) -> String {
+        if index >= 0 { return String(UInt(index) + 1) }
+        return String(index + 1)
+    }
+
     /// User-facing, metadata-only explanation.
     var description: String {
         var context: [String] = []
-        if let batchIndex, let batchCount { context.append("批次 \(batchIndex + 1)/\(batchCount)") }
-        else if let batchIndex { context.append("批次 \(batchIndex + 1)") }
+        if let batchIndex, let batchCount { context.append("批次 \(Self.oneBasedIndex(batchIndex))/\(batchCount)") }
+        else if let batchIndex { context.append("批次 \(Self.oneBasedIndex(batchIndex))") }
         if let itemIndex {
             let noun = stage == .additions ? "补充建议" : stage == .corrections ? "修正项" : "项目"
-            context.append("第 \(itemIndex + 1) 条\(noun)")
+            context.append("第 \(Self.oneBasedIndex(itemIndex)) 条\(noun)")
         }
-        if let pointIndex { context.append("笔记要点 \(pointIndex + 1)") }
+        if let pointIndex { context.append("笔记要点 \(Self.oneBasedIndex(pointIndex))") }
         if let field { context.append("字段 \(field)") }
         let head = "复查失败[\(stage.label)]" + (context.isEmpty ? "" : "（" + context.joined(separator: " · ") + "）")
         var text = "\(head)：\(localizedDetail)"
