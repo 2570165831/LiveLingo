@@ -66,6 +66,7 @@ struct DropProbeCLI {
         guard !FileManager.default.fileExists(atPath: root.path) else { throw CocoaError(.fileWriteFileExists) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
+        try PreviewDropProbe.shared.beginRecording(root.appendingPathComponent("events.jsonl"))
         let asr = try ProbeASR(worker: args[3], model: args[4])
         let pipeline = SpeechPipeline(transcriber: { url, _, enhance, mode in
             if mode == .probe { return ASRTranscription(text: "", languageMode: .probe) }

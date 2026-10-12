@@ -1179,7 +1179,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             for input in inputs {
                 #if LIVELINGO_DROP_PROBE
                 let result = continuation.yield(input)
-                if case .dropped(let dropped) = result { PreviewDropProbe.shared.input("dropped", dropped) }
+                if case .dropped(let dropped) = result { PreviewDropProbe.shared.dropped(dropped) }
                 if case .terminated = result { PreviewDropProbe.shared.input("terminated", input) }
                 #else
                 continuation.yield(input)
@@ -1369,10 +1369,21 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 guard self?.ownsPreview(token) == true else { return }
                 do {
                     #if LIVELINGO_DROP_PROBE
-                    try await analyzer.start(inputSequence: stream.map { value in
-                        PreviewDropProbe.shared.input("consumed", value)
-                        return value
-                    })
+                    if PreviewDropProbe.shared.stallConsumer {
+                        // A cancellable test replacement takes one input, then
+                        // stops pulling without reporting an analyzer failure.
+                        var iterator = stream.makeAsyncIterator()
+                        if let value = await iterator.next() {
+                            PreviewDropProbe.shared.input("consumed", value)
+                            PreviewDropProbe.shared.record(["event": "analyzer_replacement_stalled"])
+                            try await Task.sleep(for: .seconds(86_400))
+                        }
+                    } else {
+                        try await analyzer.start(inputSequence: stream.map { value in
+                            PreviewDropProbe.shared.input("consumed", value)
+                            return value
+                        })
+                    }
                     #else
                     try await analyzer.start(inputSequence: stream)
                     #endif
