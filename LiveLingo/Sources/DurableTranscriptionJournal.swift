@@ -22,10 +22,19 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
         /// nor the fallback produced accepted English, and the fallback heard
         /// Han-dominant speech. Audio is kept; manual retry works.
         case otherLanguage
+        /// SoundAnalysis found no speech before ASR. Terminal until an explicit
+        /// manual retry; unlike digital silence, the chunk must remain on disk.
+        case noSpeech
 
         /// What 0.2.0 understands. Newer statuses are written as this plus
         /// `extendedStatus`, so an older build still decodes the whole journal.
-        var legacy: Status { self == .otherLanguage ? .failed : self }
+        var legacy: Status {
+            switch self {
+            case .otherLanguage: return .failed
+            case .noSpeech: return .silent
+            default: return self
+            }
+        }
     }
     enum Attempt: String, Codable, Sendable { case initial, automaticRetry, manual }
     /// Why the latest attempt produced no accepted English. A fixed set of
@@ -35,6 +44,7 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
         case repeatedLoop, runawayText, error
         /// The attempt did not finish: reopened after quitting, paused, or yielded to captions.
         case interrupted
+        case noSpeech
 
         /// Mirrors `SpeechPipeline.preferredTranscript`; nil when the text is accepted.
         static func rejection(of text: String, audioDuration: TimeInterval) -> FailureReason? {
@@ -84,6 +94,9 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
     var candidateOrigin: String?
     var failure: String?
     var failureReason: FailureReason?
+    /// Only an intercepted attempt writes this key. Passing analysis must not
+    /// change the frozen bytes of ordinary transcription records.
+    var speechConfidence: Double? = nil
     /// Immutable evidence from the first claim, including an explicitly empty
     /// predecessor. Retries never borrow evidence from a later live ordinal.
     var sourceTriggerPredecessor: SourceLanguagePolicy.TriggerState?
@@ -142,7 +155,7 @@ extension TranscriptionWorkRecord {
         case id, sessionID, ordinal, audioFile, startFrame, endFrame, sampleRate, start, end
         case captureStart, captureEnd, modelKey, fallbackModelKey, appleEvidence, recordingFile, audioRetired
         case status, extendedStatus, attempt, automaticRetryCount, manualRetryCount
-        case text, textLanguage, candidateText, candidateLanguage, candidateOrigin, failure, failureReason
+        case text, textLanguage, candidateText, candidateLanguage, candidateOrigin, failure, failureReason, speechConfidence
         case sourceTriggerPredecessor, sourceTriggerDecision, sourceTriggerAfter
         case sourceTriggerPendingBoundary
         case sourceProbeInput, sourceProbeFinished, sourceRevisionAllowed, sourceInitialEnglishDigest
@@ -177,6 +190,7 @@ extension TranscriptionWorkRecord {
         candidateOrigin = try c.decodeIfPresent(String.self, forKey: .candidateOrigin)
         failure = try c.decodeIfPresent(String.self, forKey: .failure)
         failureReason = try c.decodeIfPresent(String.self, forKey: .failureReason).flatMap(FailureReason.init(rawValue:))
+        speechConfidence = try c.decodeIfPresent(Double.self, forKey: .speechConfidence)
         sourceTriggerPredecessor = try c.decodeIfPresent(SourceLanguagePolicy.TriggerState.self, forKey: .sourceTriggerPredecessor)
         sourceTriggerDecision = try c.decodeIfPresent(SourceLanguagePolicy.Decision.self, forKey: .sourceTriggerDecision)
         sourceTriggerAfter = try c.decodeIfPresent(SourceLanguagePolicy.TriggerState.self, forKey: .sourceTriggerAfter)
@@ -206,6 +220,7 @@ extension TranscriptionWorkRecord {
         try c.encodeIfPresent(SpokenLanguage.nonEnglishCode(candidateLanguage), forKey: .candidateLanguage)
         try c.encodeIfPresent(candidateOrigin, forKey: .candidateOrigin); try c.encodeIfPresent(failure, forKey: .failure)
         try c.encodeIfPresent(failureReason?.rawValue, forKey: .failureReason)
+        try c.encodeIfPresent(speechConfidence, forKey: .speechConfidence)
         try c.encodeIfPresent(sourceTriggerPredecessor, forKey: .sourceTriggerPredecessor)
         try c.encodeIfPresent(sourceTriggerDecision, forKey: .sourceTriggerDecision)
         try c.encodeIfPresent(sourceTriggerAfter, forKey: .sourceTriggerAfter)
@@ -228,6 +243,9 @@ struct TranscriptionProcessingState: Sendable, Equatable {
     /// Terminal non-English chunks without a pending candidate. Disjoint from
     /// `unresolvedCount`: nothing is pending or failed.
     var otherLanguageCount = 0
+    /// Terminal filtered chunks with no candidate awaiting confirmation.
+    /// They are neither pending work nor transcription failures.
+    var noSpeechCount = 0
     /// Records `claimNext()` can still take without anyone's help.
     var claimableCount = 0
     /// Failed records that only a manual retry can move again.
@@ -236,6 +254,13 @@ struct TranscriptionProcessingState: Sendable, Equatable {
     var candidateCount = 0
     /// Records counted in both `failedCount` and `candidateCount`.
     var failedWithCandidateCount = 0
+    /// Preserve frozen CLI events exactly when no chunk was intercepted.
+    static func addingNoSpeechStatistic(_ fields: [String: Any], count: Int) -> [String: Any] {
+        guard count > 0 else { return fields }
+        var result = fields
+        result["noSpeechTranscription"] = count
+        return result
+    }
     /// Audio is opened on demand; no waiting task retains decoded audio.
     let prefetchedCount: Int = 0
     /// Transcription can still move on its own: something is running, or the
@@ -264,7 +289,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     static let directoryName = "durable-transcription"
     static let maximumAutomaticRetries = 2
     enum JournalError: LocalizedError {
-        case corrupt(String), sessionMismatch, invalidRange, duplicateIdentity, unsafePath
+        case corrupt(String), sessionMismatch, invalidRange, duplicateIdentity, unsafePath, invalidSpeechConfidence
         var errorDescription: String? {
             switch self {
             case .corrupt(let detail): return "转写工作记录损坏，原文件已保留：\(detail)"
@@ -272,6 +297,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             case .invalidRange: return "转写片段的帧范围或时间范围无效。"
             case .duplicateIdentity: return "同一转写片段 ID 对应不同音频范围。"
             case .unsafePath: return "转写工作记录包含目录外的音频路径。"
+            case .invalidSpeechConfidence: return "讲话置信度必须是 0 至 1 之间的有限数值。"
             }
         }
     }
@@ -485,6 +511,9 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     }
     private func validateRecord(_ record: TranscriptionWorkRecord) throws {
         guard record.sessionID == sessionID else { throw JournalError.sessionMismatch }
+        if let confidence = record.speechConfidence {
+            guard confidence.isFinite, (0...1).contains(confidence) else { throw JournalError.invalidSpeechConfidence }
+        }
         guard record.startFrame >= 0, record.endFrame > record.startFrame,
               record.sampleRate.isFinite, record.sampleRate > 0,
               record.start.isFinite, record.end.isFinite, record.start >= 0, record.end > record.start,
@@ -656,6 +685,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             if record.status == .retryWaiting { record.attempt = .automaticRetry; record.automaticRetryCount += 1 }
             else if record.status == .manualPending { record.attempt = .manual; record.manualRetryCount += 1 }
             else { record.attempt = .initial }
+            record.speechConfidence = nil
             record.status = .active
             try append(record: record) // debit retries durably BEFORE invoking ASR
             return record
@@ -675,10 +705,36 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             }
         }
     }
+    /// Called only after consistent automatic no-speech evidence. No audio
+    /// is opened, materialized, retired or removed by this mutation.
+    func markNoSpeech(id: UUID, speechConfidence: Double) throws {
+        try lock.withLock {
+            guard speechConfidence.isFinite, (0...1).contains(speechConfidence) else {
+                throw JournalError.invalidSpeechConfidence
+            }
+            guard var record = record(id: id) else { throw JournalError.corrupt("找不到该转写片段") }
+            guard record.status == .active, record.attempt != .manual, record.manualRetryCount == 0 else {
+                throw JournalError.corrupt("手动重试及其后续补转不可标记未识别到讲话")
+            }
+            record.status = .noSpeech
+            record.failureReason = .noSpeech
+            record.failure = "未识别到讲话，音频已保留；可手动重试。"
+            record.speechConfidence = speechConfidence
+            // A terminal filter verdict cannot leave deferred probe work alive.
+            record.sourceProbeInput = nil
+            record.sourceProbeFinished = nil
+            try append(record: record)
+        }
+    }
     func retry(id: UUID) throws {
         try lock.withLock {
             guard var record = record(id: id) else { throw JournalError.corrupt("找不到该转写片段") }
             guard record.status != .active else { return }
+            if record.status == .noSpeech || record.failureReason == .noSpeech {
+                record.speechConfidence = nil
+                record.failureReason = nil
+                record.failure = nil
+            }
             record.status = .manualPending
             try append(record: record)
         }
@@ -693,6 +749,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
                 unresolvedCount: state.records.filter { $0.status == .failed || $0.status == .retryWaiting || $0.candidateText != nil }.count,
                 // A pending candidate still needs confirmation; it is counted once, as unresolved.
                 otherLanguageCount: state.records.filter { $0.status == .otherLanguage && $0.candidateText == nil }.count,
+                noSpeechCount: state.records.filter { $0.status == .noSpeech && $0.candidateText == nil }.count,
                 claimableCount: state.records.filter(\.isClaimable).count,
                 failedCount: state.records.filter(\.isStuckFailed).count,
                 candidateCount: state.records.filter { $0.candidateText != nil }.count,

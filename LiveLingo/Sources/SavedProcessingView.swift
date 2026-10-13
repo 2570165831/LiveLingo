@@ -6,9 +6,7 @@ struct SavedProcessingView: View {
     @ObservedObject var model: AppModel
 
     private var actionable: [TranscriptionWorkRecord] {
-        model.savedTranscriptionWork.filter {
-            $0.needsWork || $0.status == .failed || $0.status == .otherLanguage || $0.candidateText != nil
-        }
+        model.savedTranscriptionWork.filter(SavedProcessingPresentation.showsTranscriptionTask)
     }
 
     var body: some View {
@@ -38,6 +36,14 @@ struct SavedProcessingView: View {
                             .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     } else if let summary = SavedProcessingPresentation.languageSummary(segments: model.segments) {
                         Text(summary)
+                            .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    }
+                    if model.transcriptionProcessing == nil,
+                       let summary = SavedProcessingPresentation.noSpeechSummary(count: model.savedNoSpeechCount) {
+                        Text(summary).font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    }
+                    if model.savedNoSpeechCount > 0 {
+                        Text("这些片段的音频已保留，可用下方“重试这段”手动重试。")
                             .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     }
                     HStack {
@@ -94,7 +100,7 @@ struct SavedProcessingView: View {
                                     .monospacedDigit()
                                 Text(SavedProcessingPresentation.recordLabel(record.status)).foregroundStyle(ReadingAccessibility.secondaryText)
                                 Spacer(minLength: 8)
-                                if record.status == .failed || record.status == .otherLanguage {
+                                if SavedProcessingPresentation.canRetryTranscription(record) {
                                     Button("重试这段") { model.resumeSavedProcessing(retryID: record.id) }
                                         .disabled(model.legacyProvenanceUnavailable)
                                         .accessibilityLabel("重试 \(LearningTimeLabel.stamp(record.start)) 至 \(LearningTimeLabel.stamp(record.end)) 的转写")

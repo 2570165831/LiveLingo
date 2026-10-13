@@ -2819,7 +2819,7 @@ enum RecordingDiagnostics {
                        end: TimeInterval? = nil, detail: String, candidate: String? = nil,
                        reason: TranscriptionWorkRecord.FailureReason? = nil) {
         let logger = Logger(subsystem: "com.jianhongli.LiveLingo", category: "RecordingDiagnostics")
-        let knownEvents = ["transcription_missing", "transcription_non_english", "transcription_retry"]
+        let knownEvents = ["transcription_missing", "transcription_non_english", "transcription_retry", "transcription_no_speech"]
         let category = knownEvents.contains(event) ? event : "transcription_issue"
         logger.notice("event=\(category, privacy: .public) has_interval=\(start != nil && end != nil) reason=\(reason?.rawValue ?? "none", privacy: .public)")
         guard let recordingURL else { return }

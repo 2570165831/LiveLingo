@@ -117,6 +117,18 @@ enum SavedProcessingPresentation {
     private static let nonEnglishSpeech = "非英语讲话"
     static let untranscribedSpeech = nonEnglishSpeech + "（未转写）"
 
+    static func showsTranscriptionTask(_ record: TranscriptionWorkRecord) -> Bool {
+        record.needsWork || canRetryTranscription(record) || record.candidateText != nil
+    }
+
+    static func canRetryTranscription(_ record: TranscriptionWorkRecord) -> Bool {
+        [.failed, .otherLanguage, .noSpeech].contains(record.status)
+    }
+
+    static func noSpeechSummary(count: Int) -> String? {
+        count > 0 ? "未识别到讲话 \(count) 段" : nil
+    }
+
     static func languageSummary(segments: [TranscriptSegment], untranscribedCount: Int = 0) -> String? {
         let chinese = segments.filter { $0.sourceLanguage == "zh" }.count
         let other = segments.filter {
@@ -131,6 +143,7 @@ enum SavedProcessingPresentation {
 
     static func workSummary(_ state: TranscriptionProcessingState, segments: [TranscriptSegment]) -> String {
         let existing = "等待转写 \(state.pendingCount) 段 · 待确认或失败 \(state.unresolvedCount) 段"
+            + (noSpeechSummary(count: state.noSpeechCount).map { " · " + $0 } ?? "")
         // English-gate rejections already had a shorter summary before language tags.
         // Keep that exact wording when no confirmed multilingual caption is present.
         guard segments.contains(where: { SpokenLanguage.nonEnglishCode($0.sourceLanguage) != nil }) else {
@@ -153,6 +166,7 @@ enum SavedProcessingPresentation {
         case .silent: return "已确认无讲话"
         case .failed: return "转写失败"
         case .otherLanguage: return untranscribedSpeech
+        case .noSpeech: return "未识别到讲话"
         }
     }
 }
