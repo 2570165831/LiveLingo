@@ -42,18 +42,22 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
 
     struct TranslationFailure: Codable, Equatable, Sendable {
         let reason: TranslationFailureReason
+        let rejection: TranslationAcceptance.Rejection?
         var count: Int
 
-        private enum CodingKeys: String, CodingKey { case reason, count }
+        private enum CodingKeys: String, CodingKey { case reason, rejection, count }
 
-        init(reason: TranslationFailureReason, count: Int) {
+        init(reason: TranslationFailureReason, count: Int, rejection: TranslationAcceptance.Rejection? = nil) {
             self.reason = reason
             self.count = count
+            self.rejection = reason == .translationRejected ? rejection : nil
         }
 
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
             reason = TranslationFailureReason(rawValue: try values.decode(String.self, forKey: .reason)) ?? .unknown
+            let code = try? values.decode(String.self, forKey: .rejection)
+            rejection = reason == .translationRejected ? code.flatMap(TranslationAcceptance.Rejection.init(rawValue:)) : nil
             count = try values.decode(Int.self, forKey: .count)
             guard count > 0 else {
                 throw DecodingError.dataCorruptedError(forKey: .count, in: values,
@@ -160,10 +164,18 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     var displayChinese: String {
         switch translationState {
         case .completed: return chinese
-        case .failed: return "（本段翻译未完成，可对照英文）"
+        case .failed: return modelDidNotTranslate ? "（模型未翻译此句，可对照英文）" : "（本段翻译未完成，可对照英文）"
         case .pending, .translating: return "（本段暂无译文）"
         }
     }
+
+    var modelDidNotTranslate: Bool {
+        guard translationState == .failed, let failure = translationFailures.last,
+              failure.reason == .translationRejected else { return false }
+        return failure.rejection == .modelReply || failure.rejection == .sourceEcho
+    }
+
+    var translationFailureStatus: String { modelDidNotTranslate ? "模型未翻译此句" : "本段翻译未完成" }
 
     mutating func beginTranslation() {
         translationState = .translating
@@ -191,7 +203,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         switch captionAnnotation {
         case .formulaNeedsReview: return ClassroomFixedText.formulaNeedsReview.text(targetCode: targetCode)
         case .translationPending: return ClassroomFixedText.pendingTranslation.text(targetCode: targetCode)
-        case .translationIncomplete: return ClassroomFixedText.failedAgainstSource.text(targetCode: targetCode)
+        case .translationIncomplete: return (modelDidNotTranslate ? ClassroomFixedText.modelUntranslatedAgainstSource : .failedAgainstSource).text(targetCode: targetCode)
         case nil: return nil
         }
     }
@@ -202,8 +214,8 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         translationError = error
     }
 
-    mutating func recordTranslationFailure(_ reason: TranslationFailureReason) {
-        addTranslationFailure(reason, count: 1)
+    mutating func recordTranslationFailure(_ reason: TranslationFailureReason, rejection: TranslationAcceptance.Rejection? = nil) {
+        addTranslationFailure(reason, count: 1, rejection: rejection)
         translationError = nil
     }
 
@@ -216,11 +228,12 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         translationError = nil
     }
 
-    private mutating func addTranslationFailure(_ reason: TranslationFailureReason, count: Int) {
-        let index = translationFailures.firstIndex { $0.reason == reason }
+    private mutating func addTranslationFailure(_ reason: TranslationFailureReason, count: Int, rejection: TranslationAcceptance.Rejection? = nil) {
+        let code = reason == .translationRejected ? rejection : nil
+        let index = translationFailures.firstIndex { $0.reason == reason && $0.rejection == code }
         let previous = index.map { translationFailures.remove(at: $0).count } ?? 0
         let (sum, overflow) = previous.addingReportingOverflow(count)
-        translationFailures.append(.init(reason: reason, count: overflow ? Int.max : sum))
+        translationFailures.append(.init(reason: reason, count: overflow ? Int.max : sum, rejection: code))
     }
 
     mutating func deferTranslation() {
@@ -299,7 +312,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
             while !failures.isAtEnd {
                 guard let entry = try? failures.superDecoder() else { break }
                 guard let failure = try? TranslationFailure(from: entry) else { continue }
-                addTranslationFailure(failure.reason, count: failure.count)
+                addTranslationFailure(failure.reason, count: failure.count, rejection: failure.rejection)
             }
         }
         if storedLanguage == nil, translationState == .completed, english == chinese,

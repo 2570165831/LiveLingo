@@ -4843,7 +4843,7 @@ final class AppModel: ObservableObject {
                             Self.traceTranslation("rejected", id: id,
                                                   elapsed: ProcessInfo.processInfo.systemUptime - started,
                                                   detail: reason)
-                            throw QwenRuntimeError.translationRejected("译文未通过验收（\(reason)），已保留英文行等待重试。")
+                            throw QwenRuntimeError.translationRejected("译文未通过验收（\(reason)），已保留英文行等待重试。", rejection: pair.currentRejectionCode)
                         }
                         response = acceptedCurrent
                     } else {
@@ -4908,7 +4908,7 @@ final class AppModel: ObservableObject {
                     self.reviewConcurrency.observe(elapsed: 0, successful: false)
                     var reason = TranscriptSegment.TranslationFailureReason.category(for: error)
                     var transportFailuresOnly = Self.isTransportFailure(reason)
-                    self.recordCaptionTranslationFailure(reason, at: failureIndex)
+                    self.recordCaptionTranslationFailure(reason, rejection: (error as? QwenRuntimeError)?.translationRejection, at: failureIndex)
                     var recovered: String?
                     // One bounded recovery, owned by the same caption revision.
                     // Content failures change instructions; output-limit failures
@@ -4938,7 +4938,7 @@ final class AppModel: ObservableObject {
                                 session: currentSession, epoch: currentGeneration, worker: workerID) else { continue }
                             reason = TranscriptSegment.TranslationFailureReason.category(for: error)
                             transportFailuresOnly = transportFailuresOnly && Self.isTransportFailure(reason)
-                            self.recordCaptionTranslationFailure(reason, at: currentIndex)
+                            self.recordCaptionTranslationFailure(reason, rejection: (error as? QwenRuntimeError)?.translationRejection, at: currentIndex)
                         }
                     }
                     guard !Task.isCancelled, currentGeneration == self.generation,
@@ -4956,7 +4956,7 @@ final class AppModel: ObservableObject {
                         } catch {
                             reason = TranscriptSegment.TranslationFailureReason.category(for: error)
                             transportFailuresOnly = false
-                            self.recordCaptionTranslationFailure(reason, at: currentIndex)
+                            self.recordCaptionTranslationFailure(reason, rejection: (error as? QwenRuntimeError)?.translationRejection, at: currentIndex)
                         }
                     }
                     if let accepted {
@@ -5009,12 +5009,18 @@ final class AppModel: ObservableObject {
         latencyLog.notice("stop stage=\(stage, privacy: .public) elapsed_ms=\(milliseconds)")
     }
 
-    private func recordCaptionTranslationFailure(_ reason: TranscriptSegment.TranslationFailureReason, at index: Int) {
-        segments[index].recordTranslationFailure(reason)
+    private func recordCaptionTranslationFailure(_ reason: TranscriptSegment.TranslationFailureReason,
+                                                rejection: TranslationAcceptance.Rejection? = nil, at index: Int) {
+        segments[index].recordTranslationFailure(reason, rejection: rejection)
         let count = segments[index].translationFailures.last!.count
-        Self.latencyLog.notice("caption_failure reason=\(reason.rawValue, privacy: .public) count=\(count)")
+        let code = segments[index].translationFailures.last!.rejection?.rawValue ?? "unspecified"
+        Self.latencyLog.notice("caption_failure reason=\(reason.rawValue, privacy: .public) rejection=\(code, privacy: .public) count=\(count)")
         #if LIVELINGO_CLI
-        translationFailureReporter?(["translationFailureReason": reason.rawValue, "translationFailureCount": count])
+        var fields: [String: Any] = ["translationFailureReason": reason.rawValue, "translationFailureCount": count]
+        if let rejection = segments[index].translationFailures.last!.rejection {
+            fields["translationRejection"] = rejection.rawValue
+        }
+        translationFailureReporter?(fields)
         #endif
         persistCurrentSession()
     }
@@ -5977,7 +5983,7 @@ struct ProtectedChemistryTranslationInput: Sendable {
 
     func validatedRestore(in translatedText: String) throws -> String {
         if let reason = restorationFailure(in: translatedText) {
-            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason)。")
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason)。", rejection: .incompleteProse)
         }
         return restore(in: translatedText)
     }

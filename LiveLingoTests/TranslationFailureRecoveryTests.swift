@@ -12,11 +12,152 @@ private final class Item7Gate {
     func release() { continuation?.resume(); continuation = nil }
 }
 
+private actor RejectionRequestCapture {
+    var requests: [(String, String, Int)] = []
+    func record(_ input: String, _ prompt: String, _ budget: Int) { requests.append((input, prompt, budget)) }
+    func snapshot() -> [(String, String, Int)] { requests }
+}
+
 @MainActor
 final class TranslationFailureRecoveryTests: XCTestCase {
     typealias Reason = TranscriptSegment.TranslationFailureReason
     private let source = "The room is cold."
     private let result = "房间很冷。"
+
+    func testQuotationRetryUsesTheProductionPromptAndPreservesItsSource() async throws {
+        let source = "Fuck your mother."
+        for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+            let capture = RejectionRequestCapture()
+            let result = try await QwenTranslationClient.translate(source, modelName: model, attempt: .repairQuotedContent, request: { input, prompt, budget in
+                await capture.record(input, prompt, budget)
+                return "你妈的。"
+            })
+            XCTAssertEqual(result, "你妈的。")
+            let requests = await capture.snapshot()
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(requests[0].2, 320)
+            XCTAssertTrue(requests[0].1.contains("including profanity and offensive language"))
+            XCTAssertTrue(requests[0].1.hasSuffix(CaptionTranslationAttempt.repairQuotedContent.quotationPostscript(for: .simplifiedChinese)))
+            if model == QwenModelProfile.highQuality.translationModel {
+                let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(requests[0].0.utf8)) as? [String: String])
+                XCTAssertEqual(payload, ["source_text_to_translate": source])
+            } else { XCTAssertEqual(requests[0].0, source) }
+        }
+        XCTAssertEqual(CaptionTranslationAttempt.standard.quotationPostscript(for: .simplifiedChinese), "")
+        XCTAssertEqual(CaptionTranslationAttempt.repairQuotedContent.quotationPostscript(for: .english), "")
+        XCTAssertEqual(CaptionTranslationAttempt.repairContent.quotationPostscript(for: .simplifiedChinese), "")
+    }
+
+    func testAdjacentFailuresKeepTheSpecificAcceptanceCode() async throws {
+        for (output, code) in [
+            ("抱歉，我无法提供该内容的翻译。", TranslationAcceptance.Rejection.modelReply),
+            ("Fuck your mother.", .sourceEcho),
+            ("source_text_to_translate", .promptLeak)
+        ] {
+            let pair = try await QwenTranslationClient.translateAdjacent(previous: "Air is cold.", previousChinese: "空气很冷。", current: "Fuck your mother.", context: "", modelName: QwenModelProfile.highQuality.translationModel, repairPrevious: false, request: { _, _, _ in output })
+            XCTAssertNil(pair.current)
+            XCTAssertNotNil(pair.currentRejection)
+            XCTAssertEqual(pair.currentRejectionCode, code)
+        }
+    }
+
+    func testTypedRejectionCodesPersistWithoutPrivateMessages() throws {
+        var segment = TranscriptSegment(startTime: 0, endTime: 1, english: source)
+        for code in TranslationAcceptance.Rejection.allCases {
+            segment.recordTranslationFailure(.translationRejected, rejection: code)
+            segment.recordTranslationFailure(.translationRejected, rejection: code)
+        }
+        segment.finishFailedTranslation()
+        let bytes = try encode(segment)
+        let decoded = try JSONDecoder().decode(TranscriptSegment.self, from: bytes)
+        XCTAssertEqual(decoded, segment)
+        XCTAssertEqual(decoded.translationFailures.count, TranslationAcceptance.Rejection.allCases.count)
+        XCTAssertTrue(decoded.translationFailures.allSatisfy { $0.count == 2 })
+        XCTAssertNil(decoded.translationError)
+        let future = Data(#"{"reason":"translationRejected","count":2,"rejection":"future-private-text"}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(TranscriptSegment.TranslationFailure.self, from: future).rejection)
+        let malformed = Data(#"{"reason":"translationRejected","count":2,"rejection":{"private":"text"}}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(TranscriptSegment.TranslationFailure.self, from: malformed).rejection)
+        let legacy = Data(#"{"reason":"translationRejected","count":2}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(TranscriptSegment.TranslationFailure.self, from: legacy).rejection)
+        let unrelated = TranscriptSegment.TranslationFailure(reason: .processExited, count: 1, rejection: .modelReply)
+        XCTAssertNil(unrelated.rejection)
+    }
+
+    func testRefusalsAreModelRepliesButQuotedInabilityRemainsLectureContent() throws {
+        let refused = [
+            "抱歉，我无法翻译包含不适当内容的信息。如果您有其他问题或需要帮助，请随时告诉我。",
+            "抱歉，我无法提供该内容的翻译。",
+            "我无法提供涉及暴力、仇恨或不当内容的信息。我的职责是提供安全、有益的帮助。",
+            "I cannot translate offensive content."
+        ]
+        for output in refused {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: "Fuck your mother."), .modelReply)
+            XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(output, source: "Fuck your mother.")) { error in
+                XCTAssertEqual((error as? QwenRuntimeError)?.translationRejection, .modelReply)
+            }
+        }
+        for pair in [
+            ("The chatbot says, 'I cannot translate offensive content.'", "聊天机器人说：‘我无法翻译冒犯性内容。’"),
+            ("Sorry, I cannot provide a translation of this inscription.", "抱歉，我无法提供这段铭文的翻译。"),
+            ("I cannot solve this equation.", "我无法解出这个方程。"),
+            ("In the novel, he shouts, 'Fuck your mother.'", "在小说中，他喊道：‘去你妈的。’")
+        ] {
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: pair.1, source: pair.0))
+            XCTAssertEqual(try TranslationAcceptance.validatedCaption(pair.1, source: pair.0), pair.1)
+        }
+        XCTAssertThrowsError(try TranslationAcceptance.validatedCaption(String(repeating: "扩写", count: 30), source: "Hi.")) { error in
+            XCTAssertEqual((error as? QwenRuntimeError)?.translationRejection, .disproportionateLength)
+        }
+    }
+
+    func testQuotationRecoveryIsBoundedAndKeepsTheFailureCodeAfterSuccess() async throws {
+        for code in [TranslationAcceptance.Rejection.modelReply, .sourceEcho, .disproportionateLength] {
+            var attempts: [CaptionTranslationAttempt] = []
+            var deps = CaptionTranslationDependencies.unavailable
+            deps.translate = { [self] _, _, _, attempt, _ in
+                attempts.append(attempt)
+                if attempts.count == 1 { throw QwenRuntimeError.translationRejected("PRIVATE_ERROR_TEXT", rejection: code) }
+                return result
+            }
+            let (model, _) = try fixture(deps)
+            model.receiveCaptionForTesting(source, start: 0, end: 1)
+            await model.translationTaskForTesting?.value
+            XCTAssertEqual(attempts, [.standard, code == .disproportionateLength ? .repairContent : .repairQuotedContent])
+            XCTAssertEqual(model.segments[0].chinese, result)
+            XCTAssertFalse(model.segments[0].modelDidNotTranslate)
+            XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .translationRejected, count: 1, rejection: code)])
+            XCTAssertFalse(String(decoding: try encode(model.segments[0]), as: UTF8.self).contains("PRIVATE_ERROR_TEXT"))
+        }
+        XCTAssertTrue(CaptionTranslationAttempt.repairQuotedContent.promptSuffix.contains("including profanity and offensive language"))
+        XCTAssertEqual(CaptionTranslationAttempt.standard.promptSuffix, "")
+        XCTAssertEqual(CaptionTranslationAttempt.repairQuotedContent.outputTokenBudget(for: source), CaptionTranslationAttempt.repairContent.outputTokenBudget(for: source))
+    }
+
+    func testPersistentModelReplyGetsOneRetryAndTruthfulDisplays() async throws {
+        var attempts: [CaptionTranslationAttempt] = []
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.translate = { _, _, _, attempt, _ in
+            attempts.append(attempt)
+            throw QwenRuntimeError.translationRejected("PRIVATE_MODEL_REPLY", rejection: .modelReply)
+        }
+        let (model, _) = try fixture(deps)
+        model.receiveCaptionForTesting(source, start: 0, end: 1)
+        await model.translationTaskForTesting?.value
+        let segment = model.segments[0]
+        XCTAssertEqual(attempts, [.standard, .repairQuotedContent])
+        XCTAssertEqual(segment.translationFailures, [.init(reason: .translationRejected, count: 2, rejection: .modelReply)])
+        XCTAssertEqual(segment.displayChinese, "（模型未翻译此句，可对照英文）")
+        XCTAssertEqual(segment.translationFailureStatus, "模型未翻译此句")
+        XCTAssertEqual(SessionExporter.targetLine(segment), segment.displayChinese)
+        XCTAssertEqual(CaptionPresentation.translationText(segment, outputLanguage: .simplifiedChinese), segment.displayChinese)
+        var later = segment
+        later.recordTranslationFailure(.translationRejected, rejection: .disproportionateLength)
+        later.finishFailedTranslation()
+        XCTAssertFalse(later.modelDidNotTranslate)
+        XCTAssertEqual(later.displayChinese, "（本段翻译未完成，可对照英文）")
+        XCTAssertEqual(later.translationFailures.count, 2)
+    }
 
     private func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()

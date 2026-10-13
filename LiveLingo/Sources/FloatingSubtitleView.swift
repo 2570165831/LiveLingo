@@ -312,7 +312,7 @@ extension AppModel {
             if caption.hasUsableTranslation {
                 return captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter)
             }
-            return caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…"
+            return caption.translationState == .failed ? caption.translationFailureStatus : "等待正式译文…"
         }
         return previewTranslationEnabled ? "当前系统不支持初译；停顿时显示正式译文" : "初译已关闭；停顿时显示正式译文"
     }
@@ -351,7 +351,7 @@ extension AppModel {
             if caption.hasUsableTranslation {
                 return (captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter), false)
             }
-            return (caption.translationState == .failed ? "本段翻译未完成" : "等待正式译文…", false)
+            return (caption.translationState == .failed ? caption.translationFailureStatus : "等待正式译文…", false)
         }
         guard previewTranslationEnabled else { return ("初译已关闭", false) }
         guard supportsPreviewTranslation else { return ("当前系统不支持初译；正式译文随后显示", false) }

@@ -184,6 +184,38 @@ struct CLITranslationFailureTests {
         try expect(try encoded(model.segments[0]) == completedJSON, "frozen_successful_english_bytes")
     }
 
+    static func testTypedRejectionReporter(root: URL) async throws {
+        var dependencies = CaptionTranslationDependencies.unavailable
+        var attempts: [CaptionTranslationAttempt] = []
+        dependencies.translate = { _, _, _, attempt, _ in
+            attempts.append(attempt)
+            throw QwenRuntimeError.translationRejected(privateError, rejection: .modelReply)
+        }
+        let model = try await fixture(dependencies, root: root, name: "typed-rejection")
+        let capture = Capture()
+        await model.cliTranslateForTesting([captions()[0]], report: capture.report)
+        try expect(attempts == [.standard, .repairQuotedContent], "typed_rejection_one_quotation_retry")
+        try expect(capture.events.count == 2, "typed_rejection_event_count")
+        for index in capture.events.indices {
+            let frozen = index == 0
+                ? #"{"event":"translation_failure","translationFailureCount":1,"translationFailureReason":"translationRejected","translationRejection":"modelReply"}"#
+                : #"{"event":"translation_failure","translationFailureCount":2,"translationFailureReason":"translationRejected","translationRejection":"modelReply"}"#
+            try expect(try eventJSON(capture.events[index]) == frozen, "typed_rejection_event_bytes")
+        }
+        try expect(model.segments[0].translationFailures == [.init(reason: .translationRejected, count: 2, rejection: .modelReply)], "typed_rejection_saved_code")
+        try expect(!(try encoded(model.segments[0])).contains(privateError), "typed_rejection_omits_private_message")
+        for code in TranslationAcceptance.Rejection.allCases {
+            let event = LiveLingoCLI.safeEvent("translation_failure", fields: ["translationFailureReason": "translationRejected", "translationFailureCount": 1, "translationRejection": code.rawValue, "text": privateError], elapsed: 1)
+            try expect(event["translationRejection"] as? String == code.rawValue && event["text"] == nil, "typed_rejection_code_allowlist")
+        }
+        for code: Any in ["PRIVATE_ERROR_TEXT", 1, true, ["modelReply"]] {
+            let event = LiveLingoCLI.safeEvent("translation_failure", fields: ["translationFailureReason": "translationRejected", "translationFailureCount": 1, "translationRejection": code], elapsed: 1)
+            try expect(event["translationRejection"] == nil && event["translationFailureCount"] as? Int == 1, "typed_rejection_discards_invalid_code")
+        }
+        let unrelated = LiveLingoCLI.safeEvent("translation_failure", fields: ["translationFailureReason": "processExited", "translationFailureCount": 1, "translationRejection": "modelReply"], elapsed: 1)
+        try expect(unrelated["translationRejection"] == nil, "typed_rejection_only_on_acceptance_failure")
+    }
+
     static func testRuntimeFailureWiring(root: URL) async throws {
         var calls: [String] = [], firstAttempts = 0, sleeps = 0, preparations = 0
         var dependencies = CaptionTranslationDependencies.unavailable
@@ -276,6 +308,7 @@ struct CLITranslationFailureTests {
             try testFrozenPersistence(); passed.append("frozen_persistence")
             try testEventAllowlist(); passed.append("event_allowlist")
             try await testSuccessfulEnglish(root: root); passed.append("successful_english")
+            try await testTypedRejectionReporter(root: root); passed.append("typed_rejection_reporter")
             try await testRuntimeFailureWiring(root: root); passed.append("appmodel_runtime_failure_wiring")
             try await testDependencyCancellation(root: root, persistent: false); passed.append("dependency_cancellation_recovery")
             try await testDependencyCancellation(root: root, persistent: true); passed.append("persistent_dependency_cancellation")

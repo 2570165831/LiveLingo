@@ -123,7 +123,7 @@ final class AcceptanceVerdictSnapshotTests: XCTestCase {
             caption = try TranslationAcceptance.validatedCaption(input.candidate, source: input.source,
                                                                 sourceLanguage: input.sourceLanguage)
             captionError = nil
-        } catch QwenRuntimeError.translationRejected(let message) {
+        } catch QwenRuntimeError.translationRejected(let message, _) {
             caption = nil
             captionError = message
         }

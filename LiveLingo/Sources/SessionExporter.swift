@@ -1002,6 +1002,10 @@ enum SessionExporter {
         if target.keepsSourceAsCaption(language: segment.sourceLanguage) {
             return segment.hasUsableTranslation ? segment.chinese : target.renderPassThrough(segment.english)
         }
+        if segment.modelDidNotTranslate {
+            return (segment.sourceLanguage == nil && target == .simplifiedChinese
+                ? ClassroomFixedText.modelUntranslatedAgainstEnglish : .modelUntranslatedAgainstSource).text(targetCode: target.rawValue)
+        }
         if target != .simplifiedChinese {
             if segment.translationState == .failed { return ClassroomFixedText.failedAgainstSource.text(targetCode: target.rawValue) }
             return segment.hasUsableTranslation ? segment.chinese : ClassroomFixedText.pendingTranslation.text(targetCode: target.rawValue)

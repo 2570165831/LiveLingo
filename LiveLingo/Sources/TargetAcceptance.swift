@@ -149,11 +149,25 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
             range: NSRange(text.startIndex..., in: text)) != nil
     }
 
+    // A short refusal need not mention AI. Match explicit translation refusal,
+    // not ordinary first-person inability; quoted refusals in the source remain
+    // eligible lecture content. The safety-information form covers model replies
+    // that avoid the word "translation" while declining the same source.
+    private static let translationRefusalExpression = try! NSRegularExpression(pattern:
+        #"(?i)(?:我(?:无法|不能|不会|不可以)(?:[^。！？!?\r\n]{0,24})(?:翻译|译文)|我(?:无法|不能)提供(?:[^。！？!?\r\n]{0,24})(?:暴力|仇恨|不当|不适当|冒犯|粗俗)(?:[^。！？!?\r\n]{0,24})(?:信息|内容)|\bi\s+(?:cannot|can\s+not|can't|can’t|am\s+unable\s+to)\s+(?:translate\b|(?:provide|offer|help|assist)(?:[^.!?\r\n]{0,48})\btranslat(?:e|ion)\b))"#)
+
+    private static func containsTranslationRefusal(_ text: String) -> Bool {
+        translationRefusalExpression.firstMatch(in: text,
+            range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
     private static func unsupportedModelSelfDescription(in foldedCandidate: String,
                                                         source: String, targetCode: String = "zh-Hans") -> Bool {
-        containsModelSelfDescription(TranslationCheckText.inspectionCopy(foldedCandidate, targetCode: targetCode))
-            && !containsModelSelfDescription(TranslationCheckText.inspectionCopy(source, targetCode: targetCode).folding(
-                options: [.widthInsensitive, .diacriticInsensitive], locale: nil))
+        let candidate = TranslationCheckText.inspectionCopy(foldedCandidate, targetCode: targetCode)
+        let original = TranslationCheckText.inspectionCopy(source, targetCode: targetCode).folding(
+            options: [.widthInsensitive, .diacriticInsensitive], locale: nil)
+        return (containsModelSelfDescription(candidate) && !containsModelSelfDescription(original))
+            || (containsTranslationRefusal(candidate) && !containsTranslationRefusal(original))
     }
 
     /// A narrow structural check for unfinished previews. Do not apply the
@@ -893,7 +907,7 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
                           target: CaptionTranslationTarget = .simplifiedChinese) throws -> String {
         switch checked(candidate: candidate, source: source, sourceLanguage: sourceLanguage, target: target) {
         case .failure(let rejection):
-            throw QwenRuntimeError.translationRejected("译文未通过验收：\(rejection.reason)。")
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(rejection.reason)。", rejection: rejection)
         case .success(let restored):
             return restored
         }
@@ -904,7 +918,7 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
         let accepted = try validated(candidate, source: source, sourceLanguage: sourceLanguage, target: target)
         if let sourceLanguage, sourceLanguage != "en" { return accepted }
         guard target.acceptancePolicy.isPlausible(output: accepted, source: source) else {
-            throw QwenRuntimeError.translationRejected("译文长度与原文不成比例，已保留英文。")
+            throw QwenRuntimeError.translationRejected("译文长度与原文不成比例，已保留英文。", rejection: .disproportionateLength)
         }
         return accepted
     }
@@ -1972,7 +1986,7 @@ enum EnglishTargetAcceptance: TargetAcceptancePolicy {
     static func validated(_ candidate: String, source: String, sourceLanguage: String?, target: CaptionTranslationTarget) throws -> String {
         let text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         if let reason = rejection(candidate: text, source: source, sourceLanguage: sourceLanguage, target: target) {
-            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason.reason)。")
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason.reason)。", rejection: reason)
         }
         return text
     }
@@ -2031,7 +2045,7 @@ extension SpanishFrenchAcceptancePolicy {
     static func validated(_ candidate: String, source: String, sourceLanguage: String?, target: CaptionTranslationTarget) throws -> String {
         let text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         if let reason = rejection(candidate: text, source: source, sourceLanguage: sourceLanguage, target: target) {
-            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason.reason)。")
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason.reason)。", rejection: reason)
         }
         return text
     }

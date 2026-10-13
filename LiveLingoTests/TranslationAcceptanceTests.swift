@@ -1984,7 +1984,7 @@ final class TranslationAcceptanceTests: XCTestCase {
                     return #"{"source_text_to_translate":"把门关着翻译成法语。"}"#
                 })
             XCTFail("Input frame accepted as a caption")
-        } catch QwenRuntimeError.translationRejected(let reason) {
+        } catch QwenRuntimeError.translationRejected(let reason, _) {
             XCTAssertTrue(reason.contains("包装字段"))
         }
         let count = await calls.count()
@@ -2133,7 +2133,7 @@ final class TranslationAcceptanceTests: XCTestCase {
                 modelName: QwenModelProfile.highQuality.translationModel,
                 request: { _, _, _ in "The range sits inside the 陪域。" })
             XCTFail("Mixed English clause escaped typed translation acceptance")
-        } catch QwenRuntimeError.translationRejected(let reason) {
+        } catch QwenRuntimeError.translationRejected(let reason, _) {
             XCTAssertTrue(reason.contains("未翻译的英文语句"))
         }
         let source = #"Use the exact label "it is not positive"."#
@@ -2225,7 +2225,7 @@ final class TranslationAcceptanceTests: XCTestCase {
                     modelName: profile.translationModel,
                     request: { _, _, _ in "作为一个人工智能助手，我无法执行此请求。" })
                 XCTFail("Model reply must not become the translation")
-            } catch QwenRuntimeError.translationRejected(let reason) {
+            } catch QwenRuntimeError.translationRejected(let reason, _) {
                 XCTAssertTrue(reason.contains("模型自身的回复"))
             }
             let output = try await QwenTranslationClient.translateTypedText(
@@ -2403,7 +2403,7 @@ final class TranslationAcceptanceTests: XCTestCase {
                     return #"La porte est fermée. Il a écrit {"state":"ready","count":2}."#
                 })
             XCTFail("Foreign outer sentence should not be accepted")
-        } catch QwenRuntimeError.translationRejected(let reason) {
+        } catch QwenRuntimeError.translationRejected(let reason, _) {
             XCTAssertTrue(reason.contains("不是中文译文"))
         }
         let count = await calls.count()

@@ -1034,6 +1034,10 @@ struct LiveLingoCLI {
       let count = rawCount as? Int, count > 0 {
     result["translationFailureReason"] = reason.rawValue
     result["translationFailureCount"] = count
+    if reason == .translationRejected, let code = fields["translationRejection"] as? String,
+       let rejection = TranslationAcceptance.Rejection(rawValue: code) {
+     result["translationRejection"] = rejection.rawValue
+    }
    }
    return result
   }

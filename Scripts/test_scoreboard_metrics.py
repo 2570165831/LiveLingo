@@ -167,7 +167,7 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(m.parse_oslog_numeric([{"timestamp": float("inf")}]), [])
 
     def test_production_retry_enum_allowlist(self):
-        for name in ("retry_standard", "retry_repairContent", "retry_expandedBudget"):
+        for name in ("retry_standard", "retry_repairContent", "retry_repairQuotedContent", "retry_expandedBudget"):
             self.assertEqual(m.parse_oslog_numeric([event(name, 100)])[0]["event"], name)
 
 

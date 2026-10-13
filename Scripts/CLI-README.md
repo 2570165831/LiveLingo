@@ -336,14 +336,27 @@ rejected. `translationFailureReason` must be one of these frozen strings:
 `runtimeUnavailable`, `invalidResponse`, `generationInterrupted`, `requestFailed`,
 `dependencyCancelled`, `unknown`, `cancelled`, `interrupted`. If either value is
 invalid or missing, both fields are dropped and only the event name remains.
-Counts accumulate for the same reason on that caption, including retries;
-different reasons have separate counts. A successful retry retains the saved
+For `translationRejected`, an optional `translationRejection` contains only a
+`TranslationAcceptance.Rejection` enum code (for example `sourceEcho`,
+`modelReply` or `disproportionateLength`). Unknown or malformed codes are dropped;
+the field is never emitted for other failure reasons. Persisted caption entries
+store that code as optional `rejection`; older entries remain readable.
+Counts accumulate for the same reason and rejection code on that caption,
+including retries; different pairs have separate counts. A successful retry retains the saved
 trail without emitting another failure event. `dependencyCancelled` means a
 dependency raised cancellation while the caption worker itself was still
 active. The legacy `cancelled` and `interrupted` values remain readable and
 allowlisted; routine pauses, parks, restarts and actual worker cancellation do
 not write them as new translation failures. The CLI regression checks worker
 cancellation; saved-course pause/reopen coverage belongs to the app tests.
+
+Explicit model replies/refusals and English source echoes receive the existing
+single bounded retry with `repairQuotedContent`: the content-repair constraints
+plus an instruction to translate classroom quotations faithfully, including
+profanity. All other failures keep their existing recovery strategy. An explicit
+refusal quoted in the source remains translatable lecture content. If the final
+failure is a model reply or source echo, display text says the model did not
+translate that sentence; other failure placeholders remain unchanged.
 
 `--resume-saved` waits only for work that can still move on its own: active or
 claimable transcription, translation and notes. Failed segments (including
