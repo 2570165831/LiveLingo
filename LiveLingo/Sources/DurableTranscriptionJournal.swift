@@ -705,7 +705,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             }
         }
     }
-    /// Called only for an automatic attempt intercepted before ASR. No audio
+    /// Called only after consistent automatic no-speech evidence. No audio
     /// is opened, materialized, retired or removed by this mutation.
     func markNoSpeech(id: UUID, speechConfidence: Double) throws {
         try lock.withLock {
@@ -713,8 +713,8 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
                 throw JournalError.invalidSpeechConfidence
             }
             guard var record = record(id: id) else { throw JournalError.corrupt("找不到该转写片段") }
-            guard record.status == .active, record.attempt != .manual else {
-                throw JournalError.corrupt("仅可在自动转写开始前标记未识别到讲话")
+            guard record.status == .active, record.attempt != .manual, record.manualRetryCount == 0 else {
+                throw JournalError.corrupt("手动重试及其后续补转不可标记未识别到讲话")
             }
             record.status = .noSpeech
             record.failureReason = .noSpeech

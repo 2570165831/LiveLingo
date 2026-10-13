@@ -11,6 +11,29 @@ enum SpeechPresenceGate {
     static let overlapFactor = 0.5
     typealias Analyzer = @Sendable (URL) throws -> Double?
 
+    // These conservative vetoes use the existing source-probe confidence
+    // boundaries. A missing/invalid recognizer signal is never negative evidence.
+    static func parakeetSuggestsNoSpeech(valid: Bool?, mean: Double?, minimum: Double?, emptyTranscript: Bool) -> Bool {
+        guard valid == true else { return false }
+        // The service validates the observed nonblank-token count against the
+        // decoder. A valid zero-token result has no mean/minimum by definition;
+        // keep that evidence distinct from missing/invalid legacy confidence.
+        if mean == nil, minimum == nil { return emptyTranscript }
+        guard let mean, let minimum,
+              mean.isFinite, minimum.isFinite, (0...1).contains(mean), (0...1).contains(minimum) else { return false }
+        return mean < 0.90 && minimum < 0.05
+    }
+
+    static func languageSuggestsNoSpeech(valid: Bool, noSpeechLabel: Bool,
+                                        probability: Double?, englishProbability: Double?) -> Bool {
+        guard valid, let probability, let englishProbability,
+              probability.isFinite, englishProbability.isFinite,
+              (0...1).contains(probability), (0...1).contains(englishProbability) else { return false }
+        // A weak spoken-language label is uncertainty, not absence of speech.
+        // Only an explicit, confident "None" head supports suppression.
+        return noSpeechLabel && probability >= 0.55 && englishProbability < 0.55
+    }
+
     /// nil means unavailable, not zero confidence. Equality passes the gate.
     static func shouldSuppress(_ confidence: Double?, threshold: Double = Self.threshold) -> Bool {
         guard let confidence, confidence.isFinite, (0...1).contains(confidence),
@@ -48,7 +71,7 @@ enum SpeechPresenceGate {
         let tailRequest = try SNClassifySoundRequest(classifierIdentifier: .version1)
         guard tailRequest.knownClassifications.contains("speech") else { return nil }
         tailRequest.windowDuration = request.windowDuration
-        tailRequest.overlapFactor = overlapFactor
+        tailRequest.overlapFactor = request.overlapFactor
         let tailObserver = SpeechConfidenceObserver()
         let stream = SNAudioStreamAnalyzer(format: file.processingFormat)
         try stream.add(tailRequest, withObserver: tailObserver)

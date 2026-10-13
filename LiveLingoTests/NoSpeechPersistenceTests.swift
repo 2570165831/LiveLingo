@@ -165,6 +165,20 @@ struct NoSpeechPersistenceTests {
         #expect(journal.record(id: pending.id)?.speechConfidence == nil)
     }
 
+    @Test func automaticRepairAfterManualRetryCannotRestoreNoSpeechVerdict() throws {
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory(), sessionID: Self.session)
+        var value = record(status: .active)
+        value.attempt = .automaticRetry
+        value.manualRetryCount = 1
+        value.automaticRetryCount = 1
+        try journal.put(value)
+        #expect(throws: DurableTranscriptionJournal.JournalError.self) {
+            try journal.markNoSpeech(id: value.id, speechConfidence: 0.01)
+        }
+        #expect(journal.record(id: value.id)?.status == .active)
+        #expect(journal.record(id: value.id)?.speechConfidence == nil)
+    }
+
     @Test func invalidConfidenceCannotMutateTheJournal() throws {
         let journal = try DurableTranscriptionJournal(sessionDirectory: directory(), sessionID: Self.session)
         let value = record()
