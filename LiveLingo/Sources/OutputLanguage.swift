@@ -130,7 +130,10 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         let hasSnapshot = origin.map { $0 == .snapshot }
             ?? FileManager.default.fileExists(atPath: directory.appendingPathComponent(SessionStore.snapshotFileName).path)
         if hasSnapshot { return .simplifiedChinese }
-        let manifest = directory.appendingPathComponent("manifest.json")
+        // Export-managed root links are resolved and verified as a generation;
+        // the manifest itself is still opened as a strict, real file leaf.
+        let exports = try SessionExporter.currentExportDirectory(in: directory)
+        let manifest = exports.appendingPathComponent("manifest.json")
         let data = try SessionArchiveCoding.privateIO(at: manifest, { try SensitiveFileIO.readIfPresent(at: manifest) })
         return try legacyLanguage(manifestBytes: data)
     }

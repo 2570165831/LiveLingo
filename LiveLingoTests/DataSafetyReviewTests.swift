@@ -58,6 +58,101 @@ struct DataSafetyReviewTests {
         await queue.shutdownForTesting()
     }
 
+    @Test(arguments: ["summary-review.md", ReviewReportCollection.manifestFileName])
+    func revisedCloudReportDefersOnlyItsCourseAndSurvivesRestart(_ name: String) async throws {
+        let root = try DataSafetyFixtures.make("revised-cloud-report"); defer { DataSafetyFixtures.preserve(root) }
+        let a = try course(root, "a"), b = try course(root, "b"), journal = root.appendingPathComponent("queue.json")
+        var old = try recoveryJob(in: a, notebook: notebook("a", batches: 2), bound: true)
+        old.next = 1; old.reports = ["## Preserved advisory\nSYNTHETIC_FIRST_BATCH_BODY"]
+        let other = try recoveryJob(in: b, notebook: notebook("b"), bound: true)
+        try ReviewReportCollection.save(LearningReviewQueue.reportEntry(for: old), in: a)
+        try write([old, other], to: journal, paused: false)
+        let store = SessionStore(directory: a), saved = try #require(store.loadDetailedWithoutRecovery().snapshot)
+        let previous = try #require(saved.segments.first)
+        let replacement = TranscriptSegment(id: previous.id, startTime: previous.startTime, endTime: previous.endTime,
+            english: "Synthetic revised course input.", chinese: "合成课程正文已修订。", sessionID: saved.sessionID,
+            inputRevision: saved.inputRevision + 1)
+        let revised = try store.append(.inputRevision(.init(fromRevision: saved.inputRevision,
+            toRevision: saved.inputRevision + 1, previousSegment: previous, replacementSegment: replacement,
+            retainedBatches: saved.batches.filter { $0.ids.contains(previous.id) }, reason: "Synthetic confirmed revision")))
+        let probe = ReportCloudProbe(); probe.setDeferred(true)
+        var generations = 0
+        let q = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+            generate: { _, _, _, _, _ in generations += 1; return Self.response }, now: Date.init,
+            retryDelays: [0.05, 0.05], startupSnapshotReader: { _ in nil })
+        var restored: LearningReviewQueue?
+        do {
+            try await SensitiveFileIO.$datalessProbe.withValue({ $0 == a.appendingPathComponent(name) && probe.isDeferred }) {
+                try q.invalidateInputs(sessionID: saved.sessionID, inputRevision: revised.inputRevision)
+                q.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+                #expect(await waitFor { generations == 1 && !q.running && !q.hasWork })
+                try await q.waitForPendingStorage()
+                #expect(q.currentFailure == nil)
+                #expect(q.status.contains("报告已延后"))
+                let deferred = try read(journal)
+                let retired = try #require(deferred.retiredJobs?.first { $0.id == old.id })
+                #expect(retired.supersededByRevision == revised.inputRevision)
+                #expect(retired.next == 1 && retired.reports == old.reports)
+                #expect(retired.reportOutputRetry?.code == "session_storageDeferred")
+                #expect((retired.stats?.failures ?? 0) == 0)
+                #expect(try ReviewReportCollection.read(in: b).contains { $0.jobID == other.id && $0.completed == 1 })
+                await q.shutdownForTesting()
+                restored = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+                    generate: { _, _, _, _, _ in generations += 1; return Self.response }, now: Date.init,
+                    retryDelays: [0.05, 0.05], startupSnapshotReader: { _ in nil })
+                let resumed = try #require(restored)
+                #expect(resumed.currentFailure == nil)
+                #expect(resumed.journalForTesting.retiredJobs?.first?.reportOutputRetry != nil)
+                probe.setDeferred(false)
+                #expect(await waitFor { resumed.journalForTesting.retiredJobs?.first?.reportOutputRetry == nil })
+                try await resumed.waitForPendingStorage()
+                #expect(generations == 1, "Retired report retries never generate another answer")
+                let entries = try ReviewReportCollection.read(in: a)
+                let report = try #require(entries.first { $0.jobID == old.id })
+                #expect(report.supersededByRevision == revised.inputRevision)
+                #expect(report.batchReports == old.reports)
+                #expect(try read(journal).retiredJobs?.first?.reportOutputRetry == nil)
+            }
+        } catch { await q.shutdownForTesting(); await restored?.shutdownForTesting(); throw error }
+        await q.shutdownForTesting(); await restored?.shutdownForTesting()
+    }
+
+    private func committedReportAlias(at destination: URL) throws -> URL {
+        let bytes = try Data(contentsOf: destination)
+        let root = destination.deletingLastPathComponent()
+        try FileManager.default.moveItem(at: destination, to: root.appendingPathComponent("before-interruption-" + destination.lastPathComponent))
+        let orphan = root.appendingPathComponent(".sensitive-write-\(UUID()).tmp")
+        do {
+            try SensitiveFileIO.$beforeTemporaryCommit.withValue({ pending in
+                guard Darwin.rename(pending.path, orphan.path) == 0 else { throw SessionStoreError.io(operation: "stage report interruption", code: errno) }
+                throw SessionStoreError.io(operation: "synthetic report interruption", code: EIO)
+            }) { try SensitiveFileIO.atomicWrite(bytes, to: destination) }
+            Issue.record("The injected publication interruption must throw")
+        } catch SessionStoreError.io { }
+        guard Darwin.link(orphan.path, destination.path) == 0 else { throw SessionStoreError.io(operation: "publish report alias", code: errno) }
+        return orphan
+    }
+
+    @Test(arguments: ["summary-review.md", ReviewReportCollection.manifestFileName])
+    func backgroundReportRecoveryRepairsCommittedAliasesWithoutOpeningCourse(_ name: String) async throws {
+        let root = try DataSafetyFixtures.make("background-report-alias"); defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course"), journal = root.appendingPathComponent("queue.json")
+        let pending = try recoveryJob(in: directory, notebook: notebook(), bound: true)
+        var completed = pending; completed.next = 1; completed.reports = ["## Frozen advisory\nSYNTHETIC_RECOVERED_REPORT_BODY"]
+        try ReviewReportCollection.save(LearningReviewQueue.reportEntry(for: completed), in: directory)
+        let orphan = try committedReportAlias(at: directory.appendingPathComponent(name))
+        try write([pending], to: journal, paused: false)
+        var generations = 0
+        let q = queue(journal) { _, _, _, _, _ in generations += 1; return Self.response }
+        q.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+        #expect(await waitFor { !q.running && !q.hasWork })
+        await q.shutdownForTesting()
+        #expect(q.currentFailure == nil)
+        #expect(generations == 0)
+        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+        #expect(try ReviewReportCollection.read(in: directory).first?.batchReports == completed.reports)
+    }
+
     private static let response = #"{"reviewVersion":2,"corrections":[],"additions":[]}"#
 
     private func notebook(_ label: String = "fixture", batches: Int = 1) throws -> LearningNotebook {

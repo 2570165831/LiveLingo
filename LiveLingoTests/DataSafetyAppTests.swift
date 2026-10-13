@@ -76,6 +76,32 @@ final class DataSafetyAppTests: XCTestCase {
         XCTAssertFalse(label.contains("打开课程时"))
     }
 
+    func testLocalChineseExportWithoutSnapshotOpensManagedManifestLinks() async throws {
+        for language in [OutputLanguage.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong] {
+            let root = try DataSafetyFixtures.make("local-chinese-managed-manifest"); defer { DataSafetyFixtures.preserve(root) }
+            let suite = "LiveLingo-Test-\(UUID())", cleanup = try TestPreferenceCleanup(suite: suite)
+            let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+            defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+            let (model, queue) = fixture(root, defaults: defaults)
+            let course = root.appendingPathComponent("export-course", isDirectory: true)
+            try FileManager.default.createDirectory(at: course, withIntermediateDirectories: true)
+            let segment = TranscriptSegment(startTime: 0, endTime: 2, english: "Synthetic local exported lesson.", chinese: "合成本机导出课程。")
+            let summary = "# 合成本机课程\n\n正文保留。\n"
+            // The second publication uses the exporter's managed root links.
+            for _ in 0..<2 { try SessionExporter.export(segments: [segment], sessionDirectory: course,
+                summary: summary, target: language, summaryIsLegacyRendered: true) }
+            let manifest = course.appendingPathComponent("manifest.json")
+            XCTAssertTrue(try manifest.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: course.appendingPathComponent(SessionStore.snapshotFileName).path))
+            try await model.openSavedSession(course, allowAutomaticProcessing: false)
+            XCTAssertEqual(model.savedSessionDirectory, course)
+            XCTAssertEqual(model.outputLanguage, language)
+            XCTAssertEqual(model.segments, [segment])
+            XCTAssertNil(model.archiveCloudDownloadStatus)
+            await queue.shutdownForTesting()
+        }
+    }
+
     func testSlowLocalOpenNeverShowsCloudBannerOrUsesCloudTimeout() async throws {
         let root = try DataSafetyFixtures.make("slow-local-open"); defer { DataSafetyFixtures.preserve(root) }
         let suite = "LiveLingo-Test-\(UUID())", cleanup = try TestPreferenceCleanup(suite: suite)

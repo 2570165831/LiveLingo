@@ -3753,6 +3753,8 @@ final class LearningReviewQueue: ObservableObject {
         var lastRequestID: String? = nil
         // Optional so journals written before these fields existed still decode.
         var retryPending: RetryState? = nil
+        /// Report commits are retried independently, including retired inputs.
+        var reportOutputRetry: RetryState? = nil
         var interruption: Interruption? = nil
         var stats: JobStats? = nil
         /// 复查范围；nil = 整课（旧 journal 没有这个字段 ✓）。
@@ -4064,6 +4066,9 @@ final class LearningReviewQueue: ObservableObject {
     private var persistenceTail: Task<Void, Error>?
     private var outputTail: Task<Void, Error>?
     private var outputSequence = 0
+    private var reportOutputRequests: [UUID: Int] = [:]
+    private var reportRetryTask: Task<Void, Never>?
+    private var reportRetryBinding: (id: UUID, deadline: TimeInterval)?
     private var admissionTask: Task<Void, Error>?
     private var persistenceEpoch = UUID()
     private var persistencePending = 0
@@ -4508,6 +4513,7 @@ final class LearningReviewQueue: ObservableObject {
                 job.prefix = ""
                 job.prefixInputDigest = nil
                 job.retryPending = nil
+                job.reportOutputRetry = RetryState(attempts: 0, notBefore: now().timeIntervalSince1970, code: "report_output_pending")
                 retiredJobs.append(job)
                 try writeOutputs(job)
             }
@@ -4844,6 +4850,7 @@ final class LearningReviewQueue: ObservableObject {
         // instead of leaving the job blocked with no timer.
         // 但"等待手动开始"的旧任务不需要计时器：它要等用户点"开始复查" ✓。
         rebindRetryTimer()
+        rebindReportRetryTimer()
         if observeSleep {
             let center = NSWorkspace.shared.notificationCenter
             observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -5030,8 +5037,9 @@ final class LearningReviewQueue: ObservableObject {
         for var old in superseded {
             old.supersededByRevision = identity?.inputRevision
             old.prefix = ""; old.prefixInputDigest = nil; old.retryPending = nil
-            try writeOutputs(old)
+            old.reportOutputRetry = RetryState(attempts: 0, notBefore: now().timeIntervalSince1970, code: "report_output_pending")
             retiredJobs.append(old)
+            try writeOutputs(old)
         }
         let replacedIDs = Set(superseded.map(\.id))
         jobs.removeAll { replacedIDs.contains($0.id) }
@@ -5322,6 +5330,9 @@ final class LearningReviewQueue: ObservableObject {
         retryTask = nil
         retryTimerBinding = nil
         retryTimerToken = nil
+        reportRetryTask?.cancel()
+        reportRetryTask = nil
+        reportRetryBinding = nil
         let active = task
         active?.cancel()
         let admission = admissionTask
@@ -5398,6 +5409,7 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     private func reconcile() {
+        rebindReportRetryTimer()
         // 测试收尾后不再自动起任务（仅测试置位）。
         guard !testingStopped else { refreshStatus(); return }
         // Keep blocked jobs visible, and run courses in true enqueue order.
@@ -5934,24 +5946,92 @@ final class LearningReviewQueue: ObservableObject {
         }.value
     }
 
+    private func reportJob(_ id: UUID) -> Job? {
+        jobs.first { $0.id == id } ?? retiredJobs.first { $0.id == id }
+    }
+
+    private func setReportRetry(_ retry: RetryState?, for id: UUID) {
+        if let index = jobs.firstIndex(where: { $0.id == id }) { jobs[index].reportOutputRetry = retry }
+        else if let index = retiredJobs.firstIndex(where: { $0.id == id }) { retiredJobs[index].reportOutputRetry = retry }
+    }
+
+    private func rebindReportRetryTimer() {
+        let next = (jobs + retiredJobs).compactMap { job -> (job: Job, retry: RetryState)? in
+            guard let retry = job.reportOutputRetry, (reportOutputRequests[job.id] ?? 0) == 0 else { return nil }
+            return (job, retry)
+        }.min { $0.retry.notBefore < $1.retry.notBefore }
+        guard !testingStopped, !restoreBlocked, persistenceFailure == nil, !sleeping,
+              let next else {
+            reportRetryTask?.cancel(); reportRetryTask = nil; reportRetryBinding = nil
+            return
+        }
+        if reportRetryBinding?.id == next.job.id, reportRetryBinding?.deadline == next.retry.notBefore { return }
+        reportRetryTask?.cancel()
+        let id = next.job.id, deadline = next.retry.notBefore
+        reportRetryBinding = (id, deadline)
+        let delay = max(0, deadline - now().timeIntervalSince1970)
+        reportRetryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self, !Task.isCancelled, !self.testingStopped, !self.restoreBlocked,
+                  self.persistenceFailure == nil, !self.sleeping,
+                  self.reportRetryBinding?.id == id, self.reportRetryBinding?.deadline == deadline,
+                  let job = self.reportJob(id), job.reportOutputRetry?.notBefore == deadline else { return }
+            self.reportRetryTask = nil; self.reportRetryBinding = nil
+            try? self.writeOutputs(job)
+        }
+    }
+
     private func writeOutputs(_ job: Job) throws {
         let previous = outputTail
         let journal = persistenceTail
         let writer = storage
         let epoch = persistenceEpoch
         outputSequence += 1
+        reportOutputRequests[job.id, default: 0] += 1
         let request = Task { @MainActor [weak self] in
+            var writingReport = false
+            defer {
+                if let self {
+                    self.reportOutputRequests[job.id, default: 1] -= 1
+                    if self.reportOutputRequests[job.id] == 0 { self.reportOutputRequests.removeValue(forKey: job.id) }
+                    self.rebindReportRetryTimer()
+                }
+            }
             do {
                 _ = try? await previous?.value
                 try await journal?.value
                 guard let self, self.persistenceEpoch == epoch else { throw CancellationError() }
+                writingReport = true
                 let result = try await writer.writeOutputs(job)
                 if self.persistenceEpoch == epoch {
+                    // An older write cannot acknowledge a newer retirement or
+                    // body. The latest frozen report remains pending instead.
+                    if let current = self.reportJob(job.id), current.reportOutputRetry != nil,
+                       current.directory == job.directory,
+                       Self.reportMarkdown(for: current) == Self.reportMarkdown(for: job) {
+                        self.setReportRetry(nil, for: job.id)
+                        self.persistOrPause()
+                    }
                     self.onUpdate?(job.directory, result.markdown, result.progress)
                 }
             } catch {
                 if let self, self.persistenceEpoch == epoch {
-                    self.persistenceFailure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+                    let code = LearningFailureCode.code(for: error)
+                    if writingReport, ["session_storageDeferred", "session_storageBusy"].contains(code) {
+                        if let current = self.reportJob(job.id) {
+                            let count = min(current.reportOutputRetry?.storageDeferrals ?? 0, Int.max - 1) + 1
+                            let delay = self.retryDelays[max(0, min(count - 1, self.retryDelays.count - 1))]
+                            self.setReportRetry(RetryState(attempts: 0,
+                                notBefore: self.now().timeIntervalSince1970 + delay, code: code,
+                                storageDeferrals: count), for: job.id)
+                            self.persistOrPause()
+                            self.refreshStatus()
+                        }
+                        // Only this report waits. Its frozen input/body remains
+                        // in the journal, even after moving into retiredJobs.
+                        return
+                    }
+                    self.persistenceFailure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: code))"
                     self.task?.cancel()
                     self.refreshStatus()
                 }
@@ -6056,6 +6136,13 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     private func refreshStatus() {
+        defer {
+            let count = (jobs + retiredJobs).filter {
+                guard let retry = $0.reportOutputRetry else { return false }
+                return ["session_storageDeferred", "session_storageBusy"].contains(retry.code)
+            }.count
+            if count > 0 { status += (status.isEmpty ? "" : " · ") + "\(count) 项报告已延后，稍后自动重试" }
+        }
         items = jobs.map { job in
             QueueItem(id: job.id, name: job.directory.lastPathComponent, directory: job.directory,
                       completed: job.next, total: job.batches.count, failure: job.failure,

@@ -232,6 +232,76 @@ final class DataSafetyStorageTests: XCTestCase {
         XCTAssertNil(queue.currentFailure)
         await queue.shutdownForTesting()
     }
+    private func syntheticReport(in root: URL) throws -> ReviewReportEntry {
+        let entry = ReviewReportEntry(jobID: UUID(), identity: nil, scope: .wholeLesson,
+            inputDigest: nil, completed: 0, total: 0, supersededByRevision: nil,
+            updatedAt: Date(timeIntervalSince1970: 0), fileName: "summary-review.md", markdown: "SYNTHETIC_REPORT_BODY")
+        try ReviewReportCollection.save(entry, in: root)
+        return entry
+    }
+
+    func testReportAndIndexAliasRecoveryIsTargetedOutsideStorageLocksAndKeepsBytes() throws {
+        for name in ["summary-review.md", ReviewReportCollection.manifestFileName] {
+            let root = try DataSafetyFixtures.make("report-targeted-alias"); defer { DataSafetyFixtures.preserve(root) }
+            let entry = try syntheticReport(in: root)
+            let (alias, bytes) = try committedAlias(in: root, named: name)
+            let unrelated = root.appendingPathComponent(".sensitive-write-\(UUID()).tmp")
+            try interruptedWrite(Data("SYNTHETIC_UNCOMMITTED_BODY".utf8), to: root.appendingPathComponent("unrelated.json"), orphan: unrelated)
+            let trace = TraceTextProbe()
+            let reports = try SensitiveFileIO.$beforeTemporaryInspection.withValue({ _ in
+                XCTAssertFalse(SessionStore.isHoldingProcessLock)
+                XCTAssertTrue(LearningReviewStorage.processLockIsAvailableForTesting())
+                trace.record("inspection")
+            }) {
+                try SensitiveFileIO.withoutDatalessMaterialization { try ReviewReportCollection.read(in: root) }
+            }
+            XCTAssertEqual(reports.first?.markdown, entry.markdown)
+            XCTAssertFalse(trace.texts.isEmpty)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(name)), bytes)
+            XCTAssertEqual(try Data(contentsOf: unrelated), Data("SYNTHETIC_UNCOMMITTED_BODY".utf8))
+        }
+    }
+
+    func testBusyReportAliasRecoveryRemainsRetryableAndKeepsBothNames() throws {
+        let root = try DataSafetyFixtures.make("report-busy-alias"); defer { DataSafetyFixtures.preserve(root) }
+        _ = try syntheticReport(in: root)
+        let name = ReviewReportCollection.manifestFileName
+        let (alias, bytes) = try committedAlias(in: root, named: name)
+        let lease = Darwin.open(alias.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)
+        XCTAssertGreaterThanOrEqual(lease, 0)
+        guard lease >= 0 else { return }
+        defer { _ = Darwin.close(lease) }
+        XCTAssertEqual(flock(lease, LOCK_EX | LOCK_NB), 0)
+        let trace = TraceTextProbe()
+        try SensitiveFileIO.$recoveryRetryObserver.withValue({ trace.record("busy") }) {
+            XCTAssertThrowsError(try SensitiveFileIO.withoutDatalessMaterialization { try ReviewReportCollection.read(in: root) }) {
+                XCTAssertEqual(LearningFailureCode.code(for: $0), "session_storageBusy")
+                XCTAssertTrue(ReviewFailure.classify($0, defaultStage: .output).isStorageDeferred)
+            }
+        }
+        XCTAssertEqual(trace.texts.count, SensitiveFileIO.recoveryRetryLimit)
+        XCTAssertEqual(try Data(contentsOf: alias), bytes)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(name)), bytes)
+        XCTAssertEqual(flock(lease, LOCK_UN), 0)
+        XCTAssertNoThrow(try SensitiveFileIO.withoutDatalessMaterialization { try ReviewReportCollection.read(in: root) })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+    }
+
+    func testReportRecoveryNeverAcceptsUnprovenHardLinks() throws {
+        let root = try DataSafetyFixtures.make("report-unproven-alias"); defer { DataSafetyFixtures.preserve(root) }
+        _ = try syntheticReport(in: root)
+        let destination = root.appendingPathComponent("summary-review.md")
+        let bytes = try Data(contentsOf: destination)
+        let alias = root.appendingPathComponent(".sensitive-write-\(UUID()).tmp")
+        XCTAssertEqual(Darwin.link(destination.path, alias.path), 0)
+        XCTAssertThrowsError(try ReviewReportCollection.read(in: root)) {
+            XCTAssertEqual(LearningFailureCode.code(for: $0), "report_unreadable")
+        }
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertEqual(try Data(contentsOf: alias), bytes)
+    }
+
     private static let killProbeState = OSAllocatedUnfairLock(initialState: Optional<URL>.none)
 
     private func recoveryKillProbe() throws -> URL {

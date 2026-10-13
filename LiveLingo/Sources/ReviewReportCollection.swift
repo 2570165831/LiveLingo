@@ -212,7 +212,7 @@ enum ReviewReportCollection {
                 let parent = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
                 return try parent.names().map { directory.appendingPathComponent($0) }
             }
-        } catch let error as SessionStoreError where LearningFailureCode.code(for: error) == "session_storageDeferred" {
+        } catch let error as SessionStoreError where isDeferred(error) {
             throw error
         } catch { throw ReviewIdentityError.unreadable("无法列出课程目录（\(error.localizedDescription)）") }
         let manifestURL = directory.appendingPathComponent(manifestFileName)
@@ -227,7 +227,7 @@ enum ReviewReportCollection {
                 }
                 entries = manifest.entries
                 for entry in entries { try entry.validate() }
-            } catch let error as SessionStoreError where LearningFailureCode.code(for: error) == "session_storageDeferred" {
+            } catch let error as SessionStoreError where isDeferred(error) {
                 throw error
             } catch {
                 throw ReviewIdentityError.unreadable("\(manifestFileName)（\(error.localizedDescription)）")
@@ -268,14 +268,24 @@ enum ReviewReportCollection {
         do {
             return try SessionArchiveCoding.privateIO(at: url) {
                 let parent = try SensitiveFileIO.Directory.open(at: url.deletingLastPathComponent(), create: false, tighten: false)
+                // Only the selected index/legal report leaf is recovered. This
+                // read path holds neither course nor review storage locks.
+                if try parent.needsCommittedTemporaryAliasRecovery(named: url.lastPathComponent) {
+                    try SensitiveFileIO.recoverCommittedFileIfNeeded(at: url, expectedParent: parent.identity)
+                }
                 guard let bytes = try parent.readIfPresent(named: url.lastPathComponent) else {
                     throw ReviewIdentityError.unreadable("\(url.lastPathComponent) 不存在")
                 }
                 return bytes
             }
-        } catch let error as SessionStoreError where LearningFailureCode.code(for: error) == "session_storageDeferred" {
+        } catch let error as SessionStoreError where isDeferred(error) {
             throw error
         } catch { throw ReviewIdentityError.unreadable("\(url.lastPathComponent)（\(error.localizedDescription)）") }
+    }
+
+    private static func isDeferred(_ error: SessionStoreError) -> Bool {
+        if case .storageDeferred = error { return true }
+        return false
     }
 
     private static func checkConflicts(_ entries: [ReviewReportEntry]) throws {
