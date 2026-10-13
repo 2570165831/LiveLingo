@@ -21,6 +21,13 @@ enum SensitiveFileIO {
     @TaskLocal static var beforeTemporaryInspection: (@Sendable (URL) -> Void)?
     @TaskLocal static var ioClock: (@Sendable () -> UInt64)?
     @TaskLocal static var slowIOObserver: (@Sendable (IOCallSite, UInt64) -> Void)?
+    @TaskLocal static var ioBeginObserver: (@Sendable (IOCallSite, UInt64) -> Void)?
+    @TaskLocal static var datalessProbe: (@Sendable (URL) -> Bool)?
+    @TaskLocal static var beforeFileRead: (@Sendable (URL) throws -> Void)?
+    @TaskLocal static var afterRecoveryLease: (@Sendable () throws -> Void)?
+    @TaskLocal static var afterAliasUnlink: (@Sendable () throws -> Void)?
+    @TaskLocal static var recoveryRetryObserver: (@Sendable () -> Void)?
+    private enum RecoveryTestInterruption: Error { case interrupted }
     #endif
 
     /// Fixed labels only: diagnostics never interpolate a filename, path,
@@ -32,9 +39,12 @@ enum SensitiveFileIO {
         case temporaryOpen, temporaryLease, temporaryRecoveryLease
         case receiptSize, receiptRead, receiptWrite, receiptSync, receiptRemove
         case temporaryRead, destinationRead, temporaryUnlink, directorySync
+        case dataRead, dataWrite, fileSync, fileClose, fileLink, fileRename
+        case storeLease, storeProcessLock, storeDirectoryLock, directoryMake, directoryNext
     }
     static let slowIOThresholdNanoseconds: UInt64 = 100_000_000
     private static let ioLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "SensitiveFileIO")
+    private static let ioTrace = OSLog(subsystem: "com.jianhongli.LiveLingo", category: .pointsOfInterest)
 
     private static func ioNow() -> UInt64 {
         #if DEBUG
@@ -44,12 +54,32 @@ enum SensitiveFileIO {
     }
 
     static func timedIO<T>(_ site: IOCallSite, _ call: () throws -> T) rethrows -> T {
+        let incomingErrno = errno
         let start = ioNow()
+        let interval = OSSignpostID(log: ioTrace)
+        // The begin record exists even if the call never returns. Signposts
+        // have fixed labels and a monotonic timestamp, never paths or content.
+        os_signpost(.begin, log: ioTrace, name: "Sensitive I/O", signpostID: interval,
+                    "site=%{public}s start_ns=%llu", site.rawValue, start)
+        switch site {
+        case .directoryBind, .fileOpen, .dataRead, .dataWrite, .fileSync,
+             .fileLink, .fileRename, .storeLease, .storeProcessLock, .storeDirectoryLock:
+            // Info records stay cheap (memory-buffered) and are available to
+            // a live unified-log collector even without an Instruments trace.
+            ioLog.info("sensitive_io_begin site=\(site.rawValue, privacy: .public) start_ns=\(start, privacy: .public)")
+        default: break
+        }
+        #if DEBUG
+        ioBeginObserver?(site, start)
+        #endif
+        errno = incomingErrno
         defer {
             // Logging and test observers must not overwrite the syscall's errno.
             let code = errno
             let end = ioNow()
             let elapsed = end >= start ? end - start : 0
+            os_signpost(.end, log: ioTrace, name: "Sensitive I/O", signpostID: interval,
+                        "site=%{public}s errno=%d", site.rawValue, code)
             if elapsed > slowIOThresholdNanoseconds {
                 #if DEBUG
                 slowIOObserver?(site, elapsed)
@@ -122,6 +152,8 @@ enum SensitiveFileIO {
     }
     enum Failure: Error {
         case unsafePath
+        case dataless
+        case recoveryBusy
         case system(operation: String, code: Int32)
     }
 
@@ -188,6 +220,13 @@ enum SensitiveFileIO {
         try parent.append(data, named: url.lastPathComponent)
     }
 
+    static func readIfPresent(at url: URL) throws -> Data? {
+        do {
+            let parent = try Directory.open(at: url.deletingLastPathComponent(), create: false, tighten: false)
+            return try parent.readIfPresent(named: url.lastPathComponent)
+        } catch Failure.system(_, let code) where code == ENOENT { return nil }
+    }
+
     static func tightenIfPresent(at url: URL) throws {
         do {
             let parent = try Directory.open(at: url.deletingLastPathComponent(), create: false, tighten: false)
@@ -213,17 +252,30 @@ enum SensitiveFileIO {
 
     /// Explicit preparation for callers that also maintain their own locks.
     /// Call before taking those locks; locked validation remains strict.
-    static func recoverCommittedFileIfNeeded(at url: URL) throws {
-        let parent: Directory
-        do {
-            parent = try Directory.open(at: url.deletingLastPathComponent(), create: false, tighten: false)
-        } catch Failure.system(_, let code) where code == ENOENT {
-            return
+    static let recoveryRetryLimit = 40
+    static func recoverCommittedFileIfNeeded(at url: URL, expectedParent: Identity? = nil) throws {
+        for attempt in 0...recoveryRetryLimit {
+            do {
+                let parent: Directory
+                do {
+                    parent = try Directory.open(at: url.deletingLastPathComponent(), create: false, tighten: false)
+                } catch Failure.system(_, let code) where code == ENOENT && expectedParent == nil { return }
+                if let expectedParent, try parent.identity != expectedParent { throw Failure.unsafePath }
+                let name = url.lastPathComponent
+                try parent.rejectDatalessIfPresent(named: name)
+                guard try parent.needsCommittedTemporaryAliasRecovery(named: name) else { return }
+                _ = try parent.retireCommittedTemporaryAliases(of: name)
+                guard try parent.requireRegularFileIfPresent(named: name) else { throw Failure.unsafePath }
+                return
+            } catch Failure.recoveryBusy where attempt < recoveryRetryLimit {
+                #if DEBUG
+                recoveryRetryObserver?()
+                #endif
+                // No process, directory, disk or temporary lease is held here.
+                Thread.sleep(forTimeInterval: 0.025)
+            }
         }
-        let name = url.lastPathComponent
-        guard try parent.needsCommittedTemporaryAliasRecovery(named: name) else { return }
-        _ = try parent.retireCommittedTemporaryAliases(of: name)
-        guard try parent.requireRegularFileIfPresent(named: name) else { throw Failure.unsafePath }
+        throw Failure.recoveryBusy
     }
 
     final class Directory: @unchecked Sendable {
@@ -264,7 +316,7 @@ enum SensitiveFileIO {
                 var created = false
                 var next = timedIO(.directoryChild) { openat(current, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
                 if next < 0, errno == ENOENT, create {
-                    if mkdirat(current, component, 0o700) == 0 { created = true }
+                    if timedIO(.directoryMake, { mkdirat(current, component, 0o700) }) == 0 { created = true }
                     else if errno != EEXIST { throw system("create directory") }
                     next = timedIO(.directoryChild) { openat(current, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
                 }
@@ -293,7 +345,7 @@ enum SensitiveFileIO {
             var created = false
             var child = timedIO(.directoryChild) { openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             if child < 0, errno == ENOENT, create {
-                if mkdirat(fd, name, 0o700) == 0 { created = true }
+                if timedIO(.directoryMake, { mkdirat(fd, name, 0o700) }) == 0 { created = true }
                 else if errno != EEXIST { throw system("create private directory") }
                 child = timedIO(.directoryChild) { openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             }
@@ -308,7 +360,7 @@ enum SensitiveFileIO {
 
         func createSubdirectory(named name: String) throws -> Directory {
             try validateName(name)
-            guard mkdirat(fd, name, 0o700) == 0 else { throw system("create exclusive directory") }
+            guard timedIO(.directoryMake, { mkdirat(fd, name, 0o700) }) == 0 else { throw system("create exclusive directory") }
             let child = timedIO(.directoryCreate) { openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             guard child >= 0 else { throw pathFailure("bind new directory") }
             do { try makePrivate(child, directory: true) }
@@ -390,6 +442,7 @@ enum SensitiveFileIO {
         }
 
         func openRegularFile(named name: String, flags: Int32, create: Bool) throws -> Int32 {
+            try rejectDatalessIfPresent(named: name)
             guard let before = try entryStatus(name) else {
                 guard create else { throw Failure.system(operation: "open file", code: ENOENT) }
                 return try createPrivateFile(named: name)
@@ -422,12 +475,12 @@ enum SensitiveFileIO {
             try validateName(destinationName)
             guard let source = try directoryIfPresent(named: name),
                   try source.identity == identity else { throw Failure.unsafePath }
-            guard renameatx_np(fd, name, destination.fd, destinationName, UInt32(RENAME_EXCL)) == 0 else {
+            guard timedIO(.fileRename, { renameatx_np(fd, name, destination.fd, destinationName, UInt32(RENAME_EXCL)) }) == 0 else {
                 throw pathFailure("detach temporary directory")
             }
             guard let detached = try destination.directoryIfPresent(named: destinationName),
                   try detached.identity == identity else {
-                _ = renameatx_np(destination.fd, destinationName, fd, name, UInt32(RENAME_EXCL))
+                _ = timedIO(.fileRename) { renameatx_np(destination.fd, destinationName, fd, name, UInt32(RENAME_EXCL)) }
                 throw Failure.unsafePath
             }
             try synchronize()
@@ -466,6 +519,17 @@ enum SensitiveFileIO {
             return true
         }
 
+        /// Metadata only: this must precede any open that could materialize an
+        /// iCloud placeholder. The opened descriptor is checked again below.
+        func rejectDatalessIfPresent(named name: String) throws {
+            #if DEBUG
+            if datalessProbe?(url.appendingPathComponent(name)) == true { throw Failure.dataless }
+            #endif
+            if let info = try entryStatus(name), info.st_flags & UInt32(SF_DATALESS) != 0 {
+                throw Failure.dataless
+            }
+        }
+
         /// Metadata-only preflight. Two names are a request for recovery,
         /// never permission to read or replace a multiply linked file.
         func needsCommittedTemporaryAliasRecovery(named name: String) throws -> Bool {
@@ -492,13 +556,18 @@ enum SensitiveFileIO {
         }
 
         func readIfPresent(named name: String) throws -> Data? {
+            try rejectDatalessIfPresent(named: name)
             guard try requireRegularFileIfPresent(named: name) else { return nil }
-            let item = timedIO(.fileRead) { openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
-            guard item >= 0 else { throw pathFailure("open private file") }
+            let item = try openRegularFile(named: name, flags: O_RDONLY, create: false)
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
             try requireRegular(status(item))
-            return try handle.readToEnd() ?? Data()
+            return try timedIO(.dataRead) {
+                #if DEBUG
+                try beforeFileRead?(url.appendingPathComponent(name))
+                #endif
+                return try handle.readToEnd() ?? Data()
+            }
         }
 
         func atomicWrite(_ data: Data, named name: String, requireAbsent: Bool = false,
@@ -554,7 +623,7 @@ enum SensitiveFileIO {
             leased = true
             recordTemporary(item: lease, kind: "write", destination: name,
                             digest: SessionArchiveCoding.digest(data), replacement: nil)
-            defer { if !pending { _ = fremovexattr(lease, temporaryAttribute, 0) } }
+            defer { if !pending { _ = timedIO(.receiptRemove) { fremovexattr(lease, temporaryAttribute, 0) } } }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
             try writeBytes(data, to: item)
@@ -581,11 +650,11 @@ enum SensitiveFileIO {
                     guard copied.st_mode & 0o7777 & ~(original.st_mode & 0o7777) == 0 else { throw Failure.unsafePath }
                 }
             }
-            try handle.synchronize()
+            try timedIO(.fileSync) { try handle.synchronize() }
             #if DEBUG
             try beforeTemporaryCommit?(url.appendingPathComponent(temporary))
             #endif
-            try handle.close()
+            try timedIO(.fileClose) { try handle.close() }
             if let original {
                 guard let current = try entryStatus(name), Identity(current) == Identity(original),
                       current.st_mode == original.st_mode else { throw Failure.unsafePath }
@@ -594,8 +663,8 @@ enum SensitiveFileIO {
                 try compareAvailableACLs(currentACL, originalACL)
             } else if try entryStatus(name) != nil { throw Failure.unsafePath }
             if original == nil {
-                if perform(.link, { linkat(fd, temporary, fd, name, 0) }) == 0 {
-                    guard unlinkat(fd, temporary, 0) == 0 else { throw system("unlink private temporary file") }
+                if perform(.link, { timedIO(.fileLink) { linkat(fd, temporary, fd, name, 0) } }) == 0 {
+                    guard timedIO(.temporaryUnlink, { unlinkat(fd, temporary, 0) }) == 0 else { throw system("unlink private temporary file") }
                 } else {
                     guard canUsePlainRename(errno) else { throw pathFailure("commit private file") }
                     try commitByRename(temporary, to: name, requireAbsent: true)
@@ -606,7 +675,7 @@ enum SensitiveFileIO {
                 // and constraints have been checked after the atomic commit.
                 // A concurrent chmod/ACL edit or pathname replacement is
                 // rolled back instead of silently losing that restriction.
-                if perform(.swap, { renameatx_np(fd, temporary, fd, name, UInt32(RENAME_SWAP)) }) != 0 {
+                if perform(.swap, { timedIO(.fileRename) { renameatx_np(fd, temporary, fd, name, UInt32(RENAME_SWAP)) } }) != 0 {
                     guard canUsePlainRename(errno) else { throw pathFailure("replace private file") }
                     try commitByRename(temporary, to: name, requireAbsent: false)
                     pending = false
@@ -622,10 +691,10 @@ enum SensitiveFileIO {
                     let replacedACL = try readACL(originalFD)
                     defer { if let replacedACL { _ = acl_free(UnsafeMutableRawPointer(replacedACL)) } }
                     try compareAvailableACLs(replacedACL, originalACL)
-                    guard unlinkat(fd, temporary, 0) == 0 else { throw system("retire replaced file") }
+                    guard timedIO(.temporaryUnlink, { unlinkat(fd, temporary, 0) }) == 0 else { throw system("retire replaced file") }
                 } catch {
                     if let current = try entryStatus(name), Identity(current) == pendingIdentity {
-                        _ = renameatx_np(fd, temporary, fd, name, UInt32(RENAME_SWAP))
+                        _ = timedIO(.fileRename) { renameatx_np(fd, temporary, fd, name, UInt32(RENAME_SWAP)) }
                     }
                     throw error
                 }
@@ -637,14 +706,14 @@ enum SensitiveFileIO {
 
         private func commitByRename(_ temporary: String, to name: String, requireAbsent: Bool) throws {
             if requireAbsent {
-                if perform(.exclusiveRename, { renameatx_np(fd, temporary, fd, name, UInt32(RENAME_EXCL)) }) == 0 { return }
+                if perform(.exclusiveRename, { timedIO(.fileRename) { renameatx_np(fd, temporary, fd, name, UInt32(RENAME_EXCL)) } }) == 0 { return }
                 guard canUsePlainRename(errno) else { throw pathFailure("commit private file") }
                 guard try entryStatus(name) == nil else { throw Failure.unsafePath }
             }
             // Plain same-directory rename is the baseline-compatible fallback.
             // The last-check/rename race against same-user attackers is an
             // explicitly documented limitation, not a filesystem requirement.
-            guard renameat(fd, temporary, fd, name) == 0 else { throw pathFailure("commit private file") }
+            guard timedIO(.fileRename, { renameat(fd, temporary, fd, name) }) == 0 else { throw pathFailure("commit private file") }
         }
 
         func append(_ data: Data, named name: String) throws {
@@ -661,8 +730,8 @@ enum SensitiveFileIO {
             if let original, Identity(opened) != Identity(original) { throw Failure.unsafePath }
             guard fcntl(item, F_SETFL, fcntl(item, F_GETFL) | O_APPEND) == 0 else { throw system("set append mode") }
             try writeBytes(data, to: item)
-            try handle.synchronize()
-            try handle.close()
+            try timedIO(.fileSync) { try handle.synchronize() }
+            try timedIO(.fileClose) { try handle.close() }
             try synchronize()
             ExitDeadline.storageDidProgress()
         }
@@ -674,8 +743,8 @@ enum SensitiveFileIO {
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
             try requireRegular(status(item))
-            try handle.truncate(atOffset: length)
-            try handle.synchronize()
+            try timedIO(.fileTruncate) { try handle.truncate(atOffset: length) }
+            try timedIO(.fileSync) { try handle.synchronize() }
         }
 
         func removeRegularFileIfPresent(named name: String) throws {
@@ -696,7 +765,7 @@ enum SensitiveFileIO {
             var result: [String] = []
             while true {
                 errno = 0
-                guard let entry = readdir(stream) else {
+                guard let entry = timedIO(.directoryNext, { readdir(stream) }) else {
                     if errno != 0 { throw system("read private directory") }
                     return result
                 }
@@ -780,6 +849,7 @@ enum SensitiveFileIO {
             try assertStillAtOriginalPath()
             let allNames = try names().sorted()
             var removed = false
+            var busy = false
             for name in allNames where [".session-write-", ".sensitive-write-"].contains(where: { prefix in
                 name.hasPrefix(prefix) && name.hasSuffix(".tmp") &&
                     UUID(uuidString: String(name.dropFirst(prefix.count).dropLast(4))) != nil
@@ -787,17 +857,26 @@ enum SensitiveFileIO {
                 guard let info = try entryStatus(name), Identity(info) == Identity(target) else { continue }
                 let reason: String
                 do { reason = try recoverTemporaryItem(name, allNames: allNames, write: true) }
-                catch { reason = "inspection_failed" }
+                catch Failure.recoveryBusy { reason = "active_or_unavailable" }
+                catch {
+                    #if DEBUG
+                    if error is RecoveryTestInterruption { throw error }
+                    #endif
+                    reason = "inspection_failed"
+                }
                 let fingerprint = SessionArchiveCoding.digest(Data(name.utf8))
                 recoveryLog.notice("temporary_recovery id=\(fingerprint, privacy: .public) reason=\(reason, privacy: .public)")
                 if reason == "removed_alias" { removed = true }
+                if reason == "active_or_unavailable" { busy = true }
             }
+            if busy, try needsCommittedTemporaryAliasRecovery(named: destination) { throw Failure.recoveryBusy }
             return removed
         }
 
         private func recoverTemporaryItem(_ name: String, allNames: [String], write: Bool) throws -> String {
             guard let before = try entryStatus(name) else { return "already_absent" }
             try requireOwner(before)
+            try rejectDatalessIfPresent(named: name)
             let kind = before.st_mode & S_IFMT
             // Two links may be the committed destination plus this name, left by
             // a kill between linkat and unlinkat; the receipt must prove that.
@@ -814,6 +893,9 @@ enum SensitiveFileIO {
             guard TemporaryIdentity(try status(item)) == TemporaryIdentity(before) else { return "identity_changed" }
             guard timedIO(.temporaryRecoveryLease, { flock(item, LOCK_EX | LOCK_NB) }) == 0 else { return "active_or_unavailable" }
             defer { _ = flock(item, LOCK_UN) }
+            #if DEBUG
+            try afterRecoveryLease?()
+            #endif
             let length = timedIO(.receiptSize) { fgetxattr(item, temporaryAttribute, nil, 0, 0, 0) }
             guard length > 0, length <= 4096 else { return "unregistered" }
             var bytes = Data(count: length)
@@ -851,6 +933,10 @@ enum SensitiveFileIO {
                     return "identity_changed"
                 }
                 guard timedIO(.temporaryUnlink, { unlinkat(fd, name, 0) }) == 0 else { throw system("retire committed temporary alias") }
+                #if DEBUG
+                do { try afterAliasUnlink?() }
+                catch { throw RecoveryTestInterruption.interrupted }
+                #endif
                 // Only after the alias is gone: the receipt no longer has a use.
                 _ = timedIO(.receiptRemove) { fremovexattr(item, temporaryAttribute, 0) }
                 try synchronize()
@@ -967,7 +1053,7 @@ enum SensitiveFileIO {
         try data.withUnsafeBytes { bytes in
             var offset = 0
             while offset < bytes.count {
-                let count = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), min(1_048_576, bytes.count - offset))
+                let count = timedIO(.dataWrite) { Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), min(1_048_576, bytes.count - offset)) }
                 if count < 0, errno == EINTR { continue }
                 guard count > 0 else {
                     if count == 0 { errno = EIO }
@@ -1055,6 +1141,7 @@ enum SensitiveFileIO {
     private static func requireRegular(_ info: stat) throws {
         try requireOwner(info)
         guard info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1 else { throw Failure.unsafePath }
+        guard info.st_flags & UInt32(SF_DATALESS) == 0 else { throw Failure.dataless }
     }
 
     private static func makePrivate(_ fd: Int32, directory: Bool) throws {

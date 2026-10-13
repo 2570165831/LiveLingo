@@ -90,8 +90,8 @@ enum ReviewInputBinding {
 
     /// Loading a snapshot is read-only; old Markdown never invents batch IDs.
     /// Review reads run on the queue's storage actor, which also serialises
-    /// journal saves and report writes, so they never run the course's
-    /// temporary recovery scan (DU-05); opening the course does that.
+    /// journal saves and report writes. They skip the general temporary scan;
+    /// a receipt-proven committed alias can need targeted repair outside locks.
     static func snapshot(in directory: URL) throws -> SessionSnapshot? {
         let result = try SessionStore(directory: directory).loadDetailedWithoutRecovery()
         return try snapshot(from: result)

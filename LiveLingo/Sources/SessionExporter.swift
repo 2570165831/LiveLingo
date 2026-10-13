@@ -470,7 +470,11 @@ enum SessionExporter {
         let link: String
         if lstat(portable.path, &info) == 0 {
             try SessionArchiveCoding.requireRegularFileIfPresent(portable)
-            let pointer = try SessionArchiveCoding.decode(ExportPointer.self, from: Data(contentsOf: portable))
+            let pointerBytes = try SessionArchiveCoding.privateIO(at: portable) {
+                guard let bytes = try SensitiveFileIO.readIfPresent(at: portable) else { throw SessionStoreError.corruptSnapshot }
+                return bytes
+            }
+            let pointer = try SessionArchiveCoding.decode(ExportPointer.self, from: pointerBytes)
             guard pointer.version == 1, UUID(uuidString: pointer.generation) != nil else {
                 throw SessionStoreError.corruptSnapshot
             }

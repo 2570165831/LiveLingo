@@ -132,7 +132,7 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         if hasSnapshot { return .simplifiedChinese }
         struct Metadata: Decodable { let targetLocale: String? }
         let manifest = directory.appendingPathComponent("manifest.json")
-        if let data = try? Data(contentsOf: manifest),
+        if let data = try SessionArchiveCoding.privateIO(at: manifest, { try SensitiveFileIO.readIfPresent(at: manifest) }),
            let metadata = try? JSONDecoder().decode(Metadata.self, from: data) {
             // The non-regional code occurs in synthetic verifier fixtures,
             // not released exporters. Continue using the supported generator.

@@ -5998,15 +5998,7 @@ final class LearningReviewQueue: ObservableObject {
     }
 
     fileprivate nonisolated static func journalBytes(at url: URL) throws -> Data? {
-        var status = stat()
-        guard lstat(url.path, &status) == 0 else {
-            if errno == ENOENT { return nil }
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        guard status.st_mode & S_IFMT == S_IFREG else {
-            throw ReviewIdentityError.unreadable("复查日志不是普通文件，未写回")
-        }
-        return try Data(contentsOf: url)
+        try SessionArchiveCoding.privateIO(at: url) { try SensitiveFileIO.readIfPresent(at: url) }
     }
 
     /// 上一次成功写出的日志内容（用于跳过内容未变的重复写入）。
@@ -6060,7 +6052,7 @@ final class LearningReviewQueue: ObservableObject {
 
 /// Blocking filesystem work is serialized outside MainActor. The comparison,
 /// checksum and replacement remain one owned operation under the disk lock.
-private actor LearningReviewStorage {
+actor LearningReviewStorage {
     /// Distinct queue actors in this process must not contend with each other
     /// on LOCK_NB. Keep cross-process contention nonblocking and retain CAS.
     private static let processLock = NSLock()
@@ -6068,12 +6060,20 @@ private actor LearningReviewStorage {
     private var expectedBytes: Data?
     private var lastSavedSequence = 0
 
+    #if DEBUG
+    nonisolated static func processLockIsAvailableForTesting() -> Bool {
+        guard processLock.try() else { return false }
+        processLock.unlock()
+        return true
+    }
+    #endif
+
     init(journalURL: URL, expectedBytes: Data?) {
         self.journalURL = journalURL
         self.expectedBytes = expectedBytes
     }
 
-    func prepareEnqueue(directory: URL, notebook: LearningNotebook, scope: LearningReviewScope,
+    fileprivate func prepareEnqueue(directory: URL, notebook: LearningNotebook, scope: LearningReviewScope,
         sessionID: UUID?, inputRevision: Int?, targetLocale: String?, jobs: [LearningReviewQueue.Job],
         retiredJobs: [LearningReviewQueue.Job], allowUnreleased: Bool) throws -> LearningReviewQueue.EnqueuePlan? {
         try LearningReviewQueue.prepareEnqueue(directory: directory, notebook: notebook, scope: scope,
@@ -6096,8 +6096,13 @@ private actor LearningReviewStorage {
         // This actor serializes its own saves. Any receipt-proven alias left
         // by an interrupted first write is prepared outside both storage locks;
         // the strict check and expected-bytes check still run inside them.
-        try SensitiveFileIO.recoverCommittedFileIfNeeded(at: journalURL)
-        Self.processLock.lock()
+        try SessionArchiveCoding.privateIO(at: journalURL) {
+            try SensitiveFileIO.recoverCommittedFileIfNeeded(at: journalURL)
+        }
+        let journalParent = try SensitiveFileIO.Directory.open(at: journalURL.deletingLastPathComponent(), create: true, tighten: true)
+        try journalParent.rejectDatalessIfPresent(named: journalURL.lastPathComponent)
+        try journalParent.rejectDatalessIfPresent(named: journalURL.appendingPathExtension("lock").lastPathComponent)
+        SensitiveFileIO.timedIO(.storeProcessLock) { Self.processLock.lock() }
         defer { Self.processLock.unlock() }
         try SensitiveFileIO.prepareDirectory(journalURL.deletingLastPathComponent())
         try SensitiveFileIO.tightenFileIfPresent(journalURL)
@@ -6109,7 +6114,7 @@ private actor LearningReviewStorage {
         guard fstat(descriptor, &lockStatus) == 0, lockStatus.st_mode & S_IFMT == S_IFREG else {
             throw ReviewIdentityError.unreadable("复查日志锁不是普通文件，未写回")
         }
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+        guard SensitiveFileIO.timedIO(.storeLease, { flock(descriptor, LOCK_EX | LOCK_NB) }) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         defer { _ = flock(descriptor, LOCK_UN) }
