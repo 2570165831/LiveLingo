@@ -4,7 +4,26 @@ import CoreServices
 import OSLog
 import SwiftUI
 #if DEBUG
+import Darwin
 import ObjectiveC
+
+/// A failed test-host guard must stop the process without a crash report.
+private enum UnitTestSafetyFailure {
+    enum Reason: String {
+        case temporaryDirectory = "Cannot create the isolated test worker directory"
+        case filePanelGuard = "Cannot install the isolated test file-panel guard"
+        case presentationGuard = "Cannot install the isolated test presentation guard"
+        case activationPolicy = "Cannot keep the test host out of foreground activation"
+    }
+
+    nonisolated static func stop(_ reason: Reason) -> Never {
+        let message = "LiveLingo isolated test host stopped: \(reason.rawValue)\n"
+        message.utf8CString.withUnsafeBytes {
+            _ = Darwin.write(STDERR_FILENO, $0.baseAddress, $0.count - 1)
+        }
+        Darwin.exit(EXIT_FAILURE)
+    }
+}
 
 /// Darwin Foundation can choose its own per-user temporary directory despite
 /// TMPDIR. The isolated test host redirects the getter before any fixtures run.
@@ -31,7 +50,7 @@ private enum UnitTestTemporaryDirectory {
         let directory = base.appendingPathComponent(
             "worker-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)", isDirectory: true)
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
-        catch { preconditionFailure("Cannot create the isolated test worker directory") }
+        catch { UnitTestSafetyFailure.stop(.temporaryDirectory) }
         return directory
     }()
     private static let install: Void = {
@@ -76,7 +95,7 @@ enum UnitTestFilePanelSafety {
     private static func replace(_ type: AnyClass, _ name: String, _ replacement: Selector) {
         guard let original = class_getInstanceMethod(type, NSSelectorFromString(name)),
               let replacement = class_getInstanceMethod(NSSavePanel.self, replacement) else {
-            preconditionFailure("Cannot install the isolated test file-panel guard")
+            UnitTestSafetyFailure.stop(.filePanelGuard)
         }
         // Install on each concrete class, including inherited methods. Exchanging
         // an inherited method twice could restore the unsafe superclass method.
@@ -105,8 +124,10 @@ private extension NSSavePanel {
 }
 
 /// Only the isolated XCTest host changes AppKit dispatch. Windows remain
-/// transparent and cannot acquire real keyboard focus or activate an app.
-/// Keyboard routing uses injected test owners. Synchronous modals abort.
+/// transparent and cannot activate an app. Key methods are suppressed unless
+/// native-focus tests are explicitly enabled; those tests still require an
+/// already-foreground host. Default keyboard routing uses injected test owners.
+/// Synchronous modals abort.
 @MainActor
 enum UnitTestPresentationSafety {
     static let isInstalled: Bool = {
@@ -114,8 +135,10 @@ enum UnitTestPresentationSafety {
         exchange(NSWindow.self, NSStringFromSelector(#selector(NSWindow.order(_:relativeTo:))), #selector(NSWindow.isolatedTestOrder(_:relativeTo:)))
         exchange(NSWindow.self, "orderFront:", #selector(NSWindow.isolatedTestOrderFront(_:)))
         exchange(NSWindow.self, "orderFrontRegardless", #selector(NSWindow.isolatedTestOrderFrontRegardless))
-        exchange(NSWindow.self, "makeKeyAndOrderFront:", #selector(NSWindow.isolatedTestMakeKeyAndOrderFront(_:)))
-        exchange(NSWindow.self, "makeKeyWindow", #selector(NSWindow.isolatedTestMakeKeyWindow))
+        installKeyWindowGuards(nativeFocusTestsEnabled: nativeFocusTestsEnabled(
+            environment: ProcessInfo.processInfo.environment)) { name, replacement in
+            exchange(NSWindow.self, name, replacement)
+        }
         exchange(NSWindow.self, "setAlphaValue:", #selector(NSWindow.isolatedTestSetAlphaValue(_:)))
         exchange(NSApplication.self, "activateIgnoringOtherApps:", #selector(NSApplication.isolatedTestActivate(ignoringOtherApps:)))
         exchange(NSApplication.self, "activate", #selector(NSApplication.isolatedTestActivateWithoutOptions), required: false)
@@ -128,18 +151,31 @@ enum UnitTestPresentationSafety {
         if policy != .accessory && policy != .prohibited {
             _ = application.setActivationPolicy(.accessory)
         }
-        precondition(application.activationPolicy() != .regular,
-                     "Cannot keep the test host out of foreground activation")
+        guard application.activationPolicy() != .regular else {
+            UnitTestSafetyFailure.stop(.activationPolicy)
+        }
         return true
     }()
 
     private static func exchange(_ type: AnyClass, _ name: String, _ replacement: Selector, required: Bool = true) {
         guard let original = class_getInstanceMethod(type, NSSelectorFromString(name)),
               let replacement = class_getInstanceMethod(type, replacement) else {
-            precondition(!required, "Cannot install the isolated test presentation guard")
+            if required { UnitTestSafetyFailure.stop(.presentationGuard) }
             return
         }
         method_exchangeImplementations(original, replacement)
+    }
+
+    nonisolated static func nativeFocusTestsEnabled(environment: [String: String]) -> Bool {
+        environment["LIVELINGO_NATIVE_FOCUS_TESTS"] == "1"
+    }
+
+    /// Inject dispatch changes so policy tests never call real key methods.
+    static func installKeyWindowGuards(nativeFocusTestsEnabled: Bool = false,
+                                       exchange: (String, Selector) -> Void) {
+        guard !nativeFocusTestsEnabled else { return }
+        exchange("makeKeyAndOrderFront:", #selector(NSWindow.isolatedTestMakeKeyAndOrderFront(_:)))
+        exchange("makeKeyWindow", #selector(NSWindow.isolatedTestMakeKeyWindow))
     }
 
     nonisolated static func alphaValue(requested: CGFloat, isUnitTesting: Bool) -> CGFloat {

@@ -56,6 +56,44 @@ final class PrivacyExitTests: XCTestCase {
         XCTAssertEqual(UnitTestPresentationSafety.alphaValue(requested: 1, isUnitTesting: true), 0)
     }
 
+    func testUnitTestPresentationSafetyRequiresExactNativeFocusOptInByInjection() {
+        XCTAssertFalse(UnitTestPresentationSafety.nativeFocusTestsEnabled(environment: [:]))
+        for value in ["", "0", "true", "yes", " 1", "1 "] {
+            XCTAssertFalse(UnitTestPresentationSafety.nativeFocusTestsEnabled(
+                environment: ["LIVELINGO_NATIVE_FOCUS_TESTS": value]))
+        }
+        XCTAssertTrue(UnitTestPresentationSafety.nativeFocusTestsEnabled(
+            environment: ["LIVELINGO_NATIVE_FOCUS_TESTS": "1"]))
+    }
+
+    func testUnitTestPresentationSafetyDisablesKeyMethodsByDefaultUsingMockMethodTable() {
+        var methods = ["makeKeyAndOrderFront:": "original-order-and-key",
+                       "makeKeyWindow": "original-key"]
+        var exchanged: [String] = []
+        UnitTestPresentationSafety.installKeyWindowGuards { name, replacement in
+            exchanged.append(name)
+            methods[name] = NSStringFromSelector(replacement)
+        }
+        XCTAssertEqual(exchanged, ["makeKeyAndOrderFront:", "makeKeyWindow"])
+        XCTAssertEqual(methods["makeKeyAndOrderFront:"], "isolatedTestMakeKeyAndOrderFront:")
+        XCTAssertEqual(methods["makeKeyWindow"], "isolatedTestMakeKeyWindow")
+    }
+
+    func testUnitTestPresentationSafetyPreservesAuthorizedKeyMethodsUsingMockMethodTable() {
+        let originalMethods = ["makeKeyAndOrderFront:": "original-order-and-key",
+                               "makeKeyWindow": "original-key"]
+        var methods = originalMethods
+        var exchanges = 0
+        let enabled = UnitTestPresentationSafety.nativeFocusTestsEnabled(
+            environment: ["LIVELINGO_NATIVE_FOCUS_TESTS": "1"])
+        UnitTestPresentationSafety.installKeyWindowGuards(nativeFocusTestsEnabled: enabled) { name, replacement in
+            exchanges += 1
+            methods[name] = NSStringFromSelector(replacement)
+        }
+        XCTAssertEqual(exchanges, 0)
+        XCTAssertEqual(methods, originalMethods)
+    }
+
     func testUnitTestPresentationSafetyLeavesProductionPoliciesUnchangedByInjection() {
         var activations = 0, modals = 0
         XCTAssertTrue(UnitTestPresentationSafety.performActivation(isUnitTesting: false) {

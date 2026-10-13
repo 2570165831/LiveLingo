@@ -502,6 +502,15 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
     }
 
     func testNativeSizeMenuShowsCustomAndCanReselectThePreviousPreset() async throws {
+        try await checkSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: false)
+    }
+
+    func testAuthorizedNativeSizePopupShowsCustomAndCanReselectThePreviousPreset() async throws {
+        try requireNativeMenuAuthorization()
+        try await checkSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: true)
+    }
+
+    private func checkSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: Bool) async throws {
         let (model, store) = try fixture()
         let preferences = FloatingSubtitlePreferences(store: store)
         model.loadPresentationForTesting(phase: .recording, evidence: [])
@@ -510,7 +519,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         preferences.sourceTextSizeBinding.wrappedValue = 18
         preferences.translationTextSizeBinding.wrappedValue = 36
         try await resizeAndSettle(window, view: controller.view)
-        let items = try inspectSizeMenu(in: controller.view, selecting: "标准")
+        let items = try inspectSizeMenu(in: controller.view, selecting: "标准", nativePopup: nativePopup)
         let custom = try XCTUnwrap(items.first { $0.title == "自定义" })
         XCTAssertFalse(custom.enabled)
         for title in ["标准", "大", "特大"] {
@@ -522,7 +531,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         let reopened = FloatingSubtitlePreferences(store: store)
         XCTAssertEqual(reopened.sourceTextSize, 21)
         XCTAssertEqual(reopened.translationTextSize, 24)
-        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: controller.view).first { $0.title == "标准" }).state, .on)
+        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: controller.view, nativePopup: nativePopup).first { $0.title == "标准" }).state, .on)
     }
 
     func testHostedAccessibilitySeparatesLanguageLabelAndHidesUnselectedCaption() async throws {
@@ -594,6 +603,15 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
     }
 
     func testNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset() async throws {
+        try await checkNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: false)
+    }
+
+    func testAuthorizedNonactivatingPanelSizePopupShowsCustomAndCanReselectThePreviousPreset() async throws {
+        try requireNativeMenuAuthorization()
+        try await checkNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: true)
+    }
+
+    private func checkNonactivatingPanelSizeMenuShowsCustomAndCanReselectThePreviousPreset(nativePopup: Bool) async throws {
         let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
         let preferences = FloatingSubtitlePreferences(store: fixture.defaults)
         fixture.model.loadPresentationForTesting(phase: .recording, evidence: [])
@@ -610,7 +628,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         controller.show(model: fixture.model)
         try await settle(view)
 
-        let items = try inspectSizeMenu(in: view, selecting: "标准")
+        let items = try inspectSizeMenu(in: view, selecting: "标准", nativePopup: nativePopup)
         XCTAssertFalse(try XCTUnwrap(items.first { $0.title == "自定义" }).enabled)
         for title in ["标准", "大", "特大"] {
             XCTAssertEqual(try XCTUnwrap(items.first { $0.title == title }).state, .off)
@@ -621,13 +639,13 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         XCTAssertEqual(standard.translationTextSize, 24)
         XCTAssertEqual(fixture.defaults.double(forKey: "floatingSourceTextSize"), 0)
         XCTAssertEqual(fixture.defaults.double(forKey: "floatingTranslationTextSize"), 0)
-        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view, selecting: "特大")
+        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view, selecting: "特大", nativePopup: nativePopup)
             .first { $0.title == "标准" }).state, .on)
         try await settle(view)
         let extraLarge = FloatingSubtitlePreferences(store: fixture.defaults)
         XCTAssertEqual(extraLarge.sourceTextSize, 29)
         XCTAssertEqual(extraLarge.translationTextSize, 32)
-        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view).first { $0.title == "特大" }).state, .on)
+        XCTAssertEqual(try XCTUnwrap(inspectSizeMenu(in: view, nativePopup: nativePopup).first { $0.title == "特大" }).state, .on)
         XCTAssertTrue(controller.panel === panel)
     }
 
@@ -1185,7 +1203,79 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
     }
 
-    private func inspectSizeMenu(in view: NSView, selecting title: String? = nil) throws -> [SizeMenuItem] {
+    private func requireNativeMenuAuthorization() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["LIVELINGO_NATIVE_FOCUS_TESTS"] == "1",
+                          "Native menu tracking requires explicitly authorized screen use; default tests never open a menu")
+    }
+
+    private func sizeMenu(in root: NSMenu) -> NSMenu? {
+        if root.indexOfItem(withTitle: "标准") >= 0 { return root }
+        return root.items.compactMap(\.submenu).compactMap { sizeMenu(in: $0) }.first
+    }
+
+    private func sizeMenuItems(in root: NSMenu) -> [SizeMenuItem] {
+        root.items.flatMap { item in
+            [SizeMenuItem(title: item.title, enabled: item.isEnabled, state: item.state)]
+                + (item.submenu.map { sizeMenuItems(in: $0) } ?? [])
+        }
+    }
+
+    private func prepareSizeMenu(_ menu: NSMenu, button: NSPopUpButton) throws {
+        // SwiftUI's popup coordinator creates this NSMenu's items in its cell
+        // preparation callback, rather than NSMenuDelegate.menuNeedsUpdate.
+        // Invoke just that observed callback; never click or start tracking.
+        let cell = try XCTUnwrap(button.cell as? NSPopUpButtonCell)
+        let delegate = try XCTUnwrap(menu.delegate as? NSObject)
+        let selector = NSSelectorFromString("popUpButtonCell:willShowMenu:")
+        XCTAssertTrue(delegate.responds(to: selector))
+        guard delegate.responds(to: selector) else { return }
+        let method = try XCTUnwrap(class_getInstanceMethod(type(of: delegate), selector))
+        let returnType = try XCTUnwrap(method_copyReturnType(method))
+        defer { free(returnType) }
+        XCTAssertEqual(method_getNumberOfArguments(method), 4)
+        XCTAssertEqual(String(cString: returnType), "v")
+        guard method_getNumberOfArguments(method) == 4,
+              String(cString: returnType) == "v" else { return }
+        typealias Prepare = @convention(c) (AnyObject, Selector, NSPopUpButtonCell, NSMenu) -> Void
+        let prepare = unsafeBitCast(delegate.method(for: selector), to: Prepare.self)
+        prepare(delegate, selector, cell, menu)
+        menu.update()
+    }
+
+    private func inspectSizeMenu(in view: NSView, selecting title: String? = nil,
+                                 nativePopup: Bool = false) throws -> [SizeMenuItem] {
+        if nativePopup { return try inspectNativeSizeMenu(in: view, selecting: title) }
+        let button = try XCTUnwrap(descendants(view).compactMap { $0 as? NSPopUpButton }.first {
+            String(describing: type(of: $0)) == "SwiftUIPopupButton"
+        })
+        let tracking = MenuInspection()
+        NotificationCenter.default.addObserver(tracking, selector: #selector(MenuInspection.menuBegan(_:)),
+                                               name: NSMenu.didBeginTrackingNotification, object: nil)
+        defer {
+            NotificationCenter.default.removeObserver(tracking)
+            XCTAssertNil(tracking.menu, "Direct menu inspection and item actions must never start menu tracking")
+        }
+        // Read and update the real menu model without clicking the popup or
+        // entering AppKit's tracking loop. Its item targets retain SwiftUI's
+        // production binding actions, including reselecting the old preset.
+        let root = try XCTUnwrap(button.menu, "The size popup must provide its menu without tracking")
+        try prepareSizeMenu(root, button: button)
+        let menu = try XCTUnwrap(sizeMenu(in: root), "Menu items: \(sizeMenuItems(in: root).map(\.title))")
+        let items = sizeMenuItems(in: root)
+        if let title {
+            let index = menu.indexOfItem(withTitle: title)
+            XCTAssertGreaterThanOrEqual(index, 0)
+            guard index >= 0 else { return items }
+            XCTAssertTrue(menu.item(at: index)?.isEnabled == true)
+            menu.performActionForItem(at: index)
+        }
+        return items
+    }
+
+    private func inspectNativeSizeMenu(in view: NSView, selecting title: String? = nil) throws -> [SizeMenuItem] {
+        // Also guard the helper, so a future caller cannot accidentally bypass
+        // the opt-in test's authorization gate.
+        try requireNativeMenuAuthorization()
         let button = try XCTUnwrap(descendants(view).compactMap { $0 as? NSButton }.first {
             String(describing: type(of: $0)) == "SwiftUIPopupButton"
         })

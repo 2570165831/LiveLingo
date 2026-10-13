@@ -49,7 +49,7 @@ In Save recording and notes mode, click **End and save (结束并保存)** after
 
 In Temporary live session mode, the button is **End session (结束记录)**. A normal end discards the session. Starting again after either mode creates a new recording.
 
-The **Recording (录音)** menu offers the same actions. Use **⌘R** to start or end a session and **⌘⇧P** to pause or resume.
+The **Recording (录音)** menu offers the same actions. Use **⌘R** to start or end a session and **⇧⌘P** to pause or resume.
 
 ## Live captions and language labels
 

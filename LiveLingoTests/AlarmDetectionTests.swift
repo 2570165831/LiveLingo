@@ -48,7 +48,9 @@ final class AlarmDetectionTests: XCTestCase {
             }
             XCTAssertNotNil(firstTrigger, "phase=\(phase)")
             // The first four independent windows contain one miss. A nine-
-            // second history drops the first hit and cannot trigger until 15s.
+            // second history drops the first hit: this fixture first triggers
+            // at 15s for phase 0, but at 40.5s for phase 1.5 (the window ending
+            // at 16.5s is already silent). Twelve seconds retains that hit.
             XCTAssertEqual(firstTrigger, phase + 12, "phase=\(phase): retain the first hit across the miss")
         }
     }
