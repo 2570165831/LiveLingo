@@ -2670,6 +2670,15 @@ extension SpeechPipeline {
             throw error
         }
     }
+    func bindSyntheticMicrophoneEngine(_ engine: any MicrophoneCaptureEngine) {
+        precondition(AppRuntimeEnvironment.isUnitTesting)
+        stateLock.withLock {
+            precondition(captureConfigured && !isStopping && inputMode == .microphone && audioEngine == nil)
+            audioEngine = engine
+            microphoneTapInstalled = true
+            microphoneNeedsRecovery = false
+        }
+    }
     func startSyntheticPreview(prepare: @Sendable () async -> Void,
                                result: Task<Void, Never>, analysis: Task<Void, Never>) async {
         let token = stateLock.withLock { generation }

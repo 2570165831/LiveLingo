@@ -5,11 +5,39 @@ import XCTest
 
 @MainActor
 final class AlarmLifecycleTests: XCTestCase {
+    @MainActor private final class Gate {
+        private(set) var entered = false
+        private var continuation: CheckedContinuation<Void, Never>?
+        func wait() async { await withCheckedContinuation { continuation = $0; entered = true } }
+        func release() { continuation?.resume(); continuation = nil }
+    }
+    private func eventually(_ condition: @escaping @MainActor () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !condition() {
+            guard ContinuousClock.now < deadline else { XCTFail("Alarm lifecycle checkpoint was not reached"); throw CancellationError() }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
     private final class FailureSwitch: @unchecked Sendable {
         let lock = NSLock()
         private var enabled = false
         func enable() { lock.withLock { enabled = true } }
         func check() throws { if lock.withLock({ enabled }) { throw CocoaError(.fileWriteUnknown) } }
+    }
+    private final class SyntheticMicrophone: NSObject, MicrophoneCaptureEngine, @unchecked Sendable {
+        private let lock = NSLock()
+        private var running = true
+        private var starts = 0
+        var notificationObject: AnyObject { self }
+        let outputFormat = MediaFileImport.storageFormat
+        var isRunning: Bool { lock.withLock { running } }
+        var startCount: Int { lock.withLock { starts } }
+        func installTap(format: AVAudioFormat, input: OwnedAudioCaptureBuffer) throws {}
+        func removeTap() {}
+        func prepare() {}
+        func start() throws { lock.withLock { running = true; starts += 1 } }
+        func pause() { lock.withLock { running = false } }
+        func stop() { lock.withLock { running = false } }
     }
     private struct Fixture {
         let root: URL
@@ -19,7 +47,7 @@ final class AlarmLifecycleTests: XCTestCase {
         let queue: LearningReviewQueue
         let model: AppModel
     }
-    private func fixture(failure: FailureSwitch? = nil) throws -> Fixture {
+    private func fixture(failure: FailureSwitch? = nil, translation: CaptionTranslationDependencies = .unavailable) throws -> Fixture {
         let root = TestFixtureDirectory.root.appendingPathComponent("Alarm-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let suite = "LiveLingo-Test-\(UUID())"
@@ -30,7 +58,8 @@ final class AlarmLifecycleTests: XCTestCase {
             enableMicrophoneWatchdog: false, enableCaptureHealthWatchdog: false)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review.json"),
             observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
-        let model = AppModel(reviewQueue: queue, pipeline: pipeline, backgroundServices: false, defaults: defaults)
+        let model = AppModel(reviewQueue: queue, pipeline: pipeline, translation: translation, notes: .unavailable,
+                             backgroundServices: false, defaults: defaults, recoveryDirectory: root)
         addTeardownBlock { @MainActor in
             await model.retireAlarmTasksForTesting()
             await pipeline.stopCapture(continueTranscribing: false)
@@ -41,8 +70,8 @@ final class AlarmLifecycleTests: XCTestCase {
         return Fixture(root: root, defaults: defaults, cleanup: cleanup, pipeline: pipeline, queue: queue, model: model)
     }
     private func trigger(_ model: AppModel, now: Double = 100) {
-        for (index, end) in [3.0, 4.5, 6].enumerated() {
-            model.receiveAlarmSoundForTesting(.init(start: end - 3, end: end, score: 0.8), now: now + Double(index) * 1.5)
+        for end in [3.0, 4.5, 6, 7.5, 9] {
+            model.receiveAlarmSoundForTesting(.init(start: end - 3, end: end, score: 0.8), now: now + end - 6)
         }
     }
     private func pcm(_ value: Float, frames: UInt32 = 1600) -> AVAudioPCMBuffer {
@@ -127,6 +156,12 @@ final class AlarmLifecycleTests: XCTestCase {
         let f = try fixture()
         let first = f.root.appendingPathComponent("first")
         let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        FloatingSubtitlePreferences(store: f.defaults).showsOnRecordStart = true
+        let subtitles = FloatingSubtitleWindowController(defaults: f.defaults)
+        let panel = subtitles.prepareWindow(model: f.model)
+        panel.alphaValue = 0
+        defer { subtitles.shutdown() }
+        let observer = FloatingSubtitleRecordStartObserver(model: f.model, windowController: subtitles, defaults: f.defaults)
         let identity = input.identity
         XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
         await input.drain()
@@ -137,6 +172,10 @@ final class AlarmLifecycleTests: XCTestCase {
         let split = try XCTUnwrap(f.model.alarmRolloverTaskForTesting)
         try await TestTaskLifetime.value(split)
         XCTAssertTrue(f.model.isRecording)
+        withExtendedLifetime(observer) {
+            XCTAssertFalse(subtitles.isVisible, "An alarm split cannot reopen deliberately hidden subtitles")
+            XCTAssertFalse(panel.isVisible)
+        }
         let second = try XCTUnwrap(f.model.currentCourseDirectory)
         XCTAssertNotEqual(first, second)
         XCTAssertEqual(second.deletingLastPathComponent(), first.deletingLastPathComponent())
@@ -192,6 +231,220 @@ final class AlarmLifecycleTests: XCTestCase {
         await f.pipeline.stopCapture(continueTranscribing: false)
         XCTAssertEqual(try AVAudioFile(forReading: first.appendingPathComponent("recording.wav")).length, 3200)
         XCTAssertNotNil(try SessionStore(directory: first).load())
+    }
+    func testPauseAfterRolloverPreparationRestoresTranscriptionAndTranslationOnResume() async throws {
+        var translations = 0
+        var dependencies = CaptionTranslationDependencies.unavailable
+        dependencies.translate = { _, _, _, _, _ in
+            translations += 1
+            return "恢复后的合成译文。"
+        }
+        let f = try fixture(translation: dependencies)
+        let first = f.root.appendingPathComponent("first")
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        let microphone = SyntheticMicrophone()
+        f.pipeline.bindSyntheticMicrophoneEngine(microphone)
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        var checkpointReached = false
+        f.model.alarmPreparationParkedForTesting = {
+            checkpointReached = true
+            XCTAssertTrue(f.model.savedProcessingIsPaused)
+            XCTAssertEqual(f.pipeline.transcriptionState()?.isPaused, true)
+            f.model.pause()
+        }
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        f.model.alarmPreparationParkedForTesting = nil
+        XCTAssertTrue(checkpointReached)
+        XCTAssertTrue(f.model.isPaused)
+        XCTAssertFalse(f.model.savedProcessingIsPaused)
+        XCTAssertEqual(f.pipeline.transcriptionState()?.isPaused, false)
+        XCTAssertEqual(f.model.currentCourseDirectory, first)
+        f.model.resume()
+        XCTAssertTrue(f.model.isRecording)
+        XCTAssertEqual(microphone.startCount, 1)
+        XCTAssertEqual(push(input, value: 0.25, end: 1.1), .accepted)
+        let segment = TranscriptSegment(startTime: 0, endTime: 0.2, english: "Synthetic caption after resume.",
+            sessionID: f.model.captureHealthSessionIDForTesting)
+        f.model.receiveIdentifiedCaptionForTesting(segment)
+        if let translation = f.model.translationTaskForTesting { try await TestTaskLifetime.value(translation) }
+        XCTAssertEqual(translations, 1)
+        XCTAssertEqual(f.model.segments.first(where: { $0.id == segment.id })?.chinese, "恢复后的合成译文。")
+        await f.pipeline.stopCapture(continueTranscribing: false)
+        XCTAssertEqual(try AVAudioFile(forReading: first.appendingPathComponent("recording.wav")).length, 3200)
+    }
+
+    func testOpeningPreAlarmCourseJoinsBackgroundOwnerBeforeBindingForegroundArchive() async throws {
+        let f = try fixture()
+        let first = f.root.appendingPathComponent("first")
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        await f.model.waitForAlarmArchivesForTesting()
+        let archived = try XCTUnwrap(f.model.alarmArchivedModelsForTesting.first)
+        XCTAssertEqual(archived.currentCourseDirectory, first)
+        await f.model.stopSavedCourseForTesting()
+        // A path alias must resolve to the same owner, not another journal.
+        let alias = f.root.appendingPathComponent("first-alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: first)
+        try await f.model.openSavedSession(alias, allowAutomaticProcessing: false)
+        XCTAssertTrue(f.model.alarmArchivedModelsForTesting.isEmpty)
+        XCTAssertTrue(archived.savedProcessingIsPaused)
+        XCTAssertNil(archived.savedProcessingTaskForTesting)
+        XCTAssertNil(archived.translationTaskForTesting)
+        XCTAssertNil(archived.summaryTaskForTesting)
+        XCTAssertEqual(SessionDirectoryLocation.canonical(try XCTUnwrap(f.model.currentCourseDirectory)),
+                       SessionDirectoryLocation.canonical(first))
+        XCTAssertNil(f.model.archiveError)
+        try await f.model.flushSavedCourseForTesting()
+        let saved = try XCTUnwrap(SessionStore(directory: first).load())
+        XCTAssertEqual(saved.sessionID, f.model.captureHealthSessionIDForTesting)
+        XCTAssertEqual(saved.audioFiles.first?.frameCount, 1600)
+        XCTAssertEqual(saved.audioFiles.first?.isFinalized, true)
+        await archived.retireAlarmTasksForTesting()
+    }
+
+    func testBackgroundParkingFailureDoesNotOpenASecondWriter() async throws {
+        let f = try fixture()
+        let first = f.root.appendingPathComponent("first")
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        await f.model.waitForAlarmArchivesForTesting()
+        let archived = try XCTUnwrap(f.model.alarmArchivedModelsForTesting.first)
+        await f.model.stopSavedCourseForTesting()
+        let second = f.model.currentCourseDirectory
+        archived.configurePrivacyExitForTesting(.init(park: { throw CocoaError(.fileWriteUnknown) }))
+        defer { archived.configurePrivacyExitForTesting(.init()) }
+        do {
+            try await f.model.openSavedSession(first, allowAutomaticProcessing: false)
+            XCTFail("Failed ownership handoff must not bind a second archive writer")
+        } catch { XCTAssertTrue(error is CocoaError) }
+        XCTAssertEqual(f.model.currentCourseDirectory, second)
+        XCTAssertTrue(f.model.alarmArchivedModelsForTesting.contains(where: { $0 === archived }))
+    }
+    func testCommittedRolloverKeepsRecordingAndBlocksAllSessionSwitchEntrypoints() async throws {
+        let f = try fixture()
+        let first = f.root.appendingPathComponent("first")
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        f.model.loadPresentationForTesting(phase: .recording, evidence: [])
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        let other = f.root.appendingPathComponent("other")
+        let otherID = UUID()
+        try SessionStore(directory: other).save(SessionSnapshot(sessionID: otherID))
+        let originalID = f.model.captureHealthSessionIDForTesting
+        let originalOutput = f.model.outputDirectory
+        var checkpoint = false
+        defer { f.model.alarmBeforeBindingForTesting = nil }
+        f.model.alarmBeforeBindingForTesting = {
+            checkpoint = true
+            XCTAssertTrue(f.model.isRecording)
+            XCTAssertTrue(f.model.hasActiveSession)
+            XCTAssertTrue(f.model.phase.isBusy, "Preclone's phase gate must still see live capture")
+            XCTAssertTrue(f.model.canToggleRecording, "Stop must remain available")
+            XCTAssertEqual(f.model.stopRecordingTitle, "结束并保存")
+            XCTAssertFalse(f.model.canPauseRecording)
+            XCTAssertFalse(f.model.canStart)
+            XCTAssertFalse(f.model.canOpenLesson)
+            XCTAssertFalse(f.model.canImportMedia)
+            // Never invoke an admitted start in a red fixture: that could prepare
+            // a real model. A rejected start exercises the production entry guard.
+            if !f.model.canStart { f.model.start() }
+            if !f.model.canOpenLesson { try await f.model.openSavedSession(other, allowAutomaticProcessing: false) }
+            await f.model.recoverRecording(.init(id: otherID, directory: other, outputRoot: f.root))
+            f.model.useOutputDirectory(other)
+            let chosen = await f.model.chooseOutputDirectory()
+            XCTAssertNil(chosen)
+            f.model.pause()
+            XCTAssertTrue(f.model.isRecording)
+            XCTAssertEqual(f.model.captureHealthSessionIDForTesting, originalID)
+            XCTAssertEqual(f.model.outputDirectory, originalOutput)
+        }
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        XCTAssertTrue(checkpoint)
+        XCTAssertTrue(f.model.isRecording)
+        XCTAssertNotEqual(f.model.captureHealthSessionIDForTesting, originalID)
+        XCTAssertEqual(push(input, value: 0.25, end: 1.1), .accepted)
+    }
+
+    func testConvertedLiveCourseSavesBothAlarmSectionsToSelectedLocation() async throws {
+        let f = try fixture()
+        let staging = try SessionWorkspace.makeTemporarySessionDirectory()
+        let selected = f.root.appendingPathComponent("selected", isDirectory: true)
+        try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: false)
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: staging, storage: .liveOnly)
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        await f.model.convertCurrentSessionToRecording(in: selected)
+        XCTAssertNil(f.model.archiveError)
+        XCTAssertFalse(f.model.isLiveOnly)
+        let oldID = f.model.captureHealthSessionIDForTesting
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        XCTAssertTrue(f.model.isRecording)
+        let next = try XCTUnwrap(f.model.currentCourseDirectory)
+        XCTAssertEqual(next.deletingLastPathComponent(), selected)
+        XCTAssertEqual(push(input, value: 0.25, end: 1.1), .accepted)
+        await f.model.stopSavedCourseForTesting()
+        XCTAssertEqual(f.model.savedSessionDirectory, next)
+        let courses = try FileManager.default.contentsOfDirectory(at: selected, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("LiveLingo ") }
+        XCTAssertEqual(courses.count, 2)
+        let snapshots = try courses.map { try XCTUnwrap(SessionStore(directory: $0).load()) }
+        XCTAssertTrue(snapshots.contains(where: { $0.sessionID == oldID }))
+        XCTAssertTrue(snapshots.allSatisfy { $0.audioFiles.first?.isFinalized == true })
+        let audioFrames = try courses.map { try AVAudioFile(forReading: $0.appendingPathComponent("recording.wav")).length }
+        XCTAssertEqual(audioFrames.sorted(), [1600, 1600])
+        XCTAssertTrue(try SessionWorkspace.recordingRecoveries(in: f.root).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path))
+        let preserved = try FileManager.default.contentsOfDirectory(at: staging.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("." + staging.lastPathComponent + ".migrated-") }
+        XCTAssertEqual(preserved.count, 1, "Converted source must be recoverably retained")
+    }
+
+    func testExitDuringCommittedRolloverBindsAndFinalizesNewCourseWithinSameLease() async throws {
+        let f = try fixture()
+        let first = f.root.appendingPathComponent("first")
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        let gate = Gate()
+        defer { gate.release(); f.model.alarmBeforeBindingForTesting = nil }
+        f.model.alarmBeforeBindingForTesting = { await gate.wait() }
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        let rollover = try XCTUnwrap(f.model.alarmRolloverTaskForTesting)
+        try await eventually { gate.entered }
+        XCTAssertEqual(push(input, value: 0.25, end: 1.1), .accepted)
+        await input.drain()
+        let deadline = ExitDeadline(seconds: 5)
+        let exit = Task { @MainActor in await f.model.prepareForApplicationExit(deadline: deadline) }
+        try await eventually { f.model.isTerminating && deadline.hasPendingOperations }
+        gate.release()
+        try await TestTaskLifetime.value(rollover)
+        let exited = await exit.value
+        XCTAssertTrue(exited)
+        XCTAssertFalse(deadline.isExpired)
+        XCTAssertFalse(f.pipeline.alarmCaptureIsActive)
+        let next = try XCTUnwrap(f.model.currentCourseDirectory)
+        XCTAssertNotEqual(next, first)
+        XCTAssertEqual(f.model.phase, .saved(next))
+        XCTAssertEqual(try SessionStore(directory: first).load()?.audioFiles.first?.isFinalized, true)
+        XCTAssertEqual(try SessionStore(directory: next).load()?.audioFiles.first?.isFinalized, true)
+        XCTAssertEqual(try AVAudioFile(forReading: first.appendingPathComponent("recording.wav")).length, 1600)
+        XCTAssertEqual(try AVAudioFile(forReading: next.appendingPathComponent("recording.wav")).length, 1600)
     }
     func testLateOldQueueProcessingCannotBorrowNewCourseAudioRanges() async throws {
         let f = try fixture()

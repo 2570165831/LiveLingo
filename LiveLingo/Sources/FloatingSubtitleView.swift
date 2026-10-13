@@ -59,7 +59,7 @@ private struct FloatingSubtitleContent: View {
                     .help(model.isPaused ? "继续录音" : "暂停录音")
                     .accessibilityLabel(model.isPaused ? "继续录音" : "暂停录音")
                     .accessibilityIdentifier("floating-pause")
-                    .disabled(windowController.isLocked)
+                    .disabled(windowController.isLocked || !model.canPauseRecording)
                 }
                 Picker("悬浮字幕显示", selection: preferences.displayModeBinding) {
                     ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
@@ -78,7 +78,9 @@ private struct FloatingSubtitleContent: View {
                         .font(.system(size: 12 * scale))
                         .foregroundStyle(Color(white: palette.headerWhite))
                         .allowsHitTesting(false)
-                        .accessibilityLabel("字幕窗已锁定，点击穿透；可用菜单栏图标、主窗口或 ⇧⌘L 解锁")
+                        .accessibilityLabel(model.alarmBanner == nil
+                            ? "字幕窗已锁定，点击穿透；可用菜单栏图标、主窗口或 ⇧⌘L 解锁"
+                            : "字幕窗已锁定；提醒期间可点击取消按钮，其他控件保持锁定")
                 } else {
                     Button { windowController.toggleLock() } label: {
                         Image(systemName: "lock.open")

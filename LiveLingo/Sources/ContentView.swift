@@ -260,7 +260,7 @@ struct ContentView: View {
                 Label(model.isPaused ? "继续" : "暂停",
                       systemImage: model.isPaused ? "play.fill" : "pause.fill")
             }
-            .disabled(!model.hasActiveSession)
+            .disabled(!model.canPauseRecording)
             .help(model.isPaused ? "继续录音" : "暂停录音")
             .accessibilityIdentifier("classroom-pause-resume")
         }
@@ -959,13 +959,13 @@ struct ClassroomSettingsView: View {
                         .disabled(model.phase.isBusy)
                 }
             }
-            Section("警报提醒") {
+            Section("提醒") {
                 Toggle("录音时检测警报声并提醒", isOn: $model.alarmDetectionEnabled)
                 Text(AlarmPolicy.explanation).font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("警报时自动保存本节并另开新录音", isOn: $model.alarmAutomaticSaveEnabled)
                     .disabled(!model.alarmDetectionEnabled)
-                Text("检测到持续警报后倒计时 \(AlarmPolicy.countdownSeconds) 秒，可取消；保存模式会在同一位置开始带有“\(AlarmPolicy.postAlarmFolderSuffix)”后缀的新录音。暂停时取消倒计时，实时暂存模式只提醒。通知权限在首次开启检测并开始麦克风录音时由系统询问。")
+                Text("检测到持续警报后倒计时 \(AlarmPolicy.countdownSeconds) 秒，可取消；保存模式会在同一位置开始带有“\(AlarmPolicy.postAlarmFolderSuffix)”后缀的新录音。暂停时取消倒计时，实时暂存模式只提醒。字幕窗可见时不发系统通知；隐藏时才发，首次需要时由系统询问通知权限。字幕窗或 LiveLingo 获得键盘焦点时可按 Esc 取消提醒。")
                     .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 if let notice = model.alarmDetectionNotice { Text(notice).font(.callout) }
@@ -1104,8 +1104,8 @@ private struct SubtitleSpacesToggle: View {
 
 extension AppModel {
     var canToggleRecording: Bool { hasActiveSession || (canStart && !phase.isBusy) }
-    var canOpenLesson: Bool { !(phase.isBusy || archiveLoading || isImportingFile) }
-    var canImportMedia: Bool { !phase.isBusy && translationReady && !isImportingFile }
+    var canOpenLesson: Bool { !sessionSwitchBlocked && !isImportingFile }
+    var canImportMedia: Bool { !sessionSwitchBlocked && translationReady && !isImportingFile }
     var stopRecordingTitle: String { isLiveOnly ? "结束记录" : "结束并保存" }
 
     func toggleRecording() { hasActiveSession ? stop() : start() }
@@ -1148,7 +1148,7 @@ struct RecordingMenuItems: View {
                 .disabled(!model.canToggleRecording)
             Button(model.isPaused ? "继续" : "暂停") { model.togglePause() }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
-                .disabled(!model.hasActiveSession)
+                .disabled(!model.canPauseRecording)
             Divider()
             if model.isImportingFile {
                 Button("停止导入") { model.cancelMediaImport() }

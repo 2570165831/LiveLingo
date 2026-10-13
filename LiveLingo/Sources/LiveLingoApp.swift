@@ -293,15 +293,15 @@ final class FloatingSubtitleRecordStartObserver {
             previousPhase = phase
             if Self.shouldShow(previous: previous, next: phase, importing: model.isImportingFile,
                                enabled: FloatingSubtitlePreferences(store: defaults).showsOnRecordStart,
-                               visible: windowController.isVisible) {
+                               visible: windowController.isVisible, alarmRollover: model.alarmRolloverIsActive) {
                 windowController.show(model: model)
             }
         }
     }
 
     static func shouldShow(previous: AppPhase, next: AppPhase, importing: Bool,
-                           enabled: Bool, visible: Bool) -> Bool {
-        previous == .preparing && next == .recording && !importing && enabled && !visible
+                           enabled: Bool, visible: Bool, alarmRollover: Bool = false) -> Bool {
+        previous == .preparing && next == .recording && !importing && enabled && !visible && !alarmRollover
     }
 }
 

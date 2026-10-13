@@ -1078,7 +1078,7 @@ final class AppModel: ObservableObject {
             preferences.set(alarmDetectionEnabled, forKey: Self.alarmDetectionDefaultsKey)
             pipeline.setAlarmDetectionEnabled(alarmDetectionEnabled && activeInputMode == .microphone)
             if !alarmDetectionEnabled { clearAlarmReminder() }
-            else if isRecording && activeInputMode == .microphone { prepareAlarmNotifications() }
+            else if isRecording && activeInputMode == .microphone { prepareAlarmPresenter() }
         }
     }
     @Published var alarmAutomaticSaveEnabled: Bool {
@@ -1097,12 +1097,22 @@ final class AppModel: ObservableObject {
     private var alarmCountdownTask: Task<Void, Never>?
     private var alarmRolloverTask: Task<Void, Never>?
     private var alarmRolloverInProgress = false
+    @Published private var alarmRolloverSwitching = false
     private var alarmStopRequested = false
     private var alarmPreviousQueue: DurableTranscriptionQueue?
-    private var alarmArchivedModels: [AppModel] = []
-    private var alarmArchivedOpenTasks: [Task<Void, Never>] = []
+    private struct AlarmArchivedCourse {
+        let directory: URL
+        let model: AppModel
+        let opening: Task<Void, Never>
+    }
+    private var alarmArchivedCourses: [AlarmArchivedCourse] = []
     private var alarmArchivedProcessingTask: Task<Void, Never>?
     private weak var alarmForegroundModel: AppModel?
+    var alarmRolloverIsActive: Bool { alarmRolloverInProgress }
+    #if DEBUG
+    var alarmPreparationParkedForTesting: (() -> Void)?
+    var alarmBeforeBindingForTesting: (() async throws -> Void)?
+    #endif
     #if !LIVELINGO_CLI
     private var alarmPresenter: AlarmReminderPresenter?
     #endif
@@ -1433,7 +1443,9 @@ final class AppModel: ObservableObject {
 
     var isRecording: Bool { phase == .recording }
     var isPaused: Bool { phase == .paused }
-    var hasActiveSession: Bool { isRecording || isPaused }
+    var hasActiveSession: Bool { isRecording || isPaused || (alarmRolloverInProgress && pipeline.alarmCaptureIsActive) }
+    var canPauseRecording: Bool { hasActiveSession && !alarmRolloverSwitching }
+    var sessionSwitchBlocked: Bool { alarmRolloverInProgress || preparingApplicationExit || phase.isBusy || archiveLoading }
     var isLiveOnly: Bool {
         if savedSessionDirectory != nil { return false }
         return (activeStorageMode ?? selectedStorageMode) == .liveOnly
@@ -1451,7 +1463,7 @@ final class AppModel: ObservableObject {
     }
     var isSystemAudio: Bool { currentInputMode == .systemAudio }
     var canStart: Bool {
-        !phase.isBusy && !archiveLoading && translationReady
+        !sessionSwitchBlocked && translationReady
     }
 
     var phaseLabel: String {
@@ -1533,6 +1545,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func chooseOutputDirectory() async -> URL? {
+        guard !alarmRolloverInProgress, !preparingApplicationExit else { return nil }
         #if LIVELINGO_PREVIEW
         do {
             let directory = try PreviewDataIsolation.makeCoursesDirectory()
@@ -1552,7 +1565,8 @@ final class AppModel: ObservableObject {
         return await withCheckedContinuation { continuation in
             FilePanelPresentation.begin(panel) { [weak self] response in
                 Task { @MainActor in
-                    guard response == .OK, let directory = panel.url, let self else {
+                    guard response == .OK, let directory = panel.url, let self,
+                          !self.alarmRolloverInProgress, !self.preparingApplicationExit else {
                         continuation.resume(returning: nil)
                         return
                     }
@@ -1570,6 +1584,7 @@ final class AppModel: ObservableObject {
     /// Re-choosing the same folder also stores a fresh grant: that is what the
     /// legacy and unreachable-folder notices ask for.
     func useOutputDirectory(_ directory: URL) {
+        guard !alarmRolloverInProgress, !preparingApplicationExit else { return }
         outputDirectory = directory
         guard let staging = temporarySessionDirectory,
               let recovery = recoverableRecordings.first(where: { $0.id == sessionID && $0.needsPromotion }),
@@ -1587,7 +1602,7 @@ final class AppModel: ObservableObject {
     }
 
     func convertCurrentSessionToRecording() async {
-        guard hasActiveSession, activeStorageMode == .liveOnly else { return }
+        guard hasActiveSession, activeStorageMode == .liveOnly, !alarmRolloverInProgress else { return }
         let identity = sessionID
         let epoch = generation
         guard let directory = await chooseOutputDirectory(),
@@ -1597,7 +1612,7 @@ final class AppModel: ObservableObject {
     }
 
     func convertCurrentSessionToRecording(in directory: URL) async {
-        guard hasActiveSession, activeStorageMode == .liveOnly else { return }
+        guard hasActiveSession, activeStorageMode == .liveOnly, !alarmRolloverInProgress else { return }
         let identity = sessionID, epoch = generation
         do {
             guard let source = sessionDirectory else { throw AppError.outputDirectoryMissing }
@@ -1638,7 +1653,7 @@ final class AppModel: ObservableObject {
     /// relaunched recovery reopens the selected folders through their
     /// app-scoped bookmarks and keeps those grants while the course is open.
     func recoverRecording(_ recovery: SessionWorkspace.RecordingRecovery) async {
-        guard !phase.isBusy, !archiveLoading else { return }
+        guard !sessionSwitchBlocked else { return }
         var record = recovery
         var grants: [SessionWorkspace.ScopedFolderAccess] = []
         var notice = "已恢复未完成录音；处理保持暂停，可重试保存到所选目录。"
@@ -1694,15 +1709,14 @@ final class AppModel: ObservableObject {
             alarmBanner?.secondsRemaining = nil
             alarmCountdownTask?.cancel(); alarmCountdownTask = nil
         } else if phase == .recording {
-            if alarmDetectionEnabled && activeInputMode == .microphone { prepareAlarmNotifications() }
+            if alarmDetectionEnabled && activeInputMode == .microphone { prepareAlarmPresenter() }
         } else if !alarmRolloverInProgress { clearAlarmReminder() }
     }
 
-    private func prepareAlarmNotifications() {
+    private func prepareAlarmPresenter() {
         #if !LIVELINGO_CLI
         guard backgroundServicesEnabled, !preparingApplicationExit else { return }
         if alarmPresenter == nil { alarmPresenter = AlarmReminderPresenter() }
-        alarmPresenter?.prepareNotificationsAtRecordingStart()
         #endif
     }
 
@@ -1776,21 +1790,31 @@ final class AppModel: ObservableObject {
         guard isRecording, activeInputMode == .microphone, activeStorageMode == .saveSession,
               !isImportingFile, !alarmRolloverInProgress, !preparingApplicationExit,
               let previousDirectory = currentCourseDirectory else { return }
+        let parent: URL
+        if temporarySessionDirectory != nil {
+            guard let outputDirectory else {
+                alarmBanner = AlarmBannerState(failure: "未设置保存位置，录音继续保留；请先选择保存位置。")
+                return
+            }
+            parent = outputDirectory
+        } else { parent = previousDirectory.deletingLastPathComponent() }
         alarmRolloverInProgress = true
         alarmStopRequested = false
         alarmBanner?.saving = true
         let priorID = sessionID, epoch = generation, revision = lifecycleRevision
         let target = outputLanguage
-        let parent = previousDirectory.deletingLastPathComponent()
         let nextID = UUID()
         let nextDirectory = SessionWorkspace.uniqueFinalDirectory(in: parent,
             preferredName: Self.sessionFolderName(startedAt: .now()) + AlarmPolicy.postAlarmFolderSuffix)
         var boundary: SpeechPipeline.AlarmRolloverResult?
-        defer { alarmPreviousQueue = nil; alarmRolloverInProgress = false }
+        defer { alarmPreviousQueue = nil; alarmRolloverSwitching = false; alarmRolloverInProgress = false }
         do {
             // Cancel/join old generation work while microphone PCM continues to
             // arrive. No model health probe or permission dialog occurs at split.
             try await parkSavedProcessing()
+            #if DEBUG
+            if AppRuntimeEnvironment.isUnitTesting { alarmPreparationParkedForTesting?() }
+            #endif
             try validateLifecycleCompletion(revision)
             guard sessionID == priorID, generation == epoch, isRecording,
                   !alarmStopRequested, !preparingApplicationExit else { throw CancellationError() }
@@ -1803,8 +1827,14 @@ final class AppModel: ObservableObject {
             let initialSnapshot = try await Task.detached { [initial] in
                 try SessionStore(directory: nextDirectory).save(initial)
             }.value
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch, isRecording,
+                  !alarmStopRequested, !preparingApplicationExit else { throw CancellationError() }
             let nextEpoch = generation + 1
             alarmPreviousQueue = pipeline.alarmQueueForArchive
+            // Preparation can still be paused; the short writer-switch/binding
+            // interval keeps Stop available but must not change capture state.
+            alarmRolloverSwitching = true
             let result = try await pipeline.rolloverForAlarm(
                 recordingURL: nextDirectory.appendingPathComponent(SessionWorkspace.recordingFileName),
                 sessionID: nextID) { [weak self] event in
@@ -1814,6 +1844,8 @@ final class AppModel: ObservableObject {
                     }
                 }
             boundary = result
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch else { throw CancellationError() }
             alarmSwitchMilliseconds = result.switchMilliseconds
             // The old queue is parked, so its immutable terminal ranges can be
             // bound to the old snapshot even though capture already writes new PCM.
@@ -1835,43 +1867,64 @@ final class AppModel: ObservableObject {
                 sessionSnapshot = snapshot
             }
             stopElapsedClock()
-            activeStorageMode = nil; activeInputMode = nil
-            phase = .saved(previousDirectory)
             try await flushSessionArchive()
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch else { throw CancellationError() }
+            let archiveDirectory = try await finalizeSessionDirectoryIfNeeded(resumeAfterMigration: false,
+                parkedQueue: result.previousQueue)
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch else { throw CancellationError() }
             let captions = segments, notes = lectureSummary, legacy = summaryIsLegacyRendered
             let evidence = notesScheduleEvidence, converter = chineseScriptConverter
             try await Task.detached {
-                try SessionExporter.export(segments: captions, sessionDirectory: previousDirectory,
+                try SessionExporter.export(segments: captions, sessionDirectory: archiveDirectory,
                     summary: notes, target: target, summaryIsLegacyRendered: legacy,
                     summaryEvidence: evidence, converter: converter)
             }.value
-            // This reset never deletes saved content; old work was parked above.
-            guard resetSessionStateForNewRun(allowAlarmBindingDuringExit: true) else { throw AppError.sessionDirectoryMissing }
+            #if DEBUG
+            if AppRuntimeEnvironment.isUnitTesting { try await alarmBeforeBindingForTesting?() }
+            #endif
+            try validateLifecycleCompletion(revision)
+            guard sessionID == priorID, generation == epoch else { throw CancellationError() }
+            try retireRecordingRecovery(session: priorID)
+            // This dedicated transition preserves the exit lease, does no
+            // temporary cleanup, and cannot wait on its own tracked task.
+            try resetSessionStateForAlarmRollover(previousSession: priorID, previousGeneration: epoch, revision: revision)
             sessionID = nextID; outputLanguage = target
             sessionDirectory = nextDirectory; currentCaptureStart = result.nextCaptureStart
             activeStorageMode = .saveSession; activeInputMode = .microphone
             var capturedSnapshot = initialSnapshot
             capturedSnapshot.captureStart = result.nextCaptureStart
             bindSessionArchive(to: nextDirectory, restored: capturedSnapshot)
-            try await flushSessionArchive()
-            guard pipeline.alarmCaptureIsActive else { throw SpeechPipeline.PipelineError.noActiveSession }
             phase = .recording; beginElapsedClock()
+            try await flushSessionArchive()
+            try validateLifecycleCompletion(revision)
+            guard sessionID == nextID, generation == nextEpoch, pipeline.alarmCaptureIsActive,
+                  pipeline.transcriptionState()?.sessionID == nextID else { throw SpeechPipeline.PipelineError.noActiveSession }
             processingPaused = false
             try pipeline.resumeTranscription()
             audioInputStatus = "麦克风已接入"
             alarmBanner = AlarmBannerState(saved: true)
-            if !preparingApplicationExit { retainAlarmSavedCourse(previousDirectory, queue: result.previousQueue) }
+            if !preparingApplicationExit { retainAlarmSavedCourse(archiveDirectory, queue: result.previousQueue) }
             if result.queueFinalizationFailed {
                 await stopSession(failure: "分段后的转写状态保存失败；前后两段录音均已保留。")
             } else if alarmStopRequested || preparingApplicationExit { await stopSession() }
         } catch {
+            // An obsolete rollover can retain its files but must never stop or
+            // rewrite a pipeline that has since been rebound by another owner.
+            guard (sessionID == priorID && generation == epoch) || (sessionID == nextID && generation == epoch + 1) else { return }
+            let captureID = pipeline.transcriptionState()?.sessionID
+            guard captureID == priorID || captureID == nextID else { return }
             // Preparation failure keeps writing the first course. A committed
             // boundary failure keeps *both* trees and closes the new writer;
             // neither recording is removed or overwritten.
             if boundary != nil {
                 await pipeline.stopCapture(continueTranscribing: false)
                 phase = .failed("警报分段保存未完成；前后两段录音与课程文件均已保留。")
-            } else if isRecording {
+            } else if hasActiveSession, sessionID == priorID, generation == epoch, lifecycleRevision == revision {
+                // User pause may abort preparation after the ASR/translation
+                // queues were parked. Ordinary capture resume does not unpark
+                // them, so restore this course's processing even while paused.
                 processingPaused = false
                 try? pipeline.resumeTranscription()
                 restorePendingCaptionWork(); drainTranslationQueue()
@@ -1896,7 +1949,6 @@ final class AppModel: ObservableObject {
             scheduledNotes: scheduledNotesEnabled, defaults: preferences,
             chineseScriptConverter: chineseScriptConverter)
         saved.alarmForegroundModel = self
-        alarmArchivedModels.append(saved)
         let opening = Task { @MainActor [weak self] in
             do {
                 try await saved.openSavedSession(directory, allowAutomaticProcessing: false)
@@ -1905,11 +1957,37 @@ final class AppModel: ObservableObject {
                 self?.archiveNotice = "警报前课程已保留；后台整理可在打开该课程后继续。"
             }
         }
-        alarmArchivedOpenTasks.append(opening)
+        alarmArchivedCourses.append(.init(directory: SessionDirectoryLocation.canonical(directory),
+                                          model: saved, opening: opening))
+    }
+
+    /// Reopen uses one archive/journal writer. Remove the background owner from
+    /// scheduling before any await, join its opening and all work, then let the
+    /// caller read the latest committed snapshot and bind its foreground queue.
+    private func takeAlarmSavedCourse(_ directory: URL) async throws -> Bool? {
+        let canonical = SessionDirectoryLocation.canonical(directory)
+        guard let index = alarmArchivedCourses.firstIndex(where: { $0.directory == canonical }) else { return nil }
+        let course = alarmArchivedCourses.remove(at: index)
+        course.model.alarmForegroundModel = nil
+        await course.opening.value
+        let wasPaused = course.model.processingPaused
+        do { try await course.model.parkSavedProcessing() }
+        catch {
+            // Failed parking cannot authorize a second writer on this course.
+            course.model.alarmForegroundModel = self
+            alarmArchivedCourses.append(course)
+            throw error
+        }
+        if alarmArchivedCourses.isEmpty {
+            alarmArchivedProcessingTask?.cancel()
+            await alarmArchivedProcessingTask?.value
+            alarmArchivedProcessingTask = nil
+        }
+        return wasPaused
     }
 
     private func startAlarmSavedProcessingCoordinator() {
-        guard !preparingApplicationExit, alarmArchivedProcessingTask == nil else { return }
+        guard !preparingApplicationExit, !alarmArchivedCourses.isEmpty, alarmArchivedProcessingTask == nil else { return }
         alarmArchivedProcessingTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -1917,7 +1995,9 @@ final class AppModel: ObservableObject {
                 // The existing memory/latency gate must also allow concurrency.
                 let livePending = hasActiveSession && (captionWorkPending || hasCaptionBacklog
                     || (transcriptionProcessing?.pendingCount ?? 0) > 0 || summaryTask != nil || !summaryConcurrencyAllowed)
-                for saved in alarmArchivedModels {
+                for course in alarmArchivedCourses {
+                    let saved = course.model
+                    guard saved.alarmForegroundModel === self else { continue }
                     saved.summaryConcurrencyAllowed = summaryConcurrencyAllowed
                     saved.summaryMemoryPressureNormal = summaryMemoryPressureNormal
                     saved.runtimeResources = runtimeResources
@@ -1937,17 +2017,19 @@ final class AppModel: ObservableObject {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         activeInputMode = input; activeStorageMode = storage; isImportingFile = importing
     }
-    func beginAlarmMicrophoneCourseForTesting(directory: URL) async throws -> OwnedAudioCaptureBuffer {
+    func beginAlarmMicrophoneCourseForTesting(directory: URL, storage: SessionStorageMode = .saveSession) async throws -> OwnedAudioCaptureBuffer {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         guard resetSessionStateForNewRun() else { throw AppError.sessionDirectoryMissing }
         sessionDirectory = directory; outputDirectory = directory.deletingLastPathComponent()
-        activeInputMode = .microphone; activeStorageMode = .saveSession; currentCaptureStart = .now()
-        bindSessionArchive(to: directory)
-        try await flushSessionArchive()
+        activeInputMode = .microphone; activeStorageMode = storage; currentCaptureStart = .now()
+        if storage == .saveSession {
+            bindSessionArchive(to: directory)
+            try await flushSessionArchive()
+        } else { temporarySessionDirectory = directory }
         let epoch = generation
         let input = try await pipeline.startSyntheticCapture(format: MediaFileImport.storageFormat,
             recordingURL: directory.appendingPathComponent(SessionWorkspace.recordingFileName),
-            sessionID: sessionID, inputMode: .microphone) { [weak self] event in
+            sessionID: sessionID, persistsSession: storage.persistsSession, inputMode: .microphone) { [weak self] event in
                 Task { @MainActor in
                     guard let self, self.generation == epoch else { return }
                     self.consume(event)
@@ -1968,21 +2050,25 @@ final class AppModel: ObservableObject {
     func presentAlarmBannerForTesting(_ state: AlarmBannerState) { alarmBanner = state }
     func retireAlarmTasksForTesting() async {
         clearAlarmReminder()
-        for opening in alarmArchivedOpenTasks { await opening.value }
-        alarmArchivedOpenTasks.removeAll()
+        for course in alarmArchivedCourses { await course.opening.value }
         alarmArchivedProcessingTask?.cancel()
         await alarmArchivedProcessingTask?.value
         alarmArchivedProcessingTask = nil
-        for saved in alarmArchivedModels {
+        for course in alarmArchivedCourses {
+            let saved = course.model
             try? await saved.parkSavedProcessing()
             await saved.noteReviewQueue.shutdownForTesting()
         }
-        alarmArchivedModels.removeAll()
+        alarmArchivedCourses.removeAll()
+    }
+    var alarmArchivedModelsForTesting: [AppModel] { alarmArchivedCourses.map(\.model) }
+    func waitForAlarmArchivesForTesting() async {
+        for course in alarmArchivedCourses { await course.opening.value }
     }
     #endif
 
     func start() {
-        guard !preparingApplicationExit, !phase.isBusy, !archiveLoading, !isImportingFile,
+        guard !sessionSwitchBlocked, !isImportingFile,
               sessionStartTask == nil else { return }
         guard admitLifecycleRetry() else { return }
         phase = .preparing
@@ -2014,7 +2100,7 @@ final class AppModel: ObservableObject {
     /// 选择本地音频/视频文件并走与实时录音相同的转写、翻译、笔记与导出流程。
     /// 不上传任何内容，也不改动源文件；导入需要先选定保存目录。
     func chooseAndImportMediaFile() {
-        guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
+        guard !sessionSwitchBlocked, !isImportingFile else { return }
         let panel = NSOpenPanel()
         panel.title = "导入本地音频或视频"
         panel.prompt = "导入"
@@ -2048,14 +2134,14 @@ final class AppModel: ObservableObject {
     }
 
     private func importMediaFile(_ fileURL: URL) async {
-        guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
+        guard !sessionSwitchBlocked, !isImportingFile else { return }
         #if LIVELINGO_PREVIEW
         do { try PreviewDataIsolation.requireCourseDirectory(fileURL) }
         catch { archiveError = error.localizedDescription; return }
         #endif
         guard admitLifecycleRetry() else { return }
         if outputDirectory == nil { await chooseOutputDirectory() }
-        guard !phase.isBusy, !isImportingFile, !archiveLoading else { return }
+        guard !sessionSwitchBlocked, !isImportingFile else { return }
         guard let outputDirectory else { return }
         let previousPhase = phase
         phase = .preparing
@@ -2385,11 +2471,10 @@ final class AppModel: ObservableObject {
                 || (temporarySessionDirectory != nil && sessionSaver == nil)
             do {
                 try await waitForLifecycle { await alarmRollover?.value }
-                for opening in alarmArchivedOpenTasks { try await waitForLifecycle { await opening.value } }
-                alarmArchivedOpenTasks.removeAll()
+                for course in alarmArchivedCourses { try await waitForLifecycle { await course.opening.value } }
                 try await waitForLifecycle { [self] in await alarmArchivedProcessingTask?.value }
                 alarmArchivedProcessingTask = nil
-                for archived in alarmArchivedModels { try await archived.parkSavedProcessing() }
+                for course in alarmArchivedCourses { try await course.model.parkSavedProcessing() }
                 try await waitForLifecycle { [self] in
                     await finalization?.value
                     while finalizationInProgress {
@@ -2571,14 +2656,14 @@ final class AppModel: ObservableObject {
     }
 
     func pause() {
-        guard isRecording else { return }
+        guard isRecording, !alarmRolloverSwitching else { return }
         pipeline.pause()
         pauseElapsedClock()
         phase = .paused
     }
 
     func resume() {
-        guard isPaused else { return }
+        guard isPaused, !alarmRolloverSwitching else { return }
         do {
             try pipeline.resume()
             resumeElapsedClock()
@@ -2687,7 +2772,9 @@ final class AppModel: ObservableObject {
         snapshot.processing.pendingSegmentIDs = segments.filter { !$0.hasUsableTranslation }.map(\.id)
         snapshot.processing.pendingBatchIDs = learningDraft.map { [$0.id] } ?? []
         snapshot.processing.pendingCaptionRepairs = pendingCaptionRepairs.isEmpty ? nil : pendingCaptionRepairs
-        if isRecording || isPaused { snapshot.processing.phase = .capturing }
+        if alarmRolloverInProgress, alarmPreviousQueue?.state?.sessionID == sessionID,
+           pipeline.transcriptionState()?.sessionID != sessionID { snapshot.processing.phase = .paused }
+        else if isRecording || isPaused { snapshot.processing.phase = .capturing }
         else if processingPaused { snapshot.processing.phase = .paused }
         else if phase == .stopping || processingTask != nil || (transcriptionProcessing?.pendingCount ?? 0) > 0 {
             snapshot.processing.phase = .draining
@@ -2810,7 +2897,7 @@ final class AppModel: ObservableObject {
     }
 
     func chooseSavedSession() {
-        guard !isTerminating, !phase.isBusy, !archiveLoading else { return }
+        guard !isTerminating, !sessionSwitchBlocked else { return }
         let panel = NSOpenPanel()
         panel.title = "打开已保存课程"
         panel.prompt = "打开课程"
@@ -2839,13 +2926,18 @@ final class AppModel: ObservableObject {
     /// Only the explicit CLI reopen path calls this overload with the opt-in.
     private func openSavedSession(_ directory: URL, allowAutomaticProcessing: Bool,
                                   allowUnreleasedChineseOutput: Bool) async throws {
+        // Secure report readers reject a symlink at the leaf. Resolve aliases
+        // while retaining the caller's URL directory formatting.
+        let directory = URL(fileURLWithPath: directory.standardizedFileURL.resolvingSymlinksInPath().path,
+                            isDirectory: directory.hasDirectoryPath)
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireCourseDirectory(directory)
         #endif
-        guard !phase.isBusy, !archiveLoading else { return }
+        guard !sessionSwitchBlocked else { return }
         guard admitLifecycleRetry() else { throw ExitDeadlineExceeded() }
         archiveLoading = true
         defer { archiveLoading = false }
+        let alarmPriorPaused = try await takeAlarmSavedCourse(directory)
         let store = SessionStore(directory: directory)
         var loaded = try await Task.detached { try store.loadDetailed() }.value
         guard var snapshot = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
@@ -2854,7 +2946,7 @@ final class AppModel: ObservableObject {
         try validateSavedOutputLanguage(restoredLanguage, allowUnreleasedChineseOutput: allowUnreleasedChineseOutput)
         let sameDirectory = sessionDirectory.map(SessionDirectoryLocation.canonical)
             == SessionDirectoryLocation.canonical(directory)
-        let priorPaused = sameDirectory ? processingPaused : snapshot.processing.paused
+        let priorPaused = sameDirectory ? processingPaused : alarmPriorPaused ?? snapshot.processing.paused
         try await parkSavedProcessing()
         if sameDirectory {
             loaded = try await Task.detached { try store.loadDetailed() }.value
@@ -3023,8 +3115,8 @@ final class AppModel: ObservableObject {
 
     /// 开始任意一次"课堂会话"前的状态重置：实时录音与文件导入共用。
     @discardableResult
-    private func resetSessionStateForNewRun(allowAlarmBindingDuringExit: Bool = false) -> Bool {
-        guard (!preparingApplicationExit || (allowAlarmBindingDuringExit && alarmRolloverInProgress)), !finalizationInProgress, sessionFinalizationTask == nil,
+    private func resetSessionStateForNewRun() -> Bool {
+        guard !preparingApplicationExit, !alarmRolloverInProgress, !finalizationInProgress, sessionFinalizationTask == nil,
               applicationExitDeadline?.hasPendingOperations != true else {
             archiveError = "前一次停止仍有任务未结束，内容与文件已保留，新课堂未开始。"
             return false
@@ -3047,6 +3139,21 @@ final class AppModel: ObservableObject {
         }
         applicationExitDeadline = nil
         lifecycleRevision = UUID()
+        clearSessionPresentationForNewRun()
+        return true
+    }
+
+    private func resetSessionStateForAlarmRollover(previousSession: UUID, previousGeneration: Int, revision: UUID) throws {
+        try validateLifecycleCompletion(revision)
+        guard alarmRolloverInProgress, alarmRolloverSwitching, sessionID == previousSession, generation == previousGeneration,
+              !finalizationInProgress, sessionFinalizationTask == nil,
+              processingPauseTask == nil, translationWorker == nil, summaryTask == nil, processingTask == nil else {
+            throw CancellationError()
+        }
+        clearSessionPresentationForNewRun()
+    }
+
+    private func clearSessionPresentationForNewRun() {
         if chineseDisplayOverride != nil {
             chineseDisplayOverride = nil
             prepareChineseDisplay()
@@ -3106,7 +3213,6 @@ final class AppModel: ObservableObject {
         translationWorker = nil
         cancelSummaryTask()
         resetElapsedClock()
-        return true
     }
 
     private func startSession() async {
@@ -5585,12 +5691,14 @@ final class AppModel: ObservableObject {
         await stopSession(failure: message)
     }
 
-    private func finalizeSessionDirectoryIfNeeded(resumeAfterMigration: Bool = true) async throws -> URL {
+    private func finalizeSessionDirectoryIfNeeded(resumeAfterMigration: Bool = true,
+                                                parkedQueue: DurableTranscriptionQueue? = nil) async throws -> URL {
         let revision = lifecycleRevision
         try validateLifecycleCompletion(revision)
         if let temporarySessionDirectory {
             guard let outputDirectory else { throw AppError.outputDirectoryMissing }
-            try await pauseTranscriptionForLifecycle()
+            if let parkedQueue { try await waitForLifecycle { try await parkedQueue.pause() } }
+            else { try await pauseTranscriptionForLifecycle() }
             let translation = translationWorker
             translation?.cancel()
             let summary = summaryTask

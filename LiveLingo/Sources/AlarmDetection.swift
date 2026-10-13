@@ -7,10 +7,10 @@ import SoundAnalysis
 enum AlarmPolicy {
     static let windowSeconds: TimeInterval = 3
     static let overlap = 0.5
-    static let historySeconds: TimeInterval = 6
+    static let historySeconds: TimeInterval = 9
     static let confidenceThreshold = 0.5
     static let requiredWindows = 3
-    static let minimumHitSpan: TimeInterval = 3
+    static let minimumHitSpan: TimeInterval = 6
     static let cooldownSeconds: TimeInterval = 180
     static let countdownSeconds = 30
     static let postAlarmFolderSuffix = " · 警报后"
@@ -42,12 +42,17 @@ struct AlarmTriggerRule: Sendable {
     mutating func observe(_ observation: AlarmSoundObservation, now: TimeInterval) -> Bool {
         guard observation.start.isFinite, observation.end.isFinite, observation.score.isFinite,
               now.isFinite, observation.start >= 0, observation.end > observation.start,
-              observation.score >= 0, observation.score <= 1, observation.end > lastEnd else { return false }
+              observation.score >= 0, observation.score <= 1, observation.end > lastEnd,
+              abs(observation.end - observation.start - AlarmPolicy.windowSeconds) < 0.01 else { return false }
         if observation.end - lastEnd > AlarmPolicy.windowSeconds { windows.removeAll() }
         lastEnd = observation.end
         guard !isPresented, now >= nextAllowedAt else { windows.removeAll(); return false }
+        // The classifier still advances every 1.5 seconds, but overlapping
+        // results cannot vote twice for the same PCM. Count three independent
+        // 3-second windows (9 seconds), including misses in that fixed cadence.
+        guard windows.last.map({ observation.start >= $0.end - 0.001 }) ?? true else { return false }
         windows.append(observation)
-        windows.removeAll { $0.end < observation.end - AlarmPolicy.historySeconds }
+        windows.removeAll { $0.start < observation.end - AlarmPolicy.historySeconds - 0.001 }
         let hits = windows.filter { $0.score >= AlarmPolicy.confidenceThreshold }
         guard hits.count >= AlarmPolicy.requiredWindows,
               let first = hits.first, let last = hits.last,
@@ -180,8 +185,17 @@ struct AlarmBannerState: Equatable, Sendable {
     var detail: String {
         if let failure { return failure }
         if saving { return "正在保存本节，录音继续。" }
-        if let secondsRemaining { return "\(secondsRemaining) 秒后保存本节，并另开新录音继续" }
+        if secondsRemaining != nil { return "倒计时结束后保存本节，并另开新录音继续。" }
         return liveOnly ? "实时暂存模式：只提醒，不自动保存或分段。" : "录音继续保留，请按现场指示行动。"
     }
-    var buttonTitle: String { secondsRemaining == nil ? "知道了" : "取消" }
+    var canCancelSegmentation: Bool { secondsRemaining != nil && !saved && !saving }
+    var buttonTitle: String {
+        if canCancelSegmentation, let secondsRemaining { return "取消（\(secondsRemaining)）" }
+        return "知道了"
+    }
+    var buttonDetail: String { canCancelSegmentation ? "不分段 · Esc" : "关闭提醒 · Esc" }
+    var accessibilityHint: String {
+        canCancelSegmentation ? "取消自动分段并关闭提醒，录音继续；字幕窗或 LiveLingo 获得键盘焦点时可按 Esc"
+            : "关闭提醒，录音继续；字幕窗或 LiveLingo 获得键盘焦点时可按 Esc"
+    }
 }

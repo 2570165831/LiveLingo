@@ -78,11 +78,116 @@ final class AlarmPresentationTests: XCTestCase {
     func testBannerTextsIncludeCountdownCancellationAndSavedConfirmation() {
         let warning = AlarmBannerState(secondsRemaining: 30)
         XCTAssertEqual(warning.title, AlarmPolicy.title)
-        XCTAssertEqual(warning.detail, "30 秒后保存本节，并另开新录音继续")
-        XCTAssertEqual(warning.buttonTitle, "取消")
+        XCTAssertEqual(warning.detail, "倒计时结束后保存本节，并另开新录音继续。")
+        XCTAssertEqual(warning.buttonTitle, "取消（30）")
+        XCTAssertEqual(AlarmBannerState(secondsRemaining: 28).buttonTitle, "取消（28）")
+        XCTAssertEqual(warning.buttonDetail, "不分段 · Esc")
+        XCTAssertEqual(AlarmBannerState(secondsRemaining: 0, saved: true).buttonTitle, "知道了")
+        XCTAssertEqual(AlarmBannerState(secondsRemaining: 0, saving: true).buttonTitle, "知道了")
         XCTAssertEqual(AlarmBannerState(saved: true).title, AlarmPolicy.savedTitle)
         XCTAssertEqual(AlarmBannerState(liveOnly: true).buttonTitle, "知道了")
         XCTAssertTrue(AlarmBannerState(liveOnly: true).detail.contains("不自动保存"))
+    }
+    func testLockedSubtitleBannerAcceptsClickAndKeyboardFocusThenRestoresClickThrough() async throws {
+        let (model, defaults, _) = try fixture()
+        let controller = FloatingSubtitleWindowController(defaults: defaults)
+        let panel = controller.prepareWindow(model: model)
+        defer { controller.shutdown() }
+        controller.toggleLock()
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        model.presentAlarmBannerForTesting(.init(secondsRemaining: 28))
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertTrue(controller.isLocked)
+        XCTAssertFalse(panel.ignoresMouseEvents)
+        XCTAssertFalse(panel.becomesKeyOnlyIfNeeded)
+        XCTAssertTrue(panel.canBecomeKey)
+        // Preference changes during a reminder must retain its temporary policy.
+        controller.updateSettings(showsAcrossSpaces: false, backgroundOpacity: 0.7)
+        XCTAssertFalse(panel.ignoresMouseEvents)
+        model.dismissAlarmReminder()
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertTrue(controller.isLocked)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        XCTAssertTrue(panel.becomesKeyOnlyIfNeeded)
+        XCTAssertFalse(panel.isVisible)
+    }
+    func testBottomSubtitleExpansionKeepsWholeSubtitleAreaOnItsOwnScreen() async throws {
+        let (model, defaults, _) = try fixture()
+        let visible = NSRect(x: -1920, y: -1000, width: 1920, height: 900)
+        let screens = FloatingSubtitleWindowScreens(windowVisibleFrame: { _ in visible },
+            mainVisibleFrame: { visible }, firstVisibleFrame: { visible })
+        let controller = FloatingSubtitleWindowController(defaults: defaults, screens: screens)
+        let panel = controller.prepareWindow(model: model)
+        defer { controller.shutdown() }
+        controller.moveToScreenBottom()
+        let original = panel.frame
+        model.presentAlarmBannerForTesting(.init(secondsRemaining: 28))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertGreaterThan(panel.frame.height, original.height)
+        XCTAssertEqual(panel.frame.minY, original.minY, accuracy: 1)
+        XCTAssertTrue(visible.contains(panel.frame), "Both the banner and subtitles must stay above the Dock")
+        XCTAssertFalse(panel.isVisible)
+        model.presentAlarmBannerForTesting(.init(saved: true))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(visible.contains(panel.frame))
+        model.dismissAlarmReminder()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(panel.frame.height, original.height, accuracy: 1)
+        XCTAssertEqual(panel.frame.minY, original.minY, accuracy: 1)
+    }
+    func testNotificationsOnlyWhenSubtitlesBecomeHiddenAndOnlyOncePerReminder() throws {
+        let (model, defaults, _) = try fixture()
+        let center = NotificationCenter()
+        let controller = FloatingSubtitleWindowController(defaults: defaults, notificationCenter: center)
+        let panel = controller.prepareWindow(model: model)
+        panel.alphaValue = 0
+        let presenter = AlarmReminderPresenter()
+        defer { presenter.hide(); controller.shutdown() }
+        var bodies: [String] = []
+        presenter.requestNotificationForTesting = { bodies.append($0) }
+        controller.show(model: model)
+        presenter.show(dismiss: {}, announce: false, subtitles: controller)
+        XCTAssertTrue(bodies.isEmpty, "Visible subtitles must not send system alerts")
+        controller.hide()
+        XCTAssertEqual(bodies, [AlarmPolicy.notification])
+        controller.show(model: model)
+        controller.hide()
+        XCTAssertEqual(bodies.count, 1)
+        presenter.hide()
+        presenter.show(dismiss: {}, announce: false, subtitles: controller)
+        XCTAssertEqual(bodies.count, 2, "A new reminder may notify while already hidden")
+        presenter.hide()
+        controller.show(model: model)
+        presenter.show(dismiss: {}, announce: false, subtitles: controller)
+        center.post(name: NSApplication.didHideNotification, object: NSApplication.shared)
+        XCTAssertFalse(controller.isVisible)
+        XCTAssertEqual(bodies.count, 3, "App hiding counts as hidden subtitles")
+        center.post(name: NSApplication.didUnhideNotification, object: NSApplication.shared)
+        XCTAssertTrue(controller.isVisible)
+        controller.windowDidMiniaturize(Notification(name: NSWindow.didMiniaturizeNotification, object: panel))
+        XCTAssertFalse(controller.isVisible)
+        XCTAssertEqual(bodies.count, 3)
+    }
+    func testEscapeCancelsOnlyLocalWindowEventsAndStopsAfterHide() throws {
+        let presenter = AlarmReminderPresenter()
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 640, height: 200),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { presenter.hide(); window.close() }
+        var cancelled = 0
+        presenter.show(dismiss: { cancelled += 1 }, notifications: false, announce: false)
+        func event(code: UInt16, number: Int) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: number, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                isARepeat: false, keyCode: code))
+        }
+        XCTAssertFalse(presenter.handleEscape(try event(code: 53, number: 0)))
+        XCTAssertFalse(presenter.handleEscape(try event(code: 0, number: window.windowNumber)))
+        XCTAssertTrue(presenter.handleEscape(try event(code: 53, number: window.windowNumber)))
+        XCTAssertEqual(cancelled, 1)
+        presenter.hide()
+        XCTAssertFalse(presenter.handleEscape(try event(code: 53, number: window.windowNumber)))
+        XCTAssertEqual(cancelled, 1)
     }
     func testMainAndFloatingBannersLightDarkAndReducedMotionScreenshots() async throws {
         let (model, defaults, _) = try fixture()
@@ -92,7 +197,7 @@ final class AlarmPresentationTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for dark in [false, true] {
             for reduced in [false, true] {
-                model.presentAlarmBannerForTesting(AlarmBannerState(secondsRemaining: 30))
+                model.presentAlarmBannerForTesting(AlarmBannerState(secondsRemaining: 28))
                 let style = (dark ? "dark" : "light") + (reduced ? "-reduced" : "-breathing")
                 let main = AnyView(ContentView().environmentObject(model).defaultAppStorage(defaults)
                     .environment(\.colorScheme, dark ? .dark : .light))
@@ -100,14 +205,18 @@ final class AlarmPresentationTests: XCTestCase {
                     border: reduced, directory: directory, name: "alarm-main-" + style)
                 let floating = AnyView(FloatingSubtitleView(windowController: controller).environmentObject(model)
                     .defaultAppStorage(defaults).environment(\.colorScheme, .dark))
-                try await capture(floating, size: NSSize(width: 670, height: 425), dark: true,
+                let floatingSize = NSHostingView(rootView: floating).fittingSize
+                try await capture(floating, size: floatingSize, dark: true,
                     border: nil, directory: directory, name: "alarm-floating-" + style)
             }
         }
         model.presentAlarmBannerForTesting(AlarmBannerState(saved: true))
         try await capture(AnyView(AlarmBanner(state: model.alarmBanner!, dismiss: {})),
-            size: NSSize(width: 1050, height: 100), dark: false, border: nil,
+            size: NSSize(width: 1050, height: 160), dark: false, border: nil,
             directory: directory, name: "alarm-saved-banner")
+        try await capture(AnyView(ClassroomSettingsView().environmentObject(model).defaultAppStorage(defaults)),
+            size: NSSize(width: 860, height: 900), dark: false, border: nil,
+            directory: directory, name: "alarm-reminder-settings")
     }
     private func capture(_ rootView: AnyView, size: NSSize, dark: Bool, border: Bool?,
                          directory: URL, name: String) async throws {

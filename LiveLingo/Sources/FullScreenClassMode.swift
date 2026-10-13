@@ -468,6 +468,8 @@ struct FullScreenRecordingState: Equatable {
     var isPaused = false
     var actionTitle = "开始记录"
     var canToggle = false
+    var pauseAllowed: Bool? = nil
+    var canPause: Bool { pauseAllowed ?? hasActiveSession }
 }
 
 @MainActor
@@ -480,7 +482,7 @@ struct FullScreenRecordingCommands {
         Self(state: {
             FullScreenRecordingState(hasActiveSession: model.hasActiveSession, isPaused: model.isPaused,
                                      actionTitle: model.hasActiveSession ? model.stopRecordingTitle : "开始记录",
-                                     canToggle: model.canToggleRecording)
+                                     canToggle: model.canToggleRecording, pauseAllowed: model.canPauseRecording)
         }, toggle: { model.toggleRecording() }, togglePause: { model.togglePause() })
     }
 }
@@ -876,7 +878,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         item(for: .moveSubtitlesToBottom)?.title = "悬浮字幕移到屏幕底部"
         item(for: .moveSubtitlesToTop)?.title = "悬浮字幕移到屏幕顶部"
         item(for: .togglePause)?.title = state.isPaused ? "继续记录" : "暂停记录"
-        item(for: .togglePause)?.isEnabled = state.hasActiveSession
+        item(for: .togglePause)?.isEnabled = state.canPause
         item(for: .toggleRecording)?.title = state.actionTitle
         item(for: .toggleRecording)?.isEnabled = state.canToggle
         item(for: .disableMode)?.title = actionTitle
@@ -919,7 +921,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
             subtitles.moveToScreenTop()
             if let model { subtitles.show(model: model) }
         case .togglePause:
-            if recording.state().hasActiveSession { recording.togglePause() }
+            if recording.state().canPause { recording.togglePause() }
         case .toggleRecording:
             if recording.state().canToggle { recording.toggle() }
         case .disableMode: toggle()
