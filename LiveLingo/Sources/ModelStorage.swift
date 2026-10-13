@@ -78,13 +78,43 @@ enum ModelStorage {
         case system(Int32)
     }
     enum Verification: String, Codable, Sendable { case sampledPrecloneV1, fullSHA256 }
-    enum Outcome: String, Sendable { case cloned, alreadyPresent }
+    enum Outcome: String, Sendable { case cloned, alreadyPresent, refreshed, repaired }
+    /// Content versions survive reinstalling the App; source inodes do not.
+    /// This is conservative provenance, not a physical-extent measurement or
+    /// an authentication claim based on a writable receipt.
+    struct FileIdentity: Codable, Equatable {
+        let device: Int32
+        let inode: UInt64
+        let size: Int64
+        let birthSeconds: Int64
+        let birthNanoseconds: Int64
+        let modifiedSeconds: Int64
+        let modifiedNanoseconds: Int64
+        let changedSeconds: Int64
+        let changedNanoseconds: Int64
+        init(_ info: stat) {
+            device = info.st_dev; inode = info.st_ino; size = info.st_size
+            birthSeconds = Int64(info.st_birthtimespec.tv_sec)
+            birthNanoseconds = Int64(info.st_birthtimespec.tv_nsec)
+            modifiedSeconds = Int64(info.st_mtimespec.tv_sec)
+            modifiedNanoseconds = Int64(info.st_mtimespec.tv_nsec)
+            changedSeconds = Int64(info.st_ctimespec.tv_sec)
+            changedNanoseconds = Int64(info.st_ctimespec.tv_nsec)
+        }
+        func sameDataObject(as other: Self) -> Bool {
+            device == other.device && inode == other.inode && size == other.size
+                && birthSeconds == other.birthSeconds && birthNanoseconds == other.birthNanoseconds
+                && modifiedSeconds == other.modifiedSeconds && modifiedNanoseconds == other.modifiedNanoseconds
+        }
+    }
     struct Receipt: Codable, Equatable {
         let schemaVersion: Int
         let model: String
         let version: String
         let manifestSHA256: String
         let verification: Verification
+        var sourceFiles: [String: FileIdentity]? = nil
+        var clonedFiles: [String: FileIdentity]? = nil
         func belongs(to model: ModelStorageManifest.Model) -> Bool {
             schemaVersion == 1 && self.model == model.name && version == model.version
                 && ModelStorageManifest.digest(manifestSHA256) && verification == .sampledPrecloneV1
@@ -178,6 +208,38 @@ enum ModelStorage {
             try FileHandle(fileDescriptor: opened, closeOnDealloc: false).write(contentsOf: JSONEncoder().encode(value))
             guard fsync(opened) == 0, fsync(fd) == 0 else { throw Failure.system(errno) }
         }
+        func receiptSnapshot() throws -> (Receipt, stat) {
+            let opened = try file(receiptName)
+            defer { _ = Darwin.close(opened) }
+            var before = stat(), after = stat()
+            guard fstat(opened, &before) == 0, before.st_uid == getuid(), before.st_size <= 16 << 20 else {
+                throw Failure.unsafePath
+            }
+            let data = try FileHandle(fileDescriptor: opened, closeOnDealloc: false).readToEnd() ?? Data()
+            guard fstat(opened, &after) == 0, sameSnapshot(before, after) else { throw Failure.unsafePath }
+            return (try JSONDecoder().decode(Receipt.self, from: data), after)
+        }
+        func replaceStagingReceipt(_ value: Receipt) throws {
+            let (original, info) = try receiptSnapshot()
+            guard original.schemaVersion == value.schemaVersion, original.model == value.model,
+                  original.version == value.version, original.manifestSHA256 == value.manifestSHA256,
+                  original.verification == value.verification else { throw Failure.mismatch }
+            let temporary = ".receipt-" + UUID().uuidString
+            let opened = try file(temporary, create: true)
+            defer { _ = Darwin.close(opened) }
+            try FileHandle(fileDescriptor: opened, closeOnDealloc: false).write(contentsOf: JSONEncoder().encode(value))
+            var current = stat()
+            guard fsync(opened) == 0, fstatat(fd, receiptName, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                  sameSnapshot(info, current) else { throw Failure.unsafePath }
+            guard renameatx_np(fd, temporary, fd, receiptName, UInt32(RENAME_SWAP)) == 0 else { throw Failure.system(errno) }
+            // Only the staging marker we just exchanged is released, never an
+            // arbitrary path or a marker from the old committed model.
+            guard fstatat(fd, temporary, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                  current.st_dev == info.st_dev, current.st_ino == info.st_ino,
+                  current.st_mode & S_IFMT == S_IFREG, current.st_nlink == 1,
+                  current.st_uid == getuid() else { throw Failure.unsafePath }
+            guard unlinkat(fd, temporary, 0) == 0, fsync(fd) == 0 else { throw Failure.system(errno) }
+        }
         func matches(_ child: Directory, name: String) throws -> Bool {
             var linked = stat()
             let opened = try child.status()
@@ -189,6 +251,18 @@ enum ModelStorage {
             guard try matches(child, name: from) else { throw Failure.unsafePath }
             guard renameatx_np(fd, from, fd, to, UInt32(RENAME_EXCL)) == 0 else { throw Failure.system(errno) }
             guard try matches(child, name: to), fsync(fd) == 0 else { throw Failure.unsafePath }
+        }
+        func exchange(_ staging: Directory, named stagingName: String,
+                      with committed: Directory, named version: String) throws {
+            guard try matches(staging, name: stagingName), try matches(committed, name: version) else {
+                throw Failure.unsafePath
+            }
+            // The old version stays published until this single atomic swap.
+            guard renameatx_np(fd, stagingName, fd, version, UInt32(RENAME_SWAP)) == 0 else {
+                throw Failure.system(errno)
+            }
+            guard try matches(staging, name: version), try matches(committed, name: stagingName),
+                  fsync(fd) == 0 else { throw Failure.unsafePath }
         }
         func names() throws -> [String] {
             let duplicate = dup(fd)
@@ -219,6 +293,138 @@ enum ModelStorage {
             }
         }
         var checkpoint: () throws -> Void = { try Task.checkCancellation() }
+        var excludeFromBackup: (Int32) throws -> Void = { fd in
+            // The on-disk backing for NSURLIsExcludedFromBackupKey. Use the
+            // opened directory, so replacing its URL cannot mark a neighbor.
+            let data = try PropertyListSerialization.data(fromPropertyList: "com.apple.backupd", format: .binary, options: 0)
+            try data.withUnsafeBytes { bytes in
+                guard fsetxattr(fd, "com.apple.metadata:com_apple_backup_excludeItem", bytes.baseAddress,
+                               bytes.count, 0, 0) == 0 else { throw Failure.system(errno) }
+            }
+        }
+    }
+
+    static func sourceIdentities(_ model: ModelStorageManifest.Model, at source: Directory,
+                                 checkpoint: () throws -> Void = {},
+                                 verification: Verification? = nil) throws -> [String: FileIdentity] {
+        var result: [String: FileIdentity] = [:]
+        for file in model.files {
+            try checkpoint()
+            let parts = file.path.split(separator: "/").map(String.init)
+            var parent = source
+            for part in parts.dropLast() { parent = try parent.child(part, create: false, owned: false) }
+            let opened = try parent.file(parts.last!)
+            defer { _ = Darwin.close(opened) }
+            var info = stat()
+            guard fstat(opened, &info) == 0, info.st_size == file.size else { throw Failure.mismatch }
+            if let verification { info = try verifyFile(file, fd: opened, verification: verification, checkpoint: checkpoint) }
+            result[file.path] = FileIdentity(info)
+        }
+        return result
+    }
+
+    /// Release only a recognized, same-version, regenerable cache whose whole
+    /// tree contains inventory paths and our receipt. Preflight the entire tree
+    /// before unlinking anything. Unknown entries/links/receipts stay retained.
+    /// This is used only while 0.3.0 loaders still read the bundled models.
+    static func releaseCache(_ model: ModelStorageManifest.Model, parent: Directory,
+                             name: String, checkpoint: () throws -> Void) throws -> Bool {
+        let directory = try parent.child(name, create: false)
+        let cacheDevice = try directory.status().st_dev
+        guard try parent.status().st_dev == cacheDevice else { return false }
+        guard let (receipt, receiptInfo) = try? directory.receiptSnapshot(),
+              receipt.belongs(to: model) else { return false }
+        let payloadPaths = Set(model.files.map(\.path))
+        var allowed: Set<String> = [receiptName]
+        for file in model.files {
+            var path = file.path
+            while !path.isEmpty {
+                allowed.insert(path)
+                path = (path as NSString).deletingLastPathComponent
+            }
+        }
+        var files: [(Directory, String, stat)] = []
+        var directories: [(Directory, String, Directory)] = []
+        func plan(_ current: Directory, prefix: String) throws -> Bool {
+            for entry in try current.names() {
+                try checkpoint()
+                guard allowed.contains(prefix + entry) else { return false }
+                var info = stat()
+                guard fstatat(current.fd, entry, &info, AT_SYMLINK_NOFOLLOW) == 0 else { throw Failure.system(errno) }
+                guard info.st_uid == getuid(), info.st_dev == cacheDevice else { return false }
+                if info.st_mode & S_IFMT == S_IFDIR {
+                    guard !payloadPaths.contains(prefix + entry), prefix + entry != receiptName else { return false }
+                    let child = try current.child(entry, create: false)
+                    guard try plan(child, prefix: prefix + entry + "/") else { return false }
+                    directories.append((current, entry, child))
+                } else {
+                    guard payloadPaths.contains(prefix + entry) || prefix + entry == receiptName,
+                          info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1 else { return false }
+                    files.append((current, entry, info))
+                }
+            }
+            return true
+        }
+        guard try plan(directory, prefix: "") else { return false }
+        // Keep the ownership marker until the payload has been released, so
+        // capture interruption/crash can resume cleanup on a later idle launch.
+        func unlink(_ owner: Directory, _ entry: String, _ original: stat) throws {
+            try checkpoint()
+            guard try parent.matches(directory, name: name) else { throw Failure.unsafePath }
+            var boundReceipt = stat()
+            guard fstatat(directory.fd, receiptName, &boundReceipt, AT_SYMLINK_NOFOLLOW) == 0,
+                  sameSnapshot(receiptInfo, boundReceipt) else { throw Failure.unsafePath }
+            for (ancestor, component, child) in directories where owner.fd != directory.fd {
+                // Payload removals happen before any directory removal.
+                guard try ancestor.matches(child, name: component) else { throw Failure.unsafePath }
+            }
+            var current = stat()
+            guard fstatat(owner.fd, entry, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                  sameSnapshot(original, current) else { throw Failure.unsafePath }
+            guard unlinkat(owner.fd, entry, 0) == 0 else { throw Failure.system(errno) }
+        }
+        let marker = files.filter { $0.0.fd == directory.fd && $0.1 == receiptName }
+        guard marker.count == 1, sameSnapshot(receiptInfo, marker[0].2) else { return false }
+        for (owner, entry, original) in files where !(owner.fd == directory.fd && entry == receiptName) {
+            try unlink(owner, entry, original)
+        }
+        for (index, item) in directories.enumerated() {
+            let (owner, entry, child) = item
+            try checkpoint()
+            guard try parent.matches(directory, name: name), try owner.matches(child, name: entry) else {
+                throw Failure.unsafePath
+            }
+            var boundReceipt = stat()
+            guard fstatat(directory.fd, receiptName, &boundReceipt, AT_SYMLINK_NOFOLLOW) == 0,
+                  sameSnapshot(receiptInfo, boundReceipt) else { throw Failure.unsafePath }
+            for (ancestor, component, descendant) in directories.dropFirst(index) {
+                guard try ancestor.matches(descendant, name: component) else { throw Failure.unsafePath }
+            }
+            guard unlinkat(owner.fd, entry, AT_REMOVEDIR) == 0 else { throw Failure.system(errno) }
+        }
+        try unlink(marker[0].0, marker[0].1, marker[0].2)
+        try checkpoint()
+        guard try parent.matches(directory, name: name) else { throw Failure.unsafePath }
+        guard unlinkat(parent.fd, name, AT_REMOVEDIR) == 0, fsync(parent.fd) == 0 else { throw Failure.system(errno) }
+        return true
+    }
+
+    static func releaseRetainedCaches(_ model: ModelStorageManifest.Model, root: Directory, parent: Directory,
+                                      destinationModels: URL, checkpoint: () throws -> Void) throws {
+        let prefix = ".retained-" + model.version + "-"
+        for name in try parent.names() where name.hasPrefix(prefix) {
+            try checkpoint()
+            try root.assertBound(to: destinationModels)
+            guard try root.matches(parent, name: model.name) else { throw Failure.unsafePath }
+            guard UUID(uuidString: String(name.dropFirst(prefix.count))) != nil,
+                  (try? parent.child(name, create: false)) != nil else { continue }
+            let released = try releaseCache(model, parent: parent, name: name, checkpoint: {
+                try checkpoint()
+                try root.assertBound(to: destinationModels)
+                guard try root.matches(parent, name: model.name) else { throw Failure.unsafePath }
+            })
+            if !released { log.notice("model=\(model.name, privacy: .public) cache=retained_unknown_entries") }
+        }
     }
 
     static func sameSnapshot(_ before: stat, _ after: stat) -> Bool {
@@ -320,8 +526,20 @@ enum ModelStorage {
         try operations.checkpoint()
         let sourceRoot = try Directory.open(bundledModels, owned: false)
         let source = try sourceRoot.descendant(model.sourceRelativePath, create: false, owned: false)
+        let sourceFiles = try sourceIdentities(model, at: source, checkpoint: operations.checkpoint)
         try SensitiveFileIO.prepareDirectory(destinationModels)
         let root = try Directory.open(destinationModels, owned: true)
+        try root.assertBound(to: destinationModels)
+        try operations.excludeFromBackup(root.fd)
+        try root.assertBound(to: destinationModels)
+        // Read the actual resource state with a fresh URL, without carrying
+        // the caller's cached resource values into verification.
+        var backupURL = URL(fileURLWithPath: destinationModels.path, isDirectory: true)
+        backupURL.removeAllCachedResourceValues()
+        guard try backupURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true else {
+            throw Failure.mismatch
+        }
+        try root.assertBound(to: destinationModels)
         let parent = try root.child(model.name, create: true)
         let lock = openat(parent.fd, ".preclone-lock", O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
         guard lock >= 0 else { throw Failure.system(errno) }
@@ -332,8 +550,8 @@ enum ModelStorage {
         guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { throw Failure.busy }
         let receipt = Receipt(schemaVersion: 1, model: model.name, version: model.version,
                               manifestSHA256: manifestSHA256, verification: .sampledPrecloneV1)
-        // Retire only our marked incomplete directories, by renaming them. No
-        // recursive deletion, Trash operation, or arbitrary residual cleanup.
+        // Retire only marked incomplete directories. Release safe same-version
+        // cache trees only after a verified replacement is available.
         let partialPrefix = ".partial-" + model.version + "-"
         for name in try parent.names() where name.hasPrefix(partialPrefix) {
             try operations.checkpoint()
@@ -343,24 +561,50 @@ enum ModelStorage {
                   let marker = try? JSONDecoder().decode(Receipt.self, from: data), marker.belongs(to: model) else { continue }
             try parent.move(candidate, from: name, to: ".retained-" + model.version + "-" + UUID().uuidString)
         }
+        var previous: Directory?
+        var previousReceipt: stat?
+        var outcome: Outcome = .cloned
         var existing = stat()
         if fstatat(parent.fd, model.version, &existing, AT_SYMLINK_NOFOLLOW) == 0 {
             let committed = try parent.child(model.version, create: false)
-            let stored = try JSONDecoder().decode(Receipt.self, from: committed.read(receiptName))
-            guard stored.belongs(to: model) else { throw Failure.mismatch }
-            try verify(model, at: committed, verification: .sampledPrecloneV1, checkpoint: operations.checkpoint)
+            let marker = try? committed.receiptSnapshot()
+            let stored = marker?.0
+            let recognized = stored?.belongs(to: model) == true
+            var damaged = !recognized
+            if recognized {
+                previousReceipt = marker?.1
+                do {
+                    try verify(model, at: committed, verification: .sampledPrecloneV1, checkpoint: operations.checkpoint)
+                } catch Failure.mismatch { damaged = true }
+                catch Failure.unsafePath { damaged = true }
+                catch Failure.system(let code) where [ENOENT, ELOOP, ENOTDIR].contains(code) { damaged = true }
+            }
             try root.assertBound(to: destinationModels)
             guard try root.matches(parent, name: model.name), try parent.matches(committed, name: model.version) else {
                 throw Failure.unsafePath
             }
-            return .alreadyPresent
+            if !damaged, stored?.sourceFiles == sourceFiles,
+               try stored?.clonedFiles == sourceIdentities(model, at: committed, checkpoint: operations.checkpoint) {
+                try releaseRetainedCaches(model, root: root, parent: parent, destinationModels: destinationModels,
+                                          checkpoint: operations.checkpoint)
+                return .alreadyPresent
+            }
+            previous = committed
+            outcome = damaged ? .repaired : .refreshed
+        } else {
+            guard errno == ENOENT else { throw Failure.system(errno) }
         }
-        guard errno == ENOENT else { throw Failure.system(errno) }
         guard try source.status().st_dev == parent.status().st_dev else { throw Failure.system(EXDEV) }
+        if previous != nil {
+            // A bad current bundle must never authorize replacing a cache.
+            guard try sourceIdentities(model, at: source, checkpoint: operations.checkpoint,
+                                       verification: .sampledPrecloneV1) == sourceFiles else { throw Failure.unsafePath }
+        }
         try operations.checkpoint()
         let partialName = partialPrefix + UUID().uuidString
         let staging = try parent.child(partialName, create: true)
         try staging.writeReceipt(receipt)
+        var clonedSourceFiles: [String: FileIdentity] = [:]
         for file in model.files {
             try operations.checkpoint()
             let parts = file.path.split(separator: "/").map(String.init)
@@ -373,23 +617,79 @@ enum ModelStorage {
             defer { _ = Darwin.close(opened) }
             var info = stat()
             guard fstat(opened, &info) == 0, info.st_size == file.size else { throw Failure.mismatch }
+            guard FileIdentity(info) == sourceFiles[file.path] else { throw Failure.unsafePath }
             try operations.clone(opened, targetParent.fd, parts.last!)
+            var after = stat()
+            guard fstat(opened, &after) == 0,
+                  FileIdentity(info).sameDataObject(as: FileIdentity(after)) else { throw Failure.unsafePath }
+            // A clone operation may change source metadata (ctime). Record its
+            // completed identity, and reject any later change before publish.
+            clonedSourceFiles[file.path] = FileIdentity(after)
             let cloned = try targetParent.file(parts.last!)
             defer { _ = Darwin.close(cloned) }
             guard fchmod(cloned, 0o600) == 0 else { throw Failure.system(errno) }
         }
+        var completedReceipt = receipt
+        completedReceipt.sourceFiles = clonedSourceFiles
+        completedReceipt.clonedFiles = try sourceIdentities(model, at: staging, checkpoint: operations.checkpoint)
+        try staging.replaceStagingReceipt(completedReceipt)
         try verify(model, at: staging, verification: .sampledPrecloneV1, checkpoint: operations.checkpoint)
         try operations.checkpoint()
+        let currentSourceRoot = try Directory.open(bundledModels, owned: false)
+        let currentSource = try currentSourceRoot.descendant(model.sourceRelativePath, create: false, owned: false)
+        let originalSource = try source.status(), reopenedSource = try currentSource.status()
+        guard originalSource.st_dev == reopenedSource.st_dev, originalSource.st_ino == reopenedSource.st_ino,
+              try sourceIdentities(model, at: currentSource, checkpoint: operations.checkpoint) == clonedSourceFiles else {
+            throw Failure.unsafePath
+        }
         guard fsync(staging.fd) == 0 else { throw Failure.system(errno) }
         try root.assertBound(to: destinationModels)
         guard try root.matches(parent, name: model.name) else { throw Failure.unsafePath }
-        try parent.move(staging, from: partialName, to: model.version)
+        if let previous {
+            if let previousReceipt {
+                let (marker, current) = try previous.receiptSnapshot()
+                guard marker.belongs(to: model), sameSnapshot(previousReceipt, current) else { throw Failure.unsafePath }
+            }
+            // A missing/unknown marker permits repair by preserving the old
+            // tree, never by declaring it disposable cache.
+            try operations.checkpoint()
+            try root.assertBound(to: destinationModels)
+            guard try root.matches(parent, name: model.name) else { throw Failure.unsafePath }
+            try parent.exchange(staging, named: partialName, with: previous, named: model.version)
+            try parent.move(previous, from: partialName, to: ".retained-" + model.version + "-" + UUID().uuidString)
+        } else {
+            try operations.checkpoint()
+            try root.assertBound(to: destinationModels)
+            guard try root.matches(parent, name: model.name) else { throw Failure.unsafePath }
+            try parent.move(staging, from: partialName, to: model.version)
+        }
         try operations.checkpoint()
         try root.assertBound(to: destinationModels)
         guard try root.matches(parent, name: model.name), try parent.matches(staging, name: model.version) else {
             throw Failure.unsafePath
         }
-        return .cloned
+        try releaseRetainedCaches(model, root: root, parent: parent, destinationModels: destinationModels,
+                                  checkpoint: operations.checkpoint)
+        return outcome
+    }
+
+    /// A bad model must not starve later entries. Capture deferral/cancellation
+    /// stops the batch immediately; ordinary failures are reported per model.
+    static func precloneAll(_ models: [ModelStorageManifest.Model], manifestSHA256: String,
+                            bundledModels: URL, destinationModels: URL, operations: Operations = Operations(),
+                            report: (String, Result<Outcome, Error>) -> Void) -> Bool {
+        for model in models {
+            do {
+                try operations.checkpoint()
+                let result = try preclone(model, manifestSHA256: manifestSHA256,
+                    bundledModels: bundledModels, destinationModels: destinationModels, operations: operations)
+                report(model.name, .success(result))
+            } catch {
+                report(model.name, .failure(error))
+                if diagnostic(error) == "deferred" { return true }
+            }
+        }
+        return false
     }
 }
 
@@ -452,14 +752,17 @@ final class ModelPrecloneController {
                     let inventory = try ModelStorageManifest.decode(data)
                     let root = try destination()
                     let manifestDigest = ModelStorage.sha256(data)
-                    for model in inventory.models {
-                        try gate.checkpoint()
-                        let result = try ModelStorage.preclone(model, manifestSHA256: manifestDigest,
-                            bundledModels: resources.appendingPathComponent("Models"), destinationModels: root,
-                            operations: .init(checkpoint: { try gate.checkpoint() }))
-                        ModelStorage.log.info("model=\(model.name, privacy: .public) result=\(result.rawValue, privacy: .public)")
+                    return ModelStorage.precloneAll(inventory.models, manifestSHA256: manifestDigest,
+                        bundledModels: resources.appendingPathComponent("Models"), destinationModels: root,
+                        operations: .init(checkpoint: { try gate.checkpoint() })) { name, result in
+                        switch result {
+                        case .success(let outcome):
+                            ModelStorage.log.info("model=\(name, privacy: .public) result=\(outcome.rawValue, privacy: .public)")
+                        case .failure(let error):
+                            let code = ModelStorage.diagnostic(error)
+                            ModelStorage.log.notice("model=\(name, privacy: .public) preclone=\(code, privacy: .public)")
+                        }
                     }
-                    return false
                 } catch {
                     let code = ModelStorage.diagnostic(error)
                     ModelStorage.log.notice("preclone=\(code, privacy: .public)")

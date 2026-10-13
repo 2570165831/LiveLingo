@@ -148,7 +148,16 @@ final class ModelStorageTests: XCTestCase {
         }
         let marker = try JSONDecoder().decode(ModelStorage.Receipt.self,
             from: Data(contentsOf: fixture.committed.appendingPathComponent(ModelStorage.receiptName)))
-        XCTAssertEqual(marker, fixture.receipt, file: file, line: line)
+        XCTAssertEqual(baseReceipt(marker), fixture.receipt, file: file, line: line)
+        XCTAssertNotNil(marker.sourceFiles, file: file, line: line)
+        XCTAssertNotNil(marker.clonedFiles, file: file, line: line)
+    }
+
+    private func baseReceipt(_ receipt: ModelStorage.Receipt) -> ModelStorage.Receipt {
+        var value = receipt
+        value.sourceFiles = nil
+        value.clonedFiles = nil
+        return value
     }
 
     private func assertNoCommit(_ fixture: Fixture, file: StaticString = #filePath, line: UInt = #line) {
@@ -317,6 +326,325 @@ final class ModelStorageTests: XCTestCase {
         XCTAssertEqual(try fixture.partials(), [])
     }
 
+    private func reinstalledBundle(_ fixture: Fixture) throws -> URL {
+        let bundled = fixture.root.appendingPathComponent("ReinstalledBundledModels", isDirectory: true)
+        let source = bundled.appendingPathComponent(fixture.model.sourceRelativePath, isDirectory: true)
+        for (path, bytes) in fixture.contents {
+            let file = source.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // An ordinary write deliberately creates independent source inodes.
+            try bytes.write(to: file)
+        }
+        return bundled
+    }
+
+    private func refresh(_ fixture: Fixture, from bundled: URL,
+                         operations: ModelStorage.Operations = .init()) throws -> ModelStorage.Outcome {
+        try ModelStorage.preclone(fixture.model, manifestSHA256: fixture.manifestDigest,
+            bundledModels: bundled, destinationModels: fixture.destination, operations: operations)
+    }
+
+    func testReinstallSameContentRefreshesAtomicallyAndReleasesOldCache() throws {
+        let fixture = try Fixture("reinstalled-source")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        let bundled = try reinstalledBundle(fixture)
+        var before = stat()
+        XCTAssertEqual(lstat(fixture.committed.path, &before), 0)
+        let native = ModelStorage.Operations().clone
+        var calls = 0
+        var operations = ModelStorage.Operations()
+        operations.clone = { source, parent, name in
+            var published = stat()
+            XCTAssertEqual(lstat(fixture.committed.path, &published), 0)
+            XCTAssertEqual(published.st_ino, before.st_ino, "Old cache remains published until all new files verify")
+            for (path, bytes) in fixture.contents {
+                XCTAssertEqual(try Data(contentsOf: fixture.committed.appendingPathComponent(path)), bytes)
+            }
+            try native(source, parent, name)
+            calls += 1
+        }
+        XCTAssertEqual(try refresh(fixture, from: bundled, operations: operations).rawValue, "refreshed")
+        XCTAssertEqual(calls, fixture.model.files.count)
+        var after = stat()
+        XCTAssertEqual(lstat(fixture.committed.path, &after), 0)
+        XCTAssertNotEqual(before.st_ino, after.st_ino)
+        XCTAssertEqual(try fixture.retained(), [])
+        XCTAssertEqual(try fixture.partials(), [])
+        let marker = try JSONDecoder().decode(ModelStorage.Receipt.self,
+            from: Data(contentsOf: fixture.committed.appendingPathComponent(ModelStorage.receiptName)))
+        let source = try ModelStorage.Directory.open(bundled.appendingPathComponent(fixture.model.sourceRelativePath), owned: false)
+        XCTAssertEqual(marker.sourceFiles, try ModelStorage.sourceIdentities(fixture.model, at: source))
+        var repeatOperations = ModelStorage.Operations()
+        repeatOperations.clone = { _, _, _ in XCTFail("The refreshed cache must be reused on the next launch") }
+        XCTAssertEqual(try refresh(fixture, from: bundled, operations: repeatOperations), .alreadyPresent)
+        try assertOriginal(fixture)
+    }
+
+    func testReplacingSourceFileWithinSameBundleRefreshesSameVersion() throws {
+        let fixture = try Fixture("replaced-source-file")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        let file = fixture.source.appendingPathComponent(fixture.contents[0].0)
+        let preserved = fixture.root.appendingPathComponent("preserved-original-source.json")
+        try FileManager.default.moveItem(at: file, to: preserved)
+        try fixture.contents[0].1.write(to: file)
+        XCTAssertEqual(try fixture.preclone().rawValue, "refreshed")
+        XCTAssertEqual(try fixture.retained(), [])
+        try assertCommitted(fixture)
+        XCTAssertEqual(try Data(contentsOf: preserved), fixture.contents[0].1)
+    }
+
+    func testInPlaceSourceOverwriteWithRestoredMtimeRefreshesSameVersion() throws {
+        let fixture = try Fixture("in-place-source-reinstall")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        let file = fixture.source.appendingPathComponent(fixture.contents[0].0)
+        let opened = Darwin.open(file.path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+        guard opened >= 0 else { throw ModelStorage.Failure.system(errno) }
+        defer { _ = Darwin.close(opened) }
+        var before = stat(), after = stat()
+        XCTAssertEqual(fstat(opened, &before), 0)
+        let bytes = fixture.contents[0].1
+        XCTAssertEqual(bytes.withUnsafeBytes { pwrite(opened, $0.baseAddress, $0.count, 0) }, bytes.count)
+        let timestamps = [before.st_atimespec, before.st_mtimespec]
+        XCTAssertEqual(timestamps.withUnsafeBufferPointer { futimens(opened, $0.baseAddress) }, 0)
+        XCTAssertEqual(fstat(opened, &after), 0)
+        XCTAssertEqual(before.st_ino, after.st_ino)
+        XCTAssertEqual(before.st_mtimespec.tv_sec, after.st_mtimespec.tv_sec)
+        XCTAssertEqual(before.st_mtimespec.tv_nsec, after.st_mtimespec.tv_nsec)
+        XCTAssertNotEqual(ModelStorage.FileIdentity(before), ModelStorage.FileIdentity(after))
+        XCTAssertEqual(try fixture.preclone().rawValue, "refreshed")
+        XCTAssertEqual(try fixture.retained(), [])
+        try assertCommitted(fixture)
+    }
+
+    func testCopiedCacheFileWithPreservedReceiptRefreshesSameVersion() throws {
+        let fixture = try Fixture("copied-cache-file")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        let path = fixture.contents[0].0
+        let target = fixture.committed.appendingPathComponent(path)
+        let preserved = fixture.root.appendingPathComponent("preserved-original-clone.json")
+        try FileManager.default.moveItem(at: target, to: preserved)
+        try fixture.contents[0].1.write(to: target)
+        XCTAssertEqual(try fixture.preclone().rawValue, "refreshed")
+        XCTAssertEqual(try fixture.retained(), [])
+        XCTAssertEqual(try Data(contentsOf: preserved), fixture.contents[0].1)
+        try assertCommitted(fixture)
+    }
+
+    func testLegacyReceiptWithoutSourceIdentityRefreshesOnce() throws {
+        let fixture = try Fixture("legacy-provenance")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        var marker = fixture.receipt
+        marker.sourceFiles = nil
+        try JSONEncoder().encode(marker).write(to: fixture.committed.appendingPathComponent(ModelStorage.receiptName))
+        XCTAssertEqual(try fixture.preclone().rawValue, "refreshed")
+        XCTAssertEqual(try fixture.preclone(), .alreadyPresent)
+        XCTAssertEqual(try fixture.retained(), [])
+        try assertCommitted(fixture)
+    }
+
+    func testRefreshCloneFailureLeavesPublishedOldVersionIntact() throws {
+        let fixture = try Fixture("refresh-failure")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        let bundled = try reinstalledBundle(fixture)
+        let marker = try Data(contentsOf: fixture.committed.appendingPathComponent(ModelStorage.receiptName))
+        var before = stat()
+        XCTAssertEqual(lstat(fixture.committed.path, &before), 0)
+        var operations = ModelStorage.Operations()
+        operations.clone = { _, _, _ in throw ModelStorage.Failure.system(ENOSPC) }
+        assertFailure(.system(ENOSPC)) { _ = try refresh(fixture, from: bundled, operations: operations) }
+        var after = stat()
+        XCTAssertEqual(lstat(fixture.committed.path, &after), 0)
+        XCTAssertEqual(before.st_ino, after.st_ino)
+        XCTAssertEqual(try Data(contentsOf: fixture.committed.appendingPathComponent(ModelStorage.receiptName)), marker)
+        XCTAssertEqual(try fixture.retained(), [])
+        XCTAssertEqual(try fixture.partials().count, 1)
+        try assertCommitted(fixture)
+    }
+
+    func testRefreshDefersDuringCloneAndIdleRetryReleasesOldAndPartialCaches() throws {
+        let fixture = try Fixture("refresh-capture-deferral")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        let bundled = try reinstalledBundle(fixture)
+        let marker = try Data(contentsOf: fixture.committed.appendingPathComponent(ModelStorage.receiptName))
+        let gate = ModelPrecloneGate()
+        gate.setBlocked(false)
+        let native = ModelStorage.Operations().clone
+        var operations = ModelStorage.Operations()
+        operations.checkpoint = { try gate.checkpoint() }
+        operations.clone = { source, parent, name in
+            try native(source, parent, name)
+            gate.setBlocked(true)
+        }
+        assertFailure(.deferred) { _ = try refresh(fixture, from: bundled, operations: operations) }
+        XCTAssertEqual(try Data(contentsOf: fixture.committed.appendingPathComponent(ModelStorage.receiptName)), marker)
+        gate.setBlocked(false)
+        operations.clone = native
+        XCTAssertEqual(try refresh(fixture, from: bundled, operations: operations).rawValue, "refreshed")
+        XCTAssertEqual(try fixture.partials(), [])
+        XCTAssertEqual(try fixture.retained(), [])
+    }
+
+    private func backupMarker(_ url: URL) throws -> String? {
+        let directory = try ModelStorage.Directory.open(url, owned: true)
+        let name = "com.apple.metadata:com_apple_backup_excludeItem"
+        let count = fgetxattr(directory.fd, name, nil, 0, 0, 0)
+        if count < 0, errno == ENOATTR { return nil }
+        guard count > 0, count <= 1 << 20 else { throw ModelStorage.Failure.system(errno) }
+        var data = Data(count: count)
+        let read = data.withUnsafeMutableBytes { fgetxattr(directory.fd, name, $0.baseAddress, $0.count, 0, 0) }
+        guard read == count else { throw ModelStorage.Failure.system(errno) }
+        return try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? String
+    }
+
+    func testBackupExclusionIsSetForNewAndExistingCacheRoots() async throws {
+        let fixture = try Fixture("backup-exclusion")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        // The temporary parent is already excluded by macOS. Require our
+        // explicit on-disk marker too, so the original implementation is red.
+        XCTAssertEqual(try backupMarker(fixture.destination), "com.apple.backupd")
+        XCTAssertEqual(try fixture.destination.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        let root = fixture.destination
+        let opened = try ModelStorage.Directory.open(root, owned: true)
+        // Simulate a legacy root with no exclusion marker synchronously.
+        // Foundation's false setter keeps removing the attribute later and
+        // would race the repair rather than establish a stable precondition.
+        XCTAssertEqual(fremovexattr(opened.fd, "com.apple.metadata:com_apple_backup_excludeItem", 0), 0)
+        XCTAssertNil(try backupMarker(root))
+        XCTAssertEqual(try fixture.preclone(), .alreadyPresent)
+        // Require persistence beyond the immediate readback as well.
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(try backupMarker(root), "com.apple.backupd")
+        var reread = URL(fileURLWithPath: root.path, isDirectory: true)
+        reread.removeAllCachedResourceValues()
+        XCTAssertEqual(try reread.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+    }
+
+    func testBackupExclusionFailureStopsBeforeCreatingModelPayload() throws {
+        let fixture = try Fixture("backup-exclusion-failure")
+        var operations = ModelStorage.Operations()
+        operations.excludeFromBackup = { _ in throw ModelStorage.Failure.system(EACCES) }
+        operations.clone = { _, _, _ in XCTFail("Backup exclusion is mandatory before cloning") }
+        assertFailure(.system(EACCES)) { _ = try fixture.preclone(operations: operations) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.parent.path))
+    }
+
+    func testBackupExclusionUsesOpenedRootWhenDestinationIsReplaced() throws {
+        let fixture = try Fixture("backup-root-replaced")
+        let preserved = fixture.root.appendingPathComponent("preserved-cache-root", isDirectory: true)
+        let canary = Data("synthetic neighbor must stay included".utf8)
+        let native = ModelStorage.Operations().excludeFromBackup
+        var neighborBefore: Bool?
+        var operations = ModelStorage.Operations()
+        operations.excludeFromBackup = { opened in
+            try FileManager.default.moveItem(at: fixture.destination, to: preserved)
+            try FileManager.default.createDirectory(at: fixture.destination, withIntermediateDirectories: false)
+            try canary.write(to: fixture.destination.appendingPathComponent("neighbor.bin"))
+            neighborBefore = try fixture.destination.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup
+            try native(opened)
+        }
+        assertFailure(.unsafePath) { _ = try fixture.preclone(operations: operations) }
+        var neighbor = fixture.destination
+        neighbor.removeAllCachedResourceValues()
+        XCTAssertEqual(try neighbor.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, neighborBefore)
+        XCTAssertEqual(try preserved.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        XCTAssertEqual(try backupMarker(preserved), "com.apple.backupd")
+        XCTAssertNil(try backupMarker(neighbor))
+        XCTAssertEqual(try Data(contentsOf: neighbor.appendingPathComponent("neighbor.bin")), canary)
+    }
+
+    func testCleanupDoesNotReleasePayloadWhenReceiptChangesDuringPreflight() throws {
+        let fixture = try Fixture("cleanup-marker-replaced")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        let parent = try ModelStorage.Directory.open(fixture.parent, owned: true)
+        let markerURL = fixture.committed.appendingPathComponent(ModelStorage.receiptName)
+        var injected = false
+        let released = try ModelStorage.releaseCache(fixture.model, parent: parent, name: fixture.model.version,
+            checkpoint: {
+                if !injected {
+                    try Data("unknown replacement marker".utf8).write(to: markerURL)
+                    injected = true
+                }
+            })
+        XCTAssertTrue(injected)
+        XCTAssertFalse(released)
+        for (path, bytes) in fixture.contents {
+            XCTAssertEqual(try Data(contentsOf: fixture.committed.appendingPathComponent(path)), bytes)
+        }
+        try assertOriginal(fixture)
+    }
+
+    func testRepeatedFailureOfFirstModelDoesNotStarveLaterModel() throws {
+        let fixture = try Fixture("independent-model-failure")
+        try fixture.requireAPFS()
+        let failed = changedModel(fixture.model, name: "FailedModel", source: "missing-source")
+        for expected in [ModelStorage.Outcome.cloned, .alreadyPresent] {
+            var visited: [String] = []
+            var success: ModelStorage.Outcome?
+            let deferred = ModelStorage.precloneAll([failed, fixture.model], manifestSHA256: fixture.manifestDigest,
+                bundledModels: fixture.bundled, destinationModels: fixture.destination) { name, result in
+                visited.append(name)
+                if name == failed.name {
+                    guard case .failure = result else { return XCTFail("Missing first source must fail") }
+                } else {
+                    success = try? result.get()
+                }
+            }
+            XCTAssertFalse(deferred)
+            XCTAssertEqual(visited, [failed.name, fixture.model.name])
+            XCTAssertEqual(success, expected)
+        }
+        try assertCommitted(fixture)
+    }
+
+    func testBatchCaptureDeferralStopsBeforeLaterModel() throws {
+        let fixture = try Fixture("batch-capture-deferral")
+        try fixture.requireAPFS()
+        let later = changedModel(fixture.model, name: "LaterModel", source: "later-source")
+        let gate = ModelPrecloneGate()
+        gate.setBlocked(false)
+        let native = ModelStorage.Operations().clone
+        var operations = ModelStorage.Operations()
+        operations.checkpoint = { try gate.checkpoint() }
+        operations.clone = { source, parent, name in
+            try native(source, parent, name)
+            gate.setBlocked(true)
+        }
+        var visited: [String] = []
+        XCTAssertTrue(ModelStorage.precloneAll([fixture.model, later], manifestSHA256: fixture.manifestDigest,
+            bundledModels: fixture.bundled, destinationModels: fixture.destination, operations: operations) { name, _ in visited.append(name) })
+        XCTAssertEqual(visited, [fixture.model.name])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.appendingPathComponent(later.name).path))
+    }
+
+    func testSourceReplacementDuringCloneCannotPublishStaleProvenance() throws {
+        let fixture = try Fixture("source-changed-during-clone")
+        try fixture.requireAPFS()
+        let native = ModelStorage.Operations().clone
+        var injected = false
+        var operations = ModelStorage.Operations()
+        operations.clone = { source, parent, name in
+            try native(source, parent, name)
+            if !injected {
+                let file = fixture.source.appendingPathComponent(fixture.contents[0].0)
+                try FileManager.default.moveItem(at: file, to: fixture.root.appendingPathComponent("preserved-source.json"))
+                try fixture.contents[0].1.write(to: file)
+                injected = true
+            }
+        }
+        assertFailure(.unsafePath) { _ = try fixture.preclone(operations: operations) }
+        XCTAssertTrue(injected)
+        assertNoCommit(fixture)
+    }
+
     func testChangedWholeManifestDigestReusesVersionAfterCurrentInventoryVerification() throws {
         let fixture = try Fixture("changed-whole-manifest")
         try fixture.requireAPFS()
@@ -385,7 +713,7 @@ final class ModelStorageTests: XCTestCase {
         try assertOriginal(fixture)
     }
 
-    func testInterruptedCheckpointRetainsPartialAndNextLaunchQuarantinesIt() throws {
+    func testInterruptedCheckpointRetainsPartialUntilVerifiedRetryThenReleasesIt() throws {
         let fixture = try Fixture("interrupt-and-relaunch")
         try fixture.requireAPFS()
         let native = ModelStorage.Operations().clone
@@ -398,20 +726,12 @@ final class ModelStorageTests: XCTestCase {
         assertNoCommit(fixture)
         let abandoned = try XCTUnwrap(try fixture.partials().only)
         let first = fixture.contents[0]
-        let marker = try Data(contentsOf: abandoned.appendingPathComponent(ModelStorage.receiptName))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: abandoned.appendingPathComponent(ModelStorage.receiptName).path))
         XCTAssertEqual(try Data(contentsOf: abandoned.appendingPathComponent(first.0)), first.1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: abandoned.appendingPathComponent(fixture.contents[1].0).path))
-        var originalIdentity = stat()
-        XCTAssertEqual(lstat(abandoned.path, &originalIdentity), 0)
         XCTAssertEqual(try fixture.preclone(), .cloned)
         XCTAssertFalse(FileManager.default.fileExists(atPath: abandoned.path))
-        let retained = try XCTUnwrap(try fixture.retained().only)
-        var retainedIdentity = stat()
-        XCTAssertEqual(lstat(retained.path, &retainedIdentity), 0)
-        XCTAssertEqual(originalIdentity.st_ino, retainedIdentity.st_ino)
-        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent(ModelStorage.receiptName)), marker)
-        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent(first.0)), first.1)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: retained.appendingPathComponent(fixture.contents[1].0).path))
+        XCTAssertEqual(try fixture.retained(), [])
         XCTAssertEqual(try fixture.partials(), [])
         try assertCommitted(fixture)
         try assertOriginal(fixture)
@@ -584,7 +904,7 @@ final class ModelStorageTests: XCTestCase {
         try assertOriginal(fixture)
     }
 
-    func testSourceSizeMismatchFailsBeforeCloneAndPreservesReceiptOnlyPartial() throws {
+    func testSourceSizeMismatchFailsBeforeCloneOrDestinationCreation() throws {
         for bytes in [Data(), Data("too-long-synthetic-model-data".utf8)] {
             let fixture = try Fixture("source-size", contents: [("weights.bin", Data([1, 2, 3]))])
             try bytes.write(to: fixture.source.appendingPathComponent("weights.bin"))
@@ -592,8 +912,7 @@ final class ModelStorageTests: XCTestCase {
             operations.clone = { _, _, _ in XCTFail("Wrong source size must fail before clone") }
             assertFailure(.mismatch) { _ = try fixture.preclone(operations: operations) }
             assertNoCommit(fixture)
-            let partial = try XCTUnwrap(try fixture.partials().only)
-            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: partial.path), [ModelStorage.receiptName])
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
             XCTAssertEqual(try Data(contentsOf: fixture.source.appendingPathComponent("weights.bin")), bytes)
         }
     }
@@ -684,7 +1003,7 @@ final class ModelStorageTests: XCTestCase {
         try assertOriginal(fixture)
     }
 
-    func testExistingDamagedFileOrUnexpectedEntryFailsWithoutReclone() throws {
+    func testExistingDamagedFileRepairsAndUnexpectedEntryIsRetained() throws {
         for unexpected in [false, true] {
             let fixture = try Fixture("existing-damage")
             try fixture.requireAPFS()
@@ -693,16 +1012,20 @@ final class ModelStorageTests: XCTestCase {
             let bytes = unexpected ? Data("preserve unexpected synthetic evidence".utf8)
                 : Data(repeating: 0xff, count: fixture.contents[0].1.count)
             try bytes.write(to: url)
-            var operations = ModelStorage.Operations()
-            operations.clone = { _, _, _ in XCTFail("An invalid existing version must not be replaced") }
-            assertFailure(.mismatch) { _ = try fixture.preclone(operations: operations) }
-            XCTAssertEqual(try Data(contentsOf: url), bytes)
+            XCTAssertEqual(try fixture.preclone(), .repaired)
+            try assertCommitted(fixture)
+            if unexpected {
+                let retained = try XCTUnwrap(try fixture.retained().only)
+                XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent("unexpected.bin")), bytes)
+            } else {
+                XCTAssertEqual(try fixture.retained(), [])
+            }
             XCTAssertEqual(try fixture.partials(), [])
             try assertOriginal(fixture)
         }
     }
 
-    func testExistingReceiptMismatchFailsWithoutOverwritingModel() throws {
+    func testExistingReceiptMismatchRepairsWhilePreservingUnknownOldTree() throws {
         let fixture = try Fixture("existing-receipt")
         try fixture.requireAPFS()
         XCTAssertEqual(try fixture.preclone(), .cloned)
@@ -711,12 +1034,54 @@ final class ModelStorageTests: XCTestCase {
         let bytes = try JSONEncoder().encode(wrong)
         let receiptURL = fixture.committed.appendingPathComponent(ModelStorage.receiptName)
         try bytes.write(to: receiptURL)
-        var operations = ModelStorage.Operations()
-        operations.clone = { _, _, _ in XCTFail("Receipt mismatch must not replace a version") }
-        assertFailure(.mismatch) { _ = try fixture.preclone(operations: operations) }
-        XCTAssertEqual(try Data(contentsOf: receiptURL), bytes)
-        for (path, original) in fixture.contents { XCTAssertEqual(try Data(contentsOf: fixture.committed.appendingPathComponent(path)), original) }
+        XCTAssertEqual(try fixture.preclone().rawValue, "repaired")
+        let retained = try XCTUnwrap(try fixture.retained().only)
+        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent(ModelStorage.receiptName)), bytes)
+        for (path, original) in fixture.contents { XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent(path)), original) }
+        try assertCommitted(fixture)
         XCTAssertEqual(try fixture.partials(), [])
+    }
+
+    func testMissingMalformedAndNewerVerificationReceiptsRepairWithoutDeletingOldTree() throws {
+        for kind in ["missing", "malformed", "newer"] {
+            let fixture = try Fixture("receipt-repair-" + kind)
+            try fixture.requireAPFS()
+            XCTAssertEqual(try fixture.preclone(), .cloned)
+            let markerURL = fixture.committed.appendingPathComponent(ModelStorage.receiptName)
+            if kind == "missing" {
+                try FileManager.default.moveItem(at: markerURL, to: fixture.root.appendingPathComponent("preserved-marker.json"))
+            } else if kind == "malformed" {
+                try Data("unknown non-JSON marker".utf8).write(to: markerURL)
+            } else {
+                var marker = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: markerURL)) as? [String: Any])
+                marker["verification"] = "futureVerification"
+                try JSONSerialization.data(withJSONObject: marker).write(to: markerURL)
+            }
+            let oldMarker = try? Data(contentsOf: markerURL)
+            XCTAssertEqual(try fixture.preclone().rawValue, "repaired")
+            let retained = try XCTUnwrap(try fixture.retained().only)
+            XCTAssertEqual(try? Data(contentsOf: retained.appendingPathComponent(ModelStorage.receiptName)), oldMarker)
+            for (path, bytes) in fixture.contents {
+                XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent(path)), bytes)
+            }
+            XCTAssertEqual(try fixture.preclone(), .alreadyPresent)
+            try assertCommitted(fixture)
+        }
+    }
+
+    func testNestedDirectoryReplacedByUnknownFileRepairsAndPreservesOldTree() throws {
+        let fixture = try Fixture("nested-type-repair")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        let nested = fixture.committed.appendingPathComponent("weights")
+        try FileManager.default.moveItem(at: nested, to: fixture.root.appendingPathComponent("preserved-weights"))
+        let unknown = Data("preserve unknown file at directory path".utf8)
+        try unknown.write(to: nested)
+        XCTAssertEqual(try fixture.preclone().rawValue, "repaired")
+        let retained = try XCTUnwrap(try fixture.retained().only)
+        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent("weights")), unknown)
+        try assertCommitted(fixture)
+        try assertOriginal(fixture)
     }
 
     func testSourceRootAndModelDirectorySymlinksAreRejectedBeforeClone() throws {
@@ -750,8 +1115,8 @@ final class ModelStorageTests: XCTestCase {
         assertNoCommit(fixture)
         try assertLink(link, target: neighbor)
         XCTAssertEqual(try Data(contentsOf: neighbor), bytes)
-        let partial = try XCTUnwrap(try fixture.partials().only)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: partial.appendingPathComponent("weights.bin").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path),
+                       "Source descriptors reject links before creating any cache directory")
     }
 
     func testSourceNestedDirectorySymlinkIsRejected() throws {
@@ -931,8 +1296,8 @@ final class ModelStorageTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: preservedParent.appendingPathComponent(fixture.model.version).path))
         let preservedStage = preservedParent.appendingPathComponent(try XCTUnwrap(stagedName), isDirectory: true)
         XCTAssertEqual(try Data(contentsOf: preservedStage.appendingPathComponent("weights.bin")), fixture.contents[0].1)
-        XCTAssertEqual(try JSONDecoder().decode(ModelStorage.Receipt.self,
-            from: Data(contentsOf: preservedStage.appendingPathComponent(ModelStorage.receiptName))), fixture.receipt)
+        XCTAssertEqual(baseReceipt(try JSONDecoder().decode(ModelStorage.Receipt.self,
+            from: Data(contentsOf: preservedStage.appendingPathComponent(ModelStorage.receiptName)))), fixture.receipt)
         try assertOriginal(fixture)
     }
 
@@ -967,8 +1332,8 @@ final class ModelStorageTests: XCTestCase {
         XCTAssertEqual(retainedIdentity.st_dev, originalIdentity.st_dev)
         XCTAssertEqual(retainedIdentity.st_ino, originalIdentity.st_ino)
         XCTAssertEqual(try Data(contentsOf: preservedVersion.appendingPathComponent("weights.bin")), fixture.contents[0].1)
-        XCTAssertEqual(try JSONDecoder().decode(ModelStorage.Receipt.self,
-            from: Data(contentsOf: preservedVersion.appendingPathComponent(ModelStorage.receiptName))), fixture.receipt)
+        XCTAssertEqual(baseReceipt(try JSONDecoder().decode(ModelStorage.Receipt.self,
+            from: Data(contentsOf: preservedVersion.appendingPathComponent(ModelStorage.receiptName)))), fixture.receipt)
         XCTAssertTrue(FileManager.default.fileExists(atPath: preservedParent.appendingPathComponent(".preclone-lock").path))
         try assertOriginal(fixture)
     }
@@ -997,7 +1362,7 @@ final class ModelStorageTests: XCTestCase {
         assertFailure(.deferred) { try gate.checkpoint() }
     }
 
-    func testRecordingGateDefersInFlightCloneAndIdleRetryPreservesPartial() throws {
+    func testRecordingGateDefersInFlightCloneAndIdleRetryReleasesOwnedPartial() throws {
         let fixture = try Fixture("recording-gate")
         try fixture.requireAPFS()
         let gate = ModelPrecloneGate()
@@ -1015,12 +1380,12 @@ final class ModelStorageTests: XCTestCase {
         XCTAssertEqual(calls, 1)
         assertNoCommit(fixture)
         let partial = try XCTUnwrap(try fixture.partials().only)
-        let original = try Data(contentsOf: partial.appendingPathComponent(fixture.contents[0].0))
+        XCTAssertEqual(try Data(contentsOf: partial.appendingPathComponent(fixture.contents[0].0)), fixture.contents[0].1)
         gate.setBlocked(ModelPrecloneController.blocksPreclone(.idle))
         operations.clone = native
         XCTAssertEqual(try fixture.preclone(operations: operations), .cloned)
-        let retained = try XCTUnwrap(try fixture.retained().only)
-        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent(fixture.contents[0].0)), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
+        XCTAssertEqual(try fixture.retained(), [])
         try assertCommitted(fixture)
         try assertOriginal(fixture)
     }
@@ -1042,8 +1407,8 @@ final class ModelStorageTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: oldPartial.appendingPathComponent("orphan.bin")), partialBytes)
         let secondVersion = first.parent.appendingPathComponent(second.model.version, isDirectory: true)
         XCTAssertEqual(try Data(contentsOf: secondVersion.appendingPathComponent("weights.bin")), second.contents[0].1)
-        XCTAssertEqual(try JSONDecoder().decode(ModelStorage.Receipt.self,
-            from: Data(contentsOf: secondVersion.appendingPathComponent(ModelStorage.receiptName))), second.receipt)
+        XCTAssertEqual(baseReceipt(try JSONDecoder().decode(ModelStorage.Receipt.self,
+            from: Data(contentsOf: secondVersion.appendingPathComponent(ModelStorage.receiptName)))), second.receipt)
         XCTAssertEqual(try first.retained(), [])
         try assertOriginal(first)
         try assertOriginal(second)
