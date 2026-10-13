@@ -311,7 +311,11 @@ final class CaptureHealthTests: XCTestCase, @unchecked Sendable {
         let f = try await start()
         let old = f.sources.latest
         f.clock.advance(0.1)
-        XCTAssertEqual(old.send(end: f.clock.now), .accepted) // deliberately not drained by the test
+        XCTAssertEqual(old.send(end: f.clock.now), .accepted)
+        // A delayed consumer observes the current clock. Settle this delivery
+        // before advancing virtual time so it cannot clear the later gap notice.
+        await old.buffer.drain()
+        await f.pipeline.drainSyntheticCaptureHealthEvents()
         await check(f, after: 2.99)
         XCTAssertTrue(f.events.notices.isEmpty)
         await check(f, after: 0.02)

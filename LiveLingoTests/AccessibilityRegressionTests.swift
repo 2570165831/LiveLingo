@@ -106,6 +106,44 @@ final class AccessibilityRegressionTests: XCTestCase {
         try XCTUnwrap(nodes(view).first { $0.id == id }, "Missing real AX element \(id)")
     }
 
+    func testAlarmCancelOccupiesBottomRowWithEqualSideMarginsAndActuallyDismisses() async throws {
+        for compact in [false, true] {
+            var dismissals = 0
+            let hosting = try await host(AlarmBanner(state: .init(secondsRemaining: 28),
+                dismiss: { dismissals += 1 }, compact: compact), width: 640, height: 220)
+            let banner = try node("alarm-banner", in: hosting.view)
+            let button = try node("alarm-dismiss", in: hosting.view)
+            XCTAssertTrue(button.strings.contains("取消（28）"))
+            XCTAssertGreaterThan(button.frame.width, banner.frame.width * 0.85)
+            XCTAssertGreaterThanOrEqual(button.frame.height, 40)
+            XCTAssertEqual(button.frame.minX - banner.frame.minX, banner.frame.maxX - button.frame.maxX, accuracy: 2)
+            XCTAssertGreaterThan(button.frame.minY, banner.frame.minY)
+            XCTAssertLessThan(button.frame.maxY, banner.frame.midY + 10, "The button belongs below the explanation")
+            let press = NSSelectorFromString("accessibilityPerformPress")
+            XCTAssertTrue(button.object.responds(to: press))
+            _ = button.object.perform(press)
+            XCTAssertEqual(dismissals, 1)
+            let window = try XCTUnwrap(hosting.view.window)
+            let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+            XCTAssertTrue(window.performKeyEquivalent(with: escape), "The production button must own the cancel shortcut")
+            XCTAssertEqual(dismissals, 2)
+            _ = try capture(hosting.view, compact ? "alarm-cancel-compact" : "alarm-cancel-main")
+        }
+    }
+
+    func testReminderSettingsGroupAndNotificationDisclosure() async throws {
+        let (model, defaults) = try fixture()
+        let hosting = try await host(ClassroomSettingsView().environmentObject(model).defaultAppStorage(defaults),
+            width: 860, height: 1200)
+        _ = try textNode("提醒", in: hosting.view)
+        let allText = nodes(hosting.view).flatMap(\.strings)
+        XCTAssertFalse(allText.contains("警报提醒"))
+        XCTAssertTrue(allText.contains(where: { $0.contains("字幕窗可见时不发系统通知") }))
+        XCTAssertTrue(allText.contains(where: { $0.contains("首次需要时由系统询问通知权限") }))
+    }
+
     private func textNode(_ text: String, in view: NSView) throws -> Node {
         try XCTUnwrap(nodes(view).first { $0.strings.contains(text) }, "Missing real AX text \(text)")
     }
