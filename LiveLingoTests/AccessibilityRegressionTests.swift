@@ -579,32 +579,36 @@ final class AccessibilityRegressionTests: XCTestCase {
         XCTAssertTrue(slider.object.responds(to: NSSelectorFromString("setAccessibilityFocused:")))
         slider.object.setValue(true, forKey: "accessibilityFocused")
         try await settle(controller.view)
-        func arrow(_ code: UInt16, _ characters: String) async throws {
-            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+        func arrow(_ code: UInt16, _ characters: String, flags: NSEvent.ModifierFlags = []) async throws {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
                 timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: characters,
                 charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
             window.sendEvent(event)
             try await settle(controller.view)
         }
-        try await arrow(124, "\u{f703}")
-        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.90, accuracy: 0.0001)
-        try await arrow(123, "\u{f702}")
-        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.85, accuracy: 0.0001)
-        try await arrow(126, "\u{f700}")
-        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.90, accuracy: 0.0001)
-        try await arrow(125, "\u{f701}")
-        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.85, accuracy: 0.0001)
+        let hardwareFlags: [NSEvent.ModifierFlags] = [[], [.numericPad, .function], .capsLock,
+                                                    [.numericPad, .function, .capsLock]]
+        for flags in hardwareFlags {
+            preferences.backgroundOpacityBinding.wrappedValue = 0.85
+            try await settle(controller.view)
+            for (code, characters, expected) in [(UInt16(124), "\u{f703}", 0.90), (123, "\u{f702}", 0.85),
+                                                 (126, "\u{f700}", 0.90), (125, "\u{f701}", 0.85)] {
+                try await arrow(code, characters, flags: flags)
+                XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), expected, accuracy: 0.0001,
+                               "Arrow keys must retain one-step movement with hardware flags \(flags.rawValue)")
+            }
+        }
         for (raw, expected) in [(0.873, 0.85), (0.878, 0.90), (0.712, 0.70), (0.992, 1.0)] {
             slider.object.setValue(raw, forKey: "accessibilityValue")
             try await settle(controller.view)
             XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), expected, accuracy: 0.0001,
                            "Slider value writes retain the existing nearest-step rounding")
         }
-        try await arrow(124, "\u{f703}")
+        try await arrow(124, "\u{f703}", flags: [.numericPad, .function, .capsLock])
         XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 1.0, accuracy: 0.0001)
         preferences.backgroundOpacityBinding.wrappedValue = 0.70
         try await settle(controller.view)
-        try await arrow(123, "\u{f702}")
+        try await arrow(123, "\u{f702}", flags: [.numericPad, .function, .capsLock])
         XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.70, accuracy: 0.0001)
         _ = try capture(controller.view, "uifix2-opacity-keyboard")
     }

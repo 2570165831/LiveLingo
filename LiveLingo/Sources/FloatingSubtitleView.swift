@@ -26,8 +26,7 @@ private struct FloatingSubtitleContent: View {
     @State private var translationLineMetrics = FloatingSubtitleLineMetrics()
 
     private var unlockHint: String {
-        let menuBar = classModeController.statusInstalled ? "菜单栏图标、" : ""
-        return "可用\(menuBar)主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）"
+        "可用\(classModeController.subtitleUnlockControls)解锁（⇧⌘L，仅 LiveLingo 在前台时有效）"
     }
 
     var body: some View {

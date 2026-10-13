@@ -684,6 +684,10 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         Binding(get: { self.isEnabled || self.menuBarIconEnabled }, set: { self.setMenuBarIconEnabled($0) })
     }
     var actionTitle: String { isEnabled ? "关闭全屏网课模式" : "开启全屏网课模式" }
+    var subtitleUnlockControls: String {
+        if isEnabled { return "菜单栏图标或主窗口" }
+        return (statusInstalled ? "菜单栏图标、" : "") + "主窗口或“录音”菜单"
+    }
 
     func connect(model: AppModel, recording: FullScreenRecordingCommands? = nil) {
         self.model = model

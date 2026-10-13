@@ -1018,9 +1018,13 @@ struct ClassroomSettingsView: View {
                 Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
                     .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("可在主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
-                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let fullScreenMode {
+                    SubtitleUnlockHint(controller: fullScreenMode)
+                } else {
+                    Text("可在主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
+                        .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if !model.previewTranslationEnabled || !model.supportsPreviewTranslation {
                     Text("“仅中文译文”在译文可用前显示原文。")
                         .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
@@ -1072,7 +1076,8 @@ struct ClassroomSettingsView: View {
                     .accessibilityValue(label)
                     .accessibilityIdentifier("floating-\(title)")
                     .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { press in
-                        guard keyboardStepping, press.modifiers.isEmpty else { return .ignored }
+                        guard keyboardStepping, press.modifiers.intersection([.shift, .control, .option, .command]).isEmpty
+                        else { return .ignored }
                         let increment = press.key == .rightArrow || press.key == .upArrow
                         value.wrappedValue = min(range.upperBound, max(range.lowerBound,
                             value.wrappedValue + (increment ? step : -step)))
@@ -1083,6 +1088,15 @@ struct ClassroomSettingsView: View {
             }
             .frame(width: subtitleControlWidth)
         }
+    }
+}
+
+private struct SubtitleUnlockHint: View {
+    @ObservedObject var controller: FullScreenClassModeController
+    var body: some View {
+        Text("可在\(controller.subtitleUnlockControls)解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
+            .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
