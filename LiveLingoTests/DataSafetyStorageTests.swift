@@ -32,7 +32,195 @@ private final class RecoveryScanProbe: @unchecked Sendable {
     func finish(_ value: Result<Void, Error>) { lock.withLock { outcome = value } }
 }
 
+private final class SlowIOProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ticks: [UInt64]
+    private var events: [String] = []
+    init(ticks: [UInt64]) { self.ticks = ticks }
+    func now() -> UInt64 { lock.withLock { ticks.removeFirst() } }
+    func record(_ site: SensitiveFileIO.IOCallSite, _ elapsed: UInt64) {
+        lock.withLock { events.append("\(site.rawValue):\(elapsed)") }
+    }
+    var recorded: [String] { lock.withLock { events } }
+}
+
 final class DataSafetyStorageTests: XCTestCase {
+    private func populatedSnapshot() -> SessionSnapshot {
+        let id = UUID()
+        let segment = TranscriptSegment(startTime: 1, endTime: 3,
+            english: "Synthetic committed evidence survives interrupted publication.",
+            chinese: "合成的已提交正文在发布中断后仍须完整。", sessionID: id)
+        return SessionSnapshot(sessionID: id, segments: [segment])
+    }
+
+    /// Model a kill after publication of the first-write hard link. The
+    /// previous committed file is retained, never overwritten by the fixture.
+    private func committedAlias(in root: URL, named name: String) throws -> (URL, Data) {
+        let destination = root.appendingPathComponent(name)
+        let bytes = try Data(contentsOf: destination)
+        try FileManager.default.moveItem(at: destination, to: root.appendingPathComponent("before-interruption-" + name))
+        let orphan = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        try interruptedWrite(bytes, to: destination, orphan: orphan)
+        guard link(orphan.path, destination.path) == 0 else {
+            throw SessionStoreError.io(operation: "publish synthetic committed alias", code: errno)
+        }
+        return (orphan, bytes)
+    }
+
+    func testSlowIODiagnosticsOnlyEmitAboveThresholdAndPreserveErrno() {
+        let threshold = SensitiveFileIO.slowIOThresholdNanoseconds
+        let probe = SlowIOProbe(ticks: [0, threshold - 1, 0, threshold, 0, threshold + 1])
+        SensitiveFileIO.$ioClock.withValue({ probe.now() }) {
+            SensitiveFileIO.$slowIOObserver.withValue({ site, elapsed in
+                probe.record(site, elapsed)
+                errno = EIO
+            }) {
+                for _ in 0..<3 {
+                    let result = SensitiveFileIO.timedIO(.temporaryOpen) { errno = EACCES; return Int32(-1) }
+                    XCTAssertEqual(result, -1)
+                    XCTAssertEqual(errno, EACCES, "Diagnostics must preserve the syscall failure")
+                }
+            }
+        }
+        XCTAssertEqual(probe.recorded, ["temporaryOpen:\(threshold + 1)"], "One fixed label and elapsed duration only")
+    }
+
+    func testSlowIODiagnosticsAlsoMeasureThrowingCalls() throws {
+        let elapsed = SensitiveFileIO.slowIOThresholdNanoseconds + 1
+        let probe = SlowIOProbe(ticks: [0, elapsed])
+        try SensitiveFileIO.$ioClock.withValue({ probe.now() }) {
+            try SensitiveFileIO.$slowIOObserver.withValue({ probe.record($0, $1) }) {
+                XCTAssertThrowsError(try SensitiveFileIO.timedIO(.temporaryRead) {
+                    throw SessionStoreError.io(operation: "synthetic read failure", code: EIO)
+                })
+            }
+        }
+        XCTAssertEqual(probe.recorded, ["temporaryRead:\(elapsed)"])
+    }
+
+    func testDU05SaveRepairsCommittedAliasesOutsideLocksAndRunsTransactionOnce() throws {
+        let root = try DataSafetyFixtures.make("DU05-save-alias")
+        defer { DataSafetyFixtures.preserve(root) }
+        let store = SessionStore(directory: root)
+        let stored = try store.save(populatedSnapshot())
+        let (snapshotAlias, original) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let (lockAlias, _) = try committedAlias(in: root, named: ".session-store.lock")
+        let probe = RecoveryScanProbe()
+        var transactions = 0
+        let saved = try SensitiveFileIO.$beforeTemporaryInspection.withValue({ url in
+            probe.record(url)
+            XCTAssertFalse(SessionStore.isHoldingProcessLock, "A temporary alias must never be opened under the process lock")
+            let fd = Darwin.open(root.appendingPathComponent(".session-store.lock").path,
+                                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+            XCTAssertGreaterThanOrEqual(fd, 0)
+            if fd >= 0 {
+                XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0, "Recovery must also run outside the disk lock")
+                _ = flock(fd, LOCK_UN)
+                _ = Darwin.close(fd)
+            }
+        }) {
+            try store.withWriteTransaction { transaction in
+                transactions += 1
+                XCTAssertTrue(SessionStore.isHoldingProcessLock)
+                return try transaction.save(stored)
+            }
+        }
+        XCTAssertEqual(transactions, 1, "Recovery retries must not replay an accepted transaction")
+        XCTAssertEqual(Set(probe.names), Set([snapshotAlias.lastPathComponent, lockAlias.lastPathComponent]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: snapshotAlias.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lockAlias.path))
+        XCTAssertEqual(try SessionStore(directory: root).load(), saved)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("before-interruption-" + SessionStore.snapshotFileName)), original)
+        XCTAssertEqual(saved.sessionID, stored.sessionID)
+        XCTAssertEqual(saved.segments, stored.segments)
+    }
+
+    func testDU05StalledCommittedAliasRecoveryDoesNotBlockAnotherCourseSave() throws {
+        let root = try DataSafetyFixtures.make("DU05-stalled-save-alias")
+        let other = try DataSafetyFixtures.make("DU05-independent-course")
+        defer { DataSafetyFixtures.preserve(root); DataSafetyFixtures.preserve(other) }
+        let stored = try SessionStore(directory: root).save(populatedSnapshot())
+        let otherStored = try SessionStore(directory: other).save(populatedSnapshot())
+        let (alias, bytes) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let reached = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let done = DispatchSemaphore(value: 0), otherDone = DispatchSemaphore(value: 0)
+        let probe = RecoveryScanProbe(), otherProbe = RecoveryScanProbe()
+        DispatchQueue.global().async {
+            probe.finish(Result {
+                try SensitiveFileIO.$beforeTemporaryInspection.withValue({ url in
+                    probe.record(url)
+                    XCTAssertFalse(SessionStore.isHoldingProcessLock)
+                    reached.signal()
+                    _ = release.wait(timeout: .now() + 30)
+                }) { _ = try SessionStore(directory: root).save(stored) }
+            })
+            done.signal()
+        }
+        XCTAssertEqual(reached.wait(timeout: .now() + 10), .success)
+        // The interrupted publication was already complete before any recovery.
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(SessionStore.snapshotFileName)), bytes)
+        DispatchQueue.global().async {
+            otherProbe.finish(Result { _ = try SessionStore(directory: other).save(otherStored) })
+            otherDone.signal()
+        }
+        let independentSave = otherDone.wait(timeout: .now() + 10)
+        release.signal()
+        XCTAssertEqual(done.wait(timeout: .now() + 30), .success)
+        if independentSave != .success { XCTAssertEqual(otherDone.wait(timeout: .now() + 30), .success) }
+        XCTAssertEqual(independentSave, .success, "A stalled alias open must not hold the global save lock")
+        XCTAssertNoThrow(try XCTUnwrap(probe.result).get())
+        XCTAssertNoThrow(try XCTUnwrap(otherProbe.result).get())
+        XCTAssertEqual(probe.names, [alias.lastPathComponent])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+        let reopened = try XCTUnwrap(SessionStore(directory: root).load())
+        XCTAssertEqual(reopened.sessionID, stored.sessionID)
+        XCTAssertEqual(reopened.segments, stored.segments)
+    }
+
+    func testDU05FailedAliasRepairKeepsCommittedBytesAndDoesNotRunTransaction() throws {
+        let root = try DataSafetyFixtures.make("DU05-rejected-save-alias")
+        defer { DataSafetyFixtures.preserve(root) }
+        let store = SessionStore(directory: root)
+        _ = try store.save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        let bytes = try Data(contentsOf: destination)
+        let alias = root.appendingPathComponent(".session-write-\(UUID()).tmp")
+        XCTAssertEqual(link(destination.path, alias.path), 0)
+        let probe = RecoveryScanProbe()
+        var transactions = 0
+        XCTAssertThrowsError(try SensitiveFileIO.$beforeTemporaryInspection.withValue({ url in
+            probe.record(url)
+            XCTAssertFalse(SessionStore.isHoldingProcessLock)
+        }) {
+            try store.withWriteTransaction { _ in transactions += 1 }
+        })
+        XCTAssertEqual(transactions, 0)
+        XCTAssertEqual(probe.names, [alias.lastPathComponent], "An unproven alias gets one bounded inspection")
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertEqual(try Data(contentsOf: alias), bytes)
+    }
+
+    func testDU05TighteningNeverRecoversButExplicitUnlockedPreparationDoes() throws {
+        let root = try DataSafetyFixtures.make("DU05-explicit-alias-preparation")
+        defer { DataSafetyFixtures.preserve(root) }
+        _ = try SessionStore(directory: root).save(SessionSnapshot())
+        let destination = root.appendingPathComponent(SessionStore.snapshotFileName)
+        let (alias, bytes) = try committedAlias(in: root, named: SessionStore.snapshotFileName)
+        let probe = RecoveryScanProbe()
+        try SensitiveFileIO.$beforeTemporaryInspection.withValue({ probe.record($0) }) {
+            XCTAssertThrowsError(try SensitiveFileIO.tightenFileIfPresent(destination))
+        }
+        XCTAssertEqual(probe.names, [], "Validation must not implicitly open a temporary alias")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: alias.path))
+        try SensitiveFileIO.$beforeTemporaryInspection.withValue({ probe.record($0) }) {
+            try SensitiveFileIO.recoverCommittedFileIfNeeded(at: destination)
+        }
+        XCTAssertEqual(probe.names, [alias.lastPathComponent])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertNoThrow(try SensitiveFileIO.tightenFileIfPresent(destination))
+    }
+
     private func interruptedWrite(_ bytes: Data, to destination: URL, orphan: URL) throws {
         XCTAssertThrowsError(try SensitiveFileIO.$beforeTemporaryCommit.withValue({ pending in
             guard Darwin.rename(pending.path, orphan.path) == 0 else {

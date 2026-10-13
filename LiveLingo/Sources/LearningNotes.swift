@@ -6084,14 +6084,18 @@ private actor LearningReviewStorage {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(journal)
-        Self.processLock.lock()
-        defer { Self.processLock.unlock() }
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireContained(journalURL, in: PreviewDataIsolation.dataDirectory)
         #endif
         #if DEBUG
         ReviewStorageTestHooks.beforeDirectoryAccess?(journalURL.deletingLastPathComponent())
         #endif
+        // This actor serializes its own saves. Any receipt-proven alias left
+        // by an interrupted first write is prepared outside both storage locks;
+        // the strict check and expected-bytes check still run inside them.
+        try SensitiveFileIO.recoverCommittedFileIfNeeded(at: journalURL)
+        Self.processLock.lock()
+        defer { Self.processLock.unlock() }
         try SensitiveFileIO.prepareDirectory(journalURL.deletingLastPathComponent())
         try SensitiveFileIO.tightenFileIfPresent(journalURL)
         let lockURL = journalURL.appendingPathExtension("lock")

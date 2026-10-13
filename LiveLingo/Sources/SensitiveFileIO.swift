@@ -19,7 +19,48 @@ enum SensitiveFileIO {
     @TaskLocal static var temporaryTrackingParentOpenError: Int32?
     /// Runs immediately before recovery opens a candidate temporary object.
     @TaskLocal static var beforeTemporaryInspection: (@Sendable (URL) -> Void)?
+    @TaskLocal static var ioClock: (@Sendable () -> UInt64)?
+    @TaskLocal static var slowIOObserver: (@Sendable (IOCallSite, UInt64) -> Void)?
     #endif
+
+    /// Fixed labels only: diagnostics never interpolate a filename, path,
+    /// receipt, errno description or file content.
+    enum IOCallSite: String, Sendable {
+        case directoryBind, directoryChild, directoryCreate, temporaryParent
+        case fileCreate, fileOpen, fileTighten, fileRead, fileWriteAccess
+        case fileAppend, fileTruncate, directoryScan, entryStatus, descriptorStatus
+        case temporaryOpen, temporaryLease, temporaryRecoveryLease
+        case receiptSize, receiptRead, receiptWrite, receiptSync, receiptRemove
+        case temporaryRead, destinationRead, temporaryUnlink, directorySync
+    }
+    static let slowIOThresholdNanoseconds: UInt64 = 100_000_000
+    private static let ioLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "SensitiveFileIO")
+
+    private static func ioNow() -> UInt64 {
+        #if DEBUG
+        if let ioClock { return ioClock() }
+        #endif
+        return DispatchTime.now().uptimeNanoseconds
+    }
+
+    static func timedIO<T>(_ site: IOCallSite, _ call: () throws -> T) rethrows -> T {
+        let start = ioNow()
+        defer {
+            // Logging and test observers must not overwrite the syscall's errno.
+            let code = errno
+            let end = ioNow()
+            let elapsed = end >= start ? end - start : 0
+            if elapsed > slowIOThresholdNanoseconds {
+                #if DEBUG
+                slowIOObserver?(site, elapsed)
+                #endif
+                let milliseconds = Double(elapsed) / 1_000_000
+                ioLog.notice("sensitive_io site=\(site.rawValue, privacy: .public) elapsed_ms=\(milliseconds, privacy: .public)")
+            }
+            errno = code
+        }
+        return try call()
+    }
 
     private static func perform(_ operation: OptionalOperation, _ call: () -> Int32) -> Int32 {
         #if DEBUG
@@ -164,16 +205,25 @@ enum SensitiveFileIO {
             return
         }
         let name = url.lastPathComponent
-        do {
-            guard try parent.requireRegularFileIfPresent(named: name) else { return }
-        } catch Failure.unsafePath {
-            // A committed file still carrying its interrupted writer's second
-            // name can be repaired only by that writer's receipt. Anything
-            // else stays rejected.
-            guard try parent.retireCommittedTemporaryAliases(of: name),
-                  try parent.requireRegularFileIfPresent(named: name) else { throw Failure.unsafePath }
-        }
+        // Recovery is explicit, so callers holding a storage lock cannot
+        // accidentally enter a temporary scan through this validation API.
+        guard try parent.requireRegularFileIfPresent(named: name) else { return }
         try parent.tightenIfPresent(named: name)
+    }
+
+    /// Explicit preparation for callers that also maintain their own locks.
+    /// Call before taking those locks; locked validation remains strict.
+    static func recoverCommittedFileIfNeeded(at url: URL) throws {
+        let parent: Directory
+        do {
+            parent = try Directory.open(at: url.deletingLastPathComponent(), create: false, tighten: false)
+        } catch Failure.system(_, let code) where code == ENOENT {
+            return
+        }
+        let name = url.lastPathComponent
+        guard try parent.needsCommittedTemporaryAliasRecovery(named: name) else { return }
+        _ = try parent.retireCommittedTemporaryAliases(of: name)
+        guard try parent.requireRegularFileIfPresent(named: name) else { throw Failure.unsafePath }
     }
 
     final class Directory: @unchecked Sendable {
@@ -202,7 +252,7 @@ enum SensitiveFileIO {
             var current: Int32
             while true {
                 let prefix = "/" + components.prefix(existingCount).joined(separator: "/")
-                current = Darwin.open(prefix, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY | O_NONBLOCK)
+                current = timedIO(.directoryBind) { Darwin.open(prefix, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY | O_NONBLOCK) }
                 if current >= 0 { break }
                 guard create, errno == ENOENT, existingCount > 0 else { throw pathFailure("open directory") }
                 existingCount -= 1
@@ -212,11 +262,11 @@ enum SensitiveFileIO {
             for index in existingCount..<components.count {
                 let component = components[index]
                 var created = false
-                var next = openat(current, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+                var next = timedIO(.directoryChild) { openat(current, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
                 if next < 0, errno == ENOENT, create {
                     if mkdirat(current, component, 0o700) == 0 { created = true }
                     else if errno != EEXIST { throw system("create directory") }
-                    next = openat(current, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+                    next = timedIO(.directoryChild) { openat(current, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
                 }
                 guard next >= 0 else { throw pathFailure("open directory") }
                 do {
@@ -241,11 +291,11 @@ enum SensitiveFileIO {
         func subdirectory(named name: String, create: Bool = true) throws -> Directory {
             try validateName(name)
             var created = false
-            var child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+            var child = timedIO(.directoryChild) { openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             if child < 0, errno == ENOENT, create {
                 if mkdirat(fd, name, 0o700) == 0 { created = true }
                 else if errno != EEXIST { throw system("create private directory") }
-                child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+                child = timedIO(.directoryChild) { openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             }
             guard child >= 0 else { throw pathFailure("open private directory") }
             do {
@@ -259,7 +309,7 @@ enum SensitiveFileIO {
         func createSubdirectory(named name: String) throws -> Directory {
             try validateName(name)
             guard mkdirat(fd, name, 0o700) == 0 else { throw system("create exclusive directory") }
-            let child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+            let child = timedIO(.directoryCreate) { openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             guard child >= 0 else { throw pathFailure("bind new directory") }
             do { try makePrivate(child, directory: true) }
             catch { _ = Darwin.close(child); throw error }
@@ -289,9 +339,9 @@ enum SensitiveFileIO {
             let parentFD: Int32
             #if DEBUG
             if let code = temporaryTrackingParentOpenError { errno = code; parentFD = -1 }
-            else { parentFD = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) }
+            else { parentFD = timedIO(.temporaryParent) { openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) } }
             #else
-            parentFD = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            parentFD = timedIO(.temporaryParent) { openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             #endif
             guard parentFD >= 0 else {
                 let code = errno
@@ -327,7 +377,7 @@ enum SensitiveFileIO {
         /// opened for writing by this creation-only operation.
         func createPrivateFile(named name: String) throws -> Int32 {
             try validateName(name)
-            let item = openat(fd, name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
+            let item = timedIO(.fileCreate) { openat(fd, name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600) }
             guard item >= 0 else { throw pathFailure("create private file") }
             do { try makePrivate(item, directory: false) }
             catch {
@@ -345,7 +395,7 @@ enum SensitiveFileIO {
                 return try createPrivateFile(named: name)
             }
             try requireRegular(before)
-            let item = openat(fd, name, flags | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+            let item = timedIO(.fileOpen) { openat(fd, name, flags | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK) }
             guard item >= 0 else { throw pathFailure("open existing file") }
             do {
                 let opened = try status(item)
@@ -416,13 +466,24 @@ enum SensitiveFileIO {
             return true
         }
 
+        /// Metadata-only preflight. Two names are a request for recovery,
+        /// never permission to read or replace a multiply linked file.
+        func needsCommittedTemporaryAliasRecovery(named name: String) throws -> Bool {
+            guard let info = try entryStatus(name) else { return false }
+            try requireOwner(info)
+            guard info.st_mode & S_IFMT == S_IFREG else { throw Failure.unsafePath }
+            if info.st_nlink == 2 { return true }
+            try requireRegular(info)
+            return false
+        }
+
         func tightenIfPresent(named name: String) throws {
             guard let info = try entryStatus(name) else { return }
             let isDirectory = info.st_mode & S_IFMT == S_IFDIR
             guard isDirectory || info.st_mode & S_IFMT == S_IFREG else { throw Failure.unsafePath }
             try requireOwner(info)
             let flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | (isDirectory ? O_DIRECTORY : 0)
-            let item = openat(fd, name, flags)
+            let item = timedIO(.fileTighten) { openat(fd, name, flags) }
             guard item >= 0 else { throw pathFailure("open private object") }
             defer { _ = Darwin.close(item) }
             let opened = try status(item)
@@ -432,7 +493,7 @@ enum SensitiveFileIO {
 
         func readIfPresent(named name: String) throws -> Data? {
             guard try requireRegularFileIfPresent(named: name) else { return nil }
-            let item = openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+            let item = timedIO(.fileRead) { openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             guard item >= 0 else { throw pathFailure("open private file") }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
@@ -454,7 +515,7 @@ enum SensitiveFileIO {
                 if let originalACL { _ = acl_free(UnsafeMutableRawPointer(originalACL)) }
             }
             if let original {
-                originalFD = openat(fd, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+                originalFD = timedIO(.fileWriteAccess) { openat(fd, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
                 guard originalFD >= 0 else { throw pathFailure("write access to existing file") }
                 guard Identity(try status(originalFD)) == Identity(original) else { throw Failure.unsafePath }
                 originalACL = try readACL(originalFD)
@@ -480,10 +541,10 @@ enum SensitiveFileIO {
             do { try beforeTemporaryLease?(url.appendingPathComponent(temporary)) }
             catch { _ = Darwin.close(item); throw error }
             #endif
-            // This invocation created the file exclusively, so only a recovery
-            // scan can hold its lock, and only briefly (it never blocks while
-            // holding it). Wait for it instead of failing an ordinary save.
-            while flock(lease, LOCK_EX) != 0 {
+            // A recovery scan can acquire this exclusively created file's
+            // lease during the creation window. Wait rather than fail a save;
+            // this advisory lease does not impose an I/O time limit.
+            while timedIO(.temporaryLease, { flock(lease, LOCK_EX) }) != 0 {
                 guard errno == EINTR else {
                     _ = Darwin.close(item)
                     throw system("lock private temporary file")
@@ -591,7 +652,7 @@ enum SensitiveFileIO {
             if let original { try requireRegular(original) }
             let item: Int32
             if original == nil { item = try createPrivateFile(named: name) }
-            else { item = openat(fd, name, O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
+            else { item = timedIO(.fileAppend) { openat(fd, name, O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) } }
             guard item >= 0 else { throw pathFailure("open private append file") }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
@@ -608,7 +669,7 @@ enum SensitiveFileIO {
 
         func truncate(named name: String, to length: UInt64) throws {
             guard try requireRegularFileIfPresent(named: name) else { throw Failure.unsafePath }
-            let item = openat(fd, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+            let item = timedIO(.fileTruncate) { openat(fd, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             guard item >= 0 else { throw pathFailure("open private repair file") }
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
             defer { try? handle.close() }
@@ -624,7 +685,7 @@ enum SensitiveFileIO {
 
         func names() throws -> [String] {
             // A fresh open description avoids sharing a directory scan offset.
-            let scan = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            let scan = timedIO(.directoryScan) { openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
             guard scan >= 0 else { throw system("open private directory scan") }
             guard let stream = fdopendir(scan) else {
                 let error = system("scan private directory")
@@ -653,10 +714,10 @@ enum SensitiveFileIO {
                     item: TemporaryIdentity(try status(item)), destination: destination,
                     digest: digest, replacement: replacement)
                 let bytes = try JSONEncoder().encode(receipt)
-                let result = bytes.withUnsafeBytes {
-                    fsetxattr(item, temporaryAttribute, $0.baseAddress, $0.count, 0, 0)
+                let result = bytes.withUnsafeBytes { buffer in
+                    timedIO(.receiptWrite) { fsetxattr(item, temporaryAttribute, buffer.baseAddress, buffer.count, 0, 0) }
                 }
-                guard result == 0, fsync(item) == 0 else {
+                guard result == 0, timedIO(.receiptSync, { fsync(item) }) == 0 else {
                     recoveryLog.notice("temporary_recovery reason=receipt_unavailable")
                     return
                 }
@@ -747,16 +808,16 @@ enum SensitiveFileIO {
             #if DEBUG
             beforeTemporaryInspection?(url.appendingPathComponent(name))
             #endif
-            let item = openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | (write ? 0 : O_DIRECTORY))
+            let item = timedIO(.temporaryOpen) { openat(fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | (write ? 0 : O_DIRECTORY)) }
             guard item >= 0 else { throw pathFailure("inspect temporary object") }
             defer { _ = Darwin.close(item) }
             guard TemporaryIdentity(try status(item)) == TemporaryIdentity(before) else { return "identity_changed" }
-            guard flock(item, LOCK_EX | LOCK_NB) == 0 else { return "active_or_unavailable" }
+            guard timedIO(.temporaryRecoveryLease, { flock(item, LOCK_EX | LOCK_NB) }) == 0 else { return "active_or_unavailable" }
             defer { _ = flock(item, LOCK_UN) }
-            let length = fgetxattr(item, temporaryAttribute, nil, 0, 0, 0)
+            let length = timedIO(.receiptSize) { fgetxattr(item, temporaryAttribute, nil, 0, 0, 0) }
             guard length > 0, length <= 4096 else { return "unregistered" }
             var bytes = Data(count: length)
-            let read = bytes.withUnsafeMutableBytes { fgetxattr(item, temporaryAttribute, $0.baseAddress, $0.count, 0, 0) }
+            let read = timedIO(.receiptRead) { bytes.withUnsafeMutableBytes { fgetxattr(item, temporaryAttribute, $0.baseAddress, $0.count, 0, 0) } }
             guard read == length,
                   let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
                   Set(object.keys).isSubset(of: ["version", "kind", "parent", "item", "destination", "digest", "replacement"]),
@@ -789,9 +850,9 @@ enum SensitiveFileIO {
                       let latest = try entryStatus(receipt.destination), TemporaryIdentity(latest) == receipt.item else {
                     return "identity_changed"
                 }
-                guard unlinkat(fd, name, 0) == 0 else { throw system("retire committed temporary alias") }
+                guard timedIO(.temporaryUnlink, { unlinkat(fd, name, 0) }) == 0 else { throw system("retire committed temporary alias") }
                 // Only after the alias is gone: the receipt no longer has a use.
-                _ = fremovexattr(item, temporaryAttribute, 0)
+                _ = timedIO(.receiptRemove) { fremovexattr(item, temporaryAttribute, 0) }
                 try synchronize()
                 return "removed_alias"
             } else if write {
@@ -806,8 +867,8 @@ enum SensitiveFileIO {
                     let handle = FileHandle(fileDescriptor: target, closeOnDealloc: true)
                     defer { try? handle.close() }
                     let pending = FileHandle(fileDescriptor: item, closeOnDealloc: false)
-                    guard SessionArchiveCoding.digest(try pending.readToEnd() ?? Data()) == expected,
-                          SessionArchiveCoding.digest(try handle.readToEnd() ?? Data()) == expected else { return "unique_candidate" }
+                    guard SessionArchiveCoding.digest(try timedIO(.temporaryRead) { try pending.readToEnd() ?? Data() }) == expected,
+                          SessionArchiveCoding.digest(try timedIO(.destinationRead) { try handle.readToEnd() ?? Data() }) == expected else { return "unique_candidate" }
                     destinationIdentity = TemporaryIdentity(destination)
                     reason = "removed_duplicate"
                 }
@@ -829,7 +890,7 @@ enum SensitiveFileIO {
                     return "destination_changed"
                 }
             }
-            guard unlinkat(fd, name, write ? 0 : AT_REMOVEDIR) == 0 else { throw system("retire unused temporary object") }
+            guard timedIO(.temporaryUnlink, { unlinkat(fd, name, write ? 0 : AT_REMOVEDIR) }) == 0 else { throw system("retire unused temporary object") }
             try synchronize()
             return reason
         }
@@ -880,7 +941,7 @@ enum SensitiveFileIO {
         private func entryStatus(_ name: String) throws -> stat? {
             try validateName(name)
             var info = stat()
-            if fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 { return info }
+            if timedIO(.entryStatus, { fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) }) == 0 { return info }
             if errno == ENOENT { return nil }
             throw system("inspect private entry")
         }
@@ -891,7 +952,7 @@ enum SensitiveFileIO {
         }
 
         private func synchronize() throws {
-            guard perform(.directorySync, { fsync(fd) }) == 0 || unsupported(errno) else { throw system("sync private directory") }
+            guard perform(.directorySync, { timedIO(.directorySync) { fsync(fd) } }) == 0 || unsupported(errno) else { throw system("sync private directory") }
         }
     }
 
@@ -983,7 +1044,7 @@ enum SensitiveFileIO {
 
     private static func status(_ fd: Int32) throws -> stat {
         var info = stat()
-        guard fstat(fd, &info) == 0 else { throw system("inspect private descriptor") }
+        guard timedIO(.descriptorStatus, { fstat(fd, &info) }) == 0 else { throw system("inspect private descriptor") }
         return info
     }
 

@@ -622,6 +622,9 @@ final class SessionStore: @unchecked Sendable {
     static let snapshotFileName = "session-snapshot.json"
     static let journalFileName = "session-journal.jsonl"
     private static let processLock = NSLock()
+    #if DEBUG
+    @TaskLocal static var isHoldingProcessLock = false
+    #endif
     let directory: URL
     private let atomicWrite: @Sendable (Data, URL) throws -> Void
     private let journalWrite: @Sendable (Data, URL) throws -> Void
@@ -644,8 +647,9 @@ final class SessionStore: @unchecked Sendable {
     func load() throws -> SessionSnapshot? { try loadDetailed().snapshot }
 
     /// Opening a course runs the best-effort temporary recovery scan, outside
-    /// both store locks. Write transactions and the no-scan reads below never
-    /// scan; anything that calls this still waits for the scan itself.
+    /// both store locks. Writes and no-scan reads skip the general scan; a
+    /// receipt-proven committed alias may still need targeted, unlocked repair.
+    /// Anything that calls this still waits for the scan itself.
     func loadDetailed() throws -> SessionLoadResult {
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireSessionDirectory(directory)
@@ -654,13 +658,13 @@ final class SessionStore: @unchecked Sendable {
         return try locked(writing: false) { try read().result }
     }
 
-    /// A read that never runs the recovery scan, for readers that are not
+    /// A read that never runs the general recovery scan, for readers that are not
     /// opening the course: a saver's readback and the review queue's storage.
     func loadDetailedWithoutRecovery() throws -> SessionLoadResult {
         try locked(writing: false) { try read().result }
     }
 
-    /// A saver's readback of its own committed state; it never scans.
+    /// A saver's readback of its own committed state; it skips the general scan.
     func loadCommittedSnapshot() throws -> SessionSnapshot? {
         try loadDetailedWithoutRecovery().snapshot
     }
@@ -684,7 +688,9 @@ final class SessionStore: @unchecked Sendable {
     }
 
     /// The disk identity and complete hash chain are checked once while both
-    /// writer locks remain held. Every accepted event still reaches its original
+    /// writer locks remain held. Receipt-proven alias repair, when required,
+    /// runs before the transaction begins and outside both locks.
+    /// Every accepted event still reaches its original
     /// file/parent sync boundary before advancing the in-memory revision.
     func withWriteTransaction<T>(requiringExistingDirectory: Bool = false,
                                  _ action: (WriteTransaction) throws -> T) throws -> T {
@@ -1059,8 +1065,51 @@ final class SessionStore: @unchecked Sendable {
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireSessionDirectory(directory)
         #endif
+        var attempted = Set<String>()
+        while true {
+            do {
+                return try lockedAttempt(writing: writing, requiringExistingDirectory: requiringExistingDirectory, action)
+            } catch let request as CommittedAliasRecoveryRequired {
+                // Only preflight can request this retry: action has not run.
+                // Each fixed store filename is repaired at most once, so a
+                // racing or unproven second name cannot cause an endless loop.
+                guard attempted.insert(request.name).inserted else {
+                    throw SessionStoreError.unsafePath(directory.path)
+                }
+                try SessionArchiveCoding.privateIO(at: directory) {
+                    let parent = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
+                    guard try parent.identity == request.parent else { throw SensitiveFileIO.Failure.unsafePath }
+                    _ = try parent.retireCommittedTemporaryAliases(of: request.name)
+                    // A concurrent scanner may already have retired it. Only
+                    // a now-safe committed file permits another locked attempt.
+                    guard try parent.requireRegularFileIfPresent(named: request.name) else {
+                        throw SensitiveFileIO.Failure.unsafePath
+                    }
+                }
+            }
+        }
+    }
+
+    private struct CommittedAliasRecoveryRequired: Error {
+        let name: String
+        let parent: SensitiveFileIO.Identity
+    }
+
+    private func lockedAttempt<T>(writing: Bool, requiringExistingDirectory: Bool,
+                                  _ action: () throws -> T) throws -> T {
         Self.processLock.lock()
         defer { Self.processLock.unlock() }
+        #if DEBUG
+        return try Self.$isHoldingProcessLock.withValue(true) {
+            try lockedFiles(writing: writing, requiringExistingDirectory: requiringExistingDirectory, action)
+        }
+        #else
+        return try lockedFiles(writing: writing, requiringExistingDirectory: requiringExistingDirectory, action)
+        #endif
+    }
+
+    private func lockedFiles<T>(writing: Bool, requiringExistingDirectory: Bool,
+                                _ action: () throws -> T) throws -> T {
         try SessionArchiveCoding.privateIO(at: directory) {
             if writing && !requiringExistingDirectory {
                 try SensitiveFileIO.prepareDirectory(directory)
@@ -1071,8 +1120,14 @@ final class SessionStore: @unchecked Sendable {
                 // migration, including the empty directory used for its lock.
                 throw SessionStoreError.missingSnapshot
             }
+            // Bind once; checking the three leaves uses fstatat only. No
+            // temporary candidate or extra leaf is opened by this preflight.
+            guard FileManager.default.fileExists(atPath: directory.path) else { return }
+            let parent = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
             for name in [Self.snapshotFileName, Self.journalFileName, ".session-store.lock"] {
-                try SensitiveFileIO.tightenFileIfPresent(directory.appendingPathComponent(name))
+                if try parent.needsCommittedTemporaryAliasRecovery(named: name) {
+                    throw CommittedAliasRecoveryRequired(name: name, parent: try parent.identity)
+                }
             }
         }
         let fd: Int32
@@ -1095,8 +1150,9 @@ final class SessionStore: @unchecked Sendable {
 
     /// Runs outside the process and disk locks (DU-05). Each candidate is
     /// protected by its own writer lease and creation receipt, never by the
-    /// store lock, so a slow or stuck open here cannot delay this or another
-    /// store's write transaction. It does delay the caller of loadDetailed.
+    /// store lock, so a slow or stuck open here retains neither store lock.
+    /// It delays loadDetailed; a save needing the same committed alias still
+    /// requires successful repair, while unrelated stores can keep saving.
     private func inspectTemporaryItemsOnce() {
         let first = recoveryClaim.withLock {
             defer { inspectedTemporaryItems = true }
