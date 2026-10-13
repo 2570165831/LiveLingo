@@ -1205,6 +1205,7 @@ final class AppModel: ObservableObject {
     @Published private var preparingApplicationExit = false
     var isTerminating: Bool { preparingApplicationExit }
     private var applicationExitDeadline: ExitDeadline?
+    private var conversionRecoveryTask: Task<Void, Never>?
     private let exitStorageProgress = ExitDeadline.StorageProgress()
     private var temporaryCleanupRequested = false
     private var lifecycleRevision = UUID()
@@ -1644,6 +1645,9 @@ final class AppModel: ObservableObject {
         if deadline != nil, result == .converted {
             applicationExitDeadline = nil
             exitStorageProgress.attach(nil)
+        } else if let deadline, result == .failed {
+            deadline.revoke()
+            resumeAfterFailedRecordingConversion(deadline, session: identity, epoch: epoch)
         }
         return result
     }
@@ -1655,22 +1659,72 @@ final class AppModel: ObservableObject {
         do {
             try ExitDeadline.current?.check()
             guard let source = sessionDirectory else { throw AppError.outputDirectoryMissing }
+            // A timed flush may never finish. Establish a readable archive and
+            // startup locator before entering that asynchronous wait. Preserve
+            // any existing archive and reject another session's identity.
+            let store = SessionStore(directory: source)
+            let initial: SessionSnapshot
+            if let stored = try store.load() {
+                guard stored.sessionID == identity else {
+                    throw SessionStoreError.identityConflict("转换位置属于另一课程，原件已保留")
+                }
+                initial = stored
+            } else {
+                var snapshot = SessionSnapshot(sessionID: identity, segments: segments,
+                    audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)],
+                    transcriptionJournalPath: DurableTranscriptionJournal.directoryName + "/work.jsonl",
+                    targetLocale: outputLanguage.persistedLocale)
+                snapshot.captureStart = currentCaptureStart
+                snapshot.generation = epoch
+                learningNotebook.writeState(to: &snapshot)
+                snapshot.processing.phase = .capturing
+                initial = try store.save(snapshot)
+            }
+            guard try store.load()?.sessionID == identity else { throw SessionStoreError.missingSnapshot }
             try pipeline.updatePersistence(persistsSession: true)
             activeStorageMode = .saveSession
             selectedStorageMode = .saveSession
             outputDirectory = directory
-            if sessionSaver == nil { bindSessionArchive(to: source) }
-            try await flushSessionArchive()
-            guard sessionID == identity, generation == epoch else { return .cancelled }
-            try ExitDeadline.current?.check()
+            if sessionSaver == nil { bindSessionArchive(to: source, restored: initial) }
             let recovery = SessionWorkspace.RecordingRecovery(id: identity, directory: source, outputRoot: directory)
                 .withOutputRoot(directory)
             try storeRecordingRecovery(recovery)
+            try ExitDeadline.current?.check()
+            try await flushSessionArchive()
+            guard sessionID == identity, generation == epoch else { return .cancelled }
             try ExitDeadline.current?.check()
             return .converted
         } catch {
             archiveError = "录音继续保留；转换后的保存或恢复索引尚未确认：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
             return .failed
+        }
+    }
+
+    private func resumeAfterFailedRecordingConversion(_ deadline: ExitDeadline, session: UUID, epoch: Int) {
+        conversionRecoveryTask?.cancel()
+        if let saver = sessionSaver {
+            // An index failure can precede the first awaited flush, while the
+            // coalesced archive writer is already running. Join it as well.
+            let settle = Task { @MainActor in _ = try? await saver.flush() }
+            deadline.track(settle)
+        }
+        conversionRecoveryTask = Task { @MainActor [weak self] in
+            await deadline.waitUntilDrained()
+            guard let self, !Task.isCancelled, self.sessionID == session, self.generation == epoch,
+                  self.applicationExitDeadline === deadline, !self.preparingApplicationExit,
+                  !deadline.hasPendingOperations else { return }
+            self.applicationExitDeadline = nil
+            self.exitStorageProgress.attach(nil)
+            self.conversionRecoveryTask = nil
+            // Only new work receives a fresh context; the old lease stays
+            // revoked so its delayed continuations still cannot publish.
+            ExitDeadline.$current.withValue(nil) {
+                ExitDeadline.$storageProgress.withValue(nil) {
+                    self.persistCurrentSession()
+                    self.drainTranslationQueue()
+                    self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
+                }
+            }
         }
     }
 
@@ -4550,6 +4604,7 @@ final class AppModel: ObservableObject {
         scheduleSummaryRefresh(force: force)
     }
     var summaryTaskForTesting: Task<Void, Never>? { summaryTask }
+    var conversionRecoveryTaskForTesting: Task<Void, Never>? { conversionRecoveryTask }
     var summaryWakeTaskForTesting: Task<Void, Never>? { summaryScheduleTask }
     var learningNotebookForTesting: LearningNotebook { learningNotebook }
     var savedProcessingTaskForTesting: Task<Void, Never>? { processingTask }

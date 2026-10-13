@@ -28,6 +28,29 @@ final class ExitDeadline: @unchecked Sendable {
     private let lock = NSLock()
     private var revoked = false
     private var pending = 0
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitUntilDrained() async {
+        await withCheckedContinuation { continuation in
+            let drained = lock.withLock {
+                if pending == 0 { return true }
+                drainWaiters.append(continuation)
+                return false
+            }
+            if drained { continuation.resume() }
+        }
+    }
+
+    private func finishPendingOperation() {
+        let waiters = lock.withLock {
+            pending -= 1
+            guard pending == 0 else { return [CheckedContinuation<Void, Never>]() }
+            let waiters = drainWaiters
+            drainWaiters.removeAll()
+            return waiters
+        }
+        for waiter in waiters { waiter.resume() }
+    }
 
     init(seconds: TimeInterval = applicationTimeout) {
         end = ContinuousClock.now.advanced(by: .seconds(max(0, seconds)))
@@ -83,7 +106,7 @@ final class ExitDeadline: @unchecked Sendable {
         lock.withLock { pending += 1 }
         Task {
             _ = await task.result
-            self.lock.withLock { self.pending -= 1 }
+            self.finishPendingOperation()
         }
     }
 
@@ -95,7 +118,7 @@ final class ExitDeadline: @unchecked Sendable {
         let completion = Completion<Value>()
         lock.withLock { pending += 1 }
         let work = Task { @MainActor in
-            defer { self.lock.withLock { self.pending -= 1 } }
+            defer { self.finishPendingOperation() }
             try self.check()
             return try await ExitDeadline.$current.withValue(self) { try await operation() }
         }

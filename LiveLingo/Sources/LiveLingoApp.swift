@@ -449,6 +449,7 @@ enum FilePanelPresentation {
 
 @MainActor
 enum RecordingQuitConfirmation {
+    typealias FocusRestore = @MainActor () -> Void
     enum Choice { case continueSession, saveAndQuit, quitWithoutSaving }
 
     static func choice(for response: NSApplication.ModalResponse, liveOnly: Bool) -> Choice {
@@ -482,10 +483,11 @@ enum RecordingQuitConfirmation {
     }
 
     static func present(environment: PresentationEnvironment, shouldRestore: () -> Bool,
-                        confirm: () -> Bool) -> Bool {
+                        confirm: () -> Bool, onConfirmed: ((FocusRestore?) -> Void)? = nil) -> Bool {
         let restorePrevious = environment.capturePreviousApplication()
         environment.activateApplication()
         let confirmed = confirm()
+        if confirmed { onConfirmed?(restorePrevious) }
         if !confirmed, shouldRestore() { restorePrevious?() }
         return confirmed
     }
@@ -533,6 +535,15 @@ enum RecordingQuitConfirmation {
         alert.window.preventsApplicationTerminationWhenModal = false
         return alert
     }
+
+    static func makeSaveFailureAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "保存未完成，已取消退出"
+        alert.informativeText = "临时录音与现有文件已保留，请重试保存。"
+        alert.addButton(withTitle: "继续")
+        alert.window.preventsApplicationTerminationWhenModal = false
+        return alert
+    }
 }
 
 @MainActor
@@ -544,6 +555,9 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     private var recordingConfirmationAlert: NSAlert?
     private var presentingRecordingConfirmation = false
     private var systemQuitRequested = false
+    private var cancelledQuitFocusRestore: RecordingQuitConfirmation.FocusRestore?
+    private var presentingLiveSessionSaveFailure = false
+    private var liveSessionSaveFailureAlert: NSAlert?
     #if DEBUG
     var cleanupForTesting: (@MainActor @Sendable () async -> Bool)?
     var replyForTesting: (@MainActor @Sendable (Bool) -> Void)?
@@ -554,6 +568,7 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     var recordingQuitChoiceForTesting: (@MainActor () -> RecordingQuitConfirmation.Choice)?
     var liveOnlyForTesting: Bool?
     var liveSessionSaveFailureForTesting: (@MainActor () -> Void)?
+    var abortLiveSessionSaveFailureForTesting: (@MainActor () -> Void)?
     var recordingConfirmationEnvironmentForTesting: RecordingQuitConfirmation.PresentationEnvironment?
     var abortRecordingConfirmationForTesting: (@MainActor () -> Void)?
     var terminationEventForTesting: NSAppleEventDescriptor?
@@ -599,6 +614,7 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
             return true
         }
         saveLiveSessionOnQuit = false
+        cancelledQuitFocusRestore = nil
         let state: (AppPhase, Bool)
         #if DEBUG
         if let recordingStateForTesting { state = recordingStateForTesting() }
@@ -626,6 +642,8 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
                         ?? (self.confirmRecordingQuitForTesting?() == true
                             ? (liveOnly ? .quitWithoutSaving : .saveAndQuit) : .continueSession)
                     return choice != .continueSession
+                }, onConfirmed: { restore in
+                    if liveOnly, choice == .saveAndQuit { self.cancelledQuitFocusRestore = restore }
                 })
         }
         else if !AppRuntimeEnvironment.isUnitTesting {
@@ -669,6 +687,8 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
             confirm: {
                 choice = RecordingQuitConfirmation.choice(for: alert.runModal(), liveOnly: liveOnly)
                 return choice != .continueSession
+            }, onConfirmed: { restore in
+                if liveOnly, choice == .saveAndQuit { self.cancelledQuitFocusRestore = restore }
             })
         return choice
     }
@@ -682,6 +702,7 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         #endif
         let systemTermination = RecordingQuitConfirmation.isSystemTermination(event)
         let abortConfirmation = systemTermination && presentingRecordingConfirmation && !systemQuitRequested
+        let abortSaveFailure = systemTermination && presentingLiveSessionSaveFailure && !systemQuitRequested
         if systemTermination {
             systemQuitRequested = true
             // A system quit also cancels a folder chooser from Save and Quit.
@@ -701,12 +722,28 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
             }
             #endif
         }
+        if abortSaveFailure {
+            #if DEBUG
+            if let abortLiveSessionSaveFailureForTesting { abortLiveSessionSaveFailureForTesting() }
+            else if let liveSessionSaveFailureAlert {
+                sender.abortModal()
+                liveSessionSaveFailureAlert.window.orderOut(nil)
+            }
+            #else
+            if let liveSessionSaveFailureAlert {
+                sender.abortModal()
+                liveSessionSaveFailureAlert.window.orderOut(nil)
+            }
+            #endif
+        }
         guard terminationTask == nil else { return .terminateLater }
         guard systemTermination || authorizeRecordingTermination() else { return .terminateCancel }
         // A system quit can arrive inside the confirmation's modal loop and
         // start saving before that loop returns. Join that existing attempt.
         guard terminationTask == nil else { return .terminateLater }
         let saveLiveSession = saveLiveSessionOnQuit && !systemQuitRequested
+        let restoreCancelledQuit = cancelledQuitFocusRestore
+        cancelledQuitFocusRestore = nil
         recordingQuitAuthorized = false
         saveLiveSessionOnQuit = false
         FilePanelPresentation.cancelAll()
@@ -716,19 +753,32 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         let deadline = ExitDeadline(inactivityTimeout: ExitDeadline.applicationTimeout)
         #endif
         terminationTask = Task { [self] in
-            let retireServices: @MainActor @Sendable () async throws -> Void = {
-                guard !AppRuntimeEnvironment.isUnitTesting else { return }
-                await ASRRuntime.shared.stop()
-                // The process's own termination remains visible if its exit
-                // cannot be confirmed within the shared application deadline.
-                guard !deadline.isExpired else { return }
-                await MLXRuntime.shared.shutdown()
-                guard await !ASRRuntime.shared.isRunning, await MLXRuntime.shared.resourceStates().isEmpty else {
-                    throw ExitDeadlineExceeded()
+            let prepare: @MainActor @Sendable (ExitDeadline) async -> Bool = { [self] lease in
+                let retireServices: @MainActor @Sendable () async throws -> Void = {
+                    guard !AppRuntimeEnvironment.isUnitTesting else { return }
+                    await ASRRuntime.shared.stop()
+                    guard !lease.isExpired else { return }
+                    await MLXRuntime.shared.shutdown()
+                    guard await !ASRRuntime.shared.isRunning, await MLXRuntime.shared.resourceStates().isEmpty else {
+                        throw ExitDeadlineExceeded()
+                    }
                 }
+                #if DEBUG
+                if let cleanupForTesting {
+                    do { return try await lease.wait { await cleanupForTesting() } }
+                    catch { return false }
+                }
+                #endif
+                if let model = Self.model {
+                    return await model.prepareForApplicationExit(deadline: lease, retireServices: retireServices)
+                }
+                do { try await lease.wait { try await retireServices() }; return true }
+                catch { return false }
             }
             var shouldExit = false
             var mayPrepareExit = true
+            var cancelledFolderSelection = false
+            var systemArrivedDuringFailure = false
             if saveLiveSession {
                 let conversion = await Self.model?.convertCurrentSessionToRecording(
                     usingExistingOutputDirectory: true, deadline: deadline) ?? .failed
@@ -738,35 +788,20 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
                 if !systemQuitRequested {
                     switch conversion {
                     case .converted: break
-                    case .cancelled: mayPrepareExit = false
+                    case .cancelled:
+                        mayPrepareExit = false
+                        cancelledFolderSelection = true
                     case .failed:
                         mayPrepareExit = false
                         notifyLiveSessionSaveFailure()
+                        systemArrivedDuringFailure = systemQuitRequested
                     }
                 }
             }
-            #if DEBUG
-            if !mayPrepareExit { shouldExit = false }
-            else if let cleanupForTesting {
-                do { shouldExit = try await deadline.wait { await cleanupForTesting() } }
-                catch { shouldExit = false }
-            } else if let model = Self.model {
-                shouldExit = await model.prepareForApplicationExit(deadline: deadline, retireServices: retireServices)
-            } else {
-                do { try await deadline.wait { try await retireServices() }; shouldExit = true }
-                catch { shouldExit = false }
-            }
-            #else
-            if !mayPrepareExit { shouldExit = false }
-            else if let model = Self.model {
-                shouldExit = await model.prepareForApplicationExit(deadline: deadline, retireServices: retireServices)
-            } else {
-                do { try await deadline.wait { try await retireServices() }; shouldExit = true }
-                catch { shouldExit = false }
-            }
-            #endif
+            if mayPrepareExit { shouldExit = await prepare(deadline) }
             if !shouldExit, mayPrepareExit, saveLiveSession, !systemQuitRequested {
                 notifyLiveSessionSaveFailure()
+                systemArrivedDuringFailure = systemQuitRequested
             } else if !shouldExit, mayPrepareExit, !systemQuitRequested {
                 #if DEBUG
                 if let confirmExitWithoutSavingForTesting {
@@ -779,26 +814,43 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
                 #endif
                 if shouldExit { deadline.revoke() }
             }
+            if systemArrivedDuringFailure {
+                // A system request closes the failure modal and makes one
+                // fresh bounded save attempt. The failed lease stays revoked.
+                #if DEBUG
+                let systemDeadline = ExitDeadline(inactivityTimeout: terminationTimeoutForTesting ?? ExitDeadline.applicationTimeout)
+                #else
+                let systemDeadline = ExitDeadline(inactivityTimeout: ExitDeadline.applicationTimeout)
+                #endif
+                shouldExit = await prepare(systemDeadline)
+            }
+            let restoreFocus = !shouldExit && cancelledFolderSelection && !systemQuitRequested ? restoreCancelledQuit : nil
             terminationTask = nil
             recordingQuitAuthorized = false
             systemQuitRequested = false
             #if DEBUG
-            if let replyForTesting { replyForTesting(shouldExit); return }
+            if let replyForTesting {
+                replyForTesting(shouldExit)
+                if !systemQuitRequested { restoreFocus?() }
+                return
+            }
             #endif
             sender.reply(toApplicationShouldTerminate: shouldExit)
+            if !systemQuitRequested { restoreFocus?() }
         }
         return .terminateLater
     }
 
     private func notifyLiveSessionSaveFailure() {
+        guard !systemQuitRequested else { return }
+        presentingLiveSessionSaveFailure = true
+        defer { presentingLiveSessionSaveFailure = false; liveSessionSaveFailureAlert = nil }
         #if DEBUG
         if let liveSessionSaveFailureForTesting { liveSessionSaveFailureForTesting(); return }
         guard !AppRuntimeEnvironment.isUnitTesting else { return }
         #endif
-        let alert = NSAlert()
-        alert.messageText = "保存未完成，已取消退出"
-        alert.informativeText = "临时录音与现有文件已保留，请重试保存。"
-        alert.addButton(withTitle: "继续")
+        let alert = RecordingQuitConfirmation.makeSaveFailureAlert()
+        liveSessionSaveFailureAlert = alert
         _ = alert.runModal()
     }
 
