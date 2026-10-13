@@ -125,6 +125,9 @@ struct CaptionTranslationDependencies {
     var repairTarget: ((DeferredCaptionRepair, CaptionTranslationTarget) async throws -> QwenTranslationClient.PreviousRepair)? = nil
     var retrySleep: @MainActor (TimeInterval) async throws -> Void = CaptionTranslationDependencies.sleepBeforeRetry
     var prepareRetry: @MainActor (String) async throws -> Void = { _ in }
+    var initialTranslation: @MainActor (String) async throws -> String = { _ in
+        throw QwenRuntimeError.runtimeUnavailable
+    }
 
     nonisolated private static func sleepBeforeRetry(_ seconds: TimeInterval) async throws {
         try await Task.sleep(for: .seconds(seconds))
@@ -159,6 +162,17 @@ struct CaptionTranslationDependencies {
                 context: DeferredCaptionRepair.englishContext(pending.context), modelName: pending.modelName, target: target)
         }
         dependencies.prepareRetry = { try await MLXRuntime.shared.finishRetirementBeforeRetry($0) }
+        dependencies.initialTranslation = { text in
+            // installedSource never downloads a package or opens a preparation
+            // sheet. Older systems can reuse their prepared preview session.
+            guard #available(macOS 26.0, *) else { throw QwenRuntimeError.runtimeUnavailable }
+            let source = Locale.Language(identifier: "en")
+            let target = Locale.Language(identifier: "zh-Hans")
+            guard await LanguageAvailability().status(from: source, to: target) == .installed else {
+                throw QwenRuntimeError.runtimeUnavailable
+            }
+            return try await TranslationSession(installedSource: source, target: target).translate(text).targetText
+        }
         return dependencies
     }
     static let unavailable = Self(
@@ -687,6 +701,8 @@ final class AppModel: ObservableObject {
     private var previewWake: PreviewWakeSignal?
     /// 每次 `runPreviewTranslation` 的身份；旧循环返回的结果不能写进新会话。
     private var previewRunToken: UUID?
+    private var initialTranslationCache: [String: String] = [:]
+    private var preparedInitialTranslation: (@MainActor (String) async throws -> String)?
     /// 预览时序日志的窗口聚合状态（见 `tracePreviewReceiveHop`）。
     private var previewHopWindowStarted: TimeInterval = 0
     private var previewHopWorst: TimeInterval = 0
@@ -876,6 +892,7 @@ final class AppModel: ObservableObject {
         // 令牌必须在任何 await 之前绑定：否则旧会话的 prepareTranslation 返回后
         // 会覆盖新会话的令牌，把最新一次运行误判成“已过期”。
         guard applePreviewLanguagePair != nil else { return }
+        let supportsInitialFallback = applePreviewLanguagePair?.target == "zh-Hans"
         let runToken = UUID()
         previewRunToken = runToken
         // Wake the superseded loop before preparation: preparation may fail
@@ -901,6 +918,14 @@ final class AppModel: ObservableObject {
             // prepare 期间可能已经有更新的会话接替：旧会话直接退出，不改状态。
             guard previewRunToken == runToken else { return }
             previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
+            preparedInitialTranslation = { [weak self] text in
+                guard let self, supportsInitialFallback, self.previewRunToken == runToken,
+                      self.captionTarget == .simplifiedChinese else { throw QwenRuntimeError.runtimeUnavailable }
+                return try await session.translate(text).targetText
+            }
+            defer {
+                if self.previewRunToken == runToken { self.preparedInitialTranslation = nil }
+            }
             let wake = PreviewWakeSignal()
             installPreviewWake(wake)
             defer { releasePreviewWake(wake) }
@@ -920,6 +945,9 @@ final class AppModel: ObservableObject {
                 translate: { try await session.translate($0).targetText },
                 deliver: { source, translated, timing in
                     self.previewChinese = self.captionTarget.normalize(translated)
+                    if supportsInitialFallback, self.captionTarget == .simplifiedChinese {
+                        self.rememberInitialTranslation(source: source.text, translated: translated)
+                    }
                     self.previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
                     Self.tracePreview("delivered", characters: source.text.count, timing: timing)
                 },
@@ -2732,6 +2760,7 @@ final class AppModel: ObservableObject {
         liveChinese = ""
         translatingSegmentID = nil
         clearTranslationPreview()
+        initialTranslationCache.removeAll(keepingCapacity: false)
         segments = []
         initialSourceRevisionInputs = [:]
         resetLearningNotes()
@@ -3287,6 +3316,7 @@ final class AppModel: ObservableObject {
         liveChinese = ""
         translatingSegmentID = nil
         clearTranslationPreview()
+        initialTranslationCache.removeAll(keepingCapacity: false)
         segments = []
         initialSourceRevisionInputs = [:]
         lectureSummary = ""
@@ -4915,7 +4945,7 @@ final class AppModel: ObservableObject {
                     // increase the budget; transient or unclassified runtime errors
                     // retain one ordinary retry.
                     if !self.rescuedTransportCaptionIDs.contains(id),
-                       let attempt = CaptionTranslationAttempt.recovery(for: error) {
+                       let attempt = CaptionTranslationAttempt.recovery(for: error, target: target) {
                         Self.traceTranslation("retry_\(attempt.rawValue)", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started)
                         do {
@@ -4974,10 +5004,29 @@ final class AppModel: ObservableObject {
                                               detail: reason.rawValue)
                         self.segments[currentIndex].finishFailedTranslation()
                         self.segments[currentIndex].updateCaptionAnnotation(targetCode: target.rawValue)
+                        if target == .simplifiedChinese, sourceLanguage == nil || sourceLanguage == "en",
+                           self.segments[currentIndex].modelDidNotTranslate,
+                           self.segments[currentIndex].initialTranslationFallback == nil {
+                            let source = input.english.trimmingCharacters(in: .whitespacesAndNewlines)
+                            var initial = self.initialTranslationCache[self.initialTranslationCacheKey(source)]
+                            if initial == nil {
+                                let translate = self.preparedInitialTranslation ?? self.captionTranslation.initialTranslation
+                                initial = try? await translate(source)
+                            }
+                            guard !Task.isCancelled, let fallbackIndex = self.translationInputIndex(input,
+                                session: currentSession, epoch: currentGeneration, worker: workerID) else { continue }
+                            // Apple output is still a translation, not an error,
+                            // source echo or arbitrary explanatory response.
+                            let usable = initial.flatMap { try? TranslationAcceptance.validatedCaption(
+                                target.normalize($0), source: source, target: target) }
+                            self.segments[fallbackIndex].recordInitialTranslationFallback(usable, targetCode: target.rawValue)
+                        }
                         if transportFailuresOnly, !self.rescuedTransportCaptionIDs.contains(id) {
                             self.failedTransportCaptions[id] = (input, self.captionTranslationSuccessCount)
                         }
-                        self.liveChinese = self.segments[currentIndex].displayChinese
+                        guard let displayIndex = self.translationInputIndex(input, session: currentSession,
+                            epoch: currentGeneration, worker: workerID) else { continue }
+                        self.liveChinese = self.segments[displayIndex].displayChinese
                     }
                     self.persistCurrentSession()
                 }
@@ -5053,6 +5102,18 @@ final class AppModel: ObservableObject {
         // Runtime errors can embed source text or paths. Details remain in the
         // UI state; ordinary logging records only their presence.
         latencyLog.notice("caption event=\(event, privacy: .public) id=\(id.uuidString, privacy: .public) elapsed_ms=\(milliseconds) has_diagnostic=\(detail != nil)")
+    }
+
+    private func initialTranslationCacheKey(_ source: String) -> String {
+        "\(sessionID.uuidString)|\(generation)|\(source.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    func rememberInitialTranslation(source: String, translated: String) {
+        let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty, captionTarget == .simplifiedChinese,
+              let text = try? TranslationAcceptance.validatedCaption(translated, source: source) else { return }
+        if initialTranslationCache.count >= 64 { initialTranslationCache.removeAll(keepingCapacity: true) }
+        initialTranslationCache[initialTranslationCacheKey(source)] = text
     }
 
     private static func previewMilliseconds(_ value: TimeInterval) -> Int {

@@ -238,7 +238,11 @@ class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(manifest["targetsWithPrompts"], ["zh-Hans"])
             self.assertEqual(manifest["targetsWithoutPrompts"], ["en", "es", "fr"])
             self.assertFalse(manifest["addedTrailingNewline"])
-            self.assertEqual(len(manifest["prompts"]), 14)
+            self.assertEqual(len(manifest["prompts"]), 16)
+            for profile in ("4b", "9b"):
+                quotation = (destination / f"zh-Hans-caption-quotation-repair-{profile}.utf8").read_text()
+                self.assertIn("including profanity and offensive language", quotation)
+                self.assertIn("这是课堂字幕", quotation)
             for entry in manifest["prompts"]:
                 data = (destination / entry["file"]).read_bytes()
                 self.assertEqual(entry["byteCount"], len(data))
@@ -321,7 +325,7 @@ class TargetAcceptanceCLIIntegrationTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 replies = list(pool.map(lambda _: self.run_cli(["prompts", "--output-dir", path]), range(2)))
             self.assertEqual(sum(row.returncode == 0 for row in replies), 1)
-            self.assertEqual(len(json.loads((Path(path) / "manifest.json").read_text())["prompts"]), 14)
+            self.assertEqual(len(json.loads((Path(path) / "manifest.json").read_text())["prompts"]), 16)
 
     def test_build_directory_creation_is_exclusive_and_rejects_checkout(self):
         with tempfile.TemporaryDirectory(prefix="synthetic-build-exclusive-", dir=self.output) as scratch:

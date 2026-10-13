@@ -638,7 +638,7 @@ enum CaptionTranslationAttempt: String, Sendable {
     func promptSuffix(for target: CaptionTranslationTarget) -> String {
         let recovery = target.isSpanishOrFrench && isContentRepair ? LatinCaptionPrompts.recovery(for: target)
             : target == .english && isContentRepair ? QwenTranslationClient.englishRecoverySuffix : contentRepairSuffix
-        return recovery + (self == .repairQuotedContent ? quotedContentSuffix : "")
+        return recovery + (self == .repairQuotedContent && target == .simplifiedChinese ? quotedContentSuffix : "")
     }
 
     var promptSuffix: String {
@@ -666,12 +666,13 @@ enum CaptionTranslationAttempt: String, Sendable {
         """
     }
 
-    static func recovery(for error: Error) -> Self? {
+    static func recovery(for error: Error, target: CaptionTranslationTarget = .simplifiedChinese) -> Self? {
         if error is CancellationError { return nil }
         guard let runtime = error as? QwenRuntimeError else { return .standard }
         switch runtime {
         case .translationRejected(_, let rejection):
-            return rejection == .modelReply || rejection == .sourceEcho ? .repairQuotedContent : .repairContent
+            return target == .simplifiedChinese && (rejection == .modelReply || rejection == .sourceEcho)
+                ? .repairQuotedContent : .repairContent
         case .outputLimitReached: return .expandedBudget
         case .serviceUnavailable, .transcriptionTimedOut, .lmStudioUnavailable,
              .invalidResponse, .generationInterrupted, .requestTimedOut, .processExited:

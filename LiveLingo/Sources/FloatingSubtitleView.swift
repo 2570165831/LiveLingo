@@ -280,8 +280,13 @@ extension AppModel {
         let formal = floatingTranslationWithoutPreview
         var translatedText = formal ?? preview.text
         var isPreview = formal == nil && preview.isPreview
+        let fallback = volatileEnglish.isEmpty ? segments.last?.initialTranslationDisplay : nil
+        if let fallback, captionTarget == .simplifiedChinese {
+            translatedText = captionDisplayLanguage.renderForDisplay(fallback, converter: chineseScriptConverter)
+            isPreview = true
+        }
         var hasTranslation = true
-        if mode == .translationOnly {
+        if mode == .translationOnly, fallback == nil {
             if let caption = confirmedNonEnglishCaption {
                 hasTranslation = captionTarget.keepsSourceAsCaption(language: caption.sourceLanguage)
                     || caption.hasUsableTranslation
@@ -312,7 +317,8 @@ extension AppModel {
             if caption.hasUsableTranslation {
                 return captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter)
             }
-            return caption.translationState == .failed ? caption.translationFailureStatus : "等待正式译文…"
+            return caption.translationState == .failed
+                ? (captionTarget == .simplifiedChinese ? caption.translationFailureStatus : "本段翻译未完成") : "等待正式译文…"
         }
         return previewTranslationEnabled ? "当前系统不支持初译；停顿时显示正式译文" : "初译已关闭；停顿时显示正式译文"
     }
@@ -342,6 +348,10 @@ extension AppModel {
     }
 
     private var previewChinesePresentation: (text: String, isPreview: Bool) {
+        if volatileEnglish.isEmpty, captionTarget == .simplifiedChinese,
+           let initial = segments.last?.initialTranslationDisplay {
+            return (captionDisplayLanguage.renderForDisplay(initial, converter: chineseScriptConverter), true)
+        }
         if captionTarget == .english, !volatileEnglish.isEmpty { return (volatileEnglish, false) }
         if let caption = confirmedNonEnglishCaption {
             let target = captionTarget
@@ -351,7 +361,8 @@ extension AppModel {
             if caption.hasUsableTranslation {
                 return (captionDisplayLanguage.renderForDisplay(caption.chinese, converter: chineseScriptConverter), false)
             }
-            return (caption.translationState == .failed ? caption.translationFailureStatus : "等待正式译文…", false)
+            return (caption.translationState == .failed
+                ? (captionTarget == .simplifiedChinese ? caption.translationFailureStatus : "本段翻译未完成") : "等待正式译文…", false)
         }
         guard previewTranslationEnabled else { return ("初译已关闭", false) }
         guard supportsPreviewTranslation else { return ("当前系统不支持初译；正式译文随后显示", false) }

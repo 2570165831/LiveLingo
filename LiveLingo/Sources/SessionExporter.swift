@@ -1002,7 +1002,8 @@ enum SessionExporter {
         if target.keepsSourceAsCaption(language: segment.sourceLanguage) {
             return segment.hasUsableTranslation ? segment.chinese : target.renderPassThrough(segment.english)
         }
-        if segment.modelDidNotTranslate {
+        if target == .simplifiedChinese, let initial = segment.initialTranslationDisplay { return initial }
+        if target == .simplifiedChinese, segment.modelDidNotTranslate {
             return (segment.sourceLanguage == nil && target == .simplifiedChinese
                 ? ClassroomFixedText.modelUntranslatedAgainstEnglish : .modelUntranslatedAgainstSource).text(targetCode: target.rawValue)
         }
@@ -1083,8 +1084,11 @@ enum SessionExporter {
                                    converter: ChineseScriptConverter = .shared) throws -> String {
         var draft = targetLine(segment, outputLanguage: outputLanguage)
         let sourceOnly = outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
-        if outputLanguage.profile.renderer != .identity, !sourceOnly, segment.translationState == .failed {
-            draft = (segment.sourceLanguage == nil ? ClassroomFixedText.failedAgainstEnglish : .failedAgainstSource)
+        if outputLanguage.profile.renderer != .identity, !sourceOnly, segment.translationState == .failed,
+           segment.initialTranslationDisplay == nil {
+            draft = (segment.modelDidNotTranslate
+                ? (segment.sourceLanguage == nil ? ClassroomFixedText.modelUntranslatedAgainstEnglish : .modelUntranslatedAgainstSource)
+                : (segment.sourceLanguage == nil ? .failedAgainstEnglish : .failedAgainstSource))
                 .text(targetCode: "zh-Hans")
         }
         return !sourceOnly && !segment.hasUsableTranslation

@@ -111,6 +111,141 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         }
     }
 
+    func testTranslationLectureContentIsNeverARefusal() async throws {
+        let pairs = [
+            ("I cannot accurately translate this poem.", "我无法准确翻译这首诗。"),
+            ("I won't go through every step of translation.", "我不会详细讲解翻译的每一个步骤。"),
+            ("I can't cover transcription and translation in one lecture.", "我无法在一节课里讲完转录和翻译。"),
+            ("I'm unable to translate it literally.", "我无法逐字翻译它。"),
+            ("I can't be sure, but the translation of this word is roughly freedom.", "我无法确定，但这个词的翻译大致是自由。"),
+            ("I'm not going to ask you to translate this on the exam.", "我不会让你们在考试中翻译这个。"),
+            ("I cannot explain mRNA translation without discussing ribosomes.", "我无法在不讨论核糖体的情况下解释 mRNA 翻译。"),
+            ("I'm sorry, I can't translate this idiom literally.", "抱歉，我没法直译这个习语。"),
+            ("Translation stops when the ribosome reaches a stop codon.", "核糖体到达终止密码子时，翻译停止。"),
+            ("Sorry, I cannot help with this request.", "对不起，我不能协助处理这类请求。"),
+            ("I'm unable to assist with this request.", "我无法协助处理这类请求。"),
+            ("I won't help with this request.", "我不会帮助处理这类请求。"),
+            ("Sorry, Alice missed 3 lectures.", "抱歉，Alice 错过了 3 节课。"),
+            ("Alice scored 42 points.", "抱歉，无法翻译该内容。Alice 得了 42 分。"),
+            ("Alice scored 42 points.", "对不起，我无法提供 Alice 的 42 分的翻译。")
+        ]
+        for (source, output) in pairs {
+            XCTAssertFalse(TranslationAcceptance.isModelReply(output, source: source), source)
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source), source)
+            XCTAssertEqual(try TranslationAcceptance.validatedCaption(output, source: source), output)
+            var requests = 0
+            var deps = CaptionTranslationDependencies.unavailable
+            deps.translate = { _, _, _, _, _ in requests += 1; return output }
+            let (model, _) = try fixture(deps)
+            model.receiveCaptionForTesting(source, start: 0, end: 1)
+            await model.translationTaskForTesting?.value
+            XCTAssertEqual(requests, 1, source)
+            XCTAssertTrue(model.segments[0].hasUsableTranslation, source)
+        }
+    }
+
+    func testWholeRefusalVariantsAndSourceContentExceptions() throws {
+        for output in [
+            "抱歉，无法翻译该内容。", "抱歉，此内容包含不当语言，无法提供翻译。",
+            "对不起，我不便翻译这句话。", "很抱歉，我不能协助处理这类请求。",
+            "我拒绝翻译这句话。", "抱歉，我无法提供该内容的翻译。"
+        ] {
+            XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: "Fuck your mother."), .modelReply, output)
+            XCTAssertFalse(TranslationAcceptance.isModelReply(output, source: "We are discussing translation."))
+        }
+        for output in ["我不能翻译这首诗。", "我无法翻译 mRNA。", "抱歉，我不能提供第 42 题的翻译。",
+                       "抱歉，我不能翻译该内容，Alice 得了 42 分。"] {
+            XCTAssertFalse(TranslationAcceptance.isModelReply(output, source: "Alice scored 42 points."), output)
+        }
+    }
+
+    func testInitialFallbackReusesExactPreviewOrMakesOneRequestOrRecordsFailure() async throws {
+        for scenario in ["cached", "request", "failure", "wrong-source", "echo"] {
+            var requests: [String] = []
+            var deps = CaptionTranslationDependencies.unavailable
+            deps.translate = { _, _, _, _, _ in throw QwenRuntimeError.translationRejected("synthetic", rejection: .sourceEcho) }
+            deps.initialTranslation = { text in
+                requests.append(text)
+                if scenario == "failure" { throw QwenRuntimeError.runtimeUnavailable }
+                return scenario == "echo" ? text : "房间很冷。"
+            }
+            let (model, _) = try fixture(deps)
+            if scenario == "cached" { model.rememberInitialTranslation(source: source, translated: "房间很冷。") }
+            if scenario == "wrong-source" { model.rememberInitialTranslation(source: "The room is warm.", translated: "房间很暖。") }
+            model.receiveCaptionForTesting(source, start: 0, end: 1)
+            await model.translationTaskForTesting?.value
+            let segment = model.segments[0]
+            XCTAssertEqual(requests, scenario == "cached" ? [] : [source], scenario)
+            XCTAssertEqual(segment.translationState, .failed)
+            XCTAssertEqual(segment.chinese, "")
+            XCTAssertFalse(segment.hasUsableTranslation)
+            var gate = CaptionNoteGate()
+            let admission = gate.evaluate(.init(captions: [.init(id: segment.id, revision: segment.inputRevision,
+                start: segment.startTime, end: segment.endTime, english: segment.english,
+                chinese: segment.chinese, usable: segment.hasUsableTranslation)], producerDrained: true), now: 0)
+            XCTAssertTrue(admission.eligible.isEmpty, "Display-only initial captions must not enter note evidence")
+            XCTAssertEqual(segment.translationFailures, [.init(reason: .translationRejected, count: 2, rejection: .sourceEcho)])
+            let display = ["failure", "echo"].contains(scenario) ? "（模型未翻译此句，可对照英文）" : "初译 · 房间很冷。"
+            XCTAssertEqual(segment.displayChinese, display, scenario)
+            XCTAssertEqual(SessionExporter.targetLine(segment), display)
+            XCTAssertTrue(SessionExporter.srtCue(segment, index: 0).contains(display))
+            XCTAssertEqual(CaptionPresentation.translationText(segment, outputLanguage: .simplifiedChinese), display)
+            XCTAssertEqual(try JSONDecoder().decode(TranscriptSegment.self, from: encode(segment)), segment)
+            XCTAssertNil(segment.withoutTranslationFailures.initialTranslationFallback)
+            XCTAssertFalse(LearningSourceUnit.make([segment]).contains { $0.text.contains("房间很冷") })
+            if segment.initialTranslationDisplay != nil {
+                XCTAssertEqual(try SessionExporter.renderedTargetLine(segment, outputLanguage: .traditionalChineseTaiwan), "初譯 · 房間很冷。")
+                let presentation = model.floatingSubtitlePresentation(mode: .translationOnly)
+                XCTAssertEqual(presentation.translation?.isPreview, true)
+                XCTAssertTrue(model.previewChineseDisplay.contains("初译"))
+            }
+        }
+    }
+
+    func testInitialFallbackDoesNotApplyToOtherFailuresOrTargetsAndClearsOnSuccess() throws {
+        var segment = TranscriptSegment(startTime: 0, endTime: 1, english: source)
+        segment.recordTranslationFailure(.translationRejected, rejection: .modelReply)
+        segment.finishFailedTranslation()
+        segment.recordInitialTranslationFallback(result, targetCode: "en")
+        XCTAssertNil(segment.initialTranslationFallback)
+        segment.recordInitialTranslationFallback(result, targetCode: "zh-Hans")
+        XCTAssertEqual(SessionExporter.targetLine(segment, target: .english), source)
+        XCTAssertEqual(SessionExporter.targetLine(segment, target: .spanish), ClassroomFixedText.failedAgainstSource.text(targetCode: "es"))
+        for target in [CaptionTranslationTarget.english, .spanish, .french] {
+            XCTAssertEqual(CaptionTranslationAttempt.recovery(for: QwenRuntimeError.translationRejected("test", rejection: .modelReply), target: target), .repairContent)
+            XCTAssertFalse(CaptionTranslationAttempt.repairQuotedContent.promptSuffix(for: target).contains("including profanity"))
+        }
+        var plain = segment
+        plain.recordTranslationFailure(.processExited)
+        plain.finishFailedTranslation()
+        XCTAssertNil(plain.initialTranslationDisplay)
+        XCTAssertTrue(segment.sameContent(as: segment.withoutTranslationFailures))
+        segment.completeTranslation(result)
+        XCTAssertNil(segment.initialTranslationFallback)
+        XCTAssertEqual(segment.displayChinese, result)
+    }
+
+    func testStructuredRepairFailuresKeepTheirActualSubreason() throws {
+        let quote = try XCTUnwrap(TranslationAcceptance.quotedTranslationRepairPlan(
+            candidate: #"把"The lamp is not on"译成法语。"#, source: #"Translate "The lamp is not on" into French."#))
+        for (response, code) in [(#"{}"#, TranslationAcceptance.Rejection.jsonStructure),
+                                 (#"{"q0":""}"#, .empty), (#"{"q0":"The lamp is not on"}"#, .nonChineseText),
+                                 (#"{"q0":"灯亮着"}"#, .incompleteProse)] {
+            XCTAssertThrowsError(try quote.applying(response)) { error in
+                XCTAssertEqual((error as? QwenRuntimeError)?.translationRejection, code)
+            }
+        }
+        let status = try XCTUnwrap(TranslationAcceptance.jsonStatusRepairPlan(
+            candidate: #"她写了 {"state":"not stable"}。"#, source: #"She wrote {"state":"not stable"}."#))
+        for (response, code) in [(#"{}"#, TranslationAcceptance.Rejection.jsonStructure),
+                                 (#"{"0":""}"#, .empty), (#"{"0":"stable"}"#, .nonChineseText),
+                                 (#"{"0":"稳定"}"#, .incompleteProse), (#"{"0":"不稳定 42"}"#, .jsonQuantity)] {
+            XCTAssertThrowsError(try status.applying(response)) { error in
+                XCTAssertEqual((error as? QwenRuntimeError)?.translationRejection, code)
+            }
+        }
+    }
+
     func testQuotationRecoveryIsBoundedAndKeepsTheFailureCodeAfterSuccess() async throws {
         for code in [TranslationAcceptance.Rejection.modelReply, .sourceEcho, .disproportionateLength] {
             var attempts: [CaptionTranslationAttempt] = []

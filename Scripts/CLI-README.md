@@ -350,13 +350,29 @@ allowlisted; routine pauses, parks, restarts and actual worker cancellation do
 not write them as new translation failures. The CLI regression checks worker
 cancellation; saved-course pause/reopen coverage belongs to the app tests.
 
-Explicit model replies/refusals and English source echoes receive the existing
+For Chinese output, explicit model replies/refusals and English source echoes receive the existing
 single bounded retry with `repairQuotedContent`: the content-repair constraints
 plus an instruction to translate classroom quotations faithfully, including
 profanity. All other failures keep their existing recovery strategy. An explicit
-refusal quoted in the source remains translatable lecture content. If the final
-failure is a model reply or source echo, display text says the model did not
-translate that sentence; other failure placeholders remain unchanged.
+refusal quoted in the source remains translatable lecture content. Lecture sources
+discussing translation are exempt from the generic refusal parser. The parser
+requires an entire refusal/courtesy response with no translated names, quantities
+or factual clauses; an inability verb alone is insufficient.
+
+After a final refusal or English echo, Chinese captions first reuse the exact
+sentence's Apple initial translation from this session. If absent, they request
+one local translation of the final English, using an installed language pair;
+no download or repeated Apple retries occur. The caption stays failed, retains
+its rejection code and stores the Apple output separately from formal Chinese.
+The UI, SRT and text exports prefix it with `初译 · `; it is not admitted as
+learning-note evidence. Only when no usable initial translation is available
+does the caption say the model did not translate the sentence. A failed Apple
+attempt is persisted to prevent repeated requests on resume. macOS 26 can
+create an installed-only session; older systems need an already prepared Apple
+preview session. Other failure placeholders and non-Chinese recovery stay unchanged.
+
+The offline prompt audit exports both model profiles' complete quotation-repair
+prompts, including the Chinese postscript, alongside the unchanged normal prompts.
 
 `--resume-saved` waits only for work that can still move on its own: active or
 claimable transcription, translation and notes. Failed segments (including

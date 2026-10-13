@@ -149,16 +149,46 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
             range: NSRange(text.startIndex..., in: text)) != nil
     }
 
-    // A short refusal need not mention AI. Match explicit translation refusal,
-    // not ordinary first-person inability; quoted refusals in the source remain
-    // eligible lecture content. The safety-information form covers model replies
-    // that avoid the word "translation" while declining the same source.
-    private static let translationRefusalExpression = try! NSRegularExpression(pattern:
-        #"(?i)(?:我(?:无法|不能|不会|不可以)(?:[^。！？!?\r\n]{0,24})(?:翻译|译文)|我(?:无法|不能)提供(?:[^。！？!?\r\n]{0,24})(?:暴力|仇恨|不当|不适当|冒犯|粗俗)(?:[^。！？!?\r\n]{0,24})(?:信息|内容)|\bi\s+(?:cannot|can\s+not|can't|can’t|am\s+unable\s+to)\s+(?:translate\b|(?:provide|offer|help|assist)(?:[^.!?\r\n]{0,48})\btranslat(?:e|ion)\b))"#)
+    // Parse a complete generic refusal, rather than searching lecture prose for
+    // an inability verb near "translation". Every clause must be refusal or
+    // courtesy; no wildcard slot may consume a translated name, number or fact.
+    private enum RefusalReply {
+        static let object = #"(?:该|此|这(?:一|类|些)?)(?:内容|信息|句(?:话|子)|请求)"#
+        static let unsafe = #"(?:暴力|仇恨|不当|不适当|冒犯(?:性)?|粗俗)(?:[、,或和及]*(?:暴力|仇恨|不当|不适当|冒犯(?:性)?|粗俗))*"#
+        static let unsafeObject = #"(?:包含|涉及)"# + unsafe + #"(?:语言|用语|内容|信息)(?:的(?:内容|信息))?"#
+        static let action = #"(?:翻译(?:"# + object + "|" + unsafeObject + #")?|(?:提供|给出)(?:"#
+            + object + #"的)?(?:翻译|译文)|(?:协助|帮助)(?:处理)?"# + object
+            + #"|提供(?:"# + unsafeObject + #"))"#
+        static let apology = #"(?:(?:很|非常)?抱歉|对不起)"#
+        static let chinese = try! NSRegularExpression(pattern: #"^\s*(?:"# + apology + #"[,，:：\s]*)?(?:"#
+            + object + #"(?:包含|涉及)"# + unsafe + #"(?:语言|用语|内容|信息)[,，:：\s]+)?(?:我)?(?:无法|不能|不会|不可以|不便|拒绝)"#
+            + action + #"\s*$"#)
+        static let english = try! NSRegularExpression(pattern:
+            #"(?i)^\s*(?:(?:i(?:['’]m| am)\s+)?sorry[,\s]*)?(?:i\s+(?:cannot|can\s+not|can['’]t|will\s+not|won['’]t|am\s+unable\s+to|refuse\s+to)|i['’]m\s+unable\s+to)\s+(?:translate(?:\s+(?:this|that|the|offensive|inappropriate)(?:\s+(?:content|text|sentence|request)))?|(?:provide|offer)\s+(?:a\s+)?translation(?:\s+of\s+(?:this|that|the)\s+(?:content|text|sentence))?|(?:help|assist)(?:\s+(?:with|in\s+handling))?\s+(?:this|that|the)\s+request)\s*$"#)
+        static let courtesy = try! NSRegularExpression(pattern:
+            #"^(?:如果您有其他问题或需要(?:帮助|支持)[,，]请随时告诉我|我的职责是提供安全[、,，]有益的(?:帮助|信息(?:和服务)?)|如果您有其他问题或需要(?:帮助|支持)[,，]我很乐意为您提供帮助)$"#)
 
-    private static func containsTranslationRefusal(_ text: String) -> Bool {
-        translationRefusalExpression.firstMatch(in: text,
-            range: NSRange(text.startIndex..., in: text)) != nil
+        static func matches(_ expression: NSRegularExpression, _ text: String) -> Bool {
+            expression.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+        }
+
+        static func isEntireReply(_ text: String) -> Bool {
+            let clauses = text.split(whereSeparator: { "。.!！?？\r\n".contains($0) })
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            guard let refusal = clauses.first,
+                  matches(chinese, refusal) || matches(english, refusal) else { return false }
+            return clauses.dropFirst().allSatisfy { matches(courtesy, $0) }
+        }
+
+        static func isUnsupported(_ candidate: String, source: String) -> Bool {
+            // Includes translate/translation/translating and biology lectures.
+            guard !source.lowercased().contains("translat"),
+                  !["翻译", "译文", "直译"].contains(where: source.contains),
+                  !isEntireReply(source) else { return false }
+            // The closed grammar is also the content check: an extra translated
+            // clause or concrete object makes this false, even after an apology.
+            return isEntireReply(candidate)
+        }
     }
 
     private static func unsupportedModelSelfDescription(in foldedCandidate: String,
@@ -167,7 +197,7 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
         let original = TranslationCheckText.inspectionCopy(source, targetCode: targetCode).folding(
             options: [.widthInsensitive, .diacriticInsensitive], locale: nil)
         return (containsModelSelfDescription(candidate) && !containsModelSelfDescription(original))
-            || (containsTranslationRefusal(candidate) && !containsTranslationRefusal(original))
+            || RefusalReply.isUnsupported(candidate, source: original)
     }
 
     /// A narrow structural check for unfinished previews. Do not apply the
@@ -414,8 +444,8 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
         }
 
         func applying(_ response: String, target: CaptionTranslationTarget = .simplifiedChinese) throws -> String {
-            func fail() -> QwenRuntimeError {
-                .translationRejected("译文未通过验收：引语补译格式无效，或仍有未译内容。")
+            func fail(_ rejection: Rejection = .jsonStructure) -> QwenRuntimeError {
+                .translationRejected("译文未通过验收：引语补译格式无效，或仍有未译内容。", rejection: rejection)
             }
             guard let object = try? JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: String],
                   Set(object.keys) == Set(values.map(\.id) + statusValues.map(\.id)) else { throw fail() }
@@ -425,14 +455,15 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
             for value in values {
                 guard let raw = object[value.id] else { throw fail() }
                 let text = target.normalize(raw).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard containsHan(text), !containsKanaOrHangul(text), text.count <= 160,
-                      text.rangeOfCharacter(from: CharacterSet(charactersIn: "\"'“”‘’`\r\n")) == nil
-                else { throw fail() }
+                guard !text.isEmpty else { throw fail(.empty) }
+                guard containsHan(text), !containsKanaOrHangul(text) else { throw fail(.nonChineseText) }
+                guard text.count <= 160 else { throw fail(.disproportionateLength) }
+                guard text.rangeOfCharacter(from: CharacterSet(charactersIn: "\"'“”‘’`\r\n")) == nil else { throw fail() }
                 _ = try validated(text, source: value.source, target: target)
                 // A surface safeguard, not proof of semantic negation scope.
                 if value.source.range(of: #"(?i)\b(?:not|no|never|neither|nor|none|nothing|without|cannot|[a-z]+n['’]t)\b"#,
                                       options: .regularExpression) != nil,
-                   !text.contains(where: { "不没未无非勿别否禁".contains($0) }) { throw fail() }
+                   !text.contains(where: { "不没未无非勿别否禁".contains($0) }) { throw fail(.incompleteProse) }
                 replacements.append((value.range, text))
             }
             if !statusValues.isEmpty {
@@ -581,8 +612,8 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
         }
 
         func replacements(_ response: String, target: CaptionTranslationTarget = .simplifiedChinese) throws -> [(NSRange, String)] {
-            func fail() -> QwenRuntimeError {
-                .translationRejected("译文未通过验收：状态补译格式无效，或无法核实中文和否定。")
+            func fail(_ rejection: Rejection = .jsonStructure) -> QwenRuntimeError {
+                .translationRejected("译文未通过验收：状态补译格式无效，或无法核实中文和否定。", rejection: rejection)
             }
             guard let object = try? JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: String],
                   Set(object.keys) == Set(values.map(\.id)) else { throw fail() }
@@ -592,15 +623,16 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
             for value in values {
                 guard let raw = object[value.id] else { throw fail() }
                 let translation = target.normalize(raw).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !translation.isEmpty, translation.count <= 32, containsHan(translation),
+                guard !translation.isEmpty else { throw fail(.empty) }
+                guard translation.count <= 32 else { throw fail(.disproportionateLength) }
+                guard containsHan(translation),
                       // The prose tokenizer also includes Han letters. Inspect
                       // scripts directly so Chinese itself is not rejected.
                       !translation.unicodeScalars.contains(where: {
                           CharacterSet.letters.contains($0) && !isHan($0)
-                      }),
-                      !translation.unicodeScalars.contains(where: CharacterSet.decimalDigits.contains),
-                      !value.source.hasPrefix("not ") || translation.contains(where: { "不没未无非".contains($0) })
-                else { throw fail() }
+                      }) else { throw fail(.nonChineseText) }
+                guard !translation.unicodeScalars.contains(where: CharacterSet.decimalDigits.contains) else { throw fail(.jsonQuantity) }
+                guard !value.source.hasPrefix("not ") || translation.contains(where: { "不没未无非".contains($0) }) else { throw fail(.incompleteProse) }
                 _ = try validated(translation, source: value.source, target: target)
                 let data = try JSONSerialization.data(withJSONObject: [translation], options: [.withoutEscapingSlashes])
                 let quoted = String(decoding: data, as: UTF8.self).dropFirst().dropLast()
