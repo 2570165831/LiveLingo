@@ -80,7 +80,7 @@ Use the lock icon beside Floating subtitles in the main window to lock the panel
 
 1. Click **Unlock floating subtitles (解锁浮动字幕)** using the lock icon in the main window.
 2. In normal mode, choose **Recording → Unlock floating subtitles**. In full-screen class mode, use that action in the LiveLingo menu-bar icon's menu.
-3. Press **⌘⇧L** while LiveLingo is the foreground app. This is an app shortcut, not a global shortcut.
+3. Press **⇧⌘L** while LiveLingo is the foreground app. This is an app shortcut, not a global shortcut.
 
 The panel starts unlocked on each launch.
 

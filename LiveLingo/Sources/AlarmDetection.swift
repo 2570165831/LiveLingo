@@ -193,8 +193,8 @@ struct AlarmBannerState: Equatable, Sendable {
         if canCancelSegmentation, let secondsRemaining { return "取消（\(secondsRemaining)）" }
         return "知道了"
     }
-    var buttonDetail: String {
-        (canCancelSegmentation ? "不分段" : "关闭提醒") + " · 字幕窗或 LiveLingo 获得键盘焦点时可按 Esc"
+    func buttonDetail(hasKeyboardFocus: Bool) -> String {
+        (canCancelSegmentation ? "不分段" : "关闭提醒") + (hasKeyboardFocus ? " · Esc" : "")
     }
     var accessibilityHint: String {
         canCancelSegmentation ? "取消自动分段并关闭提醒，录音继续；字幕窗或 LiveLingo 获得键盘焦点时可按 Esc"

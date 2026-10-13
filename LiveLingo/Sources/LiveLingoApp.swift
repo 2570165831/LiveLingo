@@ -42,6 +42,7 @@ private enum UnitTestTemporaryDirectory {
     }()
     @MainActor static func configure() {
         _ = install
+        _ = UnitTestFilePanelSafety.isInstalled
         _ = UnitTestPresentationSafety.isInstalled
     }
 }
@@ -56,9 +57,56 @@ private extension FileManager {
     }
 }
 
-/// Only the isolated XCTest host changes AppKit dispatch. Windows can still
-/// become key inside that process for keyboard tests, but cannot be seen or
-/// activate an application on the user's desktop. Synchronous modals abort.
+/// File choosers can be presented by a separate system process, so making an
+/// app-owned window transparent cannot contain them. The XCTest host replaces
+/// every open/save presentation entry point with cancellation before fixtures
+/// run. No original AppKit implementation is called by these replacements.
+@MainActor
+enum UnitTestFilePanelSafety {
+    static let isInstalled: Bool = {
+        guard AppRuntimeEnvironment.isUnitTesting else { return false }
+        for type: AnyClass in [NSSavePanel.self, NSOpenPanel.self] {
+            replace(type, "beginWithCompletionHandler:", #selector(NSSavePanel.isolatedTestFilePanelBegin(completionHandler:)))
+            replace(type, "beginSheetModalForWindow:completionHandler:", #selector(NSSavePanel.isolatedTestFilePanelBeginSheet(for:completionHandler:)))
+            replace(type, "runModal", #selector(NSSavePanel.isolatedTestFilePanelRunModal))
+        }
+        return true
+    }()
+
+    private static func replace(_ type: AnyClass, _ name: String, _ replacement: Selector) {
+        guard let original = class_getInstanceMethod(type, NSSelectorFromString(name)),
+              let replacement = class_getInstanceMethod(NSSavePanel.self, replacement) else {
+            preconditionFailure("Cannot install the isolated test file-panel guard")
+        }
+        // Install on each concrete class, including inherited methods. Exchanging
+        // an inherited method twice could restore the unsafe superclass method.
+        class_replaceMethod(type, NSSelectorFromString(name), method_getImplementation(replacement),
+                            method_getTypeEncoding(original))
+    }
+
+    static func cancelPresentation(_ completion: (NSApplication.ModalResponse) -> Void) {
+        completion(.cancel)
+    }
+}
+
+private extension NSSavePanel {
+    @objc(isolatedTestFilePanelBeginWithCompletionHandler:)
+    dynamic func isolatedTestFilePanelBegin(completionHandler handler: @escaping (NSApplication.ModalResponse) -> Void) {
+        UnitTestFilePanelSafety.cancelPresentation(handler)
+    }
+
+    @objc(isolatedTestFilePanelBeginSheetForWindow:completionHandler:)
+    dynamic func isolatedTestFilePanelBeginSheet(for window: NSWindow,
+                                                completionHandler handler: @escaping (NSApplication.ModalResponse) -> Void) {
+        UnitTestFilePanelSafety.cancelPresentation(handler)
+    }
+
+    @objc dynamic func isolatedTestFilePanelRunModal() -> NSApplication.ModalResponse { .cancel }
+}
+
+/// Only the isolated XCTest host changes AppKit dispatch. Windows remain
+/// transparent and cannot acquire real keyboard focus or activate an app.
+/// Keyboard routing uses injected test owners. Synchronous modals abort.
 @MainActor
 enum UnitTestPresentationSafety {
     static let isInstalled: Bool = {
@@ -67,6 +115,7 @@ enum UnitTestPresentationSafety {
         exchange(NSWindow.self, "orderFront:", #selector(NSWindow.isolatedTestOrderFront(_:)))
         exchange(NSWindow.self, "orderFrontRegardless", #selector(NSWindow.isolatedTestOrderFrontRegardless))
         exchange(NSWindow.self, "makeKeyAndOrderFront:", #selector(NSWindow.isolatedTestMakeKeyAndOrderFront(_:)))
+        exchange(NSWindow.self, "makeKeyWindow", #selector(NSWindow.isolatedTestMakeKeyWindow))
         exchange(NSWindow.self, "setAlphaValue:", #selector(NSWindow.isolatedTestSetAlphaValue(_:)))
         exchange(NSApplication.self, "activateIgnoringOtherApps:", #selector(NSApplication.isolatedTestActivate(ignoringOtherApps:)))
         exchange(NSApplication.self, "activate", #selector(NSApplication.isolatedTestActivateWithoutOptions), required: false)
@@ -75,7 +124,12 @@ enum UnitTestPresentationSafety {
         exchange(NSAlert.self, "runModal", #selector(NSAlert.isolatedTestRunModal))
         let application = NSApplication.shared
         for window in application.windows { window.alphaValue = 0 }
-        precondition(application.setActivationPolicy(.accessory), "Cannot keep the test host out of foreground activation")
+        let policy = application.activationPolicy()
+        if policy != .accessory && policy != .prohibited {
+            _ = application.setActivationPolicy(.accessory)
+        }
+        precondition(application.activationPolicy() != .regular,
+                     "Cannot keep the test host out of foreground activation")
         return true
     }()
 
@@ -119,8 +173,12 @@ private extension NSWindow {
 
     @objc dynamic func isolatedTestMakeKeyAndOrderFront(_ sender: Any?) {
         alphaValue = 0
-        isolatedTestMakeKeyAndOrderFront(sender)
+        // In particular a nonactivating panel must not borrow the keyboard
+        // from whichever application the user is working in.
+        orderFront(sender)
     }
+
+    @objc dynamic func isolatedTestMakeKeyWindow() {}
 
     @objc dynamic func isolatedTestSetAlphaValue(_ value: CGFloat) {
         isolatedTestSetAlphaValue(UnitTestPresentationSafety.alphaValue(requested: value,
@@ -171,12 +229,40 @@ private extension NSAlert {
 /// Otherwise AppKit can reject termination before the delegate sees it.
 @MainActor
 enum FilePanelPresentation {
+    /// A chooser's lifecycle boundary. Tests supply closures without creating
+    /// an NSOpenPanel, NSSavePanel, window, or system-panel service.
+    struct Chooser {
+        var allowTermination: @MainActor () -> Void
+        var present: @MainActor (@escaping (NSApplication.ModalResponse) -> Void) -> Void
+        var cancel: @MainActor () -> Void
+        var orderOut: @MainActor () -> Void
+
+        static var cancelling: Self {
+            Self(allowTermination: {}, present: { $0(.cancel) }, cancel: {}, orderOut: {})
+        }
+
+        static func live(_ panel: NSSavePanel) -> Self {
+            Self(allowTermination: { panel.preventsApplicationTerminationWhenModal = false },
+                 present: { finish in
+                     if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+                         panel.beginSheetModal(for: window, completionHandler: finish)
+                     } else {
+                         panel.begin(completionHandler: finish)
+                     }
+                 }, cancel: { panel.cancel(nil) }, orderOut: { panel.orderOut(nil) })
+        }
+    }
+
+    static func chooser(isUnitTesting: Bool, live: () -> Chooser) -> Chooser {
+        isUnitTesting ? .cancelling : live()
+    }
+
     // Authorize before dismissing anything: cancelling quit must leave the
     // recording and its currently presented chooser/sheet untouched.
     static var authorizeTermination: (@MainActor () -> Bool)?
     // Consent is valid only during the synchronous AppKit terminate call.
     static var performAuthorizedTermination: (@MainActor (@MainActor @Sendable () -> Void) -> Void)?
-    private static var panels: [UUID: NSSavePanel] = [:]
+    private static var panels: [UUID: Chooser] = [:]
     private static var sheets: [UUID: @MainActor () -> Void] = [:]
     private static var quitMonitor: Any?
     private static var pendingTermination: (@MainActor @Sendable () -> Void)?
@@ -196,32 +282,34 @@ enum FilePanelPresentation {
 
     static func begin(_ panel: NSSavePanel,
                       completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        begin(chooser(isUnitTesting: AppRuntimeEnvironment.isUnitTesting) { .live(panel) },
+              completion: completion)
+    }
+
+    static func begin(_ panel: Chooser,
+                      completion: @escaping (NSApplication.ModalResponse) -> Void) {
         guard pendingTermination == nil else {
             completion(.cancel)
             return
         }
         // A chooser has no unsaved document to protect. Allow the app's quit
         // command to reach its cancellation/termination path while it is open.
-        panel.preventsApplicationTerminationWhenModal = false
+        panel.allowTermination()
         let id = UUID()
         panels[id] = panel
         FullScreenClassModeController.shared.setPresentedPopup(id, isPresented: true)
         installQuitMonitor()
         let finish: (NSApplication.ModalResponse) -> Void = { response in
             Task { @MainActor in
+                guard panels.removeValue(forKey: id) != nil else { return }
                 let quitting = pendingTermination != nil
-                panels[id] = nil
-                if quitting { panel.orderOut(nil) }
+                if quitting { panel.orderOut() }
                 completion(quitting ? .cancel : response)
                 FullScreenClassModeController.shared.setPresentedPopup(id, isPresented: false)
                 finishIfDismissed()
             }
         }
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
-            panel.beginSheetModal(for: window, completionHandler: finish)
-        } else {
-            panel.begin(completionHandler: finish)
-        }
+        panel.present(finish)
     }
 
     /// Register the binding that dismisses a SwiftUI sheet. The onDismiss
@@ -300,7 +388,7 @@ enum FilePanelPresentation {
     }
 
     static func cancelAll() {
-        for panel in Array(panels.values) { panel.cancel(nil) }
+        for panel in Array(panels.values) { panel.cancel() }
     }
 
     /// Dismiss owned choosers before asking AppKit to quit. AppKit can reject

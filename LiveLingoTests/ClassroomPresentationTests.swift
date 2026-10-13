@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import ObjectiveC
 import SwiftUI
 import XCTest
 @testable import LiveLingo
@@ -382,6 +383,246 @@ final class ClassroomPresentationTests: XCTestCase {
 
     @MainActor private final class FilePanelQuitProbe {
         var events: [String] = []
+        var scheduled: [@MainActor @Sendable () -> Void] = []
+
+        func runScheduledTermination() {
+            guard !scheduled.isEmpty else { XCTFail("Termination was not scheduled"); return }
+            scheduled.removeFirst()()
+        }
+    }
+
+    @MainActor private final class FilePanelChooserDouble {
+        let probe: FilePanelQuitProbe
+        var preventsTermination = true
+        var completesOnCancel = true
+        var completion: ((NSApplication.ModalResponse) -> Void)?
+
+        init(probe: FilePanelQuitProbe) { self.probe = probe }
+
+        var chooser: FilePanelPresentation.Chooser {
+            .init(allowTermination: { self.preventsTermination = false },
+                  present: { self.completion = $0; self.probe.events.append("present") },
+                  cancel: {
+                      self.probe.events.append("cancel-requested")
+                      if self.completesOnCancel { self.completion?(.cancel) }
+                  }, orderOut: { self.probe.events.append("order-out") })
+        }
+    }
+
+    func testUnitTestFilePanelGuardReplacesEveryOpenAndSavePresentationEntrypoint() throws {
+        XCTAssertTrue(AppRuntimeEnvironment.isUnitTesting)
+        XCTAssertTrue(UnitTestFilePanelSafety.isInstalled)
+        let selectors = [
+            ("beginWithCompletionHandler:", "isolatedTestFilePanelBeginWithCompletionHandler:"),
+            ("beginSheetModalForWindow:completionHandler:", "isolatedTestFilePanelBeginSheetForWindow:completionHandler:"),
+            ("runModal", "isolatedTestFilePanelRunModal")
+        ]
+        // Read dispatch tables without constructing or invoking a system panel.
+        for type: AnyClass in [NSSavePanel.self, NSOpenPanel.self] {
+            for (entrypoint, replacement) in selectors {
+                let entry = try XCTUnwrap(class_getInstanceMethod(type, NSSelectorFromString(entrypoint)))
+                let safe = try XCTUnwrap(class_getInstanceMethod(NSSavePanel.self, NSSelectorFromString(replacement)))
+                XCTAssertEqual(unsafeBitCast(method_getImplementation(entry), to: UInt.self),
+                               unsafeBitCast(method_getImplementation(safe), to: UInt.self),
+                               "\(NSStringFromClass(type)).\(entrypoint) must never call original AppKit presentation")
+            }
+        }
+    }
+
+    func testUnitTestFilePanelGuardCompletesOnceWithCancellation() {
+        var responses: [NSApplication.ModalResponse] = []
+        UnitTestFilePanelSafety.cancelPresentation { responses.append($0) }
+        XCTAssertEqual(responses, [.cancel])
+    }
+
+    func testFilePanelDefaultUnitTestChooserNeverEvaluatesLiveFactory() {
+        let probe = FilePanelQuitProbe()
+        let panel = FilePanelChooserDouble(probe: probe)
+        let chooser = FilePanelPresentation.chooser(isUnitTesting: AppRuntimeEnvironment.isUnitTesting) {
+            XCTFail("The unit test default must not construct a live panel adapter")
+            return panel.chooser
+        }
+        var responses: [NSApplication.ModalResponse] = []
+        chooser.allowTermination()
+        chooser.present { responses.append($0) }
+        chooser.cancel()
+        chooser.orderOut()
+        XCTAssertEqual(responses, [.cancel])
+        XCTAssertTrue(probe.events.isEmpty)
+        XCTAssertTrue(panel.preventsTermination)
+    }
+
+    func testFilePanelProductionPolicySelectsInjectedLiveChooser() {
+        let probe = FilePanelQuitProbe()
+        let panel = FilePanelChooserDouble(probe: probe)
+        var factories = 0
+        let chooser = FilePanelPresentation.chooser(isUnitTesting: false) {
+            factories += 1
+            return panel.chooser
+        }
+        XCTAssertEqual(factories, 1)
+        XCTAssertTrue(probe.events.isEmpty, "Selecting an adapter must not present it")
+        var responses: [NSApplication.ModalResponse] = []
+        chooser.allowTermination()
+        chooser.present { responses.append($0) }
+        panel.completion?(.OK)
+        XCTAssertFalse(panel.preventsTermination)
+        XCTAssertEqual(probe.events, ["present"])
+        XCTAssertEqual(responses, [.OK])
+    }
+
+    private func withFilePanelScheduler(_ operation: @MainActor (FilePanelQuitProbe) async -> Void) async {
+        let probe = FilePanelQuitProbe()
+        let previousScheduler = FilePanelPresentation.scheduleAfterEventForTesting
+        let previousAuthorization = FilePanelPresentation.authorizeTermination
+        FilePanelPresentation.scheduleAfterEventForTesting = { probe.scheduled.append($0) }
+        FilePanelPresentation.authorizeTermination = { true }
+        defer {
+            // Release a scheduled quit even if a preceding assertion failed.
+            while !probe.scheduled.isEmpty { probe.runScheduledTermination() }
+            FilePanelPresentation.scheduleAfterEventForTesting = previousScheduler
+            FilePanelPresentation.authorizeTermination = previousAuthorization
+        }
+        await operation(probe)
+    }
+
+    private func waitForFilePanel(_ condition: () -> Bool) async {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        XCTAssertTrue(condition(), "The synthetic chooser lifecycle did not finish")
+    }
+
+    func testFilePanelQuitWaitsForCancellationAcknowledgementAndCoalescesRequests() async {
+        await withFilePanelScheduler { probe in
+            let panel = FilePanelChooserDouble(probe: probe)
+            panel.completesOnCancel = false
+            FilePanelPresentation.begin(panel.chooser) { response in
+                XCTAssertEqual(response, .cancel, "A late OK response during quit cannot select a file")
+                probe.events.append("cancelled")
+            }
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            FilePanelPresentation.requestTermination { probe.events.append("duplicate-termination") }
+            XCTAssertEqual(probe.events, ["present", "cancel-requested"])
+            XCTAssertTrue(probe.scheduled.isEmpty, "Cancellation must be acknowledged before scheduling quit")
+            panel.completion?(.OK)
+            await waitForFilePanel { probe.scheduled.count == 1 }
+            XCTAssertEqual(probe.events, ["present", "cancel-requested", "order-out", "cancelled"])
+            probe.runScheduledTermination()
+            XCTAssertEqual(probe.events.last, "terminate")
+            XCTAssertFalse(probe.events.contains("duplicate-termination"))
+        }
+    }
+
+    func testFilePanelDeclinedQuitLeavesChooserOpenUntilAuthorizedRetry() async {
+        await withFilePanelScheduler { probe in
+            let panel = FilePanelChooserDouble(probe: probe)
+            var authorizations = 0
+            FilePanelPresentation.authorizeTermination = { authorizations += 1; return false }
+            FilePanelPresentation.begin(panel.chooser) { response in
+                XCTAssertEqual(response, .cancel)
+                probe.events.append("cancelled")
+            }
+            FilePanelPresentation.requestTermination { probe.events.append("declined-termination") }
+            XCTAssertEqual(authorizations, 1)
+            XCTAssertEqual(probe.events, ["present"], "Declining quit must not cancel or hide the chooser")
+            XCTAssertTrue(probe.scheduled.isEmpty)
+            FilePanelPresentation.authorizeTermination = { authorizations += 1; return true }
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            await waitForFilePanel { probe.scheduled.count == 1 }
+            probe.runScheduledTermination()
+            XCTAssertEqual(authorizations, 2)
+            XCTAssertEqual(probe.events, ["present", "cancel-requested", "order-out", "cancelled", "terminate"])
+        }
+    }
+
+    func testFilePanelQuitWaitsForEveryChooserAndSheetAndRejectsNewChoosers() async {
+        await withFilePanelScheduler { probe in
+            let first = FilePanelChooserDouble(probe: probe), second = FilePanelChooserDouble(probe: probe)
+            first.completesOnCancel = false
+            second.completesOnCancel = false
+            FilePanelPresentation.begin(first.chooser) { _ in probe.events.append("first-completed") }
+            FilePanelPresentation.begin(second.chooser) { _ in probe.events.append("second-completed") }
+            let sheet = UUID()
+            FilePanelPresentation.registerSheet(id: sheet) { probe.events.append("dismiss-sheet") }
+            defer { FilePanelPresentation.sheetDidDismiss(id: sheet) }
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            XCTAssertEqual(probe.events.filter { $0 == "cancel-requested" }.count, 2)
+            XCTAssertEqual(probe.events.filter { $0 == "dismiss-sheet" }.count, 1)
+            let lateProbe = FilePanelQuitProbe()
+            let late = FilePanelChooserDouble(probe: lateProbe)
+            var lateResponses: [NSApplication.ModalResponse] = []
+            FilePanelPresentation.begin(late.chooser) { lateResponses.append($0) }
+            XCTAssertEqual(lateResponses, [.cancel])
+            XCTAssertTrue(lateProbe.events.isEmpty, "A chooser requested during quit must never present")
+            XCTAssertTrue(late.preventsTermination, "Rejected choosers must not even be configured")
+            first.completion?(.cancel)
+            await waitForFilePanel { probe.events.contains("first-completed") }
+            XCTAssertTrue(probe.scheduled.isEmpty, "The second chooser still owns its presentation")
+            second.completion?(.cancel)
+            await waitForFilePanel { probe.events.contains("second-completed") }
+            XCTAssertTrue(probe.scheduled.isEmpty, "The SwiftUI sheet still owns its presentation")
+            FilePanelPresentation.sheetDidDismiss(id: sheet)
+            XCTAssertEqual(probe.scheduled.count, 1)
+            probe.runScheduledTermination()
+            XCTAssertEqual(probe.events.last, "terminate")
+        }
+    }
+
+    func testFilePanelNormalCompletionPreservesResponseAndReleasesOwner() async {
+        for response: NSApplication.ModalResponse in [.OK, .cancel] {
+            await withFilePanelScheduler { probe in
+                let panel = FilePanelChooserDouble(probe: probe)
+                var responses: [NSApplication.ModalResponse] = []
+                FilePanelPresentation.begin(panel.chooser) { responses.append($0) }
+                panel.completion?(response)
+                await waitForFilePanel { !responses.isEmpty }
+                XCTAssertEqual(responses, [response])
+                XCTAssertEqual(probe.events, ["present"], "Ordinary completion must not trigger quit cancellation")
+                FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+                XCTAssertEqual(probe.events, ["present", "terminate"])
+                XCTAssertTrue(probe.scheduled.isEmpty)
+            }
+        }
+    }
+
+    func testFilePanelDuplicateCallbacksCompleteAndTerminateOnlyOnce() async {
+        await withFilePanelScheduler { probe in
+            let panel = FilePanelChooserDouble(probe: probe)
+            panel.completesOnCancel = false
+            var responses: [NSApplication.ModalResponse] = []
+            FilePanelPresentation.begin(panel.chooser) { responses.append($0) }
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            panel.completion?(.cancel)
+            panel.completion?(.OK)
+            panel.completion?(.cancel)
+            await waitForFilePanel { probe.scheduled.count == 1 }
+            probe.runScheduledTermination()
+            panel.completion?(.cancel)
+            // Give all deliberately duplicated callbacks a turn on the actor.
+            try? await Task.sleep(for: .milliseconds(10))
+            XCTAssertEqual(responses, [.cancel])
+            XCTAssertEqual(probe.events.filter { $0 == "order-out" }.count, 1)
+            XCTAssertEqual(probe.events.filter { $0 == "terminate" }.count, 1)
+            XCTAssertTrue(probe.scheduled.isEmpty)
+        }
+    }
+
+    func testFilePanelCancelAllDoesNotRequestTermination() async {
+        await withFilePanelScheduler { probe in
+            let panel = FilePanelChooserDouble(probe: probe)
+            var responses: [NSApplication.ModalResponse] = []
+            FilePanelPresentation.begin(panel.chooser) { responses.append($0) }
+            FilePanelPresentation.cancelAll()
+            await waitForFilePanel { !responses.isEmpty }
+            XCTAssertEqual(responses, [.cancel])
+            XCTAssertEqual(probe.events, ["present", "cancel-requested"])
+            XCTAssertTrue(probe.scheduled.isEmpty)
+            FilePanelPresentation.requestTermination { probe.events.append("terminate") }
+            XCTAssertEqual(probe.events.last, "terminate", "A completed cancellation must release the chooser owner")
+            XCTAssertTrue(probe.scheduled.isEmpty)
+        }
     }
 
     func testFilePanelQuitWithoutChoosersUsesNormalTerminationImmediately() {
@@ -445,26 +686,18 @@ final class ClassroomPresentationTests: XCTestCase {
 
     func testFilePanelQuitCancelsChooserBeforeTermination() async throws {
         let probe = FilePanelQuitProbe()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
-                              styleMask: [.titled], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        defer { window.close() }
-        let panel = NSOpenPanel()
-        panel.title = "Synthetic quit test — no file is selected"
-        defer { panel.cancel(nil); panel.orderOut(nil) }
-        FilePanelPresentation.begin(panel) { response in
+        let panel = FilePanelChooserDouble(probe: probe)
+        FilePanelPresentation.begin(panel.chooser) { response in
             XCTAssertEqual(response, .cancel)
             probe.events.append("cancelled")
         }
-        XCTAssertFalse(panel.preventsApplicationTerminationWhenModal)
+        XCTAssertFalse(panel.preventsTermination)
         FilePanelPresentation.requestTermination { probe.events.append("terminate") }
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while probe.events.last != "terminate", ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(2))
         }
-        XCTAssertEqual(probe.events, ["cancelled", "terminate"])
-        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(probe.events, ["present", "cancel-requested", "order-out", "cancelled", "terminate"])
     }
 
     func testNotesRenderingDuringUnrelatedPublishedUpdates() async throws {

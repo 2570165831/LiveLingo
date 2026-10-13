@@ -5,11 +5,47 @@ import QuartzCore
 import SwiftUI
 import UserNotifications
 
+/// App activation and nonactivating subtitle-panel key focus are separate.
+/// Observe only local AppKit notifications; never monitor another app's keys.
+@MainActor
+final class AlarmKeyboardFocus: ObservableObject {
+    @Published private(set) var hasKeyboardFocus: Bool
+    private let readFocus: @MainActor () -> Bool
+    private var subscription: AnyCancellable?
+
+    nonisolated static func ownsKeyboard(applicationActive: Bool, keyWindowIsKey: Bool,
+                                         keyWindowIsNonactivatingPanel: Bool) -> Bool {
+        applicationActive || (keyWindowIsKey && keyWindowIsNonactivatingPanel)
+    }
+
+    init(center: NotificationCenter = .default, readFocus: @escaping @MainActor () -> Bool = {
+        let app = NSApplication.shared
+        let window = app.keyWindow
+        return AlarmKeyboardFocus.ownsKeyboard(applicationActive: app.isActive,
+            keyWindowIsKey: window?.isKeyWindow == true,
+            keyWindowIsNonactivatingPanel: (window as? NSPanel)?.styleMask.contains(.nonactivatingPanel) == true)
+    }) {
+        self.readFocus = readFocus
+        hasKeyboardFocus = readFocus()
+        let events = [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
+                      NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification]
+        subscription = Publishers.MergeMany(events.map { center.publisher(for: $0) }).sink { [weak self] event in
+            let becameInactive = event.name == NSApplication.didResignActiveNotification
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // A normal key window can remain remembered after deactivation.
+                self.hasKeyboardFocus = becameInactive ? false : self.readFocus()
+            }
+        }
+    }
+}
 
 struct AlarmBanner: View {
     let state: AlarmBannerState
     let dismiss: () -> Void
     var compact = false
+    var keyboardFocusOverride: Bool?
+    @StateObject private var keyboardFocus = AlarmKeyboardFocus()
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
@@ -28,7 +64,8 @@ struct AlarmBanner: View {
                 VStack(spacing: 2) {
                     Text(state.buttonTitle).font(.system(size: compact ? 15 : 17, weight: .semibold))
                         .monospacedDigit()
-                    Text(state.buttonDetail).font(.system(size: compact ? 11 : 12))
+                    Text(state.buttonDetail(hasKeyboardFocus: keyboardFocusOverride ?? keyboardFocus.hasKeyboardFocus))
+                        .font(.system(size: compact ? 11 : 12))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 4)

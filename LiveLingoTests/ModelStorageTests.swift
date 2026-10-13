@@ -1,7 +1,9 @@
+import Combine
 import CryptoKit
 import Darwin
 import Foundation
 import XCTest
+import os
 @testable import LiveLingo
 
 /// All bytes, receipts, links and locks belong to UUID-named synthetic fixtures.
@@ -12,6 +14,29 @@ final class ModelStorageTests: XCTestCase {
     // Existing storage cases must not read the user's hidden backup preference.
     nonisolated private static func excludedOperations() -> ModelStorage.Operations {
         .init(modelsIncludedInTimeMachine: { false })
+    }
+
+    @MainActor private final class ManualPrecloneScheduler {
+        struct Scheduled {
+            let delay: Duration
+            let priority: TaskPriority
+            let work: @Sendable () -> Bool
+            let complete: @MainActor @Sendable (Bool) -> Void
+            let cancelled = OSAllocatedUnfairLock(initialState: false)
+        }
+        private(set) var jobs: [Scheduled] = []
+        func schedule(delay: Duration, priority: TaskPriority, work: @escaping @Sendable () -> Bool,
+                      completion: @escaping @MainActor @Sendable (Bool) -> Void) -> ModelPrecloneController.Job {
+            let entry = Scheduled(delay: delay, priority: priority, work: work, complete: completion)
+            jobs.append(entry)
+            let cancelled = entry.cancelled
+            return .init(cancel: { cancelled.withLock { $0 = true } })
+        }
+    }
+
+    @MainActor private final class WeakPrecloneController {
+        weak var value: ModelPrecloneController?
+        init(_ value: ModelPrecloneController?) { self.value = value }
     }
 
     private func backupPreferences(_ included: Bool?) throws -> UserDefaults {
@@ -665,11 +690,16 @@ final class ModelStorageTests: XCTestCase {
         let fixture = try Fixture("independent-model-failure")
         try fixture.requireAPFS()
         let failed = changedModel(fixture.model, name: "FailedModel", source: "missing-source")
+        var preferenceReads = 0, backupWrites = 0, backupReadbacks = 0
+        let operations = ModelStorage.Operations(
+            modelsIncludedInTimeMachine: { preferenceReads += 1; return false },
+            excludeFromBackup: { _ in backupWrites += 1 },
+            isExcludedFromBackup: { _ in backupReadbacks += 1; return true })
         for expected in [ModelStorage.Outcome.cloned, .alreadyPresent] {
             var visited: [String] = []
             var success: ModelStorage.Outcome?
             let deferred = ModelStorage.precloneAll([failed, fixture.model], manifestSHA256: fixture.manifestDigest,
-                bundledModels: fixture.bundled, destinationModels: fixture.destination) { name, result in
+                bundledModels: fixture.bundled, destinationModels: fixture.destination, operations: operations) { name, result in
                 visited.append(name)
                 if name == failed.name {
                     guard case .failure = result else { return XCTFail("Missing first source must fail") }
@@ -681,6 +711,10 @@ final class ModelStorageTests: XCTestCase {
             XCTAssertEqual(visited, [failed.name, fixture.model.name])
             XCTAssertEqual(success, expected)
         }
+        XCTAssertEqual(preferenceReads, 2)
+        XCTAssertEqual(backupWrites, 2)
+        XCTAssertEqual(backupReadbacks, 2)
+        XCTAssertNil(try backupMarker(fixture.destination), "This case must use the backup-attribute stand-in")
         try assertCommitted(fixture)
     }
 
@@ -1427,6 +1461,171 @@ final class ModelStorageTests: XCTestCase {
         }
     }
 
+    func testControllerCaptureDuringGraceDefersBeforeWorkAndIdleStartsAnotherGrace() {
+        let phases = CurrentValueSubject<AppPhase, Never>(.idle)
+        let scheduler = ManualPrecloneScheduler()
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let controller = ModelPrecloneController(phases: phases.eraseToAnyPublisher(), scheduler: scheduler.schedule,
+            work: { _ in calls.withLock { $0 += 1 }; return false })
+        withExtendedLifetime(controller) {
+            XCTAssertEqual(scheduler.jobs.count, 1)
+            XCTAssertEqual(scheduler.jobs[0].delay, .seconds(15))
+            XCTAssertEqual(scheduler.jobs[0].priority, .background)
+            XCTAssertEqual(calls.withLock { $0 }, 0, "Scheduling must not execute disk work inline")
+            phases.send(.idle)
+            phases.send(.saved(URL(fileURLWithPath: "/synthetic-saved-phase")))
+            XCTAssertEqual(scheduler.jobs.count, 1, "Only one grace/worker may be pending")
+            phases.send(.recording)
+            let deferred = scheduler.jobs[0].work()
+            XCTAssertTrue(deferred)
+            XCTAssertEqual(calls.withLock { $0 }, 0, "Capture during grace must stop before entering work")
+            scheduler.jobs[0].complete(deferred)
+            XCTAssertEqual(scheduler.jobs.count, 1, "Blocked capture must not retry")
+            phases.send(.paused)
+            phases.send(.stopping)
+            XCTAssertEqual(scheduler.jobs.count, 1)
+            phases.send(.idle)
+            XCTAssertEqual(scheduler.jobs.count, 2)
+            XCTAssertEqual(scheduler.jobs[1].delay, .seconds(15))
+            XCTAssertFalse(scheduler.jobs[1].work())
+            scheduler.jobs[1].complete(false)
+            phases.send(.recording)
+            phases.send(.idle)
+            XCTAssertEqual(scheduler.jobs.count, 2, "Completed work must wait until the next launch")
+            XCTAssertEqual(calls.withLock { $0 }, 1)
+        }
+    }
+
+    func testControllerInFlightDeferralWaitsForCompletionBeforeRetryAndIgnoresStaleCompletion() {
+        let phases = CurrentValueSubject<AppPhase, Never>(.idle)
+        let scheduler = ManualPrecloneScheduler()
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let controller = ModelPrecloneController(phases: phases.eraseToAnyPublisher(), scheduler: scheduler.schedule,
+            work: { gate in
+                let call = calls.withLock { $0 += 1; return $0 }
+                try gate.checkpoint()
+                if call == 1 {
+                    // A capture transition between bounded work segments.
+                    gate.setBlocked(true)
+                    try gate.checkpoint()
+                }
+                return false
+            })
+        withExtendedLifetime(controller) {
+            let first = scheduler.jobs[0]
+            XCTAssertTrue(first.work())
+            phases.send(.recording)
+            phases.send(.idle)
+            XCTAssertEqual(scheduler.jobs.count, 1, "Idle must not overlap an unacknowledged worker")
+            first.complete(true)
+            XCTAssertEqual(scheduler.jobs.count, 2)
+            XCTAssertEqual(scheduler.jobs[1].delay, .seconds(15))
+            first.complete(false)
+            phases.send(.idle)
+            XCTAssertEqual(scheduler.jobs.count, 2, "An old callback must not finish or replace the new run")
+            XCTAssertFalse(scheduler.jobs[1].work())
+            scheduler.jobs[1].complete(false)
+            XCTAssertEqual(calls.withLock { $0 }, 2)
+        }
+    }
+
+    func testControllerOrdinaryFailureDoesNotRetryOnPhaseChanges() {
+        let phases = CurrentValueSubject<AppPhase, Never>(.idle)
+        let scheduler = ManualPrecloneScheduler()
+        let controller = ModelPrecloneController(phases: phases.eraseToAnyPublisher(), scheduler: scheduler.schedule,
+            work: { _ in throw ModelStorage.Failure.mismatch })
+        withExtendedLifetime(controller) {
+            XCTAssertFalse(scheduler.jobs[0].work())
+            scheduler.jobs[0].complete(false)
+            phases.send(.recording)
+            phases.send(.idle)
+            phases.send(.failed("synthetic failure"))
+            XCTAssertEqual(scheduler.jobs.count, 1)
+        }
+    }
+
+    func testControllerDeinitCancelsScheduledJobAndBlocksRetainedWorker() {
+        let phases = CurrentValueSubject<AppPhase, Never>(.idle)
+        let scheduler = ManualPrecloneScheduler()
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        var controller: ModelPrecloneController? = .init(phases: phases.eraseToAnyPublisher(), scheduler: scheduler.schedule,
+            work: { _ in calls.withLock { $0 += 1 }; return false })
+        let observed = WeakPrecloneController(controller)
+        XCTAssertNotNil(observed.value)
+        let pending = scheduler.jobs[0]
+        controller = nil
+        XCTAssertNil(observed.value, "A pending worker must not retain the controller")
+        XCTAssertTrue(pending.cancelled.withLock { $0 })
+        XCTAssertTrue(pending.work(), "Even a scheduler that ignores cancellation must encounter the blocked gate")
+        pending.complete(true)
+        phases.send(.idle)
+        XCTAssertEqual(scheduler.jobs.count, 1)
+        XCTAssertEqual(calls.withLock { $0 }, 0)
+    }
+
+    func testDisabledControllerNeverSchedulesOrEntersWork() {
+        let phases = CurrentValueSubject<AppPhase, Never>(.idle)
+        let scheduler = ManualPrecloneScheduler()
+        let controller = ModelPrecloneController(phases: phases.eraseToAnyPublisher(), scheduler: scheduler.schedule,
+            work: { _ in XCTFail("Disabled test hosts must never enter model work"); return false }, enabled: false)
+        withExtendedLifetime(controller) {
+            phases.send(.recording)
+            phases.send(.idle)
+            XCTAssertTrue(scheduler.jobs.isEmpty)
+        }
+    }
+
+    func testControllerWorkerRemainsBackgroundWhenHighPriorityCallerWaitsForCallback() async {
+        // The caller awaits a callback continuation, never the worker's Task.
+        await Task(priority: .high) { @MainActor in
+            XCTAssertEqual(Task.currentPriority, .high)
+            let observation = OSAllocatedUnfairLock(initialState: (priority: TaskPriority?.none, mainThread: true))
+            let phases = CurrentValueSubject<AppPhase, Never>(.idle)
+            var controller: ModelPrecloneController?
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                controller = ModelPrecloneController(phases: phases.eraseToAnyPublisher(),
+                    scheduler: { delay, priority, work, complete in
+                        XCTAssertEqual(delay, .seconds(15))
+                        XCTAssertEqual(priority, .background)
+                        // Exercise the production scheduler with an injected
+                        // clock; work is entirely synthetic and in memory.
+                        return ModelPrecloneController.scheduleBackground(delay: delay, priority: priority, work: work,
+                            completion: { deferred in
+                                complete(deferred)
+                                continuation.resume()
+                            }, wait: { grace in
+                                // If the old MainActor task awaits worker.value,
+                                // it must suspend before this actor hop can run.
+                                // Thus escalation precedes the priority sample;
+                                // the regression does not depend on a short sleep.
+                                await MainActor.run { XCTAssertEqual(grace, .seconds(15)) }
+                            })
+                    }, work: { gate in
+                        try gate.checkpoint()
+                        observation.withLock { $0 = (Task.currentPriority, Thread.isMainThread) }
+                        return false
+                    })
+            }
+            withExtendedLifetime(controller) {
+                let result = observation.withLock { $0 }
+                XCTAssertEqual(result.priority, .background, "A high-priority waiter must not escalate model work")
+                XCTAssertFalse(result.mainThread, "Model work must execute off MainActor")
+            }
+        }.value
+    }
+
+    func testBackgroundSchedulerCancellationDuringGraceNeverEntersWork() async {
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let deferred = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let job = ModelPrecloneController.scheduleBackground(delay: .seconds(15), priority: .background,
+                work: { calls.withLock { $0 += 1 }; return false },
+                completion: { continuation.resume(returning: $0) })
+            job.cancel()
+        }
+        XCTAssertTrue(deferred)
+        XCTAssertEqual(calls.withLock { $0 }, 0)
+    }
+
     func testInitiallyBlockedGateDefersBeforeCreatingDestination() throws {
         let fixture = try Fixture("initial-gate")
         let gate = ModelPrecloneGate()
@@ -1475,12 +1674,21 @@ final class ModelStorageTests: XCTestCase {
         try first.requireAPFS()
         try second.requireAPFS()
         XCTAssertNotEqual(first.model.version, second.model.version)
-        XCTAssertEqual(try first.preclone(), .cloned)
+        var preferenceReads = 0, backupWrites = 0, backupReadbacks = 0
+        let operations = ModelStorage.Operations(
+            modelsIncludedInTimeMachine: { preferenceReads += 1; return false },
+            excludeFromBackup: { _ in backupWrites += 1 },
+            isExcludedFromBackup: { _ in backupReadbacks += 1; return true })
+        XCTAssertEqual(try first.preclone(operations: operations), .cloned)
         let oldMarker = try Data(contentsOf: first.committed.appendingPathComponent(ModelStorage.receiptName))
         let oldPartial = try first.seedPartial(marker: JSONEncoder().encode(first.receipt))
         let partialBytes = try Data(contentsOf: oldPartial.appendingPathComponent("orphan.bin"))
         XCTAssertEqual(try ModelStorage.preclone(second.model, manifestSHA256: second.manifestDigest,
-            bundledModels: second.bundled, destinationModels: first.destination), .cloned)
+            bundledModels: second.bundled, destinationModels: first.destination, operations: operations), .cloned)
+        XCTAssertEqual(preferenceReads, 2)
+        XCTAssertEqual(backupWrites, 2)
+        XCTAssertEqual(backupReadbacks, 2)
+        XCTAssertNil(try backupMarker(first.destination), "This case must use the backup-attribute stand-in")
         try assertCommitted(first)
         XCTAssertEqual(try Data(contentsOf: first.committed.appendingPathComponent(ModelStorage.receiptName)), oldMarker)
         XCTAssertEqual(try Data(contentsOf: oldPartial.appendingPathComponent("orphan.bin")), partialBytes)

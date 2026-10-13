@@ -5,10 +5,10 @@ import fcntl
 import importlib.util
 import json
 import os
+import plistlib
 from pathlib import Path
 import signal
 import re
-import shutil
 import stat
 import subprocess
 import threading
@@ -112,16 +112,35 @@ def preference_events(scratch, host_pids, previous_workers, allow_empty=False):
 
 
 def retire_workers(scratch, host_pids, previous_workers):
-    """Remove this invocation's audited worker directories, all inside DerivedData/tmp."""
+    """Quarantine owned fixtures for recoverable cleanup; never use the user's Trash."""
     owned, _ = invocation_workers(scratch, host_pids, previous_workers)
-    removed = []
+    archived = []
+    quarantine = OUT / 'to-trash'
+    if quarantine.is_symlink():
+        raise ValueError('invalid worker quarantine')
+    quarantine.mkdir(exist_ok=True)
+    if quarantine.resolve().parent != OUT or quarantine.stat().st_dev != scratch.stat().st_dev:
+        raise ValueError('worker quarantine must be on the output volume')
     for worker in owned:
         status = worker.lstat()
         if status.st_uid != os.getuid() or not stat.S_ISDIR(status.st_mode):
             raise ValueError('invalid worker directory')
-        shutil.rmtree(worker)
-        removed.append(worker.name)
-    return removed
+        target = quarantine / worker.name
+        if target.exists() or target.is_symlink():
+            raise ValueError('worker quarantine already exists')
+        worker.rename(target)
+        archived.append(str(target))
+    return archived
+
+
+def test_host_info(name):
+    """LaunchServices sees the background-only test host before any AppKit startup."""
+    info = plistlib.loads((REPO / 'LiveLingo/Resources/Info.plist').read_bytes())
+    info['LSUIElement'] = True
+    target = OUT / (name + '-host-info.plist')
+    with target.open('x', encoding='utf-8') as output:
+        output.write(plistlib.dumps(info).decode('utf-8'))
+    return target
 
 
 EVIDENCE_TIMEOUT_S = 10
@@ -267,6 +286,8 @@ def main():
     previous_workers = {path.name for path in (DD / 'tmp').glob('worker-*')}
     log_path = OUT / (args.name + '.log')
     result_path = OUT / (args.name + '.xcresult')
+    if log_path.exists() or log_path.is_symlink():
+        raise FileExistsError('test log already exists')
     command = ['/usr/bin/xcodebuild', '-project', 'LiveLingo.xcodeproj',
                '-scheme', 'LiveLingo', '-configuration', 'Debug',
                '-destination', 'platform=macOS,arch=arm64',
@@ -276,6 +297,7 @@ def main():
                '-test-timeouts-enabled', 'YES',
                '-default-test-execution-time-allowance', '120',
                '-maximum-test-execution-time-allowance', '180',
+               'LIVELINGO_HOST_INFO_PLIST=' + str(test_host_info(args.name)),
                'CODE_SIGNING_ALLOWED=NO']
     # Clean first: warnings appear only for files Xcode compiles, so the warning
     # gate needs a full compile of both targets in this very log.
@@ -461,11 +483,10 @@ def main():
         print(output.rstrip())
     receipt['guards'] = guards
     passed = all(item['exit_code'] == 0 for item in guards) and not receipt.get('trash_added')
-    # Keep worker directories (fixtures, screenshots) as evidence after a
-    # failure; after a pass their events are already in the verification log.
+    # Keep failed runs in place; archive successful fixtures after auditing.
     if passed and not args.keep_workers:
         try:
-            receipt['removed_workers'] = retire_workers(DD / 'tmp', set(observed_hosts), previous_workers)
+            receipt['archived_workers'] = retire_workers(DD / 'tmp', set(observed_hosts), previous_workers)
         except (ValueError, OSError):
             receipt['worker_cleanup_error'] = 'could not remove this invocation worker directories'
             print(receipt['worker_cleanup_error'])

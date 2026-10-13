@@ -47,7 +47,9 @@ final class AlarmDetectionTests: XCTestCase {
                 if rule.observe(window(end, score), now: end) { firstTrigger = end; break }
             }
             XCTAssertNotNil(firstTrigger, "phase=\(phase)")
-            XCTAssertLessThanOrEqual(firstTrigger ?? .infinity, phase + 15)
+            // The first four independent windows contain one miss. A nine-
+            // second history drops the first hit and cannot trigger until 15s.
+            XCTAssertEqual(firstTrigger, phase + 12, "phase=\(phase): retain the first hit across the miss")
         }
     }
     func testShortBeepAcrossOverlappingWindowBoundariesNeverTriggers() {

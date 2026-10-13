@@ -715,13 +715,24 @@ final class ModelPrecloneGate: Sendable {
 
 @MainActor
 final class ModelPrecloneController {
+    /// Cancellation is the only handle exposed to the owner. In particular,
+    /// there is no Task.value for a higher-priority caller to await/escalate.
+    struct Job: Sendable {
+        let cancel: @Sendable () -> Void
+    }
+    typealias Scheduler = @MainActor (Duration, TaskPriority,
+        @escaping @Sendable () -> Bool,
+        @escaping @MainActor @Sendable (Bool) -> Void) -> Job
+
     private let gate = ModelPrecloneGate()
     private var subscription: AnyCancellable?
-    private var task: Task<Void, Never>?
+    private var job: Job?
+    private var activeRun: UUID?
     private var finished = false
     private var blocked = true
-    private let resources: URL
-    private let destination: @Sendable () throws -> URL
+    private let enabled: Bool
+    private let scheduler: Scheduler
+    private let work: @Sendable (ModelPrecloneGate) throws -> Bool
 
     static func blocksPreclone(_ phase: AppPhase) -> Bool {
         switch phase {
@@ -729,9 +740,9 @@ final class ModelPrecloneController {
         default: return true
         }
     }
-    init(model: AppModel) {
-        resources = Bundle.main.resourceURL ?? Bundle.main.bundleURL
-        destination = {
+    convenience init(model: AppModel) {
+        let resources = Bundle.main.resourceURL ?? Bundle.main.bundleURL
+        let destination: @Sendable () throws -> URL = {
             #if LIVELINGO_PREVIEW
             return try PreviewDataIsolation.dataURL("Models")
             #else
@@ -740,7 +751,62 @@ final class ModelPrecloneController {
             return support.appendingPathComponent("LiveLingo/Models", isDirectory: true)
             #endif
         }
-        subscription = model.$phase.sink { [weak self] phase in self?.update(phase) }
+        self.init(phases: model.$phase.eraseToAnyPublisher(), scheduler: { delay, priority, work, completion in
+                      Self.scheduleBackground(delay: delay, priority: priority, work: work, completion: completion)
+                  },
+                  work: { gate in try Self.preclone(resources: resources, destination: destination, gate: gate) },
+                  enabled: !AppRuntimeEnvironment.isUnitTesting)
+    }
+
+    /// Tests must inject both scheduling and work: this initializer has no
+    /// default that can reach bundled models, standard defaults or user data.
+    /// A scheduler delivers completion after returning its cancellation handle.
+    init(phases: AnyPublisher<AppPhase, Never>, scheduler: @escaping Scheduler,
+         work: @escaping @Sendable (ModelPrecloneGate) throws -> Bool, enabled: Bool = true) {
+        self.enabled = enabled
+        self.scheduler = scheduler
+        self.work = work
+        subscription = phases.sink { [weak self] phase in self?.update(phase) }
+    }
+
+    nonisolated static func scheduleBackground(delay: Duration, priority: TaskPriority,
+        work: @escaping @Sendable () -> Bool,
+        completion: @escaping @MainActor @Sendable (Bool) -> Void,
+        wait: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) -> Job {
+        // This independent task owns the grace period and all disk work. Its
+        // owner never awaits it; only the final bookkeeping hops to MainActor.
+        let task = Task.detached(priority: priority) {
+            let deferred: Bool
+            do {
+                try await wait(delay)
+                try Task.checkCancellation()
+                deferred = work()
+            } catch {
+                deferred = true
+            }
+            await completion(deferred)
+        }
+        return Job(cancel: { task.cancel() })
+    }
+
+    nonisolated private static func preclone(resources: URL, destination: @Sendable () throws -> URL,
+                                             gate: ModelPrecloneGate) throws -> Bool {
+        let directory = try ModelStorage.Directory.open(resources, owned: false)
+        let data = try directory.read(ModelStorageManifest.filename)
+        let inventory = try ModelStorageManifest.decode(data)
+        let root = try destination()
+        let manifestDigest = ModelStorage.sha256(data)
+        return ModelStorage.precloneAll(inventory.models, manifestSHA256: manifestDigest,
+            bundledModels: resources.appendingPathComponent("Models"), destinationModels: root,
+            operations: .init(checkpoint: { try gate.checkpoint() })) { name, result in
+            switch result {
+            case .success(let outcome):
+                ModelStorage.log.info("model=\(name, privacy: .public) result=\(outcome.rawValue, privacy: .public)")
+            case .failure(let error):
+                let code = ModelStorage.diagnostic(error)
+                ModelStorage.log.notice("model=\(name, privacy: .public) preclone=\(code, privacy: .public)")
+            }
+        }
     }
     private func update(_ phase: AppPhase) {
         blocked = Self.blocksPreclone(phase)
@@ -748,41 +814,28 @@ final class ModelPrecloneController {
         if !blocked { schedule() }
     }
     private func schedule() {
-        guard !finished, task == nil, !blocked, !AppRuntimeEnvironment.isUnitTesting else { return }
-        let resources = resources, destination = destination, gate = gate
-        task = Task { [weak self] in
-            // Allow launch/readiness and an immediate record click to settle.
-            do { try await Task.sleep(for: .seconds(15)) } catch { return }
-            let deferred = await Task.detached(priority: .background) {
-                do {
-                    try gate.checkpoint()
-                    let directory = try ModelStorage.Directory.open(resources, owned: false)
-                    let data = try directory.read(ModelStorageManifest.filename)
-                    let inventory = try ModelStorageManifest.decode(data)
-                    let root = try destination()
-                    let manifestDigest = ModelStorage.sha256(data)
-                    return ModelStorage.precloneAll(inventory.models, manifestSHA256: manifestDigest,
-                        bundledModels: resources.appendingPathComponent("Models"), destinationModels: root,
-                        operations: .init(checkpoint: { try gate.checkpoint() })) { name, result in
-                        switch result {
-                        case .success(let outcome):
-                            ModelStorage.log.info("model=\(name, privacy: .public) result=\(outcome.rawValue, privacy: .public)")
-                        case .failure(let error):
-                            let code = ModelStorage.diagnostic(error)
-                            ModelStorage.log.notice("model=\(name, privacy: .public) preclone=\(code, privacy: .public)")
-                        }
-                    }
-                } catch {
-                    let code = ModelStorage.diagnostic(error)
-                    ModelStorage.log.notice("preclone=\(code, privacy: .public)")
-                    return code == "deferred"
-                }
-            }.value
-            guard let self else { return }
-            task = nil
-            finished = !deferred  // Other failures retry on the next App launch.
-            if deferred, !blocked { schedule() }
-        }
+        guard enabled, !finished, activeRun == nil, !blocked else { return }
+        let gate = gate, work = work, run = UUID()
+        activeRun = run
+        job = scheduler(.seconds(15), .background, {
+            do {
+                try gate.checkpoint()
+                return try work(gate)
+            } catch {
+                let code = ModelStorage.diagnostic(error)
+                ModelStorage.log.notice("preclone=\(code, privacy: .public)")
+                return code == "deferred"
+            }
+        }, { [weak self] deferred in
+            guard let self, self.activeRun == run else { return }
+            self.job = nil
+            self.activeRun = nil
+            self.finished = !deferred  // Other failures retry on the next App launch.
+            if deferred, !self.blocked { self.schedule() }
+        })
     }
-    deinit { gate.setBlocked(true); task?.cancel() }
+    deinit {
+        gate.setBlocked(true)
+        job?.cancel()
+    }
 }

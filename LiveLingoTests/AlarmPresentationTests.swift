@@ -5,6 +5,14 @@ import XCTest
 
 @MainActor
 final class AlarmPresentationTests: XCTestCase {
+    @MainActor private final class FocusProbe { var focused = false }
+    private func eventually(_ condition: @escaping @MainActor () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !condition() {
+            guard ContinuousClock.now < deadline else { XCTFail("Focus hint did not update"); throw CancellationError() }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
     private func fixture() throws -> (AppModel, TestUserDefaults, LearningReviewQueue) {
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
@@ -81,7 +89,9 @@ final class AlarmPresentationTests: XCTestCase {
         XCTAssertEqual(warning.detail, "倒计时结束后保存本节，并另开新录音继续。")
         XCTAssertEqual(warning.buttonTitle, "取消（30）")
         XCTAssertEqual(AlarmBannerState(secondsRemaining: 28).buttonTitle, "取消（28）")
-        XCTAssertEqual(warning.buttonDetail, "不分段 · 字幕窗或 LiveLingo 获得键盘焦点时可按 Esc")
+        XCTAssertEqual(warning.buttonDetail(hasKeyboardFocus: true), "不分段 · Esc")
+        XCTAssertEqual(warning.buttonDetail(hasKeyboardFocus: false), "不分段")
+        XCTAssertTrue(warning.accessibilityHint.contains("字幕窗或 LiveLingo 获得键盘焦点时可按 Esc"))
         XCTAssertEqual(AlarmBannerState(secondsRemaining: 0, saved: true).buttonTitle, "知道了")
         XCTAssertEqual(AlarmBannerState(secondsRemaining: 0, saving: true).buttonTitle, "知道了")
         XCTAssertEqual(AlarmBannerState(saved: true).title, AlarmPolicy.savedTitle)
@@ -91,8 +101,41 @@ final class AlarmPresentationTests: XCTestCase {
     func testAcknowledgementDetailsAlsoExplainEscapeFocusRequirement() {
         for state in [AlarmBannerState(saved: true), AlarmBannerState(saving: true),
                       AlarmBannerState(liveOnly: true), AlarmBannerState(failure: "Synthetic failure")] {
-            XCTAssertEqual(state.buttonDetail, "关闭提醒 · 字幕窗或 LiveLingo 获得键盘焦点时可按 Esc")
+            XCTAssertEqual(state.buttonDetail(hasKeyboardFocus: true), "关闭提醒 · Esc")
+            XCTAssertEqual(state.buttonDetail(hasKeyboardFocus: false), "关闭提醒")
+            XCTAssertTrue(state.accessibilityHint.contains("字幕窗或 LiveLingo 获得键盘焦点时可按 Esc"))
         }
+    }
+    func testEscapeHintFocusIncludesInactiveNonactivatingSubtitlePanel() {
+        XCTAssertTrue(AlarmKeyboardFocus.ownsKeyboard(applicationActive: true, keyWindowIsKey: false,
+            keyWindowIsNonactivatingPanel: false))
+        XCTAssertTrue(AlarmKeyboardFocus.ownsKeyboard(applicationActive: false, keyWindowIsKey: true,
+            keyWindowIsNonactivatingPanel: true))
+        XCTAssertFalse(AlarmKeyboardFocus.ownsKeyboard(applicationActive: false, keyWindowIsKey: true,
+            keyWindowIsNonactivatingPanel: false))
+        XCTAssertFalse(AlarmKeyboardFocus.ownsKeyboard(applicationActive: false, keyWindowIsKey: false,
+            keyWindowIsNonactivatingPanel: true))
+    }
+    func testEscapeHintRefreshesOnInjectedAppAndSubtitleFocusChanges() async throws {
+        let center = NotificationCenter()
+        let probe = FocusProbe()
+        let focus = AlarmKeyboardFocus(center: center, readFocus: { probe.focused })
+        XCTAssertFalse(focus.hasKeyboardFocus)
+        probe.focused = true
+        center.post(name: NSWindow.didBecomeKeyNotification, object: nil)
+        try await eventually { focus.hasKeyboardFocus }
+        // Deactivation clears a remembered normal key window even if the
+        // injected key-window query still remembers it. No app is activated.
+        center.post(name: NSApplication.didResignActiveNotification, object: nil)
+        try await eventually { !focus.hasKeyboardFocus }
+        center.post(name: NSWindow.didBecomeKeyNotification, object: nil)
+        try await eventually { focus.hasKeyboardFocus }
+        probe.focused = false
+        center.post(name: NSWindow.didResignKeyNotification, object: nil)
+        try await eventually { !focus.hasKeyboardFocus }
+        probe.focused = true
+        center.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        try await eventually { focus.hasKeyboardFocus }
     }
     func testAlarmDismissalReturnsInjectedKeyWindowWithoutShowingNativeWindows() throws {
         // Native NSWindow identities with injected key routing: no makeKey,
@@ -309,6 +352,18 @@ final class AlarmPresentationTests: XCTestCase {
         try await capture(AnyView(AlarmBanner(state: model.alarmBanner!, dismiss: {})),
             size: NSSize(width: 1050, height: 160), dark: false, border: nil,
             directory: directory, name: "alarm-saved-banner")
+        for compact in [false, true] {
+            for focused in [false, true] {
+                for saved in [false, true] {
+                    let state = AlarmBannerState(secondsRemaining: saved ? nil : 28, saved: saved)
+                    let name = "alarm-hint-" + (compact ? "floating-" : "main-")
+                        + (saved ? "saved-" : "countdown-") + (focused ? "focused" : "unfocused")
+                    try await capture(AnyView(AlarmBanner(state: state, dismiss: {}, compact: compact,
+                        keyboardFocusOverride: focused)), size: NSSize(width: compact ? 640 : 1050, height: 160),
+                        dark: compact, border: nil, directory: directory, name: name)
+                }
+            }
+        }
         try await capture(AnyView(ClassroomSettingsView().environmentObject(model).defaultAppStorage(defaults)),
             size: NSSize(width: 860, height: 900), dark: false, border: nil,
             directory: directory, name: "alarm-reminder-settings")
@@ -318,13 +373,13 @@ final class AlarmPresentationTests: XCTestCase {
         let frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        window.alphaValue = 0
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.title = "LiveLingo · 合成界面测试"
         let hosting = NSHostingView(rootView: rootView)
         hosting.sizingOptions = []
         hosting.frame = frame
         window.contentView = hosting
-        window.makeKeyAndOrderFront(nil)
         defer { window.orderOut(nil); window.contentView = nil; window.close() }
         try await Task.sleep(for: .milliseconds(200))
         window.setContentSize(size)

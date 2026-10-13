@@ -1,10 +1,17 @@
 import AVFoundation
+import Combine
 import Foundation
 import XCTest
 @testable import LiveLingo
 
 @MainActor
 final class AlarmLifecycleTests: XCTestCase {
+    private final class DiskWorkProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        var count: Int { lock.withLock { calls } }
+        func enter() { lock.withLock { calls += 1 } }
+    }
     @MainActor private final class Gate {
         private(set) var entered = false
         private var continuation: CheckedContinuation<Void, Never>?
@@ -540,6 +547,117 @@ final class AlarmLifecycleTests: XCTestCase {
     private func postAlarmDirectories(_ root: URL) throws -> [URL] {
         try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
             .filter { $0.lastPathComponent.contains(AlarmPolicy.postAlarmFolderSuffix) }
+    }
+
+    func testAlarmSegmentationNeverStartsPrecloneDiskWorkWhileCaptureContinues() async throws {
+        let f = try fixture()
+        let disk = DiskWorkProbe()
+        var scheduled = 0
+        var worker: (@Sendable () -> Bool)?
+        var complete: (@MainActor @Sendable (Bool) -> Void)?
+        let controller = ModelPrecloneController(phases: f.model.$phase.eraseToAnyPublisher(),
+            scheduler: { delay, priority, work, completion in
+                XCTAssertEqual(delay, .seconds(15))
+                XCTAssertEqual(priority, .background)
+                scheduled += 1; worker = work; complete = completion
+                return .init(cancel: {})
+            }, work: { _ in disk.enter(); return false })
+        defer { withExtendedLifetime(controller) {} }
+        XCTAssertEqual(scheduled, 1, "Idle schedules an initial grace period")
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: f.root.appendingPathComponent("first"))
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        var splitPhases: [AppPhase] = []
+        let observation = f.model.$phase.sink { phase in
+            if f.model.alarmRolloverIsActive {
+                splitPhases.append(phase)
+                XCTAssertTrue(ModelPrecloneController.blocksPreclone(phase), "Capture is active during alarm split: \(phase)")
+            }
+        }
+        defer { observation.cancel() }
+        f.model.alarmPreparationReadyForTesting = { _ in
+            XCTAssertTrue(f.model.alarmRolloverIsActive)
+            XCTAssertTrue(f.pipeline.alarmCaptureIsActive)
+            guard let worker, let complete else { XCTFail("Missing injected preclone job"); return }
+            XCTAssertTrue(worker(), "An idle grace period expiring during split must defer before disk work")
+            complete(true)
+            XCTAssertEqual(disk.count, 0)
+            XCTAssertEqual(scheduled, 1, "A deferred job cannot reschedule during segmentation")
+        }
+        f.model.alarmBeforeBindingForTesting = {
+            XCTAssertTrue(f.model.alarmRolloverIsActive)
+            XCTAssertTrue(f.pipeline.alarmCaptureIsActive)
+            XCTAssertEqual(scheduled, 1)
+            XCTAssertEqual(disk.count, 0)
+        }
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        XCTAssertTrue(splitPhases.contains(.preparing))
+        XCTAssertTrue(splitPhases.contains(.recording))
+        XCTAssertTrue(f.pipeline.alarmCaptureIsActive)
+        XCTAssertTrue(f.model.isRecording)
+        XCTAssertEqual(scheduled, 1)
+        XCTAssertEqual(disk.count, 0)
+        await f.model.stopSavedCourseForTesting()
+        XCTAssertEqual(scheduled, 2, "Disk work may schedule again only after recording stops")
+        XCTAssertFalse(try XCTUnwrap(worker)())
+        try XCTUnwrap(complete)(false)
+        XCTAssertEqual(disk.count, 1, "The injected worker must actually be usable after capture")
+    }
+
+    func testContinuousAlarmAfterSplitKeepsSavedBannerUntilCooldownEnds() async throws {
+        let f = try fixture()
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: f.root.appendingPathComponent("first"))
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        let start = ProcessInfo.processInfo.systemUptime
+        trigger(f.model, now: start)
+        let originalDeadline = f.model.alarmCooldownDeadlineForTesting
+        f.model.alarmCountdownTickForTesting(now: start + 33)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        let second = f.model.currentCourseDirectory
+        let deadline = f.model.alarmCooldownDeadlineForTesting
+        XCTAssertGreaterThanOrEqual(deadline, originalDeadline, "Segmentation must not reset the reminder cooldown")
+        XCTAssertEqual(f.model.alarmBanner?.saved, true)
+        // Audio timestamps restart for the new writer. Keep the same alarm
+        // sounding, including the old 9–12s regression and the cooldown edge.
+        for end in stride(from: 3.0, through: 177.0, by: 1.5) {
+            f.model.receiveAlarmSoundForTesting(.init(start: end - 3, end: end, score: 0.9), now: start + end)
+            XCTAssertEqual(f.model.alarmBanner?.saved, true, "new audio end=\(end)")
+            XCTAssertNil(f.model.alarmRolloverTaskForTesting)
+        }
+        f.model.receiveAlarmSoundForTesting(.init(start: 175.5, end: 178.5, score: 0.9), now: deadline - 0.001)
+        XCTAssertEqual(f.model.alarmBanner?.saved, true)
+        // After cooldown a fresh independent run can remind, but never split
+        // the already post-alarm course or replace its recording directory.
+        for end in [180.0, 183, 186] {
+            f.model.receiveAlarmSoundForTesting(.init(start: end - 3, end: end, score: 0.9), now: deadline + end - 180)
+        }
+        XCTAssertEqual(f.model.alarmBanner?.saved, false)
+        XCTAssertNil(f.model.alarmBanner?.secondsRemaining)
+        f.model.alarmCountdownTickForTesting(now: deadline + 100)
+        XCTAssertNil(f.model.alarmRolloverTaskForTesting)
+        XCTAssertEqual(f.model.currentCourseDirectory, second)
+        XCTAssertEqual(try postAlarmDirectories(f.root).count, 1)
+    }
+
+    func testAcknowledgingSavedBannerStillSuppressesContinuousAlarmDuringCooldown() async throws {
+        let f = try fixture()
+        _ = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: f.root.appendingPathComponent("first"))
+        let start = ProcessInfo.processInfo.systemUptime
+        trigger(f.model, now: start)
+        f.model.alarmCountdownTickForTesting(now: start + 33)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        XCTAssertEqual(f.model.alarmBanner?.saved, true)
+        f.model.dismissAlarmReminder()
+        XCTAssertNil(f.model.alarmBanner)
+        let deadline = f.model.alarmCooldownDeadlineForTesting
+        for end in stride(from: 3.0, through: 174.0, by: 1.5) {
+            f.model.receiveAlarmSoundForTesting(.init(start: end - 3, end: end, score: 0.9), now: deadline - 180 + end)
+            XCTAssertNil(f.model.alarmBanner)
+        }
+        XCTAssertNil(f.model.alarmRolloverTaskForTesting)
     }
 
     func testPostAlarmCourseOnlyRemindsAndFreshRecordingCanSplitAgain() async throws {

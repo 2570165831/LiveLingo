@@ -78,13 +78,60 @@ Preview builds use their own `PreviewDataIsolation` data root. Unit-test hosts
 do not start this controller; tests inject temporary roots. No courses,
 checkpoints or recording folders are inspected by preclone.
 
-After a 15-second launch grace period, a detached task at background priority
-starts only when not preparing, recording, paused or stopping. The phase
+One independent detached task at background priority owns both the 15-second
+launch grace period and the subsequent disk work. The controller retains only
+a cancellation closure: no higher-priority task awaits the worker's `value`,
+which would otherwise escalate its priority. The worker sends its final Bool
+result back to MainActor for bookkeeping; no model I/O runs in that callback.
+Work starts only when not preparing, recording, paused or stopping. The phase
 observer updates an in-memory flag synchronously. Each file and each read
 checks that flag; a new recording defers remaining work. Finishing capture
 retries after another grace period. Other failures retry at the next launch.
 No audio/UI operation waits for cloning or hashing. An already entered kernel
 clone call/read cannot be preempted by the flag, but reads are bounded.
+Releasing the controller blocks the shared gate and cancels its pending task,
+including the grace-period wait. A completion carries its run identity so a
+late or repeated callback cannot finish a newer retry.
+
+### In-memory controller tests and lifecycle composition
+
+`ModelPrecloneController(phases:scheduler:work:enabled:)` requires an injected
+phase publisher, scheduler and work closure. It does not default to model
+resources, standard preferences or a real destination. The normal
+`init(model:)` disables scheduling in unit-test hosts. Controller tests use
+in-memory work; existing storage fixtures still exercise APFS clones with tiny
+synthetic files and explicit preferences. Cases unrelated to backup behavior
+must inject backup-attribute stand-ins when adding direct storage calls. The
+two independent-model/distinct-version cases inject both writes and readbacks;
+the dedicated exclusion tests retain real attributes on synthetic fixtures.
+
+The scheduler receives `(Duration, TaskPriority, work, completion)`, returns a
+`Job` containing only `cancel`, and must call completion after returning that
+handle. It can retain work/completion for deterministic tests rather than
+starting a task. The controller requests `.seconds(15)` and `.background` on
+each eligible attempt. Work accepts the thread-safe `ModelPrecloneGate`, may
+call `checkpoint()` between segments, and returns `true` for deferral or
+`false` for completion. The controller also checks the gate before entering
+work. Cancellation/deferral errors produce `true`; ordinary failures produce
+`false`. Completion is MainActor-isolated and clears only its own active run.
+
+Lifecycle tests can use `model.$phase.eraseToAnyPublisher()` with a manual
+scheduler and segmented synthetic work. Hold an attempt between checkpoints,
+perform the capture/alarm transition, then confirm that the next checkpoint
+defers before advancing its segment. Returning to idle while completion is
+still held must not schedule overlapping work. Delivering deferred completion
+in idle schedules one new grace period; delivering it while capture is blocked
+waits for a later eligible phase. These hooks do not require model disk work.
+
+`scheduleBackground(delay:priority:work:completion:wait:)` exercises the actual
+detached scheduling topology with injected work and an optional async clock.
+Production uses `Task.sleep`; the priority regression uses a MainActor clock
+barrier before sampling `Task.currentPriority` in synthetic work. That barrier
+forces a MainActor waiter using the former `await detached.value` topology to
+suspend first, exposing its priority escalation without a timing-based sleep.
+The fixed topology must keep the work at `.background` even when initiated by
+a `.high` caller. Tests also cover cancellation during the grace period,
+controller release, phase gates, retries, ordinary failure and stale callbacks.
 
 For each model the worker holds a nonblocking `flock`, checks a committed
 receipt, data and source-file identity when present, otherwise creates a private

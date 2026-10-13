@@ -5,6 +5,7 @@ from contextlib import ExitStack
 import importlib.util
 import io
 import json
+import plistlib
 from pathlib import Path
 import signal
 import subprocess
@@ -264,6 +265,9 @@ class RunnerHarness:
 
     def open(self, path, mode="r", buffering=-1, encoding=None,
              errors=None, newline=None):
+        if path == REPO / 'LiveLingo/Resources/Info.plist':
+            self.case.assertEqual(mode, 'rb', 'The production plist is read-only')
+            return self.real_open(path, mode=mode)
         if path == self.dd / ".test-run.lock":
             self.case.assertEqual(mode, "a")
             stream = io.StringIO()
@@ -605,6 +609,19 @@ class RunnerEvidenceTests(unittest.TestCase):
 
 
 class GateAndCleanupTests(unittest.TestCase):
+    def test_host_is_background_only_before_launch_and_production_plist_is_unchanged(self):
+        source = REPO / 'LiveLingo/Resources/Info.plist'
+        original = source.read_bytes()
+        self.assertNotIn('LSUIElement', plistlib.loads(original))
+        with RunnerHarness(self, exit_code=0) as harness:
+            self.assertEqual(harness.runner.main(), 0)
+            target = harness.output / 'synthetic-host-info.plist'
+            self.assertIn('LIVELINGO_HOST_INFO_PLIST=' + str(target), harness.command)
+            info = plistlib.loads(target.read_bytes())
+            self.assertIs(info.pop('LSUIElement'), True)
+            self.assertEqual(info, plistlib.loads(original))
+        self.assertEqual(source.read_bytes(), original)
+
     def test_full_run_cleans_before_testing_and_requires_compile_and_events(self):
         with RunnerHarness(self, exit_code=0) as harness:
             harness.args.only = []
@@ -618,7 +635,7 @@ class GateAndCleanupTests(unittest.TestCase):
             self.assertEqual(preferences[3:], [])
             self.assertFalse(harness.runner.preference_events.call_args.kwargs["allow_empty"])
             harness.runner.retire_workers.assert_called_once()
-            self.assertEqual(harness.receipt()["removed_workers"], ["worker-810001-synthetic"])
+            self.assertEqual(harness.receipt()["archived_workers"], ["worker-810001-synthetic"])
 
     def test_focused_run_may_have_no_suites_but_still_requires_full_compile(self):
         with RunnerHarness(self, exit_code=0) as harness:
@@ -637,7 +654,7 @@ class GateAndCleanupTests(unittest.TestCase):
             harness.guard_exit_code = 1
             self.assertEqual(harness.runner.main(), 1)
             harness.runner.retire_workers.assert_not_called()
-            self.assertNotIn("removed_workers", harness.receipt())
+            self.assertNotIn("archived_workers", harness.receipt())
         with RunnerHarness(self, exit_code=0) as harness:
             harness.args.keep_workers = True
             self.assertEqual(harness.runner.main(), 0)
@@ -734,11 +751,13 @@ class WorkerDirectoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no preference audit events"):
                 runner.preference_events(scratch, {810009}, previous, allow_empty=True)
 
-    def test_retire_removes_only_this_invocations_observed_workers(self):
+    def test_retire_preserves_only_this_invocations_observed_workers_in_quarantine(self):
         runner = load_runner()
         with tempfile.TemporaryDirectory(dir=WORK) as temporary:
             scratch = Path(temporary) / "tmp"
             scratch.mkdir()
+            runner.OUT = Path(temporary) / "evidence"
+            runner.OUT.mkdir()
             outside = Path(temporary) / "outside"
             outside.mkdir()
             (outside / "keep.txt").write_text("synthetic outside content\n")
@@ -750,8 +769,9 @@ class WorkerDirectoryTests(unittest.TestCase):
             self.assertTrue((outside / "keep.txt").exists())
             link.unlink()
             self.assertEqual(runner.retire_workers(scratch, {810001}, {paths["old"].name}),
-                             [paths["current"].name])
+                             [str(runner.OUT / 'to-trash' / paths['current'].name)])
             self.assertFalse(paths["current"].exists())
+            self.assertEqual((runner.OUT / 'to-trash' / paths['current'].name / 'screenshots' / 'synthetic.png').read_bytes(), b'synthetic')
             self.assertTrue((paths["old"] / "screenshots" / "synthetic.png").exists())
             self.assertTrue((paths["other"] / "screenshots" / "synthetic.png").exists())
             self.assertTrue((outside / "keep.txt").exists())

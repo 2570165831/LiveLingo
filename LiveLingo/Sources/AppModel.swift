@@ -1909,7 +1909,6 @@ final class AppModel: ObservableObject {
             sessionDirectory = nextDirectory; currentCaptureStart = result.nextCaptureStart
             activeStorageMode = .saveSession; activeInputMode = .microphone
             alarmPostSplitCourse = true
-            alarmRule.stop()
             var capturedSnapshot = initialSnapshot
             capturedSnapshot.captureStart = result.nextCaptureStart
             bindSessionArchive(to: nextDirectory, restored: capturedSnapshot)
@@ -1921,6 +1920,11 @@ final class AppModel: ObservableObject {
             processingPaused = false
             try pipeline.resumeTranscription()
             audioInputStatus = "麦克风已接入"
+            // Restart the reminder cooldown at successful segmentation, keeping
+            // any later deadline. New audio time must not revive the same alarm
+            // or replace the saved confirmation a few seconds after rollover.
+            alarmRule.dismiss(now: ProcessInfo.processInfo.systemUptime)
+            alarmRule.clearEvidence()
             alarmBanner = AlarmBannerState(saved: true)
             if !preparingApplicationExit { retainAlarmSavedCourse(archiveDirectory, queue: result.previousQueue) }
             if result.queueFinalizationFailed {
@@ -2139,6 +2143,7 @@ final class AppModel: ObservableObject {
         receiveAlarmSound(observation, now: now)
     }
     func alarmCountdownTickForTesting(now: TimeInterval) { alarmCountdownTick(now: now) }
+    var alarmCooldownDeadlineForTesting: TimeInterval { alarmRule.nextAllowedAt }
     var alarmRolloverTaskForTesting: Task<Void, Never>? { alarmRolloverTask }
     func presentAlarmBannerForTesting(_ state: AlarmBannerState) { alarmBanner = state }
     func retireAlarmTasksForTesting() async {
