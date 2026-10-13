@@ -1239,6 +1239,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var candidateConfirmationInFlight = false
     private var lastReviewInvalidation: (sessionID: UUID, revision: Int)?
     @Published private(set) var archiveLoading = false
+    @Published private(set) var archiveCloudDownloadStatus: String?
+    private var archiveCloudDownloadTask: Task<SessionLoadResult, Error>?
+    private var archiveCloudDownloadToken: UUID?
+
+    func cancelCloudCourseOpen() { archiveCloudDownloadTask?.cancel() }
     @Published private(set) var legacyProvenanceUnavailable = false
     private var readinessGeneration = 0
     private var setupError: String?
@@ -3042,10 +3047,30 @@ final class AppModel: ObservableObject {
         guard !sessionSwitchBlocked else { return }
         guard admitLifecycleRetry() else { throw ExitDeadlineExceeded() }
         archiveLoading = true
-        defer { archiveLoading = false }
+        defer {
+            archiveLoading = false
+            archiveCloudDownloadTask = nil
+            archiveCloudDownloadToken = nil
+            archiveCloudDownloadStatus = nil
+        }
         let alarmPriorPaused = try await takeAlarmSavedCourse(directory)
+        let downloadToken = UUID()
+        archiveCloudDownloadToken = downloadToken
+        archiveCloudDownloadStatus = "正在检查这节课的本机文件；需要时会等待 iCloud 下载。"
         let store = SessionStore(directory: directory)
-        var loaded = try await Task.detached { try store.loadDetailed() }.value
+        let download = Task { [weak self] in
+            try await SessionCloudOpenPreparation.load(store) { [weak self] count in
+                Task { @MainActor in
+                    guard let self, self.archiveCloudDownloadToken == downloadToken else { return }
+                    self.archiveCloudDownloadStatus = "这节课的文件还在 iCloud，正在下载到本机；完成后自动打开。等待 \(count) 个文件。"
+                }
+            }
+        }
+        archiveCloudDownloadTask = download
+        var loaded = try await withTaskCancellationHandler { try await download.value } onCancel: { download.cancel() }
+        archiveCloudDownloadTask = nil
+        archiveCloudDownloadStatus = nil
+        archiveCloudDownloadToken = nil
         guard var snapshot = loaded.snapshot else { throw SessionStoreError.missingSnapshot }
         _ = try LearningNotebook(snapshot: snapshot)
         var restoredLanguage = try OutputLanguage.savedLanguage(in: directory, snapshot: snapshot, origin: loaded.origin)

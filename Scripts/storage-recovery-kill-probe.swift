@@ -22,6 +22,12 @@ enum StorageRecoveryKillProbe {
     }
 
     private static func run() throws {
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "signpost" {
+            _ = readLine() // Let a PID-filtered collector attach first.
+            SensitiveFileIO.timedIO(.entryStatus) { errno = ENOENT }
+            Thread.sleep(forTimeInterval: 0.1)
+            return
+        }
         guard CommandLine.arguments.count == 3,
               ["after-unlink", "before-relock"].contains(CommandLine.arguments[1]) else { exit(64) }
         let destination = URL(fileURLWithPath: CommandLine.arguments[2])

@@ -190,6 +190,17 @@ struct ContentView: View {
                 AlarmBanner(state: alarm, dismiss: model.dismissAlarmReminder)
             }
             recordingStrip
+            if let status = model.archiveCloudDownloadStatus {
+                HStack(spacing: 12) {
+                    ProgressView().controlSize(.small)
+                    Text(status).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("取消等待") { model.cancelCloudCourseOpen() }
+                        .accessibilityIdentifier("cloud-course-cancel")
+                }
+                .padding(12)
+                .accessibilityIdentifier("cloud-course-download-status")
+            }
             workspace
             statusBar
         }

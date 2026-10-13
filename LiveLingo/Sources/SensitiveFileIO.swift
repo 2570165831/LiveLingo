@@ -27,6 +27,7 @@ enum SensitiveFileIO {
     @TaskLocal static var afterRecoveryLease: (@Sendable () throws -> Void)?
     @TaskLocal static var afterAliasUnlink: (@Sendable () throws -> Void)?
     @TaskLocal static var recoveryRetryObserver: (@Sendable () -> Void)?
+    @TaskLocal static var signpostObserver: (@Sendable (String) -> Void)?
     private enum RecoveryTestInterruption: Error { case interrupted }
     #endif
 
@@ -45,6 +46,29 @@ enum SensitiveFileIO {
     static let slowIOThresholdNanoseconds: UInt64 = 100_000_000
     private static let ioLog = Logger(subsystem: "com.jianhongli.LiveLingo", category: "SensitiveFileIO")
     private static let ioTrace = OSLog(subsystem: "com.jianhongli.LiveLingo", category: .pointsOfInterest)
+    @TaskLocal static var materializationBlocked = false
+
+    /// Synchronous scope only; explicit user downloads run outside this scope.
+    static func withoutDatalessMaterialization<T>(_ action: () throws -> T) throws -> T {
+        let prior = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
+        guard prior >= 0 else { throw system("read materialization policy") }
+        guard setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD,
+                            IOPOL_MATERIALIZE_DATALESS_FILES_OFF) == 0 else {
+            throw system("disable locked materialization")
+        }
+        defer { _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, prior) }
+        do { return try $materializationBlocked.withValue(true, operation: action) }
+        catch Failure.system(_, let code) where code == EDEADLK { throw Failure.dataless }
+        catch {
+            let value = error as NSError
+            let underlying = value.userInfo[NSUnderlyingErrorKey] as? NSError
+            if value.domain == NSPOSIXErrorDomain && value.code == Int(EDEADLK)
+                || underlying?.domain == NSPOSIXErrorDomain && underlying?.code == Int(EDEADLK) {
+                throw Failure.dataless
+            }
+            throw error
+        }
+    }
 
     private static func ioNow() -> UInt64 {
         #if DEBUG
@@ -59,8 +83,9 @@ enum SensitiveFileIO {
         let interval = OSSignpostID(log: ioTrace)
         // The begin record exists even if the call never returns. Signposts
         // have fixed labels and a monotonic timestamp, never paths or content.
+        let begin = "site=\(site.rawValue) start_ns=\(start)"
         os_signpost(.begin, log: ioTrace, name: "Sensitive I/O", signpostID: interval,
-                    "site=%{public}s start_ns=%llu", site.rawValue, start)
+                    "%{public}@", begin as NSString)
         switch site {
         case .directoryBind, .fileOpen, .dataRead, .dataWrite, .fileSync,
              .fileLink, .fileRename, .storeLease, .storeProcessLock, .storeDirectoryLock:
@@ -70,6 +95,7 @@ enum SensitiveFileIO {
         default: break
         }
         #if DEBUG
+        signpostObserver?(begin)
         ioBeginObserver?(site, start)
         #endif
         errno = incomingErrno
@@ -78,8 +104,12 @@ enum SensitiveFileIO {
             let code = errno
             let end = ioNow()
             let elapsed = end >= start ? end - start : 0
+            let endMessage = "site=\(site.rawValue) errno=\(code)"
             os_signpost(.end, log: ioTrace, name: "Sensitive I/O", signpostID: interval,
-                        "site=%{public}s errno=%d", site.rawValue, code)
+                        "%{public}@", endMessage as NSString)
+            #if DEBUG
+            signpostObserver?(endMessage)
+            #endif
             if elapsed > slowIOThresholdNanoseconds {
                 #if DEBUG
                 slowIOObserver?(site, elapsed)
@@ -384,6 +414,13 @@ enum SensitiveFileIO {
         }
 
         var identity: Identity { get throws { Identity(try status(fd)) } }
+        var creationDate: Date {
+            get throws {
+                let info = try status(fd)
+                return Date(timeIntervalSince1970: Double(info.st_birthtimespec.tv_sec)
+                    + Double(info.st_birthtimespec.tv_nsec) / 1_000_000_000)
+            }
+        }
 
         /// Shared ancestors remain usable for export, but do not become a
         /// trusted cleanup namespace merely because this child is ours.
@@ -442,7 +479,7 @@ enum SensitiveFileIO {
         }
 
         func openRegularFile(named name: String, flags: Int32, create: Bool) throws -> Int32 {
-            try rejectDatalessIfPresent(named: name)
+            if materializationBlocked { try rejectDatalessIfPresent(named: name) }
             guard let before = try entryStatus(name) else {
                 guard create else { throw Failure.system(operation: "open file", code: ENOENT) }
                 return try createPrivateFile(named: name)
@@ -556,7 +593,7 @@ enum SensitiveFileIO {
         }
 
         func readIfPresent(named name: String) throws -> Data? {
-            try rejectDatalessIfPresent(named: name)
+            if materializationBlocked { try rejectDatalessIfPresent(named: name) }
             guard try requireRegularFileIfPresent(named: name) else { return nil }
             let item = try openRegularFile(named: name, flags: O_RDONLY, create: false)
             let handle = FileHandle(fileDescriptor: item, closeOnDealloc: true)
@@ -857,7 +894,6 @@ enum SensitiveFileIO {
                 guard let info = try entryStatus(name), Identity(info) == Identity(target) else { continue }
                 let reason: String
                 do { reason = try recoverTemporaryItem(name, allNames: allNames, write: true) }
-                catch Failure.recoveryBusy { reason = "active_or_unavailable" }
                 catch {
                     #if DEBUG
                     if error is RecoveryTestInterruption { throw error }
@@ -981,9 +1017,9 @@ enum SensitiveFileIO {
             return reason
         }
 
-        private func linkTarget(named name: String) throws -> String? {
+        func linkTarget(named name: String) throws -> String? {
             var target = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
-            let count = readlinkat(fd, name, &target, target.count - 1)
+            let count = timedIO(.entryStatus) { readlinkat(fd, name, &target, target.count - 1) }
             guard count >= 0, count < target.count - 1 else { return nil }
             return String(bytes: target.prefix(Int(count)).map { UInt8(bitPattern: $0) }, encoding: .utf8)
         }
@@ -1024,7 +1060,7 @@ enum SensitiveFileIO {
             return nil
         }
 
-        private func entryStatus(_ name: String) throws -> stat? {
+        func entryStatus(_ name: String) throws -> stat? {
             try validateName(name)
             var info = stat()
             if timedIO(.entryStatus, { fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) }) == 0 { return info }
@@ -1141,7 +1177,7 @@ enum SensitiveFileIO {
     private static func requireRegular(_ info: stat) throws {
         try requireOwner(info)
         guard info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1 else { throw Failure.unsafePath }
-        guard info.st_flags & UInt32(SF_DATALESS) == 0 else { throw Failure.dataless }
+        if materializationBlocked, info.st_flags & UInt32(SF_DATALESS) != 0 { throw Failure.dataless }
     }
 
     private static func makePrivate(_ fd: Int32, directory: Bool) throws {

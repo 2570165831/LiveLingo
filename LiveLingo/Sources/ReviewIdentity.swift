@@ -217,7 +217,7 @@ enum ReviewInputBinding {
         guard identity == nil else {
             throw ReviewIdentityError.conflict("课程身份快照缺失，请恢复完整课程目录")
         }
-        let summary = SessionExporter.savedSummaryURL(in: directory, targetLocale: nil)
+        let summary = try SessionExporter.savedSummaryURL(in: directory, targetLocale: nil)
         if FileManager.default.fileExists(atPath: summary.path) {
             let saved = try Data(contentsOf: summary)
             struct Metadata: Decodable { let targetLocale: String? }

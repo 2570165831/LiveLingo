@@ -2163,6 +2163,7 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
     }
 
     var errorDescription: String? { description }
+    var isStorageDeferred: Bool { ["session_storageDeferred", "session_storageBusy"].contains(code) }
 
     /// A nonnegative Int index fits in UInt with room for its one-based value.
     /// Negative metadata retains its prior display without a trapping conversion.
@@ -2182,7 +2183,8 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
         }
         if let pointIndex { context.append("笔记要点 \(Self.oneBasedIndex(pointIndex))") }
         if let field { context.append("字段 \(field)") }
-        let head = "复查失败[\(stage.label)]" + (context.isEmpty ? "" : "（" + context.joined(separator: " · ") + "）")
+        let head = (isStorageDeferred ? "复查已延后" : "复查失败") + "[\(stage.label)]"
+            + (context.isEmpty ? "" : "（" + context.joined(separator: " · ") + "）")
         var text = "\(head)：\(localizedDetail)"
         // Only exact numeric validator templates carry additional counts.
         let templates = [
@@ -2201,6 +2203,8 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
     /// the runtime developer log. Unknown details never enter reports.
     var localizedDetail: String {
         switch (stage, code) {
+        case (_, "session_storageDeferred"): return LearningFailureCode.label(for: code) + "；稍后自动重试"
+        case (_, "session_storageBusy"): return LearningFailureCode.label(for: code) + "；稍后自动重试"
         case (.decode, "invalid_json"), (.input, "invalid_json"):
             return "响应不是合法 JSON，无法解析复查结果"
         case (.decode, "missing_key"): return "响应缺少必需字段"
@@ -2303,6 +2307,7 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
             "unsupported_target", "no_pending_batch", "unrecognized_saved_prompt",
             "session_unsupportedSchema", "session_corruptSnapshot", "session_corruptJournal",
             "session_incompleteJournalTail", "session_unsafePath", "session_invalidState", "session_io",
+            "session_storageDeferred", "session_storageBusy", "cloud_download_timeout", "cloud_download_unavailable",
         ]
         if known.contains(raw) { return raw }
         if raw.range(of: #"^ns_(NSCocoaErrorDomain|NSPOSIXErrorDomain|NSURLErrorDomain|AVFoundationErrorDomain|unknown)_-?[0-9]{1,12}$"#,
@@ -2445,7 +2450,11 @@ enum LearningFailureCode {
             case .unreadable: return "report_unreadable"
             }
         case let error as SessionStoreError:
+            if case .storageDeferred(let reason) = error, reason == "其他操作仍在修复课程文件" { return "session_storageBusy" }
             return "session_" + String(String(describing: error).prefix(while: \.isLetter))
+        case let error as SessionCloudOpenError:
+            return error == .timedOut ? "cloud_download_timeout" : "cloud_download_unavailable"
+        case is CancellationError: return "cancelled"
         case let error as DecodingError:
             switch error {
             case .keyNotFound: return "missing_key"
@@ -2466,6 +2475,11 @@ enum LearningFailureCode {
     /// Short Chinese reason for the notes status line.
     static func label(for code: String) -> String {
         switch code {
+        case "session_storageDeferred": return "这节课的文件还在 iCloud，尚未下载到本机；打开课程时会先请求下载"
+        case "session_storageBusy": return "其他操作仍在准备课程文件，原文件已保留"
+        case "cloud_download_timeout": return "等待 iCloud 下载已超时，课程文件保留；请重新打开重试"
+        case "cloud_download_unavailable": return "iCloud 暂时无法下载这节课，请检查网络后重新打开"
+        case "cancelled": return "已取消等待，课程文件保留"
         case "timeout": return "超时"
         case "output_limit": return "输出超出长度上限"
         case "generation_interrupted": return "生成被中断"
@@ -2534,6 +2548,7 @@ final class ReviewRequestIdentityBox: @unchecked Sendable {
 /// Task-local scope keeps synthetic delays out of unrelated queue operations.
 enum ReviewStorageTestHooks {
     @TaskLocal static var beforeDirectoryAccess: (@Sendable (URL) -> Void)?
+    @TaskLocal static var beforeSnapshotRead: (@Sendable (URL) throws -> Void)?
 }
 #endif
 
@@ -3638,6 +3653,7 @@ enum ReviewRetryPolicy {
     static let delays: [TimeInterval] = [30, 120]
 
     static func isRetryable(_ failure: ReviewFailure) -> Bool {
+        if failure.isStorageDeferred { return true }
         guard !["model_unavailable", "file_missing", "ns_NSCocoaErrorDomain_4",
                 "ns_NSCocoaErrorDomain_260", "ns_NSPOSIXErrorDomain_2"].contains(failure.code) else { return false }
         switch failure.stage {
@@ -4177,7 +4193,7 @@ final class LearningReviewQueue: ObservableObject {
             // original is never compared with the full-course Markdown when a
             // snapshot provides exact batch identity and evidence instead.
             let snapshot = try ReviewInputBinding.snapshot(in: directory)
-            if snapshot == nil, !FileManager.default.fileExists(atPath: SessionExporter.savedSummaryURL(in: target, targetLocale: nil).path) {
+            if snapshot == nil, !FileManager.default.fileExists(atPath: try SessionExporter.savedSummaryURL(in: target, targetLocale: nil).path) {
                 throw ReviewIdentityError.conflict("目标目录没有可核对的课程快照或笔记")
             }
             for job in moving {
@@ -4453,8 +4469,18 @@ final class LearningReviewQueue: ObservableObject {
 
     private func validatedSnapshotAsync(_ job: Job, at directory: URL,
                                         allowHistorical: Bool) async throws -> SessionSnapshot? {
-        try await Task.detached {
-            try Self.validatedSnapshot(job, at: directory, allowHistorical: allowHistorical)
+        #if DEBUG
+        let observer = ReviewStorageTestHooks.beforeSnapshotRead
+        #endif
+        return try await Task.detached {
+            #if DEBUG
+            try observer?(directory)
+            #endif
+            return try SessionArchiveCoding.privateIO(at: directory) {
+                try SensitiveFileIO.withoutDatalessMaterialization {
+                    try Self.validatedSnapshot(job, at: directory, allowHistorical: allowHistorical)
+                }
+            }
         }.value
     }
 
@@ -4651,7 +4677,12 @@ final class LearningReviewQueue: ObservableObject {
         if FileManager.default.fileExists(atPath: self.journalURL.path) {
             restoreBlocked = true
             do {
-                let bytes = try Self.journalBytes(at: self.journalURL)
+                let bytes = try SessionArchiveCoding.privateIO(at: self.journalURL) {
+                    try SensitiveFileIO.withoutDatalessMaterialization {
+                        try SensitiveFileIO.recoverCommittedFileIfNeeded(at: self.journalURL)
+                        return try Self.journalBytes(at: self.journalURL)
+                    }
+                }
                 guard let bytes else { throw ReviewIdentityError.unreadable("复查日志在读取期间消失") }
                 let journal = try JSONDecoder().decode(Journal.self, from: bytes)
                 // Pause is a user choice, preserved even when job validation
@@ -5689,8 +5720,8 @@ final class LearningReviewQueue: ObservableObject {
                 }
                 jobs[0].lastRequestID = identity.latest
                 let attempts = jobs[0].retryPending?.attempts ?? 0
-                if ReviewRetryPolicy.isRetryable(failure), attempts < ReviewRetryPolicy.maximumAttempts {
-                    let attempt = attempts + 1
+                if failure.isStorageDeferred || ReviewRetryPolicy.isRetryable(failure) && attempts < ReviewRetryPolicy.maximumAttempts {
+                    let attempt = failure.isStorageDeferred ? min(attempts + 1, ReviewRetryPolicy.maximumAttempts) : attempts + 1
                     let delay = retryDelays[max(0, min(attempt - 1, retryDelays.count - 1))]
                     jobs[0].retryPending = RetryState(attempts: attempt,
                                                       notBefore: now().timeIntervalSince1970 + delay,
@@ -5698,7 +5729,7 @@ final class LearningReviewQueue: ObservableObject {
                     var retryStats = jobs[0].stats ?? JobStats()
                     retryStats.retries += 1
                     jobs[0].stats = retryStats
-                    recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "retry_scheduled",
+                    recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: failure.isStorageDeferred ? "storage_deferred" : "retry_scheduled",
                                                  stage: failure.stage.rawValue, batch: batchIndex,
                                                  batchCount: batchCount, request: failure.requestID,
                                                  detail: "attempt=\(attempt) delay_s=\(Int(delay)) code=\(failure.code)"), at: 0)
@@ -6034,9 +6065,12 @@ final class LearningReviewQueue: ObservableObject {
         else if userPaused { status = "\(progress) · 已手动暂停" }
         else if let retry = job.retryPending, !running {
             let remaining = retry.remainingSeconds(now: now().timeIntervalSince1970)
-            status = remaining > 0
+            if ["session_storageDeferred", "session_storageBusy"].contains(retry.code) {
+                status = "\(progress) · \(LearningFailureCode.label(for: retry.code))；已延后，稍后自动重试"
+            } else { status = remaining > 0
                 ? "\(progress) · 第 \(retry.attempts) 次自动重试将在 \(remaining) 秒后开始"
                 : "\(progress) · 第 \(retry.attempts) 次自动重试进行中"
+            }
         }
         // 升级迁移后的旧任务：进度保留，但不再自动跑；用户点"开始复查"才继续。
         else if job.awaitingManualStart == true { status = "\(progress) · 已排队，等待开始（不会自动运行）" }
@@ -6099,6 +6133,7 @@ actor LearningReviewStorage {
         try SessionArchiveCoding.privateIO(at: journalURL) {
             try SensitiveFileIO.recoverCommittedFileIfNeeded(at: journalURL)
         }
+        return try SensitiveFileIO.withoutDatalessMaterialization {
         let journalParent = try SensitiveFileIO.Directory.open(at: journalURL.deletingLastPathComponent(), create: true, tighten: true)
         try journalParent.rejectDatalessIfPresent(named: journalURL.lastPathComponent)
         try journalParent.rejectDatalessIfPresent(named: journalURL.appendingPathExtension("lock").lastPathComponent)
@@ -6127,6 +6162,7 @@ actor LearningReviewStorage {
         expectedBytes = data
         lastSavedSequence = sequence
         return data
+        }
     }
 
     struct Output: Sendable {
@@ -6140,6 +6176,8 @@ actor LearningReviewStorage {
     }
 
     func writeOutputs(_ job: LearningReviewQueue.Job, validatedSnapshot snapshot: SessionSnapshot?) throws -> Output {
+        try SessionArchiveCoding.privateIO(at: job.directory) {
+        try SensitiveFileIO.withoutDatalessMaterialization {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: job.directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw QwenRuntimeError.requestFailed("录音目录已移动或不可用")
@@ -6156,5 +6194,7 @@ actor LearningReviewStorage {
             validatedSnapshot: snapshot, sessionID: job.identity?.sessionID)
         return Output(markdown: report ?? entry.markdown,
             progress: LearningReviewQueue.reportProgress(next: job.next, total: job.batches.count, scope: job.scope))
+        }
+        }
     }
 }
