@@ -130,10 +130,17 @@ enum OutputLanguage: String, CaseIterable, Identifiable, Sendable {
         let hasSnapshot = origin.map { $0 == .snapshot }
             ?? FileManager.default.fileExists(atPath: directory.appendingPathComponent(SessionStore.snapshotFileName).path)
         if hasSnapshot { return .simplifiedChinese }
+        // Export-managed root links are resolved and verified as a generation;
+        // the manifest itself is still opened as a strict, real file leaf.
+        let exports = try SessionExporter.currentExportDirectory(in: directory)
+        let manifest = exports.appendingPathComponent("manifest.json")
+        let data = try SessionArchiveCoding.privateIO(at: manifest, { try SensitiveFileIO.readIfPresent(at: manifest) })
+        return try legacyLanguage(manifestBytes: data)
+    }
+
+    static func legacyLanguage(manifestBytes: Data?) throws -> Self {
         struct Metadata: Decodable { let targetLocale: String? }
-        let manifest = directory.appendingPathComponent("manifest.json")
-        if let data = try? Data(contentsOf: manifest),
-           let metadata = try? JSONDecoder().decode(Metadata.self, from: data) {
+        if let manifestBytes, let metadata = try? JSONDecoder().decode(Metadata.self, from: manifestBytes) {
             // The non-regional code occurs in synthetic verifier fixtures,
             // not released exporters. Continue using the supported generator.
             if metadata.targetLocale == "zh-Hant" { return .simplifiedChinese }

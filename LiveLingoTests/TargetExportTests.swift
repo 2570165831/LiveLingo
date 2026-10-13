@@ -49,13 +49,13 @@ final class TargetExportTests: XCTestCase {
             try Data("Synthetic summary".utf8).write(to: root.appendingPathComponent(name))
         }
         try Data(#"{"targetLocale":"fr"}"#.utf8).write(to: root.appendingPathComponent("manifest.json"))
-        XCTAssertEqual(SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-fr.md")
+        XCTAssertEqual(try SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-fr.md")
         try Data("Synthetic summary".utf8).write(to: root.appendingPathComponent("summary-en.md"))
-        XCTAssertEqual(SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-en.md")
+        XCTAssertEqual(try SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-en.md")
         try FileManager.default.removeItem(at: root.appendingPathComponent("summary-en.md"))
-        XCTAssertEqual(SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-fr.md")
+        XCTAssertEqual(try SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-fr.md")
         try FileManager.default.removeItem(at: root.appendingPathComponent("summary-fr.md"))
-        XCTAssertEqual(SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-zh-Hans.md")
+        XCTAssertEqual(try SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-zh-Hans.md")
     }
 
     @MainActor
@@ -77,10 +77,10 @@ final class TargetExportTests: XCTestCase {
         try Data("Summary\n".utf8).write(to: root.appendingPathComponent("summary-en.md"))
         defaults.set("zh-Hans", forKey: "LiveLingo.outputLanguage")
         let before = try SessionDirectoryIdentity.resolve(directory: root)
-        let summary = SessionExporter.savedSummaryURL(in: root)
+        let summary = try SessionExporter.savedSummaryURL(in: root)
         defaults.set("fr", forKey: "LiveLingo.outputLanguage")
         XCTAssertEqual(try SessionDirectoryIdentity.resolve(directory: root), before)
-        XCTAssertEqual(SessionExporter.savedSummaryURL(in: root), summary)
+        XCTAssertEqual(try SessionExporter.savedSummaryURL(in: root), summary)
     }
 
     // SRT ends a cue at a blank line, so text with internal blank lines must not

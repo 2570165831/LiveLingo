@@ -166,9 +166,9 @@ final class MultilingualSessionExporterTests: XCTestCase {
         XCTAssertFalse(SessionExporter.isValidTargetLocale("../../private"))
         try Data(#"{"targetLocale":"zh-Hant-TW"}"#.utf8).write(to: root.appendingPathComponent("manifest.json"))
         try Data("# 舊筆記\n".utf8).write(to: root.appendingPathComponent("summary-zh-Hans.md"))
-        XCTAssertEqual(SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-zh-Hans.md")
+        XCTAssertEqual(try SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-zh-Hans.md")
         try Data("# 新筆記\n".utf8).write(to: root.appendingPathComponent("summary-zh-Hant-TW.md"))
-        XCTAssertEqual(SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-zh-Hant-TW.md")
+        XCTAssertEqual(try SessionExporter.savedSummaryURL(in: root).lastPathComponent, "summary-zh-Hant-TW.md")
         let snapshot = try SessionStore(directory: root).loadDetailed().snapshot
         XCTAssertEqual(snapshot?.legacyMarkdown, "# 新筆記\n")
     }

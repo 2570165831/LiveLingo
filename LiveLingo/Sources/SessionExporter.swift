@@ -448,7 +448,7 @@ enum SessionExporter {
 
     private static func requireDirectory(_ url: URL) throws {
         var info = stat()
-        guard lstat(url.path, &info) == 0 else {
+        guard SensitiveFileIO.timedIO(.entryStatus, { lstat(url.path, &info) }) == 0 else {
             throw SessionStoreError.io(operation: "inspect export directory", code: errno)
         }
         guard info.st_mode & S_IFMT == S_IFDIR else { throw SessionStoreError.unsafePath(url.path) }
@@ -456,64 +456,120 @@ enum SessionExporter {
 
     /// Resolve once, then read an immutable generation. Root aliases all follow
     /// the same atomic pointer; the historical file contents remain unchanged.
-    static func currentExportDirectory(in directory: URL) throws -> URL {
-        let store = directory.appendingPathComponent(".exports", isDirectory: true)
-        var storeInfo = stat()
-        if lstat(store.path, &storeInfo) != 0 {
-            guard errno == ENOENT else { throw SessionStoreError.io(operation: "inspect export store", code: errno) }
-            return directory
-        }
-        try requireDirectory(store)
-        let current = store.appendingPathComponent("current")
-        let portable = store.appendingPathComponent("current.json")
-        var info = stat()
-        let link: String
-        if lstat(portable.path, &info) == 0 {
-            try SessionArchiveCoding.requireRegularFileIfPresent(portable)
-            let pointer = try SessionArchiveCoding.decode(ExportPointer.self, from: Data(contentsOf: portable))
-            guard pointer.version == 1, UUID(uuidString: pointer.generation) != nil else {
-                throw SessionStoreError.corruptSnapshot
+    static func currentExportDirectory(in directory: URL, boundRoot: SensitiveFileIO.Directory? = nil,
+                                       prepareCommittedAliases: Bool = false) throws -> URL {
+        try SessionArchiveCoding.privateIO(at: directory) {
+            let root = try boundRoot ?? SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
+            guard let store = try root.directoryIfPresent(named: ".exports") else { return directory }
+            if prepareCommittedAliases {
+                try SensitiveFileIO.recoverCommittedFileIfNeeded(at: store.url.appendingPathComponent("current.json"), expectedParent: store.identity)
             }
-            link = "versions/" + pointer.generation
-        } else {
-            guard errno == ENOENT else { throw SessionStoreError.io(operation: "read portable export index", code: errno) }
-            guard lstat(current.path, &info) == 0 else {
-                if errno == ENOENT { return directory }
-                throw SessionStoreError.io(operation: "read export index", code: errno)
+            let link: String
+            if let pointerBytes = try store.readIfPresent(named: "current.json") {
+                let pointer = try SessionArchiveCoding.decode(ExportPointer.self, from: pointerBytes)
+                guard pointer.version == 1, UUID(uuidString: pointer.generation) != nil else {
+                    throw SessionStoreError.corruptSnapshot
+                }
+                link = "versions/" + pointer.generation
+            } else {
+                guard let info = try store.entryStatus("current") else { return directory }
+                guard info.st_mode & S_IFMT == S_IFLNK,
+                      let target = try store.linkTarget(named: "current") else { throw SensitiveFileIO.Failure.unsafePath }
+                link = target
             }
-            guard info.st_mode & S_IFMT == S_IFLNK else { throw SessionStoreError.unsafePath(current.path) }
-            link = try FileManager.default.destinationOfSymbolicLink(atPath: current.path)
+            let parts = link.split(separator: "/")
+            guard parts.count == 2, parts[0] == "versions", UUID(uuidString: String(parts[1])) != nil,
+                  let versions = try store.directoryIfPresent(named: "versions"),
+                  let selected = try versions.directoryIfPresent(named: String(parts[1])) else {
+                throw SensitiveFileIO.Failure.unsafePath
+            }
+            try validateExportGeneration(selected.url, bound: selected, prepareCommittedAliases: prepareCommittedAliases)
+            return selected.url
         }
-        let parts = link.split(separator: "/")
-        guard parts.count == 2, parts[0] == "versions", UUID(uuidString: String(parts[1])) != nil else {
-            throw SessionStoreError.unsafePath(current.path)
-        }
-        try requireDirectory(store)
-        try requireDirectory(store.appendingPathComponent("versions", isDirectory: true))
-        let selected = store.appendingPathComponent(link, isDirectory: true)
-        try requireDirectory(selected)
-        guard SessionDirectoryLocation.canonical(selected).deletingLastPathComponent()
-            == SessionDirectoryLocation.canonical(store.appendingPathComponent("versions", isDirectory: true)) else {
-            throw SessionStoreError.unsafePath(selected.path)
-        }
-        try validateExportGeneration(selected)
-        return selected
     }
 
-    private static func validateExportGeneration(_ selected: URL) throws {
-        try requireDirectory(selected)
-        let indexURL = selected.appendingPathComponent("export-index.json")
-        try SessionArchiveCoding.requireRegularFileIfPresent(indexURL)
-        let index = try SessionArchiveCoding.decode(ExportIndex.self, from: Data(contentsOf: indexURL))
-        guard index.version == 1 else { throw SessionStoreError.unsupportedSchema(index.version) }
-        for (name, digest) in index.members {
-            guard !name.isEmpty, !name.contains("/"), !name.utf8.contains(0), name != ".", name != "..", SessionArchiveCoding.isDigest(digest) else {
-                throw SessionStoreError.corruptSnapshot
+    private static func validateExportGeneration(_ selected: URL, bound: SensitiveFileIO.Directory? = nil,
+                                                 prepareCommittedAliases: Bool = false) throws {
+        try SessionArchiveCoding.privateIO(at: selected) {
+            let parent = try bound ?? SensitiveFileIO.Directory.open(at: selected, create: false, tighten: false)
+            if prepareCommittedAliases {
+                try SensitiveFileIO.recoverCommittedFileIfNeeded(at: parent.url.appendingPathComponent("export-index.json"), expectedParent: parent.identity)
             }
-            let url = selected.appendingPathComponent(name)
-            try SessionArchiveCoding.requireRegularFileIfPresent(url)
-            guard SessionArchiveCoding.digest(try Data(contentsOf: url)) == digest else { throw SessionStoreError.corruptSnapshot }
+            guard let indexBytes = try parent.readIfPresent(named: "export-index.json") else { throw SessionStoreError.corruptSnapshot }
+            let index = try SessionArchiveCoding.decode(ExportIndex.self, from: indexBytes)
+            guard index.version == 1 else { throw SessionStoreError.unsupportedSchema(index.version) }
+            for (name, digest) in index.members {
+                guard !name.isEmpty, !name.contains("/"), !name.utf8.contains(0), name != ".", name != "..",
+                      SessionArchiveCoding.isDigest(digest) else { throw SessionStoreError.corruptSnapshot }
+                if prepareCommittedAliases {
+                    try SensitiveFileIO.recoverCommittedFileIfNeeded(at: parent.url.appendingPathComponent(name), expectedParent: parent.identity)
+                }
+                guard let bytes = try parent.readIfPresent(named: name), SessionArchiveCoding.digest(bytes) == digest else {
+                    throw SessionStoreError.corruptSnapshot
+                }
+            }
         }
+    }
+
+    /// Only the active course metadata/export generation is requested. Never
+    /// walk old generations or follow links into unrelated folders.
+    static func pendingCloudItems(in directory: URL) throws -> [URL] {
+        do { return try SensitiveFileIO.withoutDatalessMaterialization {
+            var rootInfo = stat()
+            guard SensitiveFileIO.timedIO(.entryStatus, { lstat(directory.path, &rootInfo) }) == 0 else {
+                if errno == ENOENT { throw SessionStoreError.missingSnapshot }
+                throw SensitiveFileIO.Failure.system(operation: "inspect course", code: errno)
+            }
+            guard rootInfo.st_mode & S_IFMT == S_IFDIR, rootInfo.st_uid == getuid() else { throw SensitiveFileIO.Failure.unsafePath }
+            if rootInfo.st_flags & UInt32(SF_DATALESS) != 0 { return [directory] }
+            let root = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
+            var pending: [URL] = []
+            func inspect(_ parent: SensitiveFileIO.Directory, _ name: String) throws -> Bool {
+                guard let info = try parent.entryStatus(name) else { return false }
+                if info.st_flags & UInt32(SF_DATALESS) != 0 {
+                    pending.append(parent.url.appendingPathComponent(name, isDirectory: info.st_mode & S_IFMT == S_IFDIR))
+                    return true
+                }
+                return false
+            }
+            for name in [SessionStore.snapshotFileName, SessionStore.journalFileName, ".session-store.lock"] { _ = try inspect(root, name) }
+            if try root.entryStatus(SessionStore.snapshotFileName) != nil { return pending }
+            func legacyItems(_ parent: SensitiveFileIO.Directory) throws {
+                for name in try parent.names() where name == "manifest.json" || name == "bilingual.jsonl"
+                    || name.hasPrefix("summary-") && name.hasSuffix(".md") { _ = try inspect(parent, name) }
+            }
+            if try inspect(root, ".exports") { return pending }
+            guard let store = try root.directoryIfPresent(named: ".exports") else { try legacyItems(root); return pending }
+            if try inspect(store, "current.json") { return pending }
+            try SensitiveFileIO.recoverCommittedFileIfNeeded(at: store.url.appendingPathComponent("current.json"), expectedParent: store.identity)
+            let generation: String
+            if let bytes = try store.readIfPresent(named: "current.json") {
+                let pointer = try SessionArchiveCoding.decode(ExportPointer.self, from: bytes)
+                guard pointer.version == 1, UUID(uuidString: pointer.generation) != nil else { throw SessionStoreError.corruptSnapshot }
+                generation = pointer.generation
+            } else if let link = try store.linkTarget(named: "current") {
+                let parts = link.split(separator: "/")
+                guard parts.count == 2, parts[0] == "versions", UUID(uuidString: String(parts[1])) != nil else { throw SensitiveFileIO.Failure.unsafePath }
+                generation = String(parts[1])
+            } else { try legacyItems(root); return pending }
+            if try inspect(store, "versions") { return pending }
+            guard let versions = try store.directoryIfPresent(named: "versions") else { throw SessionStoreError.corruptSnapshot }
+            if try inspect(versions, generation) { return pending }
+            guard let selected = try versions.directoryIfPresent(named: generation) else { throw SessionStoreError.corruptSnapshot }
+            if try inspect(selected, "export-index.json") { return pending }
+            try SensitiveFileIO.recoverCommittedFileIfNeeded(at: selected.url.appendingPathComponent("export-index.json"), expectedParent: selected.identity)
+            if let bytes = try selected.readIfPresent(named: "export-index.json") {
+                let index = try SessionArchiveCoding.decode(ExportIndex.self, from: bytes)
+                guard index.version == 1 else { throw SessionStoreError.unsupportedSchema(index.version) }
+                for name in index.members.keys {
+                    try SessionArchiveCoding.validateRelativePath(name)
+                    guard !name.contains("/") else { throw SensitiveFileIO.Failure.unsafePath }
+                    _ = try inspect(selected, name)
+                }
+            }
+            try legacyItems(selected)
+            return Array(Set(pending)).sorted { $0.lastPathComponent < $1.lastPathComponent }
+        } } catch SensitiveFileIO.Failure.dataless { return [directory] }
     }
 
     /// Migration accepts only registered aliases and the relative generation
@@ -965,34 +1021,33 @@ enum SessionExporter {
 
     /// Saved courses keep the target recorded at export time. Pre-manifest
     /// courses retain their legacy summary name and identity fingerprint.
-    static func savedSummaryURL(in directory: URL) -> URL {
-        // This convenience entry point is for callers outside SessionStore's
-        // lock. Store readers must use the explicit-target overload below.
-        let snapshotURL = directory.appendingPathComponent(SessionStore.snapshotFileName)
-        let snapshot = FileManager.default.fileExists(atPath: snapshotURL.path)
-            ? try? SessionStore(directory: directory).load() : nil
-        return savedSummaryURL(in: directory, targetLocale: snapshot?.targetLocale)
+    static func savedSummaryURL(in directory: URL) throws -> URL {
+        let snapshot = try SessionStore(directory: directory).loadDetailedWithoutRecovery().snapshot
+        return try savedSummaryURL(in: directory, targetLocale: snapshot?.targetLocale)
     }
 
-    /// Does not acquire a SessionStore lock or read a snapshot. The caller
-    /// supplies its already known target (nil for a legacy import).
-    static func savedSummaryURL(in directory: URL, targetLocale: String?) -> URL {
+    /// Throwing metadata read: a cloud placeholder cannot silently choose the
+    /// wrong legacy language. Store readers pass their already read manifest.
+    static func savedSummaryURL(in directory: URL, targetLocale: String?) throws -> URL {
+        try SessionArchiveCoding.privateIO(at: directory) {
+            // Published root names are managed symlinks. Resolve the checked
+            // immutable generation, then open its real leaves with NOFOLLOW.
+            let selected = try currentExportDirectory(in: directory)
+            let parent = try SensitiveFileIO.Directory.open(at: selected, create: false, tighten: false)
+            return try savedSummaryURL(in: parent, targetLocale: targetLocale,
+                                       manifestBytes: parent.readIfPresent(named: "manifest.json"))
+        }
+    }
+
+    static func savedSummaryURL(in parent: SensitiveFileIO.Directory, targetLocale: String?, manifestBytes: Data?) throws -> URL {
         struct TargetMetadata: Decodable { let targetLocale: String }
         var names: [String] = []
-        if let locale = targetLocale, isValidTargetLocale(locale) {
-            names.append(targetSummaryFileName(for: locale))
-        }
-        if let data = try? Data(contentsOf: directory.appendingPathComponent("manifest.json")),
-           let metadata = try? JSONDecoder().decode(TargetMetadata.self, from: data),
-           isValidTargetLocale(metadata.targetLocale) {
-            names.append(targetSummaryFileName(for: metadata.targetLocale))
-        }
-        for name in ["summary-zh-Hans.md"] where !names.contains(name) {
-            names.append(name)
-        }
-        return names.map { directory.appendingPathComponent($0) }
-            .first { FileManager.default.fileExists(atPath: $0.path) }
-            ?? directory.appendingPathComponent(names[0])
+        if let locale = targetLocale, isValidTargetLocale(locale) { names.append(targetSummaryFileName(for: locale)) }
+        if let manifestBytes, let metadata = try? JSONDecoder().decode(TargetMetadata.self, from: manifestBytes),
+           isValidTargetLocale(metadata.targetLocale) { names.append(targetSummaryFileName(for: metadata.targetLocale)) }
+        if !names.contains("summary-zh-Hans.md") { names.append("summary-zh-Hans.md") }
+        for name in names where try parent.entryStatus(name) != nil { return parent.url.appendingPathComponent(name) }
+        return parent.url.appendingPathComponent(names[0])
     }
 
     /// Language labels are UI metadata, never part of copied/exported text.

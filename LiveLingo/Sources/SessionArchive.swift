@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import os
 
 /// A persisted URL may lose its trailing directory separator during decoding.
 /// Normalize that presentation detail before comparing course locators. The
@@ -591,6 +592,7 @@ enum SessionStoreError: LocalizedError, Equatable {
     case staleSnapshot
     case identityConflict(String)
     case unsafePath(String)
+    case storageDeferred(String)
     case io(operation: String, code: Int32)
 
     var errorDescription: String? {
@@ -605,6 +607,7 @@ enum SessionStoreError: LocalizedError, Equatable {
         case .staleSnapshot: return "课程已被其他写入更新，请重新读取后保存。"
         case .identityConflict(let reason): return "课程身份冲突：\(reason)，已停止自动合并。"
         case .unsafePath(let path): return "课程路径不满足文件安全要求：\(path)。"
+        case .storageDeferred(let reason): return "课程暂时无法读取或保存：\(reason)；原文件已保留，请稍后重试。"
         case let .io(operation, code): return "课程文件操作失败（\(operation)，\(code)）。"
         }
     }
@@ -626,6 +629,17 @@ final class SessionStore: @unchecked Sendable {
     static let snapshotFileName = "session-snapshot.json"
     static let journalFileName = "session-journal.jsonl"
     private static let processLock = NSLock()
+    private struct DirectoryLockEntry {
+        let lock = NSLock()
+        var users = 0
+    }
+    private static let directoryLocks = OSAllocatedUnfairLock(initialState: [SensitiveFileIO.Identity: DirectoryLockEntry]())
+    @TaskLocal private static var boundDirectory: SensitiveFileIO.Directory?
+    #if DEBUG
+    @TaskLocal static var isHoldingProcessLock = false
+    @TaskLocal static var afterAliasRecovery: (@Sendable () throws -> Void)?
+    @TaskLocal static var directoryOpenError: Int32?
+    #endif
     let directory: URL
     private let atomicWrite: @Sendable (Data, URL) throws -> Void
     private let journalWrite: @Sendable (Data, URL) throws -> Void
@@ -648,8 +662,9 @@ final class SessionStore: @unchecked Sendable {
     func load() throws -> SessionSnapshot? { try loadDetailed().snapshot }
 
     /// Opening a course runs the best-effort temporary recovery scan, outside
-    /// both store locks. Write transactions and the no-scan reads below never
-    /// scan; anything that calls this still waits for the scan itself.
+    /// both store locks. Writes and no-scan reads skip the general scan; a
+    /// receipt-proven committed alias may still need targeted, unlocked repair.
+    /// Anything that calls this still waits for the scan itself.
     func loadDetailed() throws -> SessionLoadResult {
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireSessionDirectory(directory)
@@ -658,13 +673,13 @@ final class SessionStore: @unchecked Sendable {
         return try locked(writing: false) { try read().result }
     }
 
-    /// A read that never runs the recovery scan, for readers that are not
+    /// A read that never runs the general recovery scan, for readers that are not
     /// opening the course: a saver's readback and the review queue's storage.
     func loadDetailedWithoutRecovery() throws -> SessionLoadResult {
         try locked(writing: false) { try read().result }
     }
 
-    /// A saver's readback of its own committed state; it never scans.
+    /// A saver's readback of its own committed state; it skips the general scan.
     func loadCommittedSnapshot() throws -> SessionSnapshot? {
         try loadDetailedWithoutRecovery().snapshot
     }
@@ -688,7 +703,9 @@ final class SessionStore: @unchecked Sendable {
     }
 
     /// The disk identity and complete hash chain are checked once while both
-    /// writer locks remain held. Every accepted event still reaches its original
+    /// writer locks remain held. Receipt-proven alias repair, when required,
+    /// runs before the transaction begins and outside both locks.
+    /// Every accepted event still reaches its original
     /// file/parent sync boundary before advancing the in-memory revision.
     func withWriteTransaction<T>(requiringExistingDirectory: Bool = false,
                                  _ action: (WriteTransaction) throws -> T) throws -> T {
@@ -804,12 +821,13 @@ final class SessionStore: @unchecked Sendable {
             let state = try read()
             guard state.result.incompleteTailBytes > 0 else { return nil }
             let journal = directory.appendingPathComponent(Self.journalFileName)
-            let original = try Data(contentsOf: journal)
+            guard let parent = Self.boundDirectory,
+                  let original = try parent.readIfPresent(named: Self.journalFileName) else { throw SessionStoreError.missingSnapshot }
             guard original == state.journalData else { throw SessionStoreError.staleSnapshot }
             let backup = directory.appendingPathComponent("session-journal.incomplete-\(UUID().uuidString).jsonl")
             try atomicWrite(original, backup)
-            guard try Data(contentsOf: backup) == original,
-                  try Data(contentsOf: journal) == original else { throw SessionStoreError.staleSnapshot }
+            guard try parent.readIfPresent(named: backup.lastPathComponent) == original,
+                  try parent.readIfPresent(named: Self.journalFileName) == original else { throw SessionStoreError.staleSnapshot }
             try atomicWrite(original.prefix(state.validJournalBytes), journal)
             return backup
         }
@@ -868,17 +886,13 @@ final class SessionStore: @unchecked Sendable {
 
     private func read() throws -> ReadState {
         didRead()
-        let snapshotURL = directory.appendingPathComponent(Self.snapshotFileName)
-        let journalURL = directory.appendingPathComponent(Self.journalFileName)
-        try SessionArchiveCoding.requireRegularFileIfPresent(snapshotURL)
-        try SessionArchiveCoding.requireRegularFileIfPresent(journalURL)
-        guard FileManager.default.fileExists(atPath: snapshotURL.path) else {
-            guard !FileManager.default.fileExists(atPath: journalURL.path) else { throw SessionStoreError.missingSnapshot }
+        guard let parent = Self.boundDirectory else { return ReadState(result: .init(snapshot: nil, origin: .absent)) }
+        guard let data = try parent.readIfPresent(named: Self.snapshotFileName) else {
+            guard try !parent.requireRegularFileIfPresent(named: Self.journalFileName) else { throw SessionStoreError.missingSnapshot }
             let legacy = try readLegacy()
             return ReadState(result: .init(snapshot: legacy, origin: legacy == nil ? .absent : .legacy,
                                            legacyProvenanceUnavailable: legacy != nil))
         }
-        let data = try Data(contentsOf: snapshotURL)
         try SessionArchiveCoding.checkSchema(data)
         var snapshot: SessionSnapshot
         do {
@@ -893,7 +907,7 @@ final class SessionStore: @unchecked Sendable {
         catch { throw SessionStoreError.corruptSnapshot }
         let checkpointSequence = snapshot.lastJournalSequence
         let checkpointDigest = snapshot.lastJournalDigest
-        let bytes = FileManager.default.fileExists(atPath: journalURL.path) ? try Data(contentsOf: journalURL) : Data()
+        let bytes = try parent.readIfPresent(named: Self.journalFileName) ?? Data()
         var position = bytes.startIndex
         var sequence = 0
         var digest = SessionArchiveCoding.genesisDigest
@@ -960,17 +974,17 @@ final class SessionStore: @unchecked Sendable {
     }
 
     private func readLegacy() throws -> SessionSnapshot? {
-        let exports = try SessionExporter.currentExportDirectory(in: directory)
+        let exports = try SessionExporter.currentExportDirectory(in: directory, boundRoot: Self.boundDirectory)
         let jsonl = exports.appendingPathComponent("bilingual.jsonl")
-        let markdown = SessionExporter.savedSummaryURL(in: exports, targetLocale: nil)
-        try SessionArchiveCoding.requireRegularFileIfPresent(jsonl)
-        try SessionArchiveCoding.requireRegularFileIfPresent(markdown)
-        let hasJSONL = FileManager.default.fileExists(atPath: jsonl.path)
-        let hasMarkdown = FileManager.default.fileExists(atPath: markdown.path)
-        guard hasJSONL || hasMarkdown else { return nil }
+        let parent = try SensitiveFileIO.Directory.open(at: exports, create: false, tighten: false)
+        let manifestBytes = try parent.readIfPresent(named: "manifest.json")
+        let markdown = try SessionExporter.savedSummaryURL(in: parent, targetLocale: nil, manifestBytes: manifestBytes)
+        let jsonlBytes = try parent.readIfPresent(named: jsonl.lastPathComponent)
+        let markdownBytes = try parent.readIfPresent(named: markdown.lastPathComponent)
+        guard jsonlBytes != nil || markdownBytes != nil else { return nil }
         var segments: [TranscriptSegment] = []
-        if hasJSONL {
-            let text = try String(contentsOf: jsonl, encoding: .utf8)
+        if let jsonlBytes {
+            guard let text = String(data: jsonlBytes, encoding: .utf8) else { throw SessionStoreError.corruptJournal(line: 1) }
             let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
             for (index, line) in lines.enumerated() {
                 if line.isEmpty && (index == lines.count - 1 || lines.count == 2 && lines.allSatisfy(\.isEmpty)) { continue }
@@ -981,8 +995,9 @@ final class SessionStore: @unchecked Sendable {
         }
         let ids = Set(segments.compactMap(\.sessionID))
         guard ids.count <= 1 else { throw SessionStoreError.identityConflict("旧字幕包含多个会话标识") }
-        let summary = hasMarkdown ? try String(contentsOf: markdown, encoding: .utf8) : nil
-        let date = (try? directory.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
+        let summary = markdownBytes.flatMap { String(data: $0, encoding: .utf8) }
+        if markdownBytes != nil, summary == nil { throw SessionStoreError.corruptSnapshot }
+        let date = try Self.boundDirectory?.creationDate ?? parent.creationDate
         var snapshot = SessionSnapshot(sessionID: ids.first ?? legacySessionID,
                                        inputRevision: segments.map(\.inputRevision).max() ?? 0,
                                        segments: segments, legacyMarkdown: summary, createdAt: date)
@@ -990,7 +1005,7 @@ final class SessionStore: @unchecked Sendable {
         // including regional Traditional manifests. Keep their fingerprints
         // and paused source ledgers frozen; savedLanguage still selects their
         // display locale. Non-Chinese imports must bind their own generator.
-        let language = try OutputLanguage.savedLanguage(in: exports, snapshot: snapshot, origin: .legacy)
+        let language = try OutputLanguage.legacyLanguage(manifestBytes: manifestBytes)
         if language.profile.generationLocale != "zh-Hans" {
             snapshot.targetLocale = language.persistedLocale
         }
@@ -1063,44 +1078,130 @@ final class SessionStore: @unchecked Sendable {
         #if LIVELINGO_PREVIEW
         try PreviewDataIsolation.requireSessionDirectory(directory)
         #endif
-        Self.processLock.lock()
-        defer { Self.processLock.unlock() }
-        try SessionArchiveCoding.privateIO(at: directory) {
-            if writing && !requiringExistingDirectory {
-                try SensitiveFileIO.prepareDirectory(directory)
-            } else if FileManager.default.fileExists(atPath: directory.path) {
-                _ = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: true)
-            } else if requiringExistingDirectory {
-                // A previously bound saver must never recreate a course after
-                // migration, including the empty directory used for its lock.
-                throw SessionStoreError.missingSnapshot
-            }
-            for name in [Self.snapshotFileName, Self.journalFileName, ".session-store.lock"] {
-                try SensitiveFileIO.tightenFileIfPresent(directory.appendingPathComponent(name))
+        var attempted = Set<String>()
+        while true {
+            do {
+                return try lockedAttempt(writing: writing, requiringExistingDirectory: requiringExistingDirectory, action)
+            } catch let request as CommittedAliasRecoveryRequired {
+                // Only preflight can request this retry: action has not run.
+                // Each fixed store filename is repaired at most once, so a
+                // racing or unproven second name cannot cause an endless loop.
+                guard !attempted.contains(request.name) else {
+                    throw SessionStoreError.unsafePath(directory.path)
+                }
+                try SessionArchiveCoding.privateIO(at: directory) {
+                    try SensitiveFileIO.recoverCommittedFileIfNeeded(
+                        at: directory.appendingPathComponent(request.name), expectedParent: request.parent)
+                }
+                attempted.insert(request.name)
+                #if DEBUG
+                try Self.afterAliasRecovery?()
+                #endif
             }
         }
+    }
+
+    private struct CommittedAliasRecoveryRequired: Error {
+        let name: String
+        let parent: SensitiveFileIO.Identity
+    }
+
+    private func lockedAttempt<T>(writing: Bool, requiringExistingDirectory: Bool,
+                                  _ action: () throws -> T) throws -> T {
+        try SessionArchiveCoding.privateIO(at: directory) {
+          try SensitiveFileIO.withoutDatalessMaterialization {
+            let parent: SensitiveFileIO.Directory
+            do {
+                #if DEBUG
+                if let code = Self.directoryOpenError { throw SensitiveFileIO.Failure.system(operation: "open directory", code: code) }
+                #endif
+                parent = try SensitiveFileIO.Directory.open(at: directory,
+                    create: writing && !requiringExistingDirectory, tighten: writing)
+            } catch SensitiveFileIO.Failure.system(_, let code) where code == ENOENT {
+                if requiringExistingDirectory { throw SessionStoreError.missingSnapshot }
+                guard !writing else { throw SessionStoreError.io(operation: "open directory", code: code) }
+                return try Self.$boundDirectory.withValue(nil, operation: action)
+            }
+            // No lock is held while checking placeholders; metadata cannot
+            // request their download. Descriptor reads repeat this check.
+            for name in [Self.snapshotFileName, Self.journalFileName, ".session-store.lock"] {
+                try parent.rejectDatalessIfPresent(named: name)
+            }
+            if try parent.entryStatus(Self.snapshotFileName) == nil {
+                let exports = try SessionExporter.currentExportDirectory(in: directory, boundRoot: parent, prepareCommittedAliases: true)
+                let legacy = try SensitiveFileIO.Directory.open(at: exports, create: false, tighten: false)
+                for name in try legacy.names() where name == "manifest.json" || name == "bilingual.jsonl"
+                    || name.hasPrefix("summary-") && name.hasSuffix(".md") {
+                    try legacy.rejectDatalessIfPresent(named: name)
+                }
+            }
+            let identity = try parent.identity
+            let courseLock = Self.directoryLocks.withLock { entries in
+                var entry = entries[identity] ?? DirectoryLockEntry()
+                entry.users += 1
+                entries[identity] = entry
+                return entry.lock
+            }
+            defer {
+                Self.directoryLocks.withLock { entries in
+                    if var entry = entries[identity] {
+                        entry.users -= 1
+                        if entry.users == 0 { entries.removeValue(forKey: identity) }
+                        else { entries[identity] = entry }
+                    }
+                }
+            }
+            SensitiveFileIO.timedIO(.storeDirectoryLock) { courseLock.lock() }
+            defer { courseLock.unlock() }
+            return try lockedFiles(parent: parent, writing: writing, action)
+          }
+        }
+    }
+
+    private func lockedFiles<T>(parent: SensitiveFileIO.Directory, writing: Bool,
+                                _ action: () throws -> T) throws -> T {
+        func preflight() throws {
+            for name in [Self.snapshotFileName, Self.journalFileName, ".session-store.lock"] {
+                if try parent.needsCommittedTemporaryAliasRecovery(named: name) {
+                    throw CommittedAliasRecoveryRequired(name: name, parent: try parent.identity)
+                }
+            }
+        }
+        try preflight()
         let fd: Int32
         do {
-            let parent = try SensitiveFileIO.Directory.open(at: directory, create: false, tighten: false)
             fd = try parent.openRegularFile(named: ".session-store.lock",
                                             flags: writing ? O_RDWR : O_RDONLY, create: writing)
         } catch SensitiveFileIO.Failure.system(_, let code) where !writing && code == ENOENT {
-            return try action()
-        } catch {
-            throw SessionStoreError.unsafePath(directory.path)
+            return try Self.$boundDirectory.withValue(parent, operation: action)
         }
         defer { _ = Darwin.close(fd) }
-        guard flock(fd, writing ? LOCK_EX : LOCK_SH) == 0 else {
-            throw SessionStoreError.io(operation: "lock", code: errno)
+        while SensitiveFileIO.timedIO(.storeLease, { flock(fd, writing ? LOCK_EX : LOCK_SH) }) != 0 {
+            guard errno == EINTR else { throw SessionStoreError.io(operation: "lock", code: errno) }
         }
         defer { _ = flock(fd, LOCK_UN) }
-        return try action()
+        try parent.assertStillAtOriginalPath()
+        try preflight()
+        return try Self.$boundDirectory.withValue(parent) {
+            // Readers hold the course and shared disk locks only. A slow old
+            // course cannot occupy the global writer lock. Writers retain the
+            // original cross-course serialization, after disk-lock waiting.
+            guard writing else { return try action() }
+            SensitiveFileIO.timedIO(.storeProcessLock) { Self.processLock.lock() }
+            defer { Self.processLock.unlock() }
+            #if DEBUG
+            return try Self.$isHoldingProcessLock.withValue(true, operation: action)
+            #else
+            return try action()
+            #endif
+        }
     }
 
     /// Runs outside the process and disk locks (DU-05). Each candidate is
     /// protected by its own writer lease and creation receipt, never by the
-    /// store lock, so a slow or stuck open here cannot delay this or another
-    /// store's write transaction. It does delay the caller of loadDetailed.
+    /// store lock, so a slow or stuck open here retains neither store lock.
+    /// It delays loadDetailed; a save needing the same committed alias still
+    /// requires successful repair, while unrelated stores can keep saving.
     private func inspectTemporaryItemsOnce() {
         let first = recoveryClaim.withLock {
             defer { inspectedTemporaryItems = true }
@@ -1117,6 +1218,166 @@ final class SessionStore: @unchecked Sendable {
         } catch {
             SensitiveFileIO.recordTemporaryRecoveryScanFailure()
         }
+    }
+}
+
+enum SessionCloudOpenError: Error, Equatable { case timedOut, requestUnavailable }
+
+/// Only provider download requests and polling use the bounded cloud workers.
+/// Local metadata probes and course reads retain the ordinary detached path.
+enum SessionCloudOpenPreparation {
+    struct Environment: Sendable {
+        var pendingItems: @Sendable (URL) throws -> [URL]
+        var requestDownload: @Sendable (URL) throws -> Void
+        var coordinateDownload: @Sendable (URL, @escaping @Sendable () -> Bool) throws -> Void = coordinatedDownload
+        var pollInterval: TimeInterval = 0.25
+        var timeout: TimeInterval = 120
+        static let live = Self(pendingItems: SessionExporter.pendingCloudItems,
+                               requestDownload: { try FileManager.default.startDownloadingUbiquitousItem(at: $0) })
+    }
+    @TaskLocal static var environment = Environment.live
+    #if DEBUG
+    @TaskLocal static var beforeLoad: (@Sendable () throws -> Void)?
+    #endif
+    private static let workers: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "LiveLingo.CloudOpen"
+        queue.maxConcurrentOperationCount = 2
+        return queue
+    }()
+    private final class Completion: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<Void, Error>?
+        private var waiter: CheckedContinuation<Void, Error>?
+        var finished: Bool { lock.withLock { result != nil } }
+        func resolve(_ value: Result<Void, Error>) {
+            let continuation = lock.withLock { () -> CheckedContinuation<Void, Error>? in
+                guard result == nil else { return nil }
+                result = value
+                defer { waiter = nil }
+                return waiter
+            }
+            continuation?.resume(with: value)
+        }
+        func wait() async throws {
+            try await withCheckedThrowingContinuation { continuation in
+                let value = lock.withLock { () -> Result<Void, Error>? in
+                    if let result { return result }
+                    waiter = continuation
+                    return nil
+                }
+                if let value { continuation.resume(with: value) }
+            }
+        }
+    }
+
+    private static func coordinatedDownload(_ url: URL, cancelled: @escaping @Sendable () -> Bool) throws {
+        guard !cancelled() else { throw CancellationError() }
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var readError: Error?
+        SensitiveFileIO.timedIO(.cloudCoordinate) {
+            coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinated in
+                do {
+                    guard !cancelled() else { throw CancellationError() }
+                    // Reading through checked descriptors materializes a provider
+                    // placeholder here, outside every storage lock/policy scope.
+                    var info = stat()
+                    guard SensitiveFileIO.timedIO(.entryStatus, { lstat(coordinated.path, &info) }) == 0 else {
+                        throw SensitiveFileIO.Failure.system(operation: "inspect coordinated item", code: errno)
+                    }
+                    if info.st_mode & S_IFMT == S_IFDIR {
+                        _ = try SensitiveFileIO.Directory.open(at: coordinated, create: false, tighten: false).names()
+                    } else {
+                        let parent = try SensitiveFileIO.Directory.open(at: coordinated.deletingLastPathComponent(), create: false, tighten: false)
+                        _ = try parent.readIfPresent(named: coordinated.lastPathComponent)
+                    }
+                } catch { readError = error }
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        if let readError { throw readError }
+        guard !cancelled() else { throw CancellationError() }
+    }
+
+    static func load(_ store: SessionStore, progress: @escaping @Sendable (Int) -> Void) async throws -> SessionLoadResult {
+        let settings = environment
+        #if DEBUG
+        let loadHook = beforeLoad
+        let placeholderHook = SensitiveFileIO.datalessProbe
+        #endif
+        var latePlaceholderRetries = 0
+        while true {
+            try Task.checkCancellation()
+            let pending = try await Task.detached {
+                try SessionArchiveCoding.privateIO(at: store.directory) { try settings.pendingItems(store.directory) }
+            }.value
+            try Task.checkCancellation()
+            if !pending.isEmpty {
+                try await waitForDownload(store.directory, pending: pending, settings: settings, progress: progress)
+            }
+            try Task.checkCancellation()
+            do {
+                let result = try await Task.detached {
+                    #if DEBUG
+                    try loadHook?()
+                    return try SensitiveFileIO.$datalessProbe.withValue(placeholderHook) { try store.loadDetailed() }
+                    #else
+                    return try store.loadDetailed()
+                    #endif
+                }.value
+                try Task.checkCancellation()
+                return result
+            } catch let error as SessionStoreError {
+                guard case .storageDeferred = error,
+                      LearningFailureCode.code(for: error) == "session_storageDeferred",
+                      latePlaceholderRetries < 2 else { throw error }
+                latePlaceholderRetries += 1
+            }
+        }
+    }
+
+    private static func waitForDownload(_ directory: URL, pending initial: [URL], settings: Environment,
+                                        progress: @escaping @Sendable (Int) -> Void) async throws {
+        let completion = Completion()
+        progress(initial.count)
+        let timer = Task {
+            do { try await Task.sleep(for: .seconds(max(0.001, settings.timeout))) }
+            catch { return }
+            completion.resolve(.failure(SessionCloudOpenError.timedOut))
+        }
+        defer { timer.cancel() }
+        workers.addOperation {
+            var requested = Set<URL>()
+            var pending = initial
+            do {
+                while !completion.finished {
+                    if pending.isEmpty { completion.resolve(.success(())); return }
+                    for url in pending where !requested.contains(url) {
+                        guard !completion.finished else { return }
+                        do { try SensitiveFileIO.timedIO(.cloudRequest) { try settings.requestDownload(url) } }
+                        catch {
+                            guard !completion.finished else { return }
+                            do { try settings.coordinateDownload(url, { completion.finished }) }
+                            catch {
+                                guard !completion.finished else { return }
+                                throw SessionCloudOpenError.requestUnavailable
+                            }
+                        }
+                        requested.insert(url)
+                    }
+                    guard !completion.finished else { return }
+                    Thread.sleep(forTimeInterval: max(0.001, settings.pollInterval))
+                    pending = try SessionArchiveCoding.privateIO(at: directory) { try settings.pendingItems(directory) }
+                    guard !completion.finished else { return }
+                    if !pending.isEmpty { progress(pending.count) }
+                }
+            } catch { completion.resolve(.failure(error)) }
+        }
+        try await withTaskCancellationHandler {
+            try await completion.wait()
+            try Task.checkCancellation()
+        } onCancel: { completion.resolve(.failure(CancellationError())) }
     }
 }
 
@@ -1209,7 +1470,14 @@ enum SessionArchiveCoding {
     static func privateIO<T>(at url: URL, _ action: () throws -> T) throws -> T {
         do { return try action() }
         catch SensitiveFileIO.Failure.unsafePath { throw SessionStoreError.unsafePath(url.path) }
+        catch SensitiveFileIO.Failure.dataless { throw SessionStoreError.storageDeferred("这节课的文件还在云端，尚未下载到本机") }
+        catch SensitiveFileIO.Failure.recoveryBusy { throw SessionStoreError.storageDeferred("其他操作仍在修复课程文件") }
         catch SensitiveFileIO.Failure.system(let operation, let code) {
+            // A nested privateIO must not turn the thread policy's denied
+            // materialization into a generic I/O error before the outer scope.
+            if code == EDEADLK, SensitiveFileIO.materializationBlocked {
+                throw SessionStoreError.storageDeferred("这节课的文件还在云端，尚未下载到本机")
+            }
             throw SessionStoreError.io(operation: operation, code: code)
         }
     }
@@ -1349,11 +1617,12 @@ struct SessionDirectoryIdentity: Equatable, Sendable {
         }
         // A legacy directory has no asserted UUID until explicitly saved.
         var bytes = Data()
-        for name in ["bilingual.jsonl", SessionExporter.savedSummaryURL(in: location, targetLocale: nil).lastPathComponent] {
-            let path = location.appendingPathComponent(name)
-            if FileManager.default.fileExists(atPath: path.path) {
-                bytes.append(Data(name.utf8)); bytes.append(0)
-                bytes.append(Data(SessionArchiveCoding.digest(try Data(contentsOf: path)).utf8))
+        let exports = try SessionExporter.currentExportDirectory(in: location)
+        let summary = try SessionExporter.savedSummaryURL(in: exports, targetLocale: nil)
+        for path in [exports.appendingPathComponent("bilingual.jsonl"), summary] {
+            if let content = try SessionArchiveCoding.privateIO(at: path, { try SensitiveFileIO.readIfPresent(at: path) }) {
+                bytes.append(Data(path.lastPathComponent.utf8)); bytes.append(0)
+                bytes.append(Data(SessionArchiveCoding.digest(content).utf8))
             }
         }
         return Self(directory: location, sessionID: nil, inputRevision: nil,
