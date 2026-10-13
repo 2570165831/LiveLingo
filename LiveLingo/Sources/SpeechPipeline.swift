@@ -1335,33 +1335,28 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             let stream = input.stream
             let inputContinuation = input.continuation
 
-            let resultTask = Task { [weak self] in
-                guard self?.ownsPreview(token) == true else { return }
-                do {
-                    for try await result in transcriber.results {
-                        guard !Task.isCancelled else { break }
-                        let text = String(result.text.characters)
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !text.isEmpty else { continue }
-                        let start = result.range.start.seconds.isFinite
-                            ? result.range.start.seconds
-                            : 0
-                        let duration = result.range.duration.seconds.isFinite
-                            ? result.range.duration.seconds
-                            : 0
-                        #if LIVELINGO_DROP_PROBE
-                        PreviewDropProbe.shared.record(["event": "apple_result", "text": text,
-                            "start": start, "end": start + duration, "final": result.isFinal])
-                        #endif
-                        self?.emitStreamingPreview(
-                            text: text,
-                            start: start,
-                            end: start + duration,
-                            generation: token
-                        )
-                    }
-                } catch {
-                    return
+            let resultTask = makeModernPreviewResultTask(generation: token) { [weak self] in
+                for try await result in transcriber.results {
+                    guard !Task.isCancelled else { break }
+                    let text = String(result.text.characters)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    let start = result.range.start.seconds.isFinite
+                        ? result.range.start.seconds
+                        : 0
+                    let duration = result.range.duration.seconds.isFinite
+                        ? result.range.duration.seconds
+                        : 0
+                    #if LIVELINGO_DROP_PROBE
+                    PreviewDropProbe.shared.record(["event": "apple_result", "text": text,
+                        "start": start, "end": start + duration, "final": result.isFinal])
+                    #endif
+                    self?.emitStreamingPreview(
+                        text: text,
+                        start: start,
+                        end: start + duration,
+                        generation: token
+                    )
                 }
             }
 
@@ -1413,6 +1408,20 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             Self.previewLatencyLog.notice("preview event=backend backend=none reason=modern_unavailable")
             await preparedAnalyzer?.cancelAndFinishNow()
             if stateLock.withLock({ generation == token }) { await cancelStreamingPreview() }
+        }
+    }
+
+    @available(macOS 27, *)
+    private func makeModernPreviewResultTask(generation token: UUID,
+                                            consume: @escaping @Sendable () async throws -> Void) -> Task<Void, Never> {
+        Task { [weak self] in
+            guard self?.ownsPreview(token) == true else { return }
+            do { try await consume() }
+            catch {
+                // Without results, preview audio has no usable consumer. The
+                // generation guard also covers failure before task publication.
+                self?.endModernPreviewInput(generation: token)
+            }
         }
     }
 
@@ -2586,6 +2595,27 @@ extension SpeechPipeline {
         let token = stateLock.withLock { generation }
         await prepare()
         publishPreviewTasks(result: result, analysis: analysis, generation: token)
+    }
+    @available(macOS 27, *)
+    func startSyntheticModernPreviewResult(
+        beforePublish: @Sendable (Task<Void, Never>) async -> Void = { _ in },
+        consume: @escaping @Sendable () async throws -> Void
+    ) async -> (stream: AsyncStream<AnalyzerInput>, continuation: AsyncStream<AnalyzerInput>.Continuation,
+                result: Task<Void, Never>, published: Bool) {
+        let token = stateLock.withLock { generation }
+        let input = SpeechPreviewInputQueue.makeStream(of: AnalyzerInput.self)
+        let result = makeModernPreviewResultTask(generation: token, consume: consume)
+        let analysis = Task {}
+        await beforePublish(result)
+        let published = publishPreviewTasks(result: result, analysis: analysis, generation: token) {
+            self.previewInputContinuation = input.continuation
+        }
+        if !published { input.continuation.finish() }
+        return (input.stream, input.continuation, result, published)
+    }
+    @available(macOS 27, *)
+    var syntheticModernPreviewInputIsOpen: Bool {
+        stateLock.withLock { previewInputContinuation != nil }
     }
     func checkSyntheticCaptureHealth(now: TimeInterval) {
         let (token, mode) = stateLock.withLock { (generation, inputMode) }

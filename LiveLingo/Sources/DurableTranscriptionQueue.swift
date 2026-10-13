@@ -1133,7 +1133,6 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         catch { primaryError = error }
         }
         try Task.checkCancellation()
-        var paddingCandidate: String?
         if sourceOnly == nil, record.attempt == .initial, record.modelKey == "parakeet",
            record.duration > 0, record.duration <= 3, record.start >= 0.25,
            primaryError == nil,
@@ -1164,10 +1163,10 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                    !SpeechPipeline.preferredTranscript(primary: retained, fallback: "", audioDuration: record.duration).isEmpty {
                     primary = retained
                     primaryResult = padded
-                } else if retained == nil, padded.parakeetWordSpans != nil,
-                          !SpeechPipeline.preferredTranscript(primary: padded.text, fallback: "", audioDuration: record.duration + offset).isEmpty {
-                    paddingCandidate = padded.text
                 }
+                // Unaligned left context may include borrowed words. Keep the
+                // exact-range retries free of candidates; neighbour candidates
+                // are offered below only after their automatic budget is spent.
             } catch is CancellationError { throw CancellationError() }
             catch { /* Optional left context never invalidates the exact-range pass. */ }
         }
@@ -1182,7 +1181,6 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         let plan = sourceTrigger.plan(index: record.ordinal, parakeetAccepted: input.parakeetAccepted,
             mean: input.mean, minimum: input.minimum)
         var output = Outcome(text: usable)
-        if let paddingCandidate { output.candidate = paddingCandidate; output.origin = "context" }
         output.sourceDecision = SourceLanguagePolicy.decide(plan, language: nil, probability: nil,
             englishProbability: nil, probeFailed: plan.selected)
         if usable.isEmpty {
