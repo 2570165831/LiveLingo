@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreServices
 import OSLog
 import SwiftUI
 #if DEBUG
@@ -57,6 +58,9 @@ private extension FileManager {
 /// Otherwise AppKit can reject termination before the delegate sees it.
 @MainActor
 enum FilePanelPresentation {
+    // Authorize before dismissing anything: cancelling quit must leave the
+    // recording and its currently presented chooser/sheet untouched.
+    static var authorizeTermination: (@MainActor () -> Bool)?
     private static var panels: [UUID: NSSavePanel] = [:]
     private static var sheets: [UUID: @MainActor () -> Void] = [:]
     private static var quitMonitor: Any?
@@ -157,6 +161,7 @@ enum FilePanelPresentation {
         _ terminate: @escaping @MainActor @Sendable () -> Void = { NSApp.terminate(nil) }
     ) {
         guard pendingTermination == nil else { return }
+        guard authorizeTermination?() != false else { return }
         guard !panels.isEmpty || !sheets.isEmpty else {
             terminate()
             return
@@ -169,14 +174,50 @@ enum FilePanelPresentation {
 }
 
 @MainActor
+enum RecordingQuitConfirmation {
+    static func isNeeded(phase: AppPhase, importing: Bool) -> Bool {
+        phase == .recording || phase == .paused || importing
+    }
+
+    static func isSystemTermination(_ event: NSAppleEventDescriptor?) -> Bool {
+        guard let event, event.eventID == kAEQuitApplication else { return false }
+        // loginwindow supplies the reason as an attribute. Accept the
+        // documented parameter representation too, without guessing from the
+        // sender, an app's activation policy, or an ordinary Dock quit.
+        let reason = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))
+            ?? event.paramDescriptor(forKeyword: AEKeyword(kAEQuitReason))
+        guard let reason else { return false }
+        return [kAEQuitAll, kAEShutDown, kAERestart, kAEReallyLogOut].contains(reason.enumCodeValue)
+    }
+
+    static func makeAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "正在录音。退出会结束并保存这节课。"
+        let continueButton = alert.addButton(withTitle: "继续录音")
+        continueButton.keyEquivalent = "\r"
+        continueButton.keyEquivalentModifierMask = []
+        alert.addButton(withTitle: "保存并退出").keyEquivalent = ""
+        alert.window.preventsApplicationTerminationWhenModal = false
+        return alert
+    }
+}
+
+@MainActor
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     static weak var model: AppModel?
     private var terminationTask: Task<Void, Never>?
+    private var recordingQuitAuthorized = false
+    private var recordingConfirmationAlert: NSAlert?
+    private var presentingRecordingConfirmation = false
+    private var systemQuitDuringConfirmation = false
     #if DEBUG
     var cleanupForTesting: (@MainActor @Sendable () async -> Bool)?
     var replyForTesting: (@MainActor @Sendable (Bool) -> Void)?
     var terminationTimeoutForTesting: TimeInterval?
     var confirmExitWithoutSavingForTesting: (@MainActor @Sendable () -> Bool)?
+    var recordingStateForTesting: (@MainActor () -> (AppPhase, Bool))?
+    var confirmRecordingQuitForTesting: (@MainActor () -> Bool)?
+    var terminationEventForTesting: NSAppleEventDescriptor?
     // Both regression suites inject the same bounded termination path.
     var prepareToTerminate: (@MainActor @Sendable () async -> Bool)? {
         get { cleanupForTesting }
@@ -190,6 +231,9 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard !AppRuntimeEnvironment.isUnitTesting else { return }
+        FilePanelPresentation.authorizeTermination = { [weak self] in
+            self?.authorizeRecordingTermination() ?? true
+        }
         FullScreenClassModeController.shared.start()
     }
 
@@ -198,12 +242,69 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         FullScreenClassModeController.shared.showMainWindowAfterLaunch()
     }
 
+    // Closing the classroom only hides its view. AppModelHolder owns capture
+    // for the application lifetime, including when no classroom window exists.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func authorizeRecordingTermination() -> Bool {
+        guard terminationTask == nil, !presentingRecordingConfirmation else { return false }
+        if recordingQuitAuthorized { return true }
+        let state: (AppPhase, Bool)
+        #if DEBUG
+        if let recordingStateForTesting { state = recordingStateForTesting() }
+        else { state = (Self.model?.phase ?? .idle, Self.model?.isImportingFile ?? false) }
+        #else
+        state = (Self.model?.phase ?? .idle, Self.model?.isImportingFile ?? false)
+        #endif
+        guard RecordingQuitConfirmation.isNeeded(phase: state.0, importing: state.1) else { return true }
+        presentingRecordingConfirmation = true
+        defer { presentingRecordingConfirmation = false; recordingConfirmationAlert = nil }
+        let confirmed: Bool
+        #if DEBUG
+        if let confirmRecordingQuitForTesting { confirmed = confirmRecordingQuitForTesting() }
+        else if AppRuntimeEnvironment.isUnitTesting { confirmed = false }
+        else { confirmed = presentRecordingConfirmation() }
+        #else
+        confirmed = presentRecordingConfirmation()
+        #endif
+        recordingQuitAuthorized = confirmed || systemQuitDuringConfirmation
+        return recordingQuitAuthorized
+    }
+
+    private func presentRecordingConfirmation() -> Bool {
+        let alert = RecordingQuitConfirmation.makeAlert()
+        recordingConfirmationAlert = alert
+        let popupID = UUID()
+        FullScreenClassModeController.shared.setPresentedPopup(popupID, isPresented: true)
+        defer { FullScreenClassModeController.shared.setPresentedPopup(popupID, isPresented: false) }
+        // The app may be an accessory app with its main window hidden. Bring
+        // the confirmation forward without changing the full-screen preference.
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        FilePanelPresentation.cancelAll()
         #if DEBUG
         if AppRuntimeEnvironment.isUnitTesting, cleanupForTesting == nil { return .terminateNow }
+        let event = terminationEventForTesting ?? NSAppleEventManager.shared().currentAppleEvent
+        #else
+        let event = NSAppleEventManager.shared().currentAppleEvent
         #endif
+        let systemTermination = RecordingQuitConfirmation.isSystemTermination(event)
+        if systemTermination, presentingRecordingConfirmation {
+            systemQuitDuringConfirmation = true
+            if let recordingConfirmationAlert {
+                sender.abortModal()
+                recordingConfirmationAlert.window.orderOut(nil)
+            }
+        }
         guard terminationTask == nil else { return .terminateLater }
+        guard systemTermination || authorizeRecordingTermination() else { return .terminateCancel }
+        // A system quit can arrive inside the confirmation's modal loop and
+        // start saving before that loop returns. Join that existing attempt.
+        guard terminationTask == nil else { return .terminateLater }
+        recordingQuitAuthorized = false
+        FilePanelPresentation.cancelAll()
         #if DEBUG
         let deadline = ExitDeadline(inactivityTimeout: terminationTimeoutForTesting ?? ExitDeadline.applicationTimeout)
         #else
@@ -253,6 +354,8 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
                 if shouldExit { deadline.revoke() }
             }
             terminationTask = nil
+            recordingQuitAuthorized = false
+            systemQuitDuringConfirmation = false
             #if DEBUG
             if let replyForTesting { replyForTesting(shouldExit); return }
             #endif
