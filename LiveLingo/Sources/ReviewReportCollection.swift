@@ -285,7 +285,7 @@ enum ReviewReportCollection {
 
     private static func isDeferred(_ error: SessionStoreError) -> Bool {
         if case .storageDeferred = error { return true }
-        return false
+        return ReviewDirectoryAccess.isUnavailable(error)
     }
 
     private static func checkConflicts(_ entries: [ReviewReportEntry]) throws {

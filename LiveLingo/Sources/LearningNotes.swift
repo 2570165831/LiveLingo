@@ -2307,7 +2307,7 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
             "unsupported_target", "no_pending_batch", "unrecognized_saved_prompt",
             "session_unsupportedSchema", "session_corruptSnapshot", "session_corruptJournal",
             "session_incompleteJournalTail", "session_unsafePath", "session_invalidState", "session_io",
-            "session_storageDeferred", "session_storageBusy", "cloud_download_timeout", "cloud_download_unavailable",
+            "session_storageDeferred", "session_storageBusy", "cloud_download_timeout", "cloud_download_unavailable", "report_access_unavailable",
         ]
         if known.contains(raw) { return raw }
         if raw.range(of: #"^ns_(NSCocoaErrorDomain|NSPOSIXErrorDomain|NSURLErrorDomain|AVFoundationErrorDomain|unknown)_-?[0-9]{1,12}$"#,
@@ -2476,6 +2476,7 @@ enum LearningFailureCode {
         switch code {
         case "session_storageDeferred": return "这节课的文件还在云端，尚未下载到本机"
         case "session_storageBusy": return "其他操作仍在准备课程文件，原文件已保留"
+        case "report_access_unavailable": return "这节课暂时无法访问，请重新定位课程文件夹"
         case "cloud_download_timeout": return "等待云端下载已超时，课程文件保留；请重新打开重试"
         case "cloud_download_unavailable": return "云端暂时无法下载这节课，请检查网络后重新打开"
         case "cancelled": return "操作已取消"
@@ -2542,12 +2543,82 @@ final class ReviewRequestIdentityBox: @unchecked Sendable {
     }
 }
 
+/// The batch runner and report retries use the same noninteractive bookmark
+/// lease. A resolved course URL remains authorized until the caller releases it.
+enum ReviewDirectoryAccess {
+    struct Environment: Sendable {
+        var resolve: @Sendable (Data) throws -> (url: URL, stale: Bool)
+        var start: @Sendable (URL) -> Bool
+        var stop: @Sendable (URL) -> Void
+        var refresh: @Sendable (URL) throws -> Data
+        var directoryIssue: @Sendable (URL) -> String? = LearningReviewQueue.directoryIssue
+        static let live = Self(resolve: { data in
+            var stale = false
+            let url = try URL(resolvingBookmarkData: data,
+                options: [.withSecurityScope, .withoutUI, .withoutMounting], relativeTo: nil,
+                bookmarkDataIsStale: &stale)
+            return (url, stale)
+        }, start: { $0.startAccessingSecurityScopedResource() },
+           stop: { $0.stopAccessingSecurityScopedResource() },
+           refresh: { try $0.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) })
+    }
+    @TaskLocal static var environment = Environment.live
+    struct Lease {
+        let url: URL
+        let scoped: Bool
+        let stop: @Sendable (URL) -> Void
+        func release() { if scoped { stop(url) } }
+    }
+
+    @MainActor
+    static func acquire(_ job: inout LearningReviewQueue.Job) throws -> Lease {
+        let settings = environment
+        let resolved = try job.directoryBookmark.map { try settings.resolve($0) }
+        let url = resolved?.url ?? job.directory
+        #if LIVELINGO_PREVIEW
+        try PreviewDataIsolation.requireCourseDirectory(url)
+        #endif
+        let lease = Lease(url: url, scoped: resolved != nil && settings.start(url), stop: settings.stop)
+        do {
+            if resolved?.stale == true { job.directoryBookmark = try settings.refresh(url) }
+            if let issue = settings.directoryIssue(url) {
+                throw ReviewFailure(stage: .directory, code: issue,
+                    detail: issue == "directory_in_trash"
+                        ? "录音目录已在废纸篓中，复查已停止；请恢复目录后重新定位，或移出队列"
+                        : "录音目录找不到或无法写入。请恢复目录后重试，或将此任务移出复查队列。")
+            }
+            // Resolving a bookmark can change only the directory marker on a
+            // URL. Preserve an unchanged location for admission CAS checks.
+            if job.directory.standardizedFileURL.path != url.standardizedFileURL.path {
+                job.directory = url
+            }
+            return lease
+        } catch { lease.release(); throw error }
+    }
+
+    static func isUnavailable(_ error: Error) -> Bool {
+        if let failure = error as? ReviewFailure,
+           ["directory_unavailable", "directory_in_trash"].contains(failure.code) { return true }
+        if let failure = error as? SessionStoreError {
+            if case .missingSnapshot = failure { return true }
+            if case .io(_, let code) = failure { return [EACCES, EPERM, ENOENT, ENOTDIR].contains(code) }
+        }
+        let failure = error as NSError
+        if failure.domain == NSPOSIXErrorDomain { return [Int(EACCES), Int(EPERM), Int(ENOENT), Int(ENOTDIR)].contains(failure.code) }
+        if failure.domain == NSCocoaErrorDomain {
+            return [NSFileReadNoPermissionError, NSFileWriteNoPermissionError, NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(failure.code)
+        }
+        return false
+    }
+}
+
 #if DEBUG
 /// Observes the real private-storage boundary without replacing its safety checks.
 /// Task-local scope keeps synthetic delays out of unrelated queue operations.
 enum ReviewStorageTestHooks {
     @TaskLocal static var beforeDirectoryAccess: (@Sendable (URL) -> Void)?
     @TaskLocal static var beforeSnapshotRead: (@Sendable (URL) throws -> Void)?
+    @TaskLocal static var beforeReportAccess: (@Sendable (URL) throws -> Void)?
 }
 #endif
 
@@ -5121,12 +5192,19 @@ final class LearningReviewQueue: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         var retirements: [Job] = []
+        var deferredRetirements: [UUID: RetryState] = [:]
         for original in jobs where plan.supersededIDs.contains(original.id) {
             var old = original
             old.supersededByRevision = plan.candidate.identity?.inputRevision
             old.prefix = ""; old.prefixInputDigest = nil; old.retryPending = nil
-            let snapshot = try await validatedSnapshotAsync(old, at: old.directory, allowHistorical: true)
-            try await writeOutputsAsync(old, validatedSnapshot: snapshot)
+            do {
+                let snapshot = try await validatedSnapshotAsync(old, at: old.directory, allowHistorical: true)
+                try await writeOutputsAsync(old, validatedSnapshot: snapshot)
+            } catch {
+                let code = LearningFailureCode.code(for: error)
+                guard ["session_storageDeferred", "session_storageBusy"].contains(code) else { throw error }
+                deferredRetirements[original.id] = nextReportRetry(old, code: code)
+            }
             retirements.append(original)
         }
         try Task.checkCancellation()
@@ -5154,6 +5232,7 @@ final class LearningReviewQueue: ObservableObject {
                 }
                 current.supersededByRevision = plan.candidate.identity?.inputRevision
                 current.prefix = ""; current.prefixInputDigest = nil; current.retryPending = nil
+                if let retry = deferredRetirements[original.id] { current.reportOutputRetry = retry }
                 return current
             }
             guard retiredJobs.contains(where: { $0.id == original.id }) else {
@@ -5185,12 +5264,19 @@ final class LearningReviewQueue: ObservableObject {
         do { try await writeOutputsAsync(jobs[index], validatedSnapshot: plan.snapshot) }
         catch {
             guard let current = jobs.firstIndex(where: { $0.id == plan.candidate.id }) else { throw error }
-            jobs[current].failure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
-            recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "failed",
-                stage: ReviewFailureStage.output.rawValue, batch: 0,
-                batchCount: plan.candidate.batches.count,
-                detail: "error_code=\((error as NSError).code)"), at: current)
-            try await saveAndWait()
+            let code = LearningFailureCode.code(for: error)
+            if ["session_storageDeferred", "session_storageBusy"].contains(code) {
+                deferReportOutput(plan.candidate.id, code: code)
+            } else if ReviewDirectoryAccess.isUnavailable(error) {
+                deferReportOutput(plan.candidate.id, code: "report_access_unavailable")
+            } else {
+                jobs[current].failure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: code))"
+                recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: "failed",
+                    stage: ReviewFailureStage.output.rawValue, batch: 0,
+                    batchCount: plan.candidate.batches.count,
+                    detail: "error_code=\((error as NSError).code)"), at: current)
+                try await saveAndWait()
+            }
         }
         guard let current = jobs.firstIndex(where: { $0.id == plan.candidate.id }),
               jobs[current].identity == plan.candidate.identity,
@@ -5401,7 +5487,7 @@ final class LearningReviewQueue: ObservableObject {
     ///
     /// 为什么抽出来 ✓：2026-09-18 今天这节的复查**正卡在 `.Trash` 上** ✗（`directory_in_trash` ✓），
     /// 而这条规则当时**只写在批处理内部** ✗、没有任何测试 ✗。抽成纯函数后可以逐状态验 ✓。
-    static func directoryIssue(for url: URL) -> String? {
+    nonisolated static func directoryIssue(for url: URL) -> String? {
         let parts = url.standardizedFileURL.pathComponents
         if parts.contains(".Trash") || parts.contains(".Trashes") { return "directory_in_trash" }
         if !FileManager.default.isWritableFile(atPath: url.path) { return "directory_unavailable" }
@@ -5479,7 +5565,7 @@ final class LearningReviewQueue: ObservableObject {
     private func runOneBatch() async {
         guard var job = jobs.first else { return }
         var accessURL = job.directory
-        var scoped = false
+        var directoryLease: ReviewDirectoryAccess.Lease?
         var generationAttempted = false
         var receivedCompleteResponse = false
         // The stage that was running when an error escaped; used to tag the
@@ -5499,29 +5585,14 @@ final class LearningReviewQueue: ObservableObject {
         defer { if activeRequestIdentity === identity { activeRequestIdentity = nil } }
         let batchIndex = job.next
         let batchCount = job.batches.count
-        defer { if scoped { accessURL.stopAccessingSecurityScopedResource() } }
+        defer { directoryLease?.release() }
         do {
             try Task.checkCancellation()
-            if let bookmark = job.directoryBookmark {
-                var stale = false
-                accessURL = try URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale)
-                #if LIVELINGO_PREVIEW
-                try PreviewDataIsolation.requireCourseDirectory(accessURL)
-                #endif
-                scoped = accessURL.startAccessingSecurityScopedResource()
-                jobs[0].directory = accessURL
-                if stale {
-                    jobs[0].directoryBookmark = try accessURL.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
-                }
-            }
-            if let issue = Self.directoryIssue(for: accessURL) {
-                // 2026-09-18：判定抽成纯函数 `directoryIssue(for:)` ✓（行为不变 ✓）→
-                // 这条"废纸篓拒复查"的规则**第一次有测试签字** ✓。
-                throw ReviewFailure(stage: .directory, code: issue,
-                                    detail: issue == "directory_in_trash"
-                                        ? "录音目录已在废纸篓中，复查已停止；请恢复目录后重新定位，或移出队列"
-                                        : "录音目录找不到或无法写入。请恢复目录后重试，或将此任务移出复查队列。")
-            }
+            directoryLease = try ReviewDirectoryAccess.acquire(&job)
+            accessURL = job.directory
+            guard jobs.first?.id == job.id else { return }
+            jobs[0].directory = job.directory
+            jobs[0].directoryBookmark = job.directoryBookmark
             // Now the bookmark is resolved. Finish deferred target/identity
             // upgrades before validating or sending a prompt to a generator.
             if job.targetLocale == nil {
@@ -5955,6 +6026,30 @@ final class LearningReviewQueue: ObservableObject {
         else if let index = retiredJobs.firstIndex(where: { $0.id == id }) { retiredJobs[index].reportOutputRetry = retry }
     }
 
+    private func updateReportLocation(_ job: Job) {
+        let current = reportJob(job.id)
+        if let index = jobs.firstIndex(where: { $0.id == job.id }) {
+            jobs[index].directory = job.directory; jobs[index].directoryBookmark = job.directoryBookmark
+        } else if let index = retiredJobs.firstIndex(where: { $0.id == job.id }) {
+            retiredJobs[index].directory = job.directory; retiredJobs[index].directoryBookmark = job.directoryBookmark
+        }
+        if current?.directory != job.directory || current?.directoryBookmark != job.directoryBookmark { persistOrPause() }
+    }
+
+    private func deferReportOutput(_ id: UUID, code: String) {
+        guard let current = reportJob(id) else { return }
+        setReportRetry(nextReportRetry(current, code: code), for: id)
+        persistOrPause()
+        refreshStatus()
+    }
+
+    private func nextReportRetry(_ job: Job, code: String) -> RetryState {
+        let count = min(job.reportOutputRetry?.storageDeferrals ?? 0, Int.max - 1) + 1
+        let delay = retryDelays[max(0, min(count - 1, retryDelays.count - 1))]
+        return RetryState(attempts: 0, notBefore: now().timeIntervalSince1970 + delay,
+                          code: code, storageDeferrals: count)
+    }
+
     private func rebindReportRetryTimer() {
         let next = (jobs + retiredJobs).compactMap { job -> (job: Job, retry: RetryState)? in
             guard let retry = job.reportOutputRetry, (reportOutputRequests[job.id] ?? 0) == 0 else { return nil }
@@ -5990,7 +6085,11 @@ final class LearningReviewQueue: ObservableObject {
         reportOutputRequests[job.id, default: 0] += 1
         let request = Task { @MainActor [weak self] in
             var writingReport = false
+            var acquiringDirectory = false
+            var lease: ReviewDirectoryAccess.Lease?
+            var accessedJob = job
             defer {
+                lease?.release()
                 if let self {
                     self.reportOutputRequests[job.id, default: 1] -= 1
                     if self.reportOutputRequests[job.id] == 0 { self.reportOutputRequests.removeValue(forKey: job.id) }
@@ -6002,33 +6101,31 @@ final class LearningReviewQueue: ObservableObject {
                 try await journal?.value
                 guard let self, self.persistenceEpoch == epoch else { throw CancellationError() }
                 writingReport = true
-                let result = try await writer.writeOutputs(job)
+                acquiringDirectory = true
+                lease = try ReviewDirectoryAccess.acquire(&accessedJob)
+                acquiringDirectory = false
+                self.updateReportLocation(accessedJob)
+                let result = try await writer.writeOutputs(accessedJob)
                 if self.persistenceEpoch == epoch {
                     // An older write cannot acknowledge a newer retirement or
                     // body. The latest frozen report remains pending instead.
                     if let current = self.reportJob(job.id), current.reportOutputRetry != nil,
-                       current.directory == job.directory,
-                       Self.reportMarkdown(for: current) == Self.reportMarkdown(for: job) {
+                       current.directory == accessedJob.directory,
+                       Self.reportMarkdown(for: current) == Self.reportMarkdown(for: accessedJob) {
                         self.setReportRetry(nil, for: job.id)
                         self.persistOrPause()
                     }
-                    self.onUpdate?(job.directory, result.markdown, result.progress)
+                    self.onUpdate?(accessedJob.directory, result.markdown, result.progress)
                 }
             } catch {
                 if let self, self.persistenceEpoch == epoch {
                     let code = LearningFailureCode.code(for: error)
                     if writingReport, ["session_storageDeferred", "session_storageBusy"].contains(code) {
-                        if let current = self.reportJob(job.id) {
-                            let count = min(current.reportOutputRetry?.storageDeferrals ?? 0, Int.max - 1) + 1
-                            let delay = self.retryDelays[max(0, min(count - 1, self.retryDelays.count - 1))]
-                            self.setReportRetry(RetryState(attempts: 0,
-                                notBefore: self.now().timeIntervalSince1970 + delay, code: code,
-                                storageDeferrals: count), for: job.id)
-                            self.persistOrPause()
-                            self.refreshStatus()
-                        }
-                        // Only this report waits. Its frozen input/body remains
-                        // in the journal, even after moving into retiredJobs.
+                        self.deferReportOutput(job.id, code: code)
+                        return
+                    }
+                    if writingReport, acquiringDirectory || ReviewDirectoryAccess.isUnavailable(error) {
+                        self.deferReportOutput(job.id, code: "report_access_unavailable")
                         return
                     }
                     self.persistenceFailure = "复查文件不可写，已暂停：\(LearningFailureCode.label(for: code))"
@@ -6043,9 +6140,18 @@ final class LearningReviewQueue: ObservableObject {
 
     private func writeOutputsAsync(_ job: Job, validatedSnapshot snapshot: SessionSnapshot?) async throws {
         try Task.checkCancellation()
-        let result = try await storage.writeOutputs(job, validatedSnapshot: snapshot)
+        var accessedJob = job
+        let lease = try ReviewDirectoryAccess.acquire(&accessedJob)
+        defer { lease.release() }
+        updateReportLocation(accessedJob)
+        let result: LearningReviewStorage.Output
+        if accessedJob.directory == job.directory {
+            result = try await storage.writeOutputs(accessedJob, validatedSnapshot: snapshot)
+        } else {
+            result = try await storage.writeOutputs(accessedJob)
+        }
         try Task.checkCancellation()
-        onUpdate?(job.directory, result.markdown, result.progress)
+        onUpdate?(accessedJob.directory, result.markdown, result.progress)
     }
 
     private func save() throws {
@@ -6142,6 +6248,8 @@ final class LearningReviewQueue: ObservableObject {
                 return ["session_storageDeferred", "session_storageBusy"].contains(retry.code)
             }.count
             if count > 0 { status += (status.isEmpty ? "" : " · ") + "\(count) 项报告已延后，稍后自动重试" }
+            let inaccessible = (jobs + retiredJobs).filter { $0.reportOutputRetry?.code == "report_access_unavailable" }.count
+            if inaccessible > 0 { status += (status.isEmpty ? "" : " · ") + "\(inaccessible) 项报告暂时无法访问，请重新定位课程" }
         }
         items = jobs.map { job in
             QueueItem(id: job.id, name: job.directory.lastPathComponent, directory: job.directory,
@@ -6272,16 +6380,22 @@ actor LearningReviewStorage {
     }
 
     func writeOutputs(_ job: LearningReviewQueue.Job) throws -> Output {
+        #if DEBUG
+        try ReviewStorageTestHooks.beforeReportAccess?(job.directory)
+        #endif
         let snapshot = try LearningReviewQueue.validatedSnapshot(job, at: job.directory, allowHistorical: true)
         return try writeOutputs(job, validatedSnapshot: snapshot)
     }
 
     func writeOutputs(_ job: LearningReviewQueue.Job, validatedSnapshot snapshot: SessionSnapshot?) throws -> Output {
-        try SessionArchiveCoding.privateIO(at: job.directory) {
+        #if DEBUG
+        try ReviewStorageTestHooks.beforeReportAccess?(job.directory)
+        #endif
+        return try SessionArchiveCoding.privateIO(at: job.directory) {
         try SensitiveFileIO.withoutDatalessMaterialization {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: job.directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw QwenRuntimeError.requestFailed("录音目录已移动或不可用")
+            throw ReviewFailure(stage: .directory, code: "directory_unavailable", detail: "录音目录已移动或不可用")
         }
         let entry = LearningReviewQueue.reportEntry(for: job)
         try ReviewReportCollection.save(entry, in: job.directory)

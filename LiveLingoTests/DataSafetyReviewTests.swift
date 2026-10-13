@@ -153,6 +153,243 @@ struct DataSafetyReviewTests {
         #expect(try ReviewReportCollection.read(in: directory).first?.batchReports == completed.reports)
     }
 
+    private final class BookmarkProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        let oldURL: URL
+        let resolvedURL: URL
+        let oldBookmark = Data("SYNTHETIC_OLD_BOOKMARK".utf8)
+        let newBookmark = Data("SYNTHETIC_REFRESHED_BOOKMARK".utf8)
+        private var failure: String?
+        private var active = 0
+        private var events: [String] = []
+        init(oldURL: URL, resolvedURL: URL, failure: String? = nil) {
+            self.oldURL = oldURL; self.resolvedURL = resolvedURL; self.failure = failure
+        }
+        func allow() { lock.withLock { failure = nil } }
+        var trace: [String] { lock.withLock { events } }
+        var activeScopes: Int { lock.withLock { active } }
+        func environment() -> ReviewDirectoryAccess.Environment {
+            .init(resolve: { data in try self.lock.withLock {
+                self.events.append("resolve")
+                if self.failure == "resolve" { throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError) }
+                return (self.resolvedURL, data == self.oldBookmark)
+            } }, start: { _ in self.lock.withLock {
+                self.events.append("start"); self.active += 1; return true
+            } }, stop: { _ in self.lock.withLock {
+                self.events.append("stop"); self.active -= 1
+            } }, refresh: { _ in try self.lock.withLock {
+                self.events.append("refresh")
+                if self.failure == "refresh" { throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError) }
+                return self.newBookmark
+            } }, directoryIssue: { url in self.lock.withLock {
+                if url == self.oldURL || url == self.resolvedURL {
+                    if self.failure == "missing" { return "directory_unavailable" }
+                    if self.failure == "trash" { return "directory_in_trash" }
+                }
+                return LearningReviewQueue.directoryIssue(for: url)
+            } })
+        }
+        func beforeReport(_ url: URL) throws {
+            guard url == oldURL || url == resolvedURL else { return }
+            try lock.withLock {
+                events.append("read")
+                guard url == resolvedURL, active > 0, failure != "read" else {
+                    throw SessionStoreError.io(operation: "synthetic protected course access", code: EACCES)
+                }
+            }
+        }
+    }
+
+    private final class LateReportProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var triggered = false
+        private var pending = false
+        var isPending: Bool { lock.withLock { pending } }
+        func beforeReport() { lock.withLock { if !triggered { triggered = true; pending = true } } }
+        func allow() { lock.withLock { pending = false } }
+    }
+
+    private func retiredBookmarkFixture(_ root: URL) throws -> (LearningReviewQueue.Job, URL, URL) {
+        let oldURL = try course(root, "before-move"), resolved = root.appendingPathComponent("resolved-course", isDirectory: true)
+        var old = try recoveryJob(in: oldURL, notebook: notebook("bookmark"), bound: true)
+        old.next = 1; old.reports = ["## Preserved advice\nSYNTHETIC_BOOKMARK_REPORT_BODY"]
+        try ReviewReportCollection.save(LearningReviewQueue.reportEntry(for: old), in: oldURL)
+        let store = SessionStore(directory: oldURL), saved = try #require(store.loadDetailedWithoutRecovery().snapshot)
+        let previous = try #require(saved.segments.first)
+        let replacement = TranscriptSegment(id: previous.id, startTime: previous.startTime, endTime: previous.endTime,
+            english: "Synthetic input revised before restart.", chinese: "合成输入在重启前修订。", sessionID: saved.sessionID,
+            inputRevision: saved.inputRevision + 1)
+        _ = try store.append(.inputRevision(.init(fromRevision: saved.inputRevision, toRevision: saved.inputRevision + 1,
+            previousSegment: previous, replacementSegment: replacement,
+            retainedBatches: saved.batches.filter { $0.ids.contains(previous.id) }, reason: "Synthetic confirmed revision")))
+        old.supersededByRevision = saved.inputRevision + 1
+        old.reportOutputRetry = .init(attempts: 0, notBefore: 0, code: "session_storageDeferred")
+        try FileManager.default.moveItem(at: oldURL, to: resolved)
+        return (old, oldURL, resolved)
+    }
+
+    @Test func restartedHistoricalReportRestoresMovedBookmarkBeforeReadingAndBalancesScope() async throws {
+        let root = try DataSafetyFixtures.make("historical-bookmark-scope"); defer { DataSafetyFixtures.preserve(root) }
+        var (old, before, resolved) = try retiredBookmarkFixture(root)
+        let probe = BookmarkProbe(oldURL: before, resolvedURL: resolved)
+        old.directoryBookmark = probe.oldBookmark
+        let journal = root.appendingPathComponent("queue.json")
+        try JSONEncoder().encode(LearningReviewQueue.Journal(jobs: [], userPaused: false, version: 4, retiredJobs: [old])).write(to: journal, options: .atomic)
+        var q: LearningReviewQueue?
+        do {
+            try await ReviewDirectoryAccess.$environment.withValue(probe.environment()) {
+                try await ReviewStorageTestHooks.$beforeReportAccess.withValue({ try probe.beforeReport($0) }) {
+                    let resumed = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+                        generate: { _, _, _, _, _ in Issue.record("Historical report must not generate"); return Self.response },
+                        now: Date.init, retryDelays: [0.05, 0.05], startupSnapshotReader: { _ in nil })
+                    q = resumed
+                    #expect(await waitFor { resumed.journalForTesting.retiredJobs?.first?.reportOutputRetry == nil })
+                    try await resumed.waitForPendingStorage()
+                    #expect(resumed.currentFailure == nil)
+                    let retired = try #require(try read(journal).retiredJobs?.first)
+                    #expect(retired.directory == resolved && retired.directoryBookmark == probe.newBookmark)
+                    #expect(retired.reports == old.reports)
+                    #expect(try ReviewReportCollection.read(in: resolved).first?.supersededByRevision == old.supersededByRevision)
+                    #expect(probe.trace.prefix(4).elementsEqual(["resolve", "start", "refresh", "read"]))
+                    #expect(probe.trace.last == "stop" && probe.activeScopes == 0)
+                }
+            }
+        } catch { await q?.shutdownForTesting(); throw error }
+        await q?.shutdownForTesting()
+    }
+
+    @Test(arguments: ["resolve", "refresh", "read", "missing", "trash"])
+    func historicalReportAccessFailureDoesNotPauseAnotherCourseAndRetries(_ failure: String) async throws {
+        let root = try DataSafetyFixtures.make("historical-bookmark-failure"); defer { DataSafetyFixtures.preserve(root) }
+        var (old, before, resolved) = try retiredBookmarkFixture(root)
+        let probe = BookmarkProbe(oldURL: before, resolvedURL: resolved, failure: failure)
+        old.directoryBookmark = probe.oldBookmark
+        let otherURL = try course(root, "other"), journal = root.appendingPathComponent("queue.json")
+        var other = try recoveryJob(in: otherURL, notebook: notebook("other"), bound: true)
+        other.directoryBookmark = nil
+        try JSONEncoder().encode(LearningReviewQueue.Journal(jobs: [other], userPaused: false, version: 4, retiredJobs: [old])).write(to: journal, options: .atomic)
+        var calls = 0, q: LearningReviewQueue?
+        do {
+            try await ReviewDirectoryAccess.$environment.withValue(probe.environment()) {
+                try await ReviewStorageTestHooks.$beforeReportAccess.withValue({ try probe.beforeReport($0) }) {
+                    let resumed = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+                        generate: { _, _, _, _, _ in calls += 1; return Self.response }, now: Date.init,
+                        retryDelays: [0.05, 0.05], startupSnapshotReader: { _ in nil })
+                    q = resumed
+                    resumed.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+                    #expect(await waitFor { calls == 1 && !resumed.running && !resumed.hasWork && resumed.journalForTesting.retiredJobs?.first?.reportOutputRetry?.code == "report_access_unavailable" })
+                    try await resumed.waitForPendingStorage()
+                    #expect(resumed.currentFailure == nil)
+                    #expect(resumed.status.contains("暂时无法访问"))
+                    #expect(probe.activeScopes == 0)
+                    #expect(try ReviewReportCollection.read(in: otherURL).contains { $0.jobID == other.id && $0.completed == 1 })
+                    #expect(try read(journal).retiredJobs?.first?.reports == old.reports)
+                    probe.allow()
+                    #expect(await waitFor { resumed.journalForTesting.retiredJobs?.first?.reportOutputRetry == nil })
+                    try await resumed.waitForPendingStorage()
+                    #expect(calls == 1 && probe.activeScopes == 0)
+                    #expect(try read(journal).retiredJobs?.first?.directory == resolved)
+                }
+            }
+        } catch { await q?.shutdownForTesting(); throw error }
+        await q?.shutdownForTesting()
+    }
+
+    @Test func ordinaryBatchAndReportRetryShareTheBookmarkLeasePath() async throws {
+        let root = try DataSafetyFixtures.make("ordinary-bookmark-lease"); defer { DataSafetyFixtures.preserve(root) }
+        let oldURL = try course(root, "old"), resolved = root.appendingPathComponent("resolved", isDirectory: true)
+        var pending = try recoveryJob(in: oldURL, notebook: notebook(), bound: true)
+        try FileManager.default.moveItem(at: oldURL, to: resolved)
+        let probe = BookmarkProbe(oldURL: oldURL, resolvedURL: resolved)
+        pending.directoryBookmark = probe.oldBookmark
+        let journal = root.appendingPathComponent("queue.json");try write([pending], to: journal, paused: false)
+        var calls = 0, q: LearningReviewQueue?
+        do {
+            try await ReviewDirectoryAccess.$environment.withValue(probe.environment()) {
+                try await ReviewStorageTestHooks.$beforeReportAccess.withValue({ try probe.beforeReport($0) }) {
+                    let resumed = queue(journal) { _, _, _, _, _ in calls += 1; return Self.response }
+                    q = resumed;resumed.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+                    #expect(await waitFor { !resumed.hasWork && !resumed.running })
+                    await resumed.shutdownForTesting()
+                    #expect(calls == 1 && probe.activeScopes == 0)
+                    #expect(probe.trace.contains("refresh") && probe.trace.contains("read"))
+                    #expect(probe.trace.filter { $0 == "start" }.count == probe.trace.filter { $0 == "stop" }.count)
+                    let reports = try ReviewReportCollection.read(in: resolved)
+                    #expect(reports.first?.completed == 1)
+                }
+            }
+        } catch { await q?.shutdownForTesting(); throw error }
+        await q?.shutdownForTesting()
+    }
+
+    @Test(arguments: [false, true])
+    func asyncAdmissionDefersLateCloudReportsIncludingRetiredInputs(_ replacing: Bool) async throws {
+        let root = try DataSafetyFixtures.make("async-late-report"); defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course"), journal = root.appendingPathComponent("queue.json")
+        let book = try notebook(), old = try recoveryJob(in: directory, notebook: book, bound: true)
+        try ReviewReportCollection.save(LearningReviewQueue.reportEntry(for: old), in: directory)
+        if replacing { try write([old], to: journal, paused: true) }
+        var snapshot = try #require(SessionStore(directory: directory).loadDetailedWithoutRecovery().snapshot)
+        var candidateBook = book
+        if replacing {
+            let previous = try #require(snapshot.segments.first)
+            let replacement = TranscriptSegment(id: previous.id, startTime: previous.startTime, endTime: previous.endTime,
+                english: "Synthetic admission revision.", chinese: "合成入队修订。", sessionID: snapshot.sessionID, inputRevision: snapshot.inputRevision + 1)
+            let store = SessionStore(directory: directory)
+            _ = try store.append(.inputRevision(.init(fromRevision: snapshot.inputRevision, toRevision: snapshot.inputRevision + 1,
+                previousSegment: previous, replacementSegment: replacement,
+                retainedBatches: snapshot.batches.filter { $0.ids.contains(previous.id) }, reason: "Synthetic admission revision")))
+            snapshot = try store.append(.appendBatch(LearningNoteBatch(id: UUID(), evidence: [replacement],
+                note: LearningNote(topic: "合成新版本", points: [.init(kind: "核心结论", text: "新输入保留。")]))))
+            candidateBook = try LearningNotebook(snapshot: snapshot)
+        }
+        let probe = LateReportProbe();var calls = 0
+        let q = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+            generate: { _, _, _, _, _ in calls += 1; return Self.response }, now: Date.init,
+            retryDelays: [0.05, 0.05], startupSnapshotReader: { _ in nil })
+        do {
+            try await SensitiveFileIO.$datalessProbe.withValue({ $0 == directory.appendingPathComponent("summary-review.md") && probe.isPending }) {
+                try await ReviewStorageTestHooks.$beforeReportAccess.withValue({ url in if url == directory { probe.beforeReport() } }) {
+                    q.setContext(recording: true, concurrent: false, resourcesAvailable: false)
+                    try await q.enqueueAsync(directory: directory, notebook: candidateBook, sessionID: snapshot.sessionID, inputRevision: snapshot.inputRevision)
+                    try await q.waitForPendingStorage()
+                    #expect(q.items.first?.failure == nil && q.currentFailure == nil)
+                    #expect(q.journalForTesting.jobs.first?.reportOutputRetry?.code == "session_storageDeferred")
+                    #expect(q.items.first?.retryPending == nil && calls == 0)
+                    if replacing { #expect(q.journalForTesting.retiredJobs?.first?.reportOutputRetry?.code == "session_storageDeferred") }
+                    probe.allow()
+                    #expect(await waitFor { q.journalForTesting.jobs.first?.reportOutputRetry == nil && (q.journalForTesting.retiredJobs ?? []).allSatisfy { $0.reportOutputRetry == nil } })
+                    #expect(calls == 0)
+                    if replacing { #expect(try ReviewReportCollection.read(in: directory).contains { $0.jobID == old.id && $0.supersededByRevision == snapshot.inputRevision }) }
+                }
+            }
+        } catch { await q.shutdownForTesting(); throw error }
+        await q.shutdownForTesting()
+    }
+
+    @Test func nativeBookmarkRoundTripUsesTheSharedLeaseInAnUnscopedTestHost() throws {
+        let root = try DataSafetyFixtures.make("native-bookmark-lease"); defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course"), book = try notebook()
+        var pending = try job(directory, book)
+        pending.directoryBookmark = try directory.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        // The isolated test host has no App Sandbox entitlement. Its ordinary
+        // Foundation bookmark does not carry a security scope; scope ordering
+        // and permission failures are covered by the injected restart tests.
+        var environment = ReviewDirectoryAccess.Environment.live
+        environment.resolve = { data in
+            var stale = false
+            let url = try URL(resolvingBookmarkData: data, options: [.withoutUI, .withoutMounting],
+                              relativeTo: nil, bookmarkDataIsStale: &stale)
+            return (url, stale)
+        }
+        try ReviewDirectoryAccess.$environment.withValue(environment) {
+            let lease = try ReviewDirectoryAccess.acquire(&pending)
+            defer { lease.release() }
+            #expect(pending.directory == directory)
+            #expect(LearningReviewQueue.directoryIssue(for: pending.directory) == nil)
+        }
+    }
+
     private static let response = #"{"reviewVersion":2,"corrections":[],"additions":[]}"#
 
     private func notebook(_ label: String = "fixture", batches: Int = 1) throws -> LearningNotebook {
