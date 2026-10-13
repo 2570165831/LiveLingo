@@ -1222,6 +1222,7 @@ final class AppModel: ObservableObject {
         var discardTemporarySession: (@MainActor @Sendable (URL) throws -> Void)?
     }
     private var privacyExitConfiguration: PrivacyExitConfiguration?
+    var chooseOutputDirectoryForTesting: (@MainActor () async -> URL?)?
     #endif
     private var processingTask: Task<Void, Never>?
     private var processingTaskID: UUID?
@@ -1550,6 +1551,13 @@ final class AppModel: ObservableObject {
     @discardableResult
     func chooseOutputDirectory() async -> URL? {
         guard !alarmRolloverInProgress, !preparingApplicationExit else { return nil }
+        #if DEBUG
+        if AppRuntimeEnvironment.isUnitTesting, let chooseOutputDirectoryForTesting {
+            let directory = await chooseOutputDirectoryForTesting()
+            if let directory { useOutputDirectory(directory) }
+            return directory
+        }
+        #endif
         #if LIVELINGO_PREVIEW
         do {
             let directory = try PreviewDataIsolation.makeCoursesDirectory()
@@ -1605,20 +1613,47 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func convertCurrentSessionToRecording() async {
-        guard hasActiveSession, activeStorageMode == .liveOnly, !alarmRolloverInProgress else { return }
+    enum RecordingConversionResult { case converted, cancelled, failed }
+
+    @discardableResult
+    func convertCurrentSessionToRecording(usingExistingOutputDirectory: Bool = false,
+                                          deadline: ExitDeadline? = nil) async -> RecordingConversionResult {
+        guard hasActiveSession, activeStorageMode == .liveOnly, !alarmRolloverInProgress else { return .cancelled }
         let identity = sessionID
         let epoch = generation
-        guard let directory = await chooseOutputDirectory(),
+        let directory: URL?
+        if usingExistingOutputDirectory, let existing = outputDirectory { directory = existing }
+        else { directory = await chooseOutputDirectory() }
+        guard let directory,
               sessionID == identity, generation == epoch,
-              hasActiveSession, activeStorageMode == .liveOnly else { return }
-        await convertCurrentSessionToRecording(in: directory)
+              hasActiveSession, activeStorageMode == .liveOnly else { return .cancelled }
+        if let deadline {
+            guard applicationExitDeadline?.hasPendingOperations != true else {
+                archiveError = "上次退出仍有任务未结束，内容与文件已保留，请稍后重试。"
+                return .failed
+            }
+            applicationExitDeadline = deadline
+            exitStorageProgress.attach(deadline)
+        }
+        // Choosing a folder is user interaction. The existing inactivity lease
+        // starts protecting storage only once that selection has completed.
+        deadline?.recordProgress()
+        let result = await ExitDeadline.$current.withValue(deadline ?? ExitDeadline.current) {
+            await convertCurrentSessionToRecording(in: directory)
+        }
+        if deadline != nil, result == .converted {
+            applicationExitDeadline = nil
+            exitStorageProgress.attach(nil)
+        }
+        return result
     }
 
-    func convertCurrentSessionToRecording(in directory: URL) async {
-        guard hasActiveSession, activeStorageMode == .liveOnly, !alarmRolloverInProgress else { return }
+    @discardableResult
+    func convertCurrentSessionToRecording(in directory: URL) async -> RecordingConversionResult {
+        guard hasActiveSession, activeStorageMode == .liveOnly, !alarmRolloverInProgress else { return .cancelled }
         let identity = sessionID, epoch = generation
         do {
+            try ExitDeadline.current?.check()
             guard let source = sessionDirectory else { throw AppError.outputDirectoryMissing }
             try pipeline.updatePersistence(persistsSession: true)
             activeStorageMode = .saveSession
@@ -1626,12 +1661,16 @@ final class AppModel: ObservableObject {
             outputDirectory = directory
             if sessionSaver == nil { bindSessionArchive(to: source) }
             try await flushSessionArchive()
-            guard sessionID == identity, generation == epoch else { return }
+            guard sessionID == identity, generation == epoch else { return .cancelled }
+            try ExitDeadline.current?.check()
             let recovery = SessionWorkspace.RecordingRecovery(id: identity, directory: source, outputRoot: directory)
                 .withOutputRoot(directory)
             try storeRecordingRecovery(recovery)
+            try ExitDeadline.current?.check()
+            return .converted
         } catch {
             archiveError = "录音继续保留；转换后的保存或恢复索引尚未确认：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+            return .failed
         }
     }
 
