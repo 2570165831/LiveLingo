@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import XCTest
 @testable import LiveLingo
@@ -56,11 +57,22 @@ final class AccessibilityRegressionTests: XCTestCase {
         return (model, store)
     }
 
+    private func classModeFixture(store: UserDefaults,
+                                  floating: FloatingSubtitleWindowController) -> FullScreenClassModeController {
+        let controller = FullScreenClassModeController(defaults: store,
+            application: AccessibilityClassModeApplication(), statusItem: AccessibilityClassModeStatusItem(),
+            subtitles: LiveFullScreenSubtitles(controller: floating, defaults: store),
+            notifications: NotificationCenter(), observePopupLifetimes: { _ in AnyCancellable {} },
+            schedule: { $0() })
+        addTeardownBlock { @MainActor in controller.shutdown() }
+        return controller
+    }
+
     private func host<V: View>(_ root: V, width: CGFloat = 640, height: CGFloat = 360,
-                               dark: Bool = false) async throws -> NSHostingController<AnyView> {
+                               dark: Bool = false, titled: Bool = false) async throws -> NSHostingController<AnyView> {
         let controller = NSHostingController(rootView: AnyView(root.environment(\.colorScheme, dark ? .dark : .light)))
         let window = NSWindow(contentRect: .init(x: 0, y: 0, width: width, height: height),
-                              styleMask: [.borderless], backing: .buffered, defer: false)
+                              styleMask: titled ? [.titled, .resizable] : [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -104,6 +116,67 @@ final class AccessibilityRegressionTests: XCTestCase {
 
     private func node(_ id: String, in view: NSView) throws -> Node {
         try XCTUnwrap(nodes(view).first { $0.id == id }, "Missing real AX element \(id)")
+    }
+
+    func testAlarmCancelOccupiesBottomRowWithEqualSideMarginsAndActuallyDismisses() async throws {
+        for compact in [false, true] {
+            var dismissals = 0
+            let hosting = try await host(AlarmBanner(state: .init(secondsRemaining: 28),
+                dismiss: { dismissals += 1 }, compact: compact), width: 640, height: 220)
+            let banner = try node("alarm-banner", in: hosting.view)
+            let button = try node("alarm-dismiss", in: hosting.view)
+            XCTAssertTrue(button.strings.contains("取消（28）"))
+            XCTAssertGreaterThan(button.frame.width, banner.frame.width * 0.85)
+            XCTAssertGreaterThanOrEqual(button.frame.height, 40)
+            XCTAssertEqual(button.frame.minX - banner.frame.minX, banner.frame.maxX - button.frame.maxX, accuracy: 2)
+            XCTAssertGreaterThan(button.frame.minY, banner.frame.minY)
+            XCTAssertLessThan(button.frame.maxY, banner.frame.midY + 10, "The button belongs below the explanation")
+            let press = NSSelectorFromString("accessibilityPerformPress")
+            XCTAssertTrue(button.object.responds(to: press))
+            _ = button.object.perform(press)
+            XCTAssertEqual(dismissals, 1)
+            let window = try XCTUnwrap(hosting.view.window)
+            let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+            XCTAssertTrue(window.performKeyEquivalent(with: escape), "The production button must own the cancel shortcut")
+            XCTAssertEqual(dismissals, 2)
+            _ = try capture(hosting.view, compact ? "alarm-cancel-compact" : "alarm-cancel-main")
+        }
+    }
+
+    func testReminderSettingsGroupAndNotificationDisclosure() async throws {
+        let (model, defaults) = try fixture()
+        let hosting = try await host(ClassroomSettingsView().environmentObject(model).defaultAppStorage(defaults),
+            width: 860, height: 1200)
+        _ = try textNode("提醒", in: hosting.view)
+        let allText = nodes(hosting.view).flatMap(\.strings)
+        XCTAssertFalse(allText.contains("警报提醒"))
+        XCTAssertTrue(allText.contains(where: { $0.contains("字幕窗可见时不发系统通知") }))
+        XCTAssertTrue(allText.contains(where: { $0.contains("首次需要时由系统询问通知权限") }))
+    }
+
+    func testLockedAlarmBadgeAndActionUseTheSameCurrentButtonTitleOffscreen() async throws {
+        let (model, store) = try fixture()
+        let floating = FloatingSubtitleWindowController(defaults: store)
+        let classMode = classModeFixture(store: store, floating: floating)
+        floating.toggleLock()
+        let hosting = try await host(FloatingSubtitleView(windowController: floating, classModeController: classMode)
+            .environmentObject(model).defaultAppStorage(store), height: 580, dark: true)
+        for state in [AlarmBannerState(secondsRemaining: 28), AlarmBannerState(saved: true),
+                      AlarmBannerState(saving: true), AlarmBannerState(liveOnly: true),
+                      AlarmBannerState(failure: "Synthetic failure")] {
+            model.presentAlarmBannerForTesting(state)
+            try await settle(hosting.view)
+            let badge = try node("floating-lock-status", in: hosting.view)
+            XCTAssertTrue(badge.strings.contains("字幕窗已锁定；提醒期间可点击“\(state.buttonTitle)”按钮，其他控件保持锁定"))
+            let button = try node("alarm-dismiss", in: hosting.view)
+            XCTAssertEqual(button.value("accessibilityLabel") as? String, state.buttonTitle)
+            if !state.canCancelSegmentation {
+                XCTAssertFalse(badge.strings.contains { $0.contains("取消按钮") })
+            }
+            XCTAssertFalse(try XCTUnwrap(hosting.view.window).isVisible)
+        }
     }
 
     private func textNode(_ text: String, in view: NSView) throws -> Node {
@@ -549,8 +622,12 @@ final class AccessibilityRegressionTests: XCTestCase {
 
     func testSettingsSubtitleControlsShareALeftEdgeWithoutSliderTicks() async throws {
         let (model, store) = try fixture()
-        let controller = try await host(ClassroomSettingsView().environmentObject(model).defaultAppStorage(store),
+        let floating = FloatingSubtitleWindowController(defaults: store)
+        let classMode = classModeFixture(store: store, floating: floating)
+        let controller = try await host(ClassroomSettingsView(fullScreenMode: classMode)
+            .environmentObject(model).defaultAppStorage(store),
                                          width: 520, height: 1500)
+        _ = try capture(controller.view, "uifix2-settings")
         let mode = try node("floating-display-mode", in: controller.view).frame
         for title in ["原文字号", "译文字号", "背景不透明度"] {
             let slider = try node("floating-\(title)", in: controller.view).frame
@@ -561,18 +638,70 @@ final class AccessibilityRegressionTests: XCTestCase {
         }
         XCTAssertFalse(nodes(controller.view).flatMap(\.strings).contains { $0.contains("浮动字幕") })
         _ = try textNode("阅读字号", in: controller.view)
+        _ = try textNode("可在主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。", in: controller.view)
+    }
+
+    func testOpacityArrowKeysMoveOneStepWhileMouseValueSnappingStaysUnchanged() async throws {
+        let (model, store) = try fixture()
+        let preferences = FloatingSubtitlePreferences(store: store)
+        preferences.backgroundOpacityBinding.wrappedValue = 0.85
+        let controller = try await host(ClassroomSettingsView().environmentObject(model).defaultAppStorage(store),
+                                        width: 520, height: 1500)
+        let slider = try node("floating-背景不透明度", in: controller.view)
+        XCTAssertEqual(slider.value("accessibilityRole") as? String, "AXSlider")
+        let window = try XCTUnwrap(controller.view.window)
+        window.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(window.makeFirstResponder(controller.view))
+        XCTAssertTrue(slider.object.responds(to: NSSelectorFromString("setAccessibilityFocused:")))
+        slider.object.setValue(true, forKey: "accessibilityFocused")
+        try await settle(controller.view)
+        func arrow(_ code: UInt16, _ characters: String, flags: NSEvent.ModifierFlags = []) async throws {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
+            window.sendEvent(event)
+            try await settle(controller.view)
+        }
+        let hardwareFlags: [NSEvent.ModifierFlags] = [[], [.numericPad, .function], .capsLock,
+                                                    [.numericPad, .function, .capsLock]]
+        for flags in hardwareFlags {
+            preferences.backgroundOpacityBinding.wrappedValue = 0.85
+            try await settle(controller.view)
+            for (code, characters, expected) in [(UInt16(124), "\u{f703}", 0.90), (123, "\u{f702}", 0.85),
+                                                 (126, "\u{f700}", 0.90), (125, "\u{f701}", 0.85)] {
+                try await arrow(code, characters, flags: flags)
+                XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), expected, accuracy: 0.0001,
+                               "Arrow keys must retain one-step movement with hardware flags \(flags.rawValue)")
+            }
+        }
+        for (raw, expected) in [(0.873, 0.85), (0.878, 0.90), (0.712, 0.70), (0.992, 1.0)] {
+            slider.object.setValue(raw, forKey: "accessibilityValue")
+            try await settle(controller.view)
+            XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), expected, accuracy: 0.0001,
+                           "Slider value writes retain the existing nearest-step rounding")
+        }
+        try await arrow(124, "\u{f703}", flags: [.numericPad, .function, .capsLock])
+        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 1.0, accuracy: 0.0001)
+        preferences.backgroundOpacityBinding.wrappedValue = 0.70
+        try await settle(controller.view)
+        try await arrow(123, "\u{f702}", flags: [.numericPad, .function, .capsLock])
+        XCTAssertEqual(store.double(forKey: "floatingBackgroundOpacity"), 0.70, accuracy: 0.0001)
+        _ = try capture(controller.view, "uifix2-opacity-keyboard")
     }
 
     func testFloatingLockBadgeReplacesTheSizeMenuInsideTheHeader() async throws {
         let (model, store) = try fixture()
         model.loadPresentationForTesting(phase: .recording, evidence: [], preview: "Synthetic caption.")
         let windowController = FloatingSubtitleWindowController(defaults: store)
-        let controller = try await host(FloatingSubtitleView(windowController: windowController)
+        let classMode = classModeFixture(store: store, floating: windowController)
+        let controller = try await host(FloatingSubtitleView(windowController: windowController, classModeController: classMode)
             .environmentObject(model).defaultAppStorage(store), dark: true)
         _ = try node("floating-size-menu", in: controller.view)
+        _ = try capture(controller.view, "uifix2-floating-unlocked")
         windowController.toggleLock()
         try await settle(controller.view)
-        let badge = try textNode("字幕窗已锁定，点击穿透；可用菜单栏图标、主窗口或 ⇧⌘L 解锁", in: controller.view).frame
+        _ = try capture(controller.view, "uifix2-floating-locked")
+        let badge = try textNode("字幕窗已锁定，点击穿透；可用主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）", in: controller.view).frame
         let header = try textNode(model.floatingSubtitleHeader, in: controller.view).frame
         XCTAssertEqual(badge.midY, header.midY, accuracy: 2)
         XCTAssertFalse(nodes(controller.view).contains { $0.id == "floating-size-menu" })
@@ -580,6 +709,80 @@ final class AccessibilityRegressionTests: XCTestCase {
 
     /// Issue #27: notes render line by line, so a fenced code line has no
     /// backticks of its own; its `$` and those in inline code must survive.
+    func testToolbarLockHasStableAccessibleNameAndAnIndependentToggleValue() async throws {
+        let (model, store) = try fixture()
+        let floating = FloatingSubtitleWindowController(defaults: store)
+        defer { floating.shutdown() }
+        let controller = try await host(ContentView(floatingWindow: floating).environmentObject(model).defaultAppStorage(store),
+                                        width: 1260, height: 780, titled: true)
+        for locked in [false, true] {
+            if floating.isLocked != locked { floating.toggleLock() }
+            try await settle(controller.view)
+            let control = try node("classroom-floating-lock", in: controller.view)
+            XCTAssertEqual(control.value("accessibilityLabel") as? String, "锁定悬浮字幕")
+            XCTAssertEqual((control.value("accessibilityValue") as? NSNumber)?.boolValue, locked)
+            XCTAssertEqual(control.value("accessibilityHelp") as? String,
+                           floating.lockActionTitle + "（⇧⌘L）；锁定后点击穿过字幕窗")
+            let frame = try XCTUnwrap(controller.view.window?.contentView?.superview)
+            _ = try capture(frame, "uifix2-toolbar-\(locked ? "locked" : "unlocked")")
+        }
+    }
+
+    func testQueuedPersistenceFailuresRenderTheirCategoryWithoutInventingFailedTasks() async throws {
+        for reportFailure in [false, true] {
+            let root = TestFixtureDirectory.root.appendingPathComponent("uifix2-persistence-\(UUID())", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let journalParent = root.appendingPathComponent("journal", isDirectory: true)
+            let queue = LearningReviewQueue(journalURL: journalParent.appendingPathComponent("queue.json"),
+                observeSleep: false, diagnostics: .disabled) { _, _, _, _, _ in
+                    XCTFail("A blocked persistence fixture must never generate notes")
+                    throw CancellationError()
+                }
+            addTeardownBlock { await queue.shutdownForTesting() }
+            var book = LearningNotebook()
+            try book.append(evidence: [.init(startTime: 0, endTime: 8, english: "Synthetic evidence", chinese: "合成证据")],
+                            note: .init(topic: "合成课程", points: [.init(kind: "核心结论", text: "合成要点。")]))
+            let (_, store) = try fixture()
+            let model = AppModel(reviewQueue: queue, translation: .unavailable, notes: .unavailable,
+                                 backgroundServices: false, scheduledNotes: false, defaults: store)
+            model.loadPresentationForTesting(phase: .saved(root), evidence: [], notebook: book)
+            queue.setContext(recording: true, concurrent: false, resourcesAvailable: true)
+            try queue.enqueue(directory: root, notebook: book)
+            // Admission has validated the empty recording directory. Block only
+            // the real asynchronous report writer before it gets a MainActor turn.
+            if reportFailure {
+                try FileManager.default.createDirectory(at: root.appendingPathComponent("summary-review.md"),
+                                                        withIntermediateDirectories: false)
+            }
+            if !reportFailure {
+                try await queue.waitForPendingStorage()
+                try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: journalParent.path)
+                queue.togglePause()
+            }
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: journalParent.path) }
+            do { try await queue.waitForPendingStorage(); XCTFail("The owned write must fail") }
+            catch { }
+            XCTAssertTrue(queue.hasWork)
+            XCTAssertFalse(queue.running)
+            XCTAssertEqual(queue.items.count, 1)
+            XCTAssertEqual(queue.items.filter { $0.failure != nil }.count, 0)
+            let failure = try XCTUnwrap(queue.currentFailure)
+            XCTAssertEqual(queue.status, failure)
+            XCTAssertFalse(queue.status.contains("1 项需要处理"))
+            if reportFailure { XCTAssertTrue(failure.hasPrefix("复查文件不可写，已暂停：")) }
+            else { XCTAssertTrue(failure.hasPrefix("复查进度保存失败，已暂停：")) }
+            let category = reportFailure ? "report" : "journal"
+            let overview = try await host(LearningReviewControls(model: model, showingQueueManager: .constant(false)),
+                                          width: 700, height: 480)
+            let manager = try await host(LearningReviewControls(model: model, showingQueueManager: .constant(true)),
+                                         width: 700, height: 480)
+            _ = try textNode(failure, in: overview.view)
+            _ = try textNode(failure, in: manager.view)
+            _ = try capture(overview.view, "uifix2-persistence-\(category)-overview")
+            _ = try capture(manager.view, "uifix2-persistence-\(category)-manager")
+        }
+    }
+
     func testA04NotesKeepDollarSignsInsideCode() async throws {
         let text = "jQuery 写 `$(document)` 和 `$(window)`。\n```sh\necho $HOME $PATH\n```\n速度 $v^2$"
         let controller = try await host(SummaryMarkdownView(text: text).padding(16).background(Color.white),
@@ -873,4 +1076,29 @@ final class AccessibilityRegressionTests: XCTestCase {
                              "reverse_classes": reverse.map { String(describing: type(of: $0)) }])
         _ = try capture(controller.view, "keyboard-candidate-focus-route")
     }
+}
+
+/// Keeps settings and subtitle hints independent of the process-wide singleton.
+/// Policy, status-bar and activation operations never reach the real app.
+@MainActor
+private final class AccessibilityClassModeApplication: FullScreenApplicationControlling {
+    var activationPolicy: NSApplication.ActivationPolicy = .regular
+    func setActivationPolicy(_ policy: NSApplication.ActivationPolicy) -> Bool {
+        activationPolicy = policy
+        return true
+    }
+    func windowSnapshot() -> FullScreenApplicationWindowSnapshot {
+        .init(hasWindows: false, wasKey: false, restore: {})
+    }
+    func registerMainWindow(_ window: NSWindow, reopen: @escaping () -> Void) {}
+    func showMainWindow() { XCTFail("This fixture must not show a main window") }
+    func activate() {} // Controller shutdown may restore its injected policy.
+    func requestTermination() { XCTFail("This fixture must not terminate the application") }
+}
+
+@MainActor
+private final class AccessibilityClassModeStatusItem: FullScreenStatusItemPresenting {
+    func install(menu: NSMenu, appearance: FullScreenStatusAppearance) -> Bool { true }
+    func update(appearance: FullScreenStatusAppearance) {}
+    func remove() {}
 }

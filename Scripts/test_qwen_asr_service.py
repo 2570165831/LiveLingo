@@ -467,6 +467,37 @@ class ParakeetConfidenceTests(unittest.TestCase):
         model.generate.assert_called_once_with('synthetic.wav', verbose=False)
 
 
+class ParakeetWordSpanTests(unittest.TestCase):
+    def result(self, text, tokens):
+        return SimpleNamespace(text=text, sentences=[SimpleNamespace(tokens=[
+            SimpleNamespace(text=t, start=a, end=b) for t, a, b in tokens])])
+
+    def test_subwords_reconstruct_words_with_first_and_last_token_times(self):
+        result = self.result("before fresh targets.", [
+            ("before", .16, .48), (" fre", .48, .56), ("sh", .56, .72),
+            (" targets", .72, 1.6), (".", 1.6, 1.68)])
+        self.assertEqual(service.parakeet_word_spans(result), {"pk_word_spans": [
+            {"text": "before", "start": .16, "end": .48},
+            {"text": "fresh", "start": .48, "end": .72},
+            {"text": "targets.", "start": .72, "end": 1.68}]})
+
+    def test_true_repeated_words_keep_separate_timestamps(self):
+        result = self.result("go go", [("go", .16, .48), (" go", .48, .72)])
+        self.assertEqual([s["start"] for s in service.parakeet_word_spans(result)["pk_word_spans"]], [.16, .48])
+
+    def test_missing_invalid_or_misaligned_metadata_is_omitted(self):
+        for result in (SimpleNamespace(text="old"),
+                self.result("x", [("x", float("nan"), 1)]),
+                self.result("x", [("x", 1, .5)]),
+                self.result("other", [("x", 0, 1)])):
+            self.assertEqual(service.parakeet_word_spans(result), {})
+
+    def test_service_returns_spans_without_confidence_api(self):
+        model = SimpleNamespace(generate=Mock(return_value=self.result("fresh", [("fresh", .48, .72)])))
+        self.assertEqual(service.transcribe_parakeet(model, "synthetic.wav")["pk_word_spans"],
+            [{"text": "fresh", "start": .48, "end": .72}])
+
+
 class ProbePrecisionTests(unittest.TestCase):
     cases = ((16.0, 12.5, -8.0), (1000.0, 992.0, 968.0), (-1000.0, -1008.0, -1024.0))
 

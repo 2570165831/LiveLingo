@@ -6030,8 +6030,11 @@ final class LearningReviewQueue: ObservableObject {
         guard let job = jobs.first else { status = persistenceFailure ?? ""; return }
         // 实测（2026-09-18，本机）：9B 思考复查约 306 秒/批（255 秒素材 2 批的平均）。
         let progress = Self.reportProgress(next: job.next, total: job.batches.count, scope: job.scope)
-        if persistenceFailure != nil || job.failure != nil {
-            let failedCount = max(1, jobs.filter { $0.failure != nil }.count)
+        if let persistenceFailure {
+            status = persistenceFailure
+        }
+        else if job.failure != nil {
+            let failedCount = jobs.filter { $0.failure != nil }.count
             status = "\(failedCount) 项需要处理 · 已暂停"
         }
         // A manual pause blocks the retry, so it must not read as "retrying";

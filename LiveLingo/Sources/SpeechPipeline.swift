@@ -66,6 +66,15 @@ private final class LegacySpeechPreview: @unchecked Sendable {
         }
     }
 
+    func restartForCourseBoundary() {
+        lock.withLock {
+            generation = UUID()
+            request?.endAudio(); task?.cancel()
+            request = nil; task = nil
+            requestStart = elapsed
+        }
+    }
+
     func stop() {
         lock.withLock {
             stopped = true
@@ -130,6 +139,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     enum Event: Sendable {
         case audioLevel(Float)
+        case alarmSound(AlarmSoundObservation)
+        case alarmAnalysisUnavailable
         /// `observedAt` is this pipeline's uptime when the observation was
         /// emitted, so the receiver can measure its own main-thread queueing.
         case volatile(text: String, start: TimeInterval, end: TimeInterval, observedAt: TimeInterval)
@@ -148,6 +159,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         case failure(String)
         case rejectedTranscript
         case transcriptionIssue(start: TimeInterval, end: TimeInterval, message: String)
+        /// A later complete verdict withdrew a missing-transcription warning.
+        case transcriptionIssueResolved(start: TimeInterval, end: TimeInterval)
         /// This range is terminal non-English speech: counted, not reported as an error.
         case nonEnglishSpeech(start: TimeInterval, end: TimeInterval)
     }
@@ -224,7 +237,15 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     private let stateLock = NSLock()
-    private let transcriptionQueue: TranscriptionQueue
+    private var queueStorage: TranscriptionQueue
+    private var transcriptionQueue: TranscriptionQueue { stateLock.withLock { queueStorage } }
+    private let transcriptionQueueFactory: @Sendable () -> TranscriptionQueue
+    private var alarmDetectionRequested = false
+    private var alarmAnalyzer: AlarmSoundAnalyzer?
+    private var alarmAnalysisID = UUID()
+    private var alarmWrittenFrames: AVAudioFramePosition = 0
+    private var activityAudioOffset: TimeInterval = 0
+    private var previewAudioOffset: TimeInterval = 0
     private let microphoneRecoveryQueue = DispatchQueue(label: "LiveLingo.MicrophoneRecovery")
     private let previewLocale = Locale(identifier: "en-US")
     private var audioEngine: (any MicrophoneCaptureEngine)?
@@ -322,6 +343,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
     private var previewAnalysisTask: Task<Void, Never>?
     private var previewResultTask: Task<Void, Never>?
+    private var endedModernPreviewInputGeneration: UUID?
     private var previewObservations: [AuxiliaryTranscriptObservation] = []
     private var activityDetector: SpeechActivityDetector?
     private var boundaryPolicy = CausalBoundaryPolicy()
@@ -361,6 +383,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     static let systemAudioRouteDebounce: TimeInterval = 0.75
 
     init(transcriber: TranscriptionQueue.Transcriber? = nil,
+         existingQueue: TranscriptionQueue? = nil,
          beforeAudioWrite: (@Sendable () throws -> Void)? = nil,
          beforeChunkOpen: (@Sendable () throws -> Void)? = nil,
          beforeChunkWrite: (@Sendable () throws -> Void)? = nil,
@@ -401,7 +424,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         self.beforeChunkWrite = beforeChunkWrite
         self.enableAudioAnalysis = enableAudioAnalysis
         self.captureSleepNotificationCenter = captureSleepNotificationCenter ?? NSWorkspace.shared.notificationCenter
-        transcriptionQueue = transcriber.map { TranscriptionQueue(transcriber: $0) } ?? TranscriptionQueue()
+        transcriptionQueueFactory = { transcriber.map { TranscriptionQueue(transcriber: $0) } ?? TranscriptionQueue() }
+        queueStorage = existingQueue ?? transcriptionQueueFactory()
         super.init()
         boundarySignal = DispatchSource.makeUserDataAddSource(queue: audioProcessingQueue)
         boundarySignal.setEventHandler { [weak self] in self?.rotateReadyChunk() }
@@ -632,6 +656,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             await stopCapture(continueTranscribing: false)
             throw error
         }
+        refreshAlarmAnalysis()
         if inputMode == .microphone { startMicrophoneHealthMonitoring() }
         else { startSystemAudioHealthMonitoring() }
         startCaptureSleepMonitoring()
@@ -807,6 +832,166 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         if !running { input.seal(); await source.stop(); throw CancellationError() }
     }
 
+    func setAlarmDetectionEnabled(_ enabled: Bool) {
+        stateLock.withLock { alarmDetectionRequested = enabled }
+        if enabled { refreshAlarmAnalysis() } else { retireAlarmAnalysis() }
+    }
+
+    private func retireAlarmAnalysis() {
+        let previous = stateLock.withLock { () -> AlarmSoundAnalyzer? in
+            alarmAnalysisID = UUID()
+            let value = alarmAnalyzer; alarmAnalyzer = nil; return value
+        }
+        previous?.stop()
+    }
+
+    private func refreshAlarmAnalysis() {
+        let context = stateLock.withLock { () -> (AVAudioFormat, UUID, UUID)? in
+            guard alarmDetectionRequested, inputMode == .microphone, captureConfigured,
+                  !capturePaused, !isStopping, alarmAnalyzer == nil, let format = inputFormat else { return nil }
+            return (format, generation, alarmAnalysisID)
+        }
+        guard let (format, token, id) = context else { return }
+        do {
+            let analyzer = try AlarmSoundAnalyzer(format: format, handler: { [weak self] observation in
+                let handler = self?.stateLock.withLock { () -> (@Sendable (Event) -> Void)? in
+                    guard let self, self.generation == token, self.alarmAnalysisID == id,
+                          self.inputMode == .microphone, !self.capturePaused, !self.isStopping else { return nil }
+                    return self.eventHandler
+                }
+                handler?(.alarmSound(observation))
+            }, failed: { [weak self] in
+                let handler = self?.stateLock.withLock { () -> (@Sendable (Event) -> Void)? in
+                    guard let self, self.generation == token, self.alarmAnalysisID == id else { return nil }
+                    return self.eventHandler
+                }
+                handler?(.alarmAnalysisUnavailable)
+                self?.retireAlarmAnalysis()
+            })
+            let accepted = stateLock.withLock { () -> Bool in
+                guard generation == token, alarmAnalysisID == id, alarmDetectionRequested,
+                      !capturePaused, !isStopping, alarmAnalyzer == nil else { return false }
+                alarmAnalyzer = analyzer; alarmWrittenFrames = 0
+                return true
+            }
+            if !accepted { analyzer.stop() }
+        } catch {
+            stateLock.withLock { eventHandler }?(.alarmAnalysisUnavailable)
+        }
+    }
+
+    var alarmQueueForArchive: DurableTranscriptionQueue { transcriptionQueue }
+    var alarmCaptureIsActive: Bool { stateLock.withLock { captureConfigured && !isStopping } }
+
+    struct AlarmRolloverResult: Sendable {
+        let previousQueue: TranscriptionQueue
+        let previousDuration: TimeInterval
+        let previousFrames: Int64
+        let sampleRate: Double
+        let switchMilliseconds: Double
+        let nextCaptureStart: SessionCaptureStart?
+        var queueFinalizationFailed = false
+    }
+
+    /// Serialize a user's cancellation with the irreversible writer boundary.
+    /// Cancellation can win until the boundary actually starts, including while
+    /// the async queue preparation is suspended.
+    final class AlarmRolloverCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        private var committed = false
+        func cancel() { lock.withLock { if !committed { cancelled = true } } }
+        func check() throws { try lock.withLock { if cancelled { throw CancellationError() } } }
+        func commit<T>(_ operation: () throws -> T) throws -> T {
+            try lock.withLock {
+                if cancelled { throw CancellationError() }
+                let result = try operation()
+                committed = true
+                return result
+            }
+        }
+    }
+
+    /// Switch two exclusive PCM writers on the capture consumer's serial lane.
+    /// The device and its tap never stop. Buffers before/after this barrier go
+    /// into exactly one course; the next ASR queue stays parked until UI binding.
+    func rolloverForAlarm(recordingURL: URL, sessionID nextID: UUID,
+                          cancellation: AlarmRolloverCancellation = AlarmRolloverCancellation(),
+                          eventHandler nextHandler: @escaping @Sendable (Event) -> Void) async throws -> AlarmRolloverResult {
+        let context = try stateLock.withLock { () throws -> (AVAudioFormat, UUID, TranscriptionQueue, QwenModelProfile) in
+            guard captureConfigured, inputMode == .microphone, !capturePaused, !isStopping,
+                  persistsSession, let format = inputFormat else { throw PipelineError.noActiveSession }
+            return (format, generation, queueStorage, profile)
+        }
+        let (format, token, previousQueue, preparedProfile) = context
+        try await previousQueue.pause()
+        try cancellation.check()
+        try beforeChunkOpen?()
+        let root = recordingURL.deletingLastPathComponent()
+        let nextQueue = transcriptionQueueFactory()
+        try await nextQueue.configure(directory: root, sessionID: nextID, persistent: true,
+            identified: true, startPaused: true, handler: nextHandler)
+        try cancellation.check()
+        let chunks = root.appendingPathComponent(DurableTranscriptionJournal.directoryName, isDirectory: true)
+        let full = try SecureAudioWriter(forWriting: recordingURL, format: format)
+        var committed = false
+        defer { if !committed { try? full.close() } }
+        let id = UUID()
+        let chunkURL = chunks.appendingPathComponent("chunk-" + id.uuidString + ".wav")
+        try DurableTranscriptionJournal.stageCapture(CaptureChunkDescriptor(id: id, sessionID: nextID,
+            ordinal: 0, audioFile: chunkURL.lastPathComponent, recordingFile: recordingURL.lastPathComponent,
+            startFrame: 0, sampleRate: format.sampleRate, modelKey: preparedProfile.asrKey,
+            fallbackModelKey: preparedProfile.fallbackASRKey), directory: chunks)
+        let chunk = try SecureAudioWriter(forWriting: chunkURL, format: format)
+        defer { if !committed { try? chunk.close() } }
+        let result: AlarmRolloverResult = try await withCheckedThrowingContinuation { continuation in
+            audioProcessingQueue.async { [self] in
+                do {
+                    var result = try cancellation.commit { try stateLock.withLock { () throws -> (FlushSnapshot, AlarmRolloverResult) in
+                        guard generation == token, captureConfigured, !capturePaused, !isStopping,
+                              queueStorage === previousQueue else { throw PipelineError.noActiveSession }
+                        let started = ProcessInfo.processInfo.systemUptime
+                        let elapsed = capturedAudioDuration, frames = writtenFrames
+                        _ = boundaryPolicy.finish(at: elapsed)
+                        let tail = rotateCurrentChunkLocked(elapsed: elapsed, openNext: false)
+                        try recordingFile?.close()
+                        activityAudioOffset += elapsed; previewAudioOffset += elapsed
+                        recordingFile = full; chunkFile = chunk; self.chunkURL = chunkURL
+                        chunkDirectory = chunks; sessionRecordingURL = recordingURL
+                        self.sessionID = nextID; identifiedEvents = true
+                        queueStorage = nextQueue; self.eventHandler = nextHandler
+                        writtenFrames = 0; capturedAudioDuration = 0; chunkStartedAt = 0; chunkStartFrame = 0
+                        chunkCaptureStart = nil; nextChunkIndex = 1; chunkID = id; chunkOpenFailure = nil
+                        previewObservations = []; boundaryPolicy = CausalBoundaryPolicy()
+                        firstAudioWriteUptime = nil; firstPreviewResultUptime = nil
+                        let result = AlarmRolloverResult(previousQueue: previousQueue, previousDuration: elapsed,
+                            previousFrames: frames, sampleRate: format.sampleRate,
+                            switchMilliseconds: (ProcessInfo.processInfo.systemUptime - started) * 1_000,
+                            nextCaptureStart: .now())
+                        return (tail, result)
+                    } }
+                    stateLock.withLock { legacyPreview }?.restartForCourseBoundary()
+                    if let job = result.0.job, let handler = result.0.handler { previousQueue.submit(job, handler: handler) }
+                    do {
+                        try previousQueue.setCapturing(false)
+                        try previousQueue.recoverRecordingTail()
+                        try nextQueue.setCapturing(true)
+                    } catch { result.1.queueFinalizationFailed = true }
+                    continuation.resume(returning: result.1)
+                } catch {
+                    // Retain both trees; a failed post-boundary close is surfaced
+                    // through the capture failure path, never discard either audio.
+                    if stateLock.withLock({ chunkFile == nil }) {
+                        failCapture("警报分段未完成；现有录音已保留。", generation: token)
+                    }
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+        committed = true
+        return result
+    }
+
     static func systemAudioConfiguration() -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
         configuration.width = 2
@@ -822,6 +1007,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
 
     func pause() {
+        retireAlarmAnalysis()
         let engine = stateLock.withLock { () -> (any MicrophoneCaptureEngine)? in
             capturePaused = true
             ingress?.setPaused(true)
@@ -851,6 +1037,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             return (mode, generation, audioEngine, microphoneNeedsRecovery || !microphoneTapInstalled)
         }
         guard let (mode, token, engine, needsRecovery) = context else { throw PipelineError.noActiveSession }
+        refreshAlarmAnalysis()
         switch mode {
         case .microphone:
             guard let engine else { throw PipelineError.noActiveSession }
@@ -1005,6 +1192,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 guard stateLock.withLock({ generation == token }) else { continuation.resume(); return }
                 let detector = stateLock.withLock { let d = activityDetector; activityDetector = nil; return d }
                 detector?.finish()
+                setAlarmDetectionEnabled(false)
                 flushChunkOnConsumer(openNext: false, finishBoundary: true)
                 let recordingCloseError = stateLock.withLock { () -> Error? in
                     var closeError: Error?
@@ -1107,6 +1295,9 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         if firstAudioWriteUptime == nil { firstAudioWriteUptime = capturedSpan?.observedStart ?? now }
         let legacy = legacyPreview
         let detector = activityDetector
+        let alarm = alarmAnalyzer
+        let alarmPosition = alarmWrittenFrames
+        alarmWrittenFrames += AVAudioFramePosition(buffer.frameLength)
         let statistics = Self.audioStatistics(from: buffer)
         let level = waveformMeter.consume(sumSquares: statistics.sumSquares, count: statistics.count,
             peak: statistics.peak, duration: Double(buffer.frameLength) / buffer.format.sampleRate)
@@ -1140,6 +1331,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             waveformHandler(.audioLevel(level ?? 0))
         }
 
+        alarm?.submit(buffer, at: alarmPosition)
         if enableAudioAnalysis, let owned = Self.ownedAnalysisCopy(buffer) {
             detector?.analyze(owned)
             if #available(macOS 27, *) { writeModernPreview(owned, at: audioTime) }
@@ -1170,10 +1362,24 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         let (converter, continuation) = stateLock.withLock { (previewConverter, previewInputContinuation) }
         guard let converter, let continuation else { return }
         do {
-            for input in try converter.convert(buffer, at: audioTime) {
+            let inputs = try converter.convert(buffer, at: audioTime)
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.convert(inputs, sourceFrames: Int(buffer.frameLength),
+                sourceRate: buffer.format.sampleRate, sourceEnd: stateLock.withLock { capturedAudioDuration })
+            #endif
+            for input in inputs {
+                #if LIVELINGO_DROP_PROBE
+                let result = continuation.yield(input)
+                if case .dropped(let dropped) = result { PreviewDropProbe.shared.dropped(dropped) }
+                if case .terminated = result { PreviewDropProbe.shared.input("terminated", input) }
+                #else
                 continuation.yield(input)
+                #endif
             }
         } catch {
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.record(["event": "converter_error", "error": String(describing: error)])
+            #endif
             stateLock.withLock {
                 previewConverter = nil
                 previewInputContinuation = nil
@@ -1310,41 +1516,70 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             try requireStartup(token)
             try await analyzer.prepareToAnalyze(in: nil)
             try requireStartup(token)
-            let input = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(2))
+            #if LIVELINGO_DROP_PROBE
+            let input = PreviewDropProbe.shared.lossless
+                ? SpeechPreviewInputQueue.makeStream(of: AnalyzerInput.self)
+                : AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(2))
+            #else
+            let input = SpeechPreviewInputQueue.makeStream(of: AnalyzerInput.self)
+            #endif
             let stream = input.stream
             let inputContinuation = input.continuation
 
-            let resultTask = Task { [weak self] in
-                guard self?.ownsPreview(token) == true else { return }
-                do {
-                    for try await result in transcriber.results {
-                        guard !Task.isCancelled else { break }
-                        let text = String(result.text.characters)
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !text.isEmpty else { continue }
-                        let start = result.range.start.seconds.isFinite
-                            ? result.range.start.seconds
-                            : 0
-                        let duration = result.range.duration.seconds.isFinite
-                            ? result.range.duration.seconds
-                            : 0
-                        self?.emitStreamingPreview(
-                            text: text,
-                            start: start,
-                            end: start + duration,
-                            generation: token
-                        )
-                    }
-                } catch {
-                    return
+            let resultTask = makeModernPreviewResultTask(generation: token) { [weak self] in
+                for try await result in transcriber.results {
+                    guard !Task.isCancelled else { break }
+                    let text = String(result.text.characters)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    let start = result.range.start.seconds.isFinite
+                        ? result.range.start.seconds
+                        : 0
+                    let duration = result.range.duration.seconds.isFinite
+                        ? result.range.duration.seconds
+                        : 0
+                    #if LIVELINGO_DROP_PROBE
+                    PreviewDropProbe.shared.record(["event": "apple_result", "text": text,
+                        "start": start, "end": start + duration, "final": result.isFinal])
+                    #endif
+                    self?.emitStreamingPreview(
+                        text: text,
+                        start: start,
+                        end: start + duration,
+                        generation: token
+                    )
                 }
             }
 
             let analysisTask = Task { [weak self] in
                 guard self?.ownsPreview(token) == true else { return }
                 do {
+                    #if LIVELINGO_DROP_PROBE
+                    if PreviewDropProbe.shared.stallConsumer {
+                        // A cancellable test replacement takes one input, then
+                        // stops pulling without reporting an analyzer failure.
+                        var iterator = stream.makeAsyncIterator()
+                        if let value = await iterator.next() {
+                            PreviewDropProbe.shared.input("consumed", value)
+                            PreviewDropProbe.shared.record(["event": "analyzer_replacement_stalled"])
+                            try await Task.sleep(for: .seconds(86_400))
+                        }
+                    } else {
+                        try await analyzer.start(inputSequence: stream.map { value in
+                            PreviewDropProbe.shared.input("consumed", value)
+                            return value
+                        })
+                    }
+                    #else
                     try await analyzer.start(inputSequence: stream)
+                    #endif
                 } catch {
+                    // start() can return while the analyzer keeps consuming.
+                    // Close input on failure, not on a normal start return.
+                    self?.endModernPreviewInput(generation: token)
+                    #if LIVELINGO_DROP_PROBE
+                    PreviewDropProbe.shared.record(["event": "analyzer_error", "error": String(describing: error)])
+                    #endif
                     return
                 }
             }
@@ -1367,11 +1602,26 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         }
     }
 
+    @available(macOS 27, *)
+    private func makeModernPreviewResultTask(generation token: UUID,
+                                            consume: @escaping @Sendable () async throws -> Void) -> Task<Void, Never> {
+        Task { [weak self] in
+            guard self?.ownsPreview(token) == true else { return }
+            do { try await consume() }
+            catch {
+                // Without results, preview audio has no usable consumer. The
+                // generation guard also covers failure before task publication.
+                self?.endModernPreviewInput(generation: token)
+            }
+        }
+    }
+
     @discardableResult
     private func publishPreviewTasks(result: Task<Void, Never>, analysis: Task<Void, Never>, generation token: UUID,
                                       install: (() -> Void)? = nil) -> Bool {
         let published = stateLock.withLock { () -> Bool in
-            guard generation == token, !isStopping, !Task.isCancelled else { return false }
+            guard generation == token, !isStopping, !Task.isCancelled,
+                  endedModernPreviewInputGeneration != token else { return false }
             install?()
             previewResultTask = result
             previewAnalysisTask = analysis
@@ -1382,6 +1632,20 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
     private func ownsPreview(_ token: UUID) -> Bool {
         stateLock.withLock { generation == token && !isStopping }
+    }
+
+    @available(macOS 27, *)
+    private func endModernPreviewInput(generation token: UUID) {
+        let continuation = stateLock.withLock { () -> AsyncStream<AnalyzerInput>.Continuation? in
+            guard generation == token else { return nil }
+            // Remember an early exit even when it races task publication.
+            endedModernPreviewInputGeneration = token
+            let value = previewInputContinuation
+            previewInputContinuation = nil
+            previewConverter = nil
+            return value
+        }
+        continuation?.finish()
     }
 
     private func emitStreamingPreview(text: String, start: TimeInterval, end: TimeInterval, generation token: UUID) {
@@ -1395,11 +1659,16 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             firstAudio: TimeInterval?
         ) in
             guard generation == token, !capturePaused, !isStopping else { return (nil, false, false, 0, 0, nil) }
+            guard start >= previewAudioOffset else { return (nil, false, false, 0, 0, nil) }
             let observation = AuxiliaryTranscriptObservation(
                 text: text,
-                start: max(0, start),
-                end: max(start, end)
+                start: max(0, start - previewAudioOffset),
+                end: max(start, end) - previewAudioOffset
             )
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.record(["event": "preview", "text": text, "start": start,
+                "end": end, "sourceEnd": capturedAudioDuration])
+            #endif
             if let replacementIndex = previewObservations.lastIndex(where: {
                 abs($0.start - observation.start) < 0.05
             }) {
@@ -1439,7 +1708,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                     observedAt: observedAt
                 )
             }
-            handler(.volatile(text: text, start: start, end: end, observedAt: observedAt))
+            let offset = stateLock.withLock { previewAudioOffset }
+            handler(.volatile(text: text, start: max(0, start - offset), end: max(0, end - offset), observedAt: observedAt))
         }
         evaluateBoundaryAndRotate()
     }
@@ -2108,7 +2378,12 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private func flushChunkOnConsumer(openNext: Bool, finishBoundary: Bool = false) {
         let snapshot = stateLock.withLock { () -> FlushSnapshot in
-            if finishBoundary { _ = boundaryPolicy.finish(at: capturedAudioDuration) }
+            if finishBoundary {
+                let decision = boundaryPolicy.finish(at: capturedAudioDuration)
+                #if LIVELINGO_DROP_PROBE
+                PreviewDropProbe.shared.boundary(decision)
+                #endif
+            }
             return rotateCurrentChunkLocked(elapsed: capturedAudioDuration, openNext: openNext)
         }
         if let job = snapshot.job, let handler = snapshot.handler { transcriptionQueue.submit(job, handler: handler) }
@@ -2147,6 +2422,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 writtenFrames = 0; chunkStartFrame = 0
                 chunkCaptureStart = nil; lastCaptureEnd = nil
                 captureConfigured = true
+                activityAudioOffset = 0; previewAudioOffset = 0
                 firstAudioWriteUptime = nil
                 firstPreviewResultUptime = nil
                 lastPreviewResultLogUptime = 0
@@ -2223,11 +2499,11 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private func receiveSpeechActivity(_ observation: SpeechActivityObservation, generation token: UUID) {
         stateLock.withLock {
-            guard generation == token, !isStopping else { return }
+            guard generation == token, !isStopping, observation.start >= activityAudioOffset else { return }
             boundaryPolicy.observeActivity(
                 speech: observation.speech,
-                start: observation.start,
-                end: observation.end
+                start: max(0, observation.start - activityAudioOffset),
+                end: max(0, observation.end - activityAudioOffset)
             )
         }
         evaluateBoundaryAndRotate()
@@ -2238,7 +2514,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private func rotateReadyChunk() {
         let snapshot = stateLock.withLock { () -> FlushSnapshot? in
             guard captureConfigured, !isStopping,
-                  boundaryPolicy.decision(at: capturedAudioDuration) != nil else { return nil }
+                  let decision = boundaryPolicy.decision(at: capturedAudioDuration) else { return nil }
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.boundary(decision)
+            #endif
             return rotateCurrentChunkLocked(elapsed: capturedAudioDuration, openNext: true)
         }
         if let snapshot, let job = snapshot.job, let handler = snapshot.handler {
@@ -2505,11 +2784,41 @@ extension SpeechPipeline {
             throw error
         }
     }
+    func bindSyntheticMicrophoneEngine(_ engine: any MicrophoneCaptureEngine) {
+        precondition(AppRuntimeEnvironment.isUnitTesting)
+        stateLock.withLock {
+            precondition(captureConfigured && !isStopping && inputMode == .microphone && audioEngine == nil)
+            audioEngine = engine
+            microphoneTapInstalled = true
+            microphoneNeedsRecovery = false
+        }
+    }
     func startSyntheticPreview(prepare: @Sendable () async -> Void,
                                result: Task<Void, Never>, analysis: Task<Void, Never>) async {
         let token = stateLock.withLock { generation }
         await prepare()
         publishPreviewTasks(result: result, analysis: analysis, generation: token)
+    }
+    @available(macOS 27, *)
+    func startSyntheticModernPreviewResult(
+        beforePublish: @Sendable (Task<Void, Never>) async -> Void = { _ in },
+        consume: @escaping @Sendable () async throws -> Void
+    ) async -> (stream: AsyncStream<AnalyzerInput>, continuation: AsyncStream<AnalyzerInput>.Continuation,
+                result: Task<Void, Never>, published: Bool) {
+        let token = stateLock.withLock { generation }
+        let input = SpeechPreviewInputQueue.makeStream(of: AnalyzerInput.self)
+        let result = makeModernPreviewResultTask(generation: token, consume: consume)
+        let analysis = Task {}
+        await beforePublish(result)
+        let published = publishPreviewTasks(result: result, analysis: analysis, generation: token) {
+            self.previewInputContinuation = input.continuation
+        }
+        if !published { input.continuation.finish() }
+        return (input.stream, input.continuation, result, published)
+    }
+    @available(macOS 27, *)
+    var syntheticModernPreviewInputIsOpen: Bool {
+        stateLock.withLock { previewInputContinuation != nil }
     }
     func checkSyntheticCaptureHealth(now: TimeInterval) {
         let (token, mode) = stateLock.withLock { (generation, inputMode) }
@@ -2540,6 +2849,9 @@ extension SpeechPipeline {
 
 #if LIVELINGO_CLI
 extension SpeechPipeline {
+    #if LIVELINGO_DROP_PROBE
+    func cliProbePrepare() async -> Bool { await prepareStreamingPreviewModel() }
+    #endif
     /// Feeds the same post-capture PCM path without opening an output device.
     func cliReplay(file: URL, recordingURL: URL, sessionID: UUID,
                    eventHandler: @escaping @Sendable (Event) -> Void) async throws {
@@ -2559,10 +2871,15 @@ extension SpeechPipeline {
         // after this anchor, rather than starting at the first result itself.
         let replayClock = Logger(subsystem: "com.jianhongli.LiveLingo", category: "ReplayClock")
         replayClock.notice("replay event=start sample_rate=\(Int(audio.processingFormat.sampleRate)) frames=\(audio.length)")
+        #if LIVELINGO_DROP_PROBE
+        let replayBlockSeconds = PreviewDropProbe.shared.blockSeconds
+        #else
+        let replayBlockSeconds = 0.05
+        #endif
         while audio.framePosition < audio.length {
             try Task.checkCancellation()
             guard let buffer = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
-                frameCapacity: AVAudioFrameCount(audio.processingFormat.sampleRate * 0.05)) else {
+                frameCapacity: AVAudioFrameCount(audio.processingFormat.sampleRate * replayBlockSeconds)) else {
                 throw PipelineError.invalidInputFormat
             }
             try audio.read(into: buffer)
@@ -2815,11 +3132,42 @@ enum WAVContextClip {
 enum RecordingDiagnostics {
     private static let lock = NSLock()
 
+    /// Withdraw only the missing warnings for this exact chunk. Other ranges,
+    /// retry history and unrecognized records remain byte-for-byte intact.
+    static func resolveMissing(recordingURL: URL?, start: TimeInterval, end: TimeInterval) {
+        guard let recordingURL, start.isFinite, end.isFinite else { return }
+        lock.withLock {
+            do {
+                let root = try SensitiveFileIO.Directory.open(at: recordingURL.deletingLastPathComponent(),
+                                                             create: false, tighten: false)
+                let name = "transcription-issues.jsonl"
+                guard let data = try root.readIfPresent(named: name) else { return }
+                var retained = Data()
+                var removed = false
+                let lines = data.split(separator: 0x0a, omittingEmptySubsequences: false)
+                for (index, line) in lines.enumerated() {
+                    let row = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+                    if row?["event"] as? String == "transcription_missing",
+                       row?["start"] as? Double == start, row?["end"] as? Double == end {
+                        removed = true
+                    } else {
+                        retained.append(contentsOf: line)
+                        if index < lines.count - 1 { retained.append(0x0a) }
+                    }
+                }
+                if removed { try root.atomicWrite(retained, named: name) }
+            } catch {
+                Logger(subsystem: "com.jianhongli.LiveLingo", category: "RecordingDiagnostics")
+                    .error("event=recording_diagnostic_resolution_failed code=\((error as NSError).code)")
+            }
+        }
+    }
+
     static func append(recordingURL: URL?, event: String, start: TimeInterval? = nil,
                        end: TimeInterval? = nil, detail: String, candidate: String? = nil,
                        reason: TranscriptionWorkRecord.FailureReason? = nil) {
         let logger = Logger(subsystem: "com.jianhongli.LiveLingo", category: "RecordingDiagnostics")
-        let knownEvents = ["transcription_missing", "transcription_non_english", "transcription_retry"]
+        let knownEvents = ["transcription_missing", "transcription_non_english", "transcription_retry", "transcription_no_speech"]
         let category = knownEvents.contains(event) ? event : "transcription_issue"
         logger.notice("event=\(category, privacy: .public) has_interval=\(start != nil && end != nil) reason=\(reason?.rawValue ?? "none", privacy: .public)")
         guard let recordingURL else { return }

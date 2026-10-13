@@ -279,6 +279,30 @@ enum SandboxProbe {
                 try Data().write(to: file)
                 try expectUnsafePath { _ = try SensitiveFileIO.Directory.open(at: file.appendingPathComponent("child"), create: true, tighten: false) }
             }
+            test("model_preclone_verify") {
+                let sourceRoot = base.appendingPathComponent("synthetic-bundled-models")
+                let source = sourceRoot.appendingPathComponent("probe-model")
+                try fm.createDirectory(at: source, withIntermediateDirectories: true)
+                let bytes = Data("Synthetic model bytes: no runtime, no real models".utf8)
+                try bytes.write(to: source.appendingPathComponent("weights.bin"))
+                let model = ModelStorageManifest.Model(name: "probe-model",
+                    version: "sha256-" + ModelStorage.sha256(bytes), sourceRelativePath: "probe-model",
+                    files: [.init(path: "weights.bin", size: Int64(bytes.count),
+                                  sha256: ModelStorage.sha256(bytes), sampleSHA256: ModelStorage.sha256(bytes))])
+                let destination = base.appendingPathComponent("Models")
+                let result = try ModelStorage.preclone(model, manifestSHA256: ModelStorage.sha256(bytes),
+                    bundledModels: sourceRoot, destinationModels: destination)
+                try require(result == .cloned, "clone was not published")
+                let published = destination.appendingPathComponent(model.name).appendingPathComponent(model.version)
+                let directory = try ModelStorage.Directory.open(published, owned: true)
+                try ModelStorage.verify(model, at: directory, verification: .fullSHA256, checkpoint: {})
+                try require(try directory.read("weights.bin") == bytes, "cloned bytes differ")
+                try require(try info(published.appendingPathComponent("weights.bin")).st_ino
+                    != info(source.appendingPathComponent("weights.bin")).st_ino, "clone is a hard link")
+                try require(try ModelStorage.preclone(model, manifestSHA256: ModelStorage.sha256(bytes),
+                    bundledModels: sourceRoot, destinationModels: destination) == .alreadyPresent,
+                    "repeat launch did not recognize committed clone")
+            }
             test("atomic_write_read") {
                 let file = base.appendingPathComponent("payload.json"), bytes = Data("synthetic payload".utf8)
                 try SensitiveFileIO.atomicWrite(bytes, to: file)

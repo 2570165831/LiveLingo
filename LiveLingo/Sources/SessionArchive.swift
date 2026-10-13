@@ -332,6 +332,9 @@ struct SessionProcessingState: Codable, Equatable, Sendable {
     var lastErrorSource: FailureSource?
     var captureError: String?
     var lastCapturedTime: TimeInterval?
+    /// Derived from the durable transcription journal, never an instruction to
+    /// retry. Nil when zero keeps older, unfiltered processing payloads intact.
+    var noSpeechCount: Int? = nil
 
     mutating func recordFailure(_ message: String, source: FailureSource) {
         if lastErrorSource == .capture, captureError == nil { captureError = lastError }
@@ -354,6 +357,7 @@ struct SessionProcessingState: Codable, Equatable, Sendable {
               Set(pendingBatchIDs).count == pendingBatchIDs.count,
               Set((pendingCaptionRepairs ?? []).map { $0.current.id }).count == (pendingCaptionRepairs ?? []).count,
               lastErrorSource == nil || lastError != nil,
+              noSpeechCount.map({ $0 >= 0 }) ?? true,
               lastCapturedTime.map({ $0.isFinite && $0 >= 0 && $0 <= TranscriptSegment.maximumTimestamp }) ?? true else {
             throw SessionStoreError.invalidState("待处理任务或采集进度无效")
         }
@@ -1177,6 +1181,9 @@ enum SessionArchiveCoding {
     /// Keep the frozen schema-1 payload and input fingerprints unchanged. The
     /// envelope/row gates old readers before they can discard new semantics.
     static func minimumReaderVersion(for data: Data) throws -> Int {
+        // noSpeechCount is an optional display cache. Work truth stays in the
+        // separate journal, whose noSpeech status has the terminal legacy
+        // spelling "silent"; no new session-reader gate is needed for this key.
         let captureTimeKeys: Set<String> = ["captureStartedAt", "captureUTCOffsetSeconds"]
         let modernKeys: Set<String> = ["targetLocale", "sourceLanguage", "captionAnnotation", "translationFailures",
             "pendingCaptionRepairs", "lastErrorSource", "captureError", "retireGenerationCheckpoint"]

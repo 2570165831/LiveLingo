@@ -63,6 +63,85 @@ final class FullScreenClassModeTests: XCTestCase {
         XCTAssertEqual(f.status.removeCount, 0)
     }
 
+    func testUnlockHintAvailabilityTracksSuccessfulStatusInstallationAndRemoval() throws {
+        let f = try FSCFixture(testCase: self, menuBarIcon: true)
+        XCTAssertTrue(f.controller.menuBarIconEnabled)
+        XCTAssertFalse(f.controller.statusInstalled, "A saved preference alone does not install the icon")
+        f.status.installSucceeds = false
+        f.controller.start()
+        XCTAssertFalse(f.controller.statusInstalled)
+        f.status.installSucceeds = true
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertTrue(f.controller.statusInstalled)
+        f.controller.setEnabled(true)
+        f.controller.setMenuBarIconEnabled(false)
+        XCTAssertTrue(f.controller.statusInstalled, "Class mode still owns the icon")
+        f.controller.setEnabled(false)
+        XCTAssertFalse(f.controller.statusInstalled)
+        f.controller.setMenuBarIconEnabled(true)
+        XCTAssertTrue(f.controller.statusInstalled)
+        f.controller.shutdown()
+        XCTAssertFalse(f.controller.statusInstalled)
+    }
+
+    func testUnlockHintsTrackModeAndIconChangesInMountedSettingsAndFloatingBadge() async throws {
+        let f = try FSCFixture(testCase: self)
+        let app = NSApplication.shared
+        let previous = app.value(forKey: "accessibilityEnhancedUserInterface")
+        app.setValue(true, forKey: "accessibilityEnhancedUserInterface")
+        defer { app.setValue(previous, forKey: "accessibilityEnhancedUserInterface") }
+        let floating = FloatingSubtitleWindowController(defaults: f.defaults)
+        floating.toggleLock()
+        defer { floating.shutdown() }
+        let settings = NSHostingView(rootView: ClassroomSettingsView(fullScreenMode: f.controller)
+            .environmentObject(f.model).defaultAppStorage(f.defaults))
+        let badge = NSHostingView(rootView: FloatingSubtitleView(windowController: floating, classModeController: f.controller)
+            .environmentObject(f.model).defaultAppStorage(f.defaults))
+        let settingsWindow = hiddenWindow(size: NSSize(width: 520, height: 1500))
+        let badgeWindow = hiddenWindow(size: NSSize(width: 640, height: 350))
+        settingsWindow.contentView = settings
+        badgeWindow.contentView = badge
+        defer { settingsWindow.close(); badgeWindow.close() }
+
+        func strings(in view: NSView) -> [String] {
+            var visited = Set<ObjectIdentifier>()
+            func walk(_ object: NSObject, depth: Int = 0) -> [String] {
+                guard depth < 30, visited.insert(ObjectIdentifier(object)).inserted else { return [] }
+                let text = ["accessibilityValue", "accessibilityLabel", "accessibilityHelp"].compactMap { key -> String? in
+                    object.responds(to: NSSelectorFromString(key)) ? object.value(forKey: key) as? String : nil
+                }
+                guard object.responds(to: NSSelectorFromString("accessibilityChildren")) else { return text }
+                return text + ((object.value(forKey: "accessibilityChildren") as? [NSObject]) ?? [])
+                    .flatMap { walk($0, depth: depth + 1) }
+            }
+            return walk(view)
+        }
+        func assertHints(_ controls: String, fullScreen: Bool = false,
+                         file: StaticString = #filePath, line: UInt = #line) async throws {
+            try await settle(settings)
+            try await settle(badge)
+            let suffix = "解锁（⇧⌘L，仅 LiveLingo 在前台时有效）"
+            let settingsText = strings(in: settings)
+            let badgeText = strings(in: badge)
+            XCTAssertTrue(settingsText.contains("可在\(controls)\(suffix)。"), file: file, line: line)
+            XCTAssertTrue(badgeText.contains("字幕窗已锁定，点击穿透；可用\(controls)\(suffix)"), file: file, line: line)
+            if fullScreen {
+                XCTAssertFalse((settingsText + badgeText).contains { $0.contains("“录音”菜单") }, file: file, line: line)
+            }
+            XCTAssertFalse(settingsWindow.isVisible, file: file, line: line)
+            XCTAssertFalse(badgeWindow.isVisible, file: file, line: line)
+        }
+        try await assertHints("主窗口或“录音”菜单")
+        f.controller.setMenuBarIconEnabled(true)
+        try await assertHints("菜单栏图标、主窗口或“录音”菜单")
+        f.controller.setEnabled(true)
+        try await assertHints("菜单栏图标或主窗口", fullScreen: true)
+        f.controller.setMenuBarIconEnabled(false)
+        try await assertHints("菜单栏图标或主窗口", fullScreen: true)
+        f.controller.setEnabled(false)
+        try await assertHints("主窗口或“录音”菜单")
+    }
+
     func testDisplayModeSubmenuWritesInjectedStoreAndMoveTopRoutesToPanel() throws {
         let f = try FSCFixture(testCase: self, menuBarIcon: true)
         f.controller.start()

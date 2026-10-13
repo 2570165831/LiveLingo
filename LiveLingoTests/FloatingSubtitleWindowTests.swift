@@ -57,6 +57,8 @@ final class FloatingSubtitleWindowTests: XCTestCase {
             XCTAssertFalse(FloatingSubtitleRecordStartObserver.shouldShow(previous: previous, next: .recording,
                                                                          importing: importing, enabled: enabled, visible: visible))
         }
+        XCTAssertFalse(FloatingSubtitleRecordStartObserver.shouldShow(previous: .preparing, next: .recording,
+            importing: false, enabled: true, visible: false, alarmRollover: true))
     }
 
     func testTopPlacementHandlesScreenOriginsShortScreensAndMargins() {

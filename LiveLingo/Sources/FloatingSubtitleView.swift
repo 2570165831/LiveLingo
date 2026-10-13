@@ -4,9 +4,11 @@ import SwiftUI
 struct FloatingSubtitleView: View {
     @EnvironmentObject private var model: AppModel
     var windowController: FloatingSubtitleWindowController = .shared
+    var classModeController: FullScreenClassModeController = .shared
 
     var body: some View {
-        FloatingSubtitleContent(model: model, stream: model.captionStream, windowController: windowController)
+        FloatingSubtitleContent(model: model, stream: model.captionStream, windowController: windowController,
+                                classModeController: classModeController)
     }
 }
 
@@ -14,6 +16,7 @@ private struct FloatingSubtitleContent: View {
     @ObservedObject var model: AppModel
     @ObservedObject var stream: LiveCaptionState
     @ObservedObject var windowController: FloatingSubtitleWindowController
+    @ObservedObject var classModeController: FullScreenClassModeController
 
     private var preferences = FloatingSubtitlePreferences()
     @AppStorage("transcriptTextSize") private var readingTextSize = 18.0
@@ -21,6 +24,15 @@ private struct FloatingSubtitleContent: View {
     private var scale: Double { ReadingTypography.scale(textSize: readingTextSize, dynamicType: dynamicTypeSize) }
     @State private var sourceLineMetrics = FloatingSubtitleLineMetrics()
     @State private var translationLineMetrics = FloatingSubtitleLineMetrics()
+
+    private var unlockHint: String {
+        "可用\(classModeController.subtitleUnlockControls)解锁（⇧⌘L，仅 LiveLingo 在前台时有效）"
+    }
+
+    private var lockStatusLabel: String {
+        guard let alarm = model.alarmBanner else { return "字幕窗已锁定，点击穿透；" + unlockHint }
+        return "字幕窗已锁定；提醒期间可点击“\(alarm.buttonTitle)”按钮，其他控件保持锁定"
+    }
 
     var body: some View {
         #if DEBUG
@@ -38,6 +50,9 @@ private struct FloatingSubtitleContent: View {
         let sourceHeight = presentation.source == nil ? 0 : presentation.translation == nil ? 226 : sourceBudget
         let translationHeight = presentation.translation == nil ? 0 : presentation.source == nil ? 226 : 226 - sourceBudget
         VStack(alignment: .leading, spacing: 14) {
+            if let alarm = model.alarmBanner {
+                AlarmBanner(state: alarm, dismiss: model.dismissAlarmReminder, compact: true)
+            }
             HStack {
                 Circle().fill(model.isRecording ? ClassroomPalette.recording : .gray).frame(width: 8, height: 8)
                 Text(model.floatingSubtitleHeader(for: presentation))
@@ -56,7 +71,7 @@ private struct FloatingSubtitleContent: View {
                     .help(model.isPaused ? "继续录音" : "暂停录音")
                     .accessibilityLabel(model.isPaused ? "继续录音" : "暂停录音")
                     .accessibilityIdentifier("floating-pause")
-                    .disabled(windowController.isLocked)
+                    .disabled(windowController.isLocked || !model.canPauseRecording)
                 }
                 Picker("悬浮字幕显示", selection: preferences.displayModeBinding) {
                     ForEach(FloatingSubtitleDisplayMode.allCases) { mode in
@@ -75,7 +90,8 @@ private struct FloatingSubtitleContent: View {
                         .font(.system(size: 12 * scale))
                         .foregroundStyle(Color(white: palette.headerWhite))
                         .allowsHitTesting(false)
-                        .accessibilityLabel("字幕窗已锁定，点击穿透；可用菜单栏图标、主窗口或 ⇧⌘L 解锁")
+                        .accessibilityLabel(lockStatusLabel)
+                        .accessibilityIdentifier("floating-lock-status")
                 } else {
                     Button { windowController.toggleLock() } label: {
                         Image(systemName: "lock.open")
@@ -85,7 +101,7 @@ private struct FloatingSubtitleContent: View {
                     .foregroundStyle(Color(white: palette.headerWhite))
                     .accessibilityLabel("锁定悬浮字幕")
                     .accessibilityIdentifier("floating-lock")
-                    .help("锁定后点击穿过；用菜单栏图标、主窗口或 ⇧⌘L 解锁")
+                    .help("锁定后点击穿过；" + unlockHint)
                     Menu {
                         if preferences.sizePreset == nil {
                             Button("自定义") {}.disabled(true)

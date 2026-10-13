@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import Darwin
 import Foundation
 import XCTest
@@ -21,8 +22,421 @@ private final class PrivacyExitRetryState {
 }
 
 @MainActor
+private final class RecordingQuitConsent {
+    var approved = false
+}
+
+@MainActor
 final class PrivacyExitTests: XCTestCase {
     private enum Failure: Error { case synthetic }
+
+    func testUnitTestPresentationSafetyKeepsUnshownWindowsTransparent() {
+        XCTAssertTrue(UnitTestPresentationSafety.isInstalled)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.alphaValue = 1
+        XCTAssertEqual(window.alphaValue, 0)
+        window.alphaValue = 0.75
+        XCTAssertEqual(window.alphaValue, 0)
+        XCTAssertFalse(window.isVisible, "Safety tests must never order a real window onto the screen")
+    }
+
+    func testUnitTestPresentationSafetySuppressesActivationAndModalExecutionByInjection() {
+        var activations = 0, modals = 0
+        XCTAssertFalse(UnitTestPresentationSafety.performActivation(isUnitTesting: true) {
+            activations += 1; return true
+        })
+        XCTAssertEqual(UnitTestPresentationSafety.performModal(isUnitTesting: true) {
+            modals += 1; return .alertSecondButtonReturn
+        }, .abort)
+        XCTAssertEqual(activations, 0)
+        XCTAssertEqual(modals, 0)
+        XCTAssertEqual(UnitTestPresentationSafety.alphaValue(requested: 1, isUnitTesting: true), 0)
+    }
+
+    func testUnitTestPresentationSafetyLeavesProductionPoliciesUnchangedByInjection() {
+        var activations = 0, modals = 0
+        XCTAssertTrue(UnitTestPresentationSafety.performActivation(isUnitTesting: false) {
+            activations += 1; return true
+        })
+        XCTAssertEqual(UnitTestPresentationSafety.performModal(isUnitTesting: false) {
+            modals += 1; return .alertSecondButtonReturn
+        }, .alertSecondButtonReturn)
+        XCTAssertEqual(activations, 1)
+        XCTAssertEqual(modals, 1)
+        XCTAssertEqual(UnitTestPresentationSafety.alphaValue(requested: 0.75, isUnitTesting: false), 0.75)
+    }
+
+    private func quitEvent(reason: OSType?, attribute: Bool = true,
+                           eventID: OSType = OSType(kAEQuitApplication)) -> NSAppleEventDescriptor {
+        let event = NSAppleEventDescriptor(eventClass: OSType(kCoreEventClass), eventID: eventID,
+            targetDescriptor: nil, returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID))
+        if let reason {
+            let value = NSAppleEventDescriptor(enumCode: reason)
+            if attribute { event.setAttribute(value, forKeyword: AEKeyword(kAEQuitReason)) }
+            else { event.setParam(value, forKeyword: AEKeyword(kAEQuitReason)) }
+        }
+        return event
+    }
+
+    func testRecordingQuitConfirmationIncludesPausedAndImportingSessions() {
+        for phase: AppPhase in [.recording, .paused] {
+            XCTAssertTrue(RecordingQuitConfirmation.isNeeded(phase: phase, importing: false))
+        }
+        for phase: AppPhase in [.idle, .preparing, .stopping, .liveEnded, .failed("synthetic"),
+                                .saved(TestFixtureDirectory.root)] {
+            XCTAssertFalse(RecordingQuitConfirmation.isNeeded(phase: phase, importing: false))
+            XCTAssertTrue(RecordingQuitConfirmation.isNeeded(phase: phase, importing: true))
+        }
+    }
+
+    func testRecordingQuitContinuePreservesModelAndDoesNotBeginSaving() async throws {
+        let (model, _, _) = try makeModel()
+        for phase: AppPhase in [.recording, .paused] {
+            model.loadPresentationForTesting(phase: phase, evidence: model.segments, preview: "synthetic preview")
+            let segments = model.segments, preview = model.volatileEnglish
+            let root = model.temporarySessionForPrivacyExitTesting
+            let delegate = AppLifecycleDelegate()
+            var saves = 0, prompts = 0
+            delegate.recordingStateForTesting = { (model.phase, model.isImportingFile) }
+            delegate.confirmRecordingQuitForTesting = { prompts += 1; return false }
+            delegate.cleanupForTesting = { saves += 1; return true }
+            delegate.replyForTesting = { _ in XCTFail("A cancelled quit must not produce an asynchronous reply") }
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateCancel)
+            await Task.yield()
+            XCTAssertEqual(prompts, 1)
+            XCTAssertEqual(saves, 0)
+            XCTAssertEqual(model.phase, phase)
+            XCTAssertEqual(model.segments, segments)
+            XCTAssertEqual(model.volatileEnglish, preview)
+            XCTAssertEqual(model.temporarySessionForPrivacyExitTesting, root)
+        }
+    }
+
+    func testRecordingQuitImportingCancelReturnsCancelWithoutStartingCleanup() {
+        let delegate = AppLifecycleDelegate()
+        var saves = 0
+        delegate.recordingStateForTesting = { (.preparing, true) }
+        delegate.confirmRecordingQuitForTesting = { false }
+        delegate.cleanupForTesting = { saves += 1; return true }
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateCancel)
+        XCTAssertEqual(saves, 0)
+    }
+
+    func testRecordingQuitConfirmedUsesExistingAsynchronousSaveOnce() async throws {
+        let delegate = AppLifecycleDelegate(), gate = PrivacyExitGate()
+        var prompts = 0, saves = 0, replies: [Bool] = []
+        delegate.recordingStateForTesting = { (.recording, false) }
+        delegate.confirmRecordingQuitForTesting = { prompts += 1; return true }
+        delegate.cleanupForTesting = { saves += 1; await gate.wait(); return true }
+        delegate.replyForTesting = { replies.append($0) }
+        delegate.terminationTimeoutForTesting = 5
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        let until = ContinuousClock.now.advanced(by: .seconds(2))
+        while !gate.entered, ContinuousClock.now < until { await Task.yield() }
+        XCTAssertTrue(gate.entered)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        XCTAssertEqual(prompts, 1)
+        XCTAssertEqual(saves, 1)
+        XCTAssertTrue(replies.isEmpty)
+        gate.release()
+        while replies.isEmpty, ContinuousClock.now < until { await Task.yield() }
+        XCTAssertEqual(replies, [true])
+    }
+
+    func testRecordingQuitFailedSaveRetainsExistingFailureDecisionAndRequiresFreshConsent() async throws {
+        let delegate = AppLifecycleDelegate()
+        var prompts = 0, failurePrompts = 0, replies: [Bool] = []
+        delegate.recordingStateForTesting = { (.paused, false) }
+        delegate.confirmRecordingQuitForTesting = { prompts += 1; return true }
+        delegate.cleanupForTesting = { false }
+        delegate.confirmExitWithoutSavingForTesting = { failurePrompts += 1; return false }
+        delegate.replyForTesting = { replies.append($0) }
+        for expected in 1...2 {
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+            let until = ContinuousClock.now.advanced(by: .seconds(2))
+            while replies.count < expected, ContinuousClock.now < until { await Task.yield() }
+            XCTAssertEqual(replies, Array(repeating: false, count: expected))
+            XCTAssertEqual(prompts, expected)
+            XCTAssertEqual(failurePrompts, expected)
+        }
+    }
+
+    func testRecordingQuitInactiveSessionDoesNotPrompt() async throws {
+        let delegate = AppLifecycleDelegate()
+        var replies: [Bool] = []
+        delegate.recordingStateForTesting = { (.idle, false) }
+        delegate.confirmRecordingQuitForTesting = { XCTFail("Idle quit must not prompt"); return false }
+        delegate.cleanupForTesting = { true }
+        delegate.replyForTesting = { replies.append($0) }
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        let until = ContinuousClock.now.advanced(by: .seconds(2))
+        while replies.isEmpty, ContinuousClock.now < until { await Task.yield() }
+        XCTAssertEqual(replies, [true])
+    }
+
+    func testRecordingQuitSystemReasonsBypassConfirmationAndStillSave() async throws {
+        for reason in [kAEQuitAll, kAEShutDown, kAERestart, kAEReallyLogOut] {
+            for attribute in [true, false] {
+                let delegate = AppLifecycleDelegate()
+                var saves = 0, replies: [Bool] = []
+                delegate.recordingStateForTesting = { (.recording, false) }
+                delegate.terminationEventForTesting = quitEvent(reason: reason, attribute: attribute)
+                delegate.confirmRecordingQuitForTesting = { XCTFail("System quit must not prompt"); return false }
+                delegate.cleanupForTesting = { saves += 1; return true }
+                delegate.replyForTesting = { replies.append($0) }
+                XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+                let until = ContinuousClock.now.advanced(by: .seconds(2))
+                while replies.isEmpty, ContinuousClock.now < until { await Task.yield() }
+                XCTAssertEqual(saves, 1)
+                XCTAssertEqual(replies, [true])
+            }
+        }
+    }
+
+    func testRecordingQuitDockOrOrdinaryAppleEventStillPrompts() {
+        XCTAssertFalse(RecordingQuitConfirmation.isSystemTermination(nil))
+        XCTAssertFalse(RecordingQuitConfirmation.isSystemTermination(quitEvent(reason: nil)))
+        XCTAssertFalse(RecordingQuitConfirmation.isSystemTermination(quitEvent(reason: OSType(kAEOpenApplication))))
+        XCTAssertFalse(RecordingQuitConfirmation.isSystemTermination(
+            quitEvent(reason: OSType(kAEShutDown), eventID: OSType(kAEOpenApplication))))
+        let delegate = AppLifecycleDelegate()
+        var prompts = 0
+        delegate.terminationEventForTesting = quitEvent(reason: nil)
+        delegate.recordingStateForTesting = { (.recording, false) }
+        delegate.confirmRecordingQuitForTesting = { prompts += 1; return false }
+        delegate.cleanupForTesting = { XCTFail("Cancelled Dock quit must not save"); return true }
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateCancel)
+        XCTAssertEqual(prompts, 1)
+    }
+
+    func testRecordingQuitSystemRequestWhileConfirmingDoesNotStartDuplicateSave() async throws {
+        let delegate = AppLifecycleDelegate(), gate = PrivacyExitGate()
+        var saves = 0, aborts = 0, replies: [Bool] = []
+        delegate.recordingStateForTesting = { (.paused, false) }
+        delegate.abortRecordingConfirmationForTesting = { aborts += 1 }
+        delegate.confirmRecordingQuitForTesting = {
+            delegate.terminationEventForTesting = self.quitEvent(reason: OSType(kAEShutDown))
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+            XCTAssertEqual(aborts, 1, "A system request must dismiss the confirmation only once")
+            return false
+        }
+        delegate.cleanupForTesting = { saves += 1; await gate.wait(); return true }
+        delegate.replyForTesting = { replies.append($0) }
+        delegate.terminationTimeoutForTesting = 5
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        let until = ContinuousClock.now.advanced(by: .seconds(2))
+        while !gate.entered, ContinuousClock.now < until { await Task.yield() }
+        XCTAssertEqual(saves, 1)
+        gate.release()
+        while replies.isEmpty, ContinuousClock.now < until { await Task.yield() }
+        XCTAssertEqual(replies, [true])
+    }
+
+    func testRecordingQuitContinueKeepsPresentedSheetAndApprovedQuitPromptsOnlyOnce() async throws {
+        let delegate = AppLifecycleDelegate()
+        let consent = RecordingQuitConsent()
+        var prompts = 0, dismissals = 0, replies: [Bool] = []
+        let previous = FilePanelPresentation.authorizeTermination
+        let previousAttempt = FilePanelPresentation.performAuthorizedTermination
+        FilePanelPresentation.authorizeTermination = { delegate.authorizeRecordingTermination() }
+        FilePanelPresentation.performAuthorizedTermination = { delegate.withRecordingTerminationAuthorization($0) }
+        let id = UUID()
+        defer {
+            FilePanelPresentation.sheetDidDismiss(id: id)
+            FilePanelPresentation.authorizeTermination = previous
+            FilePanelPresentation.performAuthorizedTermination = previousAttempt
+        }
+        FilePanelPresentation.registerSheet(id: id) { dismissals += 1 }
+        delegate.recordingStateForTesting = { (.recording, false) }
+        delegate.confirmRecordingQuitForTesting = { prompts += 1; return consent.approved }
+        delegate.cleanupForTesting = { true }
+        delegate.replyForTesting = { replies.append($0) }
+        FilePanelPresentation.requestTermination { _ = delegate.applicationShouldTerminate(NSApplication.shared) }
+        XCTAssertEqual(prompts, 1)
+        XCTAssertEqual(dismissals, 0)
+        XCTAssertTrue(replies.isEmpty)
+        consent.approved = true
+        FilePanelPresentation.requestTermination { _ = delegate.applicationShouldTerminate(NSApplication.shared) }
+        XCTAssertEqual(prompts, 2)
+        XCTAssertEqual(dismissals, 1)
+        FilePanelPresentation.sheetDidDismiss(id: id)
+        let until = ContinuousClock.now.advanced(by: .seconds(2))
+        while replies.isEmpty, ContinuousClock.now < until { await Task.yield() }
+        XCTAssertEqual(prompts, 2, "The delegate must consume the consent collected before dismissing the sheet")
+        XCTAssertEqual(replies, [true])
+    }
+
+    func testRecordingQuitLastWindowPolicyDoesNotTerminateOrChangeInjectedSession() async throws {
+        let (model, _, _) = try makeModel()
+        let delegate = AppLifecycleDelegate()
+        for phase: AppPhase in [.recording, .paused] {
+            model.loadPresentationForTesting(phase: phase, evidence: model.segments)
+            XCTAssertFalse(delegate.applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared))
+            XCTAssertEqual(model.phase, phase)
+            XCTAssertTrue(model.hasActiveSession)
+        }
+    }
+
+    func testRecordingQuitAlertDefaults() {
+        let alert = RecordingQuitConfirmation.makeAlert()
+        XCTAssertEqual(alert.messageText, "正在录音。退出会结束并保存这节课。")
+        XCTAssertEqual(alert.buttons.map(\.title), ["继续录音", "保存并退出"])
+        XCTAssertEqual(alert.buttons[0].keyEquivalent, "\r")
+        XCTAssertTrue(alert.buttons[0].keyEquivalentModifierMask.isEmpty)
+        XCTAssertEqual(alert.buttons[1].keyEquivalent, "")
+        XCTAssertFalse(alert.window.preventsApplicationTerminationWhenModal)
+        alert.layout()
+        let window = alert.window
+        XCTAssertTrue(window.defaultButtonCell === alert.buttons[0].cell)
+    }
+
+    func testRecordingQuitAlertCopyMatchesPausedLiveOnlyAndImportBehaviorOffscreen() {
+        let cases: [(AppPhase, Bool, Bool, String, [String])] = [
+            (.recording, false, false, "正在录音。退出会结束并保存这节课。", ["继续录音", "保存并退出"]),
+            (.paused, false, false, "录音已暂停。退出会结束并保存这节课。", ["保持暂停", "保存并退出"]),
+            (.recording, false, true, "正在实时字幕（不保存）。退出会结束本次字幕，内容不会保存。", ["继续", "退出"]),
+            (.paused, false, true, "实时字幕已暂停（不保存）。退出会结束本次字幕，内容不会保存。", ["保持暂停", "退出"]),
+            (.preparing, true, true, "正在导入文件。退出会停止导入并保存已完成的内容。", ["继续导入", "保存并退出"]),
+            (.recording, true, false, "正在导入文件。退出会停止导入并保存已完成的内容。", ["继续导入", "保存并退出"])
+        ]
+        for (phase, importing, liveOnly, message, titles) in cases {
+            let alert = RecordingQuitConfirmation.makeAlert(phase: phase, importing: importing, liveOnly: liveOnly)
+            XCTAssertEqual(alert.messageText, message)
+            XCTAssertEqual(alert.buttons.map(\.title), titles)
+            XCTAssertEqual(alert.buttons[0].keyEquivalent, "\r")
+            XCTAssertEqual(alert.buttons[1].keyEquivalent, "")
+            alert.layout()
+            XCTAssertTrue(alert.window.defaultButtonCell === alert.buttons[0].cell)
+            XCTAssertFalse(alert.window.isVisible, "Copy/default-button checks must never show a window")
+        }
+    }
+
+    func testRecordingQuitRejectedBeforeDelegateRequiresFreshConsentWithAndWithoutSheet() async {
+        for hasSheet in [false, true] {
+            let delegate = AppLifecycleDelegate(), consent = RecordingQuitConsent()
+            consent.approved = true
+            var prompts = 0, attempts = 0
+            let previous = FilePanelPresentation.authorizeTermination
+            let previousAttempt = FilePanelPresentation.performAuthorizedTermination
+            FilePanelPresentation.authorizeTermination = { delegate.authorizeRecordingTermination() }
+            FilePanelPresentation.performAuthorizedTermination = { delegate.withRecordingTerminationAuthorization($0) }
+            let id = UUID()
+            defer {
+                FilePanelPresentation.sheetDidDismiss(id: id)
+                FilePanelPresentation.authorizeTermination = previous
+                FilePanelPresentation.performAuthorizedTermination = previousAttempt
+            }
+            if hasSheet { FilePanelPresentation.registerSheet(id: id) {} }
+            delegate.recordingStateForTesting = { (.recording, false) }
+            delegate.confirmRecordingQuitForTesting = { prompts += 1; return consent.approved }
+            delegate.cleanupForTesting = { XCTFail("The rejected request must not save"); return true }
+            // Simulate AppKit rejecting terminate before calling the delegate.
+            FilePanelPresentation.requestTermination { attempts += 1 }
+            if hasSheet { FilePanelPresentation.sheetDidDismiss(id: id) }
+            let until = ContinuousClock.now.advanced(by: .seconds(2))
+            while attempts == 0, ContinuousClock.now < until { await Task.yield() }
+            XCTAssertEqual(attempts, 1)
+            consent.approved = false
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateCancel)
+            XCTAssertEqual(prompts, 2, "A rejected synchronous attempt must not authorize the next quit")
+        }
+    }
+
+    func testRecordingQuitConsentIsConsumedOnlyBySynchronousDelegateCall() {
+        let delegate = AppLifecycleDelegate()
+        var prompts = 0
+        delegate.recordingStateForTesting = { (.recording, false) }
+        delegate.confirmRecordingQuitForTesting = { prompts += 1; return false }
+        delegate.withRecordingTerminationAuthorization {
+            XCTAssertTrue(delegate.authorizeRecordingTermination())
+            XCTAssertFalse(delegate.authorizeRecordingTermination(), "The same consent cannot be used twice")
+        }
+        XCTAssertFalse(delegate.authorizeRecordingTermination())
+        XCTAssertEqual(prompts, 2)
+    }
+
+    func testRecordingQuitRepeatedCommandsCoalesceBeforeAndDuringConfirmationOffscreen() {
+        let delegate = AppLifecycleDelegate()
+        var prompts = 0, scheduled: [@MainActor @Sendable () -> Void] = []
+        let previous = FilePanelPresentation.authorizeTermination
+        let previousScheduler = FilePanelPresentation.scheduleAfterEventForTesting
+        FilePanelPresentation.authorizeTermination = { delegate.authorizeRecordingTermination() }
+        FilePanelPresentation.scheduleAfterEventForTesting = { scheduled.append($0) }
+        defer {
+            FilePanelPresentation.authorizeTermination = previous
+            FilePanelPresentation.scheduleAfterEventForTesting = previousScheduler
+        }
+        delegate.recordingStateForTesting = { (.recording, false) }
+        delegate.confirmRecordingQuitForTesting = {
+            prompts += 1
+            FilePanelPresentation.scheduleTerminationRequest { XCTFail("Repeated quit must be swallowed") }
+            FilePanelPresentation.requestTermination { XCTFail("Reentrant quit must be swallowed") }
+            return false
+        }
+        for _ in 0..<3 {
+            FilePanelPresentation.scheduleTerminationRequest { XCTFail("Cancelled quit must not terminate") }
+        }
+        XCTAssertEqual(scheduled.count, 1)
+        XCTAssertEqual(prompts, 0, "The event must finish before confirmation runs")
+        scheduled.removeFirst()()
+        XCTAssertTrue(scheduled.isEmpty, "No request may remain queued after cancelling the confirmation")
+        XCTAssertEqual(prompts, 1)
+        FilePanelPresentation.scheduleTerminationRequest { XCTFail("Cancelled quit must not terminate") }
+        XCTAssertEqual(scheduled.count, 1, "A fresh quit after cancellation must still work")
+        scheduled.removeFirst()()
+        XCTAssertEqual(prompts, 2)
+    }
+
+    func testRecordingQuitCancelRestoresPreviousForegroundApplicationOffscreen() {
+        for approved in [false, true] {
+            let delegate = AppLifecycleDelegate()
+            var actions: [String] = []
+            delegate.recordingStateForTesting = { (.recording, false) }
+            delegate.recordingConfirmationEnvironmentForTesting = .init(
+                capturePreviousApplication: { actions.append("capture"); return { actions.append("restore") } },
+                activateApplication: { actions.append("activate") })
+            delegate.confirmRecordingQuitForTesting = { actions.append("confirm"); return approved }
+            XCTAssertEqual(delegate.authorizeRecordingTermination(), approved)
+            XCTAssertEqual(actions, approved ? ["capture", "activate", "confirm"] : ["capture", "activate", "confirm", "restore"])
+        }
+    }
+
+    func testRecordingQuitCancelWithoutPreviousApplicationDoesNotRestoreOffscreen() {
+        let delegate = AppLifecycleDelegate()
+        var activations = 0
+        delegate.recordingStateForTesting = { (.paused, false) }
+        delegate.recordingConfirmationEnvironmentForTesting = .init(
+            capturePreviousApplication: { nil }, activateApplication: { activations += 1 })
+        delegate.confirmRecordingQuitForTesting = { false }
+        XCTAssertFalse(delegate.authorizeRecordingTermination())
+        XCTAssertEqual(activations, 1)
+    }
+
+    func testRecordingQuitSystemRequestDoesNotRestorePreviousApplicationOffscreen() async {
+        let delegate = AppLifecycleDelegate()
+        var restores = 0, replies: [Bool] = []
+        delegate.recordingStateForTesting = { (.recording, false) }
+        delegate.recordingConfirmationEnvironmentForTesting = .init(
+            capturePreviousApplication: { { restores += 1 } }, activateApplication: {})
+        delegate.abortRecordingConfirmationForTesting = {}
+        delegate.confirmRecordingQuitForTesting = {
+            delegate.terminationEventForTesting = self.quitEvent(reason: OSType(kAEShutDown))
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+            return false
+        }
+        delegate.cleanupForTesting = { true }
+        delegate.replyForTesting = { replies.append($0) }
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        let until = ContinuousClock.now.advanced(by: .seconds(2))
+        while replies.isEmpty, ContinuousClock.now < until { await Task.yield() }
+        XCTAssertEqual(replies, [true])
+        XCTAssertEqual(restores, 0, "System termination must not reactivate the previous application")
+    }
 
     private func makeModel() throws -> (AppModel, URL, AppModel.PrivacyExitConfiguration) {
         let evidence = TestFixtureDirectory.root.resolvingSymlinksInPath()

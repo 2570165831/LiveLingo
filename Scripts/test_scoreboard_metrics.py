@@ -230,6 +230,30 @@ class DurableTests(unittest.TestCase):
         self.assertEqual(result["failure_reasons"]["unknown"], 1)
         self.assertNotIn(SENTINEL, json.dumps(result))
 
+    def test_no_speech_is_terminal_and_statistics_do_not_expose_text(self):
+        self.write([record(status="silent", extendedStatus="noSpeech", failureReason="noSpeech",
+                           speechConfidence=0.03, appleEvidence=SENTINEL)])
+        (self.session / "transcription-issues.jsonl").write_text(
+            json.dumps({"event": "transcription_no_speech", "reason": "noSpeech"}) + "\n")
+        result = m.durable_census(self.session)
+        self.assertEqual(result.get("no_speech"), 1)
+        self.assertEqual(result["by_status"].get("noSpeech"), 1)
+        self.assertEqual(result["seconds_by_status"].get("noSpeech"), 2)
+        self.assertEqual(result["failure_reasons"].get("noSpeech"), 1)
+        self.assertEqual(result["issue_events"].get("transcription_no_speech"), 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["unresolved"], 0)
+        self.assertEqual(result["not_captioned_speech_seconds"], 0)
+        self.assertNotIn(SENTINEL, json.dumps(result))
+
+    def test_no_speech_keys_are_absent_for_unchanged_sessions(self):
+        self.write([record(status="silent")])
+        result = m.durable_census(self.session)
+        self.assertNotIn("no_speech", result)
+        self.assertNotIn("noSpeech", result["by_status"])
+        self.assertNotIn("noSpeech", result["failure_reasons"])
+        self.assertNotIn("transcription_no_speech", result["issue_events"])
+
     def test_apple_evidence_is_presence_only(self):
         values = [record("present", appleEvidence=SENTINEL), record("empty", appleEvidence=""),
                   record("absent", appleEvidence=None)]

@@ -102,6 +102,15 @@ struct ASRTranscription: Equatable, Sendable {
     /// follow the collector's rejected-Parakeet probe path.
     var parakeetConfidenceValid: Bool?
 
+    struct WordSpan: Decodable, Equatable, Sendable {
+        let text: String
+        let start: Double
+        let end: Double
+    }
+    var parakeetWordSpans: [WordSpan]?
+
+    private struct WordSpanResponse: Decodable { let pk_word_spans: [WordSpan]? }
+
     private struct ConfidenceResponse: Decodable {
         let pk_mean_probability: Double?
         let pk_min_probability: Double?
@@ -150,6 +159,14 @@ struct ASRTranscription: Equatable, Sendable {
         }
         guard requestedLanguage == .auto else {
             var result = Self(text: trimmed)
+            if let spans = (try? JSONDecoder().decode(WordSpanResponse.self, from: data))?.pk_word_spans,
+               !spans.isEmpty,
+               spans.allSatisfy({ !$0.text.isEmpty && $0.text.split(whereSeparator: { $0.isWhitespace }).count == 1
+                   && $0.start.isFinite && $0.end.isFinite && $0.start >= 0 && $0.end >= $0.start }),
+               zip(spans, spans.dropFirst()).allSatisfy({ $0.start <= $1.start }),
+               spans.map(\.text).joined(separator: " ") == trimmed.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ") {
+                result.parakeetWordSpans = spans
+            }
             if let confidence = try? JSONDecoder().decode(ConfidenceResponse.self, from: data),
                [confidence.pk_mean_probability, confidence.pk_min_probability].allSatisfy({
                    $0.map { $0.isFinite && (0...1).contains($0) } ?? true

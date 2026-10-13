@@ -140,7 +140,7 @@ enum SummaryRenderingDiagnostics {
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
-    @ObservedObject private var floatingWindow = FloatingSubtitleWindowController.shared
+    @ObservedObject private var floatingWindow: FloatingSubtitleWindowController
     @AppStorage("transcriptTextSize") private var transcriptTextSize = 18.0
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     private var readingSize: Double { 18 * ReadingTypography.scale(textSize: transcriptTextSize, dynamicType: dynamicTypeSize) }
@@ -175,7 +175,8 @@ struct ContentView: View {
         }
     }
 
-    init(showWholeLessonNotes: Bool = false) {
+    init(showWholeLessonNotes: Bool = false, floatingWindow: FloatingSubtitleWindowController = .shared) {
+        _floatingWindow = ObservedObject(wrappedValue: floatingWindow)
         _wholeLessonNotes = State(initialValue: showWholeLessonNotes)
         _compactPane = State(initialValue: showWholeLessonNotes ? .notes : .subtitles)
     }
@@ -185,6 +186,9 @@ struct ContentView: View {
         let _ = SummaryRenderingDiagnostics.record(\.rootBodies)
         #endif
         VStack(spacing: 0) {
+            if let alarm = model.alarmBanner {
+                AlarmBanner(state: alarm, dismiss: model.dismissAlarmReminder)
+            }
             recordingStrip
             workspace
             statusBar
@@ -241,12 +245,13 @@ struct ContentView: View {
                 Toggle(isOn: Binding(get: { floatingWindow.isLocked }, set: { locked in
                     if locked != floatingWindow.isLocked { floatingWindow.toggleLock() }
                 })) {
-                    Label(floatingWindow.lockActionTitle,
+                    Label("锁定悬浮字幕",
                           systemImage: floatingWindow.isLocked ? "lock.fill" : "lock.open")
                 }
                 .toggleStyle(.button)
                 .labelStyle(.iconOnly)
-                .help(floatingWindow.lockActionTitle + "（⌘⇧L）；锁定后点击穿过字幕窗")
+                .help(floatingWindow.lockActionTitle + "（⇧⌘L）；锁定后点击穿过字幕窗")
+                .accessibilityLabel("锁定悬浮字幕")
                 .accessibilityIdentifier("classroom-floating-lock")
             }
         }
@@ -257,7 +262,7 @@ struct ContentView: View {
                 Label(model.isPaused ? "继续" : "暂停",
                       systemImage: model.isPaused ? "play.fill" : "pause.fill")
             }
-            .disabled(!model.hasActiveSession)
+            .disabled(!model.canPauseRecording)
             .help(model.isPaused ? "继续录音" : "暂停录音")
             .accessibilityIdentifier("classroom-pause-resume")
         }
@@ -956,6 +961,17 @@ struct ClassroomSettingsView: View {
                         .disabled(model.phase.isBusy)
                 }
             }
+            Section("提醒") {
+                Toggle("录音时检测警报声并提醒", isOn: $model.alarmDetectionEnabled)
+                Text(AlarmPolicy.explanation).font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("警报时自动保存本节并另开新录音", isOn: $model.alarmAutomaticSaveEnabled)
+                    .disabled(!model.alarmDetectionEnabled)
+                Text("检测到持续警报后倒计时 \(AlarmPolicy.countdownSeconds) 秒，可取消；保存模式会在同一位置开始带有“\(AlarmPolicy.postAlarmFolderSuffix)”后缀的新录音。暂停时取消倒计时，实时暂存模式只提醒。字幕窗可见时不发系统通知；隐藏时才发，首次需要时由系统询问通知权限。字幕窗或 LiveLingo 获得键盘焦点时可按 Esc 取消提醒。")
+                    .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let notice = model.alarmDetectionNotice { Text(notice).font(.callout) }
+            }
             Section("字幕与处理") {
                 if model.showsOutputLanguageSelector {
                     Picker("输出语言", selection: Binding(get: { model.newCourseOutputLanguagePreference },
@@ -1017,6 +1033,13 @@ struct ClassroomSettingsView: View {
                 Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
                     .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                if let fullScreenMode {
+                    SubtitleUnlockHint(controller: fullScreenMode)
+                } else {
+                    Text("可在主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
+                        .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if !model.previewTranslationEnabled || !model.supportsPreviewTranslation {
                     Text("“仅中文译文”在译文可用前显示原文。")
                         .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
@@ -1029,7 +1052,7 @@ struct ClassroomSettingsView: View {
                                label: "\(Int(subtitles.translationTextSize)) pt")
                 subtitleSlider("背景不透明度", value: subtitles.backgroundOpacityBinding,
                                range: FloatingSubtitlePreferences.opacityRange, step: 0.05,
-                               label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
+                               label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%", keyboardStepping: true)
                 if let fullScreenMode {
                     SubtitleSpacesToggle(controller: fullScreenMode, selection: subtitles.showsAcrossSpacesBinding)
                 } else {
@@ -1059,7 +1082,7 @@ struct ClassroomSettingsView: View {
     }
 
     private func subtitleSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
-                                step: Double, label: String) -> some View {
+                                step: Double, label: String, keyboardStepping: Bool = false) -> some View {
         LabeledContent(title) {
             HStack {
                 Slider(value: Binding(get: { value.wrappedValue },
@@ -1067,11 +1090,28 @@ struct ClassroomSettingsView: View {
                     .accessibilityLabel(title)
                     .accessibilityValue(label)
                     .accessibilityIdentifier("floating-\(title)")
+                    .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { press in
+                        guard keyboardStepping, press.modifiers.intersection([.shift, .control, .option, .command]).isEmpty
+                        else { return .ignored }
+                        let increment = press.key == .rightArrow || press.key == .upArrow
+                        value.wrappedValue = min(range.upperBound, max(range.lowerBound,
+                            value.wrappedValue + (increment ? step : -step)))
+                        return .handled
+                    }
                 Text(label).monospacedDigit().foregroundStyle(ReadingAccessibility.secondaryText).frame(width: 48, alignment: .trailing)
                     .accessibilityHidden(true)
             }
             .frame(width: subtitleControlWidth)
         }
+    }
+}
+
+private struct SubtitleUnlockHint: View {
+    @ObservedObject var controller: FullScreenClassModeController
+    var body: some View {
+        Text("可在\(controller.subtitleUnlockControls)解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
+            .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -1090,8 +1130,8 @@ private struct SubtitleSpacesToggle: View {
 
 extension AppModel {
     var canToggleRecording: Bool { hasActiveSession || (canStart && !phase.isBusy) }
-    var canOpenLesson: Bool { !(phase.isBusy || archiveLoading || isImportingFile) }
-    var canImportMedia: Bool { !phase.isBusy && translationReady && !isImportingFile }
+    var canOpenLesson: Bool { !sessionSwitchBlocked && !isImportingFile }
+    var canImportMedia: Bool { !sessionSwitchBlocked && translationReady && !isImportingFile }
     var stopRecordingTitle: String { isLiveOnly ? "结束记录" : "结束并保存" }
 
     func toggleRecording() { hasActiveSession ? stop() : start() }
@@ -1134,7 +1174,7 @@ struct RecordingMenuItems: View {
                 .disabled(!model.canToggleRecording)
             Button(model.isPaused ? "继续" : "暂停") { model.togglePause() }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
-                .disabled(!model.hasActiveSession)
+                .disabled(!model.canPauseRecording)
             Divider()
             if model.isImportingFile {
                 Button("停止导入") { model.cancelMediaImport() }

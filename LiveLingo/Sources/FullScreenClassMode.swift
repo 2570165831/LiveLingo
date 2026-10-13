@@ -468,6 +468,8 @@ struct FullScreenRecordingState: Equatable {
     var isPaused = false
     var actionTitle = "开始记录"
     var canToggle = false
+    var pauseAllowed: Bool? = nil
+    var canPause: Bool { pauseAllowed ?? hasActiveSession }
 }
 
 @MainActor
@@ -480,7 +482,7 @@ struct FullScreenRecordingCommands {
         Self(state: {
             FullScreenRecordingState(hasActiveSession: model.hasActiveSession, isPaused: model.isPaused,
                                      actionTitle: model.hasActiveSession ? model.stopRecordingTitle : "开始记录",
-                                     canToggle: model.canToggleRecording)
+                                     canToggle: model.canToggleRecording, pauseAllowed: model.canPauseRecording)
         }, toggle: { model.toggleRecording() }, togglePause: { model.togglePause() })
     }
 }
@@ -597,7 +599,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
     private var recordingObserver: AnyCancellable?
     private var generation = 0
     private var started = false
-    private var statusInstalled = false
+    @Published private(set) var statusInstalled = false
     private var terminated = false
     private var needsMainWindow = false
     private weak var registeredMainWindow: NSWindow?
@@ -684,6 +686,10 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         Binding(get: { self.isEnabled || self.menuBarIconEnabled }, set: { self.setMenuBarIconEnabled($0) })
     }
     var actionTitle: String { isEnabled ? "关闭全屏网课模式" : "开启全屏网课模式" }
+    var subtitleUnlockControls: String {
+        if isEnabled { return "菜单栏图标或主窗口" }
+        return (statusInstalled ? "菜单栏图标、" : "") + "主窗口或“录音”菜单"
+    }
 
     func connect(model: AppModel, recording: FullScreenRecordingCommands? = nil) {
         self.model = model
@@ -876,7 +882,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
         item(for: .moveSubtitlesToBottom)?.title = "悬浮字幕移到屏幕底部"
         item(for: .moveSubtitlesToTop)?.title = "悬浮字幕移到屏幕顶部"
         item(for: .togglePause)?.title = state.isPaused ? "继续记录" : "暂停记录"
-        item(for: .togglePause)?.isEnabled = state.hasActiveSession
+        item(for: .togglePause)?.isEnabled = state.canPause
         item(for: .toggleRecording)?.title = state.actionTitle
         item(for: .toggleRecording)?.isEnabled = state.canToggle
         item(for: .disableMode)?.title = actionTitle
@@ -919,7 +925,7 @@ final class FullScreenClassModeController: NSObject, ObservableObject, NSMenuDel
             subtitles.moveToScreenTop()
             if let model { subtitles.show(model: model) }
         case .togglePause:
-            if recording.state().hasActiveSession { recording.togglePause() }
+            if recording.state().canPause { recording.togglePause() }
         case .toggleRecording:
             if recording.state().canToggle { recording.toggle() }
         case .disableMode: toggle()
