@@ -241,12 +241,13 @@ struct ContentView: View {
                 Toggle(isOn: Binding(get: { floatingWindow.isLocked }, set: { locked in
                     if locked != floatingWindow.isLocked { floatingWindow.toggleLock() }
                 })) {
-                    Label(floatingWindow.lockActionTitle,
+                    Label("锁定悬浮字幕",
                           systemImage: floatingWindow.isLocked ? "lock.fill" : "lock.open")
                 }
                 .toggleStyle(.button)
                 .labelStyle(.iconOnly)
                 .help(floatingWindow.lockActionTitle + "（⌘⇧L）；锁定后点击穿过字幕窗")
+                .accessibilityLabel("锁定悬浮字幕")
                 .accessibilityIdentifier("classroom-floating-lock")
             }
         }
@@ -1017,6 +1018,13 @@ struct ClassroomSettingsView: View {
                 Text("立即应用于悬浮字幕。切换显示模式时，窗口高度保持不变。")
                     .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                if let fullScreenMode {
+                    SubtitleUnlockHint(controller: fullScreenMode)
+                } else {
+                    Text("可在主窗口或“录音”菜单解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
+                        .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if !model.previewTranslationEnabled || !model.supportsPreviewTranslation {
                     Text("“仅中文译文”在译文可用前显示原文。")
                         .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
@@ -1029,7 +1037,7 @@ struct ClassroomSettingsView: View {
                                label: "\(Int(subtitles.translationTextSize)) pt")
                 subtitleSlider("背景不透明度", value: subtitles.backgroundOpacityBinding,
                                range: FloatingSubtitlePreferences.opacityRange, step: 0.05,
-                               label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%")
+                               label: "\(Int((subtitles.backgroundOpacity * 100).rounded()))%", keyboardStepping: true)
                 if let fullScreenMode {
                     SubtitleSpacesToggle(controller: fullScreenMode, selection: subtitles.showsAcrossSpacesBinding)
                 } else {
@@ -1059,7 +1067,7 @@ struct ClassroomSettingsView: View {
     }
 
     private func subtitleSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
-                                step: Double, label: String) -> some View {
+                                step: Double, label: String, keyboardStepping: Bool = false) -> some View {
         LabeledContent(title) {
             HStack {
                 Slider(value: Binding(get: { value.wrappedValue },
@@ -1067,11 +1075,28 @@ struct ClassroomSettingsView: View {
                     .accessibilityLabel(title)
                     .accessibilityValue(label)
                     .accessibilityIdentifier("floating-\(title)")
+                    .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { press in
+                        guard keyboardStepping, press.modifiers.intersection([.shift, .control, .option, .command]).isEmpty
+                        else { return .ignored }
+                        let increment = press.key == .rightArrow || press.key == .upArrow
+                        value.wrappedValue = min(range.upperBound, max(range.lowerBound,
+                            value.wrappedValue + (increment ? step : -step)))
+                        return .handled
+                    }
                 Text(label).monospacedDigit().foregroundStyle(ReadingAccessibility.secondaryText).frame(width: 48, alignment: .trailing)
                     .accessibilityHidden(true)
             }
             .frame(width: subtitleControlWidth)
         }
+    }
+}
+
+private struct SubtitleUnlockHint: View {
+    @ObservedObject var controller: FullScreenClassModeController
+    var body: some View {
+        Text("可在\(controller.subtitleUnlockControls)解锁（⇧⌘L，仅 LiveLingo 在前台时有效）。")
+            .font(.callout).foregroundStyle(ReadingAccessibility.secondaryText)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

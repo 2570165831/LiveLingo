@@ -866,6 +866,7 @@ final class ClassroomPresentationTests: XCTestCase {
         let (window, view) = try window(model: model, width: 1260)
         defer { window.close() }
         try await settle(view)
+        try captureWindow(window, name: "uifix2-toolbar-unlocked")
         let before = scrollFrames(in: view)
         let visible = Set(NSApp.windows.filter(\.isVisible).map(\.windowNumber))
         try click(window, content: view, x: view.bounds.width - 76, yFromTop: view.bounds.height - 18)
