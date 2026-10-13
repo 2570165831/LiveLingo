@@ -379,7 +379,12 @@ preview session. Other failure placeholders and non-Chinese recovery stay unchan
 The supplemental Apple request runs independently of the formal caption queue,
 with a three-second deadline. Timeout leaves the model-not-translated placeholder;
 late, revised or cancelled results cannot publish. Final exports drain this bounded
-display work only after formal captions finish. Archives containing the fallback
+display work only after formal captions finish. An Apple fallback failure or
+timeout also refreshes the main live preview and default bilingual
+floating preview with the same final failure text. An in-flight request keeps
+its waiting status; newer speech and discarded late results cannot be replaced.
+Translation-only mode retains its source fallback when no translation is usable.
+Archives containing the fallback
 field (including pending/failed request markers) require reader version 4 in the
 snapshot envelope or journal record. Older readers must refuse opening before
 saving can discard it; payload schema 1 and older archives' version gates stay unchanged.

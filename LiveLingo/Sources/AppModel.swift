@@ -5196,12 +5196,24 @@ final class AppModel: ObservableObject {
                 if let text, let usable = try? TranslationAcceptance.validatedCaption(
                     target.normalize(text), source: source, target: target) {
                     self.segments[current].completeInitialTranslationFallback(usable, targetCode: target.rawValue)
-                    if self.segments.last?.id == input.id, self.volatileEnglish.isEmpty {
-                        self.liveChinese = self.segments[current].displayChinese
-                    }
                     self.persistCurrentSession()
                 }
+                // Publish terminal failures too: the live preview observes
+                // captionStream, while removing the pending request is private.
+                if self.segments.last?.id == input.id, self.volatileEnglish.isEmpty {
+                    self.liveChinese = self.segments[current].displayChinese
+                    self.captionStream.objectWillChange.send()
+                }
             }
+    }
+
+    var failedInitialTranslationCaption: TranscriptSegment? {
+        guard volatileEnglish.isEmpty, captionTarget == .simplifiedChinese,
+              let caption = segments.last, caption.modelDidNotTranslate,
+              caption.initialTranslationFallback?.targetCode == captionTarget.rawValue,
+              caption.initialTranslationDisplay == nil,
+              initialTranslationRequests[caption.id] == nil else { return nil }
+        return caption
     }
 
     // Final exports and CLI/test readback drain bounded display work after

@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import XCTest
 @testable import LiveLingo
 
@@ -131,6 +132,14 @@ final class TranslationFailureRecoveryTests: XCTestCase {
             ("I cannot help you with this request.", "我不能协助处理这类请求。"),
             ("Sorry, I'm not able to assist with this request.", "抱歉，我无法协助处理这类请求。"),
             ("I failed to produce a Mandarin rendition of the line.", "我无法提供这句话的译文。"),
+            ("It is beyond me to put this sentence into Mandarin.", "我无法翻译这句话。"),
+            ("I lack the ability to assist with this request.", "我无法协助处理这类请求。"),
+            ("Please don't ask me for a Chinese rendering of this passage.", "请不要让我提供这段文字的中文译文。"),
+            ("At this stage I can't promise a faithful version in Mandarin.", "在这个阶段，我无法保证能给出忠实的普通话译文。"),
+            ("Translation cannot begin until the initiation complex is assembled.", "起始复合物组装完成前，翻译不能开始。"),
+            ("The ribosome cannot translate a missing reading frame.", "核糖体无法翻译缺失的阅读框。"),
+            ("The tutor declines to help with this exercise.", "辅导老师拒绝协助这道练习。"),
+            ("We use the phrase 'I refuse to help' as an example of negative politeness.", "我们用“我拒绝帮忙”这个短语作为消极礼貌的例子。"),
             ("Sorry, Alice missed 3 lectures.", "抱歉，Alice 错过了 3 节课。"),
             ("Alice scored 42 points.", "抱歉，无法翻译该内容。Alice 得了 42 分。"),
             ("Alice scored 42 points.", "对不起，我无法提供 Alice 的 42 分的翻译。")
@@ -178,6 +187,13 @@ final class TranslationFailureRecoveryTests: XCTestCase {
                 return scenario == "echo" ? text : "房间很冷。"
             }
             let (model, _) = try fixture(deps)
+            model.previewTranslationEnabled = true
+            model.previewTranslationSupportForTesting = true
+            var livePresentations: [String] = []
+            let subscription = model.captionStream.objectWillChange.sink { _ in
+                livePresentations.append(model.previewChineseDisplay)
+            }
+            defer { subscription.cancel() }
             if scenario == "cached" { model.rememberInitialTranslation(source: source, translated: "房间很冷。") }
             if scenario == "wrong-source" { model.rememberInitialTranslation(source: "The room is warm.", translated: "房间很暖。") }
             model.receiveCaptionForTesting(source, start: 0, end: 1)
@@ -207,6 +223,9 @@ final class TranslationFailureRecoveryTests: XCTestCase {
                 let presentation = model.floatingSubtitlePresentation(mode: .translationOnly)
                 XCTAssertEqual(presentation.translation?.isPreview, true)
                 XCTAssertTrue(model.previewChineseDisplay.contains("初译"))
+            } else {
+                assertFailedInitialPreview(model)
+                XCTAssertTrue(livePresentations.contains(display), "A terminal failure must notify the live caption stream")
             }
         }
     }
@@ -266,9 +285,17 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         deps.initialTranslation = { _ in try await apple.wait(); return "房间很冷。" }
         deps.initialTranslationDeadline = { try await deadline.wait() }
         let (model, _) = try fixture(deps)
+        model.previewTranslationEnabled = true
+        model.previewTranslationSupportForTesting = true
+        var livePresentations: [String] = []
+        let subscription = model.captionStream.objectWillChange.sink { _ in
+            livePresentations.append(model.previewChineseDisplay)
+        }
+        defer { subscription.cancel() }
         model.receiveCaptionForTesting(source, start: 0, end: 1)
         try await eventually { apple.entered && deadline.entered }
         await model.translationTaskForTesting?.value
+        XCTAssertEqual(model.previewChineseDisplay, "等待初译…", "A pending supplemental request is still waiting")
         deadline.release()
         var drained = false
         let drain = Task { await model.waitForInitialTranslations(); drained = true }
@@ -276,10 +303,48 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         await drain.value
         XCTAssertEqual(model.segments[0].initialTranslationFallback?.targetCode, "zh-Hans")
         XCTAssertNil(model.segments[0].initialTranslationFallback?.text)
+        assertFailedInitialPreview(model)
+        XCTAssertTrue(livePresentations.contains("（模型未翻译此句，可对照英文）"))
+        let terminalPresentations = livePresentations
         apple.release()
         for _ in 0..<20 { await Task.yield() }
         XCTAssertEqual(model.segments[0].displayChinese, "（模型未翻译此句，可对照英文）")
         XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .translationRejected, count: 2, rejection: .sourceEcho)])
+        assertFailedInitialPreview(model)
+        XCTAssertEqual(livePresentations, terminalPresentations, "A discarded late result must not refresh or overwrite the failure")
+    }
+
+    private func assertFailedInitialPreview(_ model: AppModel, file: StaticString = #filePath, line: UInt = #line) {
+        let display = "（模型未翻译此句，可对照英文）"
+        XCTAssertEqual(model.previewChineseDisplay, display, file: file, line: line)
+        let bilingual = model.floatingSubtitlePresentation(mode: .bilingual)
+        XCTAssertEqual(bilingual.translation?.text, display, file: file, line: line)
+        XCTAssertEqual(bilingual.translation?.isPreview, false, file: file, line: line)
+        let translationOnly = model.floatingSubtitlePresentation(mode: .translationOnly)
+        XCTAssertNil(translationOnly.translation, file: file, line: line)
+        XCTAssertEqual(translationOnly.source?.text, source, file: file, line: line)
+        XCTAssertEqual(SessionExporter.targetLine(model.segments[0]), display, file: file, line: line)
+    }
+
+    func testFailedInitialRequestCannotReplaceNewLiveSpeech() async throws {
+        let apple = Item7Gate(), deadline = Item7Gate()
+        defer { apple.release(); deadline.release() }
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.translate = { _, _, _, _, _ in throw QwenRuntimeError.translationRejected("synthetic", rejection: .sourceEcho) }
+        deps.initialTranslation = { _ in try await apple.wait(); throw QwenRuntimeError.runtimeUnavailable }
+        deps.initialTranslationDeadline = { try await deadline.wait() }
+        let (model, _) = try fixture(deps)
+        model.previewTranslationEnabled = true
+        model.previewTranslationSupportForTesting = true
+        model.receiveCaptionForTesting(source, start: 0, end: 1)
+        try await eventually { apple.entered }
+        await model.translationTaskForTesting?.value
+        model.receiveLivePreviewForTesting("A bell rings.", chinese: "铃响了。")
+        apple.release()
+        await model.waitForInitialTranslations()
+        XCTAssertEqual(model.previewChineseDisplay, "初译 · 铃响了。")
+        XCTAssertEqual(model.floatingSubtitlePresentation(mode: .bilingual).translation?.text, "初译 · 铃响了。")
+        XCTAssertEqual(model.segments[0].displayChinese, "（模型未翻译此句，可对照英文）")
     }
 
     func testInitialResultCannotPublishAfterRevisionOrSessionCancellation() async throws {

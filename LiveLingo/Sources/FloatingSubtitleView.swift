@@ -352,6 +352,9 @@ extension AppModel {
            let initial = segments.last?.initialTranslationDisplay {
             return (captionDisplayLanguage.renderForDisplay(initial, converter: chineseScriptConverter), true)
         }
+        if let caption = failedInitialTranslationCaption {
+            return (captionDisplayLanguage.renderForDisplay(caption.displayChinese, converter: chineseScriptConverter), false)
+        }
         if captionTarget == .english, !volatileEnglish.isEmpty { return (volatileEnglish, false) }
         if let caption = confirmedNonEnglishCaption {
             let target = captionTarget
