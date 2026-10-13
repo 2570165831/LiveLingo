@@ -286,6 +286,10 @@ enum ModelStorage {
         }
     }
 
+    static func modelsIncludedInTimeMachine(in preferences: UserDefaults = .standard) -> Bool {
+        preferences.bool(forKey: "modelsIncludedInTimeMachine")
+    }
+
     struct Operations {
         var clone: (Int32, Int32, String) throws -> Void = { source, parent, name in
             guard fclonefileat(source, parent, name, UInt32(CLONE_NOOWNERCOPY)) == 0 else {
@@ -293,6 +297,7 @@ enum ModelStorage {
             }
         }
         var checkpoint: () throws -> Void = { try Task.checkCancellation() }
+        var modelsIncludedInTimeMachine: () -> Bool = { ModelStorage.modelsIncludedInTimeMachine() }
         var excludeFromBackup: (Int32) throws -> Void = { fd in
             // The on-disk backing for NSURLIsExcludedFromBackupKey. Use the
             // opened directory, so replacing its URL cannot mark a neighbor.
@@ -301,6 +306,12 @@ enum ModelStorage {
                 guard fsetxattr(fd, "com.apple.metadata:com_apple_backup_excludeItem", bytes.baseAddress,
                                bytes.count, 0, 0) == 0 else { throw Failure.system(errno) }
             }
+        }
+        var isExcludedFromBackup: (URL) throws -> Bool = { destination in
+            // Read the actual resource state without the caller's cached values.
+            var url = URL(fileURLWithPath: destination.path, isDirectory: true)
+            url.removeAllCachedResourceValues()
+            return try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true
         }
     }
 
@@ -530,14 +541,12 @@ enum ModelStorage {
         try SensitiveFileIO.prepareDirectory(destinationModels)
         let root = try Directory.open(destinationModels, owned: true)
         try root.assertBound(to: destinationModels)
-        try operations.excludeFromBackup(root.fd)
-        try root.assertBound(to: destinationModels)
-        // Read the actual resource state with a fresh URL, without carrying
-        // the caller's cached resource values into verification.
-        var backupURL = URL(fileURLWithPath: destinationModels.path, isDirectory: true)
-        backupURL.removeAllCachedResourceValues()
-        guard try backupURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true else {
-            throw Failure.mismatch
+        // 0.3.1 owns the UI and removal of an existing exclusion marker. An
+        // older App must leave that policy untouched when inclusion is chosen.
+        if !operations.modelsIncludedInTimeMachine() {
+            try operations.excludeFromBackup(root.fd)
+            try root.assertBound(to: destinationModels)
+            guard try operations.isExcludedFromBackup(destinationModels) else { throw Failure.mismatch }
         }
         try root.assertBound(to: destinationModels)
         let parent = try root.child(model.name, create: true)

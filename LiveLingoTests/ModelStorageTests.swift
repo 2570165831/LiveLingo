@@ -9,6 +9,20 @@ import XCTest
 /// launch a runtime, use an application container, or delete fixture evidence.
 @MainActor
 final class ModelStorageTests: XCTestCase {
+    // Existing storage cases must not read the user's hidden backup preference.
+    nonisolated private static func excludedOperations() -> ModelStorage.Operations {
+        .init(modelsIncludedInTimeMachine: { false })
+    }
+
+    private func backupPreferences(_ included: Bool?) throws -> UserDefaults {
+        let suite = "LiveLingo-Test-\(UUID().uuidString)"
+        let cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        addTeardownBlock { try cleanup.remove() }
+        if let included { defaults.set(included, forKey: "modelsIncludedInTimeMachine") }
+        return defaults
+    }
+
     private static let algorithm = "first-middle-last-64KiB-v1"
     private static let smallContents: [(String, Data)] = [
         ("config.json", Data("{\"synthetic\":true}".utf8)),
@@ -83,7 +97,7 @@ final class ModelStorageTests: XCTestCase {
                   manifestSHA256: manifestDigest, verification: .sampledPrecloneV1)
         }
 
-        func preclone(operations: ModelStorage.Operations = .init()) throws -> ModelStorage.Outcome {
+        func preclone(operations: ModelStorage.Operations = ModelStorageTests.excludedOperations()) throws -> ModelStorage.Outcome {
             try ModelStorage.preclone(model, manifestSHA256: manifestDigest,
                                       bundledModels: bundled, destinationModels: destination, operations: operations)
         }
@@ -274,7 +288,7 @@ final class ModelStorageTests: XCTestCase {
     func testPrecloneRejectsInvalidConstructedModelAndManifestDigestBeforeIO() throws {
         let fixture = try Fixture("invalid-before-io")
         var calls = 0
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in calls += 1; XCTFail("Invalid manifest must not clone") }
         operations.checkpoint = { XCTFail("Invalid manifest must fail before checkpoints") }
         for (model, digest) in [(changedModel(fixture.model, source: "../escape"), fixture.manifestDigest),
@@ -292,9 +306,9 @@ final class ModelStorageTests: XCTestCase {
     func testRealAPFSCloneProducesByteIdenticalNestedModelAndReceipt() throws {
         let fixture = try Fixture("real-apfs")
         try fixture.requireAPFS()
-        let native = ModelStorage.Operations().clone
+        let native = ModelStorageTests.excludedOperations().clone
         var clonedNames: [String] = []
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { source, parent, name in
             clonedNames.append(name)
             try native(source, parent, name)
@@ -315,7 +329,7 @@ final class ModelStorageTests: XCTestCase {
         XCTAssertEqual(try fixture.preclone(), .cloned)
         var before = stat()
         XCTAssertEqual(lstat(fixture.committed.path, &before), 0)
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("An existing verified model must not clone again"); throw ModelStorage.Failure.system(EIO) }
         XCTAssertEqual(try fixture.preclone(operations: operations), .alreadyPresent)
         var after = stat()
@@ -339,7 +353,7 @@ final class ModelStorageTests: XCTestCase {
     }
 
     private func refresh(_ fixture: Fixture, from bundled: URL,
-                         operations: ModelStorage.Operations = .init()) throws -> ModelStorage.Outcome {
+                         operations: ModelStorage.Operations = ModelStorageTests.excludedOperations()) throws -> ModelStorage.Outcome {
         try ModelStorage.preclone(fixture.model, manifestSHA256: fixture.manifestDigest,
             bundledModels: bundled, destinationModels: fixture.destination, operations: operations)
     }
@@ -351,9 +365,9 @@ final class ModelStorageTests: XCTestCase {
         let bundled = try reinstalledBundle(fixture)
         var before = stat()
         XCTAssertEqual(lstat(fixture.committed.path, &before), 0)
-        let native = ModelStorage.Operations().clone
+        let native = ModelStorageTests.excludedOperations().clone
         var calls = 0
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { source, parent, name in
             var published = stat()
             XCTAssertEqual(lstat(fixture.committed.path, &published), 0)
@@ -375,7 +389,7 @@ final class ModelStorageTests: XCTestCase {
             from: Data(contentsOf: fixture.committed.appendingPathComponent(ModelStorage.receiptName)))
         let source = try ModelStorage.Directory.open(bundled.appendingPathComponent(fixture.model.sourceRelativePath), owned: false)
         XCTAssertEqual(marker.sourceFiles, try ModelStorage.sourceIdentities(fixture.model, at: source))
-        var repeatOperations = ModelStorage.Operations()
+        var repeatOperations = ModelStorageTests.excludedOperations()
         repeatOperations.clone = { _, _, _ in XCTFail("The refreshed cache must be reused on the next launch") }
         XCTAssertEqual(try refresh(fixture, from: bundled, operations: repeatOperations), .alreadyPresent)
         try assertOriginal(fixture)
@@ -455,7 +469,7 @@ final class ModelStorageTests: XCTestCase {
         let marker = try Data(contentsOf: fixture.committed.appendingPathComponent(ModelStorage.receiptName))
         var before = stat()
         XCTAssertEqual(lstat(fixture.committed.path, &before), 0)
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in throw ModelStorage.Failure.system(ENOSPC) }
         assertFailure(.system(ENOSPC)) { _ = try refresh(fixture, from: bundled, operations: operations) }
         var after = stat()
@@ -475,8 +489,8 @@ final class ModelStorageTests: XCTestCase {
         let marker = try Data(contentsOf: fixture.committed.appendingPathComponent(ModelStorage.receiptName))
         let gate = ModelPrecloneGate()
         gate.setBlocked(false)
-        let native = ModelStorage.Operations().clone
-        var operations = ModelStorage.Operations()
+        let native = ModelStorageTests.excludedOperations().clone
+        var operations = ModelStorageTests.excludedOperations()
         operations.checkpoint = { try gate.checkpoint() }
         operations.clone = { source, parent, name in
             try native(source, parent, name)
@@ -529,20 +543,85 @@ final class ModelStorageTests: XCTestCase {
 
     func testBackupExclusionFailureStopsBeforeCreatingModelPayload() throws {
         let fixture = try Fixture("backup-exclusion-failure")
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.excludeFromBackup = { _ in throw ModelStorage.Failure.system(EACCES) }
         operations.clone = { _, _, _ in XCTFail("Backup exclusion is mandatory before cloning") }
         assertFailure(.system(EACCES)) { _ = try fixture.preclone(operations: operations) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.parent.path))
     }
 
+    func testTimeMachineIncludedPreferenceSkipsWriteAndReadbackOnNewRoot() throws {
+        let fixture = try Fixture("backup-included-new")
+        try fixture.requireAPFS()
+        let preferences = try backupPreferences(true)
+        var operations = Self.excludedOperations()
+        operations.modelsIncludedInTimeMachine = { ModelStorage.modelsIncludedInTimeMachine(in: preferences) }
+        operations.excludeFromBackup = { _ in
+            XCTFail("Inclusion must skip the exclusion write")
+            throw ModelStorage.Failure.system(EACCES)
+        }
+        operations.isExcludedFromBackup = { _ in
+            XCTFail("Inclusion must skip even the readback assertion")
+            throw ModelStorage.Failure.mismatch
+        }
+        XCTAssertEqual(try fixture.preclone(operations: operations), .cloned)
+        XCTAssertNil(try backupMarker(fixture.destination))
+        try assertCommitted(fixture)
+    }
+
+    func testTimeMachineIncludedPreferencePreservesExistingExclusion() throws {
+        let fixture = try Fixture("backup-included-existing")
+        try fixture.requireAPFS()
+        XCTAssertEqual(try fixture.preclone(), .cloned)
+        XCTAssertEqual(try backupMarker(fixture.destination), "com.apple.backupd")
+        let preferences = try backupPreferences(true)
+        var operations = Self.excludedOperations()
+        operations.modelsIncludedInTimeMachine = { ModelStorage.modelsIncludedInTimeMachine(in: preferences) }
+        operations.excludeFromBackup = { _ in XCTFail("Do not rewrite an existing marker") }
+        operations.isExcludedFromBackup = { _ in
+            XCTFail("Do not assert a backup policy owned by the newer App")
+            return false
+        }
+        XCTAssertEqual(try fixture.preclone(operations: operations), .alreadyPresent)
+        XCTAssertEqual(try backupMarker(fixture.destination), "com.apple.backupd")
+        XCTAssertTrue(preferences.bool(forKey: "modelsIncludedInTimeMachine"))
+    }
+
+    func testTimeMachineFalseOrMissingPreferenceWritesAndAssertsExclusion() throws {
+        for included in [false, nil] as [Bool?] {
+            let fixture = try Fixture("backup-default-policy")
+            try fixture.requireAPFS()
+            let preferences = try backupPreferences(included)
+            let native = Self.excludedOperations()
+            var writes = 0, readbacks = 0
+            var operations = native
+            operations.modelsIncludedInTimeMachine = { ModelStorage.modelsIncludedInTimeMachine(in: preferences) }
+            operations.excludeFromBackup = { fd in
+                writes += 1
+                try native.excludeFromBackup(fd)
+            }
+            operations.isExcludedFromBackup = { url in
+                readbacks += 1
+                return try native.isExcludedFromBackup(url)
+            }
+            XCTAssertEqual(try fixture.preclone(operations: operations), .cloned)
+            XCTAssertEqual(writes, 1)
+            XCTAssertEqual(readbacks, 1)
+            XCTAssertEqual(try backupMarker(fixture.destination), "com.apple.backupd")
+            operations.isExcludedFromBackup = { _ in false }
+            assertFailure(.mismatch) { _ = try fixture.preclone(operations: operations) }
+            XCTAssertEqual(writes, 2)
+            if included == nil { XCTAssertNil(preferences.object(forKey: "modelsIncludedInTimeMachine")) }
+        }
+    }
+
     func testBackupExclusionUsesOpenedRootWhenDestinationIsReplaced() throws {
         let fixture = try Fixture("backup-root-replaced")
         let preserved = fixture.root.appendingPathComponent("preserved-cache-root", isDirectory: true)
         let canary = Data("synthetic neighbor must stay included".utf8)
-        let native = ModelStorage.Operations().excludeFromBackup
+        let native = ModelStorageTests.excludedOperations().excludeFromBackup
         var neighborBefore: Bool?
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.excludeFromBackup = { opened in
             try FileManager.default.moveItem(at: fixture.destination, to: preserved)
             try FileManager.default.createDirectory(at: fixture.destination, withIntermediateDirectories: false)
@@ -611,8 +690,8 @@ final class ModelStorageTests: XCTestCase {
         let later = changedModel(fixture.model, name: "LaterModel", source: "later-source")
         let gate = ModelPrecloneGate()
         gate.setBlocked(false)
-        let native = ModelStorage.Operations().clone
-        var operations = ModelStorage.Operations()
+        let native = ModelStorageTests.excludedOperations().clone
+        var operations = ModelStorageTests.excludedOperations()
         operations.checkpoint = { try gate.checkpoint() }
         operations.clone = { source, parent, name in
             try native(source, parent, name)
@@ -628,9 +707,9 @@ final class ModelStorageTests: XCTestCase {
     func testSourceReplacementDuringCloneCannotPublishStaleProvenance() throws {
         let fixture = try Fixture("source-changed-during-clone")
         try fixture.requireAPFS()
-        let native = ModelStorage.Operations().clone
+        let native = ModelStorageTests.excludedOperations().clone
         var injected = false
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { source, parent, name in
             try native(source, parent, name)
             if !injected {
@@ -656,7 +735,7 @@ final class ModelStorageTests: XCTestCase {
         encoder.outputFormatting = [.sortedKeys]
         let currentDigest = Self.hash(try encoder.encode(Self.inventory([fixture.model, added])))
         XCTAssertNotEqual(currentDigest, fixture.manifestDigest)
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("Changing another model's inventory must not reclone this version") }
         XCTAssertEqual(try ModelStorage.preclone(fixture.model, manifestSHA256: currentDigest,
             bundledModels: fixture.bundled, destinationModels: fixture.destination, operations: operations), .alreadyPresent)
@@ -682,7 +761,7 @@ final class ModelStorageTests: XCTestCase {
     private func cloneFailure(_ code: Int32, label: String, file: StaticString = #filePath, line: UInt = #line) throws {
         let fixture = try Fixture(label)
         var calls = 0
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in calls += 1; throw ModelStorage.Failure.system(code) }
         assertFailure(.system(code), file: file, line: line) { _ = try fixture.preclone(operations: operations) }
         XCTAssertEqual(calls, 1, "A failed clone must neither retry nor fall back to copying", file: file, line: line)
@@ -705,7 +784,7 @@ final class ModelStorageTests: XCTestCase {
 
     func testInitialCheckpointCancellationDoesNotCreateDestination() throws {
         let fixture = try Fixture("cancel-before-io")
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.checkpoint = { throw CancellationError() }
         operations.clone = { _, _, _ in XCTFail("Cancelled staging must not clone") }
         XCTAssertThrowsError(try fixture.preclone(operations: operations)) { XCTAssertTrue($0 is CancellationError) }
@@ -716,9 +795,9 @@ final class ModelStorageTests: XCTestCase {
     func testInterruptedCheckpointRetainsPartialUntilVerifiedRetryThenReleasesIt() throws {
         let fixture = try Fixture("interrupt-and-relaunch")
         try fixture.requireAPFS()
-        let native = ModelStorage.Operations().clone
+        let native = ModelStorageTests.excludedOperations().clone
         var count = 0
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { source, parent, name in try native(source, parent, name); count += 1 }
         operations.checkpoint = { if count == 1 { throw ModelStorage.Failure.deferred } }
         assertFailure(.deferred) { _ = try fixture.preclone(operations: operations) }
@@ -828,7 +907,7 @@ final class ModelStorageTests: XCTestCase {
         XCTAssertEqual(try fixture.preclone(), .cloned)
         let partial = try fixture.seedPartial(marker: JSONEncoder().encode(fixture.receipt))
         let bytes = try Data(contentsOf: partial.appendingPathComponent("orphan.bin"))
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("Recovery beside a committed model must not clone") }
         XCTAssertEqual(try fixture.preclone(operations: operations), .alreadyPresent)
         XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
@@ -859,7 +938,7 @@ final class ModelStorageTests: XCTestCase {
         let committed = try ModelStorage.Directory.open(fixture.committed, owned: true)
         XCTAssertNoThrow(try ModelStorage.verify(fixture.model, at: committed, verification: .sampledPrecloneV1, checkpoint: {}))
         assertFailure(.mismatch) { try ModelStorage.verify(fixture.model, at: committed, verification: .fullSHA256, checkpoint: {}) }
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("Repeat launch must not clone a sample-verified model") }
         XCTAssertEqual(try fixture.preclone(operations: operations), .alreadyPresent)
         XCTAssertEqual(try Data(contentsOf: fixture.committed.appendingPathComponent("weights.bin")), damaged)
@@ -908,7 +987,7 @@ final class ModelStorageTests: XCTestCase {
         for bytes in [Data(), Data("too-long-synthetic-model-data".utf8)] {
             let fixture = try Fixture("source-size", contents: [("weights.bin", Data([1, 2, 3]))])
             try bytes.write(to: fixture.source.appendingPathComponent("weights.bin"))
-            var operations = ModelStorage.Operations()
+            var operations = ModelStorageTests.excludedOperations()
             operations.clone = { _, _, _ in XCTFail("Wrong source size must fail before clone") }
             assertFailure(.mismatch) { _ = try fixture.preclone(operations: operations) }
             assertNoCommit(fixture)
@@ -933,8 +1012,8 @@ final class ModelStorageTests: XCTestCase {
         for truncate in [true, false] {
             let fixture = try Fixture("target-damage", contents: [("weights.bin", Data([1, 2, 3]))])
             try fixture.requireAPFS()
-            let native = ModelStorage.Operations().clone
-            var operations = ModelStorage.Operations()
+            let native = ModelStorageTests.excludedOperations().clone
+            var operations = ModelStorageTests.excludedOperations()
             operations.clone = { source, parent, name in
                 try native(source, parent, name)
                 let fd = openat(parent, name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
@@ -1092,7 +1171,7 @@ final class ModelStorageTests: XCTestCase {
             let alias = rootLink ? link : fixture.bundled.appendingPathComponent("linked-model")
             try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: target)
             let model = rootLink ? fixture.model : changedModel(fixture.model, source: "linked-model")
-            var operations = ModelStorage.Operations()
+            var operations = ModelStorageTests.excludedOperations()
             operations.clone = { _, _, _ in XCTFail("Source directory symlinks must not reach clone") }
             XCTAssertThrowsError(try ModelStorage.preclone(model, manifestSHA256: fixture.manifestDigest,
                 bundledModels: rootLink ? alias : fixture.bundled, destinationModels: fixture.destination, operations: operations))
@@ -1109,7 +1188,7 @@ final class ModelStorageTests: XCTestCase {
         try bytes.write(to: neighbor)
         let link = fixture.source.appendingPathComponent("weights.bin")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: neighbor)
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("Source file symlinks must not reach clone") }
         XCTAssertThrowsError(try fixture.preclone(operations: operations))
         assertNoCommit(fixture)
@@ -1127,7 +1206,7 @@ final class ModelStorageTests: XCTestCase {
         try bytes.write(to: neighbor.appendingPathComponent("model.bin"))
         let link = fixture.source.appendingPathComponent("weights")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: neighbor)
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("Nested source links must not reach clone") }
         XCTAssertThrowsError(try fixture.preclone(operations: operations))
         assertNoCommit(fixture)
@@ -1139,7 +1218,7 @@ final class ModelStorageTests: XCTestCase {
         let fixture = try Fixture("source-hardlink", contents: [("weights.bin", Data([1, 2, 3]))])
         let alias = fixture.root.appendingPathComponent("hardlink-neighbor.bin")
         try FileManager.default.linkItem(at: fixture.source.appendingPathComponent("weights.bin"), to: alias)
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("A hardlinked source must not clone") }
         assertFailure(.unsafePath) { _ = try fixture.preclone(operations: operations) }
         assertNoCommit(fixture)
@@ -1158,7 +1237,7 @@ final class ModelStorageTests: XCTestCase {
             if !rootLink { try FileManager.default.createDirectory(at: fixture.destination, withIntermediateDirectories: false) }
             let alias = rootLink ? fixture.destination : fixture.parent
             try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: neighbor)
-            var operations = ModelStorage.Operations()
+            var operations = ModelStorageTests.excludedOperations()
             operations.clone = { _, _, _ in XCTFail("Destination symlinks must not reach clone") }
             XCTAssertThrowsError(try fixture.preclone(operations: operations))
             try assertLink(alias, target: neighbor)
@@ -1176,7 +1255,7 @@ final class ModelStorageTests: XCTestCase {
         let marker = try JSONEncoder().encode(fixture.receipt)
         try marker.write(to: neighbor.appendingPathComponent(ModelStorage.receiptName))
         try FileManager.default.createSymbolicLink(at: fixture.committed, withDestinationURL: neighbor)
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("An existing version symlink must not be followed or replaced") }
         XCTAssertThrowsError(try fixture.preclone(operations: operations))
         try assertLink(fixture.committed, target: neighbor)
@@ -1193,7 +1272,7 @@ final class ModelStorageTests: XCTestCase {
         try bytes.write(to: neighbor)
         let link = fixture.parent.appendingPathComponent(".preclone-lock")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: neighbor)
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("Unsafe lock must fail before clone") }
         XCTAssertThrowsError(try fixture.preclone(operations: operations))
         try assertLink(link, target: neighbor)
@@ -1209,7 +1288,7 @@ final class ModelStorageTests: XCTestCase {
         try bytes.write(to: neighbor)
         try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: neighbor.path)
         let before = try FileManager.default.attributesOfItem(atPath: neighbor.path)[.posixPermissions] as? NSNumber
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, parent, name in
             guard symlinkat(neighbor.path, parent, name) == 0 else { throw ModelStorage.Failure.system(errno) }
         }
@@ -1229,7 +1308,7 @@ final class ModelStorageTests: XCTestCase {
         let bytes = Data("synthetic neighbor canary".utf8)
         try bytes.write(to: neighbor.appendingPathComponent("canary.bin"))
         var injected: URL?
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { _, _, _ in XCTFail("A redirected nested target must not clone") }
         operations.checkpoint = {
             if injected == nil, let partial = try fixture.partials().only,
@@ -1256,8 +1335,8 @@ final class ModelStorageTests: XCTestCase {
         try bytes.write(to: neighbor.appendingPathComponent("canary.bin"))
         let preserved = fixture.parent.appendingPathComponent("synthetic-replaced-staging", isDirectory: true)
         var oldName: URL?
-        let native = ModelStorage.Operations().clone
-        var operations = ModelStorage.Operations()
+        let native = ModelStorageTests.excludedOperations().clone
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { source, parent, name in
             let partial = try XCTUnwrap(try fixture.partials().only)
             try FileManager.default.moveItem(at: partial, to: preserved)
@@ -1279,9 +1358,9 @@ final class ModelStorageTests: XCTestCase {
         try fixture.requireAPFS()
         let preservedParent = fixture.destination.appendingPathComponent("synthetic-original-model-parent", isDirectory: true)
         let canary = Data("synthetic replacement directory must remain untouched".utf8)
-        let native = ModelStorage.Operations().clone
+        let native = ModelStorageTests.excludedOperations().clone
         var stagedName: String?
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { source, parent, name in
             stagedName = try XCTUnwrap(try fixture.partials().only).lastPathComponent
             try FileManager.default.moveItem(at: fixture.parent, to: preservedParent)
@@ -1308,7 +1387,7 @@ final class ModelStorageTests: XCTestCase {
         let canary = Data("synthetic replacement parent must remain untouched".utf8)
         var injected = false
         var publishedIdentity: stat?
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.checkpoint = {
             if !injected, FileManager.default.fileExists(atPath: fixture.committed.path) {
                 var info = stat()
@@ -1351,7 +1430,7 @@ final class ModelStorageTests: XCTestCase {
     func testInitiallyBlockedGateDefersBeforeCreatingDestination() throws {
         let fixture = try Fixture("initial-gate")
         let gate = ModelPrecloneGate()
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.checkpoint = { try gate.checkpoint() }
         operations.clone = { _, _, _ in XCTFail("Blocked preclone must not clone") }
         assertFailure(.deferred) { _ = try fixture.preclone(operations: operations) }
@@ -1367,9 +1446,9 @@ final class ModelStorageTests: XCTestCase {
         try fixture.requireAPFS()
         let gate = ModelPrecloneGate()
         gate.setBlocked(ModelPrecloneController.blocksPreclone(.idle))
-        let native = ModelStorage.Operations().clone
+        let native = ModelStorageTests.excludedOperations().clone
         var calls = 0
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.checkpoint = { try gate.checkpoint() }
         operations.clone = { source, parent, name in
             try native(source, parent, name)
@@ -1418,9 +1497,9 @@ final class ModelStorageTests: XCTestCase {
         let fixture = try Fixture("multi-instance-lock", contents: [("weights.bin", Data([1, 2, 3]))])
         try fixture.requireAPFS()
         let otherVersion = changedModel(fixture.model, version: "sha256-" + Self.hash(Data("competing version".utf8)))
-        let native = ModelStorage.Operations().clone
+        let native = ModelStorageTests.excludedOperations().clone
         var competed = false
-        var operations = ModelStorage.Operations()
+        var operations = ModelStorageTests.excludedOperations()
         operations.clone = { source, parent, name in
             let lockURL = fixture.parent.appendingPathComponent(".preclone-lock")
             let competing = Darwin.open(lockURL.path, O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
@@ -1431,7 +1510,7 @@ final class ModelStorageTests: XCTestCase {
             XCTAssertTrue(lockError == EWOULDBLOCK || lockError == EAGAIN)
             let partialsBefore = try fixture.partials()
             let markerBefore = try Data(contentsOf: XCTUnwrap(partialsBefore.only).appendingPathComponent(ModelStorage.receiptName))
-            var rejectedOperations = ModelStorage.Operations()
+            var rejectedOperations = ModelStorageTests.excludedOperations()
             rejectedOperations.clone = { _, _, _ in XCTFail("A competing instance must never clone") }
             for model in [fixture.model, otherVersion] {
                 self.assertFailure(.busy) {

@@ -49,7 +49,11 @@ host path, time, author or device identifier enters the inventory.
 ## Destination and publication
 
 Production uses the sandbox's user Application Support directory. Before any
-model payload is created, the Models root is marked `isExcludedFromBackup = true`
+model payload is created, preclone reads the Bool preference
+`modelsIncludedInTimeMachine` written by the 0.3.1 settings page. When true,
+0.3.0 skips both the exclusion write and its readback assertion, leaving any
+existing attribute untouched; it does not clear an exclusion marker or add UI.
+When absent or false, the Models root is marked `isExcludedFromBackup = true`
 and the Foundation resource value is read back without cached values. The
 readback constructs a fresh URL so the caller's cached values do not substitute
 for the current resource state.
@@ -197,10 +201,10 @@ still reads the App bundle.
 
 ## Synchronizing a dependent small-update branch
 
-The fixes are a single follow-up commit on `claude/preclone`. A dependent
-`claude/smallupd` based on the original preclone commit should cherry-pick
-that follow-up before creating its packages; do not cherry-pick the original
-preclone commit again. Keep the changed storage implementation, its regression
+The storage fixes and backup-preference compatibility are follow-up commits on
+`claude/preclone`. A dependent `claude/smallupd` should cherry-pick any missing
+follow-up before creating its packages, skipping already equivalent changes;
+do not cherry-pick the original preclone commit again. Keep the implementation, its regression
 tests and this contract together. Reconcile any model-manager changes with the
 runtime coordination requirement above and rerun full Swift/Python validation
 in that branch. This task does not merge, push or modify the dependent branch.
