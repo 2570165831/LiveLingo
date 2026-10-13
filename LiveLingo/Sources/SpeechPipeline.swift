@@ -341,6 +341,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
     private var previewAnalysisTask: Task<Void, Never>?
     private var previewResultTask: Task<Void, Never>?
+    private var endedModernPreviewInputGeneration: UUID?
     private var previewObservations: [AuxiliaryTranscriptObservation] = []
     private var activityDetector: SpeechActivityDetector?
     private var boundaryPolicy = CausalBoundaryPolicy()
@@ -1332,10 +1333,24 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         let (converter, continuation) = stateLock.withLock { (previewConverter, previewInputContinuation) }
         guard let converter, let continuation else { return }
         do {
-            for input in try converter.convert(buffer, at: audioTime) {
+            let inputs = try converter.convert(buffer, at: audioTime)
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.convert(inputs, sourceFrames: Int(buffer.frameLength),
+                sourceRate: buffer.format.sampleRate, sourceEnd: stateLock.withLock { capturedAudioDuration })
+            #endif
+            for input in inputs {
+                #if LIVELINGO_DROP_PROBE
+                let result = continuation.yield(input)
+                if case .dropped(let dropped) = result { PreviewDropProbe.shared.dropped(dropped) }
+                if case .terminated = result { PreviewDropProbe.shared.input("terminated", input) }
+                #else
                 continuation.yield(input)
+                #endif
             }
         } catch {
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.record(["event": "converter_error", "error": String(describing: error)])
+            #endif
             stateLock.withLock {
                 previewConverter = nil
                 previewInputContinuation = nil
@@ -1472,41 +1487,70 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
             try requireStartup(token)
             try await analyzer.prepareToAnalyze(in: nil)
             try requireStartup(token)
-            let input = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(2))
+            #if LIVELINGO_DROP_PROBE
+            let input = PreviewDropProbe.shared.lossless
+                ? SpeechPreviewInputQueue.makeStream(of: AnalyzerInput.self)
+                : AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(2))
+            #else
+            let input = SpeechPreviewInputQueue.makeStream(of: AnalyzerInput.self)
+            #endif
             let stream = input.stream
             let inputContinuation = input.continuation
 
-            let resultTask = Task { [weak self] in
-                guard self?.ownsPreview(token) == true else { return }
-                do {
-                    for try await result in transcriber.results {
-                        guard !Task.isCancelled else { break }
-                        let text = String(result.text.characters)
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !text.isEmpty else { continue }
-                        let start = result.range.start.seconds.isFinite
-                            ? result.range.start.seconds
-                            : 0
-                        let duration = result.range.duration.seconds.isFinite
-                            ? result.range.duration.seconds
-                            : 0
-                        self?.emitStreamingPreview(
-                            text: text,
-                            start: start,
-                            end: start + duration,
-                            generation: token
-                        )
-                    }
-                } catch {
-                    return
+            let resultTask = makeModernPreviewResultTask(generation: token) { [weak self] in
+                for try await result in transcriber.results {
+                    guard !Task.isCancelled else { break }
+                    let text = String(result.text.characters)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    let start = result.range.start.seconds.isFinite
+                        ? result.range.start.seconds
+                        : 0
+                    let duration = result.range.duration.seconds.isFinite
+                        ? result.range.duration.seconds
+                        : 0
+                    #if LIVELINGO_DROP_PROBE
+                    PreviewDropProbe.shared.record(["event": "apple_result", "text": text,
+                        "start": start, "end": start + duration, "final": result.isFinal])
+                    #endif
+                    self?.emitStreamingPreview(
+                        text: text,
+                        start: start,
+                        end: start + duration,
+                        generation: token
+                    )
                 }
             }
 
             let analysisTask = Task { [weak self] in
                 guard self?.ownsPreview(token) == true else { return }
                 do {
+                    #if LIVELINGO_DROP_PROBE
+                    if PreviewDropProbe.shared.stallConsumer {
+                        // A cancellable test replacement takes one input, then
+                        // stops pulling without reporting an analyzer failure.
+                        var iterator = stream.makeAsyncIterator()
+                        if let value = await iterator.next() {
+                            PreviewDropProbe.shared.input("consumed", value)
+                            PreviewDropProbe.shared.record(["event": "analyzer_replacement_stalled"])
+                            try await Task.sleep(for: .seconds(86_400))
+                        }
+                    } else {
+                        try await analyzer.start(inputSequence: stream.map { value in
+                            PreviewDropProbe.shared.input("consumed", value)
+                            return value
+                        })
+                    }
+                    #else
                     try await analyzer.start(inputSequence: stream)
+                    #endif
                 } catch {
+                    // start() can return while the analyzer keeps consuming.
+                    // Close input on failure, not on a normal start return.
+                    self?.endModernPreviewInput(generation: token)
+                    #if LIVELINGO_DROP_PROBE
+                    PreviewDropProbe.shared.record(["event": "analyzer_error", "error": String(describing: error)])
+                    #endif
                     return
                 }
             }
@@ -1529,11 +1573,26 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         }
     }
 
+    @available(macOS 27, *)
+    private func makeModernPreviewResultTask(generation token: UUID,
+                                            consume: @escaping @Sendable () async throws -> Void) -> Task<Void, Never> {
+        Task { [weak self] in
+            guard self?.ownsPreview(token) == true else { return }
+            do { try await consume() }
+            catch {
+                // Without results, preview audio has no usable consumer. The
+                // generation guard also covers failure before task publication.
+                self?.endModernPreviewInput(generation: token)
+            }
+        }
+    }
+
     @discardableResult
     private func publishPreviewTasks(result: Task<Void, Never>, analysis: Task<Void, Never>, generation token: UUID,
                                       install: (() -> Void)? = nil) -> Bool {
         let published = stateLock.withLock { () -> Bool in
-            guard generation == token, !isStopping, !Task.isCancelled else { return false }
+            guard generation == token, !isStopping, !Task.isCancelled,
+                  endedModernPreviewInputGeneration != token else { return false }
             install?()
             previewResultTask = result
             previewAnalysisTask = analysis
@@ -1544,6 +1603,20 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     }
     private func ownsPreview(_ token: UUID) -> Bool {
         stateLock.withLock { generation == token && !isStopping }
+    }
+
+    @available(macOS 27, *)
+    private func endModernPreviewInput(generation token: UUID) {
+        let continuation = stateLock.withLock { () -> AsyncStream<AnalyzerInput>.Continuation? in
+            guard generation == token else { return nil }
+            // Remember an early exit even when it races task publication.
+            endedModernPreviewInputGeneration = token
+            let value = previewInputContinuation
+            previewInputContinuation = nil
+            previewConverter = nil
+            return value
+        }
+        continuation?.finish()
     }
 
     private func emitStreamingPreview(text: String, start: TimeInterval, end: TimeInterval, generation token: UUID) {
@@ -1563,6 +1636,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 start: max(0, start - previewAudioOffset),
                 end: max(start, end) - previewAudioOffset
             )
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.record(["event": "preview", "text": text, "start": start,
+                "end": end, "sourceEnd": capturedAudioDuration])
+            #endif
             if let replacementIndex = previewObservations.lastIndex(where: {
                 abs($0.start - observation.start) < 0.05
             }) {
@@ -2272,7 +2349,12 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
 
     private func flushChunkOnConsumer(openNext: Bool, finishBoundary: Bool = false) {
         let snapshot = stateLock.withLock { () -> FlushSnapshot in
-            if finishBoundary { _ = boundaryPolicy.finish(at: capturedAudioDuration) }
+            if finishBoundary {
+                let decision = boundaryPolicy.finish(at: capturedAudioDuration)
+                #if LIVELINGO_DROP_PROBE
+                PreviewDropProbe.shared.boundary(decision)
+                #endif
+            }
             return rotateCurrentChunkLocked(elapsed: capturedAudioDuration, openNext: openNext)
         }
         if let job = snapshot.job, let handler = snapshot.handler { transcriptionQueue.submit(job, handler: handler) }
@@ -2403,7 +2485,10 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
     private func rotateReadyChunk() {
         let snapshot = stateLock.withLock { () -> FlushSnapshot? in
             guard captureConfigured, !isStopping,
-                  boundaryPolicy.decision(at: capturedAudioDuration) != nil else { return nil }
+                  let decision = boundaryPolicy.decision(at: capturedAudioDuration) else { return nil }
+            #if LIVELINGO_DROP_PROBE
+            PreviewDropProbe.shared.boundary(decision)
+            #endif
             return rotateCurrentChunkLocked(elapsed: capturedAudioDuration, openNext: true)
         }
         if let snapshot, let job = snapshot.job, let handler = snapshot.handler {
@@ -2685,6 +2770,27 @@ extension SpeechPipeline {
         await prepare()
         publishPreviewTasks(result: result, analysis: analysis, generation: token)
     }
+    @available(macOS 27, *)
+    func startSyntheticModernPreviewResult(
+        beforePublish: @Sendable (Task<Void, Never>) async -> Void = { _ in },
+        consume: @escaping @Sendable () async throws -> Void
+    ) async -> (stream: AsyncStream<AnalyzerInput>, continuation: AsyncStream<AnalyzerInput>.Continuation,
+                result: Task<Void, Never>, published: Bool) {
+        let token = stateLock.withLock { generation }
+        let input = SpeechPreviewInputQueue.makeStream(of: AnalyzerInput.self)
+        let result = makeModernPreviewResultTask(generation: token, consume: consume)
+        let analysis = Task {}
+        await beforePublish(result)
+        let published = publishPreviewTasks(result: result, analysis: analysis, generation: token) {
+            self.previewInputContinuation = input.continuation
+        }
+        if !published { input.continuation.finish() }
+        return (input.stream, input.continuation, result, published)
+    }
+    @available(macOS 27, *)
+    var syntheticModernPreviewInputIsOpen: Bool {
+        stateLock.withLock { previewInputContinuation != nil }
+    }
     func checkSyntheticCaptureHealth(now: TimeInterval) {
         let (token, mode) = stateLock.withLock { (generation, inputMode) }
         if mode == .microphone { checkMicrophoneCaptureHealth(now: now, generation: token) }
@@ -2714,6 +2820,9 @@ extension SpeechPipeline {
 
 #if LIVELINGO_CLI
 extension SpeechPipeline {
+    #if LIVELINGO_DROP_PROBE
+    func cliProbePrepare() async -> Bool { await prepareStreamingPreviewModel() }
+    #endif
     /// Feeds the same post-capture PCM path without opening an output device.
     func cliReplay(file: URL, recordingURL: URL, sessionID: UUID,
                    eventHandler: @escaping @Sendable (Event) -> Void) async throws {
@@ -2733,10 +2842,15 @@ extension SpeechPipeline {
         // after this anchor, rather than starting at the first result itself.
         let replayClock = Logger(subsystem: "com.jianhongli.LiveLingo", category: "ReplayClock")
         replayClock.notice("replay event=start sample_rate=\(Int(audio.processingFormat.sampleRate)) frames=\(audio.length)")
+        #if LIVELINGO_DROP_PROBE
+        let replayBlockSeconds = PreviewDropProbe.shared.blockSeconds
+        #else
+        let replayBlockSeconds = 0.05
+        #endif
         while audio.framePosition < audio.length {
             try Task.checkCancellation()
             guard let buffer = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
-                frameCapacity: AVAudioFrameCount(audio.processingFormat.sampleRate * 0.05)) else {
+                frameCapacity: AVAudioFrameCount(audio.processingFormat.sampleRate * replayBlockSeconds)) else {
                 throw PipelineError.invalidInputFormat
             }
             try audio.read(into: buffer)
