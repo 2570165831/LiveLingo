@@ -2390,7 +2390,7 @@ struct ReviewFailure: Error, Equatable, LocalizedError, CustomStringConvertible,
         case .invalidResponse:
             return ReviewFailure(stage: .generation, code: "invalid_response", detail: "本机模型返回了无法识别的数据")
         case .requestFailed(let message), .generationInterrupted(let message),
-             .translationRejected(let message), .outputLimitReached(let message):
+             .translationRejected(let message, _), .outputLimitReached(let message):
             if let parsed = parseWorkerMessage(message) { return parsed }
             return ReviewFailure(stage: defaultStage,
                                  code: qwen.preservesGenerationProgress ? "generation_interrupted" : "request_failed",

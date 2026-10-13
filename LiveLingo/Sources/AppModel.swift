@@ -125,6 +125,12 @@ struct CaptionTranslationDependencies {
     var repairTarget: ((DeferredCaptionRepair, CaptionTranslationTarget) async throws -> QwenTranslationClient.PreviousRepair)? = nil
     var retrySleep: @MainActor (TimeInterval) async throws -> Void = CaptionTranslationDependencies.sleepBeforeRetry
     var prepareRetry: @MainActor (String) async throws -> Void = { _ in }
+    var initialTranslation: @MainActor (String) async throws -> String = { _ in
+        throw QwenRuntimeError.runtimeUnavailable
+    }
+    var initialTranslationDeadline: @MainActor () async throws -> Void = {
+        try await Task.sleep(for: .seconds(3))
+    }
 
     nonisolated private static func sleepBeforeRetry(_ seconds: TimeInterval) async throws {
         try await Task.sleep(for: .seconds(seconds))
@@ -159,6 +165,17 @@ struct CaptionTranslationDependencies {
                 context: DeferredCaptionRepair.englishContext(pending.context), modelName: pending.modelName, target: target)
         }
         dependencies.prepareRetry = { try await MLXRuntime.shared.finishRetirementBeforeRetry($0) }
+        dependencies.initialTranslation = { text in
+            // installedSource never downloads a package or opens a preparation
+            // sheet. Older systems can reuse their prepared preview session.
+            guard #available(macOS 26.0, *) else { throw QwenRuntimeError.runtimeUnavailable }
+            let source = Locale.Language(identifier: "en")
+            let target = Locale.Language(identifier: "zh-Hans")
+            guard await LanguageAvailability().status(from: source, to: target) == .installed else {
+                throw QwenRuntimeError.runtimeUnavailable
+            }
+            return try await TranslationSession(installedSource: source, target: target).translate(text).targetText
+        }
         return dependencies
     }
     static let unavailable = Self(
@@ -222,6 +239,55 @@ struct LearningGenerationDependencies {
     func generateNote(_ input: String, model: String, prefix: String, systemPrompt: String,
                       onUpdate: @escaping @MainActor @Sendable (String) async -> Void) async throws -> String {
         try await generate(input, model, prefix, systemPrompt, onUpdate)
+    }
+}
+
+/// An unstructured race: cancellation never joins a provider that ignores it.
+/// Only the first completion/timeout can publish; a late result is discarded.
+@MainActor
+private final class InitialTranslationRequest {
+    private var operation: Task<Void, Never>?
+    private var timer: Task<Void, Never>?
+    private var completed = false
+    private var completion: ((String?) -> Void)?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func start(source: String, translate: @escaping @MainActor (String) async throws -> String,
+               deadline: @escaping @MainActor () async throws -> Void,
+               completion: @escaping (String?) -> Void) {
+        self.completion = completion
+        operation = Task(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
+            let text = try? await translate(source)
+            guard !Task.isCancelled else { return }
+            self?.finish(text)
+        }
+        timer = Task(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
+            do { try await deadline() } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.finish(nil)
+        }
+    }
+
+    func wait() async {
+        guard !completed else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func cancel() { finish(nil) }
+
+    private func finish(_ text: String?) {
+        guard !completed else { return }
+        completed = true
+        operation?.cancel(); timer?.cancel()
+        operation = nil; timer = nil
+        let publish = completion
+        completion = nil
+        publish?(text)
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
     }
 }
 
@@ -687,6 +753,9 @@ final class AppModel: ObservableObject {
     private var previewWake: PreviewWakeSignal?
     /// 每次 `runPreviewTranslation` 的身份；旧循环返回的结果不能写进新会话。
     private var previewRunToken: UUID?
+    private var initialTranslationCache: [String: String] = [:]
+    private var initialTranslationRequests: [UUID: (token: UUID, request: InitialTranslationRequest)] = [:]
+    private var preparedInitialTranslation: (@MainActor (String) async throws -> String)?
     /// 预览时序日志的窗口聚合状态（见 `tracePreviewReceiveHop`）。
     private var previewHopWindowStarted: TimeInterval = 0
     private var previewHopWorst: TimeInterval = 0
@@ -876,6 +945,7 @@ final class AppModel: ObservableObject {
         // 令牌必须在任何 await 之前绑定：否则旧会话的 prepareTranslation 返回后
         // 会覆盖新会话的令牌，把最新一次运行误判成“已过期”。
         guard applePreviewLanguagePair != nil else { return }
+        let supportsInitialFallback = applePreviewLanguagePair?.target == "zh-Hans"
         let runToken = UUID()
         previewRunToken = runToken
         // Wake the superseded loop before preparation: preparation may fail
@@ -901,6 +971,14 @@ final class AppModel: ObservableObject {
             // prepare 期间可能已经有更新的会话接替：旧会话直接退出，不改状态。
             guard previewRunToken == runToken else { return }
             previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
+            preparedInitialTranslation = { [weak self] text in
+                guard let self, supportsInitialFallback, self.previewRunToken == runToken,
+                      self.captionTarget == .simplifiedChinese else { throw QwenRuntimeError.runtimeUnavailable }
+                return try await session.translate(text).targetText
+            }
+            defer {
+                if self.previewRunToken == runToken { self.preparedInitialTranslation = nil }
+            }
             let wake = PreviewWakeSignal()
             installPreviewWake(wake)
             defer { releasePreviewWake(wake) }
@@ -920,6 +998,9 @@ final class AppModel: ObservableObject {
                 translate: { try await session.translate($0).targetText },
                 deliver: { source, translated, timing in
                     self.previewChinese = self.captionTarget.normalize(translated)
+                    if supportsInitialFallback, self.captionTarget == .simplifiedChinese {
+                        self.rememberInitialTranslation(source: source.text, translated: translated)
+                    }
                     self.previewTranslationStatus = "苹果初译 · 定稿后替换为正式译文"
                     Self.tracePreview("delivered", characters: source.text.count, timing: timing)
                 },
@@ -2649,6 +2730,7 @@ final class AppModel: ObservableObject {
         defer { preparingApplicationExit = false }
         return await ExitDeadline.$current.withValue(deadline) {
             cancelScheduledSummaryRefresh()
+            cancelInitialTranslationRequests()
             processingPaused = true
             let readiness = readinessMonitorTask, power = powerMonitorTask
             let refresh = resourceRefreshTask, manual = manualTranslationTask
@@ -2835,6 +2917,8 @@ final class AppModel: ObservableObject {
         liveChinese = ""
         translatingSegmentID = nil
         clearTranslationPreview()
+        cancelInitialTranslationRequests()
+        initialTranslationCache.removeAll(keepingCapacity: false)
         segments = []
         initialSourceRevisionInputs = [:]
         resetLearningNotes()
@@ -3059,6 +3143,7 @@ final class AppModel: ObservableObject {
         let translation = translationWorker
         let translationID = translationWorkerID
         let summary = summaryTask
+        cancelInitialTranslationRequests()
         processingPaused = true
         translationEnqueuedAt.removeAll()
         clearTranslationPreview()
@@ -3409,6 +3494,8 @@ final class AppModel: ObservableObject {
         liveChinese = ""
         translatingSegmentID = nil
         clearTranslationPreview()
+        cancelInitialTranslationRequests()
+        initialTranslationCache.removeAll(keepingCapacity: false)
         segments = []
         initialSourceRevisionInputs = [:]
         lectureSummary = ""
@@ -3699,6 +3786,7 @@ final class AppModel: ObservableObject {
                 return
             }
             guard sessionID == identity, generation == epoch else { return }
+            cancelInitialTranslationRequests()
             processingPaused = true
             activeStorageMode = nil
             activeInputMode = nil
@@ -3778,6 +3866,8 @@ final class AppModel: ObservableObject {
         if summaryTaskGeneration == noteOwner { summaryTask = nil }
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
         do {
+            await waitForInitialTranslations()
+            guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
             try await flushSessionArchive()
             let captions = segments, notes = lectureSummary, target = outputLanguage
             let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
@@ -4598,6 +4688,10 @@ final class AppModel: ObservableObject {
     }
     var hasCaptionBacklogForTesting: Bool { hasCaptionBacklog }
     var captionWorkPendingForTesting: Bool { captionWorkPending }
+    func drainCaptionQueueForTesting() {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        drainTranslationQueue()
+    }
     func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         appendConfirmedCaption(segment, hints: hints)
@@ -4873,6 +4967,7 @@ final class AppModel: ObservableObject {
                     self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
                     continue
                 }
+                self.cancelInitialTranslationRequest(id)
                 self.segments[index].beginTranslation()
                 let english = self.segments[index].english
                 let recentContext = self.recentTranslationContext(before: index)
@@ -4966,7 +5061,7 @@ final class AppModel: ObservableObject {
                             Self.traceTranslation("rejected", id: id,
                                                   elapsed: ProcessInfo.processInfo.systemUptime - started,
                                                   detail: reason)
-                            throw QwenRuntimeError.translationRejected("译文未通过验收（\(reason)），已保留英文行等待重试。")
+                            throw QwenRuntimeError.translationRejected("译文未通过验收（\(reason)），已保留英文行等待重试。", rejection: pair.currentRejectionCode)
                         }
                         response = acceptedCurrent
                     } else {
@@ -5031,14 +5126,14 @@ final class AppModel: ObservableObject {
                     self.reviewConcurrency.observe(elapsed: 0, successful: false)
                     var reason = TranscriptSegment.TranslationFailureReason.category(for: error)
                     var transportFailuresOnly = Self.isTransportFailure(reason)
-                    self.recordCaptionTranslationFailure(reason, at: failureIndex)
+                    self.recordCaptionTranslationFailure(reason, rejection: (error as? QwenRuntimeError)?.translationRejection, at: failureIndex)
                     var recovered: String?
                     // One bounded recovery, owned by the same caption revision.
                     // Content failures change instructions; output-limit failures
                     // increase the budget; transient or unclassified runtime errors
                     // retain one ordinary retry.
                     if !self.rescuedTransportCaptionIDs.contains(id),
-                       let attempt = CaptionTranslationAttempt.recovery(for: error) {
+                       let attempt = CaptionTranslationAttempt.recovery(for: error, target: target) {
                         Self.traceTranslation("retry_\(attempt.rawValue)", id: id,
                                               elapsed: ProcessInfo.processInfo.systemUptime - started)
                         do {
@@ -5061,7 +5156,7 @@ final class AppModel: ObservableObject {
                                 session: currentSession, epoch: currentGeneration, worker: workerID) else { continue }
                             reason = TranscriptSegment.TranslationFailureReason.category(for: error)
                             transportFailuresOnly = transportFailuresOnly && Self.isTransportFailure(reason)
-                            self.recordCaptionTranslationFailure(reason, at: currentIndex)
+                            self.recordCaptionTranslationFailure(reason, rejection: (error as? QwenRuntimeError)?.translationRejection, at: currentIndex)
                         }
                     }
                     guard !Task.isCancelled, currentGeneration == self.generation,
@@ -5079,7 +5174,7 @@ final class AppModel: ObservableObject {
                         } catch {
                             reason = TranscriptSegment.TranslationFailureReason.category(for: error)
                             transportFailuresOnly = false
-                            self.recordCaptionTranslationFailure(reason, at: currentIndex)
+                            self.recordCaptionTranslationFailure(reason, rejection: (error as? QwenRuntimeError)?.translationRejection, at: currentIndex)
                         }
                     }
                     if let accepted {
@@ -5097,10 +5192,17 @@ final class AppModel: ObservableObject {
                                               detail: reason.rawValue)
                         self.segments[currentIndex].finishFailedTranslation()
                         self.segments[currentIndex].updateCaptionAnnotation(targetCode: target.rawValue)
+                        if target == .simplifiedChinese, sourceLanguage == nil || sourceLanguage == "en",
+                           self.segments[currentIndex].modelDidNotTranslate,
+                           self.segments[currentIndex].initialTranslationFallback == nil {
+                            self.scheduleInitialTranslationFallback(input, at: currentIndex, target: target)
+                        }
                         if transportFailuresOnly, !self.rescuedTransportCaptionIDs.contains(id) {
                             self.failedTransportCaptions[id] = (input, self.captionTranslationSuccessCount)
                         }
-                        self.liveChinese = self.segments[currentIndex].displayChinese
+                        guard let displayIndex = self.translationInputIndex(input, session: currentSession,
+                            epoch: currentGeneration, worker: workerID) else { continue }
+                        self.liveChinese = self.segments[displayIndex].displayChinese
                     }
                     self.persistCurrentSession()
                 }
@@ -5132,12 +5234,18 @@ final class AppModel: ObservableObject {
         latencyLog.notice("stop stage=\(stage, privacy: .public) elapsed_ms=\(milliseconds)")
     }
 
-    private func recordCaptionTranslationFailure(_ reason: TranscriptSegment.TranslationFailureReason, at index: Int) {
-        segments[index].recordTranslationFailure(reason)
+    private func recordCaptionTranslationFailure(_ reason: TranscriptSegment.TranslationFailureReason,
+                                                rejection: TranslationAcceptance.Rejection? = nil, at index: Int) {
+        segments[index].recordTranslationFailure(reason, rejection: rejection)
         let count = segments[index].translationFailures.last!.count
-        Self.latencyLog.notice("caption_failure reason=\(reason.rawValue, privacy: .public) count=\(count)")
+        let code = segments[index].translationFailures.last!.rejection?.rawValue ?? "unspecified"
+        Self.latencyLog.notice("caption_failure reason=\(reason.rawValue, privacy: .public) rejection=\(code, privacy: .public) count=\(count)")
         #if LIVELINGO_CLI
-        translationFailureReporter?(["translationFailureReason": reason.rawValue, "translationFailureCount": count])
+        var fields: [String: Any] = ["translationFailureReason": reason.rawValue, "translationFailureCount": count]
+        if let rejection = segments[index].translationFailures.last!.rejection {
+            fields["translationRejection"] = rejection.rawValue
+        }
+        translationFailureReporter?(fields)
         #endif
         persistCurrentSession()
     }
@@ -5170,6 +5278,80 @@ final class AppModel: ObservableObject {
         // Runtime errors can embed source text or paths. Details remain in the
         // UI state; ordinary logging records only their presence.
         latencyLog.notice("caption event=\(event, privacy: .public) id=\(id.uuidString, privacy: .public) elapsed_ms=\(milliseconds) has_diagnostic=\(detail != nil)")
+    }
+
+    private func initialTranslationCacheKey(_ source: String) -> String {
+        "\(sessionID.uuidString)|\(generation)|\(source.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    private func cancelInitialTranslationRequest(_ id: UUID) {
+        let pending = initialTranslationRequests.removeValue(forKey: id)
+        pending?.request.cancel()
+    }
+
+    private func cancelInitialTranslationRequests() {
+        let pending = initialTranslationRequests.values.map(\.request)
+        initialTranslationRequests.removeAll()
+        for request in pending { request.cancel() }
+    }
+
+    private func scheduleInitialTranslationFallback(_ input: TranscriptSegment, at index: Int,
+                                                     target: CaptionTranslationTarget) {
+        let source = input.english.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cached = initialTranslationCache[initialTranslationCacheKey(source)]
+        // Save the attempt before starting, including its failure/timeout state.
+        segments[index].recordInitialTranslationFallback(cached, targetCode: target.rawValue)
+        guard cached == nil else { return }
+        let identity = sessionID, epoch = generation, token = UUID()
+        let request = InitialTranslationRequest()
+        initialTranslationRequests[input.id] = (token, request)
+        request.start(source: source,
+            translate: preparedInitialTranslation ?? captionTranslation.initialTranslation,
+            deadline: captionTranslation.initialTranslationDeadline) { [weak self] text in
+                guard let self, self.initialTranslationRequests[input.id]?.token == token else { return }
+                self.initialTranslationRequests.removeValue(forKey: input.id)
+                guard self.sessionID == identity, self.generation == epoch, !self.processingPaused,
+                      self.captionTarget == target,
+                      let current = self.segments.firstIndex(where: {
+                          $0.id == input.id && $0.inputRevision == input.inputRevision
+                              && $0.english == input.english && $0.sourceLanguage == input.sourceLanguage
+                      }), self.segments[current].modelDidNotTranslate else { return }
+                if let text, let usable = try? TranslationAcceptance.validatedCaption(
+                    target.normalize(text), source: source, target: target) {
+                    self.segments[current].completeInitialTranslationFallback(usable, targetCode: target.rawValue)
+                    self.persistCurrentSession()
+                }
+                // Publish terminal failures too: the live preview observes
+                // captionStream, while removing the pending request is private.
+                if self.segments.last?.id == input.id, self.volatileEnglish.isEmpty {
+                    self.liveChinese = self.segments[current].displayChinese
+                    self.captionStream.objectWillChange.send()
+                }
+            }
+    }
+
+    var failedInitialTranslationCaption: TranscriptSegment? {
+        guard volatileEnglish.isEmpty, captionTarget == .simplifiedChinese,
+              let caption = segments.last, caption.modelDidNotTranslate,
+              caption.initialTranslationFallback?.targetCode == captionTarget.rawValue,
+              caption.initialTranslationDisplay == nil,
+              initialTranslationRequests[caption.id] == nil else { return nil }
+        return caption
+    }
+
+    // Final exports and CLI/test readback drain bounded display work after
+    // formal captions finish. Caption processing and notes never await it.
+    func waitForInitialTranslations() async {
+        let requests = initialTranslationRequests.values.map(\.request)
+        for request in requests { await request.wait() }
+    }
+
+    func rememberInitialTranslation(source: String, translated: String) {
+        let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty, captionTarget == .simplifiedChinese,
+              let text = try? TranslationAcceptance.validatedCaption(translated, source: source) else { return }
+        if initialTranslationCache.count >= 64 { initialTranslationCache.removeAll(keepingCapacity: true) }
+        initialTranslationCache[initialTranslationCacheKey(source)] = text
     }
 
     private static func previewMilliseconds(_ value: TimeInterval) -> Int {
@@ -6100,7 +6282,7 @@ struct ProtectedChemistryTranslationInput: Sendable {
 
     func validatedRestore(in translatedText: String) throws -> String {
         if let reason = restorationFailure(in: translatedText) {
-            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason)。")
+            throw QwenRuntimeError.translationRejected("译文未通过验收：\(reason)。", rejection: .incompleteProse)
         }
         return restore(in: translatedText)
     }
@@ -6662,6 +6844,7 @@ extension AppModel {
         defer { translationFailureReporter = nil }
         for caption in captions { appendConfirmedCaption(caption, hints: []) }
         await translationWorker?.value
+        await waitForInitialTranslations()
     }
     #endif
 

@@ -336,14 +336,61 @@ rejected. `translationFailureReason` must be one of these frozen strings:
 `runtimeUnavailable`, `invalidResponse`, `generationInterrupted`, `requestFailed`,
 `dependencyCancelled`, `unknown`, `cancelled`, `interrupted`. If either value is
 invalid or missing, both fields are dropped and only the event name remains.
-Counts accumulate for the same reason on that caption, including retries;
-different reasons have separate counts. A successful retry retains the saved
+For `translationRejected`, an optional `translationRejection` contains only a
+`TranslationAcceptance.Rejection` enum code (for example `sourceEcho`,
+`modelReply` or `disproportionateLength`). Unknown or malformed codes are dropped;
+the field is never emitted for other failure reasons. Persisted caption entries
+store that code as optional `rejection`; older entries remain readable.
+Counts accumulate for the same reason and rejection code on that caption,
+including retries; different pairs have separate counts. A successful retry retains the saved
 trail without emitting another failure event. `dependencyCancelled` means a
 dependency raised cancellation while the caption worker itself was still
 active. The legacy `cancelled` and `interrupted` values remain readable and
 allowlisted; routine pauses, parks, restarts and actual worker cancellation do
 not write them as new translation failures. The CLI regression checks worker
 cancellation; saved-course pause/reopen coverage belongs to the app tests.
+
+For Chinese output, explicit model replies/refusals and English source echoes receive the existing
+single bounded retry with `repairQuotedContent`: the content-repair constraints
+plus an instruction to translate classroom quotations faithfully, including
+profanity. All other failures keep their existing recovery strategy. An explicit
+refusal quoted in the source remains translatable lecture content. Lecture sources
+discussing translation are exempt from refusal recognition. The check accepts
+only a closed set of whole replies, with minor whitespace/punctuation differences.
+Source translations of refusal/help language are allowed. Unknown wording, names,
+numbers and non-English sources are allowed; inability verbs never suffice.
+For a matching reply, rejection additionally requires known source words whose
+translations are absent. This deliberately narrow correspondence vocabulary
+currently covers the diagnostic profanity examples; other sources pass rather
+than risk discarding a legitimate lecture translation.
+
+After a final refusal or English echo, Chinese captions first reuse the exact
+sentence's Apple initial translation from this session. If absent, they request
+one local translation of the final English, using an installed language pair;
+no download or repeated Apple retries occur. The caption stays failed, retains
+its rejection code and stores the Apple output separately from formal Chinese.
+The UI, SRT and text exports prefix it with `初译 · `; it is not admitted as
+learning-note evidence. Only when no usable initial translation is available
+does the caption say the model did not translate the sentence. A failed Apple
+attempt is persisted to prevent repeated requests on resume. macOS 26 can
+create an installed-only session; older systems need an already prepared Apple
+preview session. Other failure placeholders and non-Chinese recovery stay unchanged.
+
+The supplemental Apple request runs independently of the formal caption queue,
+with a three-second deadline. Timeout leaves the model-not-translated placeholder;
+late, revised or cancelled results cannot publish. Final exports drain this bounded
+display work only after formal captions finish. An Apple fallback failure or
+timeout also refreshes the main live preview and default bilingual
+floating preview with the same final failure text. An in-flight request keeps
+its waiting status; newer speech and discarded late results cannot be replaced.
+Translation-only mode retains its source fallback when no translation is usable.
+Archives containing the fallback
+field (including pending/failed request markers) require reader version 4 in the
+snapshot envelope or journal record. Older readers must refuse opening before
+saving can discard it; payload schema 1 and older archives' version gates stay unchanged.
+
+The offline prompt audit exports both model profiles' complete quotation-repair
+prompts, including the Chinese postscript, alongside the unchanged normal prompts.
 
 `--resume-saved` waits only for work that can still move on its own: active or
 claimable transcription, translation and notes. Failed segments (including

@@ -64,7 +64,7 @@ _EVENTS = frozenset(("start", "end", "backend", "first_result", "result", "reque
                      "current_preview", "complete", "complete_adjacent", "complete_after_retry",
                      "rejected", "failed", "adjacent_repair", "adjacent_repair_kept",
                      "retry_ordinary", "retry_content", "retry_outputLimit", "retry_transport",
-                     "retry_standard", "retry_repairContent", "retry_expandedBudget",
+                     "retry_standard", "retry_repairContent", "retry_repairQuotedContent", "retry_expandedBudget",
                      "delivered", "main_hop", "released", "timing", "unknown") + _ISSUES)
 _NUMERIC_FIELDS = frozenset(("elapsed_ms", "duration_ms", "duration_s", "sample_rate", "frames",
                             "fed_seconds", "captured_since_range_end_ms", "since_first_audio_ms",

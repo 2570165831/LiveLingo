@@ -79,7 +79,7 @@ def load_session(root, counters):
             row = json.loads(line)
             payload = base64.b64decode(row["payload"], validate=True)
             version = row["schemaVersion"]
-            if version not in (1, 2, 3):
+            if version not in (1, 2, 3, 4):
                 raise ValueError()
             sequence += 1
             prefix = (f"LiveLingo-journal-{version}\n{sequence}\n{row['sessionID']}\n"
