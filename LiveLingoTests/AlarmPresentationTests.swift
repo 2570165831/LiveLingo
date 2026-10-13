@@ -81,12 +81,61 @@ final class AlarmPresentationTests: XCTestCase {
         XCTAssertEqual(warning.detail, "倒计时结束后保存本节，并另开新录音继续。")
         XCTAssertEqual(warning.buttonTitle, "取消（30）")
         XCTAssertEqual(AlarmBannerState(secondsRemaining: 28).buttonTitle, "取消（28）")
-        XCTAssertEqual(warning.buttonDetail, "不分段 · Esc")
+        XCTAssertEqual(warning.buttonDetail, "不分段 · 字幕窗或 LiveLingo 获得键盘焦点时可按 Esc")
         XCTAssertEqual(AlarmBannerState(secondsRemaining: 0, saved: true).buttonTitle, "知道了")
         XCTAssertEqual(AlarmBannerState(secondsRemaining: 0, saving: true).buttonTitle, "知道了")
         XCTAssertEqual(AlarmBannerState(saved: true).title, AlarmPolicy.savedTitle)
         XCTAssertEqual(AlarmBannerState(liveOnly: true).buttonTitle, "知道了")
         XCTAssertTrue(AlarmBannerState(liveOnly: true).detail.contains("不自动保存"))
+    }
+    func testAcknowledgementDetailsAlsoExplainEscapeFocusRequirement() {
+        for state in [AlarmBannerState(saved: true), AlarmBannerState(saving: true),
+                      AlarmBannerState(liveOnly: true), AlarmBannerState(failure: "Synthetic failure")] {
+            XCTAssertEqual(state.buttonDetail, "关闭提醒 · 字幕窗或 LiveLingo 获得键盘焦点时可按 Esc")
+        }
+    }
+    func testAlarmDismissalReturnsInjectedKeyWindowWithoutShowingNativeWindows() throws {
+        // Native NSWindow identities with injected key routing: no makeKey,
+        // orderFront, activation, or user input is sent to the real application.
+        for wasVisible in [false, true] {
+            for ownsKey in [false, true] {
+                let (model, defaults, _) = try fixture()
+                let previous = NSWindow(contentRect: .init(x: 0, y: 0, width: 200, height: 100),
+                    styleMask: [.titled], backing: .buffered, defer: false)
+                previous.isReleasedWhenClosed = false
+                var keyWindow: NSWindow? = previous
+                var visible = wasVisible
+                var operations: [String] = []
+                let focus = FloatingSubtitleWindowFocus(isKeyWindow: { keyWindow === $0 },
+                    isVisible: { _ in visible }, orderOut: { panel in
+                        XCTAssertTrue(keyWindow === panel)
+                        operations.append("out")
+                        visible = false
+                        keyWindow = previous
+                    }, orderFront: { _ in
+                        operations.append("front")
+                        visible = true
+                    })
+                let controller = FloatingSubtitleWindowController(defaults: defaults, focus: focus)
+                let panel = controller.prepareWindow(model: model)
+                defer { controller.shutdown(); previous.close() }
+                controller.toggleLock()
+                model.presentAlarmBannerForTesting(.init(secondsRemaining: 28))
+                XCTAssertFalse(panel.ignoresMouseEvents)
+                XCTAssertFalse(panel.becomesKeyOnlyIfNeeded)
+                XCTAssertTrue(try XCTUnwrap(panel.contentView).acceptsFirstMouse(for: nil),
+                              "The alarm action must accept the first click without app activation")
+                if ownsKey { keyWindow = panel }
+                model.dismissAlarmReminder()
+                XCTAssertTrue(keyWindow === previous, "The injected key window must return to its original owner")
+                XCTAssertEqual(operations, ownsKey ? (wasVisible ? ["out", "front"] : ["out"]) : [])
+                XCTAssertEqual(visible, wasVisible, "Dismissal must preserve the panel's prior visibility")
+                XCTAssertTrue(panel.ignoresMouseEvents)
+                XCTAssertTrue(panel.becomesKeyOnlyIfNeeded)
+                XCTAssertFalse(panel.isVisible)
+                XCTAssertFalse(previous.isVisible)
+            }
+        }
     }
     func testLockedSubtitleBannerAcceptsClickAndKeyboardFocusThenRestoresClickThrough() async throws {
         let (model, defaults, _) = try fixture()
@@ -110,6 +159,52 @@ final class AlarmPresentationTests: XCTestCase {
         XCTAssertTrue(panel.ignoresMouseEvents)
         XCTAssertTrue(panel.becomesKeyOnlyIfNeeded)
         XCTAssertFalse(panel.isVisible)
+    }
+    func testAlarmDismissalReturnsNativeKeyWindowWithTransparentTestWindows() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["LIVELINGO_NATIVE_FOCUS_TESTS"] == "1",
+                          "Native key ownership requires separately authorized foreground testing; default tests cannot take user focus")
+        try XCTSkipUnless(NSApplication.shared.isActive, "The test host must already be in the foreground; this test never activates it")
+        // An ordinary panel exercises AppKit's real key-window handoff without
+        // borrowing another application's focus through a nonactivating panel.
+        // The production panel's policy is covered separately above.
+        let (model, defaults, _) = try fixture()
+        let controller = FloatingSubtitleWindowController(defaults: defaults)
+        controller.panelFactoryForTesting = { rect, style in
+            NSPanel(contentRect: rect, styleMask: style.subtracting(.nonactivatingPanel), backing: .buffered, defer: false)
+        }
+        let panel = controller.prepareWindow(model: model)
+        let previous = NSWindow(contentRect: .init(x: -10000, y: -10000, width: 200, height: 100),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        previous.isReleasedWhenClosed = false
+        previous.alphaValue = 0
+        panel.alphaValue = 0
+        let inheritedTestKey = NSApplication.shared.keyWindow
+        let inheritedTestMain = NSApplication.shared.mainWindow
+        defer {
+            controller.shutdown()
+            previous.orderOut(nil)
+            previous.close()
+            inheritedTestMain?.makeMain()
+            inheritedTestKey?.makeKey()
+        }
+        previous.orderFront(nil)
+        previous.makeMain()
+        previous.makeKey()
+        XCTAssertTrue(NSApplication.shared.keyWindow === previous)
+        controller.toggleLock()
+        model.presentAlarmBannerForTesting(.init(secondsRemaining: 28))
+        panel.orderFront(nil)
+        panel.makeKey()
+        XCTAssertFalse(panel.styleMask.contains(.nonactivatingPanel), "Offscreen tests must not borrow external keyboard focus")
+        XCTAssertTrue(NSApplication.shared.keyWindow === panel)
+        XCTAssertTrue(panel.isKeyWindow)
+        model.dismissAlarmReminder()
+        XCTAssertTrue(NSApplication.shared.keyWindow === previous, "AppKit must return focus to the test's original key window")
+        XCTAssertFalse(panel.isKeyWindow)
+        XCTAssertTrue(panel.isVisible, "The reminder must not hide previously visible subtitles")
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        XCTAssertEqual(panel.alphaValue, 0)
+        XCTAssertEqual(previous.alphaValue, 0)
     }
     func testBottomSubtitleExpansionKeepsWholeSubtitleAreaOnItsOwnScreen() async throws {
         let (model, defaults, _) = try fixture()

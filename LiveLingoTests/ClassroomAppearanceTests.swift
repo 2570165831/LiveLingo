@@ -251,6 +251,11 @@ final class ClassroomAppearanceTests: XCTestCase {
     private func pixels(_ view: NSView) throws -> Pixels {
         XCTAssertTrue(try XCTUnwrap(view.window).isKeyWindow, "The window must remain key at capture time")
         XCTAssertTrue(try XCTUnwrap(view.window).isMainWindow, "The window must remain main at capture time")
+        // Root replacement can discard an automatically focused Toggle. Both
+        // rendering arms need the same unfocused state, independently of other
+        // tests' synthetic keyboard navigation and without activating the host.
+        XCTAssertTrue(try XCTUnwrap(view.window).makeFirstResponder(nil))
+        view.displayIfNeeded()
         let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         view.cacheDisplay(in: view.bounds, to: bitmap)
         let image = try XCTUnwrap(bitmap.cgImage)

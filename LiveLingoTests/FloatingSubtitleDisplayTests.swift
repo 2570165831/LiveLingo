@@ -676,7 +676,7 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
         }
     }
 
-    func testNonactivatingPanelTextControlsBecomeKeyAndCopyToPrivatePasteboard() async throws {
+    func testOffscreenPanelTextControlsSelectAndCopyToPrivatePasteboard() async throws {
         let fixture = try FloatingSubtitleWindowTestFixture(testCase: self)
         let source = "El agua está fría."
         let translation = "水很冷。"
@@ -684,10 +684,13 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             TranscriptSegment(startTime: 0, endTime: 2, english: source, chinese: translation, sourceLanguage: "es")
         ])
         let controller = FloatingSubtitleWindowController(defaults: fixture.defaults)
+        controller.panelFactoryForTesting = { rect, style in
+            NSPanel(contentRect: rect, styleMask: style.subtracting(.nonactivatingPanel), backing: .buffered, defer: false)
+        }
         let panel = controller.prepareWindow(model: fixture.model)
         defer { controller.close() }
         let view = try XCTUnwrap(panel.contentView)
-        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertFalse(panel.styleMask.contains(.nonactivatingPanel), "This test must never borrow another app's focus")
         XCTAssertTrue(panel.canBecomeKey)
         XCTAssertTrue(panel.becomesKeyOnlyIfNeeded)
         XCTAssertFalse(panel.ignoresMouseEvents)
@@ -708,8 +711,6 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
             XCTAssertTrue(control.needsPanelToBecomeKey)
             XCTAssertTrue(panel.makeFirstResponder(control))
             XCTAssertTrue(panel.firstResponder === control)
-            panel.makeKey()
-            XCTAssertTrue(panel.isKeyWindow)
             control.perform(selectAll, with: nil)
             pasteboard.clearContents()
             try copySelection(control, to: pasteboard)

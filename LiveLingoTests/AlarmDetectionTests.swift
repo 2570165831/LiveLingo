@@ -23,16 +23,32 @@ final class AlarmDetectionTests: XCTestCase {
         XCTAssertTrue(rule.observe(window(9, 0.8), now: 9))
         XCTAssertFalse(rule.observe(window(10.5, 1), now: 10.5))
     }
-    func testIndependentMissBreaksPersistenceAndFreshSustainedAlarmCanTrigger() {
+    func testIntermittentAlarmToleratesOneIndependentMissWithinTwelveSeconds() {
         var rule = AlarmTriggerRule()
-        let scores = [0.8, 0.8, 0.1, 0.8, 0.8, 0.8, 0.8, 0.8]
-        for (index, score) in scores.enumerated() {
-            let end = 3 + Double(index) * 1.5
-            XCTAssertFalse(rule.observe(window(end, score), now: end))
-        }
-        XCTAssertTrue(rule.observe(window(15, 0.8), now: 15))
+        XCTAssertFalse(rule.observe(window(3, 0.8), now: 3))
+        XCTAssertFalse(rule.observe(window(6, 0.4), now: 6))
+        XCTAssertFalse(rule.observe(window(9, 0.9), now: 9))
+        XCTAssertTrue(rule.observe(window(12, 0.6), now: 12))
         rule.stop()
         for end in [3.0, 12, 30] { XCTAssertFalse(rule.observe(window(end, 1), now: end)) }
+    }
+    func testFifteenSecondAlarmWithTwelveSecondGapsAndFluctuatingScoresTriggersInBothPhases() {
+        for phase in [0.0, 1.5] {
+            var rule = AlarmTriggerRule()
+            var firstTrigger: Double?
+            for index in 0..<80 {
+                let end = phase + 3 + Double(index) * 1.5
+                let midpoint = end - 1.5
+                let sounding = midpoint.truncatingRemainder(dividingBy: 27) < 15
+                // Three of four independent windows clear the threshold. This
+                // is a rule fixture, not a prediction of classifier confidence.
+                let scores = [0.6, 0.4, 0.9, 0.7]
+                let score = sounding ? scores[(index / 2) % scores.count] : 0.02
+                if rule.observe(window(end, score), now: end) { firstTrigger = end; break }
+            }
+            XCTAssertNotNil(firstTrigger, "phase=\(phase)")
+            XCTAssertLessThanOrEqual(firstTrigger ?? .infinity, phase + 15)
+        }
     }
     func testShortBeepAcrossOverlappingWindowBoundariesNeverTriggers() {
         // Deliberately overestimate classification: ANY positive PCM overlap
@@ -40,7 +56,7 @@ final class AlarmDetectionTests: XCTestCase {
         // Sweep start phases across the complete independent 3-second cadence.
         var scenarios = 0
         var triggers = 0
-        for duration in [0.1, 1.5, 2.0, 3.0] {
+        for duration in [0.1, 1.5, 2.0, 2.5, 3.0] {
             for phase in stride(from: 0.0, through: 2.75, by: 0.25) {
                 let beep = (start: 12 + phase, end: 12 + phase + duration)
                 var rule = AlarmTriggerRule()
@@ -54,7 +70,7 @@ final class AlarmDetectionTests: XCTestCase {
                 scenarios += 1
             }
         }
-        print("ALARM_SYNTHETIC_BEEP scenarios=\(scenarios) durations_s=0.1,1.5,2,3 phase_step_s=0.25 false_triggers=\(triggers) scoring=any_positive_overlap real_classifier=false")
+        print("ALARM_SYNTHETIC_BEEP scenarios=\(scenarios) durations_s=0.1,1.5,2,2.5,3 phase_step_s=0.25 false_triggers=\(triggers) scoring=any_positive_overlap real_classifier=false")
     }
     func testSeparatedBeepTrainDoesNotAccumulateIndependentEvidence() {
         var rule = AlarmTriggerRule()

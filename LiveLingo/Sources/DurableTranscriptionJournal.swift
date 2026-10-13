@@ -22,8 +22,8 @@ struct TranscriptionWorkRecord: Codable, Sendable, Equatable, Identifiable {
         /// nor the fallback produced accepted English, and the fallback heard
         /// Han-dominant speech. Audio is kept; manual retry works.
         case otherLanguage
-        /// SoundAnalysis found no speech before ASR. Terminal until an explicit
-        /// manual retry; unlike digital silence, the chunk must remain on disk.
+        /// Consistent recognizer, language and classifier evidence found no speech.
+        /// Terminal until manual retry; unlike digital silence, keep the chunk on disk.
         case noSpeech
 
         /// What 0.2.0 understands. Newer statuses are written as this plus
@@ -707,7 +707,9 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
     }
     /// Called only after consistent automatic no-speech evidence. No audio
     /// is opened, materialized, retired or removed by this mutation.
-    func markNoSpeech(id: UUID, speechConfidence: Double) throws {
+    /// Returns the persisted result, including a veto by newer speech evidence.
+    @discardableResult
+    func markNoSpeech(id: UUID, speechConfidence: Double) throws -> TranscriptionWorkRecord {
         try lock.withLock {
             guard speechConfidence.isFinite, (0...1).contains(speechConfidence) else {
                 throw JournalError.invalidSpeechConfidence
@@ -716,14 +718,39 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
             guard record.status == .active, record.attempt != .manual, record.manualRetryCount == 0 else {
                 throw JournalError.corrupt("手动重试及其后续补转不可标记未识别到讲话")
             }
+            // Read and resolve competing evidence under the same journal lock
+            // as the append. The queue must not overwrite text/candidates that
+            // arrived after its asynchronous recognizer/classifier snapshot.
+            let hasBody = record.text?.isEmpty == false
+            let hasCandidate = record.candidateText?.isEmpty == false
+            if hasBody || hasCandidate || !record.appleEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                record.speechConfidence = nil
+                if hasBody {
+                    record.status = .completed
+                    record.failure = nil; record.failureReason = nil
+                } else {
+                    record.status = record.automaticRetryCount < Self.maximumAutomaticRetries ? .retryWaiting : .failed
+                    record.failure = hasCandidate
+                        ? "已有待确认文字，尚无可靠正文；音频已保留，可核对候选或重试。"
+                        : "预览已有讲话文字，尚无可靠正文；音频已保留，可重试。"
+                    if record.failureReason == nil || record.failureReason == .noSpeech { record.failureReason = .emptyOutput }
+                }
+                try append(record: record)
+                return record
+            }
             record.status = .noSpeech
+            record.text = nil; record.textLanguage = nil
+            record.candidateText = nil; record.candidateLanguage = nil; record.candidateOrigin = nil
             record.failureReason = .noSpeech
-            record.failure = "未识别到讲话，音频已保留；可手动重试。"
+            record.failure = "未识别到讲话，音频已保留，可手动重试。"
             record.speechConfidence = speechConfidence
             // A terminal filter verdict cannot leave deferred probe work alive.
             record.sourceProbeInput = nil
             record.sourceProbeFinished = nil
+            record.sourceRevisionAllowed = nil
+            record.sourceInitialEnglishDigest = nil
             try append(record: record)
+            return record
         }
     }
     func retry(id: UUID) throws {

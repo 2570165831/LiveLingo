@@ -112,11 +112,15 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
     private final class Observed: @unchecked Sendable {
         private let lock = NSLock()
         private var values: [String] = []
+        private var resolvedRanges: [[TimeInterval]] = []
         func add(_ value: String) { lock.withLock { values.append(value) } }
         var all: [String] { lock.withLock { values } }
+        var resolutions: [[TimeInterval]] { lock.withLock { resolvedRanges } }
         func receive(_ event: SpeechPipeline.Event) {
             switch event {
             case .transcriptionIssue: add("issue")
+            case .transcriptionIssueResolved(let start, let end):
+                lock.withLock { values.append("resolved"); resolvedRanges.append([start, end]) }
             case .volatile(let text, _, _, _): if text.isEmpty { add("clearPreview") }
             case .identifiedFinal, .final: add("final")
             default: break
@@ -460,7 +464,7 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(suppressed.status, .noSpeech)
         XCTAssertEqual(queue.state?.noSpeechCount, 1)
         XCTAssertEqual(queue.state?.unresolvedCount, 0)
-        XCTAssertEqual(events.all, [], "A no-speech terminal must neither warn nor clear the existing preview")
+        XCTAssertEqual(events.all, ["resolved"], "A no-speech terminal resolves its notice without warning or clearing preview")
         let diagnostics = try String(contentsOf: root.appendingPathComponent("transcription-issues.jsonl"), encoding: .utf8)
         let rows = try diagnostics.split(separator: "\n").map { line in
             try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
@@ -483,6 +487,240 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(reopened.records.first?.attempt, .manual)
         XCTAssertNil(reopened.records.first?.speechConfidence)
         await reopened.cancel()
+    }
+
+    private actor DeferredProbeGate {
+        private var opened = false
+        private var continuation: CheckedContinuation<Void, Never>?
+        func wait() async {
+            guard !opened else { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+        func open() {
+            opened = true
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
+    private func diagnosticRows(_ root: URL) throws -> [[String: Any]] {
+        let file = root.appendingPathComponent("transcription-issues.jsonl")
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        return try String(contentsOf: file, encoding: .utf8).split(separator: "\n").map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+    }
+
+    private func seedPersistedMissing(_ recording: URL) {
+        RecordingDiagnostics.append(recordingURL: recording, event: "transcription_missing",
+            start: 0, end: 3, detail: "Synthetic earlier failure", reason: .emptyOutput)
+        RecordingDiagnostics.append(recordingURL: recording, event: "transcription_missing",
+            start: 3, end: 6, detail: "Synthetic neighboring failure", reason: .error)
+        RecordingDiagnostics.append(recordingURL: recording, event: "transcription_retry",
+            start: 0, end: 3, detail: "Synthetic retry", reason: .emptyOutput)
+    }
+
+    private func assertOnlyMatchingMissingWasWithdrawn(_ rows: [[String: Any]],
+                                                     file: StaticString = #filePath, line: UInt = #line) {
+        let missing = rows.filter { $0["event"] as? String == "transcription_missing" }
+        XCTAssertEqual(missing.count, 1, file: file, line: line)
+        XCTAssertEqual(missing.first?["start"] as? Double, 3, file: file, line: line)
+        XCTAssertEqual(missing.first?["end"] as? Double, 6, file: file, line: line)
+        XCTAssertEqual(missing.first?["reason"] as? String, "error", file: file, line: line)
+        XCTAssertEqual(rows.filter { $0["event"] as? String == "transcription_retry" }.count, 1,
+            file: file, line: line)
+    }
+
+    func testNoSpeechTerminalWithdrawsPersistedMissingForOnlyItsInterval() async throws {
+        let recording = try audio(seconds: 3, kind: 2)
+        let root = recording.deletingLastPathComponent()
+        let session = UUID(), events = Observed()
+        seedPersistedMissing(recording)
+        let queue = DurableTranscriptionQueue(transcriber: { _, model, _, mode in
+            Self.negativeRecognition(model, mode: mode)
+        }, speechAnalyzer: { _ in 0.05 })
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true) { events.receive($0) }
+        queue.submit(.init(audioURL: recording, modelKey: "primary", fallbackModelKey: "fallback",
+            start: 0, end: 3, appleEvidence: "", recordingURL: recording, sessionID: session,
+            startFrame: 0, endFrame: 48_000, sampleRate: 16_000)) { _ in }
+        await queue.finish(sessionID: session)
+        await queue.cancel()
+        XCTAssertEqual(queue.records.first?.status, .noSpeech)
+        XCTAssertEqual(events.all, ["resolved"])
+        XCTAssertEqual(events.resolutions, [[0, 3]])
+        let rows = try diagnosticRows(root)
+        assertOnlyMatchingMissingWasWithdrawn(rows)
+        XCTAssertEqual(rows.filter { $0["event"] as? String == "transcription_no_speech" }.count, 1)
+    }
+
+    func testRestoredNoSpeechWithdrawsPersistedMissingWithoutRecognition() async throws {
+        let recording = try audio(seconds: 3, kind: 2)
+        let root = recording.deletingLastPathComponent()
+        let session = UUID(), events = Observed()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        var saved = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 0,
+            audioFile: "retained.wav", startFrame: 0, endFrame: 48_000, sampleRate: 16_000,
+            start: 0, end: 3, captureStart: nil, captureEnd: nil, modelKey: "primary",
+            fallbackModelKey: "fallback", appleEvidence: "", recordingFile: recording.lastPathComponent)
+        saved.status = .active
+        try FileManager.default.copyItem(at: recording, to: journal.audioURL(for: saved))
+        try journal.put(saved)
+        try journal.markNoSpeech(id: saved.id, speechConfidence: 0.05)
+        try journal.checkpoint()
+        // Simulate a legacy record or interruption after the terminal append,
+        // before the queue removed its earlier persistent missing notice.
+        seedPersistedMissing(recording)
+        let queue = DurableTranscriptionQueue(transcriber: { _, _, _, _ in
+            XCTFail("Restoring a no-speech terminal must not run recognition")
+            return .init(text: "")
+        }, speechAnalyzer: { _ in XCTFail("Restoration must not classify audio"); return nil })
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+            restoring: true, startPaused: true) { events.receive($0) }
+        await queue.cancel()
+        XCTAssertEqual(queue.records.first?.status, .noSpeech)
+        XCTAssertEqual(events.all, ["resolved"])
+        XCTAssertEqual(events.resolutions, [[0, 3]])
+        let rows = try diagnosticRows(root)
+        assertOnlyMatchingMissingWasWithdrawn(rows)
+        XCTAssertFalse(rows.contains { $0["event"] as? String == "transcription_no_speech" },
+            "Restoration resolves the notice without manufacturing a new classification event")
+        XCTAssertEqual(try Data(contentsOf: journal.audioURL(for: saved)), try Data(contentsOf: recording))
+    }
+
+    func testRestoredDeferredRetryWithdrawsPersistedMissingOnNoSpeech() async throws {
+        let recording = try audio(seconds: 3, kind: 2)
+        let root = recording.deletingLastPathComponent()
+        let session = UUID(), events = Observed()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        var saved = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 0,
+            audioFile: "deferred-retry.wav", startFrame: 0, endFrame: 48_000, sampleRate: 16_000,
+            start: 0, end: 3, captureStart: nil, captureEnd: nil, modelKey: "primary",
+            fallbackModelKey: "fallback", appleEvidence: "", recordingFile: recording.lastPathComponent)
+        saved.status = .retryWaiting
+        saved.failure = "Synthetic earlier empty first pass"
+        saved.failureReason = .emptyOutput
+        saved.sourceProbeInput = .init(parakeetAccepted: false, mean: 0.3, minimum: 0.01)
+        saved.sourceProbeFinished = true
+        saved.sourceTriggerPredecessor = .init()
+        var after = SourceLanguagePolicy.TriggerState()
+        after.advance(index: 0, decision: nil)
+        saved.sourceTriggerAfter = after
+        try FileManager.default.copyItem(at: recording, to: journal.audioURL(for: saved))
+        try journal.put(saved)
+        try journal.checkpoint()
+        seedPersistedMissing(recording)
+        let queue = DurableTranscriptionQueue(transcriber: { _, model, _, mode in
+            Self.negativeRecognition(model, mode: mode)
+        }, speechAnalyzer: { _ in 0.05 })
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+            restoring: true, startPaused: true) { events.receive($0) }
+        XCTAssertTrue(events.all.isEmpty, "Do not resolve a warning until the saved retry has a no-speech verdict")
+        try queue.resume()
+        await queue.finish(sessionID: session)
+        await queue.cancel()
+        let result = try XCTUnwrap(queue.records.first)
+        XCTAssertEqual(result.status, .noSpeech)
+        XCTAssertEqual(result.attempt, .automaticRetry)
+        XCTAssertEqual(result.automaticRetryCount, 1)
+        XCTAssertEqual(events.all, ["resolved"])
+        XCTAssertEqual(events.resolutions, [[0, 3]])
+        let rows = try diagnosticRows(root)
+        assertOnlyMatchingMissingWasWithdrawn(rows)
+        XCTAssertEqual(rows.filter { $0["event"] as? String == "transcription_no_speech" }.count, 1)
+        XCTAssertEqual(try Data(contentsOf: journal.audioURL(for: saved)), try Data(contentsOf: recording))
+    }
+
+    func testDeferredPredecessorThenNoSpeechNeverEmitsMissingNotice() async throws {
+        try await deferredPredecessorFixture(confidence: 0.05, expectedStatus: .noSpeech)
+    }
+
+    func testDeferredPredecessorStillReportsMissingWhenClassifierIsUnavailable() async throws {
+        try await deferredPredecessorFixture(confidence: nil, expectedStatus: .failed)
+    }
+
+    private func deferredPredecessorFixture(confidence: Double?,
+                                           expectedStatus: TranscriptionWorkRecord.Status) async throws {
+        let recording = try audio(seconds: 6, kind: 2)
+        let chunk = try audio(seconds: 3, kind: 2)
+        let root = recording.deletingLastPathComponent()
+        let first = root.appendingPathComponent("predecessor.wav")
+        let second = root.appendingPathComponent("deferred.wav")
+        try FileManager.default.copyItem(at: chunk, to: first)
+        try FileManager.default.copyItem(at: chunk, to: second)
+        let gate = DeferredProbeGate()
+        let entered = expectation(description: "Older deferred language head is awaiting its result")
+        let stages = Observed(), events = Observed(), analyses = Observed()
+        let session = UUID()
+        let queue = DurableTranscriptionQueue(transcriber: { clip, model, enhanced, mode in
+            let predecessor = clip.lastPathComponent == "predecessor.wav"
+            stages.add("\(predecessor ? "predecessor" : "empty"):\(mode == .probe ? "probe" : model):\(enhanced)")
+            if predecessor {
+                if mode == .probe {
+                    entered.fulfill()
+                    await gate.wait()
+                    return .init(text: "", languageMode: .probe, detectedLabel: "English",
+                        languageProbability: 0.99, englishProbability: 0.99, policy: 1)
+                }
+                return .init(text: "A synthetic predecessor contains speech.",
+                    parakeetMeanProbability: 0.3, parakeetMinProbability: 0.01, parakeetConfidenceValid: true)
+            }
+            return Self.negativeRecognition(model, mode: mode)
+        }, speechAnalyzer: { _ in analyses.add("analysis"); return confidence })
+        try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true,
+            startPaused: true) { events.receive($0) }
+        // Keep every synthetic chunk; finish must not retire completed audio.
+        try queue.setCapturing(true)
+        for (index, url) in [first, second].enumerated() {
+            queue.submit(.init(audioURL: url, modelKey: "primary", fallbackModelKey: "fallback",
+                start: Double(index * 3), end: Double((index + 1) * 3), appleEvidence: "",
+                recordingURL: recording, sessionID: session, startFrame: Int64(index * 48_000),
+                endFrame: Int64((index + 1) * 48_000), sampleRate: 16_000)) { _ in }
+        }
+        try queue.resume()
+        await fulfillment(of: [entered], timeout: 5)
+        let deferred = queue.records.first { $0.ordinal == 1 }
+        // Always release before a throwing assertion, so a failed test cannot
+        // strand the injected recognizer or the parent's unified test runner.
+        let beforeEvents = events.all
+        let beforeRows = try? diagnosticRows(root)
+        let beforeStages = stages.all
+        await gate.open()
+        await queue.finish(sessionID: session)
+        await queue.cancel()
+        XCTAssertEqual(deferred?.status, .retryWaiting)
+        XCTAssertEqual(deferred?.attempt, .initial)
+        XCTAssertNil(deferred?.sourceTriggerPredecessor)
+        XCTAssertNotNil(deferred?.sourceProbeInput)
+        XCTAssertFalse(beforeEvents.contains("issue"))
+        XCTAssertNotNil(beforeRows)
+        XCTAssertFalse(beforeRows?.contains { $0["event"] as? String == "transcription_missing" } ?? true)
+        XCTAssertFalse(beforeStages.contains { $0.hasPrefix("empty:probe") })
+        let saved = try XCTUnwrap(queue.records.first { $0.ordinal == 1 })
+        XCTAssertEqual(saved.status, expectedStatus)
+        XCTAssertEqual(saved.attempt, .automaticRetry)
+        let rows = try diagnosticRows(root)
+        if expectedStatus == .noSpeech {
+            XCTAssertEqual(saved.automaticRetryCount, 1)
+            XCTAssertEqual(saved.speechConfidence, 0.05)
+            XCTAssertEqual(analyses.all.count, 1)
+            XCTAssertEqual(events.all, ["final", "resolved"], "Only the predecessor may publish; never warn or clear preview")
+            XCTAssertEqual(events.resolutions, [[3, 6]])
+            XCTAssertEqual(rows.count, 1)
+            XCTAssertEqual(rows.first?["event"] as? String, "transcription_no_speech")
+            XCTAssertEqual(rows.first?["start"] as? Double, 3)
+            XCTAssertEqual(rows.first?["end"] as? Double, 6)
+        } else {
+            XCTAssertEqual(saved.automaticRetryCount, DurableTranscriptionJournal.maximumAutomaticRetries)
+            XCTAssertNotNil(saved.failure)
+            XCTAssertEqual(saved.failureReason, .emptyOutput)
+            XCTAssertTrue(events.all.contains("issue"), "Deferral must not hide an eventual real failure")
+            XCTAssertTrue(rows.contains { $0["event"] as? String == "transcription_missing" })
+            XCTAssertFalse(rows.contains { $0["event"] as? String == "transcription_no_speech" })
+        }
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        XCTAssertEqual(journal.record(id: saved.id), saved)
+        XCTAssertEqual(try Data(contentsOf: journal.audioURL(for: saved)), try Data(contentsOf: chunk))
+        XCTAssertEqual(journal.processingState.noSpeechCount, expectedStatus == .noSpeech ? 1 : 0)
     }
 
     func testFailedManualRetryContinuesThroughAutomaticContextRepair() async throws {

@@ -7,7 +7,7 @@ import SoundAnalysis
 enum AlarmPolicy {
     static let windowSeconds: TimeInterval = 3
     static let overlap = 0.5
-    static let historySeconds: TimeInterval = 9
+    static let historySeconds: TimeInterval = 12
     static let confidenceThreshold = 0.5
     static let requiredWindows = 3
     static let minimumHitSpan: TimeInterval = 6
@@ -49,7 +49,7 @@ struct AlarmTriggerRule: Sendable {
         guard !isPresented, now >= nextAllowedAt else { windows.removeAll(); return false }
         // The classifier still advances every 1.5 seconds, but overlapping
         // results cannot vote twice for the same PCM. Count three independent
-        // 3-second windows (9 seconds), including misses in that fixed cadence.
+        // 3-second windows within twelve seconds, including misses in that cadence.
         guard windows.last.map({ observation.start >= $0.end - 0.001 }) ?? true else { return false }
         windows.append(observation)
         windows.removeAll { $0.start < observation.end - AlarmPolicy.historySeconds - 0.001 }
@@ -193,7 +193,9 @@ struct AlarmBannerState: Equatable, Sendable {
         if canCancelSegmentation, let secondsRemaining { return "取消（\(secondsRemaining)）" }
         return "知道了"
     }
-    var buttonDetail: String { canCancelSegmentation ? "不分段 · Esc" : "关闭提醒 · Esc" }
+    var buttonDetail: String {
+        (canCancelSegmentation ? "不分段" : "关闭提醒") + " · 字幕窗或 LiveLingo 获得键盘焦点时可按 Esc"
+    }
     var accessibilityHint: String {
         canCancelSegmentation ? "取消自动分段并关闭提醒，录音继续；字幕窗或 LiveLingo 获得键盘焦点时可按 Esc"
             : "关闭提醒，录音继续；字幕窗或 LiveLingo 获得键盘焦点时可按 Esc"

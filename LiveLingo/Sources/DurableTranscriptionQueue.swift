@@ -133,7 +133,11 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             storageFailure = nil
         }
         if restoring {
+            let restoredOwner = lock.withLock { context }
             for record in journal.records {
+                if record.status == .noSpeech, let restoredOwner {
+                    Self.resolveNoSpeechIssue(record, owner: restoredOwner)
+                }
                 if let text = record.text, !text.isEmpty { emitCommit(record, text: text, repair: true) }
                 if record.candidateText != nil { emitCandidate(record) }
             }
@@ -841,30 +845,19 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                             try owner.journal.put(record)
                             return
                         }
-                        if output.noSpeech, record.text?.isEmpty == false || record.candidateText?.isEmpty == false
-                            || !record.appleEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            record.status = record.text?.isEmpty == false ? .completed : .failed
-                            record.failure = nil; record.failureReason = nil; record.speechConfidence = nil
-                            try owner.journal.put(record)
-                            return
-                        }
                         let alreadyDelivered = record.text?.isEmpty == false
                         if let candidate = output.candidate {
                             record.candidateText = candidate; record.candidateOrigin = output.origin
                             record.candidateLanguage = nil
                         }
                         if output.noSpeech, let confidence = output.speechConfidence {
-                            record.status = .noSpeech
-                            record.text = nil; record.textLanguage = nil
-                            record.candidateText = nil; record.candidateLanguage = nil; record.candidateOrigin = nil
-                            record.sourceProbeInput = nil; record.sourceProbeFinished = nil
-                            record.sourceRevisionAllowed = nil; record.sourceInitialEnglishDigest = nil
-                            record.failure = "未识别到讲话，音频已保留，可手动重试。"
-                            record.failureReason = .noSpeech
-                            record.speechConfidence = confidence
-                            RecordingDiagnostics.append(recordingURL: try? owner.journal.recordingURL(for: record),
-                                event: "transcription_no_speech", start: record.start, end: record.end,
-                                detail: "", reason: .noSpeech)
+                            record = try owner.journal.markNoSpeech(id: record.id, speechConfidence: confidence)
+                            if record.status == .noSpeech {
+                                Self.resolveNoSpeechIssue(record, owner: owner)
+                                RecordingDiagnostics.append(recordingURL: try? owner.journal.recordingURL(for: record),
+                                    event: "transcription_no_speech", start: record.start, end: record.end,
+                                    detail: "", reason: .noSpeech)
+                            }
                         } else if output.silent {
                             record.status = .silent; record.failure = nil; record.failureReason = nil
                             owner.handler(.volatile(text: "", start: record.start, end: record.end,
@@ -886,7 +879,9 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         } else {
                             markFailure(&record, message: "此处尚未得到可靠的英文转写，音频已保留。", reason: output.failureReason)
                         }
-                        try owner.journal.put(record)
+                        // markNoSpeech atomically persisted either the terminal
+                        // verdict or the competing speech/candidate repair state.
+                        if !output.noSpeech || output.speechConfidence == nil { try owner.journal.put(record) }
                         if !alreadyDelivered, !output.text.isEmpty, record.text == output.text, record.textLanguage == output.language {
                             emitCommit(record, text: output.text, repair: claimed.attempt != .initial)
                         }
@@ -901,7 +896,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         try owner.journal.put(record)
                     }
                     try refreshInitialProgress(owner)
-                    if let failure = record.failure, record.status != .noSpeech {
+                    if let failure = record.failure, record.status != .noSpeech, !Self.defersMissingNotice(record) {
                         let recording = record.recordingFile.map { owner.journal.directory.deletingLastPathComponent().appendingPathComponent($0) }
                         RecordingDiagnostics.append(recordingURL: recording,
                             event: record.status == .otherLanguage ? "transcription_non_english" : "transcription_missing",
@@ -1026,7 +1021,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                         try owner.journal.put(record)
                     }
                     if !record.needsWork { owner.attempts.remove(id: record.id) }
-                    if let failure = record.failure, failure != previousFailure || record.failureReason != previousReason {
+                    if let failure = record.failure, !Self.defersMissingNotice(record),
+                       failure != previousFailure || record.failureReason != previousReason {
                         let recording = record.recordingFile.map {
                             owner.journal.directory.deletingLastPathComponent().appendingPathComponent($0)
                         }
@@ -1045,6 +1041,23 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         record.failure = message
         record.failureReason = reason
         record.status = record.automaticRetryCount < DurableTranscriptionJournal.maximumAutomaticRetries ? .retryWaiting : .failed
+    }
+
+    /// An empty first pass with a deferred causal head has not had its complete
+    /// no-speech decision yet. Keep durable retry work, but publish a missing
+    /// notice only after the first automatic repair can evaluate that head.
+    /// This also covers the source pump completing before the repair is claimed.
+    private static func defersMissingNotice(_ record: TranscriptionWorkRecord) -> Bool {
+        record.attempt == .initial && record.manualRetryCount == 0
+            && record.status == .retryWaiting && record.sourceProbeInput != nil
+            && record.text?.isEmpty != false && record.candidateText?.isEmpty != false
+            && record.appleEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func resolveNoSpeechIssue(_ record: TranscriptionWorkRecord, owner: Context) {
+        RecordingDiagnostics.resolveMissing(recordingURL: try? owner.journal.recordingURL(for: record),
+            start: record.start, end: record.end)
+        owner.handler(.transcriptionIssueResolved(start: record.start, end: record.end))
     }
     private func emitCommit(_ record: TranscriptionWorkRecord, text: String, repair: Bool,
                             replacingInitialText: String? = nil) {

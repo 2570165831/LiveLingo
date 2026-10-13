@@ -153,6 +153,28 @@ struct FloatingSubtitleWindowScreens {
     }
 }
 
+/// AppKit releases a nonactivating panel's borrowed keyboard focus when it is
+/// ordered out. Ordering it front again preserves visibility without making it
+/// key or activating the application. Tests inject these operations and key
+/// ownership so no native window needs to be shown or focused.
+@MainActor
+struct FloatingSubtitleWindowFocus {
+    var isKeyWindow: (NSPanel) -> Bool
+    var isVisible: (NSPanel) -> Bool
+    var orderOut: (NSPanel) -> Void
+    var orderFront: (NSPanel) -> Void
+
+    static let live = Self(isKeyWindow: { $0.isKeyWindow }, isVisible: { $0.isVisible },
+                           orderOut: { $0.orderOut(nil) }, orderFront: { $0.orderFront(nil) })
+
+    func returnKeyboardFocus(from panel: NSPanel) {
+        guard isKeyWindow(panel) else { return }
+        let wasVisible = isVisible(panel)
+        orderOut(panel)
+        if wasVisible { orderFront(panel) }
+    }
+}
+
 /// Owns one nonactivating panel, rather than borrowing a SwiftUI scene window.
 /// SwiftUI hosts only its content and cannot rewrite scene-level window policy.
 /// Locking and visibility are memory-only; every launch starts closed/unlocked.
@@ -167,6 +189,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     private let defaults: UserDefaults
     private let screens: FloatingSubtitleWindowScreens
     private let notificationCenter: NotificationCenter
+    private let focus: FloatingSubtitleWindowFocus
     private var configuration: FloatingSubtitleWindowConfiguration?
     private var settings = FloatingSubtitleWindowSettings()
     private enum Placement { case top, bottom }
@@ -185,10 +208,11 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
     var lockActionTitle: String { isLocked ? "解锁悬浮字幕" : "锁定悬浮字幕" }
 
     init(defaults: UserDefaults = .standard, screens: FloatingSubtitleWindowScreens = .live,
-         notificationCenter: NotificationCenter = .default) {
+         notificationCenter: NotificationCenter = .default, focus: FloatingSubtitleWindowFocus = .live) {
         self.defaults = defaults
         self.screens = screens
         self.notificationCenter = notificationCenter
+        self.focus = focus
         super.init(window: nil)
         applicationHidden = NSApp?.isHidden == true
         for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
@@ -225,7 +249,7 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         panel.isRestorable = false
         panel.appearance = NSAppearance(named: .darkAqua)
 
-        let host = NSHostingView(rootView: AnyView(FloatingSubtitleView(windowController: self)
+        let host = FloatingSubtitleHostingView(rootView: AnyView(FloatingSubtitleView(windowController: self)
             .environmentObject(model).defaultAppStorage(defaults)))
         panel.contentView = host
         host.layoutSubtreeIfNeeded()
@@ -288,8 +312,9 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         configuration?.apply(settings)
         panel?.becomesKeyOnlyIfNeeded = !settings.alarmIsPresented
         (panel as? FloatingSubtitlePanel)?.alarmIsPresented = settings.alarmIsPresented
-        if wasInteractive, !settings.alarmIsPresented, panel?.isKeyWindow == true {
-            panel?.resignKey()
+        (panel?.contentView as? FloatingSubtitleHostingView)?.alarmIsPresented = settings.alarmIsPresented
+        if wasInteractive, !settings.alarmIsPresented, let panel {
+            focus.returnKeyboardFocus(from: panel)
         }
     }
 
@@ -440,6 +465,13 @@ final class FloatingSubtitleWindowController: NSWindowController, ObservableObje
         panel.setFrame(frame, display: false)
         keepClearOfMenuBar()
         saveFrame()
+    }
+}
+
+private final class FloatingSubtitleHostingView: NSHostingView<AnyView> {
+    var alarmIsPresented = false
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        alarmIsPresented || super.acceptsFirstMouse(for: event)
     }
 }
 

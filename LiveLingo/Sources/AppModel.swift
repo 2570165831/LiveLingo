@@ -1099,6 +1099,8 @@ final class AppModel: ObservableObject {
     private var alarmRolloverInProgress = false
     @Published private var alarmRolloverSwitching = false
     private var alarmStopRequested = false
+    private var alarmPostSplitCourse = false
+    private var alarmRolloverCancellation: SpeechPipeline.AlarmRolloverCancellation?
     private var alarmPreviousQueue: DurableTranscriptionQueue?
     private struct AlarmArchivedCourse {
         let directory: URL
@@ -1111,6 +1113,8 @@ final class AppModel: ObservableObject {
     var alarmRolloverIsActive: Bool { alarmRolloverInProgress }
     #if DEBUG
     var alarmPreparationParkedForTesting: (() -> Void)?
+    var alarmPreparationReadyForTesting: ((URL) async -> Void)?
+    var alarmBeforeEmptyCleanupForTesting: ((URL) -> Void)?
     var alarmBeforeBindingForTesting: (() async throws -> Void)?
     #endif
     #if !LIVELINGO_CLI
@@ -1744,7 +1748,7 @@ final class AppModel: ObservableObject {
         guard alarmDetectionEnabled, isRecording, activeInputMode == .microphone,
               !isImportingFile, !alarmRolloverInProgress else { return }
         guard alarmRule.observe(observation, now: now) else { return }
-        let automatic = alarmAutomaticSaveEnabled && activeStorageMode == .saveSession
+        let automatic = alarmAutomaticSaveEnabled && activeStorageMode == .saveSession && !alarmPostSplitCourse
         alarmBanner = AlarmBannerState(secondsRemaining: automatic ? AlarmPolicy.countdownSeconds : nil,
                                       liveOnly: activeStorageMode == .liveOnly)
         #if !LIVELINGO_CLI
@@ -1788,7 +1792,7 @@ final class AppModel: ObservableObject {
 
     private func performAlarmRollover() async {
         guard isRecording, activeInputMode == .microphone, activeStorageMode == .saveSession,
-              !isImportingFile, !alarmRolloverInProgress, !preparingApplicationExit,
+              !isImportingFile, !alarmRolloverInProgress, !alarmPostSplitCourse, !preparingApplicationExit,
               let previousDirectory = currentCourseDirectory else { return }
         let parent: URL
         if temporarySessionDirectory != nil {
@@ -1800,6 +1804,8 @@ final class AppModel: ObservableObject {
         } else { parent = previousDirectory.deletingLastPathComponent() }
         alarmRolloverInProgress = true
         alarmStopRequested = false
+        let cancellation = SpeechPipeline.AlarmRolloverCancellation()
+        alarmRolloverCancellation = cancellation
         alarmBanner?.saving = true
         let priorID = sessionID, epoch = generation, revision = lifecycleRevision
         let target = outputLanguage
@@ -1807,7 +1813,11 @@ final class AppModel: ObservableObject {
         let nextDirectory = SessionWorkspace.uniqueFinalDirectory(in: parent,
             preferredName: Self.sessionFolderName(startedAt: .now()) + AlarmPolicy.postAlarmFolderSuffix)
         var boundary: SpeechPipeline.AlarmRolloverResult?
-        defer { alarmPreviousQueue = nil; alarmRolloverSwitching = false; alarmRolloverInProgress = false }
+        var preparedIdentity: SensitiveFileIO.Identity?
+        defer {
+            alarmPreviousQueue = nil; alarmRolloverSwitching = false; alarmRolloverInProgress = false
+            alarmRolloverCancellation = nil
+        }
         do {
             // Cancel/join old generation work while microphone PCM continues to
             // arrive. No model health probe or permission dialog occurs at split.
@@ -1818,7 +1828,9 @@ final class AppModel: ObservableObject {
             try validateLifecycleCompletion(revision)
             guard sessionID == priorID, generation == epoch, isRecording,
                   !alarmStopRequested, !preparingApplicationExit else { throw CancellationError() }
-            try SensitiveFileIO.prepareDirectory(nextDirectory)
+            let preparedParent = try SensitiveFileIO.Directory.open(at: parent, create: false, tighten: false)
+            let prepared = try preparedParent.createSubdirectory(named: nextDirectory.lastPathComponent)
+            preparedIdentity = try prepared.identity
             var initial = SessionSnapshot(sessionID: nextID,
                 audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)],
                 transcriptionJournalPath: DurableTranscriptionJournal.directoryName + "/work.jsonl",
@@ -1827,6 +1839,9 @@ final class AppModel: ObservableObject {
             let initialSnapshot = try await Task.detached { [initial] in
                 try SessionStore(directory: nextDirectory).save(initial)
             }.value
+            #if DEBUG
+            if AppRuntimeEnvironment.isUnitTesting { await alarmPreparationReadyForTesting?(nextDirectory) }
+            #endif
             try validateLifecycleCompletion(revision)
             guard sessionID == priorID, generation == epoch, isRecording,
                   !alarmStopRequested, !preparingApplicationExit else { throw CancellationError() }
@@ -1837,7 +1852,7 @@ final class AppModel: ObservableObject {
             alarmRolloverSwitching = true
             let result = try await pipeline.rolloverForAlarm(
                 recordingURL: nextDirectory.appendingPathComponent(SessionWorkspace.recordingFileName),
-                sessionID: nextID) { [weak self] event in
+                sessionID: nextID, cancellation: cancellation) { [weak self] event in
                     Task { @MainActor in
                         guard let self, self.generation == nextEpoch, self.sessionID == nextID else { return }
                         self.consume(event)
@@ -1893,6 +1908,8 @@ final class AppModel: ObservableObject {
             sessionID = nextID; outputLanguage = target
             sessionDirectory = nextDirectory; currentCaptureStart = result.nextCaptureStart
             activeStorageMode = .saveSession; activeInputMode = .microphone
+            alarmPostSplitCourse = true
+            alarmRule.stop()
             var capturedSnapshot = initialSnapshot
             capturedSnapshot.captureStart = result.nextCaptureStart
             bindSessionArchive(to: nextDirectory, restored: capturedSnapshot)
@@ -1910,6 +1927,18 @@ final class AppModel: ObservableObject {
                 await stopSession(failure: "分段后的转写状态保存失败；前后两段录音均已保留。")
             } else if alarmStopRequested || preparingApplicationExit { await stopSession() }
         } catch {
+            if boundary == nil, let preparedIdentity {
+                do {
+                    #if DEBUG
+                    let beforeRemoval = AppRuntimeEnvironment.isUnitTesting ? alarmBeforeEmptyCleanupForTesting : nil
+                    #else
+                    let beforeRemoval: ((URL) -> Void)? = nil
+                    #endif
+                    try Self.removeUnrecordedAlarmDirectory(nextDirectory, session: nextID, identity: preparedIdentity,
+                                                           beforeRemoval: beforeRemoval)
+                }
+                catch { archiveNotice = "未开始录音的警报分段目录含未知内容或无法清理，已保留供检查。" }
+            }
             // An obsolete rollover can retain its files but must never stop or
             // rewrite a pipeline that has since been rebound by another owner.
             guard (sessionID == priorID && generation == epoch) || (sessionID == nextID && generation == epoch + 1) else { return }
@@ -1932,6 +1961,8 @@ final class AppModel: ObservableObject {
             if alarmStopRequested || preparingApplicationExit {
                 if boundary == nil { await stopSession() }
                 clearAlarmReminder()
+            } else if isPaused, error is CancellationError {
+                alarmBanner = AlarmBannerState()
             } else if hasActiveSession {
                 alarmBanner = AlarmBannerState(failure: "自动分段未完成，现有录音与内容已保留。请按现场指示行动。")
             } else {
@@ -1939,6 +1970,68 @@ final class AppModel: ObservableObject {
                 archiveNotice = "警报分段未完成；前后两段录音与课程文件均已保留。"
             }
         }
+    }
+
+    /// Only the exclusively-created preparation tree is eligible. A replaced
+    /// directory, unknown file, symlink, or any PCM frame vetoes the entire cleanup.
+    private static func removeUnrecordedAlarmDirectory(_ directory: URL, session: UUID,
+                                                       identity: SensitiveFileIO.Identity,
+                                                       beforeRemoval: ((URL) -> Void)? = nil) throws {
+        let parent = try SensitiveFileIO.Directory.open(at: directory.deletingLastPathComponent(),
+                                                       create: false, tighten: false)
+        guard let root = try parent.directoryIfPresent(named: directory.lastPathComponent),
+              try root.identity == identity else { throw SensitiveFileIO.Failure.unsafePath }
+        let allowed: Set<String> = [SessionStore.snapshotFileName, SessionStore.journalFileName,
+                                   ".session-store.lock", SessionWorkspace.recordingFileName,
+                                   DurableTranscriptionJournal.directoryName]
+        let names = try root.names()
+        guard Set(names).isSubset(of: allowed) else { throw SensitiveFileIO.Failure.unsafePath }
+        for name in names where name != DurableTranscriptionJournal.directoryName {
+            _ = try root.requireRegularFileIfPresent(named: name)
+        }
+        if let snapshot = try SessionStore(directory: directory).loadCommittedSnapshot() {
+            guard snapshot.sessionID == session, snapshot.segments.isEmpty, snapshot.batches.isEmpty,
+                  snapshot.audioRanges.isEmpty else { throw SensitiveFileIO.Failure.unsafePath }
+        }
+        if names.contains(SessionWorkspace.recordingFileName) {
+            guard try AVAudioFile(forReading: directory.appendingPathComponent(SessionWorkspace.recordingFileName)).length == 0
+            else { throw SensitiveFileIO.Failure.unsafePath }
+        }
+        let chunks = try root.directoryIfPresent(named: DurableTranscriptionJournal.directoryName)
+        let chunkNames = try chunks?.names() ?? []
+        if let chunks {
+            for name in chunkNames {
+                guard name == "work.jsonl" || Self.isAlarmPreparationChunkName(name) else {
+                    throw SensitiveFileIO.Failure.unsafePath
+                }
+                _ = try chunks.requireRegularFileIfPresent(named: name)
+                if name.hasSuffix(".wav") {
+                    guard try AVAudioFile(forReading: chunks.url.appendingPathComponent(name)).length == 0
+                    else { throw SensitiveFileIO.Failure.unsafePath }
+                }
+            }
+        }
+        try root.assertStillAtOriginalPath()
+        beforeRemoval?(directory)
+        // Remove only the validated preparation files. Any file added after
+        // validation remains untouched and makes the empty-directory check fail.
+        if let chunks {
+            let chunkIdentity = try chunks.identity
+            for name in chunkNames { try chunks.removeRegularFileIfPresent(named: name) }
+            try root.removeEmptyDirectory(named: DurableTranscriptionJournal.directoryName, matching: chunkIdentity)
+        }
+        for name in names where name != DurableTranscriptionJournal.directoryName {
+            try root.removeRegularFileIfPresent(named: name)
+        }
+        try parent.removeEmptyDirectory(named: directory.lastPathComponent, matching: identity)
+    }
+
+    private static func isAlarmPreparationChunkName(_ name: String) -> Bool {
+        for (prefix, suffix) in [("capture-", ".json"), ("chunk-", ".wav")] {
+            if name.hasPrefix(prefix), name.hasSuffix(suffix),
+               UUID(uuidString: String(name.dropFirst(prefix.count).dropLast(suffix.count))) != nil { return true }
+        }
+        return false
     }
 
     private func retainAlarmSavedCourse(_ directory: URL, queue: DurableTranscriptionQueue) {
@@ -2413,7 +2506,11 @@ final class AppModel: ObservableObject {
 
     func stop() {
         clearAlarmReminder()
-        if alarmRolloverInProgress { alarmStopRequested = true; return }
+        if alarmRolloverInProgress {
+            alarmStopRequested = true
+            alarmRolloverCancellation?.cancel()
+            return
+        }
         guard !preparingApplicationExit,
               hasActiveSession || (activeStorageMode == .liveOnly && temporarySessionDirectory != nil) else { return }
         guard admitLifecycleRetry() else { return }
@@ -2444,6 +2541,7 @@ final class AppModel: ObservableObject {
         preparingApplicationExit = true
         clearAlarmReminder()
         alarmStopRequested = true
+        alarmRolloverCancellation?.cancel()
         alarmArchivedProcessingTask?.cancel()
         defer { preparingApplicationExit = false }
         return await ExitDeadline.$current.withValue(deadline) {
@@ -3162,6 +3260,7 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionPresentationForNewRun() {
+        alarmPostSplitCourse = false
         if chineseDisplayOverride != nil {
             chineseDisplayOverride = nil
             prepareChineseDisplay()
@@ -4100,6 +4199,8 @@ final class AppModel: ObservableObject {
             sessionNotice = Self.rejectedTranscriptNotice
         case let .transcriptionIssue(start, end, message):
             sessionNotice = "\(Self.transcriptionNoticeRange(start, end)) · \(message)"
+        case let .transcriptionIssueResolved(start, end):
+            if sessionNotice?.hasPrefix(Self.transcriptionNoticeRange(start, end) + " · ") == true { sessionNotice = nil }
         case let .nonEnglishSpeech(start, end):
             // An earlier attempt's warning for this range no longer applies.
             if sessionNotice?.hasPrefix(Self.transcriptionNoticeRange(start, end) + " · ") == true { sessionNotice = nil }

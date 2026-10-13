@@ -159,6 +159,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         case failure(String)
         case rejectedTranscript
         case transcriptionIssue(start: TimeInterval, end: TimeInterval, message: String)
+        /// A later complete verdict withdrew a missing-transcription warning.
+        case transcriptionIssueResolved(start: TimeInterval, end: TimeInterval)
         /// This range is terminal non-English speech: counted, not reported as an error.
         case nonEnglishSpeech(start: TimeInterval, end: TimeInterval)
     }
@@ -891,10 +893,30 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         var queueFinalizationFailed = false
     }
 
+    /// Serialize a user's cancellation with the irreversible writer boundary.
+    /// Cancellation can win until the boundary actually starts, including while
+    /// the async queue preparation is suspended.
+    final class AlarmRolloverCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        private var committed = false
+        func cancel() { lock.withLock { if !committed { cancelled = true } } }
+        func check() throws { try lock.withLock { if cancelled { throw CancellationError() } } }
+        func commit<T>(_ operation: () throws -> T) throws -> T {
+            try lock.withLock {
+                if cancelled { throw CancellationError() }
+                let result = try operation()
+                committed = true
+                return result
+            }
+        }
+    }
+
     /// Switch two exclusive PCM writers on the capture consumer's serial lane.
     /// The device and its tap never stop. Buffers before/after this barrier go
     /// into exactly one course; the next ASR queue stays parked until UI binding.
     func rolloverForAlarm(recordingURL: URL, sessionID nextID: UUID,
+                          cancellation: AlarmRolloverCancellation = AlarmRolloverCancellation(),
                           eventHandler nextHandler: @escaping @Sendable (Event) -> Void) async throws -> AlarmRolloverResult {
         let context = try stateLock.withLock { () throws -> (AVAudioFormat, UUID, TranscriptionQueue, QwenModelProfile) in
             guard captureConfigured, inputMode == .microphone, !capturePaused, !isStopping,
@@ -903,24 +925,29 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
         }
         let (format, token, previousQueue, preparedProfile) = context
         try await previousQueue.pause()
+        try cancellation.check()
+        try beforeChunkOpen?()
         let root = recordingURL.deletingLastPathComponent()
         let nextQueue = transcriptionQueueFactory()
         try await nextQueue.configure(directory: root, sessionID: nextID, persistent: true,
             identified: true, startPaused: true, handler: nextHandler)
+        try cancellation.check()
         let chunks = root.appendingPathComponent(DurableTranscriptionJournal.directoryName, isDirectory: true)
         let full = try SecureAudioWriter(forWriting: recordingURL, format: format)
+        var committed = false
+        defer { if !committed { try? full.close() } }
         let id = UUID()
         let chunkURL = chunks.appendingPathComponent("chunk-" + id.uuidString + ".wav")
-        try beforeChunkOpen?()
         try DurableTranscriptionJournal.stageCapture(CaptureChunkDescriptor(id: id, sessionID: nextID,
             ordinal: 0, audioFile: chunkURL.lastPathComponent, recordingFile: recordingURL.lastPathComponent,
             startFrame: 0, sampleRate: format.sampleRate, modelKey: preparedProfile.asrKey,
             fallbackModelKey: preparedProfile.fallbackASRKey), directory: chunks)
         let chunk = try SecureAudioWriter(forWriting: chunkURL, format: format)
-        return try await withCheckedThrowingContinuation { continuation in
+        defer { if !committed { try? chunk.close() } }
+        let result: AlarmRolloverResult = try await withCheckedThrowingContinuation { continuation in
             audioProcessingQueue.async { [self] in
                 do {
-                    var result = try stateLock.withLock { () throws -> (FlushSnapshot, AlarmRolloverResult) in
+                    var result = try cancellation.commit { try stateLock.withLock { () throws -> (FlushSnapshot, AlarmRolloverResult) in
                         guard generation == token, captureConfigured, !capturePaused, !isStopping,
                               queueStorage === previousQueue else { throw PipelineError.noActiveSession }
                         let started = ProcessInfo.processInfo.systemUptime
@@ -942,7 +969,7 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                             switchMilliseconds: (ProcessInfo.processInfo.systemUptime - started) * 1_000,
                             nextCaptureStart: .now())
                         return (tail, result)
-                    }
+                    } }
                     stateLock.withLock { legacyPreview }?.restartForCourseBoundary()
                     if let job = result.0.job, let handler = result.0.handler { previousQueue.submit(job, handler: handler) }
                     do {
@@ -961,6 +988,8 @@ final class SpeechPipeline: NSObject, @unchecked Sendable {
                 }
             }
         }
+        committed = true
+        return result
     }
 
     static func systemAudioConfiguration() -> SCStreamConfiguration {
@@ -3102,6 +3131,37 @@ enum WAVContextClip {
 /// Audio remains in recording.wav; diagnostic entries contain only failed/retried spans.
 enum RecordingDiagnostics {
     private static let lock = NSLock()
+
+    /// Withdraw only the missing warnings for this exact chunk. Other ranges,
+    /// retry history and unrecognized records remain byte-for-byte intact.
+    static func resolveMissing(recordingURL: URL?, start: TimeInterval, end: TimeInterval) {
+        guard let recordingURL, start.isFinite, end.isFinite else { return }
+        lock.withLock {
+            do {
+                let root = try SensitiveFileIO.Directory.open(at: recordingURL.deletingLastPathComponent(),
+                                                             create: false, tighten: false)
+                let name = "transcription-issues.jsonl"
+                guard let data = try root.readIfPresent(named: name) else { return }
+                var retained = Data()
+                var removed = false
+                let lines = data.split(separator: 0x0a, omittingEmptySubsequences: false)
+                for (index, line) in lines.enumerated() {
+                    let row = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+                    if row?["event"] as? String == "transcription_missing",
+                       row?["start"] as? Double == start, row?["end"] as? Double == end {
+                        removed = true
+                    } else {
+                        retained.append(contentsOf: line)
+                        if index < lines.count - 1 { retained.append(0x0a) }
+                    }
+                }
+                if removed { try root.atomicWrite(retained, named: name) }
+            } catch {
+                Logger(subsystem: "com.jianhongli.LiveLingo", category: "RecordingDiagnostics")
+                    .error("event=recording_diagnostic_resolution_failed code=\((error as NSError).code)")
+            }
+        }
+    }
 
     static func append(recordingURL: URL?, event: String, start: TimeInterval? = nil,
                        end: TimeInterval? = nil, detail: String, candidate: String? = nil,

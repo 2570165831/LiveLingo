@@ -24,6 +24,19 @@ final class AlarmLifecycleTests: XCTestCase {
         func enable() { lock.withLock { enabled = true } }
         func check() throws { if lock.withLock({ enabled }) { throw CocoaError(.fileWriteUnknown) } }
     }
+    private final class WriterPreparationGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private let ready = DispatchSemaphore(value: 0)
+        private var armed = false
+        private var reached = false
+        var entered: Bool { lock.withLock { reached } }
+        func arm() { lock.withLock { armed = true } }
+        func holdIfArmed() {
+            guard lock.withLock({ if armed { reached = true; return true }; return false }) else { return }
+            _ = ready.wait(timeout: .now() + 5)
+        }
+        func release() { ready.signal() }
+    }
     private final class SyntheticMicrophone: NSObject, MicrophoneCaptureEngine, @unchecked Sendable {
         private let lock = NSLock()
         private var running = true
@@ -47,14 +60,15 @@ final class AlarmLifecycleTests: XCTestCase {
         let queue: LearningReviewQueue
         let model: AppModel
     }
-    private func fixture(failure: FailureSwitch? = nil, translation: CaptionTranslationDependencies = .unavailable) throws -> Fixture {
+    private func fixture(failure: FailureSwitch? = nil, writerPreparation: WriterPreparationGate? = nil,
+                         translation: CaptionTranslationDependencies = .unavailable) throws -> Fixture {
         let root = TestFixtureDirectory.root.appendingPathComponent("Alarm-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let suite = "LiveLingo-Test-\(UUID())"
         let cleanup = try TestPreferenceCleanup(suite: suite)
         let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
         let pipeline = SpeechPipeline(transcriber: { _, _, _ in "Synthetic public test voice." },
-            beforeChunkOpen: { try failure?.check() }, enableAudioAnalysis: false,
+            beforeChunkOpen: { try failure?.check(); writerPreparation?.holdIfArmed() }, enableAudioAnalysis: false,
             enableMicrophoneWatchdog: false, enableCaptureHealthWatchdog: false)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review.json"),
             observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
@@ -231,6 +245,8 @@ final class AlarmLifecycleTests: XCTestCase {
         await f.pipeline.stopCapture(continueTranscribing: false)
         XCTAssertEqual(try AVAudioFile(forReading: first.appendingPathComponent("recording.wav")).length, 3200)
         XCTAssertNotNil(try SessionStore(directory: first).load())
+        XCTAssertTrue(try postAlarmDirectories(f.root).isEmpty,
+                      "A writer preparation failure must not leave an empty post-alarm course")
     }
     func testPauseAfterRolloverPreparationRestoresTranscriptionAndTranslationOnResume() async throws {
         var translations = 0
@@ -262,6 +278,7 @@ final class AlarmLifecycleTests: XCTestCase {
         XCTAssertFalse(f.model.savedProcessingIsPaused)
         XCTAssertEqual(f.pipeline.transcriptionState()?.isPaused, false)
         XCTAssertEqual(f.model.currentCourseDirectory, first)
+        XCTAssertNil(f.model.alarmBanner?.failure, "A user pause is not a segmentation failure")
         f.model.resume()
         XCTAssertTrue(f.model.isRecording)
         XCTAssertEqual(microphone.startCount, 1)
@@ -518,5 +535,137 @@ final class AlarmLifecycleTests: XCTestCase {
         f.model.alarmCountdownTickForTesting(now: 133)
         XCTAssertNil(f.model.alarmRolloverTaskForTesting)
         await f.model.stopSavedCourseForTesting()
+    }
+
+    private func postAlarmDirectories(_ root: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.contains(AlarmPolicy.postAlarmFolderSuffix) }
+    }
+
+    func testPostAlarmCourseOnlyRemindsAndFreshRecordingCanSplitAgain() async throws {
+        let f = try fixture()
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: f.root.appendingPathComponent("first"))
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        let second = f.model.currentCourseDirectory
+        f.model.dismissAlarmReminder()
+        trigger(f.model, now: ProcessInfo.processInfo.systemUptime + AlarmPolicy.cooldownSeconds + 10)
+        XCTAssertNotNil(f.model.alarmBanner)
+        XCTAssertNil(f.model.alarmBanner?.secondsRemaining)
+        f.model.alarmCountdownTickForTesting(now: ProcessInfo.processInfo.systemUptime + 500)
+        XCTAssertNil(f.model.alarmRolloverTaskForTesting)
+        XCTAssertEqual(f.model.currentCourseDirectory, second)
+        XCTAssertEqual(try postAlarmDirectories(f.root).count, 1)
+        await f.model.stopSavedCourseForTesting()
+        _ = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: f.root.appendingPathComponent("fresh"))
+        trigger(f.model)
+        XCTAssertEqual(f.model.alarmBanner?.secondsRemaining, 30)
+    }
+
+    func testPauseStopAndQuitDuringPreparedSplitLeaveNoEmptyCourse() async throws {
+        for action in 0..<3 {
+            let f = try fixture()
+            let first = f.root.appendingPathComponent("first")
+            let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+            XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+            await input.drain()
+            let gate = Gate()
+            var prepared: URL?
+            f.model.alarmPreparationReadyForTesting = { directory in prepared = directory; await gate.wait() }
+            defer { gate.release(); f.model.alarmPreparationReadyForTesting = nil }
+            trigger(f.model)
+            f.model.alarmCountdownTickForTesting(now: 133)
+            let rollover = try XCTUnwrap(f.model.alarmRolloverTaskForTesting)
+            try await eventually { gate.entered }
+            let next = try XCTUnwrap(prepared)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: next.path))
+            var exit: Task<Bool, Never>?
+            if action == 0 { f.model.pause() }
+            else if action == 1 { f.model.stop() }
+            else {
+                exit = Task { @MainActor in await f.model.prepareForApplicationExit(deadline: ExitDeadline(seconds: 5)) }
+                try await eventually { f.model.isTerminating }
+            }
+            gate.release()
+            try await TestTaskLifetime.value(rollover)
+            if let exit { let result = await exit.value; XCTAssertTrue(result) }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: next.path))
+            XCTAssertEqual(f.model.currentCourseDirectory, first)
+            XCTAssertNil(f.model.alarmBanner?.failure)
+            if action == 0 { XCTAssertTrue(f.model.isPaused) }
+            else { XCTAssertNil(f.model.alarmBanner) }
+            await f.pipeline.stopCapture(continueTranscribing: false)
+            XCTAssertEqual(try AVAudioFile(forReading: first.appendingPathComponent("recording.wav")).length, 1600)
+        }
+    }
+
+    func testAbortedSplitPreservesUnexpectedFileAndNeighbourCourse() async throws {
+        let f = try fixture()
+        let first = f.root.appendingPathComponent("first")
+        _ = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        let neighbour = f.root.appendingPathComponent("neighbour" + AlarmPolicy.postAlarmFolderSuffix)
+        let neighbourID = UUID()
+        try SessionStore(directory: neighbour).save(SessionSnapshot(sessionID: neighbourID))
+        var next: URL?
+        f.model.alarmPreparationReadyForTesting = { directory in
+            next = directory
+            try? Data("keep".utf8).write(to: directory.appendingPathComponent("keep.txt"))
+            f.model.pause()
+        }
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        f.model.alarmPreparationReadyForTesting = nil
+        let prepared = try XCTUnwrap(next)
+        XCTAssertEqual(try Data(contentsOf: prepared.appendingPathComponent("keep.txt")), Data("keep".utf8))
+        XCTAssertEqual(try SessionStore(directory: neighbour).load()?.sessionID, neighbourID)
+        XCTAssertNotNil(f.model.archiveNotice)
+    }
+
+    func testStopWhileWriterPreparationIsBlockedCancelsBeforeAudioBoundary() async throws {
+        let gate = WriterPreparationGate()
+        defer { gate.release() }
+        let f = try fixture(writerPreparation: gate)
+        let first = f.root.appendingPathComponent("first")
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        XCTAssertEqual(push(input, value: 0.125, end: 1), .accepted)
+        await input.drain()
+        gate.arm()
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        let rollover = try XCTUnwrap(f.model.alarmRolloverTaskForTesting)
+        try await eventually { gate.entered }
+        f.model.stop()
+        gate.release()
+        try await TestTaskLifetime.value(rollover)
+        XCTAssertEqual(f.model.phase, .saved(first))
+        XCTAssertEqual(f.model.currentCourseDirectory, first)
+        XCTAssertNil(f.model.alarmBanner)
+        XCTAssertTrue(try postAlarmDirectories(f.root).isEmpty)
+        XCTAssertEqual(try AVAudioFile(forReading: first.appendingPathComponent("recording.wav")).length, 1600)
+    }
+
+    func testFileAddedAfterPreparationCleanupValidationIsNeverRemoved() async throws {
+        let f = try fixture()
+        let first = f.root.appendingPathComponent("first")
+        _ = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        var next: URL?
+        f.model.alarmPreparationReadyForTesting = { directory in next = directory; f.model.pause() }
+        f.model.alarmBeforeEmptyCleanupForTesting = { directory in
+            try? Data("Late user file must remain".utf8).write(to: directory.appendingPathComponent("late-keep.txt"))
+        }
+        defer { f.model.alarmPreparationReadyForTesting = nil; f.model.alarmBeforeEmptyCleanupForTesting = nil }
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        let prepared = try XCTUnwrap(next)
+        XCTAssertEqual(try Data(contentsOf: prepared.appendingPathComponent("late-keep.txt")),
+                       Data("Late user file must remain".utf8))
+        XCTAssertEqual(f.model.currentCourseDirectory, first)
+        XCTAssertTrue(f.model.isPaused)
+        XCTAssertNotNil(f.model.archiveNotice)
     }
 }

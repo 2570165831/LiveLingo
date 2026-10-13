@@ -196,6 +196,70 @@ struct NoSpeechPersistenceTests {
         #expect(journal.record(id: value.id)?.speechConfidence == nil)
     }
 
+    @Test func noSpeechWritebackPreservesBodyAddedAfterClaim() throws {
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory(), sessionID: Self.session)
+        try journal.put(record())
+        var current = try #require(try journal.claimNext())
+        current.text = "Synthetic speech added while classification was running."
+        current.failure = "Earlier empty attempt"
+        current.failureReason = .emptyOutput
+        try journal.put(current)
+        try journal.markNoSpeech(id: current.id, speechConfidence: 0.05)
+        let saved = try #require(journal.record(id: current.id))
+        #expect(saved.status == .completed)
+        #expect(saved.text == current.text)
+        #expect(saved.failure == nil)
+        #expect(saved.failureReason == nil)
+        #expect(saved.speechConfidence == nil)
+        #expect(journal.processingState.noSpeechCount == 0)
+    }
+
+    @Test func candidateOnlyWritebackKeepsRepairBudgetAndExplainsExhaustion() throws {
+        for retries in [0, DurableTranscriptionJournal.maximumAutomaticRetries] {
+            let root = try directory()
+            let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: Self.session)
+            var current = record(status: .active)
+            current.attempt = .automaticRetry
+            current.automaticRetryCount = retries
+            current.candidateText = "Synthetic candidate added during classification."
+            current.candidateOrigin = "context"
+            try journal.put(current)
+            try journal.markNoSpeech(id: current.id, speechConfidence: 0.05)
+            let saved = try #require(journal.record(id: current.id))
+            #expect(saved.status == (retries < DurableTranscriptionJournal.maximumAutomaticRetries ? .retryWaiting : .failed))
+            #expect(saved.candidateText == current.candidateText)
+            #expect(saved.candidateOrigin == "context")
+            #expect(saved.text == nil)
+            #expect(saved.failure?.isEmpty == false)
+            #expect(saved.failureReason == .emptyOutput)
+            #expect(saved.speechConfidence == nil)
+            #expect(saved.isClaimable == (retries < DurableTranscriptionJournal.maximumAutomaticRetries))
+            try journal.checkpoint()
+            let reopened = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: Self.session)
+            #expect(reopened.record(id: current.id) == saved)
+            #expect(reopened.processingState.noSpeechCount == 0)
+            #expect(reopened.processingState.candidateCount == 1)
+        }
+    }
+
+    @Test func noSpeechTerminalClearsDeferredReplacementWork() throws {
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory(), sessionID: Self.session)
+        var current = record(status: .active)
+        current.sourceProbeInput = .init(parakeetAccepted: false, mean: 0.3, minimum: 0.01)
+        current.sourceProbeFinished = false
+        current.sourceRevisionAllowed = true
+        current.sourceInitialEnglishDigest = "synthetic-obsolete-digest"
+        try journal.put(current)
+        try journal.markNoSpeech(id: current.id, speechConfidence: 0.05)
+        let saved = try #require(journal.record(id: current.id))
+        #expect(saved.status == .noSpeech)
+        #expect(saved.sourceProbeInput == nil)
+        #expect(saved.sourceProbeFinished == nil)
+        #expect(saved.sourceRevisionAllowed == nil)
+        #expect(saved.sourceInitialEnglishDigest == nil)
+        #expect(journal.processingState.pendingCount == 0)
+    }
+
     @Test func terminalCountersRemainDisjointFromFailuresAndCandidates() throws {
         let journal = try DurableTranscriptionJournal(sessionDirectory: directory(), sessionID: Self.session)
         var filtered = record(status: .noSpeech)

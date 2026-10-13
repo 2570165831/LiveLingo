@@ -140,7 +140,7 @@ enum SummaryRenderingDiagnostics {
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
-    @ObservedObject private var floatingWindow = FloatingSubtitleWindowController.shared
+    @ObservedObject private var floatingWindow: FloatingSubtitleWindowController
     @AppStorage("transcriptTextSize") private var transcriptTextSize = 18.0
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     private var readingSize: Double { 18 * ReadingTypography.scale(textSize: transcriptTextSize, dynamicType: dynamicTypeSize) }
@@ -175,7 +175,8 @@ struct ContentView: View {
         }
     }
 
-    init(showWholeLessonNotes: Bool = false) {
+    init(showWholeLessonNotes: Bool = false, floatingWindow: FloatingSubtitleWindowController = .shared) {
+        _floatingWindow = ObservedObject(wrappedValue: floatingWindow)
         _wholeLessonNotes = State(initialValue: showWholeLessonNotes)
         _compactPane = State(initialValue: showWholeLessonNotes ? .notes : .subtitles)
     }
@@ -249,7 +250,7 @@ struct ContentView: View {
                 }
                 .toggleStyle(.button)
                 .labelStyle(.iconOnly)
-                .help(floatingWindow.lockActionTitle + "（⌘⇧L）；锁定后点击穿过字幕窗")
+                .help(floatingWindow.lockActionTitle + "（⇧⌘L）；锁定后点击穿过字幕窗")
                 .accessibilityLabel("锁定悬浮字幕")
                 .accessibilityIdentifier("classroom-floating-lock")
             }

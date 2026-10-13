@@ -29,6 +29,11 @@ private struct FloatingSubtitleContent: View {
         "可用\(classModeController.subtitleUnlockControls)解锁（⇧⌘L，仅 LiveLingo 在前台时有效）"
     }
 
+    private var lockStatusLabel: String {
+        guard let alarm = model.alarmBanner else { return "字幕窗已锁定，点击穿透；" + unlockHint }
+        return "字幕窗已锁定；提醒期间可点击“\(alarm.buttonTitle)”按钮，其他控件保持锁定"
+    }
+
     var body: some View {
         #if DEBUG
         let _ = SummaryRenderingDiagnostics.record(\.floatingBodies)
@@ -85,9 +90,8 @@ private struct FloatingSubtitleContent: View {
                         .font(.system(size: 12 * scale))
                         .foregroundStyle(Color(white: palette.headerWhite))
                         .allowsHitTesting(false)
-                        .accessibilityLabel(model.alarmBanner == nil
-                            ? "字幕窗已锁定，点击穿透；" + unlockHint
-                            : "字幕窗已锁定；提醒期间可点击取消按钮，其他控件保持锁定")
+                        .accessibilityLabel(lockStatusLabel)
+                        .accessibilityIdentifier("floating-lock-status")
                 } else {
                     Button { windowController.toggleLock() } label: {
                         Image(systemName: "lock.open")
