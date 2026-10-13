@@ -30,6 +30,7 @@ import plistlib
 import shutil
 import subprocess
 from model_files import REQUIRED_MODEL_FILES, ModelFilesError, check_app_models, check_model_files
+from model_storage_manifest import write_app_manifest
 from privacy_package import PrivacyError, copy_distribution_tree, distribution_manifest, inspect_tree
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -192,6 +193,7 @@ def check_required_paths(app_root):
     required = [
         "Contents/Info.plist",
         "Contents/Resources/LanguageRuntime/runtime-manifest.json",
+        "Contents/Resources/model-storage-manifest.json",
         "Contents/Resources/LanguageRuntime/worker.py",
         "Contents/Resources/ASRRuntime/python/bin/python3",
         "Contents/Resources/ASRRuntime/qwen_asr_service.py",
@@ -389,6 +391,9 @@ def main():
             if current_mode & 0o444 != 0o444:
                 path.chmod(current_mode | 0o444)
 
+    # Inventory the final model data (including installed notices) before the
+    # App's resource seal is signed. Never calculate 14 GB of hashes at launch.
+    write_app_manifest(args.output)
     check_required_paths(args.output)
     scan_forbidden(args.output, "assembled candidate")
     check_symlinks(args.output)

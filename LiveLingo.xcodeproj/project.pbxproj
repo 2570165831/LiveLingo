@@ -11,6 +11,8 @@
 		86B347C6DC90AFCA90545B4E /* AlarmDetectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54F16503B030335BD5F6AD62 /* AlarmDetectionTests.swift */; };
 		3772C481EE72ED50456D9E16 /* AlarmPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD5A21292E04B26AC53AE337 /* AlarmPresentation.swift */; };
 		7A9D6513CE9702EA8794AF3A /* AlarmDetection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 355021C3CA065EA9A1C27125 /* AlarmDetection.swift */; };
+		AC1300000000000000000001 /* ModelStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1300000000000000000002 /* ModelStorage.swift */; };
+		AC1300000000000000000003 /* ModelStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1300000000000000000004 /* ModelStorageTests.swift */; };
 		B7C200000000000000000001 /* SessionArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C200000000000000000002 /* SessionArchiveTests.swift */; };
 		E10000000000000000000003 /* MLXExitCancellationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000004 /* MLXExitCancellationTests.swift */; };
 		E10000000000000000000001 /* SessionEnergyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002 /* SessionEnergyTests.swift */; };
@@ -168,6 +170,8 @@
 		54F16503B030335BD5F6AD62 /* AlarmDetectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlarmDetectionTests.swift; sourceTree = "<group>"; };
 		CD5A21292E04B26AC53AE337 /* AlarmPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlarmPresentation.swift; sourceTree = "<group>"; };
 		355021C3CA065EA9A1C27125 /* AlarmDetection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlarmDetection.swift; sourceTree = "<group>"; };
+		AC1300000000000000000002 /* ModelStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStorage.swift; sourceTree = "<group>"; };
+		AC1300000000000000000004 /* ModelStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStorageTests.swift; sourceTree = "<group>"; };
 		B7C200000000000000000002 /* SessionArchiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionArchiveTests.swift; sourceTree = "<group>"; };
 		E10000000000000000000004 /* MLXExitCancellationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLXExitCancellationTests.swift; sourceTree = "<group>"; };
 		E10000000000000000000002 /* SessionEnergyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionEnergyTests.swift; sourceTree = "<group>"; };
@@ -340,6 +344,7 @@
 		A70000000000000000000003 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				AC1300000000000000000002 /* ModelStorage.swift */,
 				AA1100000000000000000002 /* ReadingAccessibility.swift */,
 				C70400000000000000000002 /* ChineseScriptConverter.swift */,
 				C70900000000000000000002 /* ClassroomMarkdownRendering.swift */,
@@ -402,6 +407,7 @@
 		A70000000000000000000005 /* LiveLingoTests */ = {
 			isa = PBXGroup;
 			children = (
+				AC1300000000000000000004 /* ModelStorageTests.swift */,
 				AA1200000000000000000002 /* AccessibilityRegressionTests.swift */,
 				AA1212000000000000000002 /* SavedProcessingViewTests.swift */,
 				C70800000000000000000002 /* TraditionalCaptionPresentationTests.swift */,
@@ -554,6 +560,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AC1300000000000000000001 /* ModelStorage.swift in Sources */,
 				AA1100000000000000000001 /* ReadingAccessibility.swift in Sources */,
 				CEED4CDF0362D0B9AE3DDE16 /* SecureAudioWriter.swift in Sources */,
 				281E57C8E7D68A294B32CF61 /* ExitDeadline.swift in Sources */,
@@ -611,6 +618,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AC1300000000000000000003 /* ModelStorageTests.swift in Sources */,
 				AA1200000000000000000001 /* AccessibilityRegressionTests.swift in Sources */,
 				AA1212000000000000000001 /* SavedProcessingViewTests.swift in Sources */,
 				D8BA39AA5D7459C24D85E6DE /* PrivacyExitTests.swift in Sources */,

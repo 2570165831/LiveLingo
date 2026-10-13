@@ -66,6 +66,7 @@ TEXT_NAMES = frozenset({"license", "licence", "copying", "notice", "copyright", 
                         "authors", "changes", "changelog", "install", "thanks"})
 APP_RESOURCES = frozenset({
     "LanguageRuntime", "ASRRuntime", "Models", "LICENSE", "THIRD_PARTY_NOTICES.md",
+    "model-storage-manifest.json",  # Data inventory, still checked as structured JSON.
     "Assets.car", "AppIcon.icns", "AppIcon.icon", "InfoPlist.strings",
     "ZhVariants",  # OpenCC tables and reviewed phrases for Traditional Chinese output
 })

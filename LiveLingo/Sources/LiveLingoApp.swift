@@ -638,6 +638,7 @@ final class FloatingSubtitleRecordStartObserver {
 private final class AppModelHolder: ObservableObject {
     let model: AppModel?
     private var floatingRecordStart: FloatingSubtitleRecordStartObserver?
+    private var modelPreclone: ModelPrecloneController?
     init() {
         #if DEBUG
         UnitTestTemporaryDirectory.configure()
@@ -646,6 +647,7 @@ private final class AppModelHolder: ObservableObject {
         if let model {
             FullScreenClassModeController.shared.connect(model: model)
             floatingRecordStart = FloatingSubtitleRecordStartObserver(model: model)
+            modelPreclone = ModelPrecloneController(model: model)
         }
         AppLifecycleDelegate.model = model
     }
