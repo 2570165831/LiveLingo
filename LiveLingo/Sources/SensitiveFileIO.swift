@@ -34,6 +34,7 @@ enum SensitiveFileIO {
     /// Fixed labels only: diagnostics never interpolate a filename, path,
     /// receipt, errno description or file content.
     enum IOCallSite: String, Sendable {
+        case cloudRequest, cloudCoordinate
         case directoryBind, directoryChild, directoryCreate, temporaryParent
         case fileCreate, fileOpen, fileTighten, fileRead, fileWriteAccess
         case fileAppend, fileTruncate, directoryScan, entryStatus, descriptorStatus
@@ -87,7 +88,7 @@ enum SensitiveFileIO {
         os_signpost(.begin, log: ioTrace, name: "Sensitive I/O", signpostID: interval,
                     "%{public}@", begin as NSString)
         switch site {
-        case .directoryBind, .fileOpen, .dataRead, .dataWrite, .fileSync,
+        case .cloudRequest, .cloudCoordinate, .directoryBind, .fileOpen, .dataRead, .dataWrite, .fileSync,
              .fileLink, .fileRename, .storeLease, .storeProcessLock, .storeDirectoryLock:
             // Info records stay cheap (memory-buffered) and are available to
             // a live unified-log collector even without an Instruments trace.

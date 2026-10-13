@@ -2463,7 +2463,6 @@ enum LearningFailureCode {
             case .dataCorrupted: return "invalid_json"
             @unknown default: return "invalid_json"
             }
-        case is CancellationError: return "cancelled"
         default:
             let error = error as NSError
             let domains = [NSCocoaErrorDomain, NSPOSIXErrorDomain, NSURLErrorDomain, "AVFoundationErrorDomain"]
@@ -2475,11 +2474,11 @@ enum LearningFailureCode {
     /// Short Chinese reason for the notes status line.
     static func label(for code: String) -> String {
         switch code {
-        case "session_storageDeferred": return "这节课的文件还在 iCloud，尚未下载到本机；打开课程时会先请求下载"
+        case "session_storageDeferred": return "这节课的文件还在云端，尚未下载到本机"
         case "session_storageBusy": return "其他操作仍在准备课程文件，原文件已保留"
-        case "cloud_download_timeout": return "等待 iCloud 下载已超时，课程文件保留；请重新打开重试"
-        case "cloud_download_unavailable": return "iCloud 暂时无法下载这节课，请检查网络后重新打开"
-        case "cancelled": return "已取消等待，课程文件保留"
+        case "cloud_download_timeout": return "等待云端下载已超时，课程文件保留；请重新打开重试"
+        case "cloud_download_unavailable": return "云端暂时无法下载这节课，请检查网络后重新打开"
+        case "cancelled": return "操作已取消"
         case "timeout": return "超时"
         case "output_limit": return "输出超出长度上限"
         case "generation_interrupted": return "生成被中断"
@@ -3896,11 +3895,13 @@ final class LearningReviewQueue: ObservableObject {
         }
     }
 
-    /// A bounded automatic retry that is waiting for its backoff window.
+    /// Generation retries are bounded; storage deferrals keep a separate backoff count.
     struct RetryState: Codable, Equatable, Sendable {
         var attempts: Int
         var notBefore: TimeInterval
         var code: String
+        /// Separate from the generation retry budget; absent in older journals.
+        var storageDeferrals: Int? = nil
 
         func remainingSeconds(now: TimeInterval = Date().timeIntervalSince1970) -> Int {
             max(0, Int((notBefore - now).rounded()))
@@ -5548,8 +5549,19 @@ final class LearningReviewQueue: ObservableObject {
             // The report commits before the queue journal. If that last save
             // failed, a restart must recover its frozen result without a model.
             let reportDirectory = accessURL
+            #if DEBUG
+            let reportPlaceholderHook = SensitiveFileIO.datalessProbe
+            #endif
             let savedReports = try await Task.detached {
-                try ReviewReportCollection.read(in: reportDirectory)
+                #if DEBUG
+                return try SensitiveFileIO.$datalessProbe.withValue(reportPlaceholderHook) {
+                    try SensitiveFileIO.withoutDatalessMaterialization { try ReviewReportCollection.read(in: reportDirectory) }
+                }
+                #else
+                try SensitiveFileIO.withoutDatalessMaterialization {
+                    try ReviewReportCollection.read(in: reportDirectory)
+                }
+                #endif
             }.value
             try Task.checkCancellation()
             guard ownsAttempt(job, identity) else { return }
@@ -5721,13 +5733,15 @@ final class LearningReviewQueue: ObservableObject {
                 jobs[0].lastRequestID = identity.latest
                 let attempts = jobs[0].retryPending?.attempts ?? 0
                 if failure.isStorageDeferred || ReviewRetryPolicy.isRetryable(failure) && attempts < ReviewRetryPolicy.maximumAttempts {
-                    let attempt = failure.isStorageDeferred ? min(attempts + 1, ReviewRetryPolicy.maximumAttempts) : attempts + 1
-                    let delay = retryDelays[max(0, min(attempt - 1, retryDelays.count - 1))]
+                    let attempt = failure.isStorageDeferred ? attempts : attempts + 1
+                    let deferrals = failure.isStorageDeferred ? min(jobs[0].retryPending?.storageDeferrals ?? 0, Int.max - 1) + 1 : 0
+                    let delayIndex = failure.isStorageDeferred ? deferrals : attempt
+                    let delay = retryDelays[max(0, min(delayIndex - 1, retryDelays.count - 1))]
                     jobs[0].retryPending = RetryState(attempts: attempt,
                                                       notBefore: now().timeIntervalSince1970 + delay,
-                                                      code: failure.code)
+                                                      code: failure.code, storageDeferrals: failure.isStorageDeferred ? deferrals : nil)
                     var retryStats = jobs[0].stats ?? JobStats()
-                    retryStats.retries += 1
+                    if !failure.isStorageDeferred { retryStats.retries += 1 }
                     jobs[0].stats = retryStats
                     recordEvent(ReviewQueueEvent(at: now().timeIntervalSince1970, code: failure.isStorageDeferred ? "storage_deferred" : "retry_scheduled",
                                                  stage: failure.stage.rawValue, batch: batchIndex,

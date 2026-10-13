@@ -8,6 +8,56 @@ import Testing
 @Suite(.serialized, .isolatedStorage)
 @MainActor
 struct DataSafetyReviewTests {
+    private final class ReportCloudProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deferred = false
+        func setDeferred(_ value: Bool) { lock.withLock { deferred = value } }
+        var isDeferred: Bool { lock.withLock { deferred } }
+    }
+
+    @Test(arguments: ["summary-review.md", ReviewReportCollection.manifestFileName])
+    func cloudOnlyReportDefersItsCommitAndRetriesWithoutRegenerating(_ name: String) async throws {
+        let root = try DataSafetyFixtures.make("cloud-report-commit"); defer { DataSafetyFixtures.preserve(root) }
+        let directory = try course(root, "course")
+        let book = try notebook()
+        try (book.markdown() + "\n").write(to: directory.appendingPathComponent("summary-zh-Hans.md"), atomically: true, encoding: .utf8)
+        let prior = try job(directory, book)
+        try ReviewReportCollection.save(LearningReviewQueue.reportEntry(for: prior), in: directory)
+        let reportURL = directory.appendingPathComponent(name)
+        let probe = ReportCloudProbe()
+        var generations = 0
+        let journal = root.appendingPathComponent("queue.json")
+        let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
+            generate: { _, _, _, _, _ in generations += 1; probe.setDeferred(true); return Self.response },
+            now: Date.init, retryDelays: [0.05, 0.05])
+        do {
+            try await SensitiveFileIO.$datalessProbe.withValue({ $0.lastPathComponent == name && probe.isDeferred }) {
+                queue.setContext(recording: true, concurrent: true, resourcesAvailable: true)
+                try queue.enqueue(directory: directory, notebook: book)
+                try await queue.waitForPendingStorage()
+                let before = try Data(contentsOf: reportURL)
+                queue.startAwaitingJob()
+                queue.setContext(recording: false, concurrent: true, resourcesAvailable: true)
+                #expect(await waitFor({ !queue.running && queue.items.first?.retryPending?.code == "session_storageDeferred" }))
+                #expect(generations == 1)
+                #expect(queue.currentFailure == nil)
+                #expect(queue.items.first?.completed == 1)
+                #expect(queue.status.contains("云端") && queue.status.contains("延后"))
+                #expect(try Data(contentsOf: reportURL) == before)
+                try await queue.waitForPendingStorage()
+                let deferred = try read(journal)
+                #expect((deferred.jobs.first?.stats?.failures ?? 0) == 0)
+                #expect((deferred.jobs.first?.stats?.retries ?? 0) == 0)
+                probe.setDeferred(false)
+                #expect(await waitFor({ !queue.hasWork && !queue.running }))
+                #expect(generations == 1)
+                try await queue.waitForPendingStorage()
+                #expect(try ReviewReportCollection.read(in: directory).contains { $0.jobID != prior.id && $0.completed == 1 })
+            }
+        } catch { await queue.shutdownForTesting(); throw error }
+        await queue.shutdownForTesting()
+    }
+
     private static let response = #"{"reviewVersion":2,"corrections":[],"additions":[]}"#
 
     private func notebook(_ label: String = "fixture", batches: Int = 1) throws -> LearningNotebook {

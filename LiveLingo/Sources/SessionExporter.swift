@@ -517,6 +517,7 @@ enum SessionExporter {
         do { return try SensitiveFileIO.withoutDatalessMaterialization {
             var rootInfo = stat()
             guard SensitiveFileIO.timedIO(.entryStatus, { lstat(directory.path, &rootInfo) }) == 0 else {
+                if errno == ENOENT { throw SessionStoreError.missingSnapshot }
                 throw SensitiveFileIO.Failure.system(operation: "inspect course", code: errno)
             }
             guard rootInfo.st_mode & S_IFMT == S_IFDIR, rootInfo.st_uid == getuid() else { throw SensitiveFileIO.Failure.unsafePath }

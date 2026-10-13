@@ -1223,19 +1223,17 @@ final class SessionStore: @unchecked Sendable {
 
 enum SessionCloudOpenError: Error, Equatable { case timedOut, requestUnavailable }
 
-/// Dedicated, bounded workers keep opaque provider calls off the main actor
-/// and cooperative executor. Timeout/cancel resolves the waiter immediately;
-/// late results cannot resume it twice or request further downloads.
+/// Only provider download requests and polling use the bounded cloud workers.
+/// Local metadata probes and course reads retain the ordinary detached path.
 enum SessionCloudOpenPreparation {
     struct Environment: Sendable {
         var pendingItems: @Sendable (URL) throws -> [URL]
         var requestDownload: @Sendable (URL) throws -> Void
+        var coordinateDownload: @Sendable (URL, @escaping @Sendable () -> Bool) throws -> Void = coordinatedDownload
         var pollInterval: TimeInterval = 0.25
         var timeout: TimeInterval = 120
-        static let live = Self(pendingItems: SessionExporter.pendingCloudItems, requestDownload: { url in
-            do { try FileManager.default.startDownloadingUbiquitousItem(at: url) }
-            catch { throw SessionCloudOpenError.requestUnavailable }
-        })
+        static let live = Self(pendingItems: SessionExporter.pendingCloudItems,
+                               requestDownload: { try FileManager.default.startDownloadingUbiquitousItem(at: $0) })
     }
     @TaskLocal static var environment = Environment.live
     #if DEBUG
@@ -1247,13 +1245,13 @@ enum SessionCloudOpenPreparation {
         queue.maxConcurrentOperationCount = 2
         return queue
     }()
-    private final class Completion<Value: Sendable>: @unchecked Sendable {
+    private final class Completion: @unchecked Sendable {
         private let lock = NSLock()
-        private var result: Result<Value, Error>?
-        private var waiter: CheckedContinuation<Value, Error>?
+        private var result: Result<Void, Error>?
+        private var waiter: CheckedContinuation<Void, Error>?
         var finished: Bool { lock.withLock { result != nil } }
-        func resolve(_ value: Result<Value, Error>) {
-            let continuation = lock.withLock { () -> CheckedContinuation<Value, Error>? in
+        func resolve(_ value: Result<Void, Error>) {
+            let continuation = lock.withLock { () -> CheckedContinuation<Void, Error>? in
                 guard result == nil else { return nil }
                 result = value
                 defer { waiter = nil }
@@ -1261,9 +1259,9 @@ enum SessionCloudOpenPreparation {
             }
             continuation?.resume(with: value)
         }
-        func wait() async throws -> Value {
+        func wait() async throws {
             try await withCheckedThrowingContinuation { continuation in
-                let value = lock.withLock { () -> Result<Value, Error>? in
+                let value = lock.withLock { () -> Result<Void, Error>? in
                     if let result { return result }
                     waiter = continuation
                     return nil
@@ -1273,30 +1271,76 @@ enum SessionCloudOpenPreparation {
         }
     }
 
-    static func prepare(_ directory: URL, progress: @escaping @Sendable (Int) -> Void) async throws {
-        try await wait(directory, progress: progress) { () }
+    private static func coordinatedDownload(_ url: URL, cancelled: @escaping @Sendable () -> Bool) throws {
+        guard !cancelled() else { throw CancellationError() }
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var readError: Error?
+        SensitiveFileIO.timedIO(.cloudCoordinate) {
+            coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinated in
+                do {
+                    guard !cancelled() else { throw CancellationError() }
+                    // Reading through checked descriptors materializes a provider
+                    // placeholder here, outside every storage lock/policy scope.
+                    var info = stat()
+                    guard SensitiveFileIO.timedIO(.entryStatus, { lstat(coordinated.path, &info) }) == 0 else {
+                        throw SensitiveFileIO.Failure.system(operation: "inspect coordinated item", code: errno)
+                    }
+                    if info.st_mode & S_IFMT == S_IFDIR {
+                        _ = try SensitiveFileIO.Directory.open(at: coordinated, create: false, tighten: false).names()
+                    } else {
+                        let parent = try SensitiveFileIO.Directory.open(at: coordinated.deletingLastPathComponent(), create: false, tighten: false)
+                        _ = try parent.readIfPresent(named: coordinated.lastPathComponent)
+                    }
+                } catch { readError = error }
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        if let readError { throw readError }
+        guard !cancelled() else { throw CancellationError() }
     }
 
     static func load(_ store: SessionStore, progress: @escaping @Sendable (Int) -> Void) async throws -> SessionLoadResult {
+        let settings = environment
         #if DEBUG
         let loadHook = beforeLoad
         let placeholderHook = SensitiveFileIO.datalessProbe
         #endif
-        return try await wait(store.directory, progress: progress) {
-            #if DEBUG
-            try loadHook?()
-            return try SensitiveFileIO.$datalessProbe.withValue(placeholderHook) { try store.loadDetailed() }
-            #else
-            return try store.loadDetailed()
-            #endif
+        var latePlaceholderRetries = 0
+        while true {
+            try Task.checkCancellation()
+            let pending = try await Task.detached {
+                try SessionArchiveCoding.privateIO(at: store.directory) { try settings.pendingItems(store.directory) }
+            }.value
+            try Task.checkCancellation()
+            if !pending.isEmpty {
+                try await waitForDownload(store.directory, pending: pending, settings: settings, progress: progress)
+            }
+            try Task.checkCancellation()
+            do {
+                let result = try await Task.detached {
+                    #if DEBUG
+                    try loadHook?()
+                    return try SensitiveFileIO.$datalessProbe.withValue(placeholderHook) { try store.loadDetailed() }
+                    #else
+                    return try store.loadDetailed()
+                    #endif
+                }.value
+                try Task.checkCancellation()
+                return result
+            } catch let error as SessionStoreError {
+                guard case .storageDeferred = error,
+                      LearningFailureCode.code(for: error) == "session_storageDeferred",
+                      latePlaceholderRetries < 2 else { throw error }
+                latePlaceholderRetries += 1
+            }
         }
     }
 
-    private static func wait<Value: Sendable>(_ directory: URL, progress: @escaping @Sendable (Int) -> Void,
-                                              finish: @escaping @Sendable () throws -> Value) async throws -> Value {
-        try Task.checkCancellation()
-        let settings = environment
-        let completion = Completion<Value>()
+    private static func waitForDownload(_ directory: URL, pending initial: [URL], settings: Environment,
+                                        progress: @escaping @Sendable (Int) -> Void) async throws {
+        let completion = Completion()
+        progress(initial.count)
         let timer = Task {
             do { try await Task.sleep(for: .seconds(max(0.001, settings.timeout))) }
             catch { return }
@@ -1305,36 +1349,34 @@ enum SessionCloudOpenPreparation {
         defer { timer.cancel() }
         workers.addOperation {
             var requested = Set<URL>()
-            var latePlaceholderRetries = 0
+            var pending = initial
             do {
                 while !completion.finished {
-                    let pending = try settings.pendingItems(directory)
-                    guard !completion.finished else { return }
-                    if pending.isEmpty {
-                        do { completion.resolve(.success(try finish())); return }
-                        catch let error as SessionStoreError {
-                            guard case .storageDeferred = error,
-                                  LearningFailureCode.code(for: error) == "session_storageDeferred",
-                                  latePlaceholderRetries < 2 else { throw error }
-                            latePlaceholderRetries += 1
-                            requested.removeAll()
-                            continue
-                        }
-                    }
-                    progress(pending.count)
+                    if pending.isEmpty { completion.resolve(.success(())); return }
                     for url in pending where !requested.contains(url) {
                         guard !completion.finished else { return }
-                        try settings.requestDownload(url)
+                        do { try SensitiveFileIO.timedIO(.cloudRequest) { try settings.requestDownload(url) } }
+                        catch {
+                            guard !completion.finished else { return }
+                            do { try settings.coordinateDownload(url, { completion.finished }) }
+                            catch {
+                                guard !completion.finished else { return }
+                                throw SessionCloudOpenError.requestUnavailable
+                            }
+                        }
                         requested.insert(url)
                     }
+                    guard !completion.finished else { return }
                     Thread.sleep(forTimeInterval: max(0.001, settings.pollInterval))
+                    pending = try SessionArchiveCoding.privateIO(at: directory) { try settings.pendingItems(directory) }
+                    guard !completion.finished else { return }
+                    if !pending.isEmpty { progress(pending.count) }
                 }
             } catch { completion.resolve(.failure(error)) }
         }
-        return try await withTaskCancellationHandler {
-            let value = try await completion.wait()
+        try await withTaskCancellationHandler {
+            try await completion.wait()
             try Task.checkCancellation()
-            return value
         } onCancel: { completion.resolve(.failure(CancellationError())) }
     }
 }
@@ -1428,13 +1470,13 @@ enum SessionArchiveCoding {
     static func privateIO<T>(at url: URL, _ action: () throws -> T) throws -> T {
         do { return try action() }
         catch SensitiveFileIO.Failure.unsafePath { throw SessionStoreError.unsafePath(url.path) }
-        catch SensitiveFileIO.Failure.dataless { throw SessionStoreError.storageDeferred("这节课的文件还在 iCloud，尚未下载到本机；打开课程时会先请求下载") }
+        catch SensitiveFileIO.Failure.dataless { throw SessionStoreError.storageDeferred("这节课的文件还在云端，尚未下载到本机") }
         catch SensitiveFileIO.Failure.recoveryBusy { throw SessionStoreError.storageDeferred("其他操作仍在修复课程文件") }
         catch SensitiveFileIO.Failure.system(let operation, let code) {
             // A nested privateIO must not turn the thread policy's denied
             // materialization into a generic I/O error before the outer scope.
             if code == EDEADLK, SensitiveFileIO.materializationBlocked {
-                throw SessionStoreError.storageDeferred("这节课的文件还在 iCloud，尚未下载到本机；打开课程时会先请求下载")
+                throw SessionStoreError.storageDeferred("这节课的文件还在云端，尚未下载到本机")
             }
             throw SessionStoreError.io(operation: operation, code: code)
         }

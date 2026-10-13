@@ -53,6 +53,29 @@ private final class TraceTextProbe: @unchecked Sendable {
 }
 
 final class DataSafetyStorageTests: XCTestCase {
+    func testDefaultCloudCoordinatorReadsCheckedDescriptorsOutsideStorageScope() throws {
+        let root = try DataSafetyFixtures.make("default-cloud-coordinator"); defer { DataSafetyFixtures.preserve(root) }
+        let file = root.appendingPathComponent("synthetic.json")
+        try SessionArchiveCoding.atomicWrite(Data("SYNTHETIC".utf8), file)
+        let trace = TraceTextProbe()
+        try SensitiveFileIO.$ioBeginObserver.withValue({ site, _ in trace.record(site.rawValue) }) {
+            try SensitiveFileIO.$datalessProbe.withValue({ $0 == file }) {
+                try SensitiveFileIO.$beforeFileRead.withValue({ _ in
+                    XCTAssertFalse(SensitiveFileIO.materializationBlocked)
+                    XCTAssertFalse(SessionStore.isHoldingProcessLock)
+                    XCTAssertNotEqual(getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD), IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+                }) {
+                    try SessionCloudOpenPreparation.Environment.live.coordinateDownload(file, { false })
+                    try SessionCloudOpenPreparation.Environment.live.coordinateDownload(root, { false })
+                }
+            }
+        }
+        XCTAssertEqual(trace.texts.filter { $0 == "cloudCoordinate" }.count, 2)
+        XCTAssertTrue(trace.texts.contains("dataRead"))
+        XCTAssertTrue(trace.texts.contains("directoryScan"))
+        XCTAssertThrowsError(try SessionCloudOpenPreparation.Environment.live.coordinateDownload(file, { true })) { XCTAssertTrue($0 is CancellationError) }
+    }
+
     func testSignpostUsesTheSameReadableObjectPayloadForBeginAndEnd() {
         let ticks = SlowIOProbe(ticks: [123, 124]), trace = TraceTextProbe()
         SensitiveFileIO.$ioClock.withValue({ ticks.now() }) {
@@ -88,7 +111,7 @@ final class DataSafetyStorageTests: XCTestCase {
             }
         }) { error in
             XCTAssertEqual(LearningFailureCode.code(for: error), "session_storageDeferred")
-            XCTAssertTrue(LearningFailureCode.label(for: LearningFailureCode.code(for: error)).contains("iCloud"))
+            XCTAssertTrue(LearningFailureCode.label(for: LearningFailureCode.code(for: error)).contains("云端"))
         }
     }
 

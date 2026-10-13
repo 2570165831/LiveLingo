@@ -59,7 +59,7 @@ private final class CloudReviewProbe: @unchecked Sendable {
     func read(_ url: URL) throws {
         try lock.withLock {
             attempts += 1
-            if !ready { throw SessionStoreError.storageDeferred("合成课程还在 iCloud，尚未下载") }
+            if !ready { throw SessionStoreError.storageDeferred("合成课程还在云端，尚未下载") }
         }
     }
 }
@@ -74,9 +74,14 @@ struct ReviewRetryTests {
         try (notebook.markdown() + "\n").write(to: directory.appendingPathComponent("summary-zh-Hans.md"), atomically: true, encoding: .utf8)
         let probe = CloudReviewProbe()
         var generations = 0
+        let finalGeneration = C06ReviewGate()
         let queue = LearningReviewQueue(journalURL: journal, observeSleep: false, diagnostics: .disabled,
-            generate: { _, _, _, _, _ in generations += 1; return Self.emptyV2Response },
-            now: Date.init, retryDelays: [0.05, 0.1])
+            generate: { _, _, _, _, _ in
+                generations += 1
+                if generations <= 2 { throw QwenRuntimeError.requestTimedOut }
+                await finalGeneration.wait()
+                return Self.emptyV2Response
+            }, now: Date.init, retryDelays: [0.05, 0.1])
         do {
             try await ReviewStorageTestHooks.$beforeSnapshotRead.withValue({ try probe.read($0) }) {
                 queue.setContext(recording: true, concurrent: true, resourcesAvailable: true)
@@ -86,20 +91,27 @@ struct ReviewRetryTests {
                 #expect(await waitFor({ probe.count >= 4 && !queue.running && queue.items.first?.retryPending != nil }, seconds: 3))
                 #expect(generations == 0)
                 #expect(queue.currentFailure == nil)
-                #expect(queue.status.contains("iCloud") && queue.status.contains("延后"))
+                #expect(queue.status.contains("云端") && queue.status.contains("延后"))
                 try await queue.waitForPendingStorage()
                 let deferred = try persistedJournal(journal)
                 #expect((deferred.jobs.first?.stats?.failures ?? 0) == 0)
                 #expect(deferred.jobs.first?.retryPending?.code == "session_storageDeferred")
+                #expect(deferred.jobs.first?.retryPending?.attempts == 0)
+                #expect((deferred.jobs.first?.retryPending?.storageDeferrals ?? 0) >= 3)
+                #expect((deferred.jobs.first?.stats?.retries ?? 0) == 0)
                 #expect(!(deferred.jobs.first?.events ?? []).contains { $0.code == "failed" })
                 probe.allow()
+                #expect(await waitFor({ generations == 3 }, seconds: 3))
+                #expect(queue.items.first?.stats?.retries == 2)
+                await finalGeneration.release()
                 #expect(await waitFor({ !queue.hasWork && !queue.running }, seconds: 3))
-                #expect(generations == 1)
+                #expect(generations == 3)
                 try await queue.waitForPendingStorage()
                 let finished = try persistedJournal(journal)
                 #expect((finished.retiredJobs?.first?.stats?.failures ?? 0) == 0)
             }
-        } catch { await queue.shutdownForTesting(); throw error }
+        } catch { await finalGeneration.release(); await queue.shutdownForTesting(); throw error }
+        await finalGeneration.release()
         await queue.shutdownForTesting()
     }
     private func makeNotebook(batches: Int = 1, label: String = "") -> LearningNotebook {

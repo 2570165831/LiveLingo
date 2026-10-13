@@ -3056,13 +3056,12 @@ final class AppModel: ObservableObject {
         let alarmPriorPaused = try await takeAlarmSavedCourse(directory)
         let downloadToken = UUID()
         archiveCloudDownloadToken = downloadToken
-        archiveCloudDownloadStatus = "正在检查这节课的本机文件；需要时会等待 iCloud 下载。"
         let store = SessionStore(directory: directory)
         let download = Task { [weak self] in
             try await SessionCloudOpenPreparation.load(store) { [weak self] count in
                 Task { @MainActor in
                     guard let self, self.archiveCloudDownloadToken == downloadToken else { return }
-                    self.archiveCloudDownloadStatus = "这节课的文件还在 iCloud，正在下载到本机；完成后自动打开。等待 \(count) 个文件。"
+                    self.archiveCloudDownloadStatus = "这节课的文件还在云端，正在下载到本机；完成后自动打开。等待 \(count) 个文件。"
                 }
             }
         }

@@ -61,7 +61,7 @@ final class DataSafetyAppTests: XCTestCase {
         XCTAssertEqual(code, "session_storageDeferred")
         XCTAssertEqual(ReviewFailure.safeCode(code), code)
         let label = LearningFailureCode.label(for: code)
-        XCTAssertTrue(label.contains("iCloud")); XCTAssertTrue(label.contains("尚未下载到本机"))
+        XCTAssertTrue(label.contains("云端")); XCTAssertTrue(label.contains("尚未下载到本机"))
         XCTAssertFalse(label.contains("SYNTHETIC_PRIVATE_DETAIL"))
         for stage in [ReviewFailureStage.directory, .input] {
             let failure = ReviewFailure.classify(error, defaultStage: stage)
@@ -72,7 +72,119 @@ final class DataSafetyAppTests: XCTestCase {
         }
         XCTAssertEqual(LearningFailureCode.code(for: SessionStoreError.storageDeferred("其他操作仍在修复课程文件")), "session_storageBusy")
         XCTAssertTrue(LearningFailureCode.label(for: LearningFailureCode.code(for: SessionCloudOpenError.timedOut)).contains("超时"))
-        XCTAssertTrue(LearningFailureCode.label(for: LearningFailureCode.code(for: CancellationError())).contains("已取消等待"))
+        XCTAssertEqual(LearningFailureCode.label(for: LearningFailureCode.code(for: CancellationError())), "操作已取消")
+        XCTAssertFalse(label.contains("打开课程时"))
+    }
+
+    func testSlowLocalOpenNeverShowsCloudBannerOrUsesCloudTimeout() async throws {
+        let root = try DataSafetyFixtures.make("slow-local-open"); defer { DataSafetyFixtures.preserve(root) }
+        let suite = "LiveLingo-Test-\(UUID())", cleanup = try TestPreferenceCleanup(suite: suite)
+        let defaults = try XCTUnwrap(TestUserDefaults(suiteName: suite))
+        defer { do { try cleanup.remove(defaults) } catch { XCTFail("\(error)") } }
+        let (model, queue, course, snapshot) = try cloudFixture(root, defaults: defaults)
+        let settings = SessionCloudOpenPreparation.Environment(pendingItems: { _ in
+            Thread.sleep(forTimeInterval: 0.08); return []
+        }, requestDownload: { _ in XCTFail("Local reads must never request a download") }, timeout: 0.01)
+        let work = Task {
+            try await SessionCloudOpenPreparation.$environment.withValue(settings) {
+                try await SessionCloudOpenPreparation.$beforeLoad.withValue({ Thread.sleep(forTimeInterval: 0.08) }) {
+                    try await model.openSavedSession(course, allowAutomaticProcessing: false)
+                }
+            }
+        }
+        while !model.archiveLoading { try await Task.sleep(for: .milliseconds(1)) }
+        while model.archiveLoading {
+            XCTAssertNil(model.archiveCloudDownloadStatus)
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        try await work.value
+        XCTAssertEqual(model.segments, snapshot.segments)
+        XCTAssertNil(model.archiveCloudDownloadStatus)
+        await queue.shutdownForTesting()
+    }
+
+    func testLocalOpenBypassesTwoOccupiedCloudWorkers() async throws {
+        let root = try DataSafetyFixtures.make("cloud-workers-local"); defer { DataSafetyFixtures.preserve(root) }
+        let course = root.appendingPathComponent("course", isDirectory: true)
+        let store = SessionStore(directory: course)
+        let snapshot = try store.save(SessionSnapshot())
+        let probes = [CloudOpenProbe(), CloudOpenProbe()]
+        let tasks = probes.map { probe in Task {
+            try await SessionCloudOpenPreparation.$environment.withValue(probe.environment()) {
+                try await SessionCloudOpenPreparation.load(store) { _ in }
+            }
+        } }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while probes.contains(where: { $0.order.isEmpty }), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(probes.allSatisfy { $0.order == ["download"] })
+        defer { probes.forEach { $0.release.signal() } }
+        let local = SessionCloudOpenPreparation.Environment(pendingItems: { _ in [] }, requestDownload: { _ in XCTFail("Local download") }, timeout: 0.01)
+        let result = try await SessionCloudOpenPreparation.$environment.withValue(local) {
+            try await SessionCloudOpenPreparation.$beforeLoad.withValue({ Thread.sleep(forTimeInterval: 0.04) }) {
+                try await SessionCloudOpenPreparation.load(store) { _ in XCTFail("Local progress") }
+            }
+        }
+        XCTAssertEqual(result.snapshot, snapshot)
+        XCTAssertTrue(probes.allSatisfy { $0.order == ["download"] })
+        probes.forEach { $0.release.signal() }
+        for work in tasks { _ = try await work.value }
+    }
+
+    func testPlaceholderProbeErrorsKeepTheStoreErrorCategories() async throws {
+        let root = try DataSafetyFixtures.make("cloud-probe-errors"); defer { DataSafetyFixtures.preserve(root) }
+        do {
+            _ = try await SessionCloudOpenPreparation.load(SessionStore(directory: root.appendingPathComponent("missing"))) { _ in XCTFail("Missing course progress") }
+            XCTFail("Missing directory")
+        } catch SessionStoreError.missingSnapshot { }
+        let settings = SessionCloudOpenPreparation.Environment(pendingItems: { _ in
+            throw SensitiveFileIO.Failure.system(operation: "synthetic probe", code: EIO)
+        }, requestDownload: { _ in XCTFail("Probe error download") })
+        do {
+            _ = try await SessionCloudOpenPreparation.$environment.withValue(settings) {
+                try await SessionCloudOpenPreparation.load(SessionStore(directory: root)) { _ in XCTFail("Probe error progress") }
+            }
+            XCTFail("Probe I/O error")
+        } catch SessionStoreError.io(let operation, let code) {
+            XCTAssertEqual(operation, "synthetic probe"); XCTAssertEqual(code, EIO)
+        }
+    }
+
+    func testUserCloudOpenCoordinatesWhenPrimaryDownloadIsUnsupported() async throws {
+        let root = try DataSafetyFixtures.make("cloud-coordination"); defer { DataSafetyFixtures.preserve(root) }
+        let store = SessionStore(directory: root.appendingPathComponent("course", isDirectory: true))
+        let snapshot = try store.save(SessionSnapshot())
+        let probe = CloudOpenProbe(blocked: false)
+        var settings = probe.environment()
+        settings.requestDownload = { _ in throw SessionCloudOpenError.requestUnavailable }
+        settings.coordinateDownload = { url, cancelled in
+            XCTAssertFalse(cancelled()); probe.request(url)
+        }
+        let result = try await SessionCloudOpenPreparation.$environment.withValue(settings) {
+            try await SessionCloudOpenPreparation.$beforeLoad.withValue({ try probe.beforeLoad() }) {
+                try await SessionCloudOpenPreparation.load(store) { _ in }
+            }
+        }
+        XCTAssertEqual(probe.order, ["download", "load"])
+        XCTAssertEqual(result.snapshot, snapshot)
+    }
+
+    func testCoordinatedCloudReadHasTheSameBoundedWait() async throws {
+        let root = try DataSafetyFixtures.make("cloud-coordination-timeout"); defer { DataSafetyFixtures.preserve(root) }
+        let store = SessionStore(directory: root.appendingPathComponent("course", isDirectory: true))
+        _ = try store.save(SessionSnapshot())
+        let probe = CloudOpenProbe()
+        var settings = probe.environment(timeout: 0.05)
+        settings.requestDownload = { _ in throw SessionCloudOpenError.requestUnavailable }
+        settings.coordinateDownload = { url, cancelled in probe.request(url); XCTAssertTrue(cancelled()) }
+        do {
+            _ = try await SessionCloudOpenPreparation.$environment.withValue(settings) {
+                try await SessionCloudOpenPreparation.load(store) { _ in }
+            }
+            XCTFail("Coordination must time out")
+        } catch SessionCloudOpenError.timedOut { }
+        probe.release.signal()
+        XCTAssertEqual(probe.requestFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(probe.order, ["download"])
     }
 
     func testUserCloudOpenDownloadsOutsideLocksThenOpensAndShowsWaitingState() async throws {
@@ -94,7 +206,7 @@ final class DataSafetyAppTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(5))
         }
         XCTAssertTrue(model.archiveLoading)
-        XCTAssertTrue(model.archiveCloudDownloadStatus?.contains("iCloud") == true)
+        XCTAssertTrue(model.archiveCloudDownloadStatus?.contains("云端") == true)
         XCTAssertNil(model.savedSessionDirectory, "The course is not installed while the download waits")
         probe.release.signal()
         try await work.value
