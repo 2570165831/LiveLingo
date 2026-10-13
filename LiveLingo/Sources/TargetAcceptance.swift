@@ -149,55 +149,104 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
             range: NSRange(text.startIndex..., in: text)) != nil
     }
 
-    // Parse a complete generic refusal, rather than searching lecture prose for
-    // an inability verb near "translation". Every clause must be refusal or
-    // courtesy; no wildcard slot may consume a translated name, number or fact.
+    // Conservative, finite reply set. Punctuation/spacing can vary; words,
+    // objects and courtesy sentences cannot. Unknown wording is lecture prose.
     private enum RefusalReply {
-        static let object = #"(?:该|此|这(?:一|类|些)?)(?:内容|信息|句(?:话|子)|请求)"#
-        static let unsafe = #"(?:暴力|仇恨|不当|不适当|冒犯(?:性)?|粗俗)(?:[、,或和及]*(?:暴力|仇恨|不当|不适当|冒犯(?:性)?|粗俗))*"#
-        static let unsafeObject = #"(?:包含|涉及)"# + unsafe + #"(?:语言|用语|内容|信息)(?:的(?:内容|信息))?"#
-        static let action = #"(?:翻译(?:"# + object + "|" + unsafeObject + #")?|(?:提供|给出)(?:"#
-            + object + #"的)?(?:翻译|译文)|(?:协助|帮助)(?:处理)?"# + object
-            + #"|提供(?:"# + unsafeObject + #"))"#
-        static let apology = #"(?:(?:很|非常)?抱歉|对不起)"#
-        static let chinese = try! NSRegularExpression(pattern: #"^\s*(?:"# + apology + #"[,，:：\s]*)?(?:"#
-            + object + #"(?:包含|涉及)"# + unsafe + #"(?:语言|用语|内容|信息)[,，:：\s]+)?(?:我)?(?:无法|不能|不会|不可以|不便|拒绝)"#
-            + action + #"\s*$"#)
-        static let english = try! NSRegularExpression(pattern:
-            #"(?i)^\s*(?:(?:i(?:['’]m| am)\s+)?sorry[,\s]*)?(?:i\s+(?:cannot|can\s+not|can['’]t|will\s+not|won['’]t|am\s+unable\s+to|refuse\s+to)|i['’]m\s+unable\s+to)\s+(?:translate(?:\s+(?:this|that|the|offensive|inappropriate)(?:\s+(?:content|text|sentence|request)))?|(?:provide|offer)\s+(?:a\s+)?translation(?:\s+of\s+(?:this|that|the)\s+(?:content|text|sentence))?|(?:help|assist)(?:\s+(?:with|in\s+handling))?\s+(?:this|that|the)\s+request)\s*$"#)
-        static let courtesy = try! NSRegularExpression(pattern:
-            #"^(?:如果您有其他问题或需要(?:帮助|支持)[,，]请随时告诉我|我的职责是提供安全[、,，]有益的(?:帮助|信息(?:和服务)?)|如果您有其他问题或需要(?:帮助|支持)[,，]我很乐意为您提供帮助)$"#)
+        private static let replies: Set<String> = Set([
+            "抱歉，我无法提供该内容的翻译。",
+            "抱歉，无法翻译该内容。",
+            "抱歉，此内容包含不当语言，无法提供翻译。",
+            "对不起，我不便翻译这句话。",
+            "很抱歉，我不能协助处理这类请求。",
+            "我拒绝翻译这句话。",
+            "抱歉。无法翻译该内容。",
+            "抱歉，我无法为您提供该内容的翻译。",
+            "很抱歉，但我不能翻译这句话。",
+            "抱歉，我无法提供该内容的翻译。请提供其他需要翻译的内容。",
+            "抱歉，我无法翻译包含不适当内容的信息。如果您有其他问题或需要帮助，请随时告诉我。",
+            "我无法提供涉及暴力、仇恨或不当内容的信息。我的职责是提供安全、有益的帮助。",
+            "我无法提供涉及暴力、仇恨或不当内容的信息。我的职责是提供安全、有益的帮助。如果您有其他问题或需要支持，我很乐意为您提供帮助。",
+            "我无法提供这句话的译文。",
+            "抱歉，我无法翻译这句话。",
+            "我不会翻译这句话。",
+            "我不能协助处理这类请求。",
+            "抱歉，我无法协助处理这类请求。",
+            "对不起，我不能协助处理这类请求。",
+            "我无法协助处理这类请求。",
+            "我不会帮助处理这类请求。",
+            "我无法翻译这句话。",
+            "I cannot translate offensive content."
+        ].map(normalized))
 
-        static func matches(_ expression: NSRegularExpression, _ text: String) -> Bool {
-            expression.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+        private static let punctuation = Set(",，:：;；。.!！?？、")
+        private static func normalized(_ text: String) -> String {
+            String(text.lowercased().filter { !$0.isWhitespace && !punctuation.contains($0) })
         }
 
-        static func isEntireReply(_ text: String) -> Bool {
-            let clauses = text.split(whereSeparator: { "。.!！?？\r\n".contains($0) })
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-            guard let refusal = clauses.first,
-                  matches(chinese, refusal) || matches(english, refusal) else { return false }
-            return clauses.dropFirst().allSatisfy { matches(courtesy, $0) }
+        // This vocabulary is used only to EXEMPT replies, never to detect them.
+        // Each word family is a possible source counterpart of the finite set.
+        // Ambiguous correspondence deliberately permits a false negative.
+        private static let counterparts: [(String, [String])] = [
+            (#"(?i)\b(?:sorry|apolog\w*)\b"#, ["抱歉", "对不起"]),
+            (#"(?i)\b(?:cannot|can't|can’t|unable|incapable|not|won't|won’t|refus\w*)\b"#, ["无法", "不能", "不会", "不便", "拒绝"]),
+            (#"(?i)\b(?:help\w*|assist\w*|support\w*)\b"#, ["帮助", "协助", "支持"]),
+            (#"(?i)\b(?:request\w*|ask\w*)\b"#, ["请求", "提供", "协助", "帮助"]),
+            (#"(?i)\b(?:give|giving|provid\w*|offer\w*)\b"#, ["提供", "译文"]),
+            (#"(?i)\b(?:content|information|message|sentence|text)\b"#, ["内容", "信息", "句", "译文"]),
+            (#"(?i)\b(?:viol\w*|hate|hateful|offens\w*|inappropriate|improper|vulgar|profan\w*|rude|coarse)\b"#, ["暴力", "仇恨", "不当", "不适当", "冒犯", "粗俗"]),
+            (#"(?i)\b(?:safe\w*|useful|beneficial|duty|role|responsibility)\b"#, ["安全", "有益", "职责"]),
+            (#"(?i)\b(?:other|another|question\w*)\b"#, ["其他", "问题"])
+        ]
+        private static let words = try! NSRegularExpression(pattern: #"[A-Za-z][A-Za-z'’]*|[0-9]+(?:[.,][0-9]+)*"#)
+
+        private static func tokens(_ text: String) -> Set<String> {
+            Set(words.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+                Range($0.range, in: text).map { String(text[$0]).lowercased() }
+            })
         }
 
         static func isUnsupported(_ candidate: String, source: String) -> Bool {
-            // Includes translate/translation/translating and biology lectures.
-            guard !source.lowercased().contains("translat"),
-                  !["翻译", "译文", "直译"].contains(where: source.contains),
-                  !isEntireReply(source) else { return false }
-            // The closed grammar is also the content check: an extra translated
-            // clause or concrete object makes this false, even after an apology.
-            return isEntireReply(candidate)
+            guard replies.contains(normalized(candidate)) else { return false }
+            let lower = source.lowercased()
+            // Includes indirect descriptions (put into Chinese, Chinese version,
+            // render), not just the literal English translation word family.
+            guard !["translat", "version", "chinese", "render", "interpret", "翻译", "译文", "直译"].contains(where: lower.contains),
+                  !source.unicodeScalars.contains(where: TranslationAcceptance.isHan) else { return false }
+            let recognizer = NLLanguageRecognizer()
+            recognizer.processString(source)
+            // No bilingual proof for other/unknown source languages: allow them.
+            guard recognizer.dominantLanguage == .english else { return false }
+            let shared = tokens(candidate).intersection(tokens(source))
+            let functionWords: Set<String> = ["i", "a", "an", "the", "this", "that", "of", "to", "with"]
+            guard shared.subtracting(functionWords).isEmpty else { return false }
+            for (pattern, translations) in counterparts where translations.contains(where: candidate.contains) {
+                if source.range(of: pattern, options: .regularExpression) != nil { return false }
+            }
+            // Absence of a word in the exemption table is NOT proof of absence
+            // of meaning. Only a fully mapped source vocabulary can prove that
+            // none of its content was translated. Unknown words/names/numbers
+            // therefore allow the reply, even when it looks like a refusal.
+            let content = tokens(source).subtracting(["you", "your"])
+            let provenMeanings: [String: [String]] = [
+                "fuck": ["操", "干", "妈的", "去你", "滚"],
+                "mother": ["母", "妈"],
+                "bitch": ["婊", "贱"]
+            ]
+            guard !content.isEmpty, content.allSatisfy({ provenMeanings[$0] != nil }) else { return false }
+            return !content.contains { word in
+                provenMeanings[word]!.contains(where: candidate.contains)
+            }
         }
     }
 
     private static func unsupportedModelSelfDescription(in foldedCandidate: String,
-                                                        source: String, targetCode: String = "zh-Hans") -> Bool {
+                                                        source: String, targetCode: String = "zh-Hans",
+                                                        allowRefusalCheck: Bool = true) -> Bool {
         let candidate = TranslationCheckText.inspectionCopy(foldedCandidate, targetCode: targetCode)
         let original = TranslationCheckText.inspectionCopy(source, targetCode: targetCode).folding(
             options: [.widthInsensitive, .diacriticInsensitive], locale: nil)
         return (containsModelSelfDescription(candidate) && !containsModelSelfDescription(original))
-            || RefusalReply.isUnsupported(candidate, source: original)
+            || (allowRefusalCheck && RefusalReply.isUnsupported(candidate, source: original))
     }
 
     /// A narrow structural check for unfinished previews. Do not apply the
@@ -811,7 +860,8 @@ enum HanTargetAcceptance: TargetAcceptancePolicy {
         let folded = body.folding(options: [.widthInsensitive, .diacriticInsensitive], locale: nil)
         if let structural = TranslationAcceptance.structuralRejection(in: folded, source: source, originalIsEmpty: body.isEmpty,
             containsLeak: { text in leakMarkers.contains(where: text.contains) },
-            containsSelfReply: { text, source in unsupportedModelSelfDescription(in: text, source: source, targetCode: target.rawValue) }) {
+            containsSelfReply: { text, source in unsupportedModelSelfDescription(in: text, source: source,
+                targetCode: target.rawValue, allowRefusalCheck: false) }) {
             return structural
         }
         if target.containsInstructionLeak(body) { return .promptLeak }

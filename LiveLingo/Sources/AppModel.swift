@@ -128,6 +128,9 @@ struct CaptionTranslationDependencies {
     var initialTranslation: @MainActor (String) async throws -> String = { _ in
         throw QwenRuntimeError.runtimeUnavailable
     }
+    var initialTranslationDeadline: @MainActor () async throws -> Void = {
+        try await Task.sleep(for: .seconds(3))
+    }
 
     nonisolated private static func sleepBeforeRetry(_ seconds: TimeInterval) async throws {
         try await Task.sleep(for: .seconds(seconds))
@@ -236,6 +239,55 @@ struct LearningGenerationDependencies {
     func generateNote(_ input: String, model: String, prefix: String, systemPrompt: String,
                       onUpdate: @escaping @MainActor @Sendable (String) async -> Void) async throws -> String {
         try await generate(input, model, prefix, systemPrompt, onUpdate)
+    }
+}
+
+/// An unstructured race: cancellation never joins a provider that ignores it.
+/// Only the first completion/timeout can publish; a late result is discarded.
+@MainActor
+private final class InitialTranslationRequest {
+    private var operation: Task<Void, Never>?
+    private var timer: Task<Void, Never>?
+    private var completed = false
+    private var completion: ((String?) -> Void)?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func start(source: String, translate: @escaping @MainActor (String) async throws -> String,
+               deadline: @escaping @MainActor () async throws -> Void,
+               completion: @escaping (String?) -> Void) {
+        self.completion = completion
+        operation = Task(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
+            let text = try? await translate(source)
+            guard !Task.isCancelled else { return }
+            self?.finish(text)
+        }
+        timer = Task(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
+            do { try await deadline() } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.finish(nil)
+        }
+    }
+
+    func wait() async {
+        guard !completed else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func cancel() { finish(nil) }
+
+    private func finish(_ text: String?) {
+        guard !completed else { return }
+        completed = true
+        operation?.cancel(); timer?.cancel()
+        operation = nil; timer = nil
+        let publish = completion
+        completion = nil
+        publish?(text)
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
     }
 }
 
@@ -702,6 +754,7 @@ final class AppModel: ObservableObject {
     /// 每次 `runPreviewTranslation` 的身份；旧循环返回的结果不能写进新会话。
     private var previewRunToken: UUID?
     private var initialTranslationCache: [String: String] = [:]
+    private var initialTranslationRequests: [UUID: (token: UUID, request: InitialTranslationRequest)] = [:]
     private var preparedInitialTranslation: (@MainActor (String) async throws -> String)?
     /// 预览时序日志的窗口聚合状态（见 `tracePreviewReceiveHop`）。
     private var previewHopWindowStarted: TimeInterval = 0
@@ -2574,6 +2627,7 @@ final class AppModel: ObservableObject {
         defer { preparingApplicationExit = false }
         return await ExitDeadline.$current.withValue(deadline) {
             cancelScheduledSummaryRefresh()
+            cancelInitialTranslationRequests()
             processingPaused = true
             let readiness = readinessMonitorTask, power = powerMonitorTask
             let refresh = resourceRefreshTask, manual = manualTranslationTask
@@ -2760,6 +2814,7 @@ final class AppModel: ObservableObject {
         liveChinese = ""
         translatingSegmentID = nil
         clearTranslationPreview()
+        cancelInitialTranslationRequests()
         initialTranslationCache.removeAll(keepingCapacity: false)
         segments = []
         initialSourceRevisionInputs = [:]
@@ -2985,6 +3040,7 @@ final class AppModel: ObservableObject {
         let translation = translationWorker
         let translationID = translationWorkerID
         let summary = summaryTask
+        cancelInitialTranslationRequests()
         processingPaused = true
         translationEnqueuedAt.removeAll()
         clearTranslationPreview()
@@ -3316,6 +3372,7 @@ final class AppModel: ObservableObject {
         liveChinese = ""
         translatingSegmentID = nil
         clearTranslationPreview()
+        cancelInitialTranslationRequests()
         initialTranslationCache.removeAll(keepingCapacity: false)
         segments = []
         initialSourceRevisionInputs = [:]
@@ -3607,6 +3664,7 @@ final class AppModel: ObservableObject {
                 return
             }
             guard sessionID == identity, generation == epoch else { return }
+            cancelInitialTranslationRequests()
             processingPaused = true
             activeStorageMode = nil
             activeInputMode = nil
@@ -3686,6 +3744,8 @@ final class AppModel: ObservableObject {
         if summaryTaskGeneration == noteOwner { summaryTask = nil }
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
         do {
+            await waitForInitialTranslations()
+            guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
             try await flushSessionArchive()
             let captions = segments, notes = lectureSummary, target = outputLanguage
             let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
@@ -4506,6 +4566,10 @@ final class AppModel: ObservableObject {
     }
     var hasCaptionBacklogForTesting: Bool { hasCaptionBacklog }
     var captionWorkPendingForTesting: Bool { captionWorkPending }
+    func drainCaptionQueueForTesting() {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        drainTranslationQueue()
+    }
     func receiveIdentifiedCaptionForTesting(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint] = []) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         appendConfirmedCaption(segment, hints: hints)
@@ -4780,6 +4844,7 @@ final class AppModel: ObservableObject {
                     self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
                     continue
                 }
+                self.cancelInitialTranslationRequest(id)
                 self.segments[index].beginTranslation()
                 let english = self.segments[index].english
                 let recentContext = self.recentTranslationContext(before: index)
@@ -5007,19 +5072,7 @@ final class AppModel: ObservableObject {
                         if target == .simplifiedChinese, sourceLanguage == nil || sourceLanguage == "en",
                            self.segments[currentIndex].modelDidNotTranslate,
                            self.segments[currentIndex].initialTranslationFallback == nil {
-                            let source = input.english.trimmingCharacters(in: .whitespacesAndNewlines)
-                            var initial = self.initialTranslationCache[self.initialTranslationCacheKey(source)]
-                            if initial == nil {
-                                let translate = self.preparedInitialTranslation ?? self.captionTranslation.initialTranslation
-                                initial = try? await translate(source)
-                            }
-                            guard !Task.isCancelled, let fallbackIndex = self.translationInputIndex(input,
-                                session: currentSession, epoch: currentGeneration, worker: workerID) else { continue }
-                            // Apple output is still a translation, not an error,
-                            // source echo or arbitrary explanatory response.
-                            let usable = initial.flatMap { try? TranslationAcceptance.validatedCaption(
-                                target.normalize($0), source: source, target: target) }
-                            self.segments[fallbackIndex].recordInitialTranslationFallback(usable, targetCode: target.rawValue)
+                            self.scheduleInitialTranslationFallback(input, at: currentIndex, target: target)
                         }
                         if transportFailuresOnly, !self.rescuedTransportCaptionIDs.contains(id) {
                             self.failedTransportCaptions[id] = (input, self.captionTranslationSuccessCount)
@@ -5106,6 +5159,56 @@ final class AppModel: ObservableObject {
 
     private func initialTranslationCacheKey(_ source: String) -> String {
         "\(sessionID.uuidString)|\(generation)|\(source.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    private func cancelInitialTranslationRequest(_ id: UUID) {
+        let pending = initialTranslationRequests.removeValue(forKey: id)
+        pending?.request.cancel()
+    }
+
+    private func cancelInitialTranslationRequests() {
+        let pending = initialTranslationRequests.values.map(\.request)
+        initialTranslationRequests.removeAll()
+        for request in pending { request.cancel() }
+    }
+
+    private func scheduleInitialTranslationFallback(_ input: TranscriptSegment, at index: Int,
+                                                     target: CaptionTranslationTarget) {
+        let source = input.english.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cached = initialTranslationCache[initialTranslationCacheKey(source)]
+        // Save the attempt before starting, including its failure/timeout state.
+        segments[index].recordInitialTranslationFallback(cached, targetCode: target.rawValue)
+        guard cached == nil else { return }
+        let identity = sessionID, epoch = generation, token = UUID()
+        let request = InitialTranslationRequest()
+        initialTranslationRequests[input.id] = (token, request)
+        request.start(source: source,
+            translate: preparedInitialTranslation ?? captionTranslation.initialTranslation,
+            deadline: captionTranslation.initialTranslationDeadline) { [weak self] text in
+                guard let self, self.initialTranslationRequests[input.id]?.token == token else { return }
+                self.initialTranslationRequests.removeValue(forKey: input.id)
+                guard self.sessionID == identity, self.generation == epoch, !self.processingPaused,
+                      self.captionTarget == target,
+                      let current = self.segments.firstIndex(where: {
+                          $0.id == input.id && $0.inputRevision == input.inputRevision
+                              && $0.english == input.english && $0.sourceLanguage == input.sourceLanguage
+                      }), self.segments[current].modelDidNotTranslate else { return }
+                if let text, let usable = try? TranslationAcceptance.validatedCaption(
+                    target.normalize(text), source: source, target: target) {
+                    self.segments[current].completeInitialTranslationFallback(usable, targetCode: target.rawValue)
+                    if self.segments.last?.id == input.id, self.volatileEnglish.isEmpty {
+                        self.liveChinese = self.segments[current].displayChinese
+                    }
+                    self.persistCurrentSession()
+                }
+            }
+    }
+
+    // Final exports and CLI/test readback drain bounded display work after
+    // formal captions finish. Caption processing and notes never await it.
+    func waitForInitialTranslations() async {
+        let requests = initialTranslationRequests.values.map(\.request)
+        for request in requests { await request.wait() }
     }
 
     func rememberInitialTranslation(source: String, translated: String) {
@@ -6606,6 +6709,7 @@ extension AppModel {
         defer { translationFailureReporter = nil }
         for caption in captions { appendConfirmedCaption(caption, hints: []) }
         await translationWorker?.value
+        await waitForInitialTranslations()
     }
     #endif
 

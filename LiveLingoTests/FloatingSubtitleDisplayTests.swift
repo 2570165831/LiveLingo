@@ -902,6 +902,19 @@ final class FloatingSubtitleDisplayTests: XCTestCase {
                 let identical = try pixels(current).dropFirst(currentStart) == legacyBody
                 XCTAssertTrue(identical,
                               "Caption body pixels must match 1a59adc's English view: \(preset) / dark=\(dark)")
+                if !identical {
+                    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pixel-mismatch-\(UUID())")
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try Data(legacyBody).write(to: directory.appendingPathComponent("legacy-body.bin"))
+                    try pixels(current).dropFirst(currentStart).write(to: directory.appendingPathComponent("current-body.bin"))
+                    try legacy.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("legacy.png"))
+                    try current.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("current.png"))
+                    let metadata: [String: Any] = ["preset": preset, "dark": dark,
+                        "legacy": [legacy.pixelsWide, legacy.pixelsHigh, legacy.bytesPerRow, legacy.bitsPerSample, legacy.bitsPerPixel, legacyStart],
+                        "current": [current.pixelsWide, current.pixelsHigh, current.bytesPerRow, current.bitsPerSample, current.bitsPerPixel, currentStart],
+                        "currentBounds": NSStringFromRect(controller.view.bounds)]
+                    try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]).write(to: directory.appendingPathComponent("metadata.json"))
+                }
                 try capture(controller.view, name: "english-default-\(Int(preset))-\(dark ? "dark" : "light")")
                 print("FLOATING_ENGLISH_BODY_PIXELS preset=\(preset) dark=\(dark) identical=\(identical) size=\(current.pixelsWide)x\(current.pixelsHigh)")
             }

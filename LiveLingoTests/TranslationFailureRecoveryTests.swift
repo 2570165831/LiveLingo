@@ -125,6 +125,12 @@ final class TranslationFailureRecoveryTests: XCTestCase {
             ("Sorry, I cannot help with this request.", "对不起，我不能协助处理这类请求。"),
             ("I'm unable to assist with this request.", "我无法协助处理这类请求。"),
             ("I won't help with this request.", "我不会帮助处理这类请求。"),
+            ("I cannot give you a Chinese version of this sentence.", "我无法提供这句话的译文。"),
+            ("Sorry, I can't put this sentence into Chinese.", "抱歉，我无法翻译这句话。"),
+            ("I won't render this sentence in Chinese.", "我不会翻译这句话。"),
+            ("I cannot help you with this request.", "我不能协助处理这类请求。"),
+            ("Sorry, I'm not able to assist with this request.", "抱歉，我无法协助处理这类请求。"),
+            ("I failed to produce a Mandarin rendition of the line.", "我无法提供这句话的译文。"),
             ("Sorry, Alice missed 3 lectures.", "抱歉，Alice 错过了 3 节课。"),
             ("Alice scored 42 points.", "抱歉，无法翻译该内容。Alice 得了 42 分。"),
             ("Alice scored 42 points.", "对不起，我无法提供 Alice 的 42 分的翻译。")
@@ -148,7 +154,9 @@ final class TranslationFailureRecoveryTests: XCTestCase {
         for output in [
             "抱歉，无法翻译该内容。", "抱歉，此内容包含不当语言，无法提供翻译。",
             "对不起，我不便翻译这句话。", "很抱歉，我不能协助处理这类请求。",
-            "我拒绝翻译这句话。", "抱歉，我无法提供该内容的翻译。"
+            "我拒绝翻译这句话。", "抱歉，我无法提供该内容的翻译。",
+            "抱歉。无法翻译该内容。", "抱歉，我无法为您提供该内容的翻译。",
+            "很抱歉，但我不能翻译这句话。", "抱歉，我无法提供该内容的翻译。请提供其他需要翻译的内容。"
         ] {
             XCTAssertEqual(TranslationAcceptance.rejection(candidate: output, source: "Fuck your mother."), .modelReply, output)
             XCTAssertFalse(TranslationAcceptance.isModelReply(output, source: "We are discussing translation."))
@@ -174,6 +182,7 @@ final class TranslationFailureRecoveryTests: XCTestCase {
             if scenario == "wrong-source" { model.rememberInitialTranslation(source: "The room is warm.", translated: "房间很暖。") }
             model.receiveCaptionForTesting(source, start: 0, end: 1)
             await model.translationTaskForTesting?.value
+            await model.waitForInitialTranslations()
             let segment = model.segments[0]
             XCTAssertEqual(requests, scenario == "cached" ? [] : [source], scenario)
             XCTAssertEqual(segment.translationState, .failed)
@@ -199,6 +208,109 @@ final class TranslationFailureRecoveryTests: XCTestCase {
                 XCTAssertEqual(presentation.translation?.isPreview, true)
                 XCTAssertTrue(model.previewChineseDisplay.contains("初译"))
             }
+        }
+    }
+
+    func testClosedRefusalSetAllowsSourceCounterpartsAndUnknownResponses() throws {
+        for (source, output, language) in [
+            ("No puedo traducir esta frase.", "我无法翻译这句话。", "es"),
+            ("Je ne peux pas traduire cette phrase.", "我无法翻译这句话。", "fr"),
+            ("I cannot help you with this request.", "我不能协助处理这类请求。", "en"),
+            ("Please provide information about violent language.", "我无法提供涉及暴力、仇恨或不当内容的信息。我的职责是提供安全、有益的帮助。", "en")
+        ] {
+            XCTAssertFalse(TranslationAcceptance.isModelReply(output, source: source), source)
+            XCTAssertNil(TranslationAcceptance.rejection(candidate: output, source: source, sourceLanguage: language), source)
+            // The long information example intentionally still has its old length limit.
+            if !source.contains("violent") {
+                XCTAssertEqual(try TranslationAcceptance.validatedCaption(output, source: source, sourceLanguage: language), output)
+            }
+        }
+        for output in ["对不起，该句不便处理。", "我不能翻译这首诗。", "我无法处理这个任务。",
+                       "抱歉，我无法提供该内容的翻译。Alice 得了 42 分。",
+                       "抱歉，我无法提供该内容的翻译。请联系老师。"] {
+            XCTAssertFalse(TranslationAcceptance.isModelReply(output, source: "Fuck your mother."), output)
+        }
+        XCTAssertEqual(TranslationAcceptance.rejection(candidate: " 抱歉 : 我无法为您提供该内容的翻译 ! ", source: "Fuck your mother."), .modelReply)
+    }
+
+    func testBlockedInitialTranslationDoesNotOccupyFormalCaptionQueue() async throws {
+        let apple = Item7Gate(), deadline = Item7Gate()
+        defer { apple.release(); deadline.release() }
+        var calls = 0
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.translate = { text, _, _, _, _ in
+            if text == "The room is warm." { return "房间很暖。" }
+            throw QwenRuntimeError.translationRejected("synthetic", rejection: .sourceEcho)
+        }
+        deps.initialTranslation = { _ in calls += 1; try await apple.wait(); return "房间很冷。" }
+        deps.initialTranslationDeadline = { try await deadline.wait() }
+        let (model, _) = try fixture(deps)
+        model.receiveCaptionForTesting(source, start: 0, end: 1)
+        model.receiveCaptionForTesting("The room is warm.", start: 10, end: 11)
+        try await eventually { apple.entered && model.segments.count == 2 && model.segments[1].hasUsableTranslation }
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(model.segments[1].chinese, "房间很暖。")
+        XCTAssertEqual(model.segments[0].displayChinese, "（模型未翻译此句，可对照英文）")
+        apple.release()
+        await model.waitForInitialTranslations()
+        XCTAssertEqual(model.segments[0].displayChinese, "初译 · 房间很冷。")
+        XCTAssertEqual(model.segments[1].chinese, "房间很暖。")
+    }
+
+    func testInitialTimeoutDoesNotJoinAnUncooperativeProviderOrPublishLateText() async throws {
+        let apple = Item7Gate(), deadline = Item7Gate()
+        defer { apple.release(); deadline.release() }
+        var deps = CaptionTranslationDependencies.unavailable
+        deps.translate = { _, _, _, _, _ in throw QwenRuntimeError.translationRejected("synthetic", rejection: .sourceEcho) }
+        deps.initialTranslation = { _ in try await apple.wait(); return "房间很冷。" }
+        deps.initialTranslationDeadline = { try await deadline.wait() }
+        let (model, _) = try fixture(deps)
+        model.receiveCaptionForTesting(source, start: 0, end: 1)
+        try await eventually { apple.entered && deadline.entered }
+        await model.translationTaskForTesting?.value
+        deadline.release()
+        var drained = false
+        let drain = Task { await model.waitForInitialTranslations(); drained = true }
+        try await eventually { drained }
+        await drain.value
+        XCTAssertEqual(model.segments[0].initialTranslationFallback?.targetCode, "zh-Hans")
+        XCTAssertNil(model.segments[0].initialTranslationFallback?.text)
+        apple.release()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(model.segments[0].displayChinese, "（模型未翻译此句，可对照英文）")
+        XCTAssertEqual(model.segments[0].translationFailures, [.init(reason: .translationRejected, count: 2, rejection: .sourceEcho)])
+    }
+
+    func testInitialResultCannotPublishAfterRevisionOrSessionCancellation() async throws {
+        for revision in [false, true] {
+            let apple = Item7Gate(), deadline = Item7Gate()
+            defer { apple.release(); deadline.release() }
+            var deps = CaptionTranslationDependencies.unavailable
+            deps.translate = { text, _, _, _, _ in
+                if text == "The room is warm." { return "房间很暖。" }
+                throw QwenRuntimeError.translationRejected("synthetic", rejection: .sourceEcho)
+            }
+            deps.initialTranslation = { _ in try await apple.wait(); return "房间很冷。" }
+            deps.initialTranslationDeadline = { try await deadline.wait() }
+            let (model, _) = try fixture(deps)
+            model.receiveCaptionForTesting(source, start: 0, end: 1)
+            try await eventually { apple.entered }
+            await model.translationTaskForTesting?.value
+            if revision {
+                model.reviseCaptionForTesting(id: model.segments[0].id, english: "The room is warm.")
+                model.drainCaptionQueueForTesting()
+                await model.translationTaskForTesting?.value
+            } else {
+                await model.resetTranslationSessionForTesting()?.value
+            }
+            apple.release()
+            await model.waitForInitialTranslations()
+            for _ in 0..<20 { await Task.yield() }
+            if revision {
+                XCTAssertEqual(model.segments[0].chinese, "房间很暖。")
+                XCTAssertNil(model.segments[0].initialTranslationFallback)
+            } else { XCTAssertTrue(model.segments.isEmpty) }
         }
     }
 

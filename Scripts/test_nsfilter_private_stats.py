@@ -65,6 +65,28 @@ class Tests(unittest.TestCase):
         (p/"session-snapshot.json").write_text(json.dumps(envelope(state_for(text))))
         return p
 
+    def test_reader4_fallback_journal_is_replayed_without_formal_translation(self):
+        p = self.make_session()
+        state = state_for(SENTINEL)
+        snapshot = envelope(state)
+        snapshot["schemaVersion"] = 2
+        (p / "session-snapshot.json").write_text(json.dumps(snapshot))
+        segment = {**state["segments"][0], "chinese": "", "translationState": "failed",
+                   "initialTranslationFallback": {"targetCode": "zh-Hans", "text": "初步文本"}}
+        payload = json.dumps({"upsertSegment": {"_0": segment}}, sort_keys=True, separators=(",", ":")).encode()
+        previous = "0" * 64
+        prefix = f"LiveLingo-journal-4\n1\n{state['sessionID']}\n1\n{previous}\n".encode()
+        row = {"schemaVersion": 4, "sequence": 1, "sessionID": state["sessionID"],
+               "baseStorageRevision": 1, "previousDigest": previous,
+               "payload": base64.b64encode(payload).decode(), "checksum": hashlib.sha256(prefix + payload).hexdigest()}
+        (p / "session-journal.jsonl").write_text(json.dumps(row) + "\n")
+        counters = {"snapshot_sessions": 0, "journal_sessions": 0}
+        restored = stats.load_session(p, counters)
+        self.assertEqual(restored["segments"], [segment])
+        self.assertEqual(restored["storageRevision"], 2)
+        self.assertEqual(counters, {"snapshot_sessions": 1, "journal_sessions": 1})
+        self.assertEqual(restored["segments"][0]["chinese"], "")
+
     def cli(self,p,tool=None):
         tool = TOOL if tool is None else tool
         r=subprocess.run(["/opt/homebrew/bin/python3.13","-I","-B",str(Path(__file__).with_name("nsfilter-private-stats.py")),str(p),"--tool",str(tool)],capture_output=True,text=True)

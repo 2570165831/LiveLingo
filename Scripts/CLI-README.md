@@ -355,9 +355,14 @@ single bounded retry with `repairQuotedContent`: the content-repair constraints
 plus an instruction to translate classroom quotations faithfully, including
 profanity. All other failures keep their existing recovery strategy. An explicit
 refusal quoted in the source remains translatable lecture content. Lecture sources
-discussing translation are exempt from the generic refusal parser. The parser
-requires an entire refusal/courtesy response with no translated names, quantities
-or factual clauses; an inability verb alone is insufficient.
+discussing translation are exempt from refusal recognition. The check accepts
+only a closed set of whole replies, with minor whitespace/punctuation differences.
+Source translations of refusal/help language are allowed. Unknown wording, names,
+numbers and non-English sources are allowed; inability verbs never suffice.
+For a matching reply, rejection additionally requires known source words whose
+translations are absent. This deliberately narrow correspondence vocabulary
+currently covers the diagnostic profanity examples; other sources pass rather
+than risk discarding a legitimate lecture translation.
 
 After a final refusal or English echo, Chinese captions first reuse the exact
 sentence's Apple initial translation from this session. If absent, they request
@@ -370,6 +375,14 @@ does the caption say the model did not translate the sentence. A failed Apple
 attempt is persisted to prevent repeated requests on resume. macOS 26 can
 create an installed-only session; older systems need an already prepared Apple
 preview session. Other failure placeholders and non-Chinese recovery stay unchanged.
+
+The supplemental Apple request runs independently of the formal caption queue,
+with a three-second deadline. Timeout leaves the model-not-translated placeholder;
+late, revised or cancelled results cannot publish. Final exports drain this bounded
+display work only after formal captions finish. Archives containing the fallback
+field (including pending/failed request markers) require reader version 4 in the
+snapshot envelope or journal record. Older readers must refuse opening before
+saving can discard it; payload schema 1 and older archives' version gates stay unchanged.
 
 The offline prompt audit exports both model profiles' complete quotation-repair
 prompts, including the Chinese postscript, alongside the unchanged normal prompts.

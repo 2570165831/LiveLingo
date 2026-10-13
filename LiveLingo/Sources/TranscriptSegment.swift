@@ -92,8 +92,8 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     /// the trail, so intermittent failures remain diagnosable after saving.
     private(set) var translationFailures: [TranslationFailure] = []
     private(set) var captionAnnotation: CaptionAnnotation?
-    /// Display-only Apple output. A nil text records the one failed local
-    /// request, so resuming the same caption cannot repeatedly request it.
+    /// Display-only Apple output. A nil text records the one scheduled/failed
+    /// local request, so resuming the caption cannot repeatedly request it.
     struct InitialTranslationFallback: Codable, Equatable, Sendable {
         let targetCode: String
         let text: String?
@@ -197,6 +197,14 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         guard modelDidNotTranslate, targetCode == "zh-Hans", initialTranslationFallback == nil else { return }
         let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
         initialTranslationFallback = .init(targetCode: targetCode, text: trimmed?.isEmpty == false ? trimmed : nil)
+    }
+
+    mutating func completeInitialTranslationFallback(_ text: String, targetCode: String) {
+        guard modelDidNotTranslate, initialTranslationFallback?.targetCode == targetCode,
+              targetCode == "zh-Hans" else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        initialTranslationFallback = .init(targetCode: targetCode, text: trimmed)
     }
 
     mutating func beginTranslation() {
