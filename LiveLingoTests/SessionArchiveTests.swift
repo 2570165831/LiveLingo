@@ -94,12 +94,13 @@ struct SessionArchiveTests {
             let bytes = try JSONSerialization.data(withJSONObject: ["items": [[key: "synthetic"]]])
             #expect(try SessionArchiveCoding.minimumReaderVersion(for: bytes) == 2)
         }
-        for version in 1...4 {
+        for version in 1...SessionArchiveCoding.currentReaderVersion {
             let bytes = Data("{\"schemaVersion\":\(version)}".utf8)
             try SessionArchiveCoding.checkSchema(bytes)
         }
-        #expect(throws: SessionStoreError.unsupportedSchema(5)) {
-            try SessionArchiveCoding.checkSchema(Data(#"{"schemaVersion":5}"#.utf8))
+        let future = SessionArchiveCoding.currentReaderVersion + 1
+        #expect(throws: SessionStoreError.unsupportedSchema(future)) {
+            try SessionArchiveCoding.checkSchema(Data("{\"schemaVersion\":\(future)}".utf8))
         }
     }
 

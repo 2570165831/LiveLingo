@@ -1276,6 +1276,18 @@ final class AppModel: ObservableObject {
     private var generation = 0
     private var sessionID = UUID()
     private var sessionSnapshot: SessionSnapshot?
+    let chineseRecognitionState = ChineseRecognitionPresentationState()
+    private var chineseRecognition: ChineseRecognitionDependencies
+    private var chineseRecognitionTasks: [UUID: Task<Void, Never>] = [:]
+    private var pendingChineseRecognition: [UUID: TranscriptSegment] = [:]
+    #if DEBUG
+    var chineseRecognitionArchiveBarrierForTesting: (@MainActor () async throws -> Void)?
+    #endif
+    private var chineseRecognitionTokens: [UUID: UUID] = [:]
+    private var retiredChineseRecognitionTasks: [UUID: Task<Void, Never>] = [:]
+    private var chineseRecognitionSyncTasks: [UUID: Task<Void, Never>] = [:]
+    private var chineseRecognitionLifecycleOwners: Set<UUID> = []
+    private var chineseRecognitionExportInProgress = false
     /// Set once when live capture starts; a live-only course has no archive
     /// until it is converted, so this carries the start into it.
     private var currentCaptureStart: SessionCaptureStart?
@@ -1455,6 +1467,7 @@ final class AppModel: ObservableObject {
          pipeline: SpeechPipeline = SpeechPipeline(),
          translation: CaptionTranslationDependencies? = nil,
          notes: LearningGenerationDependencies? = nil,
+         chineseRecognition: ChineseRecognitionDependencies? = nil,
          backgroundServices: Bool = true,
          scheduledNotes: Bool? = nil,
          defaults: UserDefaults = AppRuntimeEnvironment.preferences,
@@ -1465,6 +1478,7 @@ final class AppModel: ObservableObject {
         self.pipeline = pipeline
         self.captionTranslation = translation ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
         self.learningGeneration = notes ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
+        self.chineseRecognition = chineseRecognition ?? (AppRuntimeEnvironment.isUnitTesting ? .unavailable : .live)
         self.backgroundServicesEnabled = backgroundServices && !AppRuntimeEnvironment.isUnitTesting
         self.scheduledNotesEnabled = scheduledNotes ?? (backgroundServices && !AppRuntimeEnvironment.isUnitTesting)
         precondition(!AppRuntimeEnvironment.isUnitTesting || !self.scheduledNotesEnabled || notes != nil,
@@ -1741,8 +1755,12 @@ final class AppModel: ObservableObject {
     @discardableResult
     func convertCurrentSessionToRecording(in directory: URL) async -> RecordingConversionResult {
         guard hasActiveSession, activeStorageMode == .liveOnly, !alarmRolloverInProgress else { return .cancelled }
+        let chineseOwner = UUID()
+        chineseRecognitionLifecycleOwners.insert(chineseOwner)
+        defer { chineseRecognitionLifecycleOwners.remove(chineseOwner) }
         let identity = sessionID, epoch = generation
         do {
+            try await waitForChineseRecognitionWriters()
             try ExitDeadline.current?.check()
             guard let source = sessionDirectory else { throw AppError.outputDirectoryMissing }
             // A timed flush may never finish. Establish a readable archive and
@@ -2723,6 +2741,7 @@ final class AppModel: ObservableObject {
         applicationExitDeadline = deadline
         exitStorageProgress.attach(deadline)
         preparingApplicationExit = true
+        cancelAllChineseRecognition()
         clearAlarmReminder()
         alarmStopRequested = true
         alarmRolloverCancellation?.cancel()
@@ -2753,6 +2772,7 @@ final class AppModel: ObservableObject {
             let discardsContent = activeStorageMode == .liveOnly
                 || (temporarySessionDirectory != nil && sessionSaver == nil)
             do {
+                try await waitForChineseRecognitionWriters()
                 try await waitForLifecycle { await alarmRollover?.value }
                 for course in alarmArchivedCourses { try await waitForLifecycle { await course.opening.value } }
                 try await waitForLifecycle { [self] in await alarmArchivedProcessingTask?.value }
@@ -2911,6 +2931,8 @@ final class AppModel: ObservableObject {
     }
 
     private func clearLiveOnlySessionContent() {
+        cancelAllChineseRecognition()
+        chineseRecognitionState.statuses = [:]
         sessionSaver = nil
         sessionSnapshot = nil
         volatileEnglish = ""
@@ -3120,8 +3142,12 @@ final class AppModel: ObservableObject {
     /// Suspend processing of the displayed saved course before switching UI.
     /// Capture has already ended. New recording never waits for a 9B review.
     private func parkSavedProcessing() async throws {
+        let chineseOwner = UUID()
+        chineseRecognitionLifecycleOwners.insert(chineseOwner)
+        defer { chineseRecognitionLifecycleOwners.remove(chineseOwner) }
         let revision = lifecycleRevision
         try validateLifecycleCompletion(revision)
+        try await waitForChineseRecognitionWriters()
         #if DEBUG
         if let park = privacyExitConfiguration?.park {
             try await waitForLifecycle { try await park() }
@@ -3391,8 +3417,8 @@ final class AppModel: ObservableObject {
         let nextRevision = (sessionSnapshot?.inputRevision ?? segments.map(\.inputRevision).max() ?? 0) + 1
         var next = replacement
         let target = captionTarget
-        if target.keepsSourceAsCaption(language: next.sourceLanguage) {
-            next.completeTranslation(target.renderPassThrough(next.english), targetCode: target.rawValue)
+        if next.isChineseOriginal || target.keepsSourceAsCaption(language: next.sourceLanguage) {
+            next.completeTranslation(next.isChineseOriginal ? next.english : target.renderPassThrough(next.english), targetCode: target.rawValue)
             next.updateCaptionAnnotation(targetCode: target.rawValue,
                 formulaUncertain: (next.sourceLanguage == nil || next.sourceLanguage == "en")
                     && FormulaASRReview.uncertain(next.english))
@@ -3467,6 +3493,8 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionPresentationForNewRun() {
+        cancelAllChineseRecognition()
+        chineseRecognitionState.statuses = [:]
         alarmPostSplitCourse = false
         if chineseDisplayOverride != nil {
             chineseDisplayOverride = nil
@@ -3692,7 +3720,10 @@ final class AppModel: ObservableObject {
         guard finalizationOwner != identity else { return }
         finalizationOwner = identity
         finalizationInProgress = true
-        defer { finalizationInProgress = false }
+        defer {
+            finalizationInProgress = false
+            startPendingChineseRecognition()
+        }
         let mode = activeStorageMode
         if mode?.clearsHistoryWhenStopped == true {
             ExitDeadline.current?.track(translationWorker)
@@ -3703,6 +3734,7 @@ final class AppModel: ObservableObject {
         cancelScheduledSummaryRefresh()
         let stopStarted = ProcessInfo.processInfo.systemUptime
         do {
+            try await waitForChineseRecognitionWriters()
             try await stopCaptureForLifecycle(continueTranscribing: mode?.clearsHistoryWhenStopped != true)
             try validateLifecycleCompletion(revision)
         } catch {
@@ -3835,6 +3867,7 @@ final class AppModel: ObservableObject {
         await pipeline.drainTranscription(sessionID: identity)
         guard !Task.isCancelled, !processingPaused, sessionID == identity, generation == epoch else { return }
         noteSourceProducerDrained = true
+        startPendingChineseRecognition()
         drainTranslationQueue()
         startStopOverlapIfUseful()
         while translationWorker != nil || summaryTask != nil || hasPendingTranslationWork {
@@ -3975,8 +4008,8 @@ final class AppModel: ObservableObject {
         let target = captionTarget
         for index in segments.indices where !segments[index].hasUsableTranslation {
             let id = segments[index].id
-            if target.keepsSourceAsCaption(language: segments[index].sourceLanguage) {
-                segments[index].completeTranslation(target.renderPassThrough(segments[index].english),
+            if segments[index].isChineseOriginal || target.keepsSourceAsCaption(language: segments[index].sourceLanguage) {
+                segments[index].completeTranslation(segments[index].isChineseOriginal ? segments[index].english : target.renderPassThrough(segments[index].english),
                     targetCode: target.rawValue)
                 segments[index].updateCaptionAnnotation(targetCode: target.rawValue,
                     formulaUncertain: (segments[index].sourceLanguage == nil || segments[index].sourceLanguage == "en")
@@ -3993,6 +4026,236 @@ final class AppModel: ObservableObject {
 
     func candidateInputRevision(_ id: UUID) -> Int {
         segments.first(where: { $0.id == id })?.inputRevision ?? 0
+    }
+
+    func chineseRecognitionAvailability(for segment: TranscriptSegment) -> ChineseRecognitionAvailability {
+        guard !isTerminating, !archiveLoading, !alarmRolloverInProgress, !finalizationInProgress,
+              chineseRecognitionLifecycleOwners.isEmpty else {
+            return .unavailable("课程正在切换或保存，请稍后重新识别。")
+        }
+        switch phase {
+        case .recording, .paused, .saved: break
+        default: return .unavailable("请在课堂进行中或打开已保存课程后重新识别。")
+        }
+        if activeStorageMode == .liveOnly {
+            return .unavailable("实时暂存模式结束后不会保留录音；请先切换为保存录音，再排队重新识别。")
+        }
+        guard segments.contains(where: { $0.id == segment.id && $0.inputRevision == segment.inputRevision }) else {
+            return .unavailable("本句已更新，请重新打开菜单。")
+        }
+        do {
+            _ = try ChineseRecognitionAudio.slice(segment: segment, directory: currentCourseDirectory,
+                ranges: sessionSnapshot?.audioRanges ?? [],
+                retainedChunks: pipeline.transcriptionWork().filter { $0.sessionID == sessionID })
+            return .available
+        } catch {
+            return .unavailable((error as? ChineseRecognitionAudio.Failure)?.localizedDescription
+                ?? "本句录音无法读取，暂时不能重新识别。")
+        }
+    }
+
+    func recognizeCaptionAsChinese(_ id: UUID) {
+        guard chineseRecognitionTasks[id] == nil, pendingChineseRecognition[id] == nil,
+              let input = segments.first(where: { $0.id == id }) else { return }
+        let availability = chineseRecognitionAvailability(for: input)
+        guard availability.isAvailable else {
+            chineseRecognitionState.statuses[id] = .failed(availability.reason ?? "本句录音不可用，原句未改。")
+            return
+        }
+        guard chineseRecognitionTasks.count + pendingChineseRecognition.count < 8 else {
+            chineseRecognitionState.statuses[id] = .failed("中文重识别等待队列已满，请稍后再试；原句未改。")
+            return
+        }
+        // MLX inference cannot be safely preempted. Keep manual work outside
+        // both admission queues for the entire resumable capture session.
+        if phase == .recording || phase == .paused {
+            pendingChineseRecognition[id] = input
+            chineseRecognitionState.statuses[id] = .waitingForRealtime
+            return
+        }
+        let identity = sessionID, epoch = generation, token = UUID()
+        chineseRecognitionTokens[id] = token
+        chineseRecognitionState.statuses[id] = .recognizing
+        chineseRecognitionTasks[id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var clip: URL?
+            defer {
+                if let clip { try? FileManager.default.removeItem(at: clip) }
+                self.retiredChineseRecognitionTasks[token] = nil
+                if self.chineseRecognitionTokens[id] == token {
+                    self.chineseRecognitionTasks[id] = nil
+                    self.chineseRecognitionTokens[id] = nil
+                }
+            }
+            do {
+                let slice = try ChineseRecognitionAudio.slice(segment: input, directory: self.currentCourseDirectory,
+                    ranges: self.sessionSnapshot?.audioRanges ?? [],
+                    retainedChunks: self.pipeline.transcriptionWork().filter { $0.sessionID == identity })
+                let scratch = try SessionWorkspace.temporaryRoot()
+                let audio = try await Task.detached { try slice.extract(to: scratch) }.value
+                clip = audio
+                try Task.checkCancellation()
+                let result = try await self.chineseRecognition.recognize(audio, "chinese-" + token.uuidString)
+                try Task.checkCancellation()
+                guard self.sessionID == identity, self.generation == epoch,
+                      self.chineseRecognitionTokens[id] == token else { return }
+                guard !self.isTerminating, !self.archiveLoading, !self.alarmRolloverInProgress,
+                      !self.finalizationInProgress, self.chineseRecognitionLifecycleOwners.isEmpty,
+                      self.phase == .recording || self.phase == .paused || self.savedSessionDirectory != nil else {
+                    self.chineseRecognitionState.statuses[id] = .cancelled
+                    return
+                }
+                guard let index = self.segments.firstIndex(where: {
+                          $0.id == id && $0.inputRevision == input.inputRevision && $0.english == input.english
+                              && $0.sourceLanguage == input.sourceLanguage
+                      }) else {
+                    self.chineseRecognitionState.statuses[id] = .failed("本句已更新，未使用这次识别结果；请重新查看后再试。")
+                    return
+                }
+                guard result.languageMode == .chinese, result.language == "zh", result.decode == .forced,
+                      result.policy == 1, !result.truncated, (0..<256).contains(result.generatedTokens),
+                      let language = SpokenLanguage.find("zh"),
+                      SourceQualityGate.fallbackReason(for: result.text, language: language,
+                        audioDuration: slice.duration) == nil else { throw QwenRuntimeError.invalidResponse }
+                // Translation may complete while recognition is running. Preserve
+                // the latest old caption, not a stale in-flight translation draft.
+                var replacement = self.segments[index]
+                replacement.applyChineseRecognition(result.text)
+                if self.sessionSaver == nil, let directory = self.currentCourseDirectory,
+                   let snapshot = self.sessionSnapshot { self.bindSessionArchive(to: directory, restored: snapshot) }
+                self.cancelInitialTranslationRequest(id)
+                self.replaceExistingSegment(at: index, with: replacement, reason: "用户按中文重新识别")
+                self.chineseRecognitionState.statuses[id] = .saving
+                self.markCaptionActivity()
+                self.scheduleSummaryRefresh(force: self.summaryRefreshRequested)
+                let saved = await self.synchronizeChineseRecognitionArchive(session: identity, epoch: epoch)
+                guard self.sessionID == identity, self.generation == epoch,
+                      self.chineseRecognitionTokens[id] == token else { return }
+                self.chineseRecognitionState.statuses[id] = saved ? .completed
+                    : .failed("中文原文已保留，但存档或导出尚未保存完成；可以撤销，或重试保存。")
+            } catch {
+                guard self.sessionID == identity, self.generation == epoch,
+                      self.chineseRecognitionTokens[id] == token else { return }
+                if error is CancellationError || Task.isCancelled {
+                    self.chineseRecognitionState.statuses[id] = .cancelled
+                } else {
+                    self.chineseRecognitionState.statuses[id] = .failed("按中文重新识别失败，原句未改。"
+                        + LearningFailureCode.label(for: LearningFailureCode.code(for: error)))
+                }
+            }
+        }
+    }
+
+    func cancelChineseRecognition(_ id: UUID) {
+        if pendingChineseRecognition.removeValue(forKey: id) != nil {
+            chineseRecognitionState.statuses[id] = .cancelled
+            return
+        }
+        guard chineseRecognitionState.statuses[id] == .recognizing else { return }
+        if let token = chineseRecognitionTokens[id], let task = chineseRecognitionTasks[id] {
+            retiredChineseRecognitionTasks[token] = task
+        }
+        chineseRecognitionTasks[id]?.cancel()
+        chineseRecognitionTokens[id] = nil
+        chineseRecognitionTasks[id] = nil
+        chineseRecognitionState.statuses[id] = .cancelled
+    }
+
+    private func startPendingChineseRecognition() {
+        guard case .saved = phase, !isTerminating, !archiveLoading,
+              !alarmRolloverInProgress, !finalizationInProgress,
+              chineseRecognitionLifecycleOwners.isEmpty,
+              noteSourceProducerDrained || processingPaused else { return }
+        let pending = pendingChineseRecognition
+        pendingChineseRecognition.removeAll()
+        for (id, input) in pending {
+            guard segments.contains(where: { $0.id == id && $0.inputRevision == input.inputRevision
+                && $0.english == input.english && $0.sourceLanguage == input.sourceLanguage }) else {
+                chineseRecognitionState.statuses[id] = .failed("本句已更新，未执行排队的重识别；请重新查看后再试。")
+                continue
+            }
+            recognizeCaptionAsChinese(id)
+        }
+    }
+
+    private func cancelAllChineseRecognition(preserveWaiting: Bool = false) {
+        if !preserveWaiting {
+            for id in pendingChineseRecognition.keys { chineseRecognitionState.statuses[id] = .cancelled }
+            pendingChineseRecognition.removeAll()
+        }
+        for (id, task) in chineseRecognitionTasks {
+            if let token = chineseRecognitionTokens[id] { retiredChineseRecognitionTasks[token] = task }
+            // A committed caption owns a storage writer, not cancellable
+            // recognition. Lifecycle changes must join its final receipt.
+            if chineseRecognitionState.statuses[id] == .saving { continue }
+            if chineseRecognitionState.statuses[id] == .recognizing { chineseRecognitionState.statuses[id] = .cancelled }
+            task.cancel()
+            chineseRecognitionTasks[id] = nil
+            chineseRecognitionTokens[id] = nil
+        }
+    }
+
+    private func waitForChineseRecognitionWriters() async throws {
+        cancelAllChineseRecognition(preserveWaiting: finalizationInProgress && !preparingApplicationExit)
+        let tasks = Array(retiredChineseRecognitionTasks.values) + Array(chineseRecognitionSyncTasks.values)
+        let deadline = applicationExitDeadline ?? ExitDeadline.current
+        for task in tasks { deadline?.track(task) }
+        for task in tasks {
+            try await waitForLifecycle { await task.value }
+        }
+        try await waitForLifecycle { [self] in try await chineseRecognition.waitForInference() }
+    }
+
+    func undoChineseRecognition(_ id: UUID) {
+        if chineseRecognitionState.statuses[id] == .saving {
+            archiveNotice = "中文原文正在保存；保存完成后才能撤销。"
+            return
+        }
+        guard !isTerminating, !archiveLoading, !alarmRolloverInProgress, !finalizationInProgress,
+              chineseRecognitionLifecycleOwners.isEmpty,
+              phase == .recording || phase == .paused || savedSessionDirectory != nil,
+              chineseRecognitionTasks[id] == nil,
+              let index = segments.firstIndex(where: { $0.id == id }) else { return }
+        var replacement = segments[index]
+        guard replacement.undoChineseRecognition() else { return }
+        replaceExistingSegment(at: index, with: replacement, reason: "用户撤销中文重新识别")
+        chineseRecognitionState.statuses[id] = nil
+        let identity = sessionID, epoch = generation, syncID = UUID()
+        chineseRecognitionSyncTasks[syncID] = Task { [weak self] in
+            guard let self else { return }
+            defer { self.chineseRecognitionSyncTasks[syncID] = nil }
+            await self.synchronizeChineseRecognitionArchive(session: identity, epoch: epoch)
+        }
+        if !processingPaused { drainTranslationQueue() }
+    }
+
+    @discardableResult
+    private func synchronizeChineseRecognitionArchive(session identity: UUID, epoch: Int) async -> Bool {
+        while chineseRecognitionExportInProgress {
+            try? await Task.sleep(for: .milliseconds(20))
+            guard !Task.isCancelled, sessionID == identity, generation == epoch else { return false }
+        }
+        guard sessionID == identity, generation == epoch, let directory = currentCourseDirectory else { return false }
+        chineseRecognitionExportInProgress = true
+        defer { chineseRecognitionExportInProgress = false }
+        do {
+            #if DEBUG
+            try await chineseRecognitionArchiveBarrierForTesting?()
+            #endif
+            try await flushSessionArchive()
+            guard sessionID == identity, generation == epoch else { return false }
+            let captions = segments, notes = lectureSummary, target = outputLanguage
+            let legacy = summaryIsLegacyRendered, evidence = notesScheduleEvidence, converter = chineseScriptConverter
+            try await Task.detached {
+                try SessionExporter.export(segments: captions, sessionDirectory: directory, summary: notes, target: target,
+                    summaryIsLegacyRendered: legacy, summaryEvidence: evidence, converter: converter)
+            }.value
+            return true
+        } catch {
+            guard sessionID == identity, generation == epoch else { return false }
+            archiveError = "字幕修订已保留，但存档或导出尚未保存完成；请重试保存。"
+            return false
+        }
     }
 
     func acceptTranscriptionCandidate(_ id: UUID, editedText: String, expectedOriginal: String,
@@ -4618,10 +4881,12 @@ final class AppModel: ObservableObject {
     func loadPresentationForTesting(phase: AppPhase, evidence: [TranscriptSegment],
                                     notebook: LearningNotebook = .init(), notice: String? = nil,
                                     preview: String = "", processing: TranscriptionProcessingState? = nil,
-                                    outputLanguage: OutputLanguage? = nil) {
+                                    outputLanguage: OutputLanguage? = nil,
+                                    storageMode: SessionStorageMode? = nil) {
         precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
         precondition(!noteReviewQueue.hasWork && translationWorker == nil)
         if let outputLanguage { self.outputLanguage = outputLanguage }
+        if let storageMode { self.activeStorageMode = storageMode }
         self.phase = phase
         self.segments = evidence
         if let processing { self.transcriptionProcessing = processing }
@@ -4680,6 +4945,11 @@ final class AppModel: ObservableObject {
         sessionSaver?.onFailure?(error)
     }
     var translationTaskForTesting: Task<Void, Never>? { translationWorker }
+    func chineseRecognitionTaskForTesting(_ id: UUID) -> Task<Void, Never>? { chineseRecognitionTasks[id] }
+    func synchronizeChineseRecognitionExportsForTesting() async {
+        precondition(AppRuntimeEnvironment.isUnitTesting && !backgroundServicesEnabled)
+        await synchronizeChineseRecognitionArchive(session: sessionID, epoch: generation)
+    }
     var translationQueueForTesting: [UUID] { translationQueue }
     var translationEnqueuedAtForTesting: [UUID: TimeInterval] { translationEnqueuedAt }
     func restorePendingCaptionWorkForTesting() {
@@ -4955,8 +5225,8 @@ final class AppModel: ObservableObject {
                     }
                 }
                 let target = self.captionTarget
-                if target.keepsSourceAsCaption(language: input.sourceLanguage) {
-                    let rendered = target.renderPassThrough(input.english)
+                if input.isChineseOriginal || target.keepsSourceAsCaption(language: input.sourceLanguage) {
+                    let rendered = input.isChineseOriginal ? input.english : target.renderPassThrough(input.english)
                     self.segments[index].completeTranslation(rendered, targetCode: target.rawValue)
                     self.segments[index].updateCaptionAnnotation(targetCode: target.rawValue,
                         formulaUncertain: (input.sourceLanguage == nil || input.sourceLanguage == "en")
@@ -5579,7 +5849,8 @@ final class AppModel: ObservableObject {
                 guard ids.isDisjoint(with: summarizedSegmentIDs),
                       draft.matches(evidence: segments.filter { ids.contains($0.id) }, model: modelName,
                                     systemPrompt: LearningPrompts.generationPrompt(target: captionTarget,
-                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil)),
+                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil,
+                                        evidence: draft.evidence)),
                       sessionSnapshot.map({ draft.matches(snapshot: $0, model: modelName, systemPrompt: draft.systemPrompt) }) ?? true else { return nil }
                 return draft
             }
@@ -5620,7 +5891,8 @@ final class AppModel: ObservableObject {
                             pending: pending, target: captionTarget),
                         target: captionTarget,
                         systemPrompt: LearningPrompts.generationPrompt(target: captionTarget,
-                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil),
+                                        recoveringAfterOutputLimit: captionTarget != .simplifiedChinese && summaryRecoveryCharacters != nil,
+                                        evidence: inputSnapshot),
                         pendingTargets: pending.map(\.id), contextRevision: learningNotebook.revision,
                         dependencyIDs: dependencies
                     )
@@ -6107,8 +6379,12 @@ final class AppModel: ObservableObject {
 
     private func finalizeSessionDirectoryIfNeeded(resumeAfterMigration: Bool = true,
                                                 parkedQueue: DurableTranscriptionQueue? = nil) async throws -> URL {
+        let chineseOwner = UUID()
+        chineseRecognitionLifecycleOwners.insert(chineseOwner)
+        defer { chineseRecognitionLifecycleOwners.remove(chineseOwner) }
         let revision = lifecycleRevision
         try validateLifecycleCompletion(revision)
+        try await waitForChineseRecognitionWriters()
         if let temporarySessionDirectory {
             guard let outputDirectory else { throw AppError.outputDirectoryMissing }
             if let parkedQueue { try await waitForLifecycle { try await parkedQueue.pause() } }

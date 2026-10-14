@@ -169,6 +169,7 @@ actor ASRRequestCoordinator {
     private let observeExit: ExitObservation
     private let confirmationTimeout: TimeInterval
     private var leases: [Key: Lease] = [:]
+    private var chineseWaiters: Set<Key> = []
     /// Submitted auto requests in this process, including failed responses.
     /// Cached transcription results never reach this coordinator.
     private(set) var languageProbeCount = 0
@@ -206,9 +207,31 @@ actor ASRRequestCoordinator {
         let requestID = suppliedID ?? UUID().uuidString
         guard Self.validRequestID(requestID) else { throw QwenRuntimeError.requestFailed("转写请求编号无效") }
         let key = Key(endpoint: endpoint, id: requestID)
-        if leases.contains(where: { $0.key.endpoint == endpoint && $0.value.unknown }) {
+        if language == .chinese {
+            guard !chineseWaiters.contains(key), leases[key] == nil else {
+                throw QwenRuntimeError.requestFailed("转写请求仍在处理，不能重复提交")
+            }
+            guard chineseWaiters.filter({ $0.endpoint == endpoint }).count < 8 else {
+                throw QwenRuntimeError.requestFailed("中文重识别等待队列已满，请稍后再试。")
+            }
+            chineseWaiters.insert(key)
+            defer { chineseWaiters.remove(key) }
+            // No body, HTTP operation or inference lease exists while waiting.
+            // One manual request may enter only after foreground leases finish.
+            while leases.keys.contains(where: { $0.endpoint == endpoint }) {
+                if await observeExit(endpoint) == true { confirmServiceExited(endpoint) }
+                if leases.contains(where: { $0.key.endpoint == endpoint && $0.value.unknown }) {
+                    _ = await resourceState(endpoint: endpoint)
+                }
+                try await Task.sleep(for: .milliseconds(20))
+                try Task.checkCancellation()
+            }
+        }
+        if leases.contains(where: { $0.key.endpoint == endpoint && $0.value.unknown
+            && (language == .chinese || $0.value.language != .chinese) }) {
             _ = await resourceState(endpoint: endpoint)
-            guard !leases.contains(where: { $0.key.endpoint == endpoint && $0.value.unknown }) else {
+            guard !leases.contains(where: { $0.key.endpoint == endpoint && $0.value.unknown
+                && (language == .chinese || $0.value.language != .chinese) }) else {
                 throw QwenRuntimeError.requestFailed("上一转写请求的退出尚未确认；片段已保留，等待服务恢复。")
             }
         }
@@ -216,7 +239,7 @@ actor ASRRequestCoordinator {
         // this ID or filled the slots while we were waiting for the receipt.
         try Task.checkCancellation()
         guard leases[key] == nil else { throw QwenRuntimeError.requestFailed("转写请求仍在处理，不能重复提交") }
-        guard leases.keys.filter({ $0.endpoint == endpoint }).count < 3 else {
+        guard language == .chinese || leases.filter({ $0.key.endpoint == endpoint && $0.value.language != .chinese }).count < 3 else {
             throw QwenRuntimeError.requestFailed("本机转写队列已满，片段等待重试。")
         }
         var components = URLComponents(url: baseURL.appending(path: "transcribe"), resolvingAgainstBaseURL: false)
@@ -240,7 +263,7 @@ actor ASRRequestCoordinator {
         request.httpBody = try Data(contentsOf: audioURL, options: .mappedIfSafe)
         try Task.checkCancellation()
         leases[key] = Lease(model: modelKey, language: language)
-        if language != .english { languageProbeCount += 1 }
+        if language == .auto || language == .probe { languageProbeCount += 1 }
         let transport = self.transport
         let started = ProcessInfo.processInfo.systemUptime
         Self.log.notice("asr event=acquired id=\(requestID, privacy: .public) model=\(modelKey, privacy: .public)")
@@ -258,6 +281,26 @@ actor ASRRequestCoordinator {
         } onCancel: {
             delivery.resolve(.failure(CancellationError()))
             Task { await self.markCallerCancelled(key) }
+        }
+    }
+
+    #if DEBUG
+    func pendingChineseRequestCountForTesting(endpoint: ASRRuntime.Endpoint) -> Int {
+        chineseWaiters.filter { $0.endpoint == endpoint }.count
+    }
+    #endif
+
+    /// Starting another capture joins the independent manual transport, not
+    /// merely its cancelled UI caller. Unknown ownership remains a barrier.
+    func waitForChineseInferenceCompletion() async throws {
+        while !chineseWaiters.isEmpty || leases.values.contains(where: { $0.language == .chinese }) {
+            try Task.checkCancellation()
+            let endpoints = Set(leases.filter { $0.value.language == .chinese }.map { $0.key.endpoint })
+            for endpoint in endpoints {
+                if await observeExit(endpoint) == true { confirmServiceExited(endpoint) }
+                else { _ = await resourceState(endpoint: endpoint) }
+            }
+            try await Task.sleep(for: .milliseconds(20))
         }
     }
 

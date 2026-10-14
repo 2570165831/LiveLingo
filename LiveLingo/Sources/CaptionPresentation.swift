@@ -46,6 +46,13 @@ struct CaptionPresentation: Equatable {
 
     init(_ segment: TranscriptSegment, locale: Locale = CaptionLanguageNames.interfaceLocale,
          target: CaptionTranslationTarget = .simplifiedChinese) {
+        if segment.isChineseOriginal {
+            languageName = "中文原文"
+            sourceLanguage = "zh"
+            isSourceOnly = true
+            primaryText = segment.english
+            return
+        }
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
         sourceLanguage = segment.sourceLanguage
         isSourceOnly = target.keepsSourceAsCaption(language: segment.sourceLanguage)
@@ -60,6 +67,13 @@ struct CaptionPresentation: Equatable {
     init(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
          locale: Locale = CaptionLanguageNames.interfaceLocale,
          converter: ChineseScriptConverter = .shared) {
+        if segment.isChineseOriginal {
+            languageName = "中文原文"
+            sourceLanguage = "zh"
+            isSourceOnly = true
+            primaryText = segment.english
+            return
+        }
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
         sourceLanguage = segment.sourceLanguage
         isSourceOnly = outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
@@ -92,6 +106,97 @@ struct CaptionPresentation: Equatable {
 
     static func translationStatus(isTranslating: Bool) -> String {
         isTranslating ? "翻译中…" : "等待翻译…"
+    }
+}
+
+/// Per-row action state is separate from the immutable caption and its stream.
+struct ChineseRecognitionRowPresentation {
+    static let actionTitle = "按中文重新识别"
+    static let undoTitle = "撤销中文重识别"
+    static let cancelTitle = "取消"
+    static let cancelActionTitle = "取消中文重识别"
+
+    let isRecognizing: Bool
+    let isBusy: Bool
+    let canCancel: Bool
+    let canRecognize: Bool
+    let showsUndo: Bool
+    let canUndo: Bool
+    let unavailableReason: String?
+    let undoUnavailableReason: String?
+    let statusText: String?
+    let isFailure: Bool
+
+    var statusAccessibilityLabel: String? {
+        guard let statusText else { return nil }
+        guard canCancel else { return statusText }
+        let announcement = statusText.hasSuffix("…") ? String(statusText.dropLast()) : statusText
+        return "\(announcement)，可取消中文重识别。"
+    }
+
+    var cancelAccessibilityLabel: String {
+        canCancel && !isRecognizing ? "取消等待中的中文重识别" : Self.cancelActionTitle
+    }
+
+    var actionsAccessibilityLabel: String {
+        isBusy ? "字幕操作：\(statusAccessibilityLabel ?? "")" : "字幕操作：按中文重新识别或撤销"
+    }
+
+    init(status: ChineseRecognitionStatus?, availability: ChineseRecognitionAvailability,
+         canUndo: Bool) {
+        if case .recognizing? = status {
+            isRecognizing = true
+        } else {
+            isRecognizing = false
+        }
+        let busyReason: String?
+        switch status {
+        case .waitingForRealtime?:
+            isBusy = true
+            canCancel = true
+            statusText = "等待实时转写结束…"
+            busyReason = "正在等待实时转写结束，暂不能重新识别或撤销；可取消本次请求。"
+            isFailure = false
+        case .recognizing?:
+            isBusy = true
+            canCancel = true
+            statusText = "正在按中文重新识别…"
+            busyReason = "正在按中文重新识别，暂不能再次识别或撤销；可取消本次请求。"
+            isFailure = false
+        case .saving?:
+            isBusy = true
+            canCancel = false
+            statusText = "中文已识别，正在保存，暂不可撤销。"
+            busyReason = "正在保存中文识别结果，保存结束后才能重新识别或撤销，暂不可取消。"
+            isFailure = false
+        case .cancelled?:
+            isBusy = false
+            canCancel = false
+            statusText = "已取消中文重识别，原句已保留。"
+            busyReason = nil
+            isFailure = false
+        case .failed(let reason)?:
+            isBusy = false
+            canCancel = false
+            // Saving can fail after the Chinese source has already replaced
+            // the caption. Keep that notice instead of claiming it was unchanged.
+            statusText = canUndo && reason.contains("中文原文已保留") ? reason
+                : "按中文重新识别失败：\(reason)；原句已保留。"
+            busyReason = nil
+            isFailure = true
+        case .completed?, nil:
+            isBusy = false
+            canCancel = false
+            statusText = nil
+            busyReason = nil
+            isFailure = false
+        }
+        canRecognize = availability.isAvailable && !isBusy
+        showsUndo = canUndo
+        self.canUndo = canUndo && !isBusy
+        unavailableReason = busyReason ?? (availability.isAvailable ? nil
+            : availability.reason ?? "此句的录音已不可用，无法按中文重新识别。")
+        undoUnavailableReason = canUndo ? busyReason : nil
     }
 }
 

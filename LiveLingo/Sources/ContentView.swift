@@ -581,9 +581,12 @@ struct ContentView: View {
     }
 
     private func segmentRow(_ segment: TranscriptSegment) -> some View {
-        TranscriptCaptionRow(segment: segment, textSize: readingSize, stream: model.finalCaptionStream,
-                             target: model.captionDisplayLanguage, converter: model.chineseScriptConverter)
-            .equatable()
+        ChineseRecognitionCaptionRow(segment: segment, textSize: readingSize, stream: model.finalCaptionStream,
+            target: model.captionDisplayLanguage, converter: model.chineseScriptConverter,
+            state: model.chineseRecognitionState, availability: { model.chineseRecognitionAvailability(for: segment) },
+            recognize: { model.recognizeCaptionAsChinese(segment.id) },
+            cancel: { model.cancelChineseRecognition(segment.id) },
+            undo: { model.undoChineseRecognition(segment.id) })
     }
 
     private var summaryPanel: some View {
@@ -2240,6 +2243,241 @@ private struct ActiveCaptionTranslation: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// Observe manual recognition outside the Equatable caption. Changes to another
+/// row's status cannot invalidate the caption's text or translation stream.
+struct ChineseRecognitionCaptionRow: View {
+    let segment: TranscriptSegment
+    let textSize: Double
+    let stream: FinalCaptionState
+    var target: OutputLanguage = .simplifiedChinese
+    var converter: ChineseScriptConverter = .shared
+    @ObservedObject var state: ChineseRecognitionPresentationState
+    let availability: () -> ChineseRecognitionAvailability
+    let recognize: () -> Void
+    let cancel: () -> Void
+    let undo: () -> Void
+    @State private var isHovered = false
+    @State private var hasShownActions = false
+    @StateObject private var menuAvailability = ChineseRecognitionMenuAvailabilityState()
+    #if DEBUG
+    var hoveredForTesting = false
+    #endif
+
+    private var showsActions: Bool {
+        #if DEBUG
+        isHovered || hoveredForTesting
+        #else
+        isHovered
+        #endif
+    }
+
+    var body: some View {
+        let presentation = ChineseRecognitionRowPresentation(status: state.statuses[segment.id],
+            availability: .available, canUndo: segment.canUndoChineseRecognition)
+        VStack(alignment: .leading, spacing: 0) {
+            TranscriptCaptionRow(segment: segment, textSize: textSize, stream: stream,
+                                 target: target, converter: converter)
+                .equatable()
+            if presentation.statusText != nil {
+                ChineseRecognitionCaptionStatus(presentation: presentation, cancel: performCancellation)
+                    .padding(.leading, 16 + 54 * textSize / 18 + 14)
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 14)
+            }
+        }
+        .contentShape(Rectangle())
+        .contextMenu {
+            // SwiftUI eagerly constructs context-menu content. Capture the
+            // provider here and resolve it only when the actions appear.
+            ChineseRecognitionResolvingMenu(status: state.statuses[segment.id],
+                canUndo: segment.canUndoChineseRecognition, availability: availability,
+                recognize: recognize, cancel: performCancellation, undo: undo,
+                availabilityState: menuAvailability)
+        }
+        .overlay(alignment: .topTrailing) {
+            if hasShownActions || showsActions {
+                // Mount after the first hover, then retain the native control
+                // while its popup owns the pointer. Its cached availability
+                // never reads a WAV header during unrelated status updates.
+                Menu {
+                    recognitionMenu(availability: menuAvailability.value)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 28, height: 24)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .foregroundStyle(ReadingAccessibility.secondaryText)
+                .help("字幕操作")
+                .accessibilityLabel(presentation.actionsAccessibilityLabel)
+                .accessibilityIdentifier("caption-chinese-actions-\(segment.id)")
+                .opacity(showsActions ? 1 : 0)
+                .allowsHitTesting(showsActions)
+                .accessibilityHidden(!showsActions)
+                .padding(.top, 4)
+                .padding(.trailing, 12)
+            }
+        }
+        .onHover { hovered in
+            if hovered && !isHovered {
+                menuAvailability.resolve(using: availability)
+                hasShownActions = true
+            }
+            isHovered = hovered
+        }
+    }
+
+    private func recognitionMenu(availability: ChineseRecognitionAvailability) -> some View {
+        ChineseRecognitionCaptionMenu(presentation: ChineseRecognitionRowPresentation(
+            status: state.statuses[segment.id], availability: availability,
+            canUndo: segment.canUndoChineseRecognition), recognize: recognize, cancel: performCancellation, undo: undo)
+    }
+
+    /// The inline button and both menus use this same guarded event handler.
+    func performCancellation() {
+        let presentation = ChineseRecognitionRowPresentation(status: state.statuses[segment.id],
+            availability: .available, canUndo: segment.canUndoChineseRecognition)
+        guard presentation.canCancel else { return }
+        cancel()
+    }
+}
+
+@MainActor
+final class ChineseRecognitionMenuAvailabilityState: ObservableObject {
+    @Published private(set) var value = ChineseRecognitionAvailability.unavailable("正在检查本句录音…")
+
+    func resolve(using provider: () -> ChineseRecognitionAvailability) {
+        value = provider()
+    }
+}
+
+/// A closed native menu may construct its body without appearing. Keep audio
+/// inspection in the appearance callback, never in either view's body.
+struct ChineseRecognitionResolvingMenu: View {
+    let status: ChineseRecognitionStatus?
+    let canUndo: Bool
+    let availability: () -> ChineseRecognitionAvailability
+    let recognize: () -> Void
+    let cancel: () -> Void
+    let undo: () -> Void
+    @ObservedObject private var availabilityState: ChineseRecognitionMenuAvailabilityState
+
+    init(status: ChineseRecognitionStatus?, canUndo: Bool,
+         availability: @escaping () -> ChineseRecognitionAvailability,
+         recognize: @escaping () -> Void, cancel: @escaping () -> Void, undo: @escaping () -> Void,
+         availabilityState: ChineseRecognitionMenuAvailabilityState? = nil) {
+        self.status = status
+        self.canUndo = canUndo
+        self.availability = availability
+        self.recognize = recognize
+        self.cancel = cancel
+        self.undo = undo
+        self.availabilityState = availabilityState ?? ChineseRecognitionMenuAvailabilityState()
+    }
+
+    var body: some View {
+        ChineseRecognitionCaptionMenu(presentation: ChineseRecognitionRowPresentation(
+            status: status, availability: availabilityState.value, canUndo: canUndo),
+            recognize: recognize, cancel: cancel, undo: undo)
+            .onAppear(perform: menuDidAppear)
+    }
+
+    /// Also accepts an explicit menu-opening lifecycle event in native hosts
+    /// that render SwiftUI menu actions without delivering appearance callbacks.
+    func menuDidAppear() {
+        availabilityState.resolve(using: availability)
+    }
+}
+
+/// Both entry points share their exact titles, disabled reasons and actions.
+struct ChineseRecognitionCaptionMenu: View {
+    let presentation: ChineseRecognitionRowPresentation
+    let recognize: () -> Void
+    let cancel: () -> Void
+    let undo: () -> Void
+
+    var body: some View {
+        Button(ChineseRecognitionRowPresentation.actionTitle, action: performRecognition)
+            .disabled(!presentation.canRecognize)
+            .help(presentation.unavailableReason ?? ChineseRecognitionRowPresentation.actionTitle)
+            .accessibilityLabel(ChineseRecognitionRowPresentation.actionTitle)
+            .accessibilityHint(presentation.unavailableReason ?? "使用本句录音按中文重新识别。")
+            .accessibilityIdentifier("caption-recognize-chinese")
+        if let reason = presentation.unavailableReason {
+            Text(verbatim: reason)
+                .accessibilityLabel(reason)
+                .accessibilityIdentifier("caption-chinese-unavailable")
+        }
+        if presentation.canCancel {
+            Button(ChineseRecognitionRowPresentation.cancelActionTitle, action: performCancellation)
+                .accessibilityLabel(presentation.cancelAccessibilityLabel)
+                .accessibilityIdentifier("caption-cancel-chinese-menu")
+        }
+        if presentation.showsUndo {
+            Button(ChineseRecognitionRowPresentation.undoTitle, action: performUndo)
+                .disabled(!presentation.canUndo)
+                .help(presentation.undoUnavailableReason ?? ChineseRecognitionRowPresentation.undoTitle)
+                .accessibilityLabel(ChineseRecognitionRowPresentation.undoTitle)
+                .accessibilityHint(presentation.undoUnavailableReason ?? "恢复中文重识别前的原句。")
+                .accessibilityIdentifier("caption-undo-chinese")
+        }
+    }
+
+    func performRecognition() {
+        guard presentation.canRecognize else { return }
+        recognize()
+    }
+
+    func performCancellation() {
+        guard presentation.canCancel else { return }
+        cancel()
+    }
+
+    func performUndo() {
+        guard presentation.canUndo else { return }
+        undo()
+    }
+}
+
+struct ChineseRecognitionCaptionStatus: View {
+    let presentation: ChineseRecognitionRowPresentation
+    let cancel: () -> Void
+
+    var body: some View {
+        if let status = presentation.statusText {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if presentation.isBusy {
+                    ProgressView().controlSize(.small)
+                        .accessibilityHidden(true)
+                } else if presentation.isFailure {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(ClassroomPalette.failure)
+                        .accessibilityHidden(true)
+                }
+                Text(verbatim: status)
+                    .font(.caption)
+                    .foregroundStyle(ReadingAccessibility.secondaryText)
+                    .textSelection(.disabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(presentation.statusAccessibilityLabel ?? status)
+                    .accessibilityIdentifier("caption-chinese-status")
+                if presentation.canCancel {
+                    Button(ChineseRecognitionRowPresentation.cancelTitle, action: performCancellation)
+                        .controlSize(.small)
+                        .accessibilityLabel(presentation.cancelAccessibilityLabel)
+                        .accessibilityIdentifier("caption-cancel-chinese")
+                }
+            }
+        }
+    }
+
+    func performCancellation() {
+        guard presentation.canCancel else { return }
+        cancel()
     }
 }
 
