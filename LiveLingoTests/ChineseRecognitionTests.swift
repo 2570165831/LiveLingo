@@ -4,6 +4,17 @@ import XCTest
 
 @MainActor
 final class ChineseRecognitionTests: XCTestCase {
+    private final class CourseLoadBarrier: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entered = false
+        private let release = DispatchSemaphore(value: 0)
+        var isEntered: Bool { lock.withLock { entered } }
+        func wait() throws {
+            lock.withLock { entered = true }
+            guard release.wait(timeout: .now() + 5) == .success else { throw CancellationError() }
+        }
+        func finish() { release.signal() }
+    }
     private func result(_ text: String = "今天讨论二分查找。") -> ASRTranscription {
         .init(text: text, languageMode: .chinese, language: "zh", decode: .forced,
             generatedTokens: 12, policy: 1)
@@ -229,6 +240,97 @@ final class ChineseRecognitionTests: XCTestCase {
         model.loadPresentationForTesting(phase: .stopping, evidence: [corrected])
         model.undoChineseRecognition(old.id)
         XCTAssertEqual(model.segments.first, corrected)
+        XCTAssertFalse(model.chineseRecognitionState.courseActionsAvailability.isAvailable)
+        XCTAssertTrue(model.archiveNotice?.contains("暂不能修改字幕") == true)
+    }
+
+    func testCourseLoadingDisablesUndoAndExplainsStaleMenuThenCancelAllowsOneUndo() async throws {
+        let expected = result()
+        let (model, directory, old) = try await fixture(recognize: .init { _, _ in expected })
+        model.recognizeCaptionAsChinese(old.id)
+        await model.chineseRecognitionTaskForTesting(old.id)?.value
+        let corrected = try XCTUnwrap(model.segments.first)
+        let staleMenu = ChineseRecognitionCaptionMenu(presentation: ChineseRecognitionRowPresentation(
+            status: .completed, availability: .available, canUndo: true,
+            courseActionsAvailability: model.chineseRecognitionState.courseActionsAvailability),
+            recognize: {}, cancel: {}, undo: { model.undoChineseRecognition(old.id) })
+        let other = directory.deletingLastPathComponent().appendingPathComponent("ChineseRecognition-Other-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        _ = try SessionStore(directory: other).save(SessionSnapshot(sessionID: UUID(), segments: [],
+            targetLocale: OutputLanguage.simplifiedChinese.persistedLocale))
+        let barrier = CourseLoadBarrier()
+        defer { barrier.finish() }
+        let local = SessionCloudOpenPreparation.Environment(pendingItems: { _ in [] },
+            requestDownload: { _ in XCTFail("Synthetic local courses never download") })
+        let opening = Task { @MainActor in
+            try await SessionCloudOpenPreparation.$environment.withValue(local) {
+                try await SessionCloudOpenPreparation.$beforeLoad.withValue({ try barrier.wait() }) {
+                    try await model.openSavedSession(other, allowAutomaticProcessing: false)
+                }
+            }
+        }
+        try await eventually { barrier.isEntered }
+        XCTAssertTrue(model.archiveLoading)
+        let permission = model.chineseRecognitionState.courseActionsAvailability
+        XCTAssertFalse(permission.isAvailable)
+        XCTAssertTrue(permission.reason?.contains("读取或切换") == true)
+        let waitingMenu = ChineseRecognitionRowPresentation(status: .completed, availability: .available,
+            canUndo: corrected.canUndoChineseRecognition, courseActionsAvailability: permission)
+        XCTAssertFalse(waitingMenu.canUndo)
+        XCTAssertEqual(waitingMenu.undoUnavailableReason, permission.reason)
+        XCTAssertFalse(model.chineseRecognitionUndoAvailability(old.id).isAvailable)
+        staleMenu.performUndo()
+        XCTAssertEqual(model.segments.first, corrected)
+        XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first, corrected)
+        XCTAssertTrue(model.archiveNotice?.contains("读取或切换") == true)
+        model.cancelCloudCourseOpen()
+        barrier.finish()
+        do { try await opening.value; XCTFail("Cancelled course load must keep the previous course") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertFalse(model.archiveLoading)
+        XCTAssertEqual(model.currentCourseDirectory, directory)
+        XCTAssertTrue(model.chineseRecognitionState.courseActionsAvailability.isAvailable)
+        model.undoChineseRecognition(old.id)
+        await model.synchronizeChineseRecognitionExportsForTesting()
+        XCTAssertEqual(model.segments.first?.english, old.english)
+        XCTAssertNil(model.archiveNotice)
+        XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first?.english, old.english)
+        XCTAssertTrue(try String(contentsOf: directory.appendingPathComponent("transcript-en.txt"), encoding: .utf8).contains(old.english))
+    }
+
+    func testMissingRecordingDoesNotBlockUndoButFinalizationDoes() async throws {
+        let expected = result()
+        let (model, directory, old) = try await fixture(recognize: .init { _, _ in expected })
+        model.recognizeCaptionAsChinese(old.id)
+        await model.chineseRecognitionTaskForTesting(old.id)?.value
+        let corrected = try XCTUnwrap(model.segments.first)
+        try FileManager.default.moveItem(at: directory.appendingPathComponent("recording.wav"),
+            to: directory.appendingPathComponent("recording-retired.wav"))
+        XCTAssertFalse(model.chineseRecognitionAvailability(for: corrected).isAvailable)
+        XCTAssertTrue(model.chineseRecognitionUndoAvailability(old.id).isAvailable)
+        let missingAudio = model.chineseRecognitionAvailability(for: corrected)
+        XCTAssertTrue(ChineseRecognitionRowPresentation(status: .completed, availability: missingAudio,
+            canUndo: true, courseActionsAvailability: model.chineseRecognitionState.courseActionsAvailability).canUndo)
+        model.setPrivacyExitFinalizationForTesting(true)
+        XCTAssertFalse(model.chineseRecognitionState.courseActionsAvailability.isAvailable)
+        model.undoChineseRecognition(old.id)
+        XCTAssertEqual(model.segments.first, corrected)
+        XCTAssertTrue(model.archiveNotice?.contains("保存") == true)
+        model.setPrivacyExitFinalizationForTesting(false)
+        XCTAssertTrue(model.chineseRecognitionState.courseActionsAvailability.isAvailable)
+        model.undoChineseRecognition(old.id)
+        await model.synchronizeChineseRecognitionExportsForTesting()
+        XCTAssertEqual(model.segments.first?.english, old.english)
+        XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first?.english, old.english)
+    }
+
+    func testObsoleteUndoEventExplainsMissingCaptionOrMissingBackup() async throws {
+        let (model, _, old) = try await fixture()
+        model.undoChineseRecognition(UUID())
+        XCTAssertTrue(model.archiveNotice?.contains("本句已更新") == true)
+        model.undoChineseRecognition(old.id)
+        XCTAssertTrue(model.archiveNotice?.contains("没有可撤销") == true)
+        XCTAssertEqual(model.segments.first, old)
     }
 
     func testMalformedMetadataAndLoopResultsAreRejected() async throws {

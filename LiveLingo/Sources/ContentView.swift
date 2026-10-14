@@ -2275,8 +2275,7 @@ struct ChineseRecognitionCaptionRow: View {
     }
 
     var body: some View {
-        let presentation = ChineseRecognitionRowPresentation(status: state.statuses[segment.id],
-            availability: .available, canUndo: segment.canUndoChineseRecognition)
+        let presentation = actionPresentation()
         VStack(alignment: .leading, spacing: 0) {
             TranscriptCaptionRow(segment: segment, textSize: textSize, stream: stream,
                                  target: target, converter: converter)
@@ -2294,6 +2293,7 @@ struct ChineseRecognitionCaptionRow: View {
             // provider here and resolve it only when the actions appear.
             ChineseRecognitionResolvingMenu(status: state.statuses[segment.id],
                 canUndo: segment.canUndoChineseRecognition, availability: availability,
+                courseState: state,
                 recognize: recognize, cancel: performCancellation, undo: undo,
                 availabilityState: menuAvailability)
         }
@@ -2303,7 +2303,7 @@ struct ChineseRecognitionCaptionRow: View {
                 // while its popup owns the pointer. Its cached availability
                 // never reads a WAV header during unrelated status updates.
                 Menu {
-                    recognitionMenu(availability: menuAvailability.value)
+                    recognitionMenu
                 } label: {
                     Image(systemName: "ellipsis")
                         .frame(width: 28, height: 24)
@@ -2312,7 +2312,7 @@ struct ChineseRecognitionCaptionRow: View {
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .foregroundStyle(ReadingAccessibility.secondaryText)
-                .help("字幕操作")
+                .help(presentation.unavailableReason ?? "字幕操作")
                 .accessibilityLabel(presentation.actionsAccessibilityLabel)
                 .accessibilityIdentifier("caption-chinese-actions-\(segment.id)")
                 .opacity(showsActions ? 1 : 0)
@@ -2331,16 +2331,20 @@ struct ChineseRecognitionCaptionRow: View {
         }
     }
 
-    private func recognitionMenu(availability: ChineseRecognitionAvailability) -> some View {
-        ChineseRecognitionCaptionMenu(presentation: ChineseRecognitionRowPresentation(
-            status: state.statuses[segment.id], availability: availability,
-            canUndo: segment.canUndoChineseRecognition), recognize: recognize, cancel: performCancellation, undo: undo)
+    private var recognitionMenu: ChineseRecognitionObservingMenu {
+        ChineseRecognitionObservingMenu(status: state.statuses[segment.id],
+            canUndo: segment.canUndoChineseRecognition, courseState: state,
+            availabilityState: menuAvailability, recognize: recognize, cancel: performCancellation, undo: undo)
+    }
+
+    func actionPresentation(availability: ChineseRecognitionAvailability = .available) -> ChineseRecognitionRowPresentation {
+        ChineseRecognitionRowPresentation(status: state.statuses[segment.id], availability: availability,
+            canUndo: segment.canUndoChineseRecognition, courseActionsAvailability: state.courseActionsAvailability)
     }
 
     /// The inline button and both menus use this same guarded event handler.
     func performCancellation() {
-        let presentation = ChineseRecognitionRowPresentation(status: state.statuses[segment.id],
-            availability: .available, canUndo: segment.canUndoChineseRecognition)
+        let presentation = actionPresentation()
         guard presentation.canCancel else { return }
         cancel()
     }
@@ -2355,6 +2359,27 @@ final class ChineseRecognitionMenuAvailabilityState: ObservableObject {
     }
 }
 
+/// Native menus can retain already-constructed content. Observe course permission
+/// inside that content, independently of the cached recording availability.
+struct ChineseRecognitionObservingMenu: View {
+    let status: ChineseRecognitionStatus?
+    let canUndo: Bool
+    @ObservedObject var courseState: ChineseRecognitionPresentationState
+    @ObservedObject var availabilityState: ChineseRecognitionMenuAvailabilityState
+    let recognize: () -> Void
+    let cancel: () -> Void
+    let undo: () -> Void
+
+    var actions: ChineseRecognitionCaptionMenu {
+        ChineseRecognitionCaptionMenu(presentation: ChineseRecognitionRowPresentation(
+            status: status, availability: availabilityState.value, canUndo: canUndo,
+            courseActionsAvailability: courseState.courseActionsAvailability),
+            recognize: recognize, cancel: cancel, undo: undo)
+    }
+
+    var body: some View { actions }
+}
+
 /// A closed native menu may construct its body without appearing. Keep audio
 /// inspection in the appearance callback, never in either view's body.
 struct ChineseRecognitionResolvingMenu: View {
@@ -2364,26 +2389,34 @@ struct ChineseRecognitionResolvingMenu: View {
     let recognize: () -> Void
     let cancel: () -> Void
     let undo: () -> Void
+    @ObservedObject private var courseState: ChineseRecognitionPresentationState
     @ObservedObject private var availabilityState: ChineseRecognitionMenuAvailabilityState
 
     init(status: ChineseRecognitionStatus?, canUndo: Bool,
          availability: @escaping () -> ChineseRecognitionAvailability,
+         courseState: ChineseRecognitionPresentationState,
          recognize: @escaping () -> Void, cancel: @escaping () -> Void, undo: @escaping () -> Void,
          availabilityState: ChineseRecognitionMenuAvailabilityState? = nil) {
         self.status = status
         self.canUndo = canUndo
         self.availability = availability
+        self.courseState = courseState
         self.recognize = recognize
         self.cancel = cancel
         self.undo = undo
         self.availabilityState = availabilityState ?? ChineseRecognitionMenuAvailabilityState()
     }
 
-    var body: some View {
-        ChineseRecognitionCaptionMenu(presentation: ChineseRecognitionRowPresentation(
-            status: status, availability: availabilityState.value, canUndo: canUndo),
+    private var observedMenu: ChineseRecognitionObservingMenu {
+        ChineseRecognitionObservingMenu(status: status, canUndo: canUndo,
+            courseState: courseState, availabilityState: availabilityState,
             recognize: recognize, cancel: cancel, undo: undo)
-            .onAppear(perform: menuDidAppear)
+    }
+
+    var actions: ChineseRecognitionCaptionMenu { observedMenu.actions }
+
+    var body: some View {
+        observedMenu.onAppear(perform: menuDidAppear)
     }
 
     /// Also accepts an explicit menu-opening lifecycle event in native hosts
@@ -2404,7 +2437,7 @@ struct ChineseRecognitionCaptionMenu: View {
         Button(ChineseRecognitionRowPresentation.actionTitle, action: performRecognition)
             .disabled(!presentation.canRecognize)
             .help(presentation.unavailableReason ?? ChineseRecognitionRowPresentation.actionTitle)
-            .accessibilityLabel(ChineseRecognitionRowPresentation.actionTitle)
+            .accessibilityLabel(presentation.recognizeAccessibilityLabel)
             .accessibilityHint(presentation.unavailableReason ?? "使用本句录音按中文重新识别。")
             .accessibilityIdentifier("caption-recognize-chinese")
         if let reason = presentation.unavailableReason {
@@ -2414,16 +2447,23 @@ struct ChineseRecognitionCaptionMenu: View {
         }
         if presentation.canCancel {
             Button(ChineseRecognitionRowPresentation.cancelActionTitle, action: performCancellation)
+                .help(presentation.statusAccessibilityLabel ?? ChineseRecognitionRowPresentation.cancelActionTitle)
                 .accessibilityLabel(presentation.cancelAccessibilityLabel)
+                .accessibilityHint(presentation.statusAccessibilityLabel ?? "取消本次中文重识别，保留当前原句。")
                 .accessibilityIdentifier("caption-cancel-chinese-menu")
         }
         if presentation.showsUndo {
             Button(ChineseRecognitionRowPresentation.undoTitle, action: performUndo)
                 .disabled(!presentation.canUndo)
                 .help(presentation.undoUnavailableReason ?? ChineseRecognitionRowPresentation.undoTitle)
-                .accessibilityLabel(ChineseRecognitionRowPresentation.undoTitle)
+                .accessibilityLabel(presentation.undoAccessibilityLabel)
                 .accessibilityHint(presentation.undoUnavailableReason ?? "恢复中文重识别前的原句。")
                 .accessibilityIdentifier("caption-undo-chinese")
+            if let reason = presentation.undoUnavailableReason, reason != presentation.unavailableReason {
+                Text(verbatim: reason)
+                    .accessibilityLabel(reason)
+                    .accessibilityIdentifier("caption-chinese-undo-unavailable")
+            }
         }
     }
 
@@ -2468,7 +2508,9 @@ struct ChineseRecognitionCaptionStatus: View {
                 if presentation.canCancel {
                     Button(ChineseRecognitionRowPresentation.cancelTitle, action: performCancellation)
                         .controlSize(.small)
+                        .help(presentation.statusAccessibilityLabel ?? ChineseRecognitionRowPresentation.cancelActionTitle)
                         .accessibilityLabel(presentation.cancelAccessibilityLabel)
+                        .accessibilityHint(presentation.statusAccessibilityLabel ?? "取消本次中文重识别，保留当前原句。")
                         .accessibilityIdentifier("caption-cancel-chinese")
                 }
             }

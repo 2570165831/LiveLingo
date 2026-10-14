@@ -648,6 +648,7 @@ final class AppModel: ObservableObject {
             updateReviewAvailability()
             applyIdleSleepAssertion()
             alarmRecordingPhaseChanged()
+            updateChineseRecognitionCourseActions()
             persistCurrentSession()
         }
     }
@@ -1177,7 +1178,9 @@ final class AppModel: ObservableObject {
     private var alarmCountdown = AlarmCountdown()
     private var alarmCountdownTask: Task<Void, Never>?
     private var alarmRolloverTask: Task<Void, Never>?
-    private var alarmRolloverInProgress = false
+    private var alarmRolloverInProgress = false {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
     @Published private var alarmRolloverSwitching = false
     private var alarmStopRequested = false
     private var alarmPostSplitCourse = false
@@ -1286,16 +1289,23 @@ final class AppModel: ObservableObject {
     private var chineseRecognitionTokens: [UUID: UUID] = [:]
     private var retiredChineseRecognitionTasks: [UUID: Task<Void, Never>] = [:]
     private var chineseRecognitionSyncTasks: [UUID: Task<Void, Never>] = [:]
-    private var chineseRecognitionLifecycleOwners: Set<UUID> = []
+    private var chineseRecognitionLifecycleOwners: Set<UUID> = [] {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
     private var chineseRecognitionExportInProgress = false
+    private var chineseRecognitionUndoNotice: String?
     /// Set once when live capture starts; a live-only course has no archive
     /// until it is converted, so this carries the start into it.
     private var currentCaptureStart: SessionCaptureStart?
     private var sessionSaver: SessionSaveCoordinator?
     private var finalizationOwner: UUID?
-    private var finalizationInProgress = false
+    private var finalizationInProgress = false {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
     private var sessionFinalizationTask: Task<Void, Never>?
-    @Published private var preparingApplicationExit = false
+    @Published private var preparingApplicationExit = false {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
     var isTerminating: Bool { preparingApplicationExit }
     private var applicationExitDeadline: ExitDeadline?
     private var conversionRecoveryTask: Task<Void, Never>?
@@ -1333,7 +1343,9 @@ final class AppModel: ObservableObject {
     private var archiveWriteError: String?
     @Published private(set) var candidateConfirmationInFlight = false
     private var lastReviewInvalidation: (sessionID: UUID, revision: Int)?
-    @Published private(set) var archiveLoading = false
+    @Published private(set) var archiveLoading = false {
+        didSet { updateChineseRecognitionCourseActions() }
+    }
     @Published private(set) var archiveCloudDownloadStatus: String?
     private var archiveCloudDownloadTask: Task<SessionLoadResult, Error>?
     private var archiveCloudDownloadToken: UUID?
@@ -1537,6 +1549,7 @@ final class AppModel: ObservableObject {
         do { outputDirectory = try PreviewDataIsolation.makeCoursesDirectory() }
         catch { archiveError = error.localizedDescription }
         #endif
+        updateChineseRecognitionCourseActions()
         guard backgroundServicesEnabled else { return }
         refreshPermissionLabels()
         refreshSummaryConcurrency()
@@ -4028,11 +4041,47 @@ final class AppModel: ObservableObject {
         segments.first(where: { $0.id == id })?.inputRevision ?? 0
     }
 
-    func chineseRecognitionAvailability(for segment: TranscriptSegment) -> ChineseRecognitionAvailability {
-        guard !isTerminating, !archiveLoading, !alarmRolloverInProgress, !finalizationInProgress,
-              chineseRecognitionLifecycleOwners.isEmpty else {
-            return .unavailable("课程正在切换或保存，请稍后重新识别。")
+    private func chineseRecognitionCourseActionsAvailability() -> ChineseRecognitionAvailability {
+        if isTerminating { return .unavailable("课程正在退出保存，暂不能修改字幕；保存结束后再试。") }
+        if archiveLoading { return .unavailable("课程正在读取或切换，暂不能修改字幕；等待结束后再试。") }
+        if alarmRolloverInProgress { return .unavailable("课程正在分段保存，暂不能修改字幕；保存结束后再试。") }
+        if finalizationInProgress || !chineseRecognitionLifecycleOwners.isEmpty {
+            return .unavailable("课程正在切换或保存，暂不能修改字幕；等待结束后再试。")
         }
+        guard phase == .recording || phase == .paused || savedSessionDirectory != nil else {
+            return .unavailable("当前课程暂不能修改字幕，请在课堂中或打开已保存课程后操作。")
+        }
+        return .available
+    }
+
+    private func updateChineseRecognitionCourseActions() {
+        let availability = chineseRecognitionCourseActionsAvailability()
+        if chineseRecognitionState.courseActionsAvailability != availability {
+            chineseRecognitionState.courseActionsAvailability = availability
+        }
+    }
+
+    func chineseRecognitionUndoAvailability(_ id: UUID) -> ChineseRecognitionAvailability {
+        let course = chineseRecognitionCourseActionsAvailability()
+        guard course.isAvailable else { return course }
+        if chineseRecognitionState.statuses[id] == .saving {
+            return .unavailable("中文原文正在保存；保存完成后才能撤销。")
+        }
+        if chineseRecognitionTasks[id] != nil || pendingChineseRecognition[id] != nil {
+            return .unavailable("本句中文重识别仍在排队或处理中，请先取消或等待结束后撤销。")
+        }
+        guard let segment = segments.first(where: { $0.id == id }) else {
+            return .unavailable("课程或本句已更新，请重新打开字幕操作菜单。")
+        }
+        guard segment.canUndoChineseRecognition else {
+            return .unavailable("本句没有可撤销的中文识别结果，请重新打开字幕操作菜单。")
+        }
+        return .available
+    }
+
+    func chineseRecognitionAvailability(for segment: TranscriptSegment) -> ChineseRecognitionAvailability {
+        let course = chineseRecognitionCourseActionsAvailability()
+        guard course.isAvailable else { return course }
         switch phase {
         case .recording, .paused, .saved: break
         default: return .unavailable("请在课堂进行中或打开已保存课程后重新识别。")
@@ -4207,17 +4256,24 @@ final class AppModel: ObservableObject {
     }
 
     func undoChineseRecognition(_ id: UUID) {
-        if chineseRecognitionState.statuses[id] == .saving {
-            archiveNotice = "中文原文正在保存；保存完成后才能撤销。"
+        let availability = chineseRecognitionUndoAvailability(id)
+        guard availability.isAvailable else {
+            let reason = availability.reason ?? "当前暂不能撤销中文重识别，请稍后再试。"
+            chineseRecognitionUndoNotice = reason
+            archiveNotice = reason
             return
         }
-        guard !isTerminating, !archiveLoading, !alarmRolloverInProgress, !finalizationInProgress,
-              chineseRecognitionLifecycleOwners.isEmpty,
-              phase == .recording || phase == .paused || savedSessionDirectory != nil,
-              chineseRecognitionTasks[id] == nil,
-              let index = segments.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = segments.firstIndex(where: { $0.id == id }) else {
+            archiveNotice = "课程或本句已更新，请重新打开字幕操作菜单。"
+            return
+        }
         var replacement = segments[index]
-        guard replacement.undoChineseRecognition() else { return }
+        guard replacement.undoChineseRecognition() else {
+            archiveNotice = "本句没有可撤销的中文识别结果，请重新打开字幕操作菜单。"
+            return
+        }
+        if archiveNotice == chineseRecognitionUndoNotice { archiveNotice = nil }
+        chineseRecognitionUndoNotice = nil
         replaceExistingSegment(at: index, with: replacement, reason: "用户撤销中文重新识别")
         chineseRecognitionState.statuses[id] = nil
         let identity = sessionID, epoch = generation, syncID = UUID()
