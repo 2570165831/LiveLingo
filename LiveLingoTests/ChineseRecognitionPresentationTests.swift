@@ -52,15 +52,91 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         XCTAssertNil(presentation(.completed, canUndo: true).statusText)
     }
 
+    func testWaitingAndSavingExplainDisabledActionsAndAccessibilityLabels() {
+        let waitingReason = "正在等待实时转写结束，暂不能重新识别或撤销；可取消本次请求。"
+        let waiting = presentation(.waitingForRealtime, canUndo: true)
+        XCTAssertTrue(waiting.isBusy)
+        XCTAssertFalse(waiting.isRecognizing)
+        XCTAssertTrue(waiting.canCancel)
+        XCTAssertFalse(waiting.canRecognize)
+        XCTAssertTrue(waiting.showsUndo)
+        XCTAssertFalse(waiting.canUndo)
+        XCTAssertFalse(waiting.isFailure)
+        XCTAssertEqual(waiting.statusText, "等待实时转写结束…")
+        XCTAssertEqual(waiting.unavailableReason, waitingReason)
+        XCTAssertEqual(waiting.undoUnavailableReason, waitingReason)
+        XCTAssertEqual(waiting.statusAccessibilityLabel, "等待实时转写结束，可取消中文重识别。")
+        XCTAssertEqual(waiting.cancelAccessibilityLabel, "取消等待中的中文重识别")
+        XCTAssertEqual(waiting.actionsAccessibilityLabel, "字幕操作：等待实时转写结束，可取消中文重识别。")
+
+        let savingReason = "正在保存中文识别结果，保存结束后才能重新识别或撤销，暂不可取消。"
+        let saving = presentation(.saving, canUndo: true)
+        XCTAssertTrue(saving.isBusy)
+        XCTAssertFalse(saving.isRecognizing)
+        XCTAssertFalse(saving.canCancel)
+        XCTAssertFalse(saving.canRecognize)
+        XCTAssertTrue(saving.showsUndo, "Keep the undo action visible with its disabled explanation")
+        XCTAssertFalse(saving.canUndo)
+        XCTAssertFalse(saving.isFailure)
+        XCTAssertEqual(saving.statusText, "中文已识别，正在保存，暂不可撤销。")
+        XCTAssertEqual(saving.unavailableReason, savingReason)
+        XCTAssertEqual(saving.undoUnavailableReason, savingReason)
+        XCTAssertEqual(saving.statusAccessibilityLabel, "中文已识别，正在保存，暂不可撤销。")
+        XCTAssertEqual(saving.actionsAccessibilityLabel, "字幕操作：中文已识别，正在保存，暂不可撤销。")
+
+        let missingAudio = ChineseRecognitionAvailability.unavailable("此句录音已不在本机。")
+        for (status, reason) in [(ChineseRecognitionStatus.waitingForRealtime, waitingReason), (.saving, savingReason)] {
+            let busy = presentation(status, availability: missingAudio, canUndo: true)
+            XCTAssertEqual(busy.unavailableReason, reason, "The owned task must explain why actions are blocked")
+            XCTAssertEqual(busy.undoUnavailableReason, reason, "Undo is blocked by the task, not by missing audio")
+        }
+        XCTAssertFalse(presentation(.waitingForRealtime).showsUndo)
+        XCTAssertNil(presentation(.waitingForRealtime).undoUnavailableReason)
+        XCTAssertFalse(presentation(.saving).showsUndo)
+        XCTAssertNil(presentation(.saving).undoUnavailableReason)
+
+        let completed = presentation(.completed, canUndo: true)
+        XCTAssertFalse(completed.isBusy)
+        XCTAssertFalse(completed.canCancel)
+        XCTAssertTrue(completed.canRecognize)
+        XCTAssertTrue(completed.canUndo)
+        XCTAssertNil(completed.statusText)
+        XCTAssertNil(completed.statusAccessibilityLabel)
+        XCTAssertNil(completed.unavailableReason)
+        XCTAssertNil(completed.undoUnavailableReason)
+        XCTAssertEqual(completed.actionsAccessibilityLabel, "字幕操作：按中文重新识别或撤销")
+    }
+
     func testFailureAndCancellationExplicitlyPreserveOriginalCaption() {
         let failed = presentation(.failed("录音读取失败"))
         XCTAssertTrue(failed.isFailure)
         XCTAssertEqual(failed.statusText, "按中文重新识别失败：录音读取失败；原句已保留。")
         XCTAssertTrue(failed.canRecognize)
+        let failedRetry = presentation(.failed("录音读取失败"), canUndo: true)
+        XCTAssertEqual(failedRetry.statusText, "按中文重新识别失败：录音读取失败；原句已保留。")
+        XCTAssertTrue(failedRetry.canUndo, "A previous Chinese revision must remain undoable after recognition fails")
         let cancelled = presentation(.cancelled)
         XCTAssertFalse(cancelled.isFailure)
         XCTAssertEqual(cancelled.statusText, "已取消中文重识别，原句已保留。")
         XCTAssertTrue(cancelled.canRecognize)
+    }
+
+    func testSavingFailureKeepsChinesePreservationNoticeAndAllowsUndo() throws {
+        let reason = "中文原文已保留，但存档或导出尚未保存完成；可以撤销，或重试保存。"
+        let failedSave = presentation(.failed(reason), canUndo: true)
+        XCTAssertTrue(failedSave.isFailure)
+        XCTAssertFalse(failedSave.isBusy)
+        XCTAssertFalse(failedSave.canCancel)
+        XCTAssertTrue(failedSave.canRecognize)
+        XCTAssertTrue(failedSave.showsUndo)
+        XCTAssertTrue(failedSave.canUndo)
+        XCTAssertEqual(failedSave.statusText, reason)
+        XCTAssertEqual(failedSave.statusAccessibilityLabel, reason)
+        let notice = try XCTUnwrap(failedSave.statusText)
+        XCTAssertFalse(notice.contains("按中文重新识别失败"))
+        XCTAssertFalse(notice.contains("原句已保留"))
+        XCTAssertNil(failedSave.unavailableReason)
+        XCTAssertNil(failedSave.undoUnavailableReason)
     }
 
     func testManualChineseKeepsExactOriginalForEveryDisplayTargetWithoutConversion() {
@@ -164,6 +240,117 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
                        "按中文重新识别失败：未得到可靠的中文结果；原句已保留。")
         let expectedFailure = try await host(expectedRow(segment, status: .failed("未得到可靠的中文结果")), height: 250)
         XCTAssertEqual(try png(view), try png(expectedFailure), "Failure must render with the original bilingual caption still present")
+    }
+
+    func testWaitingRowAndMenusRenderReasonAndAllowCancellationOffscreen() async throws {
+        var segment = english()
+        segment.applyChineseRecognition("已有中文原文，等待中的请求不应替换它。")
+        let state = ChineseRecognitionPresentationState()
+        var recognitions = 0
+        var cancellations = 0
+        var undos = 0
+        let root = row(segment, state: state, recognize: { recognitions += 1 }, cancel: {
+            cancellations += 1
+            state.statuses[segment.id] = .cancelled
+        }, undo: { undos += 1 })
+        let view = try await host(root, height: 250)
+        let originalPixels = try png(view)
+        state.statuses[segment.id] = .waitingForRealtime
+        try await settle(view)
+        try capture(view, name: "chinese-recognition-waiting")
+        XCTAssertNotEqual(try png(view), originalPixels, "Waiting must be visible on the mounted caption")
+        XCTAssertEqual(CaptionPresentation(segment).primaryText, "已有中文原文，等待中的请求不应替换它。")
+
+        let actions = ChineseRecognitionCaptionMenu(
+            presentation: presentation(.waitingForRealtime, canUndo: segment.canUndoChineseRecognition),
+            recognize: { recognitions += 1 }, cancel: root.performCancellation, undo: { undos += 1 })
+        let menu = try await host(VStack(alignment: .leading, spacing: 12) { actions }.padding(20), height: 200)
+        try capture(menu, name: "chinese-recognition-waiting-menu")
+        XCTAssertFalse(actions.presentation.canRecognize)
+        XCTAssertFalse(actions.presentation.canUndo)
+        XCTAssertTrue(actions.presentation.showsUndo)
+        XCTAssertTrue(actions.presentation.canCancel)
+        XCTAssertNotNil(actions.presentation.unavailableReason)
+        actions.performRecognition()
+        actions.performUndo()
+        XCTAssertEqual(recognitions, 0)
+        XCTAssertEqual(undos, 0)
+        actions.performCancellation()
+        XCTAssertEqual(cancellations, 1, "The menu must cancel a queued request")
+        XCTAssertEqual(state.statuses[segment.id], .cancelled)
+        try await settle(view)
+        let expectedCancelled = try await host(expectedRow(segment, status: .cancelled), height: 250)
+        XCTAssertEqual(try png(view), try png(expectedCancelled), "Cancelling a queued request must preserve the caption")
+
+        state.statuses[segment.id] = .waitingForRealtime
+        let inline = ChineseRecognitionCaptionStatus(presentation: presentation(.waitingForRealtime),
+            cancel: root.performCancellation)
+        inline.performCancellation()
+        XCTAssertEqual(cancellations, 2, "The inline button must also cancel a queued request")
+        XCTAssertEqual(state.statuses[segment.id], .cancelled)
+        root.performCancellation()
+        XCTAssertEqual(cancellations, 2, "An inactive row must not dispatch another cancellation")
+    }
+
+    func testSavingRowAndMenusBlockActionsUntilCompletedOffscreen() async throws {
+        var segment = english()
+        segment.applyChineseRecognition("中文已经识别，保存中的原文应继续显示。")
+        let state = ChineseRecognitionPresentationState()
+        state.statuses[segment.id] = .saving
+        var recognitions = 0
+        var cancellations = 0
+        var undos = 0
+        let root = row(segment, state: state, recognize: { recognitions += 1 },
+            cancel: { cancellations += 1 }, undo: { undos += 1 })
+        let view = try await host(root, height: 250)
+        try capture(view, name: "chinese-recognition-saving")
+        let completedCaption = try await host(TranscriptCaptionRow(segment: segment, textSize: 18,
+            stream: FinalCaptionState()).equatable(), height: 250)
+        XCTAssertNotEqual(try png(view), try png(completedCaption), "Saving must remain distinct from completed")
+        XCTAssertEqual(CaptionPresentation(segment).primaryText, "中文已经识别，保存中的原文应继续显示。")
+
+        let actions = ChineseRecognitionCaptionMenu(
+            presentation: presentation(.saving, canUndo: segment.canUndoChineseRecognition),
+            recognize: { recognitions += 1 }, cancel: { cancellations += 1 }, undo: { undos += 1 })
+        let menu = try await host(VStack(alignment: .leading, spacing: 12) { actions }.padding(20), height: 200)
+        try capture(menu, name: "chinese-recognition-saving-menu")
+        XCTAssertFalse(actions.presentation.canRecognize)
+        XCTAssertFalse(actions.presentation.canCancel)
+        XCTAssertFalse(actions.presentation.canUndo)
+        XCTAssertTrue(actions.presentation.showsUndo)
+        XCTAssertEqual(actions.presentation.unavailableReason,
+                       "正在保存中文识别结果，保存结束后才能重新识别或撤销，暂不可取消。")
+        actions.performRecognition()
+        actions.performCancellation()
+        actions.performUndo()
+        root.performCancellation()
+        ChineseRecognitionCaptionStatus(presentation: presentation(.saving),
+            cancel: { cancellations += 1 }).performCancellation()
+        XCTAssertEqual(recognitions, 0)
+        XCTAssertEqual(cancellations, 0)
+        XCTAssertEqual(undos, 0, "A saving action must be disabled before its handler is reached")
+
+        state.statuses[segment.id] = .completed
+        try await settle(view)
+        try capture(view, name: "chinese-recognition-saved")
+        XCTAssertEqual(try png(view), try png(completedCaption), "Only completed removes the saving notice")
+        let completedActions = ChineseRecognitionCaptionMenu(
+            presentation: presentation(.completed, canUndo: segment.canUndoChineseRecognition),
+            recognize: { recognitions += 1 }, cancel: { cancellations += 1 }, undo: { undos += 1 })
+        completedActions.performRecognition()
+        completedActions.performUndo()
+        completedActions.performCancellation()
+        XCTAssertEqual(recognitions, 1, "A new request becomes available after saving completes")
+        XCTAssertEqual(undos, 1, "A single undo must dispatch after saving completes")
+        XCTAssertEqual(cancellations, 0)
+
+        let savingFailure = ChineseRecognitionStatus.failed(
+            "中文原文已保留，但存档或导出尚未保存完成；可以撤销，或重试保存。")
+        state.statuses[segment.id] = savingFailure
+        try await settle(view)
+        try capture(view, name: "chinese-recognition-save-failed")
+        let expectedFailure = try await host(expectedRow(segment, status: savingFailure), height: 250)
+        XCTAssertEqual(try png(view), try png(expectedFailure), "A saving failure must keep the revised Chinese with its saving notice")
     }
 
     func testCompletedChineseIsSourceOnlyAndUndoMenuCallsTheInjectedAction() async throws {
@@ -281,7 +468,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
     private func expectedRow(_ segment: TranscriptSegment, status: ChineseRecognitionStatus) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             TranscriptCaptionRow(segment: segment, textSize: 18, stream: FinalCaptionState()).equatable()
-            ChineseRecognitionCaptionStatus(presentation: presentation(status), cancel: {})
+            ChineseRecognitionCaptionStatus(presentation: presentation(status, canUndo: segment.canUndoChineseRecognition), cancel: {})
                 .padding(.leading, 84)
                 .padding(.trailing, 16)
                 .padding(.bottom, 14)

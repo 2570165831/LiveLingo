@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 enum ChineseRecognitionStatus: Equatable, Sendable {
-    case recognizing, cancelled, failed(String), completed
+    case waitingForRealtime, recognizing, saving, cancelled, failed(String), completed
 }
 
 struct ChineseRecognitionAvailability: Equatable, Sendable {
@@ -22,10 +22,26 @@ final class ChineseRecognitionPresentationState: ObservableObject {
 @MainActor
 struct ChineseRecognitionDependencies {
     var recognize: (URL, String) async throws -> ASRTranscription
+    var waitForInference: () async throws -> Void
 
-    static let live = Self { audio, requestID in
-        try await QwenASRClient.transcribe(audioURL: audio, modelKey: "1.7b",
-            enhanceSpeech: true, language: .chinese, requestID: requestID)
+    init(recognize: @escaping (URL, String) async throws -> ASRTranscription) {
+        self.recognize = recognize
+        self.waitForInference = {}
+    }
+
+    init(waitForInference: @escaping () async throws -> Void,
+         recognize: @escaping (URL, String) async throws -> ASRTranscription) {
+        self.recognize = recognize
+        self.waitForInference = waitForInference
+    }
+
+    static var live: Self {
+        Self(waitForInference: {
+            try await ASRRequestCoordinator.shared.waitForChineseInferenceCompletion()
+        }) { audio, requestID in
+            try await QwenASRClient.transcribe(audioURL: audio, modelKey: "1.7b",
+                enhanceSpeech: true, language: .chinese, requestID: requestID)
+        }
     }
     static let unavailable = Self { _, _ in throw QwenRuntimeError.runtimeUnavailable }
 }

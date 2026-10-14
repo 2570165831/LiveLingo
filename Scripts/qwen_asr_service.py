@@ -79,6 +79,10 @@ _REQUEST_IDENTITIES = {}
 MAX_COMPLETION_RECEIPTS = 256
 MAX_INFERENCE_REQUESTS = 3  # one running, at most two submitted ahead
 INFERENCE_SLOTS = threading.BoundedSemaphore(MAX_INFERENCE_REQUESTS)
+# Explicit manual re-recognition must not consume formal ASR admission slots.
+# This separate bound covers upload, queueing, execution and deferred cleanup.
+MAX_MANUAL_INFERENCE_REQUESTS = 1
+MANUAL_INFERENCE_SLOTS = threading.BoundedSemaphore(MAX_MANUAL_INFERENCE_REQUESTS)
 IDLE_MODEL_SECONDS = 120.0
 IDLE_UNLOAD_RETRY_SECONDS = 5.0
 IDLE_MAINTENANCE = None
@@ -977,7 +981,7 @@ class RequestLog:
 
 
 class PriorityInferenceExecutor:
-    """One tensor thread; queued formal work overtakes optional language heads.
+    """One tensor thread; formal work overtakes queued optional/manual work.
 
     A running tensor call is joined, never preempted. FIFO is preserved within
     each priority and Futures retain cancellation/timeout ownership semantics.
@@ -994,6 +998,9 @@ class PriorityInferenceExecutor:
         return self.enqueue(0, function, args, kwargs)
 
     def submit_probe(self, function, *args, **kwargs):
+        return self.enqueue(1, function, args, kwargs)
+
+    def submit_manual(self, function, *args, **kwargs):
         return self.enqueue(1, function, args, kwargs)
 
     def enqueue(self, priority, function, args, kwargs):
@@ -1109,12 +1116,13 @@ class Handler(BaseHTTPRequestHandler):
         if size <= 0 or size > MAX_AUDIO_BYTES:
             self.send_json(413, {"error": "Audio body is empty or too large"})
             return
-        if not INFERENCE_SLOTS.acquire(blocking=False):
+        request_slots = MANUAL_INFERENCE_SLOTS if language_mode == "Chinese" else INFERENCE_SLOTS
+        if not request_slots.acquire(blocking=False):
             self.send_json(503, {"error": "ASR queue is full", "retryable": True})
             return
         request_id = self.headers.get('X-LiveLingo-Request-ID') or uuid.uuid4().hex
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', request_id):
-            INFERENCE_SLOTS.release()
+            request_slots.release()
             self.send_json(400, {"error": "Invalid request ID"})
             return
         with MODEL_STATE_LOCK:
@@ -1134,7 +1142,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def cleanup():
             finish_request(request_id, model_key)
-            INFERENCE_SLOTS.release()
+            request_slots.release()
             for path in {temporary_path, model_input_path} - {None}:
                 try:
                     release_temporary_audio(path)
@@ -1170,7 +1178,12 @@ class Handler(BaseHTTPRequestHandler):
             RequestLog.emit(f"ASR request id={log_id} model={model_key} bytes={size}")
             # Confirmed source bodies are optional refinements of an already
             # delivered caption. Fresh formal ASR also overtakes queued bodies.
-            submit = INFERENCE_WORKER.submit_probe if language_mode == "probe" or confirmed_language is not None else INFERENCE_WORKER.submit
+            if language_mode == "Chinese":
+                submit = INFERENCE_WORKER.submit_manual
+            elif language_mode == "probe" or confirmed_language is not None:
+                submit = INFERENCE_WORKER.submit_probe
+            else:
+                submit = INFERENCE_WORKER.submit
             arguments = (request_id, model_input_path, model_key, language_mode, temporary_path)
             if confirmed_language is not None:
                 arguments += (confirmed_language,)
@@ -1244,7 +1257,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if duplicate:
                 # This handler never owns the original request or its input.
-                INFERENCE_SLOTS.release()
+                request_slots.release()
             elif not cleanup_deferred:
                 cleanup()
 

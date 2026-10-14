@@ -200,24 +200,24 @@ final class ChineseRecognitionTests: XCTestCase {
         XCTAssertNil(model.chineseRecognitionTaskForTesting(old.id))
     }
 
-    func testStoppingLiveCourseCancelsAndJoinsRecognitionBeforeFinalSave() async throws {
-        var started = false, cancelled = false
+    func testStoppingLiveCourseRunsQueuedRecognitionAfterRealtimeDrain() async throws {
+        var started = false
         let expected = result()
         let (model, directory, old) = try await fixture(recognize: .init { _, _ in
             started = true
-            do { try await Task.sleep(for: .seconds(30)) }
-            catch { cancelled = true; throw error }
             return expected
         })
         model.loadPresentationForTesting(phase: .recording, evidence: [old])
         model.recognizeCaptionAsChinese(old.id)
-        try await eventually { started }
-        await model.stopSavedCourseForTesting()
-        XCTAssertTrue(cancelled)
-        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .cancelled)
+        XCTAssertFalse(started)
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .waitingForRealtime)
         XCTAssertNil(model.chineseRecognitionTaskForTesting(old.id))
-        XCTAssertEqual(model.segments.first?.english, old.english)
-        XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first?.english, old.english)
+        await model.stopSavedCourseForTesting()
+        try await eventually { started }
+        await model.chineseRecognitionTaskForTesting(old.id)?.value
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .completed)
+        XCTAssertEqual(model.segments.first?.english, expected.text)
+        XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first?.english, expected.text)
     }
 
     func testUndoCannotMutateCaptionWhileStopping() async throws {
@@ -250,17 +250,142 @@ final class ChineseRecognitionTests: XCTestCase {
     }
 
     func testLiveCaptionCanRecognizeAndLiveWithoutAudioIsDisabled() async throws {
+        var calls = 0
         let expected = result()
-        let (model, _, old) = try await fixture(recognize: .init { _, _ in expected })
+        let (model, _, old) = try await fixture(recognize: .init { _, _ in calls += 1; return expected })
         model.loadPresentationForTesting(phase: .recording, evidence: [old])
         XCTAssertTrue(model.chineseRecognitionAvailability(for: old).isAvailable)
         model.recognizeCaptionAsChinese(old.id)
         await model.chineseRecognitionTaskForTesting(old.id)?.value
-        XCTAssertEqual(model.segments.first?.english, expected.text)
+        XCTAssertEqual(model.segments.first?.english, old.english)
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .waitingForRealtime)
         XCTAssertEqual(model.phase, .recording)
+        model.loadPresentationForTesting(phase: .paused, evidence: [old])
+        XCTAssertEqual(calls, 0)
+        model.cancelChineseRecognition(old.id)
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .cancelled)
         let (noAudio, _, original) = try await fixture(recording: false)
         noAudio.loadPresentationForTesting(phase: .recording, evidence: [original])
         XCTAssertFalse(noAudio.chineseRecognitionAvailability(for: original).isAvailable)
+    }
+
+    func testCourseSwitchCancelsQueuedRecognitionWithoutUploadingAudio() async throws {
+        var calls = 0
+        let expected = result()
+        let (model, _, old) = try await fixture(recognize: .init { _, _ in calls += 1; return expected })
+        model.loadPresentationForTesting(phase: .recording, evidence: [old])
+        model.recognizeCaptionAsChinese(old.id)
+        await model.resetTranslationSessionForTesting()?.value
+        XCTAssertEqual(calls, 0)
+        XCTAssertTrue(model.chineseRecognitionState.statuses.isEmpty)
+    }
+
+    func testLiveOnlyWithTemporaryAudioRequiresSavingModeBeforeQueueing() async throws {
+        var calls = 0
+        let expected = result()
+        let (model, _, old) = try await fixture(recognize: .init { _, _ in calls += 1; return expected })
+        model.loadPresentationForTesting(phase: .recording, evidence: [old], storageMode: .liveOnly)
+        let availability = model.chineseRecognitionAvailability(for: old)
+        XCTAssertFalse(availability.isAvailable)
+        XCTAssertTrue(availability.reason?.contains("先切换为保存录音") == true)
+        model.recognizeCaptionAsChinese(old.id)
+        XCTAssertEqual(calls, 0)
+        XCTAssertNil(model.chineseRecognitionTaskForTesting(old.id))
+        guard case .failed = model.chineseRecognitionState.statuses[old.id] else { return XCTFail("Must explain unavailable mode") }
+        model.loadPresentationForTesting(phase: .paused, evidence: [old])
+        XCTAssertFalse(model.chineseRecognitionAvailability(for: old).isAvailable)
+        model.loadPresentationForTesting(phase: .recording, evidence: [old], storageMode: .saveSession)
+        XCTAssertTrue(model.chineseRecognitionAvailability(for: old).isAvailable)
+        model.recognizeCaptionAsChinese(old.id)
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .waitingForRealtime)
+        model.cancelChineseRecognition(old.id)
+    }
+
+    func testSavingDisablesUndoWithReasonThenOneClickRestoresArchiveAndExport() async throws {
+        let expected = result()
+        let (model, directory, old) = try await fixture(recognize: .init { _, _ in expected })
+        var barrier: CheckedContinuation<Void, Never>?
+        model.chineseRecognitionArchiveBarrierForTesting = {
+            await withCheckedContinuation { barrier = $0 }
+        }
+        model.recognizeCaptionAsChinese(old.id)
+        try await eventually { barrier != nil }
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .saving)
+        let changed = try XCTUnwrap(model.segments.first)
+        let presentation = ChineseRecognitionRowPresentation(status: .saving, availability: .available,
+            canUndo: changed.canUndoChineseRecognition)
+        XCTAssertFalse(presentation.canUndo)
+        XCTAssertFalse(presentation.canRecognize)
+        model.undoChineseRecognition(old.id)
+        XCTAssertEqual(model.segments.first, changed)
+        XCTAssertTrue(model.archiveNotice?.contains("保存完成后") == true)
+        model.chineseRecognitionArchiveBarrierForTesting = nil
+        barrier?.resume()
+        await model.chineseRecognitionTaskForTesting(old.id)?.value
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .completed)
+        model.undoChineseRecognition(old.id)
+        await model.synchronizeChineseRecognitionExportsForTesting()
+        XCTAssertEqual(model.segments.first?.english, old.english)
+        XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first?.english, old.english)
+        XCTAssertTrue(try String(contentsOf: directory.appendingPathComponent("transcript-en.txt"), encoding: .utf8).contains(old.english))
+    }
+
+    func testStoppingJoinsCommittedSavingWriterWithoutLeavingSavingStatus() async throws {
+        let expected = result()
+        let (model, directory, old) = try await fixture(recognize: .init { _, _ in expected })
+        var barrier: CheckedContinuation<Void, Never>?
+        model.chineseRecognitionArchiveBarrierForTesting = {
+            await withCheckedContinuation { barrier = $0 }
+        }
+        model.recognizeCaptionAsChinese(old.id)
+        try await eventually { barrier != nil }
+        let recognition = model.chineseRecognitionTaskForTesting(old.id)
+        let stopping = Task { await model.stopSavedCourseForTesting() }
+        try await eventually { model.phase == .stopping }
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .saving)
+        model.chineseRecognitionArchiveBarrierForTesting = nil
+        barrier?.resume()
+        await recognition?.value
+        await stopping.value
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .completed)
+        XCTAssertEqual(model.segments.first?.english, expected.text)
+        XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first?.english, expected.text)
+    }
+
+    func testSaveFailureKeepsChineseCaptionAndAllowsUndoAfterWriterFinishes() async throws {
+        let expected = result()
+        let (model, directory, old) = try await fixture(recognize: .init { _, _ in expected })
+        model.chineseRecognitionArchiveBarrierForTesting = { throw SessionStoreError.invalidState("Synthetic save failure") }
+        model.recognizeCaptionAsChinese(old.id)
+        await model.chineseRecognitionTaskForTesting(old.id)?.value
+        guard case .failed(let reason) = model.chineseRecognitionState.statuses[old.id] else {
+            return XCTFail("Save failure must not claim completion or an unchanged original")
+        }
+        XCTAssertTrue(reason.contains("中文原文已保留"))
+        XCTAssertFalse(reason.contains("原句未改"))
+        let changed = try XCTUnwrap(model.segments.first)
+        XCTAssertEqual(changed.english, expected.text)
+        XCTAssertTrue(ChineseRecognitionRowPresentation(status: .failed(reason), availability: .available,
+            canUndo: changed.canUndoChineseRecognition).canUndo)
+        model.chineseRecognitionArchiveBarrierForTesting = nil
+        model.undoChineseRecognition(old.id)
+        await model.synchronizeChineseRecognitionExportsForTesting()
+        XCTAssertEqual(model.segments.first?.english, old.english)
+        XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first?.english, old.english)
+    }
+
+    func testQueuedRecognitionRejectsSourceChangedBeforeClassEnds() async throws {
+        var calls = 0
+        let expected = result()
+        let (model, _, old) = try await fixture(recognize: .init { _, _ in calls += 1; return expected })
+        model.loadPresentationForTesting(phase: .recording, evidence: [old])
+        model.recognizeCaptionAsChinese(old.id)
+        model.reviseCaptionForTesting(id: old.id, english: "A later reviewed source.")
+        await model.stopSavedCourseForTesting()
+        try await eventually { if case .failed = model.chineseRecognitionState.statuses[old.id] { return true }; return false }
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(model.segments.first?.english, "A later reviewed source.")
     }
 
     func testCloudPlaceholderDoesNotDownloadForMenuOrRecognition() async throws {

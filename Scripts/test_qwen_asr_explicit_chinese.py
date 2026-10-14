@@ -1,11 +1,13 @@
 """CPU-only explicit-Chinese protocol and quality regressions.
 
 Production definitions use the existing AST fixture boundary. No backend,
-native extension, network listener, classroom data or app process is loaded.
+third-party native extension, classroom data or app process is loaded. HTTP
+regressions use an ephemeral loopback listener and synthetic audio/model work.
 Synthetic input files are retained in to-trash for recoverable cleanup.
 """
 from concurrent.futures import ThreadPoolExecutor
 from email.message import Message
+from http.server import ThreadingHTTPServer
 import io
 import json
 import math
@@ -13,9 +15,12 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from urllib.error import HTTPError
+from urllib.request import Request, ProxyHandler, build_opener
 
 if __package__:
     from . import test_data_safety as base
@@ -40,6 +45,7 @@ class ExplicitChineseTests(unittest.TestCase):
             AUTH_TOKEN='synthetic-explicit-chinese-token', SUPERVISED=False,
             _TEMP_LOCK=threading.RLock(), _TEMPORARY_FILES={}, _TEMP_STOPPING=False,
             _ACL_API=None, INFERENCE_SLOTS=threading.BoundedSemaphore(3),
+            MANUAL_INFERENCE_SLOTS=threading.BoundedSemaphore(1),
             sf=SimpleNamespace(info=Mock(return_value=SimpleNamespace(
                 frames=80_000, samplerate=16_000))))
         self.service.tempfile = SimpleNamespace(NamedTemporaryFile=lambda **kwargs:
@@ -116,11 +122,192 @@ class ExplicitChineseTests(unittest.TestCase):
         self.assertNotIn(request_id, snapshot['requests'])
         self.assertEqual(snapshot['completed_requests'][request_id]['state'], 'finished')
         self.assertEqual(self.service._TEMPORARY_FILES, {})
-        for _ in range(3):
-            self.assertTrue(self.service.INFERENCE_SLOTS.acquire(blocking=False))
-        self.assertFalse(self.service.INFERENCE_SLOTS.acquire(blocking=False))
-        for _ in range(3):
-            self.service.INFERENCE_SLOTS.release()
+        self.assert_slot_capacity(self.service.INFERENCE_SLOTS, 3)
+        self.assert_slot_capacity(self.service.MANUAL_INFERENCE_SLOTS, 1)
+
+    def assert_slot_capacity(self, slots, count):
+        acquired = 0
+        try:
+            for _ in range(count):
+                self.assertTrue(slots.acquire(blocking=False))
+                acquired += 1
+            extra = slots.acquire(blocking=False)
+            if extra:
+                acquired += 1
+            self.assertFalse(extra)
+        finally:
+            for _ in range(acquired):
+                slots.release()
+
+    def settle(self, predicate):
+        deadline = time.monotonic() + 2
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline, 'Synthetic request did not settle')
+            threading.Event().wait(.002)
+
+    def start_http_server(self):
+        server = ThreadingHTTPServer(('127.0.0.1', 0), self.service.Handler)
+        thread = threading.Thread(target=server.serve_forever,
+                                  kwargs={'poll_interval': .01}, daemon=True)
+        thread.start()
+        def close():
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        self.addCleanup(close)
+        self.http_base = 'http://127.0.0.1:' + str(server.server_port)
+        self.http_client = build_opener(ProxyHandler({}))
+
+    def http_request(self, request_id=None, language=None, audio=AUDIO):
+        endpoint = '/health' if request_id is None else '/transcribe?model=1.7b'
+        if language is not None:
+            endpoint += '&language=' + language
+        headers = {self.service.TOKEN_HEADER: self.service.AUTH_TOKEN}
+        if request_id is not None:
+            headers['X-LiveLingo-Request-ID'] = request_id
+        request = Request(self.http_base + endpoint,
+                          data=audio if request_id is not None else None, headers=headers)
+        try:
+            response = self.http_client.open(request, timeout=3)
+        except HTTPError as error:
+            response = error
+        with response:
+            return response.code, json.load(response)
+
+    def test_http_realtime_a_then_queued_chinese_b_then_realtime_c_runs_a_c_b(self):
+        self.start_http_server()
+        entered, release = threading.Event(), threading.Event()
+        manual_queued, realtime_queued = threading.Event(), threading.Event()
+        order, tensor_threads = [], []
+        def generate(path, **kwargs):
+            label = Path(path).read_bytes().decode('ascii')
+            order.append(label)
+            tensor_threads.append(threading.get_ident())
+            if label == 'A':
+                entered.set()
+                if not release.wait(2):
+                    raise TimeoutError('Synthetic realtime A not released')
+            return SimpleNamespace(text=CHINESE if kwargs['language'] == 'Chinese' else label,
+                                   generation_tokens=18)
+        self.model.generate.side_effect = generate
+        def track(submit, event):
+            def enqueue(*args, **kwargs):
+                future = submit(*args, **kwargs)
+                event.set()
+                return future
+            return enqueue
+        with ThreadPoolExecutor(max_workers=3) as requests:
+            try:
+                a = requests.submit(self.http_request, 'realtime-a', None, b'A')
+                self.assertTrue(entered.wait(1))
+                with patch.object(self.executor, 'submit_manual',
+                                  side_effect=track(self.executor.submit_manual, manual_queued)), \
+                     patch.object(self.executor, 'submit',
+                                  side_effect=track(self.executor.submit, realtime_queued)):
+                    b = requests.submit(self.http_request, 'manual-b', 'Chinese', b'B')
+                    self.assertTrue(manual_queued.wait(1))
+                    self.assert_slot_capacity(self.service.INFERENCE_SLOTS, 2)
+                    self.assert_slot_capacity(self.service.MANUAL_INFERENCE_SLOTS, 0)
+                    c = requests.submit(self.http_request, 'realtime-c', None, b'C')
+                    self.assertTrue(realtime_queued.wait(1))
+                    self.assertEqual(order, ['A'])
+                    status, snapshot = self.http_request()
+                    self.assertEqual(status, 200)
+                    self.assertEqual(snapshot['requests'], {
+                        'realtime-a': {'model': '1.7b', 'state': 'running'},
+                        'manual-b': {'model': '1.7b', 'state': 'waiting'},
+                        'realtime-c': {'model': '1.7b', 'state': 'waiting'}})
+                    self.assertEqual(snapshot['completed_requests'], {})
+                    release.set()
+                    self.assertEqual(a.result(timeout=2)[0], 200)
+                    self.assertEqual(c.result(timeout=2)[0], 200)
+                    self.assertEqual(b.result(timeout=2)[0], 200)
+            finally:
+                release.set()
+        self.assertEqual(order, ['A', 'C', 'B'])
+        self.assertEqual(len(set(tensor_threads)), 1)
+        self.settle(lambda: not self.service.REQUEST_STATES and not self.service._TEMPORARY_FILES)
+        for request_id in ('realtime-a', 'manual-b', 'realtime-c'):
+            self.assert_released(request_id)
+
+    def test_http_manual_limit_leaves_all_three_realtime_slots_available(self):
+        self.start_http_server()
+        entered, release = threading.Event(), threading.Event()
+        queued = [threading.Event() for _ in range(3)]
+        order = []
+        def generate(path, **kwargs):
+            label = Path(path).read_bytes().decode('ascii')
+            order.append(label)
+            if kwargs['language'] == 'Chinese':
+                entered.set()
+                if not release.wait(2):
+                    raise TimeoutError('Synthetic manual inference not released')
+            return SimpleNamespace(text=CHINESE if kwargs['language'] == 'Chinese' else label,
+                                   generation_tokens=18)
+        self.model.generate.side_effect = generate
+        submit = self.executor.submit
+        def enqueue(function, request_id, *args, **kwargs):
+            future = submit(function, request_id, *args, **kwargs)
+            queued[int(request_id[-1])].set()
+            return future
+        with ThreadPoolExecutor(max_workers=4) as requests:
+            try:
+                manual = requests.submit(self.http_request, 'manual-owner', 'Chinese', b'M')
+                self.assertTrue(entered.wait(1))
+                self.assert_slot_capacity(self.service.INFERENCE_SLOTS, 3)
+                self.assert_slot_capacity(self.service.MANUAL_INFERENCE_SLOTS, 0)
+                for index in range(3):
+                    self.assertEqual(self.http_request('manual-overflow-' + str(index), 'Chinese'),
+                                     (503, {'error': 'ASR queue is full', 'retryable': True}))
+                # A cross-pool duplicate must release only its own admission,
+                # without publishing a completion receipt for the running owner.
+                self.assertEqual(self.http_request('manual-owner', 'English', b'M'),
+                                 (409, {'error': 'Request ID is already in use',
+                                        'reason': 'parameters_mismatch'}))
+                self.assert_slot_capacity(self.service.INFERENCE_SLOTS, 3)
+                self.assert_slot_capacity(self.service.MANUAL_INFERENCE_SLOTS, 0)
+                with patch.object(self.executor, 'submit', side_effect=enqueue):
+                    realtime = []
+                    for index in range(3):
+                        realtime.append(requests.submit(self.http_request,
+                            'realtime-' + str(index), None, str(index).encode('ascii')))
+                        self.assertTrue(queued[index].wait(1))
+                    self.assert_slot_capacity(self.service.INFERENCE_SLOTS, 0)
+                    status, snapshot = self.http_request()
+                    self.assertEqual(status, 200)
+                    self.assertEqual(set(snapshot['requests']),
+                                     {'manual-owner', 'realtime-0', 'realtime-1', 'realtime-2'})
+                    self.assertEqual(snapshot['completed_requests'], {})
+                    release.set()
+                    self.assertEqual(manual.result(timeout=2)[0], 200)
+                    for request in realtime:
+                        self.assertEqual(request.result(timeout=2)[0], 200)
+            finally:
+                release.set()
+        self.assertEqual(order, ['M', '0', '1', '2'])
+        self.settle(lambda: not self.service.REQUEST_STATES and not self.service._TEMPORARY_FILES)
+        for request_id in ('manual-owner', 'realtime-0', 'realtime-1', 'realtime-2'):
+            self.assert_released(request_id)
+
+    def test_manual_admission_errors_release_only_the_manual_slot(self):
+        self.assertEqual(self.post(request_id='invalid id'),
+                         (400, {'error': 'Invalid request ID'}))
+        self.assertEqual(self.service.resource_snapshot()['requests'], {})
+        self.assertEqual(self.service.resource_snapshot()['completed_requests'], {})
+        self.assert_slot_capacity(self.service.INFERENCE_SLOTS, 3)
+        self.assert_slot_capacity(self.service.MANUAL_INFERENCE_SLOTS, 1)
+        for index, error in enumerate((TimeoutError('Synthetic upload timeout'),
+                                       ValueError('Synthetic incomplete upload'))):
+            with self.subTest(error=type(error).__name__):
+                request_id = 'manual-upload-' + str(index)
+                handler = self.handler(request_id=request_id)
+                handler.read_audio_body = Mock(side_effect=error)
+                handler.do_POST()
+                self.assertEqual(handler.send_json.call_args.args[0],
+                                 408 if isinstance(error, TimeoutError) else 500)
+                self.assert_released(request_id)
+        self.model.generate.assert_not_called()
 
     def test_explicit_chinese_uses_enhanced_same_sentence_and_returns_source(self):
         status, payload = self.post()
@@ -241,6 +428,7 @@ class ExplicitChineseTests(unittest.TestCase):
     def test_unsupported_chinese_requests_are_rejected_before_admission(self):
         slots = Mock()
         self.service.INFERENCE_SLOTS = slots
+        self.service.MANUAL_INFERENCE_SLOTS = slots
         for query in ('model=parakeet&language=Chinese', 'model=1.7b&language=chinese',
                       'model=1.7b&language=Chinese&language=English',
                       'model=1.7b&language=Chinese&confirmed_language=zh',
@@ -340,6 +528,10 @@ class ExplicitChineseTests(unittest.TestCase):
                 self.assertNotIn('chinese-id', self.service.COMPLETED_REQUESTS)
                 self.assertTrue(self.service._TEMPORARY_FILES)
                 self.assertTrue(all(Path(path).exists() for path in self.service._TEMPORARY_FILES))
+                self.assert_slot_capacity(self.service.INFERENCE_SLOTS, 3)
+                self.assert_slot_capacity(self.service.MANUAL_INFERENCE_SLOTS, 0)
+                self.assertEqual(self.post(request_id='manual-overflow'),
+                                 (503, {'error': 'ASR queue is full', 'retryable': True}))
             finally:
                 release.set()
             # The next FIFO future runs after completion callbacks clean up.

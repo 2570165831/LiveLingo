@@ -2188,7 +2188,7 @@ struct ChineseRecognitionCaptionRow: View {
                 .fixedSize()
                 .foregroundStyle(ReadingAccessibility.secondaryText)
                 .help("字幕操作")
-                .accessibilityLabel("字幕操作：按中文重新识别或撤销")
+                .accessibilityLabel(presentation.actionsAccessibilityLabel)
                 .accessibilityIdentifier("caption-chinese-actions-\(segment.id)")
                 .opacity(showsActions ? 1 : 0)
                 .allowsHitTesting(showsActions)
@@ -2214,7 +2214,9 @@ struct ChineseRecognitionCaptionRow: View {
 
     /// The inline button and both menus use this same guarded event handler.
     func performCancellation() {
-        guard state.statuses[segment.id] == .recognizing else { return }
+        let presentation = ChineseRecognitionRowPresentation(status: state.statuses[segment.id],
+            availability: .available, canUndo: segment.canUndoChineseRecognition)
+        guard presentation.canCancel else { return }
         cancel()
     }
 }
@@ -2276,17 +2278,26 @@ struct ChineseRecognitionCaptionMenu: View {
     var body: some View {
         Button(ChineseRecognitionRowPresentation.actionTitle, action: performRecognition)
             .disabled(!presentation.canRecognize)
+            .help(presentation.unavailableReason ?? ChineseRecognitionRowPresentation.actionTitle)
+            .accessibilityLabel(ChineseRecognitionRowPresentation.actionTitle)
+            .accessibilityHint(presentation.unavailableReason ?? "使用本句录音按中文重新识别。")
             .accessibilityIdentifier("caption-recognize-chinese")
         if let reason = presentation.unavailableReason {
             Text(verbatim: reason)
+                .accessibilityLabel(reason)
                 .accessibilityIdentifier("caption-chinese-unavailable")
         }
-        if presentation.isRecognizing {
-            Button("取消中文重识别", action: performCancellation)
+        if presentation.canCancel {
+            Button(ChineseRecognitionRowPresentation.cancelActionTitle, action: performCancellation)
+                .accessibilityLabel(presentation.cancelAccessibilityLabel)
                 .accessibilityIdentifier("caption-cancel-chinese-menu")
         }
-        if presentation.canUndo {
+        if presentation.showsUndo {
             Button(ChineseRecognitionRowPresentation.undoTitle, action: performUndo)
+                .disabled(!presentation.canUndo)
+                .help(presentation.undoUnavailableReason ?? ChineseRecognitionRowPresentation.undoTitle)
+                .accessibilityLabel(ChineseRecognitionRowPresentation.undoTitle)
+                .accessibilityHint(presentation.undoUnavailableReason ?? "恢复中文重识别前的原句。")
                 .accessibilityIdentifier("caption-undo-chinese")
         }
     }
@@ -2297,7 +2308,7 @@ struct ChineseRecognitionCaptionMenu: View {
     }
 
     func performCancellation() {
-        guard presentation.isRecognizing else { return }
+        guard presentation.canCancel else { return }
         cancel()
     }
 
@@ -2314,7 +2325,7 @@ struct ChineseRecognitionCaptionStatus: View {
     var body: some View {
         if let status = presentation.statusText {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                if presentation.isRecognizing {
+                if presentation.isBusy {
                     ProgressView().controlSize(.small)
                         .accessibilityHidden(true)
                 } else if presentation.isFailure {
@@ -2327,14 +2338,21 @@ struct ChineseRecognitionCaptionStatus: View {
                     .foregroundStyle(ReadingAccessibility.secondaryText)
                     .textSelection(.disabled)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(presentation.statusAccessibilityLabel ?? status)
                     .accessibilityIdentifier("caption-chinese-status")
-                if presentation.isRecognizing {
-                    Button(ChineseRecognitionRowPresentation.cancelTitle, action: cancel)
+                if presentation.canCancel {
+                    Button(ChineseRecognitionRowPresentation.cancelTitle, action: performCancellation)
                         .controlSize(.small)
+                        .accessibilityLabel(presentation.cancelAccessibilityLabel)
                         .accessibilityIdentifier("caption-cancel-chinese")
                 }
             }
         }
+    }
+
+    func performCancellation() {
+        guard presentation.canCancel else { return }
+        cancel()
     }
 }
 
