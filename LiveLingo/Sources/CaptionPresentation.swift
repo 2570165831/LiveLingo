@@ -115,6 +115,7 @@ struct ChineseRecognitionRowPresentation {
     static let undoTitle = "撤销中文重识别"
     static let cancelTitle = "取消"
     static let cancelActionTitle = "取消中文重识别"
+    static let waitingStatusText = "已排队：课堂结束并完成实时转写后按中文重新识别"
 
     let isRecognizing: Bool
     let isBusy: Bool
@@ -139,11 +140,28 @@ struct ChineseRecognitionRowPresentation {
     }
 
     var actionsAccessibilityLabel: String {
-        isBusy ? "字幕操作：\(statusAccessibilityLabel ?? "")" : "字幕操作：按中文重新识别或撤销"
+        if isBusy { return "字幕操作：\(statusAccessibilityLabel ?? "")" }
+        if let reason = undoUnavailableReason {
+            return "字幕操作：暂不可重新识别或撤销，\(reason)"
+        }
+        if let reason = unavailableReason {
+            return "字幕操作：暂不可重新识别，\(reason)"
+        }
+        return "字幕操作：按中文重新识别或撤销"
+    }
+
+    var recognizeAccessibilityLabel: String {
+        guard let unavailableReason else { return Self.actionTitle }
+        return "\(Self.actionTitle)，暂不可重新识别：\(unavailableReason)"
+    }
+
+    var undoAccessibilityLabel: String {
+        guard let undoUnavailableReason else { return Self.undoTitle }
+        return "\(Self.undoTitle)，暂不可撤销：\(undoUnavailableReason)"
     }
 
     init(status: ChineseRecognitionStatus?, availability: ChineseRecognitionAvailability,
-         canUndo: Bool) {
+         canUndo: Bool, courseActionsAvailability: ChineseRecognitionAvailability = .available) {
         if case .recognizing? = status {
             isRecognizing = true
         } else {
@@ -154,8 +172,8 @@ struct ChineseRecognitionRowPresentation {
         case .waitingForRealtime?:
             isBusy = true
             canCancel = true
-            statusText = "等待实时转写结束…"
-            busyReason = "正在等待实时转写结束，暂不能重新识别或撤销；可取消本次请求。"
+            statusText = Self.waitingStatusText
+            busyReason = Self.waitingStatusText + "；暂不能重新识别或撤销，可取消本次请求。"
             isFailure = false
         case .recognizing?:
             isBusy = true
@@ -191,12 +209,14 @@ struct ChineseRecognitionRowPresentation {
             busyReason = nil
             isFailure = false
         }
-        canRecognize = availability.isAvailable && !isBusy
+        let courseReason = courseActionsAvailability.isAvailable ? nil
+            : courseActionsAvailability.reason ?? "课程当前不可操作，请稍后重试。"
+        canRecognize = availability.isAvailable && courseActionsAvailability.isAvailable && !isBusy
         showsUndo = canUndo
-        self.canUndo = canUndo && !isBusy
-        unavailableReason = busyReason ?? (availability.isAvailable ? nil
+        self.canUndo = canUndo && !isBusy && courseActionsAvailability.isAvailable
+        unavailableReason = busyReason ?? courseReason ?? (availability.isAvailable ? nil
             : availability.reason ?? "此句的录音已不可用，无法按中文重新识别。")
-        undoUnavailableReason = canUndo ? busyReason : nil
+        undoUnavailableReason = canUndo ? busyReason ?? courseReason : nil
     }
 }
 

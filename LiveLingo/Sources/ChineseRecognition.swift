@@ -17,6 +17,8 @@ struct ChineseRecognitionAvailability: Equatable, Sendable {
 @MainActor
 final class ChineseRecognitionPresentationState: ObservableObject {
     @Published var statuses: [UUID: ChineseRecognitionStatus] = [:]
+    @Published var courseActionsAvailability = ChineseRecognitionAvailability.unavailable(
+        "当前课程暂不能修改字幕，请在课堂中或打开已保存课程后操作。")
 }
 
 @MainActor

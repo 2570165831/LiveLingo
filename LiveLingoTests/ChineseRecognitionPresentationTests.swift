@@ -20,8 +20,18 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
 
     private func presentation(_ status: ChineseRecognitionStatus? = nil,
                               availability: ChineseRecognitionAvailability = .available,
-                              canUndo: Bool = false) -> ChineseRecognitionRowPresentation {
-        .init(status: status, availability: availability, canUndo: canUndo)
+                              canUndo: Bool = false,
+                              courseActionsAvailability: ChineseRecognitionAvailability = .available) -> ChineseRecognitionRowPresentation {
+        .init(status: status, availability: availability, canUndo: canUndo,
+              courseActionsAvailability: courseActionsAvailability)
+    }
+
+    private func presentationState(courseActionsAvailability: ChineseRecognitionAvailability = .available) -> ChineseRecognitionPresentationState {
+        let state = ChineseRecognitionPresentationState()
+        // Isolated UI fixtures have no AppModel lifecycle to publish permission.
+        // Keep the production idle default unavailable rather than weakening it.
+        state.courseActionsAvailability = courseActionsAvailability
+        return state
     }
 
     private func row(_ segment: TranscriptSegment, state: ChineseRecognitionPresentationState,
@@ -52,8 +62,63 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         XCTAssertNil(presentation(.completed, canUndo: true).statusText)
     }
 
+    func testCoursePermissionBlocksActionsWithoutMakingUndoDependOnAudio() {
+        let courseReason = "课程正在切换或保存，请稍后重试。"
+        let missingAudio = ChineseRecognitionAvailability.unavailable("此句录音已不在本机。")
+        let statuses: [ChineseRecognitionStatus?] = [nil, .completed, .cancelled, .failed("录音读取失败")]
+        for status in statuses {
+            for audio in [ChineseRecognitionAvailability.available, missingAudio] {
+                let blocked = presentation(status, availability: audio, canUndo: true,
+                    courseActionsAvailability: .unavailable(courseReason))
+                XCTAssertFalse(blocked.canRecognize)
+                XCTAssertTrue(blocked.showsUndo)
+                XCTAssertFalse(blocked.canUndo)
+                XCTAssertEqual(blocked.unavailableReason, courseReason)
+                XCTAssertEqual(blocked.undoUnavailableReason, courseReason)
+                XCTAssertEqual(blocked.actionsAccessibilityLabel, "字幕操作：暂不可重新识别或撤销，" + courseReason)
+                XCTAssertEqual(blocked.recognizeAccessibilityLabel, "按中文重新识别，暂不可重新识别：" + courseReason)
+                XCTAssertEqual(blocked.undoAccessibilityLabel, "撤销中文重识别，暂不可撤销：" + courseReason)
+                let released = presentation(status, availability: audio, canUndo: true,
+                    courseActionsAvailability: .available)
+                XCTAssertEqual(released.canRecognize, audio.isAvailable)
+                XCTAssertTrue(released.canUndo, "Restoring a backup must not inspect or require audio")
+                XCTAssertNil(released.undoUnavailableReason)
+            }
+        }
+        let noBackup = presentation(courseActionsAvailability: .unavailable(courseReason))
+        XCTAssertFalse(noBackup.showsUndo)
+        XCTAssertFalse(noBackup.canUndo)
+        XCTAssertNil(noBackup.undoUnavailableReason)
+        let missingCourseReason = presentation(canUndo: true,
+            courseActionsAvailability: .init(isAvailable: false, reason: nil))
+        XCTAssertEqual(missingCourseReason.unavailableReason, "课程当前不可操作，请稍后重试。")
+        XCTAssertEqual(missingCourseReason.undoUnavailableReason, missingCourseReason.unavailableReason)
+
+        for status in [ChineseRecognitionStatus.waitingForRealtime, .recognizing, .saving] {
+            let busy = presentation(status, availability: missingAudio, canUndo: true,
+                courseActionsAvailability: .unavailable(courseReason))
+            let ownedTask = presentation(status, canUndo: true)
+            XCTAssertFalse(busy.canRecognize)
+            XCTAssertFalse(busy.canUndo)
+            XCTAssertEqual(busy.unavailableReason, ownedTask.unavailableReason)
+            XCTAssertEqual(busy.undoUnavailableReason, ownedTask.undoUnavailableReason)
+            XCTAssertEqual(busy.canCancel, ownedTask.canCancel, "A queued request must remain cancellable")
+        }
+    }
+
+    func testProductionIdleStateStartsWithCourseActionsUnavailable() {
+        let state = ChineseRecognitionPresentationState()
+        var segment = english()
+        segment.applyChineseRecognition("合成中文原文")
+        let root = row(segment, state: state)
+        XCTAssertFalse(state.courseActionsAvailability.isAvailable)
+        XCTAssertFalse(root.actionPresentation().canRecognize)
+        XCTAssertFalse(root.actionPresentation().canUndo)
+        XCTAssertNotNil(root.actionPresentation().undoUnavailableReason)
+    }
+
     func testWaitingAndSavingExplainDisabledActionsAndAccessibilityLabels() {
-        let waitingReason = "正在等待实时转写结束，暂不能重新识别或撤销；可取消本次请求。"
+        let waitingReason = "已排队：课堂结束并完成实时转写后按中文重新识别；暂不能重新识别或撤销，可取消本次请求。"
         let waiting = presentation(.waitingForRealtime, canUndo: true)
         XCTAssertTrue(waiting.isBusy)
         XCTAssertFalse(waiting.isRecognizing)
@@ -62,12 +127,14 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         XCTAssertTrue(waiting.showsUndo)
         XCTAssertFalse(waiting.canUndo)
         XCTAssertFalse(waiting.isFailure)
-        XCTAssertEqual(waiting.statusText, "等待实时转写结束…")
+        XCTAssertEqual(waiting.statusText, "已排队：课堂结束并完成实时转写后按中文重新识别")
         XCTAssertEqual(waiting.unavailableReason, waitingReason)
         XCTAssertEqual(waiting.undoUnavailableReason, waitingReason)
-        XCTAssertEqual(waiting.statusAccessibilityLabel, "等待实时转写结束，可取消中文重识别。")
+        XCTAssertEqual(waiting.statusAccessibilityLabel, "已排队：课堂结束并完成实时转写后按中文重新识别，可取消中文重识别。")
+        XCTAssertEqual(waiting.recognizeAccessibilityLabel, "按中文重新识别，暂不可重新识别：" + waitingReason)
+        XCTAssertEqual(waiting.undoAccessibilityLabel, "撤销中文重识别，暂不可撤销：" + waitingReason)
         XCTAssertEqual(waiting.cancelAccessibilityLabel, "取消等待中的中文重识别")
-        XCTAssertEqual(waiting.actionsAccessibilityLabel, "字幕操作：等待实时转写结束，可取消中文重识别。")
+        XCTAssertEqual(waiting.actionsAccessibilityLabel, "字幕操作：已排队：课堂结束并完成实时转写后按中文重新识别，可取消中文重识别。")
 
         let savingReason = "正在保存中文识别结果，保存结束后才能重新识别或撤销，暂不可取消。"
         let saving = presentation(.saving, canUndo: true)
@@ -164,7 +231,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
 
     func testEntryAndUnavailableMenuUseRealSharedSwiftUIActionsOffscreen() async throws {
         let segment = english()
-        let state = ChineseRecognitionPresentationState()
+        let state = presentationState()
         var recognitions = 0
         let recognize = { recognitions += 1; state.statuses[segment.id] = .recognizing }
         let actions = ChineseRecognitionCaptionMenu(presentation: presentation(),
@@ -182,7 +249,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         }, height: 260)
         try capture(entry, name: "chinese-recognition-entry")
         let hoveredOnly = try await host(hovered, height: 200)
-        let unhovered = try await host(row(segment, state: ChineseRecognitionPresentationState()), height: 200)
+        let unhovered = try await host(row(segment, state: presentationState()), height: 200)
         XCTAssertNotEqual(try png(hoveredOnly), try png(unhovered), "The real hover menu entry must be drawn")
         XCTAssertTrue(actions.presentation.canRecognize)
         actions.performRecognition()
@@ -209,7 +276,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
 
     func testMountedRowObservesProgressCancelAndFailureWithoutReplacingText() async throws {
         let segment = english()
-        let state = ChineseRecognitionPresentationState()
+        let state = presentationState()
         var cancellations = 0
         let root = row(segment, state: state, cancel: {
             cancellations += 1
@@ -245,7 +312,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
     func testWaitingRowAndMenusRenderReasonAndAllowCancellationOffscreen() async throws {
         var segment = english()
         segment.applyChineseRecognition("已有中文原文，等待中的请求不应替换它。")
-        let state = ChineseRecognitionPresentationState()
+        let state = presentationState()
         var recognitions = 0
         var cancellations = 0
         var undos = 0
@@ -295,7 +362,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
     func testSavingRowAndMenusBlockActionsUntilCompletedOffscreen() async throws {
         var segment = english()
         segment.applyChineseRecognition("中文已经识别，保存中的原文应继续显示。")
-        let state = ChineseRecognitionPresentationState()
+        let state = presentationState()
         state.statuses[segment.id] = .saving
         var recognitions = 0
         var cancellations = 0
@@ -357,14 +424,14 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         let original = english()
         var segment = original
         segment.applyChineseRecognition("温度升高时，反应速率 increases，但不是任何情况下都成立。")
-        let state = ChineseRecognitionPresentationState()
+        let state = presentationState()
         state.statuses[segment.id] = .completed
         let completed = try await host(row(segment, state: state), height: 200)
         try capture(completed, name: "chinese-recognition-completed")
         let expected = try await host(TranscriptCaptionRow(segment: segment, textSize: 18, stream: FinalCaptionState())
             .equatable(), height: 200)
         XCTAssertEqual(try png(completed), try png(expected), "Completed manual Chinese must have only the original-caption row")
-        let originalView = try await host(row(original, state: ChineseRecognitionPresentationState()), height: 200)
+        let originalView = try await host(row(original, state: presentationState()), height: 200)
         XCTAssertNotEqual(try png(completed), try png(originalView), "The mounted row must visibly replace the original English")
         XCTAssertEqual(CaptionPresentation(segment).languageName, "中文原文")
         XCTAssertTrue(CaptionPresentation(segment).isSourceOnly)
@@ -388,7 +455,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         let stream = FinalCaptionState()
         let baseline = try await host(TranscriptCaptionRow(segment: segment, textSize: 18, stream: stream)
             .equatable(), height: 210)
-        let state = ChineseRecognitionPresentationState()
+        let state = presentationState()
         let wrapped = try await host(row(segment, state: state, stream: stream), height: 210)
         XCTAssertEqual(try png(wrapped), try png(baseline), "The English row must retain its exact rendered baseline")
         state.statuses[UUID()] = .recognizing
@@ -400,7 +467,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
 
     func testUnopenedMenuDoesNotResolveRecordingDuringCaptionOrStatusUpdates() async throws {
         let segment = english()
-        let state = ChineseRecognitionPresentationState()
+        let state = presentationState()
         var availabilityReads = 0
         let root = ChineseRecognitionCaptionRow(segment: segment, textSize: 18, stream: FinalCaptionState(),
             state: state, availability: {
@@ -415,6 +482,145 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         state.statuses[UUID()] = .recognizing
         try await settle(view)
         XCTAssertEqual(availabilityReads, 0, "Another caption's status must not inspect recording headers")
+        state.courseActionsAvailability = .unavailable("课程正在切换，请稍后重试。")
+        try await settle(view)
+        XCTAssertEqual(availabilityReads, 0, "Publishing course permission must not inspect recording headers")
+        state.courseActionsAvailability = .available
+        try await settle(view)
+        XCTAssertEqual(availabilityReads, 0, "Releasing course permission must not inspect recording headers")
+    }
+
+    func testMountedRowAndBothMenusObserveCourseSwitchWithCachedAvailableAudioOffscreen() async throws {
+        let statuses: [ChineseRecognitionStatus?] = [.completed, nil]
+        for (index, status) in statuses.enumerated() {
+            let original = english()
+            var segment = original
+            segment.applyChineseRecognition("切课时保留旧课程中文原文，暂不可修改。")
+            let state = presentationState()
+            state.statuses[segment.id] = status
+            let resolution = ChineseRecognitionMenuAvailabilityState()
+            var availabilityReads = 0
+            var recognitions = 0
+            var undos = 0
+            let fixture = MountedCourseActions(segment: segment, state: state, resolution: resolution,
+                stream: FinalCaptionState(), availability: {
+                    availabilityReads += 1
+                    return .available
+                }, recognize: { recognitions += 1 }, undo: {
+                    undos += 1
+                    XCTAssertTrue(segment.undoChineseRecognition())
+                })
+            let view = try await host(fixture, height: 460)
+            if availabilityReads == 0 {
+                fixture.resolvingMenu.menuDidAppear()
+                try await settle(view)
+            }
+            XCTAssertEqual(availabilityReads, 1)
+            XCTAssertTrue(fixture.hoverActions.presentation.canRecognize)
+            XCTAssertTrue(fixture.resolvingMenu.actions.presentation.canUndo)
+            let availablePixels = try png(view)
+
+            let reason = "课程正在切换或保存，请稍后重试。"
+            state.courseActionsAvailability = .unavailable(reason)
+            try await settle(view)
+            try capture(view, name: "chinese-recognition-course-switch-\(index)")
+            XCTAssertNotEqual(try png(view), availablePixels, "Mounted menus must visibly disable and explain the course switch")
+            XCTAssertEqual(resolution.value, .available, "The cached audio remains available during the switch")
+            XCTAssertEqual(availabilityReads, 1, "A course-only change must not read audio again")
+            XCTAssertFalse(fixture.captionRow.actionPresentation().canRecognize)
+            XCTAssertFalse(fixture.captionRow.actionPresentation().canUndo)
+            XCTAssertEqual(fixture.captionRow.actionPresentation().actionsAccessibilityLabel, "字幕操作：暂不可重新识别或撤销，" + reason)
+            for actions in [fixture.hoverActions, fixture.resolvingMenu.actions] {
+                XCTAssertFalse(actions.presentation.canRecognize)
+                XCTAssertFalse(actions.presentation.canUndo)
+                XCTAssertTrue(actions.presentation.showsUndo)
+                XCTAssertEqual(actions.presentation.unavailableReason, reason)
+                XCTAssertEqual(actions.presentation.undoUnavailableReason, reason)
+                XCTAssertEqual(actions.presentation.undoAccessibilityLabel, "撤销中文重识别，暂不可撤销：" + reason)
+                actions.performRecognition()
+                actions.performUndo()
+            }
+            XCTAssertEqual(recognitions, 0)
+            XCTAssertEqual(undos, 0)
+            XCTAssertEqual(CaptionPresentation(segment).primaryText, "切课时保留旧课程中文原文，暂不可修改。")
+
+            let expectedState = presentationState(courseActionsAvailability: .unavailable(reason))
+            expectedState.statuses[segment.id] = status
+            let expectedResolution = ChineseRecognitionMenuAvailabilityState()
+            expectedResolution.resolve { .available }
+            let expected = try await host(MountedCourseActions(segment: segment, state: expectedState,
+                resolution: expectedResolution, stream: FinalCaptionState(), availability: { .available },
+                recognize: {}, undo: {}), height: 460)
+            XCTAssertEqual(try png(view), try png(expected), "Mounted actions must match the course-disabled render without remounting")
+
+            state.courseActionsAvailability = .available
+            try await settle(view)
+            try capture(view, name: "chinese-recognition-course-switch-released-\(index)")
+            XCTAssertEqual(try png(view), availablePixels, "The same mounted menus must become available when switching ends")
+            XCTAssertEqual(availabilityReads, 1)
+            XCTAssertTrue(fixture.captionRow.actionPresentation().canRecognize)
+            XCTAssertTrue(fixture.hoverActions.presentation.canRecognize)
+            XCTAssertTrue(fixture.hoverActions.presentation.canUndo)
+            XCTAssertTrue(fixture.resolvingMenu.actions.presentation.canRecognize)
+            XCTAssertTrue(fixture.resolvingMenu.actions.presentation.canUndo)
+            fixture.resolvingMenu.actions.performUndo()
+            XCTAssertEqual(undos, 1, "One click after releasing the course barrier must dispatch undo")
+            XCTAssertEqual(segment, original)
+        }
+    }
+
+    func testMountedMissingAudioMenusKeepUndoAvailableWhenCoursePermissionReturnsOffscreen() async throws {
+        let original = english()
+        var segment = original
+        segment.applyChineseRecognition("录音缺失仍能恢复已有备份。")
+        let state = presentationState()
+        state.statuses[segment.id] = .completed
+        let resolution = ChineseRecognitionMenuAvailabilityState()
+        let audioReason = "此句录音已不在本机，无法重新识别。"
+        var availabilityReads = 0
+        var undos = 0
+        let fixture = MountedCourseActions(segment: segment, state: state, resolution: resolution,
+            stream: FinalCaptionState(), availability: {
+                availabilityReads += 1
+                return .unavailable(audioReason)
+            }, recognize: { XCTFail("Missing audio must never be submitted") }, undo: {
+                undos += 1
+                XCTAssertTrue(segment.undoChineseRecognition())
+            })
+        let view = try await host(fixture, height: 460)
+        if availabilityReads == 0 {
+            fixture.resolvingMenu.menuDidAppear()
+            try await settle(view)
+        }
+        XCTAssertEqual(availabilityReads, 1)
+        let availableUndoPixels = try png(view)
+        for actions in [fixture.hoverActions, fixture.resolvingMenu.actions] {
+            XCTAssertFalse(actions.presentation.canRecognize)
+            XCTAssertTrue(actions.presentation.canUndo)
+            XCTAssertEqual(actions.presentation.unavailableReason, audioReason)
+            XCTAssertNil(actions.presentation.undoUnavailableReason)
+            actions.performRecognition()
+        }
+        let courseReason = "课程正在切换或保存，请稍后重试。"
+        state.courseActionsAvailability = .unavailable(courseReason)
+        try await settle(view)
+        XCTAssertNotEqual(try png(view), availableUndoPixels)
+        for actions in [fixture.hoverActions, fixture.resolvingMenu.actions] {
+            XCTAssertFalse(actions.presentation.canUndo)
+            XCTAssertEqual(actions.presentation.undoUnavailableReason, courseReason)
+            actions.performUndo()
+        }
+        XCTAssertEqual(undos, 0)
+        state.courseActionsAvailability = .available
+        try await settle(view)
+        try capture(view, name: "chinese-recognition-missing-audio-undo")
+        XCTAssertEqual(try png(view), availableUndoPixels)
+        XCTAssertEqual(availabilityReads, 1, "Restoring undo permission must not resolve audio again")
+        XCTAssertTrue(fixture.hoverActions.presentation.canUndo)
+        XCTAssertTrue(fixture.resolvingMenu.actions.presentation.canUndo)
+        fixture.hoverActions.performUndo()
+        XCTAssertEqual(undos, 1)
+        XCTAssertEqual(segment, original)
     }
 
     func testResolvingMenuChecksRecordingWhenSharedActionsAppear() async throws {
@@ -424,7 +630,8 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         let menu = ChineseRecognitionResolvingMenu(status: nil, canUndo: false, availability: {
             availabilityReads += 1
             return .unavailable(reason)
-        }, recognize: { XCTFail("Missing audio must remain disabled") }, cancel: {}, undo: {},
+        }, courseState: presentationState(),
+            recognize: { XCTFail("Missing audio must remain disabled") }, cancel: {}, undo: {},
             availabilityState: resolution)
         XCTAssertEqual(availabilityReads, 0, "Constructing the menu must not inspect recording headers")
         let view = try await host(VStack(alignment: .leading, spacing: 12) { menu }.padding(20), height: 170)
@@ -448,7 +655,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         let segment = TranscriptSegment(startTime: 5, endTime: 8, english: "Synthetic pending sentence.")
         let stream = FinalCaptionState()
         stream.loadPresentationForTesting(segmentID: segment.id, text: "尚在生成的译文")
-        let state = ChineseRecognitionPresentationState()
+        let state = presentationState()
         let view = try await host(row(segment, state: state, stream: stream), height: 230)
         let before = try png(view)
         let baseline = SummaryRenderingDiagnostics.counts.streamingRows[segment.id.uuidString, default: 0]
@@ -472,6 +679,48 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
                 .padding(.leading, 84)
                 .padding(.trailing, 16)
                 .padding(.bottom, 14)
+        }
+    }
+
+    /// Mount production row and shared menu contents without opening native popups.
+    @MainActor
+    private struct MountedCourseActions: View {
+        // Keep these views constructed once. This parent intentionally observes
+        // neither state: retained menu content must refresh itself, without a
+        // replacement rootView or a parent rebuilding the menu value.
+        let captionRow: ChineseRecognitionCaptionRow
+        let resolvingMenu: ChineseRecognitionResolvingMenu
+        let hoverMenu: ChineseRecognitionObservingMenu
+
+        init(segment: TranscriptSegment, state: ChineseRecognitionPresentationState,
+             resolution: ChineseRecognitionMenuAvailabilityState, stream: FinalCaptionState,
+             availability: @escaping () -> ChineseRecognitionAvailability,
+             recognize: @escaping () -> Void, undo: @escaping () -> Void) {
+            var row = ChineseRecognitionCaptionRow(segment: segment, textSize: 18, stream: stream,
+                state: state, availability: availability, recognize: recognize, cancel: {}, undo: undo)
+            row.hoveredForTesting = true
+            captionRow = row
+            resolvingMenu = ChineseRecognitionResolvingMenu(status: state.statuses[segment.id],
+                canUndo: segment.canUndoChineseRecognition, availability: availability,
+                courseState: state,
+                recognize: recognize, cancel: {}, undo: undo, availabilityState: resolution)
+            hoverMenu = ChineseRecognitionObservingMenu(status: state.statuses[segment.id],
+                canUndo: segment.canUndoChineseRecognition, courseState: state, availabilityState: resolution,
+                recognize: recognize, cancel: {}, undo: undo)
+        }
+
+        var hoverActions: ChineseRecognitionCaptionMenu { hoverMenu.actions }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 16) {
+                captionRow
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("右键菜单内容").font(.caption).foregroundStyle(.secondary)
+                    resolvingMenu
+                    Text("悬停菜单内容").font(.caption).foregroundStyle(.secondary)
+                    hoverMenu
+                }.padding(.horizontal, 20)
+            }
         }
     }
 
