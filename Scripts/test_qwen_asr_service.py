@@ -727,7 +727,7 @@ class ServiceResponsivenessTests(unittest.TestCase):
         slots = Mock()
         with patch.object(service, 'INFERENCE_SLOTS', slots), patch.object(service, 'model_for') as load:
             for query in ('model=parakeet&language=auto', 'model=1.7b&language=xx',
-                          'model=1.7b&language=Chinese', 'model=1.7b&language=',
+                          'model=parakeet&language=Chinese', 'model=1.7b&language=',
                           'model=1.7b&language=auto&language=English'):
                 with self.subTest(query=query):
                     handler = self.synthetic_handler(query)

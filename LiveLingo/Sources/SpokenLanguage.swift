@@ -1,6 +1,6 @@
 import Foundation
 
-enum ASRLanguageMode: String, Sendable { case english, auto, probe }
+enum ASRLanguageMode: String, Sendable { case english, auto, probe; case chinese = "Chinese" }
 
 struct SpokenLanguage: Equatable, Sendable {
     enum WritingSystem: Hashable, Sendable {
@@ -139,6 +139,16 @@ struct ASRTranscription: Equatable, Sendable {
 
     static func validated(text: String, data: Data, requestedLanguage: ASRLanguageMode) throws -> Self {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if requestedLanguage == .chinese {
+            guard let response = try? JSONDecoder().decode(AutoResponse.self, from: data),
+                  response.language_mode == "explicit", response.language == "zh",
+                  response.decode == .forced, response.policy == 1, !response.truncated,
+                  (0..<256).contains(response.generated_tokens), !trimmed.isEmpty else {
+                throw QwenRuntimeError.invalidResponse
+            }
+            return Self(text: trimmed, languageMode: .chinese, language: "zh", decode: .forced,
+                generatedTokens: response.generated_tokens, truncated: false, policy: response.policy)
+        }
         if requestedLanguage == .probe {
             guard trimmed.isEmpty,
                   let response = try? JSONDecoder().decode(ProbeResponse.self, from: data),

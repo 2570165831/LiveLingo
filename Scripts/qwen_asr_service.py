@@ -669,12 +669,86 @@ def transcribe_parakeet(model, model_input_path):
         model.joint = original
 
 
+class ExplicitLanguageQualityError(ValueError):
+    """Only a fixed reason leaves the service; rejected text stays private."""
+    def __init__(self, reason):
+        super().__init__('ASR quality check failed')
+        self.reason = reason
+
+
+def chinese_quality_reason(text, audio_duration, generated_tokens):
+    """Chinese source quality plus conservative truncation/short-text checks."""
+    if (isinstance(generated_tokens, bool) or not isinstance(generated_tokens, int)
+            or generated_tokens < 0):
+        return 'invalid_metadata'
+    # generate() does not expose whether its last token was EOS. At the cap,
+    # reject conservatively rather than replace a sentence with a partial body.
+    if generated_tokens >= 256:
+        return 'truncated_transcript'
+    if not math.isfinite(audio_duration) or audio_duration <= 0:
+        return 'invalid_audio'
+    if not isinstance(text, str):
+        return 'invalid_text'
+    trimmed = text.strip()
+    if not trimmed:
+        return 'empty_transcript'
+    if '\uFFFD' in trimmed:
+        return 'invalid_text'
+    characters = ''.join(character for character in trimmed
+                         if character.isalpha() or character.isnumeric())
+    if not characters:
+        return 'invalid_text'
+    if audio_duration >= 8.0 and len(characters) == 1:
+        return 'implausibly_short'
+    if len(characters) > max(60, 12.0 * audio_duration):
+        return 'runaway_text'
+    if len(characters) >= 12:
+        for width in range(1, min(4, len(characters) // 2) + 1):
+            occurrences = {}
+            for start in range(len(characters) - width + 1):
+                unit = characters[start:start + width]
+                end, count = occurrences.get(unit, (0, 0))
+                if start < end:
+                    continue
+                count += 1
+                occurrences[unit] = (start + width, count)
+                if count >= 2 and count * width / len(characters) >= .60:
+                    return 'repeated_loop'
+    return None
+
+
+def transcribe_chinese(model, model_input_path):
+    """A user-selected sentence is decoded once, with no language probing."""
+    info = sf.info(model_input_path)
+    if info.samplerate <= 0 or info.frames <= 0:
+        raise ExplicitLanguageQualityError('invalid_audio')
+    audio_duration = info.frames / info.samplerate
+    if not math.isfinite(audio_duration):
+        raise ExplicitLanguageQualityError('invalid_audio')
+    result = model.generate(
+        model_input_path, language="Chinese", max_tokens=256,
+        temperature=0.0, verbose=False,
+    )
+    text = getattr(result, 'text', None)
+    generated_tokens = getattr(result, 'generation_tokens', None)
+    reason = chinese_quality_reason(text, audio_duration, generated_tokens)
+    if reason is not None:
+        raise ExplicitLanguageQualityError(reason)
+    return {"text": text.strip(), "language_mode": "explicit", "language": "zh",
+            "decode": "forced", "generated_tokens": generated_tokens,
+            "truncated": False, "policy": SOURCE_POLICY}
+
+
 def transcribe_audio(model_input_path: str, model_key: str, language_mode=None, probe_input_path=None, confirmed_language=None):
+    if language_mode == "Chinese" and (model_key not in {"0.6b", "1.7b"} or confirmed_language is not None):
+        raise ValueError('Unsupported explicit language request')
     # Keep MLX loading, evaluation and result access on one long-lived thread.
     with MODEL_LOCK:
         try:
             model = model_for(model_key)
             with measure("asr_inference"):
+                if language_mode == "Chinese":
+                    return transcribe_chinese(model, model_input_path)
                 if language_mode == "probe":
                     return probe_language_only(model, probe_input_path or model_input_path, model_key)
                 if language_mode == "auto":
@@ -1015,12 +1089,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         should_enhance = query.get("enhance", ["off"])[0] == "speech"
         languages = parse_qs(parsed.query, keep_blank_values=True).get("language", ["English"])
-        if len(languages) != 1 or languages[0] not in {"English", "auto", "probe"} or (
-            languages[0] in {"auto", "probe"} and model_key not in {"0.6b", "1.7b"}
+        if len(languages) != 1 or languages[0] not in {"English", "Chinese", "auto", "probe"} or (
+            languages[0] in {"Chinese", "auto", "probe"} and model_key not in {"0.6b", "1.7b"}
         ):
             self.send_json(400, {"error": "Unsupported language mode"})
             return
-        language_mode = languages[0] if languages[0] in {"auto", "probe"} else None
+        language_mode = languages[0] if languages[0] in {"Chinese", "auto", "probe"} else None
         confirmed = parse_qs(parsed.query, keep_blank_values=True).get("confirmed_language", [])
         if confirmed and (language_mode != "auto" or len(confirmed) != 1 or
                           confirmed[0] not in set(LANGUAGE_CODES.values()) - {"en"}):
@@ -1155,6 +1229,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Never answer with the owner's identity: a matched request_id
                 # and model would release the client's lease for the owner.
                 self.send_json(409, {"error": "Request ID is already in use"})
+            elif isinstance(error, ExplicitLanguageQualityError):
+                self.send_json(422, {"error": "ASR quality check failed", "reason": error.reason,
+                                     "request_id": request_id, "model": model_key})
             elif isinstance(error, ProbeQueueDeadlineExceeded):
                 self.send_json(504, {"error": "ASR queue deadline exceeded", "request_id": request_id,
                                      "model": model_key, "retryable": True})

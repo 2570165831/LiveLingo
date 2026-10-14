@@ -1233,6 +1233,7 @@ struct LearningSourceUnit: Encodable, Equatable, Sendable {
     /// The en/zh review protocol stays fixed. Non-English evidence contributes
     /// only the target group; pass-through speech uses target-normalized text.
     static func textGroups(for segment: TranscriptSegment, target: CaptionTranslationTarget = .simplifiedChinese) -> [(language: String, text: String)] {
+        if segment.isChineseOriginal { return [("zh", segment.english)] }
         let policy = target.sourcePolicy(for: segment.sourceLanguage)
         if target != .simplifiedChinese, policy.keepsSourceAsCaption {
             return [(target.rawValue, target.renderPassThrough(segment.english))]
@@ -1249,6 +1250,7 @@ struct LearningSourceUnit: Encodable, Equatable, Sendable {
     // Keep the legacy bilingual numeric/citation path exactly as it was.
     // An English target exposes only its actual English evidence group.
     static func bindingTexts(for segment: TranscriptSegment, target: CaptionTranslationTarget) -> [String] {
+        if segment.isChineseOriginal { return [segment.english] }
         if target == .simplifiedChinese { return [segment.english, segment.chinese] }
         return textGroups(for: segment, target: target).map(\.text)
     }
@@ -1479,7 +1481,7 @@ struct LearningNotebook: Sendable {
         guard batch.evidence.indices.contains(index), !quote.isEmpty else { return [] }
         let segment = batch.evidence[index]
         let bytes = Data(quote.utf8)
-        let groups = target == .simplifiedChinese
+        let groups = target == .simplifiedChinese && !segment.isChineseOriginal
             ? [(language: "en", text: segment.english), (language: "zh", text: segment.chinese)]
             : LearningSourceUnit.textGroups(for: segment, target: target)
         return groups.compactMap { language, text in
@@ -3206,14 +3208,25 @@ struct LearningDraft: Sendable {
     init?(checkpoint: SessionGenerationCheckpoint, snapshot: SessionSnapshot, model: String,
           systemPrompt: String? = nil) {
         guard let target = (try? OutputLanguage.storedLanguage(snapshot.targetLocale))?.generationTarget else { return nil }
+        let dependencyIDs = Set(checkpoint.evidenceIDs)
+        let byID = Dictionary(uniqueKeysWithValues: snapshot.segments
+            .filter { dependencyIDs.contains($0.id) }.map { ($0.id, $0) })
+        let batchIDs = checkpoint.batchEvidenceIDs ?? checkpoint.evidenceIDs
+        let evidence = batchIDs.compactMap { byID[$0] }
+        guard evidence.count == batchIDs.count,
+              checkpoint.evidenceIDs.allSatisfy({ byID[$0] != nil }) else { return nil }
+        // Rebuild the same batch prompt used when creating the draft. Prior
+        // question dependencies must not add a Chinese rule to an English batch.
+        let normal = LearningPrompts.generationPrompt(target: target, evidence: evidence)
         let defaultPrompt: String
         if target != .simplifiedChinese {
-            let recovery = LearningPrompts.generationPrompt(target: target, recoveringAfterOutputLimit: true)
+            let recovery = LearningPrompts.generationPrompt(target: target, recoveringAfterOutputLimit: true,
+                                                          evidence: evidence)
             let recoveryDigest = SessionArchiveCoding.digest(Data(recovery.utf8))
             defaultPrompt = checkpoint.promptDigest == recoveryDigest
-                ? recovery : target.learningNotePrompt
+                ? recovery : normal
         } else {
-            defaultPrompt = target.learningNotePrompt
+            defaultPrompt = normal
         }
         // Unknown digests still fail checkpoint.matches below; never revive a
         // saved custom prompt by substituting current generation instructions.
@@ -3221,11 +3234,6 @@ struct LearningDraft: Sendable {
         guard checkpoint.kind == "summary",
               checkpoint.matches(snapshot: snapshot, modelName: model, protocolVersion: 2,
                   input: checkpoint.input, prompt: prompt) else { return nil }
-        let byID = Dictionary(uniqueKeysWithValues: snapshot.segments.map { ($0.id, $0) })
-        let batchIDs = checkpoint.batchEvidenceIDs ?? checkpoint.evidenceIDs
-        let evidence = batchIDs.compactMap { byID[$0] }
-        guard evidence.count == batchIDs.count,
-              checkpoint.evidenceIDs.allSatisfy({ byID[$0] != nil }) else { return nil }
         self.init(id: checkpoint.id, evidence: evidence, model: model, input: checkpoint.input, target: target,
                   systemPrompt: prompt,
                   text: checkpoint.prefix, attempts: checkpoint.attempts, completedNote: checkpoint.completedNote,
@@ -3431,14 +3439,25 @@ enum LearningPrompts {
     Recovery request: the current evidence has been rebuilt as a smaller batch after an output limit. Start a fresh complete JSON response for THIS input only. Use only its current source IDs and offered q IDs. Do not continue discarded output, cite IDs from the previous batch, commit old coverage, or omit current formulas/values to force a shorter answer. Keep the same sourceVersion 2 schema and fixed Chinese kind/state codes; all free text remains English.
     """
 
+    static let chineseOriginalEvidenceRule = """
+    人工按中文重新识别的字幕是中文原文证据，不是译文。其 language 为 zh，正文及引用必须保留所给中文，不得把它翻成输出目标语言后冒充原文，也不得找回或推断已替换的英文。此类证据允许使用所给 zh 来源编号（包括 zh 开头的 sourceIDs 和带 .zh. 的 quoteID）；本条明确例外于上述只用目标语来源或禁止 zh 编号的规则。学习解释仍按本课程的笔记语言输出。其余来源规则保持不变。
+    """
+
+    static func promptWithChineseOriginalEvidence(_ prompt: String, evidence: [TranscriptSegment]) -> String {
+        evidence.contains(where: \.isChineseOriginal) ? prompt + "\n\n" + chineseOriginalEvidenceRule : prompt
+    }
+
     static func generationPrompt(target: CaptionTranslationTarget,
-                                 recoveringAfterOutputLimit: Bool = false) -> String {
+                                 recoveringAfterOutputLimit: Bool = false,
+                                 evidence: [TranscriptSegment] = []) -> String {
+        let prompt: String
         switch target {
-        case .simplifiedChinese: return generate
-        case .english: return recoveringAfterOutputLimit ? recoveryEnglish : generateEnglish
-        case .spanish: return recoveringAfterOutputLimit ? LatinLearningPrompts.recoverySpanish : LatinLearningPrompts.generateSpanish
-        case .french: return recoveringAfterOutputLimit ? LatinLearningPrompts.recoveryFrench : LatinLearningPrompts.generateFrench
+        case .simplifiedChinese: prompt = generate
+        case .english: prompt = recoveringAfterOutputLimit ? recoveryEnglish : generateEnglish
+        case .spanish: prompt = recoveringAfterOutputLimit ? LatinLearningPrompts.recoverySpanish : LatinLearningPrompts.generateSpanish
+        case .french: prompt = recoveringAfterOutputLimit ? LatinLearningPrompts.recoveryFrench : LatinLearningPrompts.generateFrench
         }
+        return promptWithChineseOriginalEvidence(prompt, evidence: evidence)
     }
 
     static func input(evidence: [TranscriptSegment], topics: [String], pending: [LearningNotebook.PendingPoint] = [],
@@ -3851,6 +3870,10 @@ final class LearningReviewQueue: ObservableObject {
 
         var resolvedScope: LearningReviewScope { scope ?? .wholeLesson }
 
+        var promptEvidence: [TranscriptSegment] {
+            batches.flatMap(\.evidence) + (followUpOnlyBatches ?? []).flatMap { $0.batch.evidence }
+        }
+
         /// `job.batches[index]` 之后的复查批次，以及插在它们之间的只含跟进记录的批次。
         func laterInputs(after index: Int) -> (batches: [LearningNoteBatch], followUpOnly: [(after: Int, batch: LearningNoteBatch)]) {
             (Array(batches.dropFirst(index + 1)),
@@ -3902,6 +3925,12 @@ final class LearningReviewQueue: ObservableObject {
         }
     }
 
+    nonisolated static func reviewPrompt(for job: Job, allowUnreleased: Bool = false) -> String? {
+        reviewPrompt(for: job.targetLocale, allowUnreleased: allowUnreleased).map {
+            LearningPrompts.promptWithChineseOriginalEvidence($0, evidence: job.promptEvidence)
+        }
+    }
+
     struct PreparedRequest {
         let input: PreparedReviewInput
         let prompt: String
@@ -3912,13 +3941,17 @@ final class LearningReviewQueue: ObservableObject {
     // The real worker uses this same entry, with the default release gate.
     static func prepareInput(_ batch: LearningNoteBatch, laterBatches: [LearningNoteBatch] = [],
                              followUpOnlyBatches: [(after: Int, batch: LearningNoteBatch)] = [],
-                             targetLocale: String? = nil, allowUnreleased: Bool = false) throws -> PreparedRequest {
-        guard let prompt = reviewPrompt(for: targetLocale, allowUnreleased: allowUnreleased),
+                             targetLocale: String? = nil, allowUnreleased: Bool = false,
+                             promptEvidence: [TranscriptSegment]? = nil) throws -> PreparedRequest {
+        guard let basePrompt = reviewPrompt(for: targetLocale, allowUnreleased: allowUnreleased),
               let target = (try? OutputLanguage.storedLanguage(targetLocale))?.generationTarget else {
             throw ReviewFailure(stage: .input, code: "unsupported_target", detail: "当前输出语言尚无可用的复查提示词")
         }
         let input = try LearningPrompts.reviewInput(batch, laterBatches: laterBatches,
                                                     followUpOnlyBatches: followUpOnlyBatches, target: target)
+        let prompt = LearningPrompts.promptWithChineseOriginalEvidence(basePrompt,
+            evidence: promptEvidence ?? (batch.evidence + laterBatches.flatMap(\.evidence)
+                + followUpOnlyBatches.flatMap { $0.batch.evidence }))
         return .init(input: input, prompt: prompt,
                      prefixInputDigest: prefixDigest(json: input.json, prompt: prompt, targetLocale: targetLocale))
     }
@@ -3930,7 +3963,7 @@ final class LearningReviewQueue: ObservableObject {
         let later = job.laterInputs(after: job.next)
         let request = try prepareInput(job.batches[job.next],
             laterBatches: later.batches, followUpOnlyBatches: later.followUpOnly,
-            targetLocale: job.targetLocale, allowUnreleased: allowUnreleased)
+            targetLocale: job.targetLocale, allowUnreleased: allowUnreleased, promptEvidence: job.promptEvidence)
         if let saved = job.prompt, saved != request.prompt {
             throw ReviewFailure(stage: .promptBinding, code: "unrecognized_saved_prompt",
                 detail: ClassroomFixedText.unknownReviewPrompt.text(targetCode: job.targetLocale ?? "zh-Hans"))
@@ -3947,6 +3980,7 @@ final class LearningReviewQueue: ObservableObject {
         }
         var job = Job(directory: directory, batches: batches, original: original,
                       prompt: prompt, targetLocale: SessionSnapshot.normalizedTargetLocale(targetLocale))
+        job.prompt = reviewPrompt(for: job, allowUnreleased: allowUnreleased)
         job.prefixInputDigest = try prepareInput(job, allowUnreleased: allowUnreleased).prefixInputDigest
         job.inputDigest = try ReviewInputBinding.digest(batches)
         return job
@@ -4823,7 +4857,7 @@ final class LearningReviewQueue: ObservableObject {
                     // resolves the bookmark. Keep target-dependent state intact
                     // if a best-effort read could not establish the target.
                     if deferredTargets.contains(jobs[index].id) { continue }
-                    guard let expectedPrompt = Self.reviewPrompt(for: jobs[index].targetLocale) else {
+                    guard let expectedPrompt = Self.reviewPrompt(for: jobs[index]) else {
                         // Keep the original prompt and wire prefix. These may
                         // become resumable when this language is implemented.
                         if jobs[index].next < jobs[index].batches.count {
@@ -5042,13 +5076,14 @@ final class LearningReviewQueue: ObservableObject {
         let courseDigest = try ReviewInputBinding.digest(reviewable)
         let bookmark = try? directory.bookmarkData(options: .withSecurityScope,
             includingResourceValuesForKeys: nil, relativeTo: nil)
-        let candidate = Job(directory: directory, batches: batches, original: notebook.markdown(),
+        var candidate = Job(directory: directory, batches: batches, original: notebook.markdown(),
             prompt: prompt, targetLocale: resolvedTarget, directoryBookmark: bookmark, scope: resolvedScope, identity: identity,
             inputDigest: digest, courseInputDigest: courseDigest,
             courseBatchDigests: try Dictionary(uniqueKeysWithValues: reviewable.map {
                 ($0.id.uuidString, try ReviewInputBinding.digest([$0]))
             }),
             followUpOnlyBatches: Self.followUpOnlyContext(in: notebook.batches, reviewed: batches, scope: resolvedScope))
+        candidate.prompt = Self.reviewPrompt(for: candidate, allowUnreleased: allowUnreleasedTargets)
         try validateLocation(candidate, at: directory, allowHistorical: false)
         // Validate saved reports before touching the queue. Reusing a UUID for
         // different content is an error even after the former job has finished.
@@ -5325,7 +5360,7 @@ final class LearningReviewQueue: ObservableObject {
         } else { identity = nil }
         let digest = try ReviewInputBinding.digest(batches)
         let courseDigest = try ReviewInputBinding.digest(reviewable)
-        let candidate = Job(directory: directory, batches: batches, original: notebook.markdown(),
+        var candidate = Job(directory: directory, batches: batches, original: notebook.markdown(),
             prompt: prompt, targetLocale: resolvedTarget,
             directoryBookmark: try? directory.bookmarkData(options: .withSecurityScope,
                 includingResourceValuesForKeys: nil, relativeTo: nil), scope: resolvedScope,
@@ -5334,6 +5369,7 @@ final class LearningReviewQueue: ObservableObject {
                 ($0.id.uuidString, try ReviewInputBinding.digest([$0]))
             }),
             followUpOnlyBatches: followUpOnlyContext(in: notebook.batches, reviewed: batches, scope: resolvedScope))
+        candidate.prompt = reviewPrompt(for: candidate, allowUnreleased: allowUnreleased)
         let validated = try validatedSnapshot(candidate, at: directory, allowHistorical: false)
         _ = try ReviewReportCollection.render(try ReviewReportCollection.read(in: directory) + [reportEntry(for: candidate)])
         let target = SessionDirectoryLocation.canonical(directory)
@@ -5604,7 +5640,7 @@ final class LearningReviewQueue: ObservableObject {
                 let priorIdentity = restored.identity
                 try upgradeIdentity(&restored, snapshot: snapshot)
                 var repaired = targetChanged || priorIdentity != restored.identity
-                if let prompt = Self.reviewPrompt(for: restored.targetLocale, allowUnreleased: allowUnreleasedTargets) {
+                if let prompt = Self.reviewPrompt(for: restored, allowUnreleased: allowUnreleasedTargets) {
                     if restored.prompt == nil {
                         restored.prompt = prompt
                         restored.prefix = ""
@@ -5669,7 +5705,7 @@ final class LearningReviewQueue: ObservableObject {
                 job = jobs[0]
             }
             if job.next < job.batches.count {
-                guard let prompt = Self.reviewPrompt(for: job.targetLocale, allowUnreleased: allowUnreleasedTargets), job.prompt == prompt,
+                guard let prompt = Self.reviewPrompt(for: job, allowUnreleased: allowUnreleasedTargets), job.prompt == prompt,
                       let target = (try? OutputLanguage.storedLanguage(job.targetLocale))?.generationTarget else {
                     throw ReviewFailure(stage: .input, code: "unsupported_target",
                         detail: "当前输出语言尚无可用的复查提示词；已保留原任务，未生成简体复查")

@@ -428,6 +428,48 @@ enum SandboxProbe {
                 try require(loaded.snapshot == appended && loaded.snapshot?.segments == [segment], "store reload differs")
                 try require(loaded.snapshot?.lastJournalSequence == 1, "journal replay differs")
             }
+            test("chinese_recognition_audio") {
+                let directory = base.appendingPathComponent("chinese-audio", isDirectory: true)
+                try fm.createDirectory(at: directory, withIntermediateDirectories: false)
+                let recording = directory.appendingPathComponent(SessionWorkspace.recordingFileName)
+                let layout = WAVContextClip.Layout(formatTag: 1, channelCount: 1, sampleRate: 16_000,
+                    bitsPerSample: 16, blockAlign: 2, dataOffset: 44, dataByteCount: 128_000)
+                var growing = WAVContextClip.header(layout: layout, payloadBytes: 0)
+                growing.append(Data(repeating: 0x11, count: 32_000))
+                growing.append(Data(repeating: 0x22, count: 64_000))
+                growing.append(Data(repeating: 0x33, count: 32_000))
+                try SensitiveFileIO.atomicWrite(growing, to: recording)
+                let slice = try ChineseRecognitionAudio.slice(segment: segment, directory: directory, ranges: [])
+                let clip = try slice.extract(to: directory)
+                let extracted = try Data(contentsOf: clip)
+                try require(slice.frames == 16_000..<48_000 && extracted.dropFirst(44) == Data(repeating: 0x22, count: 64_000),
+                    "Chinese retry did not extract its exact audio range")
+                try require(try Data(contentsOf: recording) == growing, "Chinese retry changed the growing recording")
+            }
+            test("chinese_recognition_archive") {
+                let directory = base.appendingPathComponent("chinese-archive", isDirectory: true)
+                let store = SessionStore(directory: directory)
+                let initial = try store.save(SessionSnapshot(segments: [segment]))
+                var corrected = segment
+                corrected.applyChineseRecognition("这句合成中文是原文。")
+                corrected.inputRevision = 1
+                let change = SessionInputRevision(fromRevision: 0, toRevision: 1, previousSegment: segment,
+                    replacementSegment: corrected, reason: "合成中文重识别")
+                let saved = try store.append(.inputRevision(change), expectedRevision: initial.storageRevision)
+                try SessionExporter.export(segments: saved.segments, sessionDirectory: directory)
+                guard var restored = try store.load()?.segments.first else { throw ProbeError.assertion("missing Chinese caption") }
+                try require(restored == corrected && restored.canUndoChineseRecognition, "Chinese source or undo did not reload")
+                try require(try String(contentsOf: directory.appendingPathComponent("transcript-en.txt"), encoding: .utf8)
+                    == corrected.english + "\n", "Chinese export did not keep source text")
+                try require(restored.undoChineseRecognition(), "Chinese source cannot be undone")
+                restored.inputRevision = 2
+                let undo = SessionInputRevision(fromRevision: 1, toRevision: 2, previousSegment: corrected,
+                    replacementSegment: restored, reason: "合成撤销中文重识别")
+                let undone = try store.append(.inputRevision(undo), expectedRevision: saved.storageRevision)
+                try SessionExporter.export(segments: undone.segments, sessionDirectory: directory)
+                try require(try store.load()?.segments.first == restored && restored.english == segment.english,
+                    "undo did not persist the original source")
+            }
             func recordedSession() throws -> URL {
                 let session = location == "tmp" ? try SessionWorkspace.makeTemporarySessionDirectory()
                     : try SessionWorkspace.makeRecoverableTemporarySessionDirectory()

@@ -35,6 +35,7 @@ CASE_NAMES = (
     "recovery_scan", "temporary_session_cleanup", "pending_cleanup_retry",
     "recording_recovery_index", "recording_recovery_bookmark",
     "session_store_roundtrip", "temporary_session_copy", "temporary_session_promote",
+    "chinese_recognition_audio", "chinese_recognition_archive",
     "review_queue_journal", "export_subfolder", "model_preclone_verify",
 )
 CHECK_NAMES = ("sandbox_identity", "container_parent_tracking") + tuple(

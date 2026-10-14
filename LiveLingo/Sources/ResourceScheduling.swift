@@ -240,7 +240,7 @@ actor ASRRequestCoordinator {
         request.httpBody = try Data(contentsOf: audioURL, options: .mappedIfSafe)
         try Task.checkCancellation()
         leases[key] = Lease(model: modelKey, language: language)
-        if language != .english { languageProbeCount += 1 }
+        if language == .auto || language == .probe { languageProbeCount += 1 }
         let transport = self.transport
         let started = ProcessInfo.processInfo.systemUptime
         Self.log.notice("asr event=acquired id=\(requestID, privacy: .public) model=\(modelKey, privacy: .public)")

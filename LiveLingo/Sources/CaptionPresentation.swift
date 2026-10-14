@@ -46,6 +46,13 @@ struct CaptionPresentation: Equatable {
 
     init(_ segment: TranscriptSegment, locale: Locale = CaptionLanguageNames.interfaceLocale,
          target: CaptionTranslationTarget = .simplifiedChinese) {
+        if segment.isChineseOriginal {
+            languageName = "中文原文"
+            sourceLanguage = "zh"
+            isSourceOnly = true
+            primaryText = segment.english
+            return
+        }
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
         sourceLanguage = segment.sourceLanguage
         isSourceOnly = target.keepsSourceAsCaption(language: segment.sourceLanguage)
@@ -60,6 +67,13 @@ struct CaptionPresentation: Equatable {
     init(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
          locale: Locale = CaptionLanguageNames.interfaceLocale,
          converter: ChineseScriptConverter = .shared) {
+        if segment.isChineseOriginal {
+            languageName = "中文原文"
+            sourceLanguage = "zh"
+            isSourceOnly = true
+            primaryText = segment.english
+            return
+        }
         languageName = CaptionLanguageNames.name(for: SpokenLanguage.nonEnglishCode(segment.sourceLanguage), locale: locale)
         sourceLanguage = segment.sourceLanguage
         isSourceOnly = outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
@@ -92,6 +106,47 @@ struct CaptionPresentation: Equatable {
 
     static func translationStatus(isTranslating: Bool) -> String {
         isTranslating ? "翻译中…" : "等待翻译…"
+    }
+}
+
+/// Per-row action state is separate from the immutable caption and its stream.
+struct ChineseRecognitionRowPresentation {
+    static let actionTitle = "按中文重新识别"
+    static let undoTitle = "撤销中文重识别"
+    static let cancelTitle = "取消"
+
+    let isRecognizing: Bool
+    let canRecognize: Bool
+    let canUndo: Bool
+    let unavailableReason: String?
+    let statusText: String?
+    let isFailure: Bool
+
+    init(status: ChineseRecognitionStatus?, availability: ChineseRecognitionAvailability,
+         canUndo: Bool) {
+        if case .recognizing? = status {
+            isRecognizing = true
+        } else {
+            isRecognizing = false
+        }
+        canRecognize = availability.isAvailable && !isRecognizing
+        self.canUndo = canUndo && !isRecognizing
+        unavailableReason = availability.isAvailable ? nil
+            : availability.reason ?? "此句的录音已不可用，无法按中文重新识别。"
+        switch status {
+        case .recognizing?:
+            statusText = "正在按中文重新识别…"
+            isFailure = false
+        case .cancelled?:
+            statusText = "已取消中文重识别，原句已保留。"
+            isFailure = false
+        case .failed(let reason)?:
+            statusText = "按中文重新识别失败：\(reason)；原句已保留。"
+            isFailure = true
+        case .completed?, nil:
+            statusText = nil
+            isFailure = false
+        }
     }
 }
 

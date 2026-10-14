@@ -152,6 +152,10 @@
 		A5F200000000000000000001 /* NoSpeechFilterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5F200000000000000000002 /* NoSpeechFilterTests.swift */; };
 		A5F300000000000000000001 /* NoSpeechPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5F300000000000000000002 /* NoSpeechPersistenceTests.swift */; };
 		D09000000000000000000001 /* SpeechPreviewInputQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = D09000000000000000000002 /* SpeechPreviewInputQueue.swift */; };
+		A689D3AE4D7F9FAA65535344 /* ChineseRecognition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16911007388311E4866DC855 /* ChineseRecognition.swift */; };
+		BAB9700E5C89EC6DBD45ECF4 /* ChineseRecognitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A453EE7B6B040CBD7F3695F2 /* ChineseRecognitionTests.swift */; };
+		984822288DBCE7B342B78DE4 /* ChineseRecognitionStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E9738A9BBB219761B315EC /* ChineseRecognitionStorageTests.swift */; };
+		AF7117C4700D5CDBD1F521E7 /* ChineseRecognitionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 510CF63739944F591E675A5B /* ChineseRecognitionPresentationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -315,6 +319,10 @@
 		A5F200000000000000000002 /* NoSpeechFilterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoSpeechFilterTests.swift; sourceTree = "<group>"; };
 		A5F300000000000000000002 /* NoSpeechPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoSpeechPersistenceTests.swift; sourceTree = "<group>"; };
 		D09000000000000000000002 /* SpeechPreviewInputQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPreviewInputQueue.swift; sourceTree = "<group>"; };
+		16911007388311E4866DC855 /* ChineseRecognition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChineseRecognition.swift; sourceTree = "<group>"; };
+		A453EE7B6B040CBD7F3695F2 /* ChineseRecognitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChineseRecognitionTests.swift; sourceTree = "<group>"; };
+		13E9738A9BBB219761B315EC /* ChineseRecognitionStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChineseRecognitionStorageTests.swift; sourceTree = "<group>"; };
+		510CF63739944F591E675A5B /* ChineseRecognitionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChineseRecognitionPresentationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -371,6 +379,7 @@
 				A20000000000000000000003 /* FloatingSubtitleView.swift */,
 				A20000000000000000000004 /* AppModel.swift */,
 				A20000000000000000000005 /* SpeechPipeline.swift */,
+				16911007388311E4866DC855 /* ChineseRecognition.swift */,
 				EA1F1D3944F74AA19F668902 /* SpokenLanguage.swift */,
 				EA1F1D3944F74AA19F668904 /* SourceLanguagePolicy.swift */,
 				A20000000000000000000006 /* TranscriptSegment.swift */,
@@ -454,6 +463,9 @@
 				789000000000000000000004 /* MultilingualSessionExporterTests.swift */,
 				789000000000000000000002 /* MultilingualLearningNotesTests.swift */,
 				6C634054097ADC3A8106F6CC /* MultilingualCaptionGateTests.swift */,
+				A453EE7B6B040CBD7F3695F2 /* ChineseRecognitionTests.swift */,
+				13E9738A9BBB219761B315EC /* ChineseRecognitionStorageTests.swift */,
+				510CF63739944F591E675A5B /* ChineseRecognitionPresentationTests.swift */,
 				E36FE3F43F9C3628B4ACABDC /* MultilingualAppModelTests.swift */,
 				7F0000000000000000000002 /* TranslationFailureRecoveryTests.swift */,
 				7F0000000000000000000006 /* TranslationRetirementRegressionTests.swift */,
@@ -593,6 +605,7 @@
 				A10000000000000000000003 /* FloatingSubtitleView.swift in Sources */,
 				A10000000000000000000004 /* AppModel.swift in Sources */,
 				A10000000000000000000005 /* SpeechPipeline.swift in Sources */,
+				A689D3AE4D7F9FAA65535344 /* ChineseRecognition.swift in Sources */,
 				EA1F1D3944F74AA19F668901 /* SpokenLanguage.swift in Sources */,
 				EA1F1D3944F74AA19F668903 /* SourceLanguagePolicy.swift in Sources */,
 				A10000000000000000000006 /* TranscriptSegment.swift in Sources */,
@@ -678,6 +691,9 @@
 				EA1F1D3944F74AA19F668905 /* SourceLanguagePolicyTests.swift in Sources */,
 				EA1F1D3944F74AA19F668907 /* LanguageCompatibilityTests.swift in Sources */,
 				23DAF99A6A46840EF75BFF87 /* MultilingualCaptionGateTests.swift in Sources */,
+				BAB9700E5C89EC6DBD45ECF4 /* ChineseRecognitionTests.swift in Sources */,
+				984822288DBCE7B342B78DE4 /* ChineseRecognitionStorageTests.swift in Sources */,
+				AF7117C4700D5CDBD1F521E7 /* ChineseRecognitionPresentationTests.swift in Sources */,
 				85FDBC2832DCA7D90ADB81A7 /* MultilingualAppModelTests.swift in Sources */,
 				7F0000000000000000000001 /* TranslationFailureRecoveryTests.swift in Sources */,
 				7F0000000000000000000005 /* TranslationRetirementRegressionTests.swift in Sources */,
