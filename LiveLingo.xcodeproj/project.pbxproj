@@ -150,6 +150,7 @@
 		AA1212000000000000000001 /* SavedProcessingViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1212000000000000000002 /* SavedProcessingViewTests.swift */; };
 		A5F100000000000000000001 /* SpeechPresenceGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5F100000000000000000002 /* SpeechPresenceGate.swift */; };
 		A5F200000000000000000001 /* NoSpeechFilterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5F200000000000000000002 /* NoSpeechFilterTests.swift */; };
+		A5F400000000000000000001 /* SingleWordEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5F400000000000000000002 /* SingleWordEvidenceTests.swift */; };
 		A5F300000000000000000001 /* NoSpeechPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5F300000000000000000002 /* NoSpeechPersistenceTests.swift */; };
 		D09000000000000000000001 /* SpeechPreviewInputQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = D09000000000000000000002 /* SpeechPreviewInputQueue.swift */; };
 		A689D3AE4D7F9FAA65535344 /* ChineseRecognition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16911007388311E4866DC855 /* ChineseRecognition.swift */; };
@@ -317,6 +318,7 @@
 		AA1212000000000000000002 /* SavedProcessingViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedProcessingViewTests.swift; sourceTree = "<group>"; };
 		A5F100000000000000000002 /* SpeechPresenceGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPresenceGate.swift; sourceTree = "<group>"; };
 		A5F200000000000000000002 /* NoSpeechFilterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoSpeechFilterTests.swift; sourceTree = "<group>"; };
+		A5F400000000000000000002 /* SingleWordEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingleWordEvidenceTests.swift; sourceTree = "<group>"; };
 		A5F300000000000000000002 /* NoSpeechPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoSpeechPersistenceTests.swift; sourceTree = "<group>"; };
 		D09000000000000000000002 /* SpeechPreviewInputQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPreviewInputQueue.swift; sourceTree = "<group>"; };
 		16911007388311E4866DC855 /* ChineseRecognition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChineseRecognition.swift; sourceTree = "<group>"; };
@@ -482,6 +484,7 @@
 				E10000000000000000000002 /* SessionEnergyTests.swift */,
 				337292BF21D61DC3DF379BC0 /* ResourceSchedulingTests.swift */,0464AE938D0DA8BDFC01AC02 /* CaptionIdentityTests.swift */, C7D2E5F80A1B4C3D9E6F7A82 /* TypedTranslationSchedulingTests.swift */, A604E8F57B707990169FA517 /* SessionTreeMigrationTests.swift */, E3E7681F6F6509C442F83158 /* SessionStoreTests.swift */, EA1F1D3944F74AA19F668906 /* SourceLanguagePolicyTests.swift */, EA1F1D3944F74AA19F668908 /* LanguageCompatibilityTests.swift */, 6B24813D3AB630C6B987A16C /* AudioRemediationTests.swift */,
 				A5F200000000000000000002 /* NoSpeechFilterTests.swift */,
+				A5F400000000000000000002 /* SingleWordEvidenceTests.swift */,
 				A5F300000000000000000002 /* NoSpeechPersistenceTests.swift */, 8A7AEC88E07581EB6259A137 /* MLXOwnershipTests.swift */, 61481391EF47F304FE7C5586 /* TranscriptStateTests.swift */, A20000000000000000000008 /* SessionExporterTests.swift */,
 				D6D19B51987F543F2052B578 /* AlarmPresentationTests.swift */,
 				B45E254EF0467B90D100F425 /* AlarmLifecycleTests.swift */,
@@ -701,6 +704,7 @@
 				0E5D0123C95A0E85803EF27C /* MultilingualTranslationTests.swift in Sources */,
 				426BDE147DC859D73739A60C /* AudioRemediationTests.swift in Sources */,
 				A5F200000000000000000001 /* NoSpeechFilterTests.swift in Sources */,
+				A5F400000000000000000001 /* SingleWordEvidenceTests.swift in Sources */,
 				A5F300000000000000000001 /* NoSpeechPersistenceTests.swift in Sources */,
 				0CE01B4507E3276B965D388A /* MLXOwnershipTests.swift in Sources */,
 				E10000000000000000000003 /* MLXExitCancellationTests.swift in Sources */,

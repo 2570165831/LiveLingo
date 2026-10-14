@@ -1,0 +1,980 @@
+{
+  "schema": 1,
+  "recognizers": [
+    "Parakeet TDT 0.6B v2",
+    "Qwen3-ASR 1.7B 4bit"
+  ],
+  "notes": [
+    "Original, unenhanced audio is used for energy, sound classification and language head.",
+    "Primary is raw Parakeet; automatic is enhanced Parakeet; fallback is enhanced forced-English Qwen.",
+    "TTS input and published caption ranges identify speech presence, not recognizer accuracy.",
+    "I input sometimes decodes as Ah or Oh; those speech controls remain included.",
+    "Public ranges are official-caption timing proxies; not audited by listening."
+  ],
+  "publicSource": {
+    "captions": "https://cdn.cs50.net/2025/fall/lectures/3/lang/en/lecture3.srt",
+    "audioSHA256": "8abb356344faeab8b95f8e28d4672636a6330614d1853aa33ebe39bcc1c35946"
+  },
+  "rows": [
+    {
+      "id": "breath-3",
+      "audioFile": "breath-3.wav",
+      "sha256": "022c18977766cd623f7944da35799a4495f43989062ac71abf645af828d8a09b",
+      "duration": 2.0,
+      "truth": "no-speech",
+      "reference": null,
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "I."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "None",
+        "language_probability": 0.9974555969238281,
+        "english_probability": 0.0019255423685535789,
+        "policy": 1
+      },
+      "provenance": {}
+    },
+    {
+      "id": "breath-4",
+      "audioFile": "breath-4.wav",
+      "sha256": "34e02eaba46e113149c768919e28fd541f4ed5af172393fe6aa1cb5770a87df7",
+      "duration": 4.0,
+      "truth": "no-speech",
+      "reference": null,
+      "primary": {
+        "text": "Really?",
+        "pk_mean_probability": 0.34258030689898045,
+        "pk_min_probability": 0.1874963366405347,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "Really?",
+            "start": 3.4399999999999995,
+            "end": 3.5199999999999996
+          }
+        ]
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "I."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "None",
+        "language_probability": 0.9973539710044861,
+        "english_probability": 0.0019253460923209786,
+        "policy": 1
+      },
+      "provenance": {}
+    },
+    {
+      "id": "breath-5",
+      "audioFile": "breath-5.wav",
+      "sha256": "30d890284b6a56b772d28dd9308f87876d39f26a24c6c469d60885454df064be",
+      "duration": 8.0,
+      "truth": "no-speech",
+      "reference": null,
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "The."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "None",
+        "language_probability": 0.9969382882118225,
+        "english_probability": 0.0021807935554534197,
+        "policy": 1
+      },
+      "provenance": {}
+    },
+    {
+      "id": "floor-5",
+      "audioFile": "floor-5.wav",
+      "sha256": "bde007a3f03c55b4d59d33e1e0f67c4d367158b0e05e73cabf41cd9bfcb13a8c",
+      "duration": 8.0,
+      "truth": "no-speech",
+      "reference": null,
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "I."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "None",
+        "language_probability": 0.4308456480503082,
+        "english_probability": 0.20351706445217133,
+        "policy": 1
+      },
+      "provenance": {}
+    },
+    {
+      "id": "Whisper-yes-85-0.0008",
+      "audioFile": "Whisper-yes-85-0.0008.wav",
+      "sha256": "3fc24e74fbd0e24b9bf773ea1173e2fbcbd176173956107f8a22696fd4ab7f12",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "Yes.",
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "Yes."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "English",
+        "language_probability": 0.6800528764724731,
+        "english_probability": 0.6800528764724731,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Whisper",
+        "say_rate": 85,
+        "reused_base": false,
+        "base_sha256": "5c7ddfca77ea282bc2899776496559bdfc60e94af2a8c224203458a70d11afe6",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "Whisper-ok-85-0.0025",
+      "audioFile": "Whisper-ok-85-0.0025.wav",
+      "sha256": "68309e42f4b96fed1d2c1f63769d81551392aa3c5ce9f5fd7b9c033a219f6a92",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "OK.",
+      "primary": {
+        "text": "Okay.",
+        "pk_mean_probability": 0.6557020928494943,
+        "pk_min_probability": 0.5892796795308807,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "Okay.",
+            "start": 3.2800000000000002,
+            "end": 3.76
+          }
+        ]
+      },
+      "automatic": {
+        "text": "Okay.",
+        "pk_mean_probability": 0.6557020928494943,
+        "pk_min_probability": 0.5892796795308807,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "Okay.",
+            "start": 3.2800000000000002,
+            "end": 3.76
+          }
+        ]
+      },
+      "fallback": {
+        "text": "Okay."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "English",
+        "language_probability": 0.6867778897285461,
+        "english_probability": 0.6867778897285461,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Whisper",
+        "say_rate": 85,
+        "reused_base": false,
+        "base_sha256": "af11c5dd220961ba84b6dfb9d44d68b8c26b16eef1e99c62bfa84d716b10a337",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "Whisper-no-85-0.0025",
+      "audioFile": "Whisper-no-85-0.0025.wav",
+      "sha256": "c13fc7cdf48a8367c06f85ea7dc94163ce21d080ffa2f139e117fbba634cc743",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "No.",
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "No."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Chinese",
+        "language_probability": 0.5824509263038635,
+        "english_probability": 0.12996236979961395,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Whisper",
+        "say_rate": 85,
+        "reused_base": false,
+        "base_sha256": "ac9b2e903d50541d933c2762af5bc07e48dac6ae3b36706c64339e1a602adbf9",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "Whisper-so-85-0.0025",
+      "audioFile": "Whisper-so-85-0.0025.wav",
+      "sha256": "07765910b1a267e8a70928ab6bd1c71ef5c761509ea56d89d38435a5e397dd3d",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "So.",
+      "primary": {
+        "text": "So",
+        "pk_mean_probability": 0.5268182544155922,
+        "pk_min_probability": 0.5268182544155922,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "So",
+            "start": 0.32,
+            "end": 0.64
+          }
+        ]
+      },
+      "automatic": {
+        "text": "So",
+        "pk_mean_probability": 0.5268182544155922,
+        "pk_min_probability": 0.5268182544155922,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "So",
+            "start": 0.32,
+            "end": 0.64
+          }
+        ]
+      },
+      "fallback": {
+        "text": "So."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "English",
+        "language_probability": 0.9725906848907471,
+        "english_probability": 0.9725906848907471,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Whisper",
+        "say_rate": 85,
+        "reused_base": false,
+        "base_sha256": "55d438148d4d124aff38c309e806d3690c7c5fec640a94d25fc94eb098218db7",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "Whisper-seven-85-0.0025",
+      "audioFile": "Whisper-seven-85-0.0025.wav",
+      "sha256": "9aad6e7ad5ee18682835a1aeff686a1e62506b67677a4d28b004350318e21d6f",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "Seven.",
+      "primary": {
+        "text": "So",
+        "pk_mean_probability": 0.7889976928190761,
+        "pk_min_probability": 0.7889976928190761,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "So",
+            "start": 3.2800000000000002,
+            "end": 3.4400000000000004
+          }
+        ]
+      },
+      "automatic": {
+        "text": "So",
+        "pk_mean_probability": 0.7889976928190761,
+        "pk_min_probability": 0.7889976928190761,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "So",
+            "start": 3.2800000000000002,
+            "end": 3.4400000000000004
+          }
+        ]
+      },
+      "fallback": {
+        "text": "Seven."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Spanish",
+        "language_probability": 0.5575131177902222,
+        "english_probability": 0.04038611426949501,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Whisper",
+        "say_rate": 85,
+        "reused_base": false,
+        "base_sha256": "5c91aeb2e9c8fef6acac43baa2d3d8bd091893b50853371a1e4db86fd6f45254",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "Samantha-i-65-0.0025",
+      "audioFile": "Samantha-i-65-0.0025.wav",
+      "sha256": "d3f9c5e7e3f1486a001c5fac73b80c4bb46a4b22c08af5d41795064a8536ba6e",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "I.",
+      "primary": {
+        "text": "Oh.",
+        "pk_mean_probability": 0.45945794367228826,
+        "pk_min_probability": 0.28639989487923245,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "Oh.",
+            "start": 0.16,
+            "end": 0.8800000000000001
+          }
+        ]
+      },
+      "automatic": {
+        "text": "Oh.",
+        "pk_mean_probability": 0.45945794367228826,
+        "pk_min_probability": 0.28639989487923245,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "Oh.",
+            "start": 0.16,
+            "end": 0.8800000000000001
+          }
+        ]
+      },
+      "fallback": {
+        "text": "Ah."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Chinese",
+        "language_probability": 0.9995410442352295,
+        "english_probability": 2.7523810786078684e-05,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Samantha",
+        "say_rate": 65,
+        "reused_base": true,
+        "base_sha256": "977c959bf3707c3f51a320983ab68f80bb4b9c47db937812c0e721361b32f76b",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "Karen-i-65-0.0008",
+      "audioFile": "Karen-i-65-0.0008.wav",
+      "sha256": "39afb8bbdd21fb1d1292d7ddedda543bc8d9b01b75135a130175db919bb2da32",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "I.",
+      "primary": {
+        "text": "Um",
+        "pk_mean_probability": 0.8658035277538807,
+        "pk_min_probability": 0.7441467881018884,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "Um",
+            "start": 3.12,
+            "end": 3.3600000000000003
+          }
+        ]
+      },
+      "automatic": {
+        "text": "Um",
+        "pk_mean_probability": 0.8658035277538807,
+        "pk_min_probability": 0.7441467881018884,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "Um",
+            "start": 3.12,
+            "end": 3.3600000000000003
+          }
+        ]
+      },
+      "fallback": {
+        "text": "Oh."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Chinese",
+        "language_probability": 0.8226620554924011,
+        "english_probability": 0.004891727119684219,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Karen",
+        "say_rate": 65,
+        "reused_base": true,
+        "base_sha256": "0354cd9dc2b27f3d46fe247834cc38fb8d260870f05a1c26a72c97c8f813fbf5",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "Whisper-ok-85-0.0008",
+      "audioFile": "Whisper-ok-85-0.0008.wav",
+      "sha256": "74c40936b640e8569bbda0ecca8ba6e2f923e12b8ea0121459b7337d14ca1743",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "OK.",
+      "primary": {
+        "text": "Okay, this one's a little bit more.",
+        "pk_mean_probability": 0.4018556062559248,
+        "pk_min_probability": 0.07816397771303976,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "Okay,",
+            "start": 0.24,
+            "end": 0.5599999999999999
+          },
+          {
+            "text": "this",
+            "start": 0.72,
+            "end": 0.7999999999999999
+          },
+          {
+            "text": "one's",
+            "start": 0.8799999999999999,
+            "end": 2.16
+          },
+          {
+            "text": "a",
+            "start": 2.16,
+            "end": 2.24
+          },
+          {
+            "text": "little",
+            "start": 2.24,
+            "end": 2.3200000000000003
+          },
+          {
+            "text": "bit",
+            "start": 2.3200000000000003,
+            "end": 2.4000000000000004
+          },
+          {
+            "text": "more.",
+            "start": 2.4,
+            "end": 2.64
+          }
+        ]
+      },
+      "automatic": {
+        "text": "Okay, this one's a little bit more.",
+        "pk_mean_probability": 0.4018556062559248,
+        "pk_min_probability": 0.07816397771303976,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "Okay,",
+            "start": 0.24,
+            "end": 0.5599999999999999
+          },
+          {
+            "text": "this",
+            "start": 0.72,
+            "end": 0.7999999999999999
+          },
+          {
+            "text": "one's",
+            "start": 0.8799999999999999,
+            "end": 2.16
+          },
+          {
+            "text": "a",
+            "start": 2.16,
+            "end": 2.24
+          },
+          {
+            "text": "little",
+            "start": 2.24,
+            "end": 2.3200000000000003
+          },
+          {
+            "text": "bit",
+            "start": 2.3200000000000003,
+            "end": 2.4000000000000004
+          },
+          {
+            "text": "more.",
+            "start": 2.4,
+            "end": 2.64
+          }
+        ]
+      },
+      "fallback": {
+        "text": "I."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Chinese",
+        "language_probability": 0.5715195536613464,
+        "english_probability": 0.1275232434272766,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Whisper",
+        "say_rate": 85,
+        "reused_base": false,
+        "base_sha256": "af11c5dd220961ba84b6dfb9d44d68b8c26b16eef1e99c62bfa84d716b10a337",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "Whisper-seven-85-0.0008",
+      "audioFile": "Whisper-seven-85-0.0008.wav",
+      "sha256": "eb929a1c103bd49dac525c53ad85ad5621b068db7d2d3eb1b9d01acace330c03",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "Seven.",
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "I."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "English",
+        "language_probability": 0.5351889133453369,
+        "english_probability": 0.5351889133453369,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Whisper",
+        "say_rate": 85,
+        "reused_base": false,
+        "base_sha256": "5c91aeb2e9c8fef6acac43baa2d3d8bd091893b50853371a1e4db86fd6f45254",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "Daniel-no-85-0.0008",
+      "audioFile": "Daniel-no-85-0.0008.wav",
+      "sha256": "f8ce31bc78373b3d1bbb034138daddbbac418286ea06fefa30a0dffa3e7adfa6",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "No.",
+      "primary": {
+        "text": "No.",
+        "pk_mean_probability": 0.3402406053420013,
+        "pk_min_probability": 0.317133110816596,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "No.",
+            "start": 3.12,
+            "end": 3.6799999999999997
+          }
+        ]
+      },
+      "automatic": {
+        "text": "No.",
+        "pk_mean_probability": 0.3402406053420013,
+        "pk_min_probability": 0.317133110816596,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "No.",
+            "start": 3.12,
+            "end": 3.6799999999999997
+          }
+        ]
+      },
+      "fallback": {
+        "text": "No."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Spanish",
+        "language_probability": 0.5377516150474548,
+        "english_probability": 0.07277676463127136,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Daniel",
+        "say_rate": 85,
+        "reused_base": false,
+        "base_sha256": "efabc35b36f021fe0c0e49333b6ff4ef35439e71e35a9cb0a1e02cccb42da7bb",
+        "reference_status": "known-TTS-input-not-human-audited"
+      }
+    },
+    {
+      "id": "cs50-short-04-new-0.001",
+      "audioFile": "cs50-short-04-new-0.001.wav",
+      "sha256": "183d4ef35a3edc3b4fc50ee2c51a39f64f1fbba4529f2317cd84a6a042993a53",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "OK,",
+      "primary": {
+        "text": "I think.",
+        "pk_mean_probability": 0.4335759448604559,
+        "pk_min_probability": 0.30548810986093083,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "I",
+            "start": 3.2800000000000002,
+            "end": 3.3600000000000003
+          },
+          {
+            "text": "think.",
+            "start": 3.4399999999999995,
+            "end": 4.0
+          }
+        ]
+      },
+      "automatic": {
+        "text": "I think.",
+        "pk_mean_probability": 0.4335759448604559,
+        "pk_min_probability": 0.30548810986093083,
+        "pk_confidence_valid": true,
+        "pk_word_spans": [
+          {
+            "text": "I",
+            "start": 3.2800000000000002,
+            "end": 3.3600000000000003
+          },
+          {
+            "text": "think.",
+            "start": 3.4399999999999995,
+            "end": 4.0
+          }
+        ]
+      },
+      "fallback": {
+        "text": "Okay."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Spanish",
+        "language_probability": 0.655093252658844,
+        "english_probability": 0.14617106318473816,
+        "policy": 1
+      },
+      "provenance": {
+        "base_sha256": "8abb356344faeab8b95f8e28d4672636a6330614d1853aa33ebe39bcc1c35946",
+        "source_start_s": 1483.449,
+        "source_end_s": 1483.8690000000001,
+        "cue": "686",
+        "reference_status": "official-caption-range-proxy-no-auditory-audit"
+      }
+    },
+    {
+      "id": "cs50-short-05-new-0.0008",
+      "audioFile": "cs50-short-05-new-0.0008.wav",
+      "sha256": "ef083bbdfadda8ce89994ee3b318dc9ecef126e76831c057fb4f94d56ef7d8bd",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "Yeah,",
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "I."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "None",
+        "language_probability": 0.42027613520622253,
+        "english_probability": 0.288851261138916,
+        "policy": 1
+      },
+      "provenance": {
+        "base_sha256": "8abb356344faeab8b95f8e28d4672636a6330614d1853aa33ebe39bcc1c35946",
+        "source_start_s": 1595.8000000000002,
+        "source_end_s": 1596.259,
+        "cue": "738",
+        "reference_status": "official-caption-range-proxy-no-auditory-audit"
+      }
+    },
+    {
+      "id": "cs50-short-03-new-0.0008",
+      "audioFile": "cs50-short-03-new-0.0008.wav",
+      "sha256": "4d00c2035dce51f1e590255dbf0b348d847f690f2b66ff8e8e9770690dceee1d",
+      "duration": 4.0,
+      "truth": "speech",
+      "reference": "Well,",
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "I."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Spanish",
+        "language_probability": 0.40357300639152527,
+        "english_probability": 0.24477939307689667,
+        "policy": 1
+      },
+      "provenance": {
+        "base_sha256": "8abb356344faeab8b95f8e28d4672636a6330614d1853aa33ebe39bcc1c35946",
+        "source_start_s": 1700.274,
+        "source_end_s": 1700.694,
+        "cue": "785",
+        "reference_status": "official-caption-range-proxy-no-auditory-audit"
+      }
+    },
+    {
+      "id": "literal-I-Samantha-180-0.001-0",
+      "audioFile": "literal-I-Samantha-180-0.001-0.wav",
+      "sha256": "c233117ebd721d0bf06d456d123b11ce564448163eb5977cbb69e42e9d6eb152",
+      "duration": 4,
+      "truth": "speech",
+      "reference": "I.",
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "I."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "English",
+        "language_probability": 0.9932348132133484,
+        "english_probability": 0.9932348132133484,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Samantha",
+        "say_rate": 180,
+        "reused_base": true,
+        "base_sha256": "88f93b8d2bc574a564b6b551bf88be0916a13616d71898ae29f74eae1c08d7b5",
+        "reference_status": "known-previous-TTS-input-new-attenuation"
+      }
+    },
+    {
+      "id": "stress-Samantha-no-0.001",
+      "audioFile": "stress-Samantha-no-0.001.wav",
+      "sha256": "7647c5fb07e222ddfe8b8296a3c3496fcab9015321fd486e92a7718e5d72fd74",
+      "duration": 3.0,
+      "truth": "speech",
+      "reference": "No.",
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "No."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Chinese",
+        "language_probability": 0.6368367075920105,
+        "english_probability": 0.01166407112032175,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Samantha",
+        "say_rate": 65,
+        "base_sha256": "eb9e57d868b6373849a338c66d76b8e4474909cb3d9692aa02afcd2e342369d9",
+        "reference_status": "known-TTS-input-not-human-speech"
+      }
+    },
+    {
+      "id": "stress-Samantha-no-0.002",
+      "audioFile": "stress-Samantha-no-0.002.wav",
+      "sha256": "cee3847f61859d7b1d80954e7a643524dffe15771cd631962566e4034810bef1",
+      "duration": 3.0,
+      "truth": "speech",
+      "reference": "No.",
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "No."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Chinese",
+        "language_probability": 0.8966482877731323,
+        "english_probability": 0.0009265045518986881,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Samantha",
+        "say_rate": 65,
+        "base_sha256": "eb9e57d868b6373849a338c66d76b8e4474909cb3d9692aa02afcd2e342369d9",
+        "reference_status": "known-TTS-input-not-human-speech"
+      }
+    },
+    {
+      "id": "stress-Samantha-seven-0.002",
+      "audioFile": "stress-Samantha-seven-0.002.wav",
+      "sha256": "abf9d026787318a6c57dc51de4147a678c62e40874f07bc8bcefe0a3b95e0db4",
+      "duration": 3.0,
+      "truth": "speech",
+      "reference": "Seven.",
+      "primary": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "automatic": {
+        "text": "",
+        "pk_mean_probability": null,
+        "pk_min_probability": null,
+        "pk_confidence_valid": true
+      },
+      "fallback": {
+        "text": "Seven."
+      },
+      "probe": {
+        "text": "",
+        "language_mode": "probe",
+        "detected_label": "Spanish",
+        "language_probability": 0.432528555393219,
+        "english_probability": 0.336853563785553,
+        "policy": 1
+      },
+      "provenance": {
+        "voice": "Samantha",
+        "say_rate": 65,
+        "base_sha256": "6d75a27363fe2fc12be24b42aa2c2be38ef7d696e4b414dd1c5c55bc9d6a200e",
+        "reference_status": "known-TTS-input-not-human-speech"
+      }
+    }
+  ]
+}

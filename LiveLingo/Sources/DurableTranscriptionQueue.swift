@@ -1147,37 +1147,13 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         // All recognizer/classifier evidence must describe these same bytes.
         // An unreadable or changed waveform cannot support a no-speech verdict.
         let gateAudio = mayFilter ? (try? TranscriptionAttemptCache.fingerprint(audioURL)) : nil
-        func supportedSingleWord(_ text: String, recognition: ASRTranscription? = nil) throws -> String {
-            // Low energy and a low sound-classifier score cannot distinguish a
-            // quiet answer from noise. Require negative token evidence from this
-            // exact-range recognition, not merely a short word or an empty peer.
-            // The English fallback currently supplies no token-quality evidence
-            // and therefore keeps its nonempty result, including a legitimate I.
-            let negativeRecognition = SpeechPresenceGate.parakeetSuggestsNoSpeech(
-                valid: recognition?.parakeetConfidenceValid, mean: recognition?.parakeetMeanProbability,
-                minimum: recognition?.parakeetMinProbability, emptyTranscript: false)
-            guard mayFilter, negativeRecognition,
+        func singleWordEnergy(_ text: String) -> Double? {
+            guard mayFilter, record.fallbackModelKey != nil,
                   SpeechPresenceGate.checksSingleWord(text, audioDuration: record.duration),
                   let gateAudio, (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
-                  let energy = try? SpeechPresenceGate.maximumFrameRMS(audioURL), energy < 0.01 else { return text }
-            let key = TranscriptionAttemptCache.SpeechKey(id: record.id, audio: gateAudio)
-            let confidence: Double?
-            if let cached = attempts.speechAnalysis(for: key) { confidence = cached.confidence }
-            else {
-                confidence = try? speechAnalyzer(audioURL)
-                try Task.checkCancellation()
-                if (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio {
-                    attempts.storeSpeechAnalysis(.init(confidence: confidence), for: key)
-                }
-            }
-            try Task.checkCancellation()
-            guard (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
-                  SpeechPresenceGate.quietSingleWord(text, audioDuration: record.duration,
-                      maximumFrameRMS: energy, speechConfidence: confidence,
-                      recognizerSuggestsNoSpeech: negativeRecognition) else { return text }
-            // Keep the existing empty/untranscribed retry and retained-audio
-            // path. This is not the stronger terminal no-speech verdict.
-            return ""
+                  let energy = try? SpeechPresenceGate.maximumFrameRMS(audioURL),
+                  energy.isFinite, energy >= 0, energy < 0.01 else { return nil }
+            return energy
         }
         let attemptNonce = UUID()
         func recognizeStage(_ url: URL, model: String, enhance: Bool, stage: String,
@@ -1269,7 +1245,6 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             catch { /* Optional left context never invalidates the exact-range pass. */ }
         }
         let primaryHadText = !primary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        primary = try supportedSingleWord(primary, recognition: primaryFromExactRange ? primaryResult : nil)
         let usable = SpeechPipeline.preferredTranscript(primary: primary, fallback: "", audioDuration: record.duration)
         let formula = FormulaASRReview.needsReview(primary, context: formulaContext)
         let needsFallback = sourceOnly == nil && (primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)
@@ -1291,21 +1266,21 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         var fallbackHasText = false
         var fallbackSucceeded = false
         var fallbackFailed = false
-        // Any usable primary English is durable before optional work begins.
-        if plan.selected && !output.text.isEmpty { try commitEnglish(output) }
+        // Ordinary primary English is durable before optional work. Hold only
+        // an exact-range quiet word until its independent quality check finishes.
+        let primaryEnergy = primaryFromExactRange ? singleWordEnergy(usable) : nil
+        if plan.selected && !output.text.isEmpty && primaryEnergy == nil { try commitEnglish(output) }
         if needsFallback, let model = record.fallbackModelKey {
             do {
                 // Formal English repair also precedes the optional language head.
                 let secondary = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback").text
                 fallbackHasText = !secondary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 fallbackSucceeded = true
-                let supportedSecondary = try supportedSingleWord(secondary)
-                let alternate = SpeechPipeline.preferredTranscript(primary: nil,
-                    fallback: supportedSecondary, audioDuration: record.duration)
+                let alternate = SpeechPipeline.preferredTranscript(primary: nil, fallback: secondary, audioDuration: record.duration)
                 fallbackVerdict = EnglishTranscriptGate.verdict(secondary)
                 if output.text.isEmpty {
                     output.text = alternate
-                    if primaryError == nil { output.failureReason = .rejection(of: supportedSecondary, audioDuration: record.duration) }
+                    if primaryError == nil { output.failureReason = .rejection(of: secondary, audioDuration: record.duration) }
                 } else if !alternate.isEmpty, alternate != output.text {
                     output.candidate = alternate; output.origin = "alternateModel"
                 }
@@ -1319,6 +1294,46 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         // request to the same failed fallback before reporting the error.
         if sourceOnly == nil, output.text.isEmpty, !fallbackSucceeded, let primaryError { throw primaryError }
         if fallbackFailed { return output }
+        // Complete formal primary/fallback recognition before a quality head.
+        // The short-word shape is only a candidate: original PCM energy, the
+        // sound classifier and a confident raw "None" head must all agree.
+        // A padded primary, alternate candidate or missing evidence fails open.
+        if output.candidate == nil, primaryFromExactRange, let model = record.fallbackModelKey,
+           let energy = primaryEnergy ?? singleWordEnergy(output.text), let gateAudio {
+            let key = TranscriptionAttemptCache.SpeechKey(id: record.id, audio: gateAudio)
+            let confidence: Double?
+            if let cached = attempts.speechAnalysis(for: key) { confidence = cached.confidence }
+            else {
+                confidence = try? speechAnalyzer(audioURL)
+                try Task.checkCancellation()
+                if (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio {
+                    attempts.storeSpeechAnalysis(.init(confidence: confidence), for: key)
+                }
+            }
+            if SpeechPresenceGate.shouldSuppress(confidence), canStartSource(),
+               (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio {
+                do {
+                    // The same exact-range cached head can serve the later
+                    // source-language decision without another model request.
+                    let head = try await recognizeStage(audioURL, model: model, enhance: false,
+                        stage: "wordQuality", mode: .probe)
+                    let negative = SpeechPresenceGate.languageSuggestsNoSpeech(
+                        valid: head.text.isEmpty && head.languageMode == .probe && head.policy == 1,
+                        noSpeechLabel: head.detectedLabel == "None", probability: head.languageProbability,
+                        englishProbability: head.englishProbability)
+                    if (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
+                       SpeechPresenceGate.quietSingleWord(output.text, audioDuration: record.duration,
+                           maximumFrameRMS: energy, speechConfidence: confidence,
+                           languageHeadSuggestsNoSpeech: negative) {
+                        output.text = ""
+                        output.failureReason = .emptyOutput
+                    }
+                } catch is CancellationError { throw CancellationError() }
+                catch { /* An unavailable quality head never erases speech. */ }
+            }
+        }
+        try Task.checkCancellation()
+        if primaryEnergy != nil, plan.selected, !output.text.isEmpty { try commitEnglish(output) }
         if deferSource, record.fallbackModelKey != nil,
            plan.selected || record.sourceTriggerPredecessor == nil,
            !output.text.isEmpty || record.sourceTriggerPredecessor == nil {
