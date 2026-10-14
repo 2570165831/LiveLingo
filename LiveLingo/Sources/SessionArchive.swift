@@ -1382,7 +1382,7 @@ enum SessionCloudOpenPreparation {
 }
 
 enum SessionArchiveCoding {
-    static let currentReaderVersion = 4
+    static let currentReaderVersion = 5
     /// Keep the frozen schema-1 payload and input fingerprints unchanged. The
     /// envelope/row gates old readers before they can discard new semantics.
     static func minimumReaderVersion(for data: Data) throws -> Int {
@@ -1400,6 +1400,8 @@ enum SessionArchiveCoding {
             return false
         }
         let object = try JSONSerialization.jsonObject(with: data)
+        // An older reader must not erase a manual source correction or undo.
+        if containsField(object, keys: ["isChineseOriginal", "chineseRecognitionOriginal"]) { return 5 }
         // Versions 2/3 can decode the failed caption but would silently erase
         // its Apple fallback (including the one-request marker) on save.
         if containsField(object, keys: ["initialTranslationFallback"]) { return 4 }

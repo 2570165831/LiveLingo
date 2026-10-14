@@ -655,7 +655,8 @@ enum SessionExporter {
         return true
     }
 
-    private static func publishExport(_ rendered: [String: Data], in directory: URL, operations: PublicationOperations) throws {
+    private static func publishExport(_ rendered: [String: Data], sourceRevision: Int,
+                                      in directory: URL, operations: PublicationOperations) throws {
         exportLock.lock()
         defer { exportLock.unlock() }
         try SensitiveFileIO.prepareDirectory(directory)
@@ -681,7 +682,26 @@ enum SessionExporter {
         defer { _ = flock(descriptor, LOCK_UN) }
         try recoverPortablePublication(in: directory)
         let selected = try currentExportDirectory(in: directory)
+        // Detached rendering can finish after a newer source edit or undo.
+        // Compare only under the same directory lock as pointer publication,
+        // before staging members or replacing any public export name.
+        let selectedParent = try SensitiveFileIO.Directory.open(at: selected, create: false, tighten: false)
+        let publishedRevision = try Self.sourceRevision(in: selectedParent.readIfPresent(named: "manifest.json"))
+        let incomingRevision = sourceRevision
+        guard incomingRevision >= publishedRevision else { return }
         var members = rendered
+        if publishedRevision > 0, try Self.sourceRevision(in: rendered["manifest.json"]) == 0 {
+            // Undo no longer has the manual marker. Carry the existing gate
+            // forward only for this already revised course; ordinary English,
+            // including old positive inputRevision values, stays byte-frozen.
+            guard let bytes = members["manifest.json"],
+                  var metadata = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
+                throw SessionStoreError.corruptSnapshot
+            }
+            metadata["sourceRevision"] = incomingRevision
+            members["manifest.json"] = try JSONSerialization.data(withJSONObject: metadata,
+                options: [.sortedKeys, .withoutEscapingSlashes])
+        }
         let priorNames = try fm.contentsOfDirectory(at: selected, includingPropertiesForKeys: nil)
             .map(\.lastPathComponent).filter { $0.hasPrefix("summary-") && $0.hasSuffix(".md") }
         for name in priorNames where members[name] == nil {
@@ -1003,6 +1023,28 @@ enum SessionExporter {
         let segmentCount: Int
         var sourceLanguages: [String]? = nil
         var converterVersion: String? = nil
+        /// Only manual Chinese edits introduce this optional publication gate.
+        /// Once present it follows undo; ordinary English bytes stay frozen.
+        var sourceRevision: Int? = nil
+    }
+
+    private static func sourceRevision(in manifest: Data?) throws -> Int {
+        guard let manifest else { return 0 }
+        if (try? JSONSerialization.jsonObject(with: manifest)) as? [String: Any] == nil {
+            // Earlier exports could contain an opaque user-owned manifest.
+            // Preserve that recovery path, but never downgrade a corrupt
+            // manifest that already advertises the new revision field.
+            guard !String(decoding: manifest, as: UTF8.self).contains("\"sourceRevision\"") else {
+                throw SessionStoreError.corruptSnapshot
+            }
+            return 0
+        }
+        // Read just the optional gate so legacy manifests need not acquire
+        // unrelated required fields or a new date-decoding policy.
+        struct RevisionMetadata: Decodable { let sourceRevision: Int? }
+        let revision = try JSONDecoder().decode(RevisionMetadata.self, from: manifest).sourceRevision ?? 0
+        guard revision >= 0 else { throw SessionStoreError.corruptSnapshot }
+        return revision
     }
 
     static var targetTranscriptFileName: String { targetTranscriptFileName(for: CaptionTranslationTarget.simplifiedChinese.rawValue) }
@@ -1054,6 +1096,7 @@ enum SessionExporter {
     static func sourceLine(_ segment: TranscriptSegment) -> String { segment.english }
 
     static func targetLine(_ segment: TranscriptSegment, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
+        if segment.isChineseOriginal { return segment.english }
         if target == .simplifiedChinese, segment.hasUsableTranslation,
            let literal = QwenTranslationClient.isolatedEnglishI(segment.english, sourceLanguage: segment.sourceLanguage) {
             return literal
@@ -1077,7 +1120,8 @@ enum SessionExporter {
     }
 
     static func captionLines(_ segment: TranscriptSegment, target: CaptionTranslationTarget = .simplifiedChinese) -> [String] {
-        target.keepsSourceAsCaption(language: segment.sourceLanguage)
+        if segment.isChineseOriginal { return [segment.english] }
+        return target.keepsSourceAsCaption(language: segment.sourceLanguage)
             ? [targetLine(segment, target: target)] : [sourceLine(segment), targetLine(segment, target: target)]
     }
 
@@ -1110,6 +1154,7 @@ enum SessionExporter {
 
     /// Saved text can be verified before its language is released for generation.
     static func targetLine(_ segment: TranscriptSegment, outputLanguage: OutputLanguage) -> String {
+        if segment.isChineseOriginal { return segment.english }
         if let generated = outputLanguage.generationTarget {
             return targetLine(segment, target: generated)
         }
@@ -1126,6 +1171,7 @@ enum SessionExporter {
     }
 
     static func captionLines(_ segment: TranscriptSegment, outputLanguage: OutputLanguage) -> [String] {
+        if segment.isChineseOriginal { return [segment.english] }
         let translated = targetLine(segment, outputLanguage: outputLanguage)
         if outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage) {
             return [translated]
@@ -1141,6 +1187,7 @@ enum SessionExporter {
     /// for UI callers. Export and saved-output verification render exactly once.
     static func renderedTargetLine(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
                                    converter: ChineseScriptConverter = .shared) throws -> String {
+        if segment.isChineseOriginal { return segment.english }
         var draft = targetLine(segment, outputLanguage: outputLanguage)
         let sourceOnly = outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
         if outputLanguage.profile.renderer != .identity, !sourceOnly, segment.translationState == .failed,
@@ -1157,6 +1204,7 @@ enum SessionExporter {
 
     static func renderedCaptionLines(_ segment: TranscriptSegment, outputLanguage: OutputLanguage,
                                     converter: ChineseScriptConverter = .shared) throws -> [String] {
+        if segment.isChineseOriginal { return [segment.english] }
         let translated = try renderedTargetLine(segment, outputLanguage: outputLanguage, converter: converter)
         return outputLanguage.keepsSourceAsCaption(language: segment.sourceLanguage)
             ? [translated] : [sourceLine(segment), translated]
@@ -1209,7 +1257,7 @@ enum SessionExporter {
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         encoder.dateEncodingStrategy = .iso8601
         let jsonl = try segments.map { segment -> String in
-            let data = try ChineseOutputDefaults.encodeBilingualDraft(segment, using: encoder)
+            let data = try ChineseOutputDefaults.encodeBilingualDraft(segment.withoutChineseRecognitionOriginal, using: encoder)
             guard let line = String(data: data, encoding: .utf8) else {
                 throw CocoaError(.fileWriteInapplicableStringEncoding)
             }
@@ -1222,6 +1270,7 @@ enum SessionExporter {
             members[targetSummaryFileName(for: target.rawValue)] = Data((trimmedSummary + "\n").utf8)
         }
 
+        let sourceRevision = segments.map(\.inputRevision).max() ?? 0
         let manifest = Manifest(
             createdAt: createdAt,
             sourceLocale: "en-US",
@@ -1229,10 +1278,11 @@ enum SessionExporter {
             recordingFile: recordingFileName,
             segmentCount: segments.count,
             sourceLanguages: sourceLanguages(in: segments),
-            converterVersion: target.profile.renderer == .identity ? nil : ChineseScriptConverter.version
+            converterVersion: target.profile.renderer == .identity ? nil : ChineseScriptConverter.version,
+            sourceRevision: segments.contains(where: \.isChineseOriginal) && sourceRevision > 0 ? sourceRevision : nil
         )
         members["manifest.json"] = try encoder.encode(manifest)
-        try publishExport(members, in: sessionDirectory, operations: operations)
+        try publishExport(members, sourceRevision: sourceRevision, in: sessionDirectory, operations: operations)
     }
 
     /// 2026-09-18：给人看的出口（字幕/转写/笔记导出）不该出现 `[翻译失败：…]` 这种英文错误串 ✗。

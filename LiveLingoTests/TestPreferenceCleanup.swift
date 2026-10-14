@@ -172,6 +172,7 @@ struct TestPreferenceCleanup: Sendable {
             "DefaultTargetGolden-",
             "LiveLingo-LatinDefaultPipeline-",
             "LiveLingo-MultilingualAppModel-",
+            "LiveLingo-ChineseRecognition-",
             "LiveLingo-MultilingualCaptionGate-",
             "MultilingualPreview-",
             "LiveLingo-V2bRecovery-",
