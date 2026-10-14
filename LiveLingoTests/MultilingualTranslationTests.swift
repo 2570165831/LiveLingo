@@ -18,6 +18,87 @@ private actor MultilingualRequestProbe {
 }
 
 final class MultilingualTranslationTests: XCTestCase, @unchecked Sendable {
+    func testIsolatedEnglishIIsPreservedBeforeModelOrStreamingOutput() async throws {
+        for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+            for source in ["I", "I.", " \nI.\t"] {
+                let result = try await QwenTranslationClient.translate(source, modelName: model,
+                    sourceLanguage: "en", onUpdate: { update in
+                        XCTAssertEqual(update, source.trimmingCharacters(in: .whitespacesAndNewlines))
+                    }, request: { _, _, _ in
+                        XCTFail("An ambiguous isolated I must never reach the model")
+                        return "一。"
+                    })
+                XCTAssertEqual(result, source.trimmingCharacters(in: .whitespacesAndNewlines))
+                let typed = try await QwenTranslationClient.translateTypedText(source, modelName: model,
+                    request: { _, _, _ in
+                        XCTFail("Typed isolated I must use the same literal policy")
+                        return "一。"
+                    })
+                XCTAssertEqual(typed, result)
+            }
+        }
+    }
+
+    func testIsolatedIRuleDoesNotRewriteRomanNumbersOrOrdinarySpeech() {
+        for source in ["Chapter I", "World War I", "Part I.", "I. Introduction", "I.\nII.",
+                       "I. I think so.", "I think so.", "Yes.", "OK.", "II", "i", "I!", "I?"] {
+            XCTAssertNil(QwenTranslationClient.isolatedEnglishI(source), source)
+        }
+        XCTAssertNil(QwenTranslationClient.isolatedEnglishI("I.", sourceLanguage: "fr"))
+        for target in [CaptionTranslationTarget.english, .spanish, .french] {
+            XCTAssertNil(QwenTranslationClient.isolatedEnglishI("I.", target: target))
+        }
+    }
+
+    func testIsolatedIReachesCaptionValidationAndAdjacentPublication() async throws {
+        for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+            for source in ["I", "I."] {
+                let protected = ChemistryTranslationProtector.prepare(source)
+                XCTAssertEqual(protected.text, source)
+                XCTAssertEqual(try protected.validatedRestore(in: source), source)
+                XCTAssertEqual(try TranslationAcceptance.validatedCaption(source, source: source), source)
+                let pair = try await QwenTranslationClient.translateAdjacent(previous: "The room is cold.",
+                    previousChinese: "房间很冷。", current: source, context: "", modelName: model,
+                    repairPrevious: false, onCurrent: { update in XCTAssertEqual(update, source) },
+                    request: { _, _, _ in
+                        XCTFail("Adjacent isolated I must not request a numeric translation")
+                        return "一。"
+                    })
+                XCTAssertEqual(pair.current, source)
+                XCTAssertNil(pair.currentRejection)
+                XCTAssertNil(pair.currentRejectionCode)
+            }
+        }
+    }
+
+    func testIsolatedIDoesNotSkipIndependentPreviousCaptionRepair() async throws {
+        let pair = try await QwenTranslationClient.translateAdjacent(previous: "The room is cold.",
+            previousChinese: "房间很冷。", current: "I.", context: "",
+            modelName: QwenModelProfile.highQuality.translationModel,
+            request: { input, _, _ in
+                XCTAssertTrue(input.contains("The room is cold."))
+                return "房间很冷。"
+            })
+        XCTAssertEqual(pair.current, "I.")
+        XCTAssertEqual(pair.previous, "房间很冷。")
+        XCTAssertNil(pair.currentRejection)
+        XCTAssertNil(pair.previousRejection)
+    }
+
+    func testIsolatedIRuleHonorsCancellation() async {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await QwenTranslationClient.translate("I.", modelName: QwenModelProfile.highQuality.translationModel)
+        }
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled translation must not publish a literal")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     // Full strings and digests captured from c630125 before this change, using
     // only invented short sources. Do not derive expectations from live prompts.
     private static let frozenSystem = """

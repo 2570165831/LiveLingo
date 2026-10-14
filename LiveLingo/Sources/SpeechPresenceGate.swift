@@ -3,13 +3,64 @@ import CoreMedia
 import Foundation
 import SoundAnalysis
 
-/// Independent of transcript text: a weak classifier result must never be
-/// replaced by a list of suspicious words ("Yes." may be real speech).
+/// No suspicious-word list: "I." and "Yes." may both be real speech.
+/// Rejecting a nonempty short result requires independent acoustic evidence.
 enum SpeechPresenceGate {
     static let threshold = 0.1
     static let windowSeconds = 1.5
     static let overlapFactor = 0.5
     typealias Analyzer = @Sendable (URL) throws -> Double?
+
+    /// A single short word over an analyzable sealed chunk merits an acoustic
+    /// check, not rejection by itself. Short utterances and sentences pass.
+    static func checksSingleWord(_ text: String, audioDuration: TimeInterval) -> Bool {
+        guard audioDuration.isFinite, audioDuration >= windowSeconds else { return false }
+        let words = text.split { !$0.isLetter && !$0.isNumber && $0 != "'" && $0 != "’" }
+        guard words.count == 1, let word = words.first else { return false }
+        return word.contains(where: \.isLetter) && word.count <= 8
+    }
+
+    /// Every original 20 ms frame must be quiet (RMS below -40 dBFS). Taking
+    /// the maximum, rather than whole-file RMS, protects a brief "Yes." amid
+    /// silence. Invalid, missing and threshold-equal evidence passes through.
+    static func quietSingleWord(_ text: String, audioDuration: TimeInterval,
+                                maximumFrameRMS: Double?, speechConfidence: Double?) -> Bool {
+        guard checksSingleWord(text, audioDuration: audioDuration),
+              let maximumFrameRMS, maximumFrameRMS.isFinite,
+              maximumFrameRMS >= 0, maximumFrameRMS < 0.01 else { return false }
+        return shouldSuppress(speechConfidence)
+    }
+
+    /// Reads only original sealed PCM. Never normalize, pad, record or write.
+    static func maximumFrameRMS(_ url: URL) throws -> Double? {
+        let file = try AVAudioFile(forReading: url)
+        let format = file.processingFormat
+        guard format.sampleRate.isFinite, format.sampleRate > 0,
+              format.commonFormat == .pcmFormatFloat32, format.channelCount > 0,
+              Double(file.length) / format.sampleRate >= windowSeconds,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096) else { return nil }
+        let window = max(1, Int((format.sampleRate * 0.02).rounded()))
+        var frames = 0, sum = 0.0, maximum = 0.0
+        while file.framePosition < file.length {
+            try file.read(into: buffer)
+            guard buffer.frameLength > 0, let channels = buffer.floatChannelData else { return nil }
+            for frame in 0..<Int(buffer.frameLength) {
+                var power = 0.0
+                for channel in 0..<Int(format.channelCount) {
+                    let sample = Double(channels[channel][frame])
+                    guard sample.isFinite else { return nil }
+                    power = max(power, sample * sample)
+                }
+                sum += power; frames += 1
+                if frames == window {
+                    maximum = max(maximum, sqrt(sum / Double(frames)))
+                    sum = 0; frames = 0
+                }
+            }
+        }
+        if frames > 0 { maximum = max(maximum, sqrt(sum / Double(frames))) }
+        return maximum
+    }
 
     // These conservative vetoes use the existing source-probe confidence
     // boundaries. A missing/invalid recognizer signal is never negative evidence.

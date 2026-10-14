@@ -1147,6 +1147,28 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         // All recognizer/classifier evidence must describe these same bytes.
         // An unreadable or changed waveform cannot support a no-speech verdict.
         let gateAudio = mayFilter ? (try? TranscriptionAttemptCache.fingerprint(audioURL)) : nil
+        func supportedSingleWord(_ text: String) throws -> String {
+            guard mayFilter, SpeechPresenceGate.checksSingleWord(text, audioDuration: record.duration),
+                  let gateAudio, (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
+                  let energy = try? SpeechPresenceGate.maximumFrameRMS(audioURL), energy < 0.01 else { return text }
+            let key = TranscriptionAttemptCache.SpeechKey(id: record.id, audio: gateAudio)
+            let confidence: Double?
+            if let cached = attempts.speechAnalysis(for: key) { confidence = cached.confidence }
+            else {
+                confidence = try? speechAnalyzer(audioURL)
+                try Task.checkCancellation()
+                if (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio {
+                    attempts.storeSpeechAnalysis(.init(confidence: confidence), for: key)
+                }
+            }
+            try Task.checkCancellation()
+            guard (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
+                  SpeechPresenceGate.quietSingleWord(text, audioDuration: record.duration,
+                      maximumFrameRMS: energy, speechConfidence: confidence) else { return text }
+            // Keep the existing empty/untranscribed retry and retained-audio
+            // path. This is not the stronger terminal no-speech verdict.
+            return ""
+        }
         let attemptNonce = UUID()
         func recognizeStage(_ url: URL, model: String, enhance: Bool, stage: String,
                             mode: ASRLanguageMode = .english) async throws -> ASRTranscription {
@@ -1234,6 +1256,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             } catch is CancellationError { throw CancellationError() }
             catch { /* Optional left context never invalidates the exact-range pass. */ }
         }
+        let primaryHadText = !primary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        primary = try supportedSingleWord(primary)
         let usable = SpeechPipeline.preferredTranscript(primary: primary, fallback: "", audioDuration: record.duration)
         let formula = FormulaASRReview.needsReview(primary, context: formulaContext)
         let needsFallback = sourceOnly == nil && (primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)
@@ -1263,11 +1287,13 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                 let secondary = try await recognizeStage(audioURL, model: model, enhance: true, stage: "fallback").text
                 fallbackHasText = !secondary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 fallbackSucceeded = true
-                let alternate = SpeechPipeline.preferredTranscript(primary: nil, fallback: secondary, audioDuration: record.duration)
+                let supportedSecondary = try supportedSingleWord(secondary)
+                let alternate = SpeechPipeline.preferredTranscript(primary: nil,
+                    fallback: supportedSecondary, audioDuration: record.duration)
                 fallbackVerdict = EnglishTranscriptGate.verdict(secondary)
                 if output.text.isEmpty {
                     output.text = alternate
-                    if primaryError == nil { output.failureReason = .rejection(of: secondary, audioDuration: record.duration) }
+                    if primaryError == nil { output.failureReason = .rejection(of: supportedSecondary, audioDuration: record.duration) }
                 } else if !alternate.isEmpty, alternate != output.text {
                     output.candidate = alternate; output.origin = "alternateModel"
                 }
@@ -1300,7 +1326,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                     let validHead = head.text.isEmpty && head.languageMode == .probe && head.policy == 1
                         && (head.detectedLabel == "None" || SpokenLanguage.all.contains { $0.qwenLabel == head.detectedLabel })
                     if mayFilter, output.text.isEmpty, output.candidate == nil,
-                       primary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !fallbackHasText,
+                       !primaryHadText, !fallbackHasText,
                        SpeechPresenceGate.parakeetSuggestsNoSpeech(valid: primaryResult?.parakeetConfidenceValid,
                            mean: primaryResult?.parakeetMeanProbability, minimum: primaryResult?.parakeetMinProbability,
                            emptyTranscript: primary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),

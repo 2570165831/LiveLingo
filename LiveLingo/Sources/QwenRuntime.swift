@@ -1711,6 +1711,12 @@ enum QwenTranslationClient {
         request: AdjacentRequest? = nil,
         route: CaptionTranslationRoute? = nil
     ) async throws -> String {
+        if let literal = isolatedEnglishI(text, sourceLanguage: sourceLanguage, target: target) {
+            try Task.checkCancellation()
+            if let onUpdate { await onUpdate(literal) }
+            try Task.checkCancellation()
+            return literal
+        }
         if target != .simplifiedChinese, target.keepsSourceAsCaption(language: sourceLanguage) {
             return target.renderPassThrough(text)
         }
@@ -1734,6 +1740,15 @@ enum QwenTranslationClient {
     }
 
     typealias AdjacentRequest = @Sendable (_ input: String, _ systemPrompt: String, _ maximumOutputTokens: Int) async throws -> String
+
+    static func isolatedEnglishI(_ text: String, sourceLanguage: String? = nil,
+                                 target: CaptionTranslationTarget = .simplifiedChinese) -> String? {
+        guard target == .simplifiedChinese, sourceLanguage == nil || sourceLanguage == "en" else { return nil }
+        let literal = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Without another word, I can also be a Roman label or an element
+        // symbol. Keep this ambiguous fragment instead of guessing a number.
+        return literal == "I" || literal == "I." ? literal : nil
+    }
 
     static func captionFormulaTransport(input: String, systemPrompt: String, modelName: String,
                                         attempt: CaptionTranslationAttempt) -> CaptionFormulaTransport {
@@ -1925,8 +1940,13 @@ enum QwenTranslationClient {
         let requestRejection: String?
         let requestRejectionCode: TranslationAcceptance.Rejection?
         do {
-            currentOutput = try await requestTranslation(protectedCurrent.text, modelName: modelName,
-                hints: protectedCurrent.translationHints(from: currentHints), target: target, request: request)
+            if let literal = isolatedEnglishI(boundaryInput, target: target) {
+                try Task.checkCancellation()
+                currentOutput = literal
+            } else {
+                currentOutput = try await requestTranslation(protectedCurrent.text, modelName: modelName,
+                    hints: protectedCurrent.translationHints(from: currentHints), target: target, request: request)
+            }
             requestRejection = nil
             requestRejectionCode = nil
         } catch QwenRuntimeError.translationRejected(let reason, let rejection) {
@@ -2175,6 +2195,7 @@ enum QwenTranslationClient {
                                    target: CaptionTranslationTarget = .simplifiedChinese,
                                    request: TypedRequest? = nil) async throws -> String {
         try Task.checkCancellation()
+        if let literal = isolatedEnglishI(text, target: target) { return literal }
         // Typed input must not pass through academic ASR correction. Express
         // direct mathematical non-independence as its equivalent dependence,
         // keeping literal wording and every other negation construction.

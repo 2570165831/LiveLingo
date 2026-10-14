@@ -753,7 +753,7 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         let deadline = ExitDeadline(inactivityTimeout: ExitDeadline.applicationTimeout)
         #endif
         terminationTask = Task { [self] in
-            let prepare: @MainActor @Sendable (ExitDeadline) async -> Bool = { [self] lease in
+            let prepare: @MainActor @Sendable (ExitDeadline) async -> Bool = { lease in
                 let retireServices: @MainActor @Sendable () async throws -> Void = {
                     guard !AppRuntimeEnvironment.isUnitTesting else { return }
                     await ASRRuntime.shared.stop()
@@ -764,7 +764,7 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 #if DEBUG
-                if let cleanupForTesting {
+                if let cleanupForTesting = self.cleanupForTesting {
                     do { return try await lease.wait { await cleanupForTesting() } }
                     catch { return false }
                 }
