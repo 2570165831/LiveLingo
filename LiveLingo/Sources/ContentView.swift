@@ -98,6 +98,38 @@ struct ClassroomLegacyPrimaryButtonStyle: ButtonStyle {
     }
 }
 
+/// A solid graphite selection remains readable while another app owns focus.
+/// Drawing the fill explicitly also avoids Sonoma's pale native toggle bezel.
+struct ClassroomFollowLatestToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button { configuration.isOn.toggle() } label: { configuration.label }
+            .buttonStyle(ClassroomFollowLatestButtonStyle(selected: configuration.isOn))
+            .accessibilityValue(configuration.isOn ? "开" : "关")
+            .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
+    }
+}
+
+private struct ClassroomFollowLatestButtonStyle: ButtonStyle {
+    let selected: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11))
+            .foregroundStyle(selected ? ClassroomPalette.onAccent : Color.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(selected ? ClassroomPalette.accent : Color(nsColor: .controlBackgroundColor),
+                        in: RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(ClassroomPalette.accentOutline.opacity(selected ? 0.6 : 0.25), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.45)
+    }
+}
+
 #if DEBUG
 /// Counts work in isolated view tests; no classroom text is collected.
 @MainActor
@@ -139,6 +171,9 @@ enum SummaryRenderingDiagnostics {
 #endif
 
 struct ContentView: View {
+    #if DEBUG
+    private var followBindingsForTesting: (@MainActor (Binding<UUID?>, Binding<Bool>) -> Void)?
+    #endif
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var floatingWindow: FloatingSubtitleWindowController
     @AppStorage("transcriptTextSize") private var transcriptTextSize = 18.0
@@ -151,6 +186,7 @@ struct ContentView: View {
     @State private var compactPane: ReadingPane = .subtitles
     @State private var followLatest = true
     @State private var captionAnchor: UUID?
+    @State private var lastObservedCaptionID: UUID?
     @State private var showStatusDetails = false
     @State private var showSummaryDetails = false
     @State private var showingReviewQueueManager = false
@@ -180,6 +216,14 @@ struct ContentView: View {
         _wholeLessonNotes = State(initialValue: showWholeLessonNotes)
         _compactPane = State(initialValue: showWholeLessonNotes ? .notes : .subtitles)
     }
+
+    #if DEBUG
+    init(followBindingsForTesting: @escaping @MainActor (Binding<UUID?>, Binding<Bool>) -> Void,
+         showWholeLessonNotes: Bool = false) {
+        self.init(showWholeLessonNotes: showWholeLessonNotes)
+        self.followBindingsForTesting = followBindingsForTesting
+    }
+    #endif
 
     var body: some View {
         #if DEBUG
@@ -225,6 +269,19 @@ struct ContentView: View {
         .environment(\.classroomReadingScale, readingSize / 18)
         .modifier(ApplePreviewTranslationHost())
         .classroomTint(ClassroomPalette.accent)
+        #if DEBUG
+        .onAppear {
+            if AppRuntimeEnvironment.isUnitTesting { followBindingsForTesting?($captionAnchor, $followLatest) }
+        }
+        #endif
+        .onReceive(model.$segments) { segments in
+            // Published emits before the property's setter completes. Read the
+            // incoming value, and retain the request even when layout is deferred.
+            let latestID = segments.last?.id
+            guard latestID != lastObservedCaptionID else { return }
+            lastObservedCaptionID = latestID
+            if followLatest { captionAnchor = latestID }
+        }
     }
 
     /// The window title names the current lesson; the app name stays in the menu bar.
@@ -470,11 +527,17 @@ struct ContentView: View {
                     .foregroundStyle(ReadingAccessibility.secondaryText)
                     .fixedSize()
                 Toggle("跟随最新", isOn: $followLatest)
-                    .toggleStyle(.button)
+                    .toggleStyle(ClassroomFollowLatestToggleStyle())
                     .controlSize(.small)
-                    .classroomTint(.gray)
                     .help("关闭后可阅读先前字幕，新内容不会自动滚动到顶部")
                     .accessibilityIdentifier("classroom-follow-latest")
+                    #if DEBUG
+                    .background {
+                        if AppRuntimeEnvironment.isUnitTesting {
+                            CaptionFrameProbe(identifier: "classroom-follow-control").allowsHitTesting(false)
+                        }
+                    }
+                    #endif
             }
             .padding(16)
 
@@ -490,12 +553,13 @@ struct ContentView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(model.segments.reversed()) { segment in
+                CaptionHistoryScrollView(latestID: model.segments.last?.id, followLatest: followLatest,
+                                         captionAnchor: $captionAnchor,
+                                         readLatestID: { model.segments.last?.id }) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(model.segments.reversed()) { segment in
+                            VStack(spacing: 0) {
                                 segmentRow(segment)
-                                    .id(segment.id)
                                 Divider()
                                     #if DEBUG
                                     .background {
@@ -506,20 +570,10 @@ struct ContentView: View {
                                     #endif
                                     .padding(.leading, 16 + 54 * readingSize / 18 + 14)
                             }
-                        }
-                        .scrollTargetLayout()
-                    }
-                    .scrollPosition(id: $captionAnchor, anchor: .top)
-                    .onChange(of: model.segments.count) {
-                        if followLatest, let latest = model.segments.last {
-                            proxy.scrollTo(latest.id, anchor: .top)
+                            .id(segment.id)
                         }
                     }
-                    .onChange(of: followLatest) {
-                        if followLatest, let latest = model.segments.last {
-                            proxy.scrollTo(latest.id, anchor: .top)
-                        }
-                    }
+                    .scrollTargetLayout()
                 }
             }
         }
@@ -811,6 +865,77 @@ struct ContentView: View {
             (total / 60) % 60,
             total % 60
         )
+    }
+}
+
+/// Keep the requested row in the same state SwiftUI uses to preserve history.
+/// A one-shot proxy scroll can be superseded by that old row during a deferred
+/// lazy-stack layout, especially while the classroom window is inactive.
+struct CaptionHistoryScrollView<Rows: View>: View {
+    let latestID: UUID?
+    let followLatest: Bool
+    @Binding var captionAnchor: UUID?
+    let rows: () -> Rows
+    private let readLatestID: (@MainActor () -> UUID?)?
+    @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.scenePhase) private var scenePhase
+
+    init(latestID: UUID?, followLatest: Bool, captionAnchor: Binding<UUID?>,
+         readLatestID: (@MainActor () -> UUID?)? = nil,
+         @ViewBuilder rows: @escaping () -> Rows) {
+        self.latestID = latestID
+        self.followLatest = followLatest
+        self._captionAnchor = captionAnchor
+        self.readLatestID = readLatestID
+        self.rows = rows
+    }
+
+    var body: some View {
+        ScrollView { rows() }
+            .scrollPosition(id: $captionAnchor, anchor: .top)
+            .background(CaptionFollowWindowFocusObserver(onBecomeKey: followIfEnabled)
+                .frame(width: 0, height: 0).accessibilityHidden(true))
+            .onChange(of: latestID) { followIfEnabled() }
+            .onChange(of: followLatest) { followIfEnabled() }
+            .onChange(of: controlActiveState) {
+                if controlActiveState == .key { followIfEnabled() }
+            }
+            .onChange(of: scenePhase) {
+                if scenePhase == .active { followIfEnabled() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                followIfEnabled()
+            }
+    }
+
+    private func followIfEnabled() {
+        guard followLatest else { return }
+        // Do not change the toggle on a manual scroll. Reading history while
+        // follow is on still lasts until the next caption or focus restoration.
+        captionAnchor = readLatestID.map { $0() } ?? latestID
+    }
+}
+
+private struct CaptionFollowWindowFocusObserver: NSViewRepresentable {
+    let onBecomeKey: @MainActor () -> Void
+    func makeNSView(context: Context) -> CaptionFollowFocusView { CaptionFollowFocusView() }
+    func updateNSView(_ view: CaptionFollowFocusView, context: Context) { view.onBecomeKey = onBecomeKey }
+}
+
+private final class CaptionFollowFocusView: NSView {
+    var onBecomeKey: (@MainActor () -> Void)?
+    private var keySubscription: AnyCancellable?
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        keySubscription = nil
+        guard let window else { return }
+        keySubscription = NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
+            .filter { [weak window] notification in
+                guard let window else { return false }
+                return notification.object as? NSWindow === window
+            }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.onBecomeKey?() }
     }
 }
 
