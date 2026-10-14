@@ -2011,9 +2011,13 @@ enum QwenTranslationClient {
                                       target: CaptionTranslationTarget = .simplifiedChinese,
                                       request: AdjacentRequest? = nil) async throws -> PreviousRepair {
         try Task.checkCancellation()
+        if let literal = isolatedEnglishI(previous, target: target) {
+            return PreviousRepair(previous: previousChinese == literal ? nil : literal, rejection: nil)
+        }
         // Use the standard translation task for each target. A multi-output JSON task
         // made this local model conflate meanings across the two chunks.
         func contextual(_ sourceText: String, before: String, after: String) async throws -> (text: String, rejection: String?) {
+            if let literal = isolatedEnglishI(sourceText, target: target) { return (literal, nil) }
             let protected = ChemistryTranslationProtector.prepare(sourceText)
             let input = try protected.contextualJSON(before: before, after: after, protectTarget: false)
             let basePrompt = captionPrompt(modelName: modelName, attempt: .standard, target: target)

@@ -4781,7 +4781,8 @@ final class AppModel: ObservableObject {
                                      at previousIndex: Int, started: TimeInterval) {
         if let revised = result.previous,
            self.segments.indices.contains(previousIndex) {
-            let normalized = captionTarget.normalize(revised)
+            let normalized = captionTarget.normalize(self.segments[previousIndex]
+                .translationPreservingIsolatedI(revised, targetCode: captionTarget.rawValue))
             // 2026-09-18：相邻修复**一次处理两段** ✗，模型多回半句就会把两段内容
             // 塞进前一段 ✗（缺陷文档 round-359 的收敛结论 ✓）。
             // 因此：修复结果若相对**前一段自己的英文**长得离谱 ✗，就**丢弃这次修复** ✓
@@ -4797,7 +4798,7 @@ final class AppModel: ObservableObject {
             if repairPlausible, !normalized.isEmpty, self.segments[previousIndex].chinese != normalized {
                 let previousID = self.segments[previousIndex].id
                 var revisedSegment = self.segments[previousIndex]
-                revisedSegment.completeTranslation(normalized)
+                revisedSegment.completeTranslation(normalized, targetCode: captionTarget.rawValue)
                 self.replaceExistingSegment(at: previousIndex, with: revisedSegment,
                     reason: "相邻语句补全译文")
                 Self.traceTranslation("adjacent_repair", id: previousID,

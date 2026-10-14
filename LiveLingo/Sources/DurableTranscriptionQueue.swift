@@ -1147,8 +1147,17 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         // All recognizer/classifier evidence must describe these same bytes.
         // An unreadable or changed waveform cannot support a no-speech verdict.
         let gateAudio = mayFilter ? (try? TranscriptionAttemptCache.fingerprint(audioURL)) : nil
-        func supportedSingleWord(_ text: String) throws -> String {
-            guard mayFilter, SpeechPresenceGate.checksSingleWord(text, audioDuration: record.duration),
+        func supportedSingleWord(_ text: String, recognition: ASRTranscription? = nil) throws -> String {
+            // Low energy and a low sound-classifier score cannot distinguish a
+            // quiet answer from noise. Require negative token evidence from this
+            // exact-range recognition, not merely a short word or an empty peer.
+            // The English fallback currently supplies no token-quality evidence
+            // and therefore keeps its nonempty result, including a legitimate I.
+            let negativeRecognition = SpeechPresenceGate.parakeetSuggestsNoSpeech(
+                valid: recognition?.parakeetConfidenceValid, mean: recognition?.parakeetMeanProbability,
+                minimum: recognition?.parakeetMinProbability, emptyTranscript: false)
+            guard mayFilter, negativeRecognition,
+                  SpeechPresenceGate.checksSingleWord(text, audioDuration: record.duration),
                   let gateAudio, (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
                   let energy = try? SpeechPresenceGate.maximumFrameRMS(audioURL), energy < 0.01 else { return text }
             let key = TranscriptionAttemptCache.SpeechKey(id: record.id, audio: gateAudio)
@@ -1164,7 +1173,8 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             try Task.checkCancellation()
             guard (try? TranscriptionAttemptCache.fingerprint(audioURL)) == gateAudio,
                   SpeechPresenceGate.quietSingleWord(text, audioDuration: record.duration,
-                      maximumFrameRMS: energy, speechConfidence: confidence) else { return text }
+                      maximumFrameRMS: energy, speechConfidence: confidence,
+                      recognizerSuggestsNoSpeech: negativeRecognition) else { return text }
             // Keep the existing empty/untranscribed retry and retained-audio
             // path. This is not the stronger terminal no-speech verdict.
             return ""
@@ -1208,6 +1218,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
         }
         var primary = ""
         var primaryResult: ASRTranscription?
+        var primaryFromExactRange = true
         var primaryError: Error?
         if sourceOnly != nil { primary = record.text ?? "" }
         else { do {
@@ -1249,6 +1260,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                    !SpeechPipeline.preferredTranscript(primary: retained, fallback: "", audioDuration: record.duration).isEmpty {
                     primary = retained
                     primaryResult = padded
+                    primaryFromExactRange = false
                 }
                 // Unaligned left context may include borrowed words. Keep the
                 // exact-range retries free of candidates; neighbour candidates
@@ -1257,7 +1269,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
             catch { /* Optional left context never invalidates the exact-range pass. */ }
         }
         let primaryHadText = !primary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        primary = try supportedSingleWord(primary)
+        primary = try supportedSingleWord(primary, recognition: primaryFromExactRange ? primaryResult : nil)
         let usable = SpeechPipeline.preferredTranscript(primary: primary, fallback: "", audioDuration: record.duration)
         let formula = FormulaASRReview.needsReview(primary, context: formulaContext)
         let needsFallback = sourceOnly == nil && (primaryError != nil || formula || !EnglishTranscriptGate.accepts(primary)

@@ -214,10 +214,16 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
 
     mutating func completeTranslation(_ text: String, targetCode: String = "zh-Hans") {
         initialTranslationFallback = nil
+        let text = translationPreservingIsolatedI(text, targetCode: targetCode)
         let usesAnnotations = !targetCode.hasPrefix("zh")
         let formulaNotice = text.hasPrefix(TranslationAcceptance.formulaNotice)
         chinese = usesAnnotations ? TranslationAcceptance.bodyWithoutApplicationNotice(text) : text
         updateCaptionAnnotation(targetCode: targetCode, formulaUncertain: formulaNotice)
+    }
+
+    func translationPreservingIsolatedI(_ text: String, targetCode: String = "zh-Hans") -> String {
+        guard targetCode.hasPrefix("zh") else { return text }
+        return QwenTranslationClient.isolatedEnglishI(english, sourceLanguage: sourceLanguage) ?? text
     }
 
     mutating func updateCaptionAnnotation(targetCode: String, formulaUncertain: Bool = false) {

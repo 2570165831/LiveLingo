@@ -4,7 +4,7 @@ import Foundation
 import SoundAnalysis
 
 /// No suspicious-word list: "I." and "Yes." may both be real speech.
-/// Rejecting a nonempty short result requires independent acoustic evidence.
+/// Rejecting a nonempty short result requires both acoustic and recognizer evidence.
 enum SpeechPresenceGate {
     static let threshold = 0.1
     static let windowSeconds = 1.5
@@ -20,12 +20,16 @@ enum SpeechPresenceGate {
         return word.contains(where: \.isLetter) && word.count <= 8
     }
 
+    /// A short word is only a candidate, never negative textual evidence.
+    /// The current recognizer must independently report validated weak tokens;
+    /// a missing score or another recognizer's empty result does not qualify.
     /// Every original 20 ms frame must be quiet (RMS below -40 dBFS). Taking
     /// the maximum, rather than whole-file RMS, protects a brief "Yes." amid
     /// silence. Invalid, missing and threshold-equal evidence passes through.
     static func quietSingleWord(_ text: String, audioDuration: TimeInterval,
-                                maximumFrameRMS: Double?, speechConfidence: Double?) -> Bool {
-        guard checksSingleWord(text, audioDuration: audioDuration),
+                                maximumFrameRMS: Double?, speechConfidence: Double?,
+                                recognizerSuggestsNoSpeech: Bool = false) -> Bool {
+        guard recognizerSuggestsNoSpeech, checksSingleWord(text, audioDuration: audioDuration),
               let maximumFrameRMS, maximumFrameRMS.isFinite,
               maximumFrameRMS >= 0, maximumFrameRMS < 0.01 else { return false }
         return shouldSuppress(speechConfidence)

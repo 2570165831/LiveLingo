@@ -99,6 +99,58 @@ final class MultilingualTranslationTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testIsolatedPreviousIBypassesContextualRetranslation() async throws {
+        for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+            for source in ["I", "I.", " \nI.\t"] {
+                let literal = source.trimmingCharacters(in: .whitespacesAndNewlines)
+                for existing in [literal, "一。"] {
+                    let result = try await QwenTranslationClient.repairPreviousCaption(previous: source,
+                        previousChinese: existing, current: "think this is useful.", context: "Part I. Introduction",
+                        modelName: model, request: { _, _, _ in
+                            XCTFail("An isolated previous I must not reach the contextual model request")
+                            return "一。"
+                        })
+                    XCTAssertEqual(result.previous ?? existing, literal)
+                    XCTAssertNil(result.rejection)
+                }
+            }
+        }
+    }
+
+    func testAdjacentCurrentStillTranslatesWhenPreviousIIsProtected() async throws {
+        for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+            let capture = MultilingualRequestProbe("我认为这是有用的。")
+            let pair = try await QwenTranslationClient.translateAdjacent(previous: "I", previousChinese: "I",
+                current: "think this is useful.", context: "", modelName: model,
+                request: { await capture.request($0, $1, $2) })
+            XCTAssertEqual(pair.current, "我认为这是有用的。")
+            XCTAssertNil(pair.previous)
+            let calls = await capture.calls
+            XCTAssertEqual(calls.count, 1, "Protect only the previous fragment, not the independent current translation")
+        }
+    }
+
+    func testIsolatedRepairTailKeepsTheStableTranslatedPrefix() async throws {
+        let result = try await QwenTranslationClient.repairPreviousCaption(previous: "Heat flows. I.",
+            previousChinese: "热量流动。一。", current: "think this is useful.", context: "",
+            modelName: QwenModelProfile.highQuality.translationModel, request: { _, _, _ in
+                XCTFail("An isolated repair target must not be translated as a number")
+                return "一。"
+            })
+        XCTAssertEqual(result.previous, "热量流动。I.")
+        XCTAssertNil(result.rejection)
+    }
+
+    func testPreviousRomanHeadingStillUsesTheOrdinaryRepair() async throws {
+        let capture = MultilingualRequestProbe("第一章")
+        let result = try await QwenTranslationClient.repairPreviousCaption(previous: "Chapter I",
+            previousChinese: "第一章", current: "Introduction.", context: "", modelName: QwenModelProfile.highQuality.translationModel,
+            request: { await capture.request($0, $1, $2) })
+        XCTAssertEqual(result.previous, "第一章")
+        let calls = await capture.calls
+        XCTAssertEqual(calls.count, 1)
+    }
+
     // Full strings and digests captured from c630125 before this change, using
     // only invented short sources. Do not derive expectations from live prompts.
     private static let frozenSystem = """

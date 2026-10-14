@@ -1,5 +1,7 @@
 import Foundation
 import Combine
+import AppKit
+import PDFKit
 import XCTest
 @testable import LiveLingo
 
@@ -24,6 +26,118 @@ final class TranslationFailureRecoveryTests: XCTestCase {
     typealias Reason = TranscriptSegment.TranslationFailureReason
     private let source = "The room is cold."
     private let result = "房间很冷。"
+
+    func testIsolatedIResistsInlineAndDeferredAppModelRepairWrites() async throws {
+        for previous in ["I", "I."] {
+            for deferred in [false, true] {
+                var adjacentCalls = 0, repairCalls = 0
+                var dependencies = CaptionTranslationDependencies.unavailable
+                dependencies.translate = { text, _, _, _, _ in text == previous ? previous : "我认为这是有用的。" }
+                dependencies.adjacent = { old, translated, _, _, _, shouldRepair, _, _, _ in
+                    adjacentCalls += 1
+                    XCTAssertEqual(old, previous)
+                    XCTAssertEqual(translated, previous)
+                    XCTAssertTrue(shouldRepair)
+                    return .init(previous: deferred ? nil : "一。", current: "我认为这是有用的。",
+                        previousRejection: nil, currentRejection: nil, previousRepairDeferred: deferred)
+                }
+                dependencies.repair = { pending in
+                    repairCalls += 1
+                    XCTAssertEqual(pending.previous.english, previous)
+                    return .init(previous: "一。", rejection: nil)
+                }
+                let (model, _) = try fixture(dependencies)
+                model.receiveCaptionForTesting(previous, start: 0, end: 1)
+                await model.translationTaskForTesting?.value
+                XCTAssertEqual(model.segments.first?.chinese, previous)
+                model.receiveCaptionForTesting("think this is useful.", start: 1, end: 3)
+                try await eventually { model.segments.count == 2 && model.translationTaskForTesting == nil }
+                XCTAssertEqual(adjacentCalls, 1)
+                XCTAssertEqual(repairCalls, deferred ? 1 : 0)
+                XCTAssertEqual(model.segments.map(\.chinese), [previous, "我认为这是有用的。"])
+                XCTAssertTrue(model.segments.allSatisfy(\.hasUsableTranslation))
+                let saved = try JSONDecoder().decode([TranscriptSegment].self, from: encode(model.segments))
+                XCTAssertEqual(saved.map(\.chinese), model.segments.map(\.chinese))
+            }
+        }
+    }
+
+    func testIsolatedIIsCanonicalOnRetryWritesButOtherTargetsStayUnchanged() {
+        for source in ["I", "I."] {
+            for target in ["zh-Hans", "zh-Hant-TW", "zh-Hant-HK"] {
+                var segment = TranscriptSegment(startTime: 0, endTime: 1, english: source)
+                segment.completeTranslation("一。", targetCode: target)
+                XCTAssertEqual(segment.chinese, source)
+                segment.beginTranslation()
+                segment.completeTranslation("一", targetCode: target)
+                XCTAssertEqual(segment.chinese, source)
+            }
+            var french = TranscriptSegment(startTime: 0, endTime: 1, english: source, sourceLanguage: "fr")
+            french.completeTranslation("字母 I")
+            XCTAssertEqual(french.chinese, "字母 I")
+            var spanishTarget = TranscriptSegment(startTime: 0, endTime: 1, english: source)
+            spanishTarget.completeTranslation("Yo.", targetCode: "es")
+            XCTAssertEqual(spanishTarget.chinese, "Yo.")
+        }
+    }
+
+    func testIsolatedLegacyIExportsCanonicalTextSRTAndJSONLWithoutRewritingInput() throws {
+        for source in ["I", "I."] {
+            let segment = TranscriptSegment(startTime: 0, endTime: 1, english: source, chinese: "一。")
+            let before = try encode(segment)
+            for language in [OutputLanguage.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong] {
+                XCTAssertEqual(SessionExporter.targetLine(segment, outputLanguage: language), source)
+                XCTAssertEqual(try SessionExporter.renderedTargetLine(segment, outputLanguage: language), source)
+                let cue = try SessionExporter.renderedSRTCue(segment, index: 0, outputLanguage: language)
+                XCTAssertFalse(cue.contains("一"))
+                let root = try directory()
+                try SessionExporter.export(segments: [segment], sessionDirectory: root, target: language)
+                let transcript = root.appendingPathComponent(SessionExporter.targetTranscriptFileName(for: language.rawValue))
+                XCTAssertEqual(try String(contentsOf: transcript, encoding: .utf8), source + "\n")
+                XCTAssertFalse(try String(contentsOf: root.appendingPathComponent("bilingual.srt"), encoding: .utf8).contains("一"))
+                let jsonl = try Data(contentsOf: root.appendingPathComponent("bilingual.jsonl"))
+                let restored = try JSONDecoder().decode(TranscriptSegment.self, from: jsonl)
+                XCTAssertEqual(restored.chinese, source)
+            }
+            XCTAssertEqual(try encode(segment), before, "Export canonicalizes only its publication copy")
+            XCTAssertEqual(segment.chinese, "一。")
+        }
+        let roman = TranscriptSegment(startTime: 0, endTime: 1, english: "World War I", chinese: "第一次世界大战")
+        XCTAssertEqual(SessionExporter.targetLine(roman), roman.chinese)
+    }
+
+    func testIsolatedIStaysLiteralInEveryNotesExportFormat() throws {
+        func snapshot(_ segment: TranscriptSegment, target: OutputLanguage) -> NotesExportSnapshot {
+            NotesExportSnapshot(className: "Synthetic class", sessionName: nil, scope: .wholeLesson,
+                scopeDetail: "整课", coverageLine: "合成测试", notesMarkdown: "测试要点。", reviewMarkdown: nil,
+                transcript: [segment], generatedAt: Date(timeIntervalSince1970: 1_760_000_000),
+                includesReviewAdvice: false, includesTranscript: true, target: target)
+        }
+        func text(_ data: Data, format: NotesExportFormat) throws -> String {
+            switch format {
+            case .word:
+                return try NSAttributedString(data: data,
+                    options: [.documentType: NSAttributedString.DocumentType.officeOpenXML],
+                    documentAttributes: nil).string
+            case .pdf:
+                return try XCTUnwrap(try XCTUnwrap(PDFDocument(data: data)).string)
+            case .markdown, .plainText:
+                return String(decoding: data, as: UTF8.self)
+            }
+        }
+        for source in ["I", "I."] {
+            let legacy = TranscriptSegment(startTime: 0, endTime: 1, english: source, chinese: "一。")
+            let expected = TranscriptSegment(startTime: 0, endTime: 1, english: source, chinese: source)
+            for target in [OutputLanguage.simplifiedChinese, .traditionalChineseTaiwan, .traditionalChineseHongKong] {
+                for format in NotesExportFormat.allCases {
+                    let actual = try text(NotesExportDocument.data(snapshot(legacy, target: target), format: format), format: format)
+                    let canonical = try text(NotesExportDocument.data(snapshot(expected, target: target), format: format), format: format)
+                    XCTAssertEqual(actual, canonical, "\(source) / \(target.rawValue) / \(format.rawValue)")
+                }
+            }
+            XCTAssertEqual(legacy.chinese, "一。")
+        }
+    }
 
     func testQuotationRetryUsesTheProductionPromptAndPreservesItsSource() async throws {
         let source = "Fuck your mother."

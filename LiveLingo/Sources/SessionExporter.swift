@@ -1054,6 +1054,10 @@ enum SessionExporter {
     static func sourceLine(_ segment: TranscriptSegment) -> String { segment.english }
 
     static func targetLine(_ segment: TranscriptSegment, target: CaptionTranslationTarget = .simplifiedChinese) -> String {
+        if target == .simplifiedChinese, segment.hasUsableTranslation,
+           let literal = QwenTranslationClient.isolatedEnglishI(segment.english, sourceLanguage: segment.sourceLanguage) {
+            return literal
+        }
         if target.keepsSourceAsCaption(language: segment.sourceLanguage) {
             return segment.hasUsableTranslation ? segment.chinese : target.renderPassThrough(segment.english)
         }
@@ -1180,6 +1184,14 @@ enum SessionExporter {
         // Release metadata does not determine whether saved text can render.
         if target.profile.renderer != .identity {
             try converter.prepare()
+        }
+        // Canonicalize only the export copy, including the persisted JSONL.
+        // Existing saved recordings and their input evidence are untouched.
+        let segments = segments.map { segment in
+            guard target.generationTarget == .simplifiedChinese, segment.hasUsableTranslation else { return segment }
+            var copy = segment
+            copy.chinese = segment.translationPreservingIsolatedI(segment.chinese, targetCode: target.rawValue)
+            return copy
         }
         let english = segments.map(sourceLine).joined(separator: "\n")
         let chinese = try segments.map { try renderedTargetLine($0, outputLanguage: target, converter: converter) }.joined(separator: "\n")

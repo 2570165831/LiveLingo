@@ -64,19 +64,22 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
 
     func testSingleWordRequiresQuietAudioAndValidCompleteSpeechEvidence() {
         for text in ["I.", "Yes.", "OK.", "Really?", "I'm."] {
+            XCTAssertFalse(SpeechPresenceGate.quietSingleWord(text, audioDuration: 3,
+                maximumFrameRMS: 0.001, speechConfidence: 0.01),
+                "A short answer and weak acoustic evidence alone never justify rejection")
             XCTAssertTrue(SpeechPresenceGate.quietSingleWord(text, audioDuration: 3,
-                maximumFrameRMS: 0.001, speechConfidence: 0.01))
+                maximumFrameRMS: 0.001, speechConfidence: 0.01, recognizerSuggestsNoSpeech: true))
             for confidence: Double? in [nil, 0.1, .nan, .infinity, -0.1, 1.1] {
                 XCTAssertFalse(SpeechPresenceGate.quietSingleWord(text, audioDuration: 3,
-                    maximumFrameRMS: 0.001, speechConfidence: confidence))
+                    maximumFrameRMS: 0.001, speechConfidence: confidence, recognizerSuggestsNoSpeech: true))
             }
             for energy: Double? in [nil, 0.01, .nan, .infinity, -0.1] {
                 XCTAssertFalse(SpeechPresenceGate.quietSingleWord(text, audioDuration: 3,
-                    maximumFrameRMS: energy, speechConfidence: 0.01))
+                    maximumFrameRMS: energy, speechConfidence: 0.01, recognizerSuggestsNoSpeech: true))
             }
             for duration in [0.7, 1.499, .nan, .infinity] {
                 XCTAssertFalse(SpeechPresenceGate.quietSingleWord(text, audioDuration: duration,
-                    maximumFrameRMS: 0.001, speechConfidence: 0.01))
+                    maximumFrameRMS: 0.001, speechConfidence: 0.01, recognizerSuggestsNoSpeech: true))
             }
         }
         for text in ["I. I think this is useful.", "I understand.", "", "...", "123", "Unfortunately."] {
@@ -93,15 +96,17 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         XCTAssertNil(try SpeechPresenceGate.maximumFrameRMS(audio(seconds: 0.7, kind: 2, gain: 0.01)))
     }
 
-    func testQuietSingleWordFromEitherRecognizerStaysUntranscribed() async throws {
+    private static func weakWord(_ text: String) -> ASRTranscription {
+        .init(text: text, parakeetMeanProbability: 0.3, parakeetMinProbability: 0.01,
+              parakeetConfidenceValid: true)
+    }
+
+    func testQuietSingleWordRequiresNegativeCurrentRecognizerEvidence() async throws {
         let url = try audio(seconds: 3, kind: 1, gain: 0.01)
-        for primary in ["", "I.", "Really?"] {
-            let output = try await DurableTranscriptionQueue.recognize(record(url), audioURL: url,
+        for text in ["I.", "Really?"] {
+            let output = try await DurableTranscriptionQueue.recognize(record(url, fallbackModelKey: nil), audioURL: url,
                 recordingURL: nil, formulaContext: "", attempts: .init(),
-                transcriber: { _, model, _, mode in
-                    if mode == .probe { return Self.negativeRecognition(model, mode: mode) }
-                    return .init(text: model == "primary" ? primary : "I.")
-                }, speechAnalyzer: { _ in 0.01 })
+                transcriber: { _, _, _, _ in Self.weakWord(text) }, speechAnalyzer: { _ in 0.01 })
             XCTAssertTrue(output.text.isEmpty)
             XCTAssertNil(output.candidate)
             XCTAssertEqual(output.failureReason, .emptyOutput)
@@ -110,12 +115,52 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testWeakAcousticsNeverRejectAnswersWithoutValidatedNegativeTokens() async throws {
+        let url = try audio(seconds: 3, kind: 1, gain: 0.01)
+        for text in ["Yes.", "OK.", "No.", "I.", "So.", "Right.", "Blue.", "Seven."] {
+            for quality: ASRTranscription in [
+                .init(text: text),
+                .init(text: text, parakeetMeanProbability: 0.3, parakeetMinProbability: 0.01,
+                      parakeetConfidenceValid: false),
+                .init(text: text, parakeetMeanProbability: 0.3, parakeetMinProbability: 0.06,
+                      parakeetConfidenceValid: true),
+                .init(text: text, parakeetMeanProbability: 0.95, parakeetMinProbability: 0.01,
+                      parakeetConfidenceValid: true)
+            ] {
+                let output = try await DurableTranscriptionQueue.recognize(record(url, fallbackModelKey: nil), audioURL: url,
+                    recordingURL: nil, formulaContext: "", attempts: .init(),
+                    transcriber: { _, _, _, _ in quality },
+                    speechAnalyzer: { _ in XCTFail("No independent negative token evidence"); return 0.01 })
+                XCTAssertEqual(output.text, text)
+                XCTAssertFalse(output.noSpeech)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+            }
+        }
+    }
+
+    func testFallbackAnswersCannotBorrowPrimaryNegativeEvidence() async throws {
+        let url = try audio(seconds: 3, kind: 1, gain: 0.01)
+        for attempt: TranscriptionWorkRecord.Attempt in [.initial, .automaticRetry] {
+            for text in ["Yes.", "OK.", "No.", "I.", "So.", "Right.", "Blue.", "Seven."] {
+                let output = try await DurableTranscriptionQueue.recognize(record(url, attempt: attempt), audioURL: url,
+                    recordingURL: nil, formulaContext: "", attempts: .init(),
+                    transcriber: { _, model, _, mode in
+                        if mode == .probe { return .init(text: "", languageMode: .probe, detectedLabel: "English",
+                            languageProbability: 0.99, englishProbability: 0.99, policy: 1) }
+                        return model == "primary" ? Self.weakWord("") : .init(text: text)
+                    }, speechAnalyzer: { _ in XCTFail("Empty primary cannot condemn a nonempty fallback"); return 0.01 })
+                XCTAssertEqual(output.text, text)
+                XCTAssertFalse(output.noSpeech)
+            }
+        }
+    }
+
     func testPositiveSpeechEvidenceAndFollowingSentenceFailOpen() async throws {
         let url = try audio(seconds: 3, kind: 1, gain: 0.01)
         for text in ["Yes.", "OK.", "I.", "I. I think this is useful."] {
             let output = try await DurableTranscriptionQueue.recognize(record(url), audioURL: url,
                 recordingURL: nil, formulaContext: "", attempts: .init(),
-                transcriber: { _, _, _, mode in .init(text: mode == .probe ? "" : text) },
+                transcriber: { _, _, _, mode in Self.weakWord(mode == .probe ? "" : text) },
                 speechAnalyzer: { _ in 0.8 })
             XCTAssertEqual(output.text, text)
             XCTAssertFalse(output.noSpeech)
@@ -123,7 +168,7 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         let sentence = "I. I think this is useful."
         let output = try await DurableTranscriptionQueue.recognize(record(url), audioURL: url,
             recordingURL: nil, formulaContext: "", attempts: .init(),
-            transcriber: { _, _, _, mode in .init(text: mode == .probe ? "" : sentence) },
+            transcriber: { _, _, _, mode in Self.weakWord(mode == .probe ? "" : sentence) },
             speechAnalyzer: { _ in XCTFail("A sentence must bypass the single-word check"); return 0 })
         XCTAssertEqual(output.text, sentence)
     }
@@ -133,9 +178,27 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         for item in [record(url, attempt: .manual), record(url, appleEvidence: "I.")] {
             let output = try await DurableTranscriptionQueue.recognize(item, audioURL: url,
                 recordingURL: nil, formulaContext: "", attempts: .init(),
-                transcriber: { _, _, _, mode in .init(text: mode == .probe ? "" : "I.") },
+                transcriber: { _, _, _, mode in Self.weakWord(mode == .probe ? "" : "I.") },
                 speechAnalyzer: { _ in XCTFail("Manual/Apple evidence must bypass the check"); return 0 })
             XCTAssertEqual(output.text, "I.")
+        }
+    }
+
+    func testNegativeTokenSingleWordHonorsConfirmedCandidateAndPriorManualBypasses() async throws {
+        let url = try audio(seconds: 3, kind: 1, gain: 0.01)
+        var confirmed = record(url)
+        confirmed.text = "I."
+        var candidate = record(url)
+        candidate.candidateText = "I."
+        var priorManual = record(url, attempt: .automaticRetry)
+        priorManual.manualRetryCount = 1
+        for item in [confirmed, candidate, priorManual] {
+            let output = try await DurableTranscriptionQueue.recognize(item, audioURL: url,
+                recordingURL: nil, formulaContext: "", attempts: .init(),
+                transcriber: { _, _, _, mode in Self.weakWord(mode == .probe ? "" : "I.") },
+                speechAnalyzer: { _ in XCTFail("Confirmed/manual content must bypass even negative tokens"); return 0 })
+            XCTAssertEqual(output.text, "I.")
+            XCTAssertFalse(output.noSpeech)
         }
     }
 
@@ -144,7 +207,7 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         let replacement = try Data(contentsOf: audio(seconds: 3, kind: 2))
         let output = try await DurableTranscriptionQueue.recognize(record(url), audioURL: url,
             recordingURL: nil, formulaContext: "", attempts: .init(),
-            transcriber: { _, _, _, mode in .init(text: mode == .probe ? "" : "I.") },
+            transcriber: { _, _, _, mode in Self.weakWord(mode == .probe ? "" : "I.") },
             speechAnalyzer: { path in try replacement.write(to: path); return 0.01 })
         XCTAssertEqual(output.text, "I.")
         XCTAssertFalse(output.noSpeech)
@@ -156,10 +219,10 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         let queue = DurableTranscriptionQueue(transcriber: { _, model, _, mode in
             if mode == .probe { return .init(text: "", languageMode: .probe, detectedLabel: "English",
                 languageProbability: 0.99, englishProbability: 0.99, policy: 1) }
-            return .init(text: model == "primary" ? "Really?" : "I.")
+            return Self.weakWord(model == "primary" ? "Really?" : "I.")
         }, speechAnalyzer: { _ in 0.01 })
         try await queue.configure(directory: root, sessionID: session, persistent: true, identified: true) { _ in }
-        let job = SpeechPipeline.ChunkJob(audioURL: url, modelKey: "primary", fallbackModelKey: "fallback",
+        let job = SpeechPipeline.ChunkJob(audioURL: url, modelKey: "primary", fallbackModelKey: nil,
             start: 0, end: 3, appleEvidence: "", recordingURL: nil, sessionID: session,
             startFrame: 0, endFrame: 48_000, sampleRate: 16_000)
         queue.submit(job) { _ in }
@@ -216,7 +279,47 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         let energy = try XCTUnwrap(SpeechPresenceGate.maximumFrameRMS(url))
         XCTAssertGreaterThan(energy, 0.01, "A short original Yes must dominate the maximum frame energy")
         XCTAssertFalse(SpeechPresenceGate.quietSingleWord("Yes.", audioDuration: 2,
-            maximumFrameRMS: energy, speechConfidence: 0.01))
+            maximumFrameRMS: energy, speechConfidence: 0.01, recognizerSuggestsNoSpeech: true))
+    }
+
+    func testLowVolumePublicYesIsAnAnalyzableSingleWordAndFailsOpenWithoutNegativeTokens() async throws {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/NoSpeech/yes.wav")
+        let source = try AVAudioFile(forReading: fixture)
+        let spoken = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: source.processingFormat,
+            frameCapacity: AVAudioFrameCount(source.length)))
+        try source.read(into: spoken)
+        for channel in 0..<Int(spoken.format.channelCount) {
+            let samples = try XCTUnwrap(spoken.floatChannelData)[channel]
+            for frame in 0..<Int(spoken.frameLength) { samples[frame] *= 0.01 }
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("NoSpeech-Quiet-Yes-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let url = root.appendingPathComponent("public-quiet-tail.wav")
+        let prefix = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: source.processingFormat, frameCapacity: 39_200))
+        prefix.frameLength = 39_200
+        for channel in 0..<Int(prefix.format.channelCount) {
+            try XCTUnwrap(prefix.floatChannelData)[channel].initialize(repeating: 0, count: 39_200)
+        }
+        var writer: AVAudioFile? = try AVAudioFile(forWriting: url, settings: source.processingFormat.settings)
+        try writer?.write(from: prefix)
+        try writer?.write(from: spoken)
+        writer = nil
+        XCTAssertTrue(SpeechPresenceGate.checksSingleWord("Yes.", audioDuration: 3))
+        let energy = try XCTUnwrap(SpeechPresenceGate.maximumFrameRMS(url))
+        XCTAssertGreaterThan(energy, 0)
+        XCTAssertLessThan(energy, 0.01)
+        let confidence = try XCTUnwrap(SpeechPresenceGate.maximumSpeechConfidence(url))
+        XCTAssertTrue((0...1).contains(confidence), "Use the real classifier on the whole quiet sealed range")
+        for attempt: TranscriptionWorkRecord.Attempt in [.initial, .automaticRetry] {
+            let output = try await DurableTranscriptionQueue.recognize(record(url, attempt: attempt), audioURL: url,
+                recordingURL: nil, formulaContext: "", attempts: .init(),
+                transcriber: { _, _, _, mode in .init(text: mode == .probe ? "" : "Yes.") },
+                speechAnalyzer: { _ in XCTFail("Low acoustic evidence alone cannot condemn a word"); return confidence })
+            XCTAssertEqual(output.text, "Yes.")
+            XCTAssertFalse(output.noSpeech)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        }
     }
 
     private func record(_ url: URL, attempt: TranscriptionWorkRecord.Attempt = .initial,
