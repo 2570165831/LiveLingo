@@ -270,9 +270,11 @@ struct LearningNote: Codable, Equatable, Sendable {
         for index in result.points.indices {
             var point = result.points[index]
             // Version 2 returns IDs, not copied quotes. Resolve against the frozen input only.
-            let ids = point.sourceIDs
+            var seenIDs = Set<String>()
+            let ids = point.sourceIDs.map { $0.filter { seenIDs.insert($0).inserted } }
+            point.sourceIDs = ids
             let supplied = ids.map { $0.compactMap { units[$0]?.source } } ?? point.sources ?? []
-            let invalidIDs = ids.map { $0.count > 2 || Set($0).count != $0.count || supplied.count != $0.count } ?? false
+            let invalidIDs = ids.map { $0.count > 2 || supplied.count != $0.count } ?? false
             let valid = supplied.filter { source in
                 guard evidence.indices.contains(source.index), !source.quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       ids != nil || source.quote.count <= 400 else { return false }
@@ -395,7 +397,45 @@ enum LearningNumericProvenance {
     /// 数值前的编号词 ✓。
     static let designatorPrefixes = ["第", "编号", "序号", "图", "表", "式", "步骤", "阶段", "级别", "等级", "题号", "版本"]
 
-    private static let numberExpression = try! NSRegularExpression(pattern: #"[0-9]+(?:\.[0-9]+)?"#)
+    private static let decimalNumberPattern = #"(?:[1-9][0-9]{0,2}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?"#
+    private static let numberExpression = try! NSRegularExpression(
+        pattern: #"[0-9]+(?:,+[0-9]+)*(?:\.[0-9]+)?"#)
+    private static let groupedNumberExpression = try! NSRegularExpression(
+        pattern: "^" + decimalNumberPattern + "$")
+
+    private static let numberPairExpression = try! NSRegularExpression(
+        pattern: #"(\[|\()[+\-−－﹣]?([0-9]+(?:\.[0-9]+)?),[+\-−－﹣]?([0-9]+(?:\.[0-9]+)?)(\]|\))"#)
+
+    /// A compact, unitless bracketed pair denotes two values, even when its
+    /// comma could otherwise look like a thousands separator.
+    private static func numberPairRanges(in text: String) -> [NSRange] {
+        let ns = text as NSString
+        return numberPairExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).flatMap { match -> [NSRange] in
+            let opener = ns.substring(with: match.range(at: 1))
+            let closer = ns.substring(with: match.range(at: 4))
+            guard (opener == "[" && closer == "]") || (opener == "(" && closer == ")") else { return [] }
+            let after = ns.substring(from: NSMaxRange(match.range)).trimmingCharacters(in: .whitespaces)
+            guard provenanceUnit(after: String(after.prefix(provenanceUnitLookahead))) == nil else { return [] }
+            return [match.range(at: 2), match.range(at: 3)]
+        }
+    }
+
+    /// Reject a suffix of a malformed separator run, while allowing punctuation
+    /// after a unit or prose ("8 kg,500 Hz") to introduce an independent value.
+    private static func isSeparatedNumberTail(in text: NSString, before start: Int) -> Bool {
+        var cursor = start
+        var hasComma = false
+        while cursor > 0 {
+            let character = text.character(at: cursor - 1)
+            guard character == 0x2C || character == 0x2E else { break }
+            if character == 0x2C { hasComma = true }
+            cursor -= 1
+        }
+        // Dots alone retain the old scalar warnings for versions such as v1.2.3.
+        guard hasComma, cursor > 0 else { return false }
+        let previous = text.character(at: cursor - 1)
+        return previous >= 0x30 && previous <= 0x39
+    }
 
     private static let minusMarks: Set<Character> = ["-", "−", "－", "﹣"]
     private static let signOpeners: Set<Character> = Set("([{（【=＝:：,，;；、。！？~～≈<>≤≥\"'“‘")
@@ -901,12 +941,13 @@ enum LearningNumericProvenance {
     /// `3e2`, `3 × 10⁶`, `10^6`: one value whose exponent digits are never
     /// separate mentions. Another base (`2^10`) stays one raw, unconverted value.
     private static let scientificExpression = try! NSRegularExpression(pattern:
-        #"(?<![A-Za-z0-9_.])([0-9]+(?:\.[0-9]+)?)(?:[eE]([+\-−]?[0-9]+)(?![A-Za-z0-9_])"#
+        #"(?<![A-Za-z0-9_.])("# + decimalNumberPattern + #")(?:[eE]([+\-−]?[0-9]+)(?![A-Za-z0-9_])"#
         + #"|[ \t]*[×xX*·⋅][ \t]*10[ \t]*(?:\^[ \t]*([+\-−]?[0-9]+)|([⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+))"#
         + #"|[ \t]*\^[ \t]*([+\-−]?[0-9]+)|([⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+))"#)
 
-    /// Each entry's range covers the expression and its parsed unit.
-    private static func scientificMentions(in text: String, excluding: [NSRange]) -> [(NSRange, Mention)] {
+    /// Ranges cover the expression and its unit. Malformed grouped prefixes
+    /// reserve the range without certifying any of its digits as a mention.
+    private static func scientificMentions(in text: String, excluding: [NSRange]) -> [(NSRange, Mention?)] {
         let ns = text as NSString
         return scientificExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
             guard !excluding.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { return nil }
@@ -918,7 +959,7 @@ enum LearningNumericProvenance {
                 String(exponent.map { superscriptCharacters[$0] ?? ($0 == "−" ? "-" : $0) })
             }
             let raw = ns.substring(with: match.range)
-            let base = group(1) ?? ""
+            let base = (group(1) ?? "").replacingOccurrences(of: ",", with: "")
             var mantissa = base, exponent = (group(2) ?? group(3) ?? group(4)).map(plain)
             if exponent == nil, base == "10" { mantissa = "1"; exponent = (group(5) ?? group(6)).map(plain) }
             let value: String
@@ -940,7 +981,9 @@ enum LearningNumericProvenance {
             let sign = negativeSign(in: ns, before: start)
             let excerpt = unit.map { "\(sign)\(raw)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(raw)" : sign + raw)
             let covered = unit.map { afterStart + $0.token.utf16.count - start } ?? match.range.length
-            return (NSRange(location: start, length: covered), Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt,
+            let range = NSRange(location: start, length: covered)
+            guard !isSeparatedNumberTail(in: ns, before: start) else { return (range, nil) }
+            return (range, Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt,
                                                                        sign: sign.isEmpty ? "" : "-"))
         }
     }
@@ -962,14 +1005,21 @@ enum LearningNumericProvenance {
         // Digits inside a parsed unit (`kg/m3`, `m^2`) are not separate numbers.
         var unitEnd = 0
         let ns = text as NSString
-        let other: [(Int, Mention)] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
-            guard match.range.location >= unitEnd else { return nil }
+        let pairs = numberPairRanges(in: text)
+        let pairStarts = Set(pairs.map(\.location))
+        let ranges = (numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).map(\.range)
+            .filter { range in !pairs.contains { NSIntersectionRange($0, range).length > 0 } } + pairs)
+            .sorted { $0.location < $1.location }
+        let other: [(Int, Mention)] = ranges.compactMap { range in
+            guard range.location >= unitEnd,
+                  (pairStarts.contains(range.location) || !isSeparatedNumberTail(in: ns, before: range.location)) else { return nil }
             while exclusionIndex < scalarExclusions.count,
-                  NSMaxRange(scalarExclusions[exclusionIndex]) <= match.range.location { exclusionIndex += 1 }
+                  NSMaxRange(scalarExclusions[exclusionIndex]) <= range.location { exclusionIndex += 1 }
             if exclusionIndex < scalarExclusions.count,
-               NSIntersectionRange(scalarExclusions[exclusionIndex], match.range).length > 0 { return nil }
-            let value = ns.substring(with: match.range)
-            let start = match.range.location, end = match.range.location + match.range.length
+               NSIntersectionRange(scalarExclusions[exclusionIndex], range).length > 0 { return nil }
+            let raw = ns.substring(with: range)
+            let value = raw.replacingOccurrences(of: ",", with: "")
+            let start = range.location, end = range.location + range.length
             let beforeStart = max(0, start - 8)
             let before = ns.substring(with: NSRange(location: beforeStart, length: start - beforeStart))
             var afterStart = end
@@ -977,22 +1027,29 @@ enum LearningNumericProvenance {
             // Include the longest supported spelling and its following boundary;
             // ten characters would truncate units such as "millilitres".
             let after = ns.substring(with: NSRange(location: afterStart, length: min(unitLookahead, ns.length - afterStart)))
-            if isDesignator(value: value, before: before, after: after) {
-                return (start, Mention(value: value, unit: nil, role: .designator, excerpt: "编号\(value)"))
-            }
             let unitText = ns.substring(with: NSRange(location: afterStart, length: min(provenanceUnitLookahead, ns.length - afterStart)))
+            if raw.contains(","), groupedNumberExpression.firstMatch(in: raw,
+                range: NSRange(location: 0, length: range.length)) == nil {
+                // Ignore the malformed value together with its unit's power digits.
+                if let unit = provenanceUnit(after: unitText) { unitEnd = afterStart + unit.token.utf16.count }
+                return nil
+            }
+            if isDesignator(value: value, before: before, after: after) {
+                return (start, Mention(value: value, unit: nil, role: .designator, excerpt: "编号\(raw)"))
+            }
             let unit = provenanceUnit(after: unitText)
             if let unit { unitEnd = afterStart + unit.token.utf16.count }
             let hasAttribute = attributeMarkers.contains(where: { before.hasSuffix($0) })
             let role: Mention.Role = unit != nil || hasAttribute ? .measurement : .ambiguous
             let sign = negativeSign(in: ns, before: start)
-            let excerpt = unit.map { "\(sign)\(value)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(value)" : sign + value)
+            let excerpt = unit.map { "\(sign)\(raw)\($0.token)" } ?? (hasAttribute ? "\(before.trimmingCharacters(in: .whitespaces))\(raw)" : sign + raw)
             return (start, Mention(value: value, unit: unit?.family, role: role, excerpt: excerpt, sign: sign.isEmpty ? "" : "-"))
         }
         // A grammatical quantifier neither raises a numeric warning nor
         // supplies a count/scalar for another claim. Other numbers in the
         // sentence are still checked independently.
-        let scalars = (other + scientific.map { ($0.0.location, $0.1) }).sorted { $0.0 < $1.0 }.map(\.1)
+        let scientificValues = scientific.compactMap { entry in entry.1.map { (entry.0.location, $0) } }
+        let scalars = (other + scientificValues).sorted { $0.0 < $1.0 }.map(\.1)
         return scalars + counts.compactMap { $0.1.role == .distributive ? nil : $0.1 }
     }
 
@@ -1671,7 +1728,10 @@ struct LearningNotebook: Sendable {
             // 明确给了来源 id 却对不上本次输入：不能撤下旧问题 ✗。
             guard named.count == declared.count else { return .none }
             var candidates: [Int] = []
-            for (index, point) in note.points.enumerated() where isEvidenceBacked(point) {
+            // Retained citations still make the sentence ambiguous when their
+            // point is unlinked or has its own question. Check answer availability last.
+            for (index, point) in note.points.enumerated()
+                where !(point.sources ?? []).isEmpty {
                 let sources = point.sources ?? []
                 func exact(_ unit: LearningSourceUnit) -> Bool {
                     sources.contains { $0.index == unit.index && ($0.quote == unit.text || unit.text.contains($0.quote)) }
@@ -1687,12 +1747,16 @@ struct LearningNotebook: Sendable {
                     exact(unit) || matched.contains { $0.index == unit.index && $0.language != unit.language }
                 }) { candidates.append(index) }
             }
-            if let chosen = record.pointIndex { return candidates.contains(chosen) ? .point(chosen) : .none }
-            switch candidates.count {
-            case 0: return .none
-            case 1: return .point(candidates[0])
-            default: return .ambiguous
+            let chosen: Int
+            if let index = record.pointIndex {
+                guard candidates.contains(index) else { return .none }
+                chosen = index
+            } else {
+                guard candidates.count <= 1 else { return .ambiguous }
+                guard let index = candidates.first else { return .none }
+                chosen = index
             }
+            return isEvidenceBacked(note.points[chosen]) ? .point(chosen) : .none
         }
         guard let index = record.pointIndex, note.points.indices.contains(index),
               isEvidenceBacked(note.points[index]) else { return .none }

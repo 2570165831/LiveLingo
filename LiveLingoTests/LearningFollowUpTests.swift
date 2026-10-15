@@ -247,7 +247,10 @@ final class LearningFollowUpTests: XCTestCase {
     // MARK: - issue #20：同一句原文拆出多条要点
 
     /// 旧问题“速度属于哪辆车”，后文一句话同时拆出“质量”和“速度”两条要点，都引用这句原文。
-    private func sharedSentenceCase(pointIndex: Int?) throws -> (notebook: LearningNotebook, target: String) {
+    private func sharedSentenceCase(pointIndex: Int?, pendingPoint: Int? = nil,
+                                    pendingKind: String = "待确认", reverseSharedPoints: Bool = false,
+                                    speedSourceIDs: [String]? = nil,
+                                    followUpSourceIDs: [String] = ["en0s0"]) throws -> (notebook: LearningNotebook, target: String) {
         var notebook = LearningNotebook()
         try notebook.append(evidence: [segment("One cart moved at 4 meters per second.",
                                                "有一辆车速度为4米每秒，尚未说明是哪辆车。")],
@@ -258,12 +261,19 @@ final class LearningFollowUpTests: XCTestCase {
         let target = try XCTUnwrap(notebook.pendingPoints.first?.id)
         let later = segment("Cart A has a mass of 8 kg and a speed of 4 m/s. Cart B is at rest.",
                             "A车质量为8千克，速度为4米每秒。B车静止。", at: 12)
-        let note = LearningNote(topic: "小车", points: [
+        var points = [
             LearningPoint(kind: "核心结论", text: "A车质量为8千克。", sourceIDs: ["en0s0", "zh0s0"]),
             LearningPoint(kind: "核心结论", text: "A车速度为4米每秒。", sourceIDs: ["en0s0", "zh0s0"]),
             LearningPoint(kind: "核心结论", text: "B车静止。", sourceIDs: ["en0s1", "zh0s1"])
-        ], sourceVersion: 2, noNewKnowledge: false, followUps: [
-            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0"], pointIndex: pointIndex,
+        ]
+        if let pendingPoint {
+            points[pendingPoint].kind = pendingKind
+            points[pendingPoint].needsContext = "速度测量发生在什么时候？"
+        }
+        if let speedSourceIDs { points[1].sourceIDs = speedSourceIDs }
+        if reverseSharedPoints { points.swapAt(0, 1) }
+        let note = LearningNote(topic: "小车", points: points, sourceVersion: 2, noNewKnowledge: false, followUps: [
+            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: followUpSourceIDs, pointIndex: pointIndex,
                              detail: "后文说明4米每秒是A车的速度。")
         ])
         try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
@@ -289,6 +299,113 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(replay.contains("属于哪辆车"), replay)
         XCTAssertTrue(rendered.contains("关系仍不明"), rendered)
         XCTAssertTrue(rendered.contains("多条要点引用了同一句原文"), rendered)
+    }
+
+    func testSharedSentenceAmbiguityIncludesPointsWithTheirOwnQuestions() throws {
+        for kind in ["待确认", "核心结论"] {
+            for reversed in [false, true] {
+                let (notebook, target) = try sharedSentenceCase(pointIndex: nil, pendingPoint: 1,
+                    pendingKind: kind, reverseSharedPoints: reversed)
+                let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+                XCTAssertEqual(committed.state, .unclear, "kind=\(kind), reversed=\(reversed)")
+                XCTAssertNil(committed.pointIndex)
+                XCTAssertEqual(committed.detail, ClassroomFixedText.ambiguousSupplementDetail.noteText(target: .simplifiedChinese))
+                XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+                XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+                let rendered = notebook.markdown()
+                XCTAssertEqual(supplementLines(rendered), [], rendered)
+                let replay = try XCTUnwrap(section(rendered, LearningNotebook.replayHeading), rendered)
+                XCTAssertTrue(replay.contains("属于哪辆车"), replay)
+                XCTAssertTrue(replay.contains("速度测量发生在什么时候"), replay)
+            }
+        }
+    }
+
+    func testSharedSentenceAmbiguityIncludesUnlinkedPoints() throws {
+        for ids in [["en0s0", "missing"], ["en0s0", "zh0s0", "en0s1"]] {
+            for reversed in [false, true] {
+                let (notebook, target) = try sharedSentenceCase(pointIndex: nil,
+                    reverseSharedPoints: reversed, speedSourceIDs: ids)
+                XCTAssertEqual(notebook.batches[1].note.points[reversed ? 0 : 1].referenceState, .unlinked)
+                let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+                XCTAssertEqual(committed.state, .unclear)
+                XCTAssertNil(committed.pointIndex)
+                XCTAssertEqual(committed.detail, ClassroomFixedText.ambiguousSupplementDetail.noteText(target: .simplifiedChinese))
+                XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+                XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+                XCTAssertEqual(supplementLines(notebook.markdown()), [])
+            }
+        }
+    }
+
+    func testRepeatedSourceIDsBindOnceAndKeepSharedSentenceAmbiguous() throws {
+        for id in ["en0s0", "zh0s0"] {
+            let (notebook, target) = try sharedSentenceCase(pointIndex: nil, speedSourceIDs: [id, id], followUpSourceIDs: [id])
+            let speed = notebook.batches[1].note.points[1]
+            XCTAssertEqual(speed.sourceIDs, [id])
+            XCTAssertEqual(speed.sources?.count, 1)
+            XCTAssertEqual(speed.referenceState, .linked)
+            let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+            XCTAssertEqual(committed.state, .unclear)
+            XCTAssertNil(committed.pointIndex)
+            XCTAssertEqual(committed.detail, ClassroomFixedText.ambiguousSupplementDetail.noteText(target: .simplifiedChinese))
+            XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+            XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+            XCTAssertEqual(supplementLines(notebook.markdown()), [])
+        }
+    }
+
+    func testExplicitUnlinkedSharedSentencePointCannotAnswer() throws {
+        for chosen in [0, 1] {
+            let (notebook, target) = try sharedSentenceCase(pointIndex: chosen,
+                speedSourceIDs: ["en0s0", "missing"])
+            XCTAssertEqual(notebook.batches[1].note.points[1].referenceState, .unlinked)
+            let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+            if chosen == 0 {
+                XCTAssertEqual(committed.state, .supplemented)
+                XCTAssertEqual(committed.pointIndex, chosen)
+                XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+            } else {
+                XCTAssertEqual(committed.state, .unclear)
+                XCTAssertNil(committed.pointIndex)
+                XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+                XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+                XCTAssertEqual(supplementLines(notebook.markdown()), [])
+            }
+        }
+    }
+
+    func testSourceIDDeduplicationPreservesOrderWithoutAcceptingUnknownIDs() {
+        let source = segment("Cart A has a mass of 8 kg.", "A车质量为8千克。")
+        let original = LearningNote(topic: "质量", points: [
+            LearningPoint(kind: "核心结论", text: "A车质量为8千克。", sourceIDs: ["zh0s0", "en0s0", "zh0s0"]),
+            LearningPoint(kind: "核心结论", text: "A车质量为8千克。", sourceIDs: ["en0s0", "missing", "missing"])
+        ], sourceVersion: 2, noNewKnowledge: false)
+        let bound = original.binding(evidence: [source])
+        XCTAssertEqual(bound.points[0].sourceIDs, ["zh0s0", "en0s0"])
+        XCTAssertEqual(bound.points[0].sources?.map(\.quote), [source.chinese, source.english])
+        XCTAssertEqual(bound.points[0].referenceState, .linked)
+        XCTAssertEqual(bound.points[1].sourceIDs, ["en0s0", "missing"])
+        XCTAssertEqual(bound.points[1].referenceState, .unlinked)
+        XCTAssertEqual(original.points[0].sourceIDs, ["zh0s0", "en0s0", "zh0s0"])
+    }
+
+    func testExplicitSharedSentenceChoiceStillRequiresAResolvedPoint() throws {
+        for chosen in [0, 1] {
+            let (notebook, target) = try sharedSentenceCase(pointIndex: chosen, pendingPoint: 1)
+            let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+            if chosen == 0 {
+                XCTAssertEqual(committed.state, .supplemented)
+                XCTAssertEqual(committed.pointIndex, chosen)
+                XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+            } else {
+                XCTAssertEqual(committed.state, .unclear)
+                XCTAssertNil(committed.pointIndex)
+                XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+                XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+                XCTAssertEqual(supplementLines(notebook.markdown()), [])
+            }
+        }
     }
 
     func testSupplementNamingOneOfSeveralMatchingPointsUsesThatPoint() throws {
@@ -841,6 +958,125 @@ final class LearningFollowUpTests: XCTestCase {
             claim: mixedClaim, cited: ["For each door, inspect 1,000 samples."], segmentTexts: [])
         XCTAssertEqual(incomplete.gaps.count, 1)
         XCTAssertTrue(incomplete.gaps.joined().contains("计数“3个”"))
+    }
+
+    func testGroupedMeasurementMentionsKeepTokenBoundaries() {
+        let mentions = LearningNumericProvenance.mentions(in: "频率为-1,234,567.5 Hz。")
+        XCTAssertEqual(mentions.count, 1)
+        XCTAssertEqual(mentions.first?.value, "1234567.5")
+        XCTAssertEqual(mentions.first?.unit, "Hz")
+        XCTAssertEqual(mentions.first?.sign, "-")
+        XCTAssertTrue(LearningNumericProvenance.mentions(in: "12,34 Hz").isEmpty)
+        XCTAssertTrue(LearningNumericProvenance.mentions(in: "1234,500 Hz").isEmpty)
+    }
+
+    func testCompactBracketedNumberPairsRemainTwoValues() {
+        for (text, values) in [
+            ("[0,100]", ["0", "100"]),
+            ("[0,255]", ["0", "255"]),
+            ("[1,100]", ["1", "100"]),
+            ("(10,200)", ["10", "200"]),
+            ("(100,200)", ["100", "200"]),
+            ("[0,1]", ["0", "1"]),
+            ("(3,4)", ["3", "4"]),
+            ("[0.5,100.5]", ["0.5", "100.5"]),
+            ("(-10,200)", ["10", "200"])
+        ] {
+            XCTAssertEqual(LearningNumericProvenance.mentions(in: text).map(\.value), values, text)
+        }
+        XCTAssertEqual(LearningNumericProvenance.mentions(in: "[1,500 Hz]").first?.value, "1500")
+        XCTAssertEqual(LearningNumericProvenance.mentions(in: "(1,500) Hz").first?.value, "1500")
+        for text in ["0,100 Hz", "01,500 Hz", "0,100e0 Hz"] {
+            XCTAssertTrue(LearningNumericProvenance.mentions(in: text).isEmpty, text)
+        }
+    }
+
+    func testCompactIntervalsAndTuplesMatchSeparateSourceValuesOnBothSides() {
+        for (pair, words) in [
+            ("[0,100]", "from 0 to 100"),
+            ("[0,255]", "from 0 to 255"),
+            ("[1,100]", "from 1 to 100"),
+            ("(10,200)", "10 and 200"),
+            ("(100,200)", "100 and 200"),
+            ("[0,1]", "from 0 to 1")
+        ] {
+            for (claim, source) in [("取值为\(pair)。", "The values are \(words)."),
+                                    ("取值为\(words)。", "The values are \(pair). ")] {
+                let report = LearningNumericProvenance.report(claim: claim, cited: [source],
+                                                             segmentTexts: [], batchTexts: [source])
+                XCTAssertFalse(report.isDecidable, "\(claim) / \(source)")
+                XCTAssertTrue(report.gaps.isEmpty, "\(claim) / \(source): \(report.gaps)")
+            }
+        }
+        let source = "The range is [0,100]."
+        let report = LearningNumericProvenance.report(claim: "取值为[0,255]。", cited: [source],
+                                                     segmentTexts: [], batchTexts: [source])
+        XCTAssertFalse(report.gaps.isEmpty)
+        XCTAssertTrue(report.gaps.joined().contains("255"))
+    }
+
+    func testThousandsGroupedMeasurementsMatchWholeValuesOnBothSides() {
+        for (claim, source) in [
+            ("频率为1500 Hz。", "The frequency is 1,500 Hz."),
+            ("频率为1,500 Hz。", "The frequency is 1500 Hz."),
+            ("频率为1,500 Hz。", "The frequency is 1,500 Hz."),
+            ("质量为2500克。", "The mass is 2,500 grams."),
+            ("质量为2,500克。", "The mass is 2500 grams."),
+            ("频率为1234567.5 Hz。", "The frequency is 1,234,567.5 Hz."),
+            ("频率为1,234,567.5 Hz。", "The frequency is 1234567.5 Hz."),
+            ("频率为-1500 Hz。", "The frequency is -1,500 Hz."),
+            ("频率为1.5e6 Hz。", "The frequency is 1,500e3 Hz."),
+            ("频率为1,500 × 10³ Hz。", "The frequency is 1500000 Hz."),
+            ("频率为500 Hz。", "The mass is 8 kg,500 Hz is the frequency."),
+            ("频率为1500000 Hz。", "The mass is 8 kg,1,500e3 Hz is the frequency."),
+            ("共有1500个样本。", "There are 1,500 samples.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source],
+                                                         segmentTexts: [], batchTexts: [source])
+            XCTAssertFalse(report.isDecidable, "\(claim) / \(source): \(report.gaps)")
+            XCTAssertTrue(report.gaps.isEmpty, "\(claim) / \(source): \(report.gaps)")
+        }
+    }
+
+    func testThousandsGroupedMeasurementsNeverUseAGroupTailAsSupport() {
+        for (claim, source) in [
+            ("频率为500 Hz。", "The frequency is 1,500 Hz."),
+            ("质量为500克。", "The mass is 2,500 grams."),
+            ("频率为567.5 Hz。", "The frequency is 1,234,567.5 Hz."),
+            ("频率为1,500 Hz。", "The frequency is 500 Hz."),
+            ("频率为500000 Hz。", "The frequency is 1,500e3 Hz."),
+            ("频率为34 Hz。", "The frequency is 12,34 Hz."),
+            ("频率为500 Hz。", "The frequency is 1234,500 Hz."),
+            ("频率为500 Hz。", "The frequency is 1,500,00 Hz."),
+            ("频率为500 Hz。", "The frequency is 1,,500 Hz."),
+            ("频率为500 Hz。", "The frequency is 1,,500e0 Hz."),
+            ("频率为0 Hz。", "The frequency is 1,,500e0 Hz."),
+            ("测量值2。", "The area is 1,,500e0 m^2."),
+            ("测量值2。", "The area is 1,,500 m^2."),
+            ("频率为-1500 Hz。", "The frequency is 1,500 Hz."),
+            ("质量为1500克。", "The frequency is 1,500 Hz.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source],
+                                                         segmentTexts: [], batchTexts: [source])
+            XCTAssertTrue(report.isDecidable, "\(claim) / \(source)")
+            XCTAssertFalse(report.gaps.isEmpty, "\(claim) / \(source)")
+        }
+    }
+
+    func testGroupedBilingualEvidenceDoesNotRewriteNotesOrCaptions() throws {
+        let source = segment("The frequency is 1,500 Hz.", "频率为1,500赫兹。")
+        let original = source
+        let correct = "频率为1500 Hz。"
+        let incorrect = "频率为500 Hz。"
+        let note = LearningNote(topic: "频率", points: [
+            LearningPoint(kind: "核心结论", text: correct, sourceIDs: ["en0s0", "zh0s0"]),
+            LearningPoint(kind: "核心结论", text: incorrect, sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false)
+        let bound = note.binding(evidence: [source])
+        XCTAssertNil(bound.points[0].numericGap)
+        XCTAssertNotNil(bound.points[1].numericGap)
+        XCTAssertEqual(bound.points.map(\.text), [correct, incorrect])
+        XCTAssertEqual(source, original)
     }
 
     func testSpelledUnitsKeepTheirFullNameAndWordBoundary() {
