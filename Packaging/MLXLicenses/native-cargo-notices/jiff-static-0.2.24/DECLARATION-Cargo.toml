@@ -1,0 +1,9 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "jiff-static"
+version = "0.2.24"
+license = "Unlicense OR MIT"
+authors = ["Andrew Gallant <jamslam@gmail.com>"]
+repository = "https://github.com/BurntSushi/jiff"
+homepage = "https://github.com/BurntSushi/jiff/tree/master/crates/jiff-static"
+description = "Create static TimeZone values for Jiff (useful in core-only environments)."

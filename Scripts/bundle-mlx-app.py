@@ -246,13 +246,19 @@ def validate_asr_python(root):
 
 
 def install_python_licenses(source_python, destination):
-    """Best-effort: collect the portable CPython's own license files at shallow depth."""
+    """Collect CPython's own shallow notices, preserving prepared notice layout.
+
+    The prepared Licenses tree already travels with the complete Python copy.
+    Flattening it duplicates third-party notices and loses the source-header
+    context required by the privacy parser.
+    """
     copies = 0
     for path in sorted(Path(source_python).rglob("*")):
         if not path.is_file() or path.is_symlink():
             continue
         relative = path.relative_to(source_python)
-        if len(relative.parts) > 3 or "site-packages" in relative.parts:
+        if (len(relative.parts) > 3 or "site-packages" in relative.parts
+                or relative.parts[0] == "Licenses"):
             continue
         if any(word in path.name.lower() for word in ("license", "licence", "notice", "copying")):
             flat_name = str(relative).replace("/", "__")

@@ -13,16 +13,16 @@ archives retain their canonical LanguageRuntime location. The offline locks
 omit soxr together with librosa; native soxr cannot be reintroduced without a
 registered corresponding-source archive.
 
-The original legal files for ten additional tokenizers 0.23.0rc0 crates are
+The original legal files for 25 additional tokenizers 0.23.0rc0 crates are
 retained byte for byte, with official archive sizes and SHA-256 values in
 `native-cargo-notices/inventory.json`. Its complete upstream Cargo.lock has
-165 registry packages: 149 versions match the inventory, including one dev-only
-entry with no notice text. Sixteen new versions remain uncollected. Removing
+165 registry packages: 164 versions match the inventory, including one dev-only
+entry with no notice text. The uncollected hashbrown 0.17.0 is also dev-only. Removing
 only the explicit Python binding's dev-only `tempfile` edge leaves 138 registry
-packages conservatively required; 15 lack notices. The hash-bound
+packages conservatively required; all have exact-version notices. The hash-bound
 `native-cargo-notices/tokenizers-0.23.0rc0-lock-audit.json` records every
-package, the 27 dev-only exclusions and missing archive metadata. This is a
-release blocker, not a claim that all remaining crates are linked. Build,
+package and the 27 dev-only exclusions. This conservative runtime graph is
+not a claim that all remaining crates are linked. Build,
 optional and platform edges stay required until exclusions are established.
 
 `runtime-manifest.json` in the enclosing LanguageRuntime records pinned Python packages and their direct license files. `AUDIT.json` records the verified collection scope.

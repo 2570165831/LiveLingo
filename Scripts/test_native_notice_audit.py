@@ -9,6 +9,18 @@ from Scripts import native_notice_audit as notices
 
 
 class NativeNoticeAuditTests(unittest.TestCase):
+    def test_committed_tokenizers_runtime_graph_has_exact_hash_bound_notices(self):
+        supplements = Path(__file__).resolve().parent.parent / "Packaging/MLXLicenses"
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            info = site / "tokenizers-0.23.0rc0.dist-info"
+            info.mkdir()
+            (info / "METADATA").write_text("Metadata-Version: 2.4\nName: tokenizers\nVersion: 0.23.0rc0\n")
+            result = notices.audit(site, supplements)
+            self.assertTrue(result["passed"], result["missingCrateNotices"])
+            self.assertEqual(len(result["lockRequiredCrates"]), 138)
+            self.assertEqual(len(result["sourceLockAudits"][0]["excludedDevOnlyCrates"]), 27)
+
     def test_only_root_dev_only_reachability_is_excluded(self):
         packages = [
             {"name": "root", "version": "1.0.0", "dependencies": ["normal", "dev", "shared"]},

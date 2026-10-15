@@ -1,0 +1,9 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "bitflags"
+version = "2.11.1"
+license = "MIT OR Apache-2.0"
+authors = ["The Rust Project Developers"]
+repository = "https://github.com/bitflags/bitflags"
+homepage = "https://github.com/bitflags/bitflags"
+description = "A macro to generate structures which behave like bitflags.\n"

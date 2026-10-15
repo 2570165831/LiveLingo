@@ -1,0 +1,9 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "tokio-macros"
+version = "2.7.0"
+license = "MIT"
+authors = ["Tokio Contributors <team@tokio.rs>"]
+repository = "https://github.com/tokio-rs/tokio"
+homepage = "https://tokio.rs"
+description = "Tokio's proc macros.\n"

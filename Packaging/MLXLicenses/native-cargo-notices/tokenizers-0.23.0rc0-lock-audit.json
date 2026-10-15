@@ -15,8 +15,8 @@
   "cargoLockSHA256": "e1a599088c38fb8f5cd9c81d70abe4f110551332a2c93ea5997f93e93a424f44",
   "scope": "Complete upstream lock graph checked; runtime requirements conservatively retain every reachable normal/build/optional/platform edge, excluding only proven root dev-only reachability. Exact historical link set is not asserted.",
   "registryPackageCount": 165,
-  "coveredRegistryPackageCount": 148,
-  "missingRegistryPackageCount": 17,
+  "coveredRegistryPackageCount": 163,
+  "missingRegistryPackageCount": 2,
   "completeNoticeCoverage": false,
   "packages": [
     {
@@ -119,7 +119,7 @@
       "version": "2.11.1",
       "checksum": "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3",
       "dependencies": [],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "bumpalo",
@@ -145,7 +145,7 @@
         "find-msvc-tools",
         "shlex"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "cfg-if",
@@ -566,7 +566,7 @@
         "quote",
         "syn"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "js-sys",
@@ -576,7 +576,7 @@
         "once_cell",
         "wasm-bindgen"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "leb128fmt",
@@ -631,7 +631,7 @@
         "autocfg",
         "rawpointer"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "memchr",
@@ -656,7 +656,7 @@
         "wasi",
         "windows-sys"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "monostate",
@@ -818,7 +818,7 @@
       "version": "0.3.33",
       "checksum": "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e",
       "dependencies": [],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "portable-atomic",
@@ -1061,7 +1061,7 @@
       "version": "2.1.2",
       "checksum": "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe",
       "dependencies": [],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "rustix",
@@ -1329,7 +1329,7 @@
         "quote",
         "syn"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "unicode-ident",
@@ -1432,7 +1432,7 @@
         "wasm-bindgen-macro",
         "wasm-bindgen-shared"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "wasm-bindgen-macro",
@@ -1442,7 +1442,7 @@
         "quote",
         "wasm-bindgen-macro-support"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "wasm-bindgen-macro-support",
@@ -1455,7 +1455,7 @@
         "syn",
         "wasm-bindgen-shared"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "wasm-bindgen-shared",
@@ -1464,7 +1464,7 @@
       "dependencies": [
         "unicode-ident"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "wasm-encoder",
@@ -1628,7 +1628,7 @@
       "dependencies": [
         "zerocopy-derive"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "zerocopy-derive",
@@ -1639,7 +1639,7 @@
         "quote",
         "syn"
       ],
-      "noticeAvailable": false
+      "noticeAvailable": true
     },
     {
       "name": "zmij",
@@ -1651,28 +1651,6 @@
   ],
   "missingPackages": [
     {
-      "name": "bitflags",
-      "version": "2.11.1",
-      "filename": "bitflags-2.11.1.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/bitflags/2.11.1",
-      "sourceURL": "https://crates.io/api/v1/crates/bitflags/2.11.1/download",
-      "bytes": 49082,
-      "sha256": "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3",
-      "license": "MIT OR Apache-2.0",
-      "downloaded": false
-    },
-    {
-      "name": "cc",
-      "version": "1.2.60",
-      "filename": "cc-1.2.60.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/cc/1.2.60",
-      "sourceURL": "https://crates.io/api/v1/crates/cc/1.2.60/download",
-      "bytes": 97051,
-      "sha256": "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20",
-      "license": "MIT OR Apache-2.0",
-      "downloaded": false
-    },
-    {
       "name": "hashbrown",
       "version": "0.17.0",
       "filename": "hashbrown-0.17.0.crate",
@@ -1682,152 +1660,9 @@
       "sha256": "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51",
       "license": "MIT OR Apache-2.0",
       "downloaded": false
-    },
-    {
-      "name": "jiff-static",
-      "version": "0.2.24",
-      "filename": "jiff-static-0.2.24.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/jiff-static/0.2.24",
-      "sourceURL": "https://crates.io/api/v1/crates/jiff-static/0.2.24/download",
-      "bytes": 83747,
-      "sha256": "e000de030ff8022ea1da3f466fbb0f3a809f5e51ed31f6dd931c35181ad8e6d7",
-      "license": "Unlicense OR MIT",
-      "downloaded": false
-    },
-    {
-      "name": "js-sys",
-      "version": "0.3.95",
-      "filename": "js-sys-0.3.95.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/js-sys/0.3.95",
-      "sourceURL": "https://crates.io/api/v1/crates/js-sys/0.3.95/download",
-      "bytes": 104031,
-      "sha256": "2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca",
-      "license": "MIT OR Apache-2.0",
-      "downloaded": false
-    },
-    {
-      "name": "matrixmultiply",
-      "version": "0.3.10",
-      "filename": "matrixmultiply-0.3.10.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/matrixmultiply/0.3.10",
-      "sourceURL": "https://crates.io/api/v1/crates/matrixmultiply/0.3.10/download",
-      "bytes": 58170,
-      "sha256": "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08",
-      "license": "MIT/Apache-2.0",
-      "downloaded": false
-    },
-    {
-      "name": "mio",
-      "version": "1.2.0",
-      "filename": "mio-1.2.0.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/mio/1.2.0",
-      "sourceURL": "https://crates.io/api/v1/crates/mio/1.2.0/download",
-      "bytes": 106403,
-      "sha256": "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1",
-      "license": "MIT",
-      "downloaded": false
-    },
-    {
-      "name": "pkg-config",
-      "version": "0.3.33",
-      "filename": "pkg-config-0.3.33.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/pkg-config/0.3.33",
-      "sourceURL": "https://crates.io/api/v1/crates/pkg-config/0.3.33/download",
-      "bytes": 21590,
-      "sha256": "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e",
-      "license": "MIT OR Apache-2.0",
-      "downloaded": false
-    },
-    {
-      "name": "rustc-hash",
-      "version": "2.1.2",
-      "filename": "rustc-hash-2.1.2.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/rustc-hash/2.1.2",
-      "sourceURL": "https://crates.io/api/v1/crates/rustc-hash/2.1.2/download",
-      "bytes": 14754,
-      "sha256": "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe",
-      "license": "Apache-2.0 OR MIT",
-      "downloaded": false
-    },
-    {
-      "name": "tokio-macros",
-      "version": "2.7.0",
-      "filename": "tokio-macros-2.7.0.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/tokio-macros/2.7.0",
-      "sourceURL": "https://crates.io/api/v1/crates/tokio-macros/2.7.0/download",
-      "bytes": 15859,
-      "sha256": "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496",
-      "license": "MIT",
-      "downloaded": false
-    },
-    {
-      "name": "wasm-bindgen",
-      "version": "0.2.118",
-      "filename": "wasm-bindgen-0.2.118.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/wasm-bindgen/0.2.118",
-      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen/0.2.118/download",
-      "bytes": 61149,
-      "sha256": "0bf938a0bacb0469e83c1e148908bd7d5a6010354cf4fb73279b7447422e3a89",
-      "license": "MIT OR Apache-2.0",
-      "downloaded": false
-    },
-    {
-      "name": "wasm-bindgen-macro",
-      "version": "0.2.118",
-      "filename": "wasm-bindgen-macro-0.2.118.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro/0.2.118",
-      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro/0.2.118/download",
-      "bytes": 9288,
-      "sha256": "eeff24f84126c0ec2db7a449f0c2ec963c6a49efe0698c4242929da037ca28ed",
-      "license": "MIT OR Apache-2.0",
-      "downloaded": false
-    },
-    {
-      "name": "wasm-bindgen-macro-support",
-      "version": "0.2.118",
-      "filename": "wasm-bindgen-macro-support-0.2.118.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro-support/0.2.118",
-      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro-support/0.2.118/download",
-      "bytes": 64823,
-      "sha256": "9d08065faf983b2b80a79fd87d8254c409281cf7de75fc4b773019824196c904",
-      "license": "MIT OR Apache-2.0",
-      "downloaded": false
-    },
-    {
-      "name": "wasm-bindgen-shared",
-      "version": "0.2.118",
-      "filename": "wasm-bindgen-shared-0.2.118.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/wasm-bindgen-shared/0.2.118",
-      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen-shared/0.2.118/download",
-      "bytes": 10565,
-      "sha256": "5fd04d9e306f1907bd13c6361b5c6bfc7b3b3c095ed3f8a9246390f8dbdee129",
-      "license": "MIT OR Apache-2.0",
-      "downloaded": false
-    },
-    {
-      "name": "zerocopy",
-      "version": "0.8.48",
-      "filename": "zerocopy-0.8.48.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/zerocopy/0.8.48",
-      "sourceURL": "https://crates.io/api/v1/crates/zerocopy/0.8.48/download",
-      "bytes": 287554,
-      "sha256": "eed437bf9d6692032087e337407a86f04cd8d6a16a37199ed57949d415bd68e9",
-      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
-      "downloaded": false
-    },
-    {
-      "name": "zerocopy-derive",
-      "version": "0.8.48",
-      "filename": "zerocopy-derive-0.8.48.crate",
-      "metadataURL": "https://crates.io/api/v1/crates/zerocopy-derive/0.8.48",
-      "sourceURL": "https://crates.io/api/v1/crates/zerocopy-derive/0.8.48/download",
-      "bytes": 97646,
-      "sha256": "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4",
-      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
-      "downloaded": false
     }
   ],
-  "authorizedArchiveCount": 10,
+  "authorizedArchiveCount": 25,
   "rootPackage": [
     "tokenizers-python",
     "0.23.0-rc0"
@@ -1859,23 +1694,7 @@
     "exclusionPolicy": "Exclude only packages unreachable after removing root dev-only edges; no target or feature pruning."
   },
   "requiredRegistryPackageCount": 138,
-  "missingRequiredCrateNotices": [
-    "bitflags-2.11.1",
-    "cc-1.2.60",
-    "jiff-static-0.2.24",
-    "js-sys-0.3.95",
-    "matrixmultiply-0.3.10",
-    "mio-1.2.0",
-    "pkg-config-0.3.33",
-    "rustc-hash-2.1.2",
-    "tokio-macros-2.7.0",
-    "wasm-bindgen-0.2.118",
-    "wasm-bindgen-macro-0.2.118",
-    "wasm-bindgen-macro-support-0.2.118",
-    "wasm-bindgen-shared-0.2.118",
-    "zerocopy-0.8.48",
-    "zerocopy-derive-0.8.48"
-  ],
+  "missingRequiredCrateNotices": [],
   "excludedDevOnlyCrates": [
     "anyhow-1.0.102",
     "equivalent-1.0.2",
@@ -1908,5 +1727,128 @@
   "existingDeclarationOnlyCrates": [
     "wasm-metadata-0.244.0"
   ],
-  "missingPackagesScope": "Metadata for 16 new exact versions; hashbrown 0.17.0 is dev-only in the upstream graph. Existing declaration-only wasm-metadata 0.244.0 is also dev-only and is not a runtime notice requirement."
+  "missingPackagesScope": "The sole uncollected exact version, hashbrown 0.17.0, is proven root dev-only. Existing declaration-only wasm-metadata 0.244.0 is also dev-only. Neither is a runtime notice requirement.",
+  "runtimeGraphNoticeCoverage": true,
+  "secondApprovedArchives": [
+    {
+      "name": "bitflags",
+      "version": "2.11.1",
+      "filename": "bitflags-2.11.1.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/bitflags/2.11.1/download",
+      "bytes": 49082,
+      "sha256": "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+    },
+    {
+      "name": "cc",
+      "version": "1.2.60",
+      "filename": "cc-1.2.60.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/cc/1.2.60/download",
+      "bytes": 97051,
+      "sha256": "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20"
+    },
+    {
+      "name": "jiff-static",
+      "version": "0.2.24",
+      "filename": "jiff-static-0.2.24.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/jiff-static/0.2.24/download",
+      "bytes": 83747,
+      "sha256": "e000de030ff8022ea1da3f466fbb0f3a809f5e51ed31f6dd931c35181ad8e6d7"
+    },
+    {
+      "name": "js-sys",
+      "version": "0.3.95",
+      "filename": "js-sys-0.3.95.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/js-sys/0.3.95/download",
+      "bytes": 104031,
+      "sha256": "2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca"
+    },
+    {
+      "name": "matrixmultiply",
+      "version": "0.3.10",
+      "filename": "matrixmultiply-0.3.10.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/matrixmultiply/0.3.10/download",
+      "bytes": 58170,
+      "sha256": "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08"
+    },
+    {
+      "name": "mio",
+      "version": "1.2.0",
+      "filename": "mio-1.2.0.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/mio/1.2.0/download",
+      "bytes": 106403,
+      "sha256": "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
+    },
+    {
+      "name": "pkg-config",
+      "version": "0.3.33",
+      "filename": "pkg-config-0.3.33.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/pkg-config/0.3.33/download",
+      "bytes": 21590,
+      "sha256": "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+    },
+    {
+      "name": "rustc-hash",
+      "version": "2.1.2",
+      "filename": "rustc-hash-2.1.2.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/rustc-hash/2.1.2/download",
+      "bytes": 14754,
+      "sha256": "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
+    },
+    {
+      "name": "tokio-macros",
+      "version": "2.7.0",
+      "filename": "tokio-macros-2.7.0.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/tokio-macros/2.7.0/download",
+      "bytes": 15859,
+      "sha256": "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
+    },
+    {
+      "name": "wasm-bindgen",
+      "version": "0.2.118",
+      "filename": "wasm-bindgen-0.2.118.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen/0.2.118/download",
+      "bytes": 61149,
+      "sha256": "0bf938a0bacb0469e83c1e148908bd7d5a6010354cf4fb73279b7447422e3a89"
+    },
+    {
+      "name": "wasm-bindgen-macro",
+      "version": "0.2.118",
+      "filename": "wasm-bindgen-macro-0.2.118.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro/0.2.118/download",
+      "bytes": 9288,
+      "sha256": "eeff24f84126c0ec2db7a449f0c2ec963c6a49efe0698c4242929da037ca28ed"
+    },
+    {
+      "name": "wasm-bindgen-macro-support",
+      "version": "0.2.118",
+      "filename": "wasm-bindgen-macro-support-0.2.118.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro-support/0.2.118/download",
+      "bytes": 64823,
+      "sha256": "9d08065faf983b2b80a79fd87d8254c409281cf7de75fc4b773019824196c904"
+    },
+    {
+      "name": "wasm-bindgen-shared",
+      "version": "0.2.118",
+      "filename": "wasm-bindgen-shared-0.2.118.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen-shared/0.2.118/download",
+      "bytes": 10565,
+      "sha256": "5fd04d9e306f1907bd13c6361b5c6bfc7b3b3c095ed3f8a9246390f8dbdee129"
+    },
+    {
+      "name": "zerocopy",
+      "version": "0.8.48",
+      "filename": "zerocopy-0.8.48.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/zerocopy/0.8.48/download",
+      "bytes": 287554,
+      "sha256": "eed437bf9d6692032087e337407a86f04cd8d6a16a37199ed57949d415bd68e9"
+    },
+    {
+      "name": "zerocopy-derive",
+      "version": "0.8.48",
+      "filename": "zerocopy-derive-0.8.48.crate",
+      "sourceURL": "https://crates.io/api/v1/crates/zerocopy-derive/0.8.48/download",
+      "bytes": 97646,
+      "sha256": "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4"
+    }
+  ]
 }
