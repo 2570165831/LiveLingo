@@ -140,7 +140,8 @@ final class AlarmLifecycleTests: XCTestCase {
         try await eventually { calls == 1 }
         await saved.chineseRecognitionTaskForTesting(caption.id)?.value
         XCTAssertEqual(calls, 1)
-        XCTAssertEqual(try SessionStore(directory: first).load()?.segments.first?.english, "警报前课程的中文原文。")
+        XCTAssertEqual(try SessionStore(directory: first).load()?.segments.first(where: { $0.id == caption.id })?.english,
+                       "警报前课程的中文原文。")
         XCTAssertNil(try SessionStore(directory: first).load()?.pendingChineseRecognition)
     }
 

@@ -908,11 +908,15 @@ struct CaptionHistoryScrollView<Rows: View>: View {
                     }
                     followIfEnabled()
                 }
-                .onAppear {
+                .task {
                     // A reconstructed history can inherit an existing reading
                     // anchor. Establish its baseline without treating it as arrival.
                     if lastFollowedCaptionID == nil, let readingAnchor = captionAnchor {
-                        lastFollowedCaptionID = readLatestID.map { $0() } ?? latestID
+                        let baseline = readLatestID.map { $0() } ?? latestID
+                        lastFollowedCaptionID = baseline
+                        await Task.yield()
+                        guard !Task.isCancelled, lastFollowedCaptionID == baseline,
+                              captionAnchor == readingAnchor else { return }
                         proxy.scrollTo(readingAnchor, anchor: .top)
                     }
                     followAfterFocus()
@@ -2301,10 +2305,9 @@ struct ChineseRecognitionCaptionRow: View {
 
     private var showsActions: Bool {
         #if DEBUG
-        isHovered || hoveredForTesting
-        #else
-        isHovered
+        if AppRuntimeEnvironment.isUnitTesting { return hoveredForTesting }
         #endif
+        return isHovered
     }
 
     var body: some View {
@@ -2358,6 +2361,9 @@ struct ChineseRecognitionCaptionRow: View {
             }
         }
         .onHover { hovered in
+            #if DEBUG
+            guard !AppRuntimeEnvironment.isUnitTesting else { return }
+            #endif
             if hovered && !isHovered {
                 menuAvailability.resolve(using: availability)
                 hasShownActions = true
