@@ -61,7 +61,14 @@ def save_image(path, value):
 def prior(tool, predicate):
     return any(e["tool"] == tool and predicate(e) for e in history())
 if name == "python-verify-stub":
-    if args and pathlib.Path(args[0]).name == "sign-offline-app.py":
+    if args and pathlib.Path(args[0]).name == "hfs_image_metadata.py":
+        record(hfsMetadataGate=True)
+        if scenario == "hfs-metadata-failure": fail("unknown synthetic Finder metadata")
+        source = owned(args[args.index("--source") + 1]); output = owned(args[args.index("--output") + 1])
+        assert not output.exists()
+        save_image(output, image(source))
+        owned(args[args.index("--report") + 1]).write_text(json.dumps({"passed": True, "synthetic": True}))
+    elif args and pathlib.Path(args[0]).name == "sign-offline-app.py":
         assert "--verify-only" in args and args[args.index("--identity") + 1] == identity
         target = owned(args[args.index("--app") + 1])
         record()
@@ -530,6 +537,7 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.calls(events, "hdiutil", "makehybrid")), 1)
         self.assertEqual(len(self.calls(events, "hdiutil", "convert")), 1)
+        self.assertEqual(sum(bool(e.get("hfsMetadataGate")) for e in events), 1)
         self.assertFalse(self.calls(events, "hdiutil", "create"))
         self.assertTrue(json.loads(report.read_text())["passed"])
         self.assertFalse(mount.exists())
@@ -566,6 +574,17 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertIn("synthetic opaque UDIF metadata", result.stderr)
         self.assertFalse((case / "release with spaces.dmg").exists())
         self.assertEqual(len(self.calls(events, "hdiutil", "detach")), 1)
+
+    def test_hfs_metadata_failure_never_converts_signs_or_publishes(self):
+        def candidate(case, app, command, env):
+            env["FAKE_CANDIDATE_ONLY"] = "1"
+            return command
+        result, events, case = self.run_case("hfs-metadata-failure", extra=("--candidate-only", "--image-method", "hybrid"), override=candidate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sum(bool(e.get("hfsMetadataGate")) for e in events), 1)
+        self.assertFalse(self.calls(events, "hdiutil", "convert"))
+        self.assertFalse(any("--sign" in e["args"] for e in self.calls(events, "codesign")))
+        self.assertFalse((case / "release with spaces.dmg").exists())
 
     def test_failure_injections_do_not_publish(self):
         scenarios = ("preflight-failure", "copy-failure", "staged-pre-verify-failure", "app-create-failure", "app-image-verify-failure",

@@ -281,7 +281,8 @@ create_image() {
     # makehybrid writes filesystem records without inheriting source xattrs.
     # Keep the raw image beside the compressed result for recoverable cleanup.
     "${hdiutil_bin}" makehybrid -hfs -hfs-volume-name "${label}" -o "${destination_path:r}-raw.dmg" "${source_path}"
-    "${hdiutil_bin}" convert "${destination_path:r}-raw.dmg" -format UDZO -imagekey zlib-level=6 -o "${destination_path}"
+    "${python_bin}" "${project_root}/Scripts/hfs_image_metadata.py" --source "${destination_path:r}-raw.dmg" --output "${destination_path:r}-clean-raw.dmg" --report "${destination_path:r}-hfs-metadata.json"
+    "${hdiutil_bin}" convert "${destination_path:r}-clean-raw.dmg" -format UDZO -imagekey zlib-level=6 -o "${destination_path}"
   else
     "${hdiutil_bin}" create -size "$("${python_bin}" "${state_script}" image-size "${source_path}")" -srcfolder "${source_path}" -volname "${label}" -format UDZO -imagekey zlib-level=6 "${destination_path}"
   fi
