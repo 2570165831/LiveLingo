@@ -182,6 +182,22 @@ class CorpusReviewTests(unittest.TestCase):
                 c.output_root()
             mkdir.assert_not_called()
 
+    def test_explicit_work_grant_accepts_outputs_but_rejects_source_and_siblings(self):
+        checkout = self.root / "checkout"
+        grant = checkout / "work" / "release-check"
+        grant.mkdir(parents=True)
+        with patch.object(c, "repository_root", return_value=checkout), \
+                patch.dict(os.environ, {c.OUTPUT_ROOT_ENV: str(grant)}):
+            result = c.write_json({"synthetic": True}, grant / "out.json")
+            self.assertEqual(json.loads(result.read_text()), {"synthetic": True})
+            for target in (checkout / "Scripts" / "out.json", checkout / "work" / "other" / "out.json"):
+                with self.subTest(target=target), self.assertRaises(ValueError):
+                    c.write_json({}, target)
+        with patch.object(c, "repository_root", return_value=checkout), \
+                patch.dict(os.environ, {c.OUTPUT_ROOT_ENV: str(checkout / "work")}), \
+                self.assertRaises(ValueError):
+            c.output_root()
+
     def test_unset_output_root_rejects_both_writers_without_creation(self):
         with patch.dict(os.environ):
             os.environ.pop(c.OUTPUT_ROOT_ENV, None)

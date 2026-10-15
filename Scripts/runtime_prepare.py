@@ -1,0 +1,558 @@
+"""Prepare a locked portable runtime from an explicit read-only input.
+
+Selection uses the INPUT's metadata, never the tool's Python environment.
+Unrecognized resources still go through the real distribution privacy gate.
+Rejected output remains available for diagnosis; no input is changed or deleted.
+"""
+import argparse
+import ast
+from collections import Counter
+from datetime import datetime, timezone
+import csv
+import hashlib
+from importlib import metadata
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tokenize
+
+try:
+    from .privacy_package import PrivacyError, excluded, inspect_tree, license_filename, validate_link
+except ImportError:
+    from privacy_package import PrivacyError, excluded, inspect_tree, license_filename, validate_link
+
+
+REPO = Path(__file__).resolve().parent.parent
+RUNTIME_MODULES = ("worker.py", "engine.py", "schemas.py", "checks.py",
+                   "review_diagnostics.py", "grammar_vocabulary.py", "latin_numbers.py", "checkpoints.py")
+STDLIB_UNUSED = frozenset({"idlelib", "turtledemo", "tkinter", "ensurepip", "venv", "turtle.py"})
+DEVELOPMENT_SUFFIXES = frozenset({".pyx", ".pxd", ".pxi", ".f", ".f90", ".o", ".exe",
+                                 ".pc", ".cmake", ".in", ".ini", ".cfg", ".tmpl", ".template",
+                                 ".tp", ".bat", ".csh", ".fish", ".ps1", ".gdb", ".cu"})
+# The app uses inference and formula composition, not tokenizer training,
+# datasets, symbolic LaTeX/MathML conversion, or extension compilation.
+UNUSED_PACKAGE_TREES = (
+    "sentencepiece/package_data", "sympy/parsing/autolev", "sympy/parsing/latex",
+    "sympy/utilities/mathml/data", "sklearn/datasets/data", "sklearn/datasets/descr",
+    "sklearn/datasets/images", "sklearn/svm/src", "mlx/share/cmake", "mlx/lib/cmake",
+)
+
+
+def canonical_name(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def locked_distributions(site, lock, mode):
+    expected = ({name: version for name, version in lock.items() if name != "python"}
+                if mode == "language" else {p["name"]: p["version"] for p in lock["packages"]})
+    expected = {canonical_name(name): version for name, version in expected.items()}
+    installed = {}
+    for info in site.iterdir():
+        if info.name.endswith((".dist-info", ".egg-info")):
+            if info.is_symlink() or any((info / name).is_symlink() for name in ("METADATA", "PKG-INFO", "RECORD")):
+                raise PrivacyError("input-distribution-metadata-symlink")
+    for dist in metadata.distributions(path=[str(site)]):
+        name = canonical_name(dist.metadata["Name"])
+        if name in installed:
+            raise PrivacyError("duplicate-input-distribution")
+        installed[name] = dist
+    if any(name not in installed or installed[name].version != version for name, version in expected.items()):
+        raise PrivacyError("runtime-version-lock-mismatch")
+    return {name: installed[name] for name in sorted(expected)}
+
+
+def portable_layout(base):
+    if base.is_symlink() or not base.is_dir() or (base / "pyvenv.cfg").exists():
+        raise PrivacyError("input-not-portable-python")
+    if (base / "lib").is_symlink() or (base / "bin").is_symlink():
+        raise PrivacyError("input-python-layout-symlink")
+    libraries = [p for p in (base / "lib").glob("python3.*") if p.is_dir() and not p.is_symlink()]
+    if len(libraries) != 1 or not (base / "bin/python3").is_file():
+        raise PrivacyError("input-python-layout-mismatch")
+    if libraries[0].name != "python3.13":
+        raise PrivacyError("input-python-minor-version-mismatch")
+    if (base / "bin").is_symlink() or (libraries[0] / "site-packages").is_symlink():
+        raise PrivacyError("input-python-layout-symlink")
+    try:
+        (base / "bin/python3").resolve(strict=True).relative_to(base.resolve())
+    except (OSError, ValueError):
+        raise PrivacyError("input-python-executable-external") from None
+    return libraries[0].relative_to(base), libraries[0] / "site-packages"
+
+
+def python_version(base):
+    # Distributed executables carry sandbox-inherit entitlements and cannot be
+    # launched by an unsandboxed build tool. Read the shared library's unique
+    # NUL-terminated version constant without loading a second Python runtime
+    # into this process or changing any code signature.
+    library = base / "lib/libpython3.13.dylib"
+    if library.is_symlink() or not library.is_file():
+        raise PrivacyError("input-python-shared-library-missing")
+    versions = set(re.findall(rb"(?<![0-9.])(3\.13\.\d+)\x00", library.read_bytes()))
+    if len(versions) != 1:
+        raise PrivacyError("input-python-version-constant-ambiguous")
+    return versions.pop().decode("ascii")
+
+
+def removal_reason(relative, stdlib, selected_files):
+    parts = relative.parts
+    if any(excluded(part) for part in parts):
+        return "tests-caches-private-records"
+    if relative.name in ("EXTERNALLY-MANAGED", ".empty", "zip-safe", ".lock", "fetch_macholib"):
+        return "install-build-markers"
+    if any(part.lower() in ("test-examples", "_examples", "examples", "benchmarks", "demos") for part in parts):
+        return "examples-benchmarks"
+    if parts[0] == "bin":
+        return None if len(parts) == 2 and re.fullmatch(r"python(?:3(?:\.13)?)?", parts[1]) else "console-install-build-tools"
+    if parts[0] != "lib":
+        return "headers-build-manuals"
+    if len(parts) == 2 and parts[1] == "libpython3.13.dylib":
+        return None
+    if not relative.is_relative_to(stdlib):
+        return "tcl-tk"
+    tail = relative.relative_to(stdlib)
+    if tail.parts[0] in STDLIB_UNUSED or tail.parts[0].startswith("config-"):
+        return "unused-stdlib-install-gui"
+    if tail.parts[0] == "lib-dynload" and tail.name.startswith("_tkinter."):
+        return "tcl-tk"
+    if tail.parts[0] == "site-packages":
+        package_file = Path(*tail.parts[1:])
+        if package_file not in selected_files:
+            return "unlocked-packages"
+        if package_file.name in ("direct_url.json", "distutils-precedence.pth", "py.typed") or "sboms" in package_file.parts:
+            return "install-provenance-typing-build-hooks"
+        if (package_file.suffix.lower() not in (".py", ".pyi") and
+                any(package_file == Path(tree) or Path(tree) in package_file.parents for tree in UNUSED_PACKAGE_TREES)):
+            return "unused-package-apis"
+        if package_file == Path("setuptools/config/setuptools.schema.json"):
+            return "development-resources"
+        if package_file == Path("scipy/stats/_sobol_direction_numbers.npz"):
+            return "unused-sobol-quasi-monte-carlo-data"
+        if package_file.name == "meson.build" or package_file.suffix.lower() in DEVELOPMENT_SUFFIXES:
+            return "development-resources"
+        # Read only by optional notebook display/manual APIs, not app inference.
+        if (package_file.parent == Path("sklearn/utils/_repr_html") and package_file.suffix == ".css"):
+            return None  # sklearn reads its CSS eagerly during import.
+        if package_file == Path("tokenizers/tools/visualizer-styles.css"):
+            return None  # tokenizers.tools reads its CSS eagerly during import.
+        if package_file.suffix.lower() in (".css", ".html", ".js", ".cc", ".1") or package_file.name == "port.yaml":
+            return "presentation-manual-resources"
+    elif tail.suffix.lower() in DEVELOPMENT_SUFFIXES or tail.suffix.lower() in (".css", ".bat", ".ctypes"):
+        return "development-resources"
+    return None
+
+
+def normalized_python(data):
+    """Escape unprintable source characters while preserving the complete AST."""
+    encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+    text = data.decode(encoding)
+    clean = "".join(char if char.isprintable() or char in "\t\r\n" else
+                    (f"\\u{ord(char):04x}" if ord(char) <= 0xffff else f"\\U{ord(char):08x}") for char in text)
+    lines = clean.splitlines(keepends=True)
+    for index in range(min(2, len(lines))):
+        lines[index] = re.sub(r"^(\s*#.*?coding[:=]\s*)[-\w.]+", r"\1utf-8", lines[index])
+    clean = "".join(lines)
+    if clean.encode("utf-8") == data:
+        return data
+    if ast.dump(ast.parse(text), include_attributes=False) != ast.dump(ast.parse(clean), include_attributes=False):
+        raise PrivacyError("source-normalization-changes-ast")
+    return clean.encode("utf-8")
+
+
+def copy_runtime_file(source, destination, *, clone):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_symlink():
+        destination.symlink_to(os.readlink(source))
+        return "copied"
+    data = None
+    change = "copied"
+    if source.suffix == ".py":
+        original = source.read_bytes()
+        normalized = normalized_python(original)
+        if __package__:
+            from .runtime_configuration import prepare_configuration
+        else:
+            from runtime_configuration import prepare_configuration
+        configured, fields = prepare_configuration(normalized, source)
+        if fields:
+            data, change = configured, "runtime-configuration-relocated"
+        elif original != normalized:
+            lines = normalized.splitlines(keepends=True)
+            insertion = 1 if normalized.startswith(b"#!") else 0
+            for index, line in enumerate(lines[:2]):
+                if re.match(rb"\s*#.*?coding[:=]\s*[-\w.]+", line):
+                    insertion = index + 1
+            lines.insert(insertion, b"# Modified by Li on 2026-10-11: normalize source encoding without changing its AST; see MODIFICATIONS.json.\n")
+            normalized = b"".join(lines)
+            if ast.dump(ast.parse(original), include_attributes=False) != ast.dump(ast.parse(normalized), include_attributes=False):
+                raise PrivacyError("source-modification-notice-changes-ast")
+            data, change = normalized, "python-encoding-ast-verified"
+    elif source.name == "METADATA" and source.parent.name.endswith(".dist-info"):
+        original = source.read_bytes()
+        # Retain all package headers (versions/dependencies/licensing). The
+        # optional README description is not an import-time resource.
+        headers = original.split(b"\n\n", 1)[0] + b"\n\n"
+        if headers != original:
+            data, change = headers, "metadata-description-omitted"
+    elif source.name == "cacert.pem" and source.parent.name == "certifi":
+        original = source.read_bytes()
+        blocks = re.findall(rb"-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----", original)
+        if not blocks:
+            raise PrivacyError("input-certifi-certificates-missing")
+        # Preserve every certificate block byte for byte; omit label comments.
+        data, change = b"\n".join(blocks) + b"\n", "certifi-comments-omitted"
+    if data is not None:
+        destination.write_bytes(data)
+        shutil.copystat(source, destination)
+    elif clone and source.stat().st_size >= 1024 * 1024:
+        result = subprocess.run(["/bin/cp", "-c", str(source), str(destination)], capture_output=True)
+        if result.returncode:
+            raise PrivacyError("runtime-apfs-clone-failed")
+    else:
+        shutil.copy2(source, destination)
+    return change
+
+
+def normalize_native_signature(path):
+    """Remove old vendor/local signatures from the new unsigned copy only.
+
+    Signature identifiers and unused reservations vary between installations.
+    Canonical unsigned inputs make the fixed preparation hashes reproducible.
+    Every file-backed section must remain identical; final signing is separate.
+    """
+    if __package__:
+        from .macho_paths import THIN, FAT, load_paths
+        from .native_build_paths import section_hashes
+    else:
+        from macho_paths import THIN, FAT, load_paths
+        from native_build_paths import section_hashes
+    if load_paths(path) is None:
+        return False
+    data = path.read_bytes()
+    slices = [(0, len(data))]
+    if data[:4] in FAT:
+        endian, wide = FAT[data[:4]]
+        count = struct.unpack_from(endian + "I", data, 4)[0]
+        width = 32 if wide else 20
+        slices = [struct.unpack_from(endian + ("QQ" if wide else "II"), data, 16 + i * width)
+                  for i in range(count)]
+    signed = False
+    for start, span in slices:
+        endian, header = THIN[data[start:start + 4]]
+        count = struct.unpack_from(endian + "I", data, start + 16)[0]
+        offset = start + header
+        for _ in range(count):
+            command, size = struct.unpack_from(endian + "II", data, offset)
+            signed |= command == 0x1D
+            offset += size
+    if not signed:
+        return False
+    sections = section_hashes(data)
+    paths = load_paths(path)
+    result = subprocess.run(["/usr/bin/codesign", "--remove-signature", str(path)], capture_output=True)
+    if result.returncode or sections != section_hashes(path.read_bytes()) or paths != load_paths(path):
+        raise PrivacyError("runtime-signature-normalization-failed")
+    return True
+
+
+def normalize_archive_metadata(path):
+    """Clear only ar member timestamps/owners; preserve every member byte."""
+    if path.suffix.lower() != ".a":
+        return 0
+    original = path.read_bytes()
+    if not original.startswith(b"!<arch>\n"):
+        raise PrivacyError("invalid-runtime-static-archive")
+    data = bytearray(original)
+    offset, changed = 8, 0
+    while offset < len(data):
+        header = bytes(data[offset:offset + 60])
+        if len(header) != 60 or header[58:] != b"`\n":
+            raise PrivacyError("invalid-runtime-static-archive")
+        try:
+            size = int(header[48:58].strip())
+        except ValueError:
+            raise PrivacyError("invalid-runtime-static-archive") from None
+        if size < 0 or offset + 60 + size > len(data):
+            raise PrivacyError("invalid-runtime-static-archive")
+        normalized = b"0".ljust(12) + b"0".ljust(6) + b"0".ljust(6)
+        if header[16:40] != normalized:
+            data[offset + 16:offset + 40] = normalized
+            changed += 1
+        end = offset + 60 + size
+        if data[offset + 60:end] != original[offset + 60:end]:
+            raise PrivacyError("runtime-static-member-changed")
+        offset = end + (end % 2)
+        if offset > len(data):
+            raise PrivacyError("invalid-runtime-static-archive")
+    if changed:
+        path.write_bytes(data)
+    return changed
+
+
+def preserve_pruned_notice(path, relative, notice_root):
+    """A notice-bearing source header must survive pruning byte for byte."""
+    if __package__:
+        from .embedded_notices import extract_notice
+    else:
+        from embedded_notices import extract_notice
+    original = path.read_bytes()
+    notice = extract_notice(original)
+    if notice is None:
+        return None
+    digest = hashlib.sha256(notice).hexdigest()
+    # Label the excerpt without changing any of its original notice bytes.
+    retained = b"Verbatim source header notice:\n\n" + notice
+    target = notice_root / "embedded-pruned-notices" / ("NOTICE-" + digest + ".txt")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_bytes(retained)
+    if target.is_symlink() or target.read_bytes() != retained:
+        raise PrivacyError("pruned-source-notice-not-preserved")
+    return {"source": relative.as_posix(), "sourceSHA256": hashlib.sha256(original).hexdigest(),
+            "copy": target.relative_to(notice_root.parent).as_posix(), "excerptSHA256": digest,
+            "sha256": hashlib.sha256(retained).hexdigest()}
+
+
+def prepare(base, output, *, mode="language", repo=REPO, clone=True):
+    base, output, repo = Path(base), Path(output), Path(repo)
+    stdlib, site = portable_layout(base)
+    if output.exists() or output.is_symlink():
+        raise PrivacyError("destination-already-exists")
+    base_real, output_real = base.resolve(), output.resolve()
+    if base_real == output_real or base_real in output_real.parents or output_real in base_real.parents:
+        raise PrivacyError("overlapping-runtime-trees")
+    if any(p.is_symlink() for p in [output.parent, *output.parent.parents]):
+        raise PrivacyError("symlink-destination-parent")
+    lock_path = repo / "Packaging" / ("MLXRuntime.lock.json" if mode == "language" else "ASRRuntime.lock.json")
+    lock = json.loads(lock_path.read_text())
+    selected = locked_distributions(site, lock, mode)
+    version = python_version(base)
+    if not re.fullmatch(r"3\.13\.\d+", version) or version != lock.get("python"):
+        raise PrivacyError("input-python-version-lock-mismatch")
+    owners = {}
+    declared_licenses = set()
+    for name, dist in selected.items():
+        if dist.files is None:
+            raise PrivacyError("input-distribution-record-missing")
+        for relative in dist.files:
+            if relative.is_absolute() or ".." in relative.parts:
+                continue  # Console scripts must not escape site-packages.
+            owners[Path(relative)] = name
+        info = next((p.parent for p in dist.files if p.name == "METADATA" and p.parent.name.endswith(".dist-info")), None)
+        if info is None:
+            raise PrivacyError("input-distribution-metadata-missing")
+        for raw in dist.metadata.get_all("License-File", []):
+            relative = Path(raw)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise PrivacyError("external-license-file-declaration")
+            candidates = [site / info / "licenses" / relative, site / info / relative]
+            source = next((p for p in candidates if p.is_file() and not p.is_symlink()), None)
+            if source is None:
+                raise PrivacyError("declared-license-file-missing")
+            if not source.resolve().is_relative_to(base_real):
+                raise PrivacyError("external-license-file-declaration")
+            declared_licenses.add(source)
+    entries = []
+    for directory, directories, files in os.walk(base, followlinks=False):
+        for name in sorted(directories + files):
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_dir():
+                entries.append(path)
+    # Discover notices BEFORE pruning, including notices in test/demo trees and
+    # unlocked installation tools. Their bytes are never rewritten.
+    licenses = []
+    before = Counter(files=0, bytes=0)
+    for path in entries:
+        if path.is_symlink():
+            continue
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise PrivacyError("special-input-runtime-entry")
+        before["files"] += 1
+        before["bytes"] += path.stat().st_size
+        if license_filename(path) or path in declared_licenses:
+            licenses.append(path)
+    output.mkdir(parents=True)
+    python = output / "python" if mode == "language" else output
+    python.mkdir(exist_ok=True)
+    notice_root = output / "Licenses"
+    removed, changed, modifications = Counter(), Counter(), []
+    removed_files, pruned_notices = [], []
+    for path in entries:
+        relative = path.relative_to(base)
+        reason = removal_reason(relative, stdlib, owners)
+        if reason:
+            # Entire unlocked packages are not distributed. For every other
+            # removed text file, preserve its leading copyright/license block;
+            # a direct wheel LICENSE alone does not cover embedded components.
+            if reason != "unlocked-packages" and not path.is_symlink():
+                notice = preserve_pruned_notice(path, relative, notice_root)
+                if notice is not None:
+                    pruned_notices.append(notice)
+            removed[reason] += 1
+            removed_files.append({"file": relative.as_posix(), "reason": reason,
+                                  "bytes": path.lstat().st_size, "symlink": path.is_symlink()})
+            continue
+        if path.is_symlink():
+            validate_link(path, base)
+        target = python / relative
+        action = copy_runtime_file(path, target,
+                                   clone=clone and path.stat().st_dev == python.stat().st_dev)
+        if not target.is_symlink():
+            archive_changes = normalize_archive_metadata(target)
+            if __package__:
+                from .macho_paths import make_portable
+            else:
+                from macho_paths import make_portable
+            native_changes = make_portable(target, python)
+            if __package__:
+                from .native_build_paths import sanitize_build_paths
+            else:
+                from native_build_paths import sanitize_build_paths
+            build_paths = sanitize_build_paths(target, python)
+            signature_removed = normalize_native_signature(target)
+            if action != "copied" or native_changes or build_paths or signature_removed or archive_changes:
+                modifications.append({"file": str(relative), "contributor": "Li",
+                                      "date": "2026-10-11", "action": action,
+                                      "loadCommands": native_changes,
+                                      "obsoleteSignatureRemoved": signature_removed,
+                                      "staticArchiveHeadersNormalized": archive_changes,
+                                      "originalSHA256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                                      "preparedSHA256": hashlib.sha256(target.read_bytes()).hexdigest()})
+                if build_paths:
+                    modifications[-1]["buildPathChanges"] = build_paths
+                if signature_removed:
+                    modifications[-1]["signatureNormalizationDate"] = datetime.now(timezone.utc).date().isoformat()
+                if action == "runtime-configuration-relocated":
+                    modifications[-1]["reason"] = "Installed directories derive from the copied module location; build-machine paths and profile data are omitted from generated configuration. Other generated fields and executable code remain intact."
+                    if __package__:
+                        from .runtime_configuration import prepare_configuration
+                    else:
+                        from runtime_configuration import prepare_configuration
+                    _, fields = prepare_configuration(normalized_python(path.read_bytes()), relative)
+                    modifications[-1]["configurationFields"] = fields
+        changed[action] += 1
+    inventory = []
+    component_licenses = {name: [] for name in selected}
+    for path in licenses:
+        relative = path.relative_to(base)
+        name = owners.get(relative.relative_to(stdlib / "site-packages")) if relative.is_relative_to(stdlib / "site-packages") else None
+        owner = name or "CPython-and-pruned-components"
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        filename = path.name[:80] + "-" + hashlib.sha256(str(relative).encode()).hexdigest()[:16] + ".txt"
+        target = notice_root / owner / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+        if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            raise PrivacyError("license-copy-hash-mismatch")
+        inventory.append({"source": str(relative), "copy": str(target.relative_to(output)), "sha256": digest})
+        if name:
+            component_licenses[name].append(filename)
+    missing = []
+    components = []
+    supplements = repo / "Packaging/MLXLicenses"
+    notice_material_changes = {"removedFiles": [], "changedInventories": []}
+    for name, dist in selected.items():
+        if not component_licenses[name]:
+            supplement = supplements / f"{name}-{dist.version}-LICENSE"
+            if supplement.is_file() and not supplement.is_symlink():
+                target = notice_root / name / "LICENSE"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(supplement, target)
+                component_licenses[name].append("LICENSE")
+            else:
+                missing.append(name)
+        components.append({"name": dist.metadata["Name"], "version": dist.version, "licenses": component_licenses[name]})
+    # Keep importlib.metadata truthful about staged files. Empty hashes are
+    # valid wheel RECORD entries; removed paths and old hashes are not retained.
+    destination_site = python / stdlib / "site-packages"
+    for dist in selected.values():
+        record = next((Path(p) for p in dist.files if p.name == "RECORD" and p.parent.name.endswith(".dist-info")), None)
+        if record is None:
+            raise PrivacyError("input-distribution-record-missing")
+        rows = [(str(p), "", "") for p in dist.files if not p.is_absolute() and ".." not in p.parts
+                and (destination_site / p).is_file()]
+        with (destination_site / record).open("w", newline="") as stream:
+            csv.writer(stream).writerows(rows)
+        modifications.append({"file": str(stdlib / "site-packages" / record), "contributor": "Li",
+                              "date": "2026-10-11", "action": "record-rebuilt-for-staged-files",
+                              "reason": "Removed paths and pre-modification hashes must not describe the prepared copy.",
+                              "originalSHA256": hashlib.sha256((site / record).read_bytes()).hexdigest(),
+                              "preparedSHA256": hashlib.sha256((destination_site / record).read_bytes()).hexdigest()})
+    if __package__:
+        from .native_notice_audit import audit, copy_asr_notices
+    else:
+        from native_notice_audit import audit, copy_asr_notices
+    native_notices = audit(destination_site, supplements)
+    if mode == "asr":
+        copy_asr_notices(supplements, notice_root, native_notices)
+    if mode == "language":
+        for name in RUNTIME_MODULES:
+            source = repo / "Scripts/mlx_runtime" / name
+            if source.is_symlink() or not source.is_file():
+                raise PrivacyError("required-worker-module-missing")
+            shutil.copy2(source, output / name)
+        for source in supplements.iterdir():
+            if source.is_dir() and not source.is_symlink():
+                for notice in source.rglob("*"):
+                    if (notice.is_file() and license_filename(notice)
+                            and any(excluded(part) for part in notice.relative_to(source).parts)):
+                        raise PrivacyError("supplement-license-needs-safe-relative-name")
+                if __package__:
+                    from .notice_copy import copy_notice_tree
+                else:
+                    from notice_copy import copy_notice_tree
+                result = copy_notice_tree(source, notice_root / source.name)
+                for key in notice_material_changes:
+                    notice_material_changes[key].extend(result[key])
+            elif source.name in ("AUDIT.json", "README.md"):
+                shutil.copy2(source, notice_root / source.name)
+        manifest = {"components": components, "missingLicenseFiles": missing, "python": "python",
+                    "chempyScope": "Only Substance.from_formula and composition; solver, plotting and notebook dependencies intentionally omitted.",
+                    "workerHashes": {name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in RUNTIME_MODULES},
+                    "nativeTransitiveNoticeAudit": json.loads((supplements / "AUDIT.json").read_text())}
+        manifest["nativeTransitiveNoticeAudit"]["distributionNoticeCorrections"] = notice_material_changes
+        manifest["nativeTransitiveNoticeAudit"]["observableRustDependencies"] = native_notices
+        (output / "runtime-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    after_files = [p for p in python.rglob("*") if p.is_file() and not p.is_symlink()]
+    report = {"mode": mode, "pythonVersion": version, "components": {name: dist.version for name, dist in selected.items()},
+              "before": dict(before), "afterPython": {"files": len(after_files), "bytes": sum(p.stat().st_size for p in after_files)},
+              "removed": dict(removed), "removedFiles": removed_files, "noticeMaterialChanges": notice_material_changes,
+              "prunedSourceNotices": pruned_notices, "nativeTransitiveNoticeAudit": native_notices,
+              "changed": dict(changed), "licenses": inventory, "missingLicenseFiles": missing}
+    (output / "runtime-preparation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    (output / "MODIFICATIONS.json").write_text(json.dumps({"contributor": "Li", "date": "2026-10-11",
+        "scope": "Prepared third-party runtime copies; originals unchanged. Encoding normalization preserves the AST. Generated CPython paths are relocated; generated NumPy/SciPy build locations are omitted. Install/build configuration files, headers and compiler inputs are outside this inference runtime. Metadata descriptions and certificate labels are omitted; certificate blocks are unchanged. Native load paths are made portable without signing.",
+        "files": modifications, "noticeMaterialChanges": notice_material_changes}, ensure_ascii=False, indent=2) + "\n")
+    if missing:
+        raise PrivacyError("runtime-license-files-missing")
+    inspect_tree(output)
+    if not native_notices["passed"]:
+        raise PrivacyError("runtime-native-transitive-notices-missing")
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--base-python", type=Path, required=True, help="read-only portable CPython tree; never a venv")
+    parser.add_argument("--output", type=Path, required=True, help="new LanguageRuntime or (with --mode asr) portable ASR Python")
+    parser.add_argument("--mode", choices=("language", "asr"), default="language")
+    args = parser.parse_args()
+    try:
+        report = prepare(args.base_python, args.output, mode=args.mode)
+    except PrivacyError as error:
+        print("prepare-runtime: " + error.args[0] + "; input unchanged, inspect the new staging tree", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, shutil.Error):
+        print("prepare-runtime: invalid input or copy failure; input unchanged", file=sys.stderr)
+        return 1
+    print(json.dumps({"mode": report["mode"], "components": len(report["components"]),
+                      "before": report["before"], "afterPython": report["afterPython"],
+                      "licenseFilesPreserved": len(report["licenses"]), "missingLicenseFiles": report["missingLicenseFiles"]}))
+    return 0

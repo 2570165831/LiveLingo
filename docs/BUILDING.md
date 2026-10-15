@@ -75,10 +75,37 @@ bundle ID 固定为 `com.jianhongli.LiveLingo.preview`，显示名和窗口标�
 ## 运行库与模型
 
 - 语言运行库版本见 [MLXRuntime.lock.json](../Packaging/MLXRuntime.lock.json)，ASR 环境见 [ASRRuntime.lock.json](../Packaging/ASRRuntime.lock.json)。这些文件不是完整的自动安装配方。
-- `Scripts/prepare-mlx-runtime.py` 从已准备好的环境组装语言运行库并核对版本；不会创建环境或下载依赖。参数见其 `--help`。
-- ASR 需要完整便携 CPython 树，不能直接用 venv 代替。
+- `Scripts/prepare-mlx-runtime.py` 从显式指定的便携 CPython 3.13 树组装精简运行库；默认准备语言库，`--mode asr` 准备 ASR Python。包版本只从输入树读取，并逐项核对相应锁文件；不混用执行脚本时的环境，不创建环境或下载依赖。ASR 还核对 Python 补丁版本；venv 不能代替便携树。
 - 模型名称、来源与许可见 [第三方声明](../Packaging/THIRD_PARTY_NOTICES.md) 及 [模型说明](../Packaging/ModelNotices/)。模型目录结构须与 `Scripts/bundle-mlx-app.py` 的映射一致。
 - MLX、Outlines Core 等原生依赖须使用兼容 macOS 14 的构建。打包脚本检查最低系统版本；安装最新依赖不能替代兼容性验证。
+
+先准备两套运行库，输出目录必须是新目录：
+
+```sh
+python3.13 Scripts/prepare-mlx-runtime.py \
+  --base-python /absolute/path/to/locked-language-python \
+  --output /absolute/path/to/LanguageRuntime
+python3.13 Scripts/prepare-mlx-runtime.py --mode asr \
+  --base-python /absolute/path/to/locked-asr-python \
+  --output /absolute/path/to/asr-python
+python3.13 Scripts/prepare-model-inputs.py \
+  --base-models /absolute/path/to/locked-models \
+  --output /absolute/path/to/prepared-models
+```
+
+语言输出供下面的 `--runtime` 使用，ASR 输出直接供 `--asr-python` 使用。准备脚本先收集全部可识别许可证和 `License-File` 声明的原文，包含被剔除的测试/示例目录；集中副本的相对原名与 SHA-256 记录在 `runtime-preparation.json`，不改许可证字节。缺少许可证就失败。删除范围限于测试、缓存、Tk/IDLE/turtle、ensurepip/venv、安装工具、开发夹具和 App 不使用的展示/训练资源；保留 Python 模块、动态库和必要数据。SciPy 导入需要 `numpy.f2py`，SymPy 导入需要 MathML 模块，不能整目录删除它们；sklearn 导入时需要自己的 CSS，同样保留。
+
+副本中的 Python 源码仅在编码或不可打印字符不被隐私门接受时规范化，并比较完整语法树确保含义不变；wheel 元数据保留版本、依赖和许可头，去掉 README 长描述与本机安装溯源，重建 RECORD。certifi 保留每个证书块，只去掉标签注释。原始输入始终只读，输出存在时拒绝覆盖；失败的输出保留供诊断，不自动删除。
+
+准备和组装都使用真实隐私门。非标准许可证名有严格的授权文本规则；Cargo 许可声明限定文件名和目录，解析全部字段并继续检查课堂内容、本机路径及注释。未知运行数据和对应源码附件不会因此自动获准。若现成环境仍含被门拒绝的必要资源，脚本返回失败；不得把已生成目录称为可分发运行库。导入检查应覆盖语言库的 worker/engine/checks 及 ASR 服务的实际依赖，仅导入，不加载模型。已签名 Python helper 的 sandbox-inherit 权限可能使其无法由未沙盒化的构建进程直接启动；兼容 Python 导入精简树的检查应单独记录，不能冒充最终 App 内运行验收。
+
+[PrivacyResources.json](../Packaging/PrivacyResources.json) 只批准确切 App 相对路径及 SHA-256，逐项记录包版本和必要性；不是扩展名白名单。当前类别是 Outlines JSON Schema、SymPy/Lark 语法、sklearn 导入时读取的 CSS、librosa 数值 MessagePack、Parakeet v2 内嵌词表、原样授权文本及七份对应源码归档。路径或哈希变化都拒绝；清单外同类文件继续走原门禁。JSON Schema 的片段引用、语法正则和授权文本标记按格式检查，其他元数据、注释和本机路径继续检查；MessagePack 只接受有限数值结构，不反序列化执行对象。Parakeet 配置的词表仅按 token 拼写检查，重复的 labels 必须与词表完全一致，其他配置字段沿用原门禁；来源是现成 v2 转换模型，未宣称已核实上游提交号。
+
+对应源码由 `Scripts/prepare_source_archive.py` 的 API 准备，逐成员流式检查，不解包执行。源包及各授权文本哈希、保留文件数量、被剔除的测试/文档/无关语言组件和注释例子处理见 [SourceArchiveAudit.json](../Packaging/SourceArchiveAudit.json)。原始上游哈希与精简后哈希分别记录；授权文本字节不改，所选实现和构建输入保留。音频库构建脚本随 libsndfile 归档保存；仅 BSD 的四份可选 codec 源包移出分发，版权声明仍保留。该静态审计没有重建对应库，不能证明与已装二进制逐字节一致。更新清单必须人工核对来源、实际依赖和内容，不能把拒绝项自动加进去。
+
+模型准备只选择 App 已使用的四个模型。翻译提示由 App 自行构造，因此移出复制的 chat template；Parakeet 从 `joint.vocabulary` 读取词表，因此移出训练 tokenizer，并只清除 `tokenizer.dir` 的训练路径。权重和内嵌词表不改，不加载模型；前后检查 safetensors 头、分片索引和必需文件。其他私人字段仍拒绝。下面两项模型参数均指向准备后的模型根目录。
+
+合成树回归可运行 `python3.13 -B -m unittest Scripts.test_privacy_package Scripts.test_model_files Scripts.test_runtime_prepare Scripts.test_reviewed_resources Scripts.test_model_prepare`；Python 全套使用 `python3.13 -B -m unittest -v`，按 CONTRIBUTING.md 保留过滤后的日志及跳过原因。使用现成 App 的 site-packages 时只读加入 PYTHONPATH，关闭字节码写入和在线模型访问。
 - 模型加载时的语法词表改用内置字符转换，保留每个原始字节和 token ID；未知 ByteLevel 字符仍拒绝，普通新增 token 仍按 UTF-8 编码，特殊 token 仍排除。词表仍在加载时准备，不把开销移到首次笔记。`test_grammar_bytes.py` 检查无效 Latin-1 字符、其他 Unicode、代理项及新增/特殊 token 边界；`test_grammar_vocabulary.py` 可用本地分词器核对中文、化学式和表情。构建步骤变快不等于整场翻译加速或耗电下降。
 - 普通翻译和摘要会复用同一模型中完全相同的输入前缀，减少任务切换后重复读取固定提示。非思考模式的结构化笔记也可使用剩余额度，最多保存 256 个输入 token；普通任务最多保存 512 个。每个已加载模型仍最多保留两份快照，合计受 128 MiB 限制。笔记不能挤掉字幕或普通摘要的快照，也不改变它们的淘汰顺序；普通任务需要空间时先释放笔记快照，再释放最久未使用的普通快照。优先复用最长的完全一致前缀，每个请求取得独立副本，语法约束状态分别创建。不复用生成答案、不裁剪输入；思考、带输出前缀的续写和断点恢复不读取新请求的前缀缓存，模型卸载时缓存一并释放。
 - 笔记缓存的本机验证包括 94 项运行库检查，以及 4B、9B 共 44 次生成的 22 组对照，完整文本和 token 序列均一致；8 次中途恢复及 8 次完成结果重放通过。每档只有两组笔记缓存命中的计时样本，平均数、中位数和最长耗时均保留；这些结果不等于真实课堂准确率、普遍加速或整机省电。新增笔记快照会使用部分原来空闲的内存额度，总上限不变。
@@ -98,28 +125,41 @@ bundle ID 固定为 `com.jianhongli.LiveLingo.preview`，显示名和窗口标�
 ./Scripts/bundle-mlx-app.py \
   --app work/ReleaseDerivedData/Build/Products/Release/LiveLingo.app \
   --runtime /absolute/path/to/LanguageRuntime \
-  --models /absolute/path/to/language-models \
-  --asr-models /absolute/path/to/asr-models \
+  --models /absolute/path/to/prepared-models \
+  --asr-models /absolute/path/to/prepared-models \
   --asr-python /absolute/path/to/portable-python \
   --output work/OfflineCandidate/LiveLingo.app
 ```
 
 输出目录必须不存在。组装后的 App 包含运行库和模型，排除录音测试 CLI、质量评估 CLI、XCTest 与虚拟音频播放器。开发 CLI 的说明见 [Scripts/CLI-README.md](../Scripts/CLI-README.md)，它只供开发测试，不随 App 或 DMG 交付。
 
+未签名候选的只读结构检查：`python3.13 Scripts/sign-offline-app.py --scan work/OfflineCandidate/LiveLingo.app`。`python3.13 Scripts/sign-offline-app.py --verify-only --app work/OfflineCandidate/LiveLingo.app` 用于已有完整签名及有效 `signed-resource-review.json` 的 App；未签名候选缺少该回执时会被拒绝。这两种模式不签名、不查询钥匙串，失败不能称为签名通过。
+
 ## 签名、公证与 DMG
 
+准备运行库时会移除复制件的旧代码签名，并核对所有文件节及加载路径未因此改变。固定资源索引绑定规范化后的未签名字节；输入版本、代码或公共字符串变化仍需逐项复审，不能仅重算哈希。`runtime-preparation.json` 的 `removedFiles` 逐项记录相对路径、大小和剔除理由。导入验证应使用独立副本，重新临时签名并逐个验证原生扩展后，再由兼容的宿主 Python 导入；不得直接启动带沙盒继承权限的内嵌解释器。
+
+仅准备本地候选、不提交公证时，给 `build-offline-dmg.sh` 显式传 `--candidate-only`，并提供已经完成 Developer ID 签名的自包含 App、身份、签名钥匙串和新输出路径。独立复验也须显式传 `verify-release-dmg.sh --candidate-only`。该模式继续检查签名、固定资源、模型和挂载后的交付内容，完全不调用公证、装订或 Gatekeeper 工具；成功只表示本地候选校验通过。默认发布模式仍要求公证及票据，不能把候选模式回执当作公开发行验收。
+
+非 Mach-O 二进制资源会检查完整可读路径。PNG 还解析块、CRC、压缩文本和嵌入 ICNS 中的 PNG；EXIF 仅保留已解析的数字显示/颜色字段；未知字段、未知块、尾部及过大压缩元数据均拒绝。静态库另检查成员头的属主字段。CAR、Metal 和旧图像编码仍有未解码部分，不能由可读字符串扫描推断全部内部元数据已清空。交付前可用 `Scripts/distribution_xattrs.py --root <副本> --report <新回执>` 枚举属性；`--strip-tracking` 只去除明确列出的下载来源、Finder 注释和最近使用字段，不能对签名件盲目清空全部属性。安全属性和无法解码的 `com.apple.provenance` 会列为待复核，不会被误报为清理成功。
+
 签名材料和公证凭据不存入仓库。发布者须提供有效的 Developer ID Application 身份、匹配证书和含私钥的签名钥匙串。公证只使用本机已有的 `notarytool` keychain profile；脚本不创建、导入或解锁钥匙串，不接受仓库内的密码、API key 或凭据文件。
+
+签名、包隐私检查和真实 DMG 发布/自检要求宿主 Python 3.11 或更新版本，包含 `hashlib.file_digest` 与 `tomllib`。系统 Python 3.9 会在发布动作前被明确拒绝。下面用已安装的宿主 Python 3.13；不要使用 App 内带沙盒继承权限的解释器。`--review-capture` 必须指向 App 外已有目录中的新回执文件；先创建本次签名的独立目录，签名失败时保留回执并重建候选，不覆盖已有回执。
 
 `--keychain` 只指定 **DMG 签名**的钥匙串。独立的 `--notary-keychain`（或 `LIVELINGO_NOTARY_KEYCHAIN`）指定公证 profile 所在钥匙串，默认省略，让 notarytool 使用正常搜索范围；用 `--sync` 保存的 profile 不应被强制限定到签名钥匙串。源码未记录发布者的 profile 名，不能猜测；下面先用 `read` 输入已有的真实名称，空值和旧文档占位符 `<你的 profile>` 都会被拒绝。
 
 ```sh
 read -r LIVELINGO_NOTARY_PROFILE
 export LIVELINGO_NOTARY_PROFILE
+export LIVELINGO_PYTHON=/absolute/path/to/host/python3.13
+mkdir work/new-signing-run
 
-./Scripts/sign-offline-app.py --app work/OfflineCandidate/LiveLingo.app \
+"$LIVELINGO_PYTHON" Scripts/sign-offline-app.py --app work/OfflineCandidate/LiveLingo.app \
   --identity 'Developer ID Application: Example Name (TEAMID)' \
   --certificate /absolute/path/to/developer-id.cer \
-  --keychain /absolute/path/to/login.keychain-db
+  --keychain /absolute/path/to/login.keychain-db \
+  --review-capture "$(pwd)/work/new-signing-run/before-signing.json"
 
 ./Scripts/build-offline-dmg.sh --app work/OfflineCandidate/LiveLingo.app \
   --identity 'Developer ID Application: Example Name (TEAMID)' \
@@ -139,7 +179,9 @@ export LIVELINGO_NOTARY_PROFILE
 7. 检查 DMG 与内置 App 的票据、严格签名及预期 Authority；对 DMG 执行 `spctl --assess --type open --context context:primary-signature`，要求返回 `Notarized Developer ID`。只读挂载后检查真实内置 App 的票据、严格签名和执行评估。按 `attach -plist` 返回的镜像设备号卸载，最多尝试 3 次；成功后清理空挂载目录。
 8. 全部自检通过且卸载成功后，才移动到正式 `--output` 文件名；已有文件或悬空链接均拒绝覆盖。半成品留在暂存，不占正式文件名。
 
-正式 DMG 顶层只有 App、“应用程序”快捷方式和使用说明；公证临时 DMG、回执、日志、状态及工具路径记录均在 payload 外。输出、暂存和挂载点拒绝使用 `/Applications`、系统目录、主目录根或卷根，也会解析目录链接后检查。暂存与输出不能放进原输入 App，须位于同卷以保证最终移动原子完成。生产工具使用绝对路径，stapler/notarytool 经系统 xcrun 解析并记录实际路径；不从普通 PATH 获取发布工具。`LIVELINGO_TEST_TOOL_DIR` 是明确的离线测试替身入口，真实发布须取消它和测试用 `LIVELINGO_PYTHON`。
+装订票据在隐私门中只允许出现在顶层 `LiveLingo.app/Contents/CodeResources`，且仅限 `signed` 阶段：须为非链接的普通文件，以 `s8ch` 开头，大小不超过 64 KiB，并单独计入 `stapled_tickets` 和不透明二进制计数。其他位置以及 `prepare`/`final` 阶段拒绝该票据。`Contents/_CodeSignature/CodeResources` 仍按签名封印 plist 检查，不使用票据豁免。这个窄分类不证明票据有效；上述实际 `stapler validate`、签名及 Gatekeeper 检查仍不可省略。
+
+正式 DMG 顶层只有 App、“应用程序”快捷方式和使用说明；公证临时 DMG、回执、日志、状态及工具路径记录均在 payload 外。输出、暂存和挂载点拒绝使用 `/Applications`、系统目录、主目录根或卷根，也会解析目录链接后检查。暂存与输出不能放进原输入 App，须位于同卷以保证最终移动原子完成。生产工具使用绝对路径，stapler/notarytool 经系统 xcrun 解析并记录实际路径；不从普通 PATH 获取发布工具。`LIVELINGO_TEST_TOOL_DIR` 是明确的离线测试替身入口，真实发布须取消它；`LIVELINGO_PYTHON` 必须重新指定为宿主 Python 3.11 以上的绝对路径，不能保留测试替身解释器。
 
 APFS 同卷暂存和 DMG 装订工作副本可共享文件块，但 App 公证镜像与发布镜像各自占用空间；不支持克隆的卷还需为工作副本预留额外空间。镜像容量按文件的逻辑长度、每个目录项的 8 KiB 元数据余量，再加 20% 和 256 MiB 估算，避免稀疏文件让自动容量估算偏小；这不是实际占用保证。暂存 App 是唯一 App 装订副本，App 临时 DMG 对应第一次提交，未改变的已上传发布 DMG 用于中断恢复，装订工作副本及日志用于自检/复核；完成真实验收且不再需要恢复后，按授权清理这些中间件。脚本不会自动删除它们。
 
@@ -201,7 +243,7 @@ helper 本身只查询；要完成剩余发布步骤优先使用打包脚本的 
 
 ```sh
 ./Scripts/verify-release-dmg.sh --dmg work/OfflineDMG/LiveLingo-next-macOS14+-arm64.dmg \
-  --identity 'Developer ID Application: Example Name (TEAMID)'
+  --identity 'Developer ID Application: Example Name (TEAMID)' --privacy-phase signed
 
 ./Scripts/build-offline-dmg.sh --dry-run
 /bin/zsh -n Scripts/build-offline-dmg.sh
@@ -238,6 +280,26 @@ PYTHONDONTWRITEBYTECODE=1 /opt/homebrew/bin/python3.13 Scripts/test-large-app-dm
 - 对最终对外文件检查隐私元数据、嵌入内容及随包文件，排除钥匙串/回执/日志/本机路径；保留必要许可证。实际上传或发布前再次核对这就是已自检的最终版本。
 
 `Scripts/run-qwen-service.sh`、`Scripts/install-qwen-service.sh` 和 `Packaging/*.command` 是历史服务与旧安装布局的辅助脚本，不属于当前安装步骤。
+
+## 可续跑的本地候选
+
+`Scripts/local_candidate.py` 将正式 Release、运行库组装、同卷克隆、Developer ID 签名、独立校验及 `--candidate-only` DMG 串成可续跑流程。它不改版本、不启动 App、不调用公证或装订；每步等待显式指定的机器空闲脚本，执行中也定期检查。宿主解释器须与启动该脚本的解释器相同，不使用随包 Python。
+
+先对已经准备并审查通过的三套输入运行 `capture-inputs --language <绝对目录> --asr <绝对目录> --models <绝对目录> --output <新收据文件>`。收据绑定每棵输入树的完整文件哈希、模式、链接目标，以及锁文件和准备政策。正式运行每次重新校验；输入或政策变化必须重新准备和审查，不能自动重写基线。
+
+准备合同同时绑定嵌入声明提取器、原生声明门禁及全部隐私解析代码；递归绑定 `Packaging/MLXLicenses`，包括 exact-version 库存、完整锁审计和每份声明正文。补许可后不能沿用旧合同，也不能把测试用 ad-hoc 运行库当成 unsigned 发布输入。新输入应记录实际准备提交、命令和许可检查结果，并与来源分支准备件逐文件核对；模型不变时仍重新绑定其完整指纹。
+
+`run --help` 列出必需参数：准确的最终源码提交、预期版本、外接产物目录、独立主机记录目录、专用 Release DerivedData、输入收据、机器空闲脚本、身份、公钥证书和钥匙串。可用带时区的 `--deadline` 限制执行时间。相同参数再次运行会检查已完成产物后续跑；仅截止时间可以调整。切换源码提交、输入、版本或身份应使用新的任务目录。
+
+签名副本与未签名参照分开保留。中断的签名副本及签名前收据移入同卷 `to-trash`，再从未签名参照克隆；已完成产物变化时拒绝继续。主机记录中的 `state.json`、阶段日志、计时和 `handoff.json` 不放进交付包。新 SecurityAgent 进程或连续 15 分钟无进程/CPU 进展会停止本任务进程组，不解锁或更改钥匙串。仅凭监测不到新进程不能证明不存在所有类型的系统界面，仍应使用已获无交互许可的签名身份。
+
+镜像默认使用 `--image-method hybrid`：`hdiutil makehybrid -hfs` 后，对原始镜像同卷克隆，在未挂载的副本上清理精确识别的 Finder 显示字段，再转换为 UDZO，避免继承构建目录的来源追踪属性。直接 makehybrid 会生成 FinderInfo，导致 App 严格签名校验失败，不能省略中间步骤。清理器仅支持明确的无日志 HFS+ 目录结构；保留链接类型/创建者标记、模式和文件叉，未知字段或结构损坏即拒绝。整文件逐字节比较证明只有允许的字段改变，原始镜像保留在暂存，验收后可恢复隔离。没有可写挂载。`create` 方法仍可显式选择，但同样必须通过实际镜像属性门禁。恢复旧暂存时保持原来的镜像方法，不能静默切换。
+
+挂载检查使用只读、不浏览、不自动打开三个参数。`--mount-point` 可指定内置盘的新目录，适合不保留属主的外接产物卷；未指定时使用宿主临时目录。续跑工具将挂载点放在主机记录目录。`--xattr-report` 保存实际只读镜像全量扩展属性及 DMG 文件自身属性，报告必须在镜像外。内置 `com.apple.provenance` 等未审查属性会阻止输出；构建目录本身的属性不代替分发件检查。宿主 DMG 文件的属性单列，复制或上传时是否携带取决于传输方式，不能把镜像内容通过说成宿主属性已清除。公证与 VM 验收由相应 owner 单独提供最终版本的证据。`spctl` 的未公证拒绝会保留记录，不冒充发行 Gatekeeper 通过。
+
+同一报告的 `containerMetadata` 检查 UDIF XML 的结构化字段和嵌入元数据、块映射尺寸/保留区、二进制中的可读私人路径，以及公开工具中的完整固定 `plst` 常量。未知二进制元数据拒绝通过；标准数值、校验和及必要文件系统数据保留，分别由镜像校验和挂载内容检查核验。FinderInfo 只接受空记录/自动定位哨兵及链接标记的精确值，不因 32 字节长度就放行其他信息。
+
+候选制作若仅在最后校验中断，可显式用 `build-offline-dmg.sh --candidate-only --resume-stage <原暂存>` 重新执行本地门禁，复用状态文件完整哈希绑定的已签名镜像。它仍不解析或调用公证/装订工具，不接受公证提交编号或重新上传选项。使用新的内置挂载目录与属性报告；输出存在或镜像被改动时拒绝继续。上层 local_candidate 的失败阶段隔离策略保持不变，直接恢复底层暂存应由该次任务的执行者审阅原日志后选择。
 
 ## 验证记录
 

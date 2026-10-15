@@ -1,0 +1,284 @@
+{
+  "archive": "gcc-13.4.0-full.tar.xz",
+  "sourceInputs": {
+    "gcc-13.4.0-full.tar.xz": {
+      "sha256": "defcacea843f6dd703f0760a90403b19cf5ca5cca08509251112e2533c4e9ce5",
+      "bytes": 130471676,
+      "scope": "wheel-corresponding-base-or-patch"
+    },
+    "gcc-13.4.0-darwin.diff": {
+      "sha256": "60b22ae7f5f78b41e12c51d8c6e99ba933a7e124454fe8cdbff7200505167949",
+      "bytes": 590233,
+      "scope": "wheel-corresponding-base-or-patch"
+    },
+    "gcc-12-13-darwin-version-mapping.diff": {
+      "sha256": "e238a71e099096eeb87daf380bb80b1a175554a5ab9cc9c5f6e9e8f044e9428b",
+      "bytes": 1849,
+      "scope": "host-macOS-26-or-later-check-only; not the SciPy wheel source patch",
+      "modification": "Correct malformed publisher final unified-diff hunk count from 6/7 to actual 5/6; no source logic changes."
+    }
+  },
+  "network": "denied-by-sandbox",
+  "scope": "native arm64 compiler and libgcc/libquadmath/libgfortran; bounded non-bootstrap check",
+  "byteIdenticalRebuild": false,
+  "passed": true,
+  "steps": {
+    "apply-darwin-patch": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 0.66,
+      "missingInput": false,
+      "log": "apply-darwin-patch.log",
+      "network": "denied-by-sandbox"
+    },
+    "apply-host-version-mapping": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 0.012,
+      "missingInput": false,
+      "log": "apply-host-version-mapping.log",
+      "network": "denied-by-sandbox"
+    },
+    "configure": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 4.786,
+      "missingInput": false,
+      "log": "configure.log",
+      "network": "denied-by-sandbox"
+    },
+    "compiler-configure": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 35.861,
+      "missingInput": false,
+      "log": "compiler-configure.log",
+      "network": "denied-by-sandbox"
+    },
+    "compiler-build": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 257.05,
+      "missingInput": false,
+      "log": "compiler-build.log",
+      "network": "denied-by-sandbox"
+    },
+    "libgcc-configure": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 5.321,
+      "missingInput": false,
+      "log": "libgcc-configure.log",
+      "network": "denied-by-sandbox"
+    },
+    "libgcc-build": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 24.377,
+      "missingInput": false,
+      "log": "libgcc-build.log",
+      "network": "denied-by-sandbox"
+    },
+    "libquadmath-configure": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 10.357,
+      "missingInput": false,
+      "log": "libquadmath-configure.log",
+      "network": "denied-by-sandbox"
+    },
+    "libquadmath-build": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 13.418,
+      "missingInput": false,
+      "log": "libquadmath-build.log",
+      "network": "denied-by-sandbox"
+    },
+    "libgfortran-configure": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 58.602,
+      "missingInput": false,
+      "log": "libgfortran-configure.log",
+      "network": "denied-by-sandbox"
+    },
+    "libgfortran-build": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 94.138,
+      "missingInput": false,
+      "log": "libgfortran-build.log",
+      "network": "denied-by-sandbox"
+    },
+    "final-current-source-make-recheck": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 2.058,
+      "missingInput": false,
+      "log": "final-native-recheck.log",
+      "network": "denied-by-sandbox"
+    }
+  },
+  "runtimeLibraries": {
+    "libgcc": {
+      "path": "build/aarch64-apple-darwin27/libgcc/libgcc_s.1.1.dylib",
+      "archs": "arm64",
+      "sha256": "b9b9cb9bfafe59d8ea97e3bc8e24d646d2ff970d2c256c2636e4fe9a744767c7",
+      "bytes": 180000
+    },
+    "libquadmath": {
+      "path": "build/aarch64-apple-darwin27/libquadmath/.libs/libquadmath.0.dylib",
+      "archs": "arm64",
+      "sha256": "7a48a8cee05995a87b26868eede67e46653d1da5d860e1b6363ca14683399a0f",
+      "bytes": 362896
+    },
+    "libgfortran": {
+      "path": "build/aarch64-apple-darwin27/libgfortran/.libs/libgfortran.5.dylib",
+      "archs": "arm64",
+      "sha256": "60a5ed7b80ab4dd84f61fe4d3d78007540c2efa86bc93bac0c3abdce9b51c33a",
+      "bytes": 1964560
+    }
+  },
+  "target": "aarch64-apple-darwin27",
+  "hostOnlyPatchApplied": true,
+  "nativeInputs": {
+    "gcc/config/aarch64/darwin.h": true,
+    "gcc/config/aarch64/t-aarch64-darwin": true,
+    "libgcc/config/aarch64/t-darwin": true,
+    "libgfortran/configure": true,
+    "libquadmath/configure": true
+  },
+  "configureArguments": [
+    "../sources/gcc-13.4.0/configure",
+    "--build=aarch64-apple-darwin27",
+    "--host=aarch64-apple-darwin27",
+    "--target=aarch64-apple-darwin27",
+    "--disable-bootstrap",
+    "--disable-multilib",
+    "--disable-nls",
+    "--enable-checking=release",
+    "--with-gcc-major-version-only",
+    "--enable-languages=c,c++,fortran",
+    "--with-system-zlib",
+    "--with-sysroot=SDK_ROOT",
+    "--prefix=WORK_PREFIX",
+    "--with-gmp=EXISTING_DEPENDENCY_PREFIX",
+    "--with-mpfr=EXISTING_DEPENDENCY_PREFIX",
+    "--with-mpc=EXISTING_DEPENDENCY_PREFIX",
+    "--with-isl=EXISTING_DEPENDENCY_PREFIX",
+    "--with-zstd=EXISTING_DEPENDENCY_PREFIX"
+  ],
+  "originalBuildSourceInputs": {
+    "gcc-13.4.0-full.tar.xz": {
+      "sha256": "297cc7cc94966cc584877e36cb2bd1dace2a341cd52b5a24b3396c5a7a11b286",
+      "bytes": 130470808,
+      "scope": "wheel-corresponding-base-or-patch"
+    },
+    "gcc-13.4.0-darwin.diff": {
+      "sha256": "60b22ae7f5f78b41e12c51d8c6e99ba933a7e124454fe8cdbff7200505167949",
+      "bytes": 590233,
+      "scope": "wheel-corresponding-base-or-patch"
+    },
+    "gcc-12-13-darwin-version-mapping.diff": {
+      "sha256": "e238a71e099096eeb87daf380bb80b1a175554a5ab9cc9c5f6e9e8f044e9428b",
+      "bytes": 1849,
+      "scope": "host-macOS-26-or-later-check-only; not the SciPy wheel source patch",
+      "modification": "Correct malformed publisher final unified-diff hunk count from 6/7 to actual 5/6; no source logic changes."
+    }
+  },
+  "configureLocationPolicy": "Portable argument values use explicit placeholders. The local receipt retains measured SDK and dependency locations; the check used MacOSX27.0.sdk and the existing Homebrew dependencies.",
+  "sourceBinding": {
+    "archiveSHA256": "defcacea843f6dd703f0760a90403b19cf5ca5cca08509251112e2533c4e9ce5",
+    "unpatchedMembersCompared": 125176,
+    "publisherPatchMembersCompared": 222,
+    "hostMappingMembersCompared": 2,
+    "mismatches": [],
+    "noticeChecks": [
+      {
+        "path": "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho",
+        "noticePath": "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho.MODIFICATIONS.txt",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho4",
+        "noticePath": "gcc-13.4.0/libgo/go/debug/dwarf/testdata/typedef.macho4.MODIFICATIONS.txt",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/libgo/go/cmd/go/testdata/script/README",
+        "noticePath": "gcc-13.4.0/libgo/go/cmd/go/testdata/script/README",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/libgo/go/go/internal/gcimporter/testdata/versions/test_go1.7_0.a",
+        "noticePath": "gcc-13.4.0/libgo/go/go/internal/gcimporter/testdata/versions/test_go1.7_0.a.MODIFICATIONS.txt",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/libgo/go/runtime/debug/stack_test.go",
+        "noticePath": "gcc-13.4.0/libgo/go/runtime/debug/stack_test.go",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/libgo/go/golang.org/x/mod/zip/zip.go",
+        "noticePath": "gcc-13.4.0/libgo/go/golang.org/x/mod/zip/zip.go",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/gcc/testsuite/go.test/test/interface/fake.go",
+        "noticePath": "gcc-13.4.0/gcc/testsuite/go.test/test/interface/fake.go",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/bug345.dir/main.go",
+        "noticePath": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/bug345.dir/main.go",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/issue5963.go",
+        "noticePath": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/issue5963.go",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/bug142.go",
+        "noticePath": "gcc-13.4.0/gcc/testsuite/go.test/test/fixedbugs/bug142.go",
+        "datedNoticePresent": true
+      },
+      {
+        "path": "gcc-13.4.0/gcc/ada/libgnat/g-dirope.ads",
+        "noticePath": "gcc-13.4.0/gcc/ada/libgnat/g-dirope.ads",
+        "datedNoticePresent": true
+      }
+    ],
+    "docs": {
+      "libstdc++-v3/doc/html/manual/documentation_hacking.html": {
+        "originalBytesUnchanged": true,
+        "sha256": "634455369b57b1754cd21548fe5c4d95cabe4b72a7bdc0160d7db6cf1cc2d2da"
+      },
+      "gcc/doc/gcov.1": {
+        "originalBytesUnchanged": true,
+        "sha256": "400cc70c9cdbfdbe2650f2d64af4d10b67d61cdd6a31f4b14771783ff823e07b"
+      },
+      "htmlEscapedFilenameClosures": 3,
+      "roffStartsWithProperComment": true,
+      "roffRenderExit": 0,
+      "roffRenderedLeadingLines": [
+        "GCOV(1)                               GNU                              GCOV(1)",
+        "",
+        "N\bNA\bAM\bME\bE",
+        "     gcov - coverage testing tool",
+        ""
+      ]
+    },
+    "hostReferencePatch": {
+      "exit": 0,
+      "timedOut": false,
+      "elapsedSeconds": 0.015,
+      "missingInput": false,
+      "log": "host-mapping-reference.log",
+      "network": "denied-by-sandbox"
+    },
+    "passed": true
+  }
+}

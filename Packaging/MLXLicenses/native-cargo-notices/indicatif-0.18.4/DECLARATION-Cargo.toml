@@ -1,0 +1,7 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "indicatif"
+version = "0.18.4"
+license = "MIT"
+repository = "https://github.com/console-rs/indicatif"
+description = "A progress bar and cli reporting library for Rust"

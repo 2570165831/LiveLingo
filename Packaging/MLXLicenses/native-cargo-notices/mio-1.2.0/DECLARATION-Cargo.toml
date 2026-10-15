@@ -1,0 +1,9 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "mio"
+version = "1.2.0"
+license = "MIT"
+authors = ["Carl Lerche <me@carllerche.com>", "Thomas de Zeeuw <thomasdezeeuw@gmail.com>", "Tokio Contributors <team@tokio.rs>"]
+repository = "https://github.com/tokio-rs/mio"
+homepage = "https://github.com/tokio-rs/mio"
+description = "Lightweight non-blocking I/O."

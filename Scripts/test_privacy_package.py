@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from Scripts import privacy_package as privacy
 from Scripts import model_files
+from Scripts import reviewed_resources
 from Scripts.test_model_files import write_model
 
 
@@ -211,7 +212,10 @@ class PrivacyPackageTests(unittest.TestCase):
             self.write(name, text)
         (self.source / "bin/python3").symlink_to("python3.13")
         self.write("lib/python3.13/site-packages/scipy/io/tests/data/test.wav", "synthetic self-test fixture")
-        privacy.copy_distribution_tree(self.source, self.output)
+        # These deliberately synthetic native bytes do not carry the release
+        # index's hash-bound approval for the real CPython library at this path.
+        with patch.object(reviewed_resources, "entries", return_value={}):
+            privacy.copy_distribution_tree(self.source, self.output)
         for name in required:
             self.assertEqual((self.output / name).read_bytes(), (self.source / name).read_bytes())
         self.assertEqual(os.readlink(self.output / "bin/python3"), "python3.13")
@@ -428,7 +432,7 @@ class PrivacyPackageTests(unittest.TestCase):
     def bundle_inputs(self, bundle):
         repo = self.root / "repo"
         for path in ("LICENSE", "Packaging/THIRD_PARTY_NOTICES.md", "Scripts/qwen_asr_service.py"):
-            self.write(path, "synthetic public file", repo)
+            self.write(path, "# synthetic public file" if path.endswith(".py") else "synthetic public file", repo)
         for name in bundle.RUNTIME_MODULES:
             self.write("Scripts/mlx_runtime/" + name, "# synthetic runtime module", repo)
         notices = {n for _, n in bundle.LANGUAGE_MODELS}
@@ -441,6 +445,10 @@ class PrivacyPackageTests(unittest.TestCase):
             self.write("Packaging/ModelNotices/" + name, '[{"url":"https://example.invalid/LICENSE"}]', repo)
         self.write("Packaging/ASRRuntime.lock.json", "{}", repo)
         self.write("Packaging/MLXLicenses/AUDIT.json", '{"status":"fixture"}', repo)
+        from Scripts.binary_provenance import INPUT_PATH, REFERENCE
+        from Scripts.test_macho_paths import image
+        self.write("Packaging/MLXLicenses/ASR-audio/soundfile-binary-provenance.json",
+                   REFERENCE.read_bytes(), repo)
         app = self.root / "LiveLingo.app"
         info = app / "Contents/Info.plist"
         info.parent.mkdir(parents=True)
@@ -458,6 +466,7 @@ class PrivacyPackageTests(unittest.TestCase):
         asr = self.root / "asr-python"
         self.write("bin/python3", "synthetic interpreter", asr)
         (asr / "lib/python3.13").mkdir(parents=True)
+        self.write(INPUT_PATH, image(), asr)
         output = self.root / "candidate/LiveLingo.app"
         args = ["bundle-mlx-app.py", "--app", str(app), "--runtime", str(runtime), "--models", str(models),
                 "--asr-models", str(models), "--asr-python", str(asr), "--output", str(output),
@@ -466,6 +475,7 @@ class PrivacyPackageTests(unittest.TestCase):
 
     def run_bundle(self, bundle, repo, args):
         with patch.object(bundle, "REPO_ROOT", repo), patch.object(bundle, "is_apfs", return_value=False), \
+             patch.object(reviewed_resources, "entries", return_value={}), \
              patch.object(bundle, "repair_portable_asr_dylib_links"), patch.object(sys, "argv", args), \
              contextlib.redirect_stdout(io.StringIO()):
             bundle.main()
@@ -482,9 +492,22 @@ class PrivacyPackageTests(unittest.TestCase):
         self.assertEqual((app / ".migration-source-fixture/transcript.txt").read_text(), CANARY)
         self.assertFalse(any(p.name.startswith(".migration-source") for p in output.rglob("*")))
         self.assertFalse((output / "Contents/Resources/LanguageRuntime/.cli-runtime").exists())
-        privacy.inspect_tree(output)
+        with patch.object(reviewed_resources, "entries", return_value={}):
+            privacy.inspect_tree(output)
         for relative in bundle.REQUIRED_MODEL_FILES:
             self.assertTrue((output / "Contents/Resources/Models" / relative / "model-00002-of-00002.safetensors").is_file())
+
+    def test_bundle_refuses_uncovered_transitive_notice_before_copying(self):
+        bundle = load_script("bundle-mlx-app")
+        repo, _, _, _, output, args = self.bundle_inputs(bundle)
+        asr = self.root / "asr-python"
+        extension = self.write("lib/python3.13/site-packages/fixture/native.so",
+                               b"registry/src/index.crates.io-abc/unique-crate-9.8.7/src/lib.rs\0", asr)
+        before = extension.read_bytes()
+        with self.assertRaisesRegex(SystemExit, "native notice audit failed"):
+            self.run_bundle(bundle, repo, args)
+        self.assertFalse(output.exists())
+        self.assertEqual(extension.read_bytes(), before)
 
     def test_bundle_entry_point_refuses_models_missing_weights_shards_or_loader_files(self):
         bundle = load_script("bundle-mlx-app")
@@ -538,6 +561,8 @@ class PrivacyPackageTests(unittest.TestCase):
         app = derived / "Build/Products/Release/LiveLingo.app"
         info = self.write("Contents/Info.plist", "", app)
         info.write_bytes(plistlib.dumps({"CFBundleIdentifier": "fixture.app"}))
+        executable = self.write("Contents/MacOS/LiveLingo", "", app)
+        executable.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 28)
         env = {"LIVELINGO_DERIVED_DATA_PATH": str(derived), "LIVELINGO_PYTHON": sys.executable,
                "TMPDIR": str(self.root), "PYTHONDONTWRITEBYTECODE": "1", "PATH": "/usr/bin:/bin"}
         result = subprocess.run(["/bin/bash", str(script)], capture_output=True, text=True, env=env)
@@ -706,13 +731,14 @@ class PrivacyPackageMetadataTests(unittest.TestCase):
                                 "unreviewed-large-metadata")
 
     def test_known_app_binaries_are_reported_as_opaque(self):
+        from Scripts.test_distribution_resources import png
         fixtures = {"Contents/MacOS/LiveLingo": b"\xcf\xfa\xed\xfe" + b"\x00" * 28,
                     "Contents/PkgInfo": b"APPL????",
                     "Contents/Resources/Assets.car": b"BOMStore" + b"\x00" * 24,
                     "Contents/Resources/AppIcon.icns": b"icns\x00\x00\x00\x08",
                     "runtime/libfixture.dylib": b"\xcf\xfa\xed\xfe" + b"\x00" * 28,
                     "runtime/default.metallib": b"MTLB" + b"\x00" * 28,
-                    "Contents/Resources/AppIcon.icon/Assets/fixture.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 24}
+                    "Contents/Resources/AppIcon.icon/Assets/fixture.png": png()}
         for filename, payload in fixtures.items():
             with self.subTest(filename=filename):
                 directory, _, destination = self.case(payload, filename)
@@ -833,7 +859,7 @@ class PrivacyPackageMetadataTests(unittest.TestCase):
         for filename in ("LICENSE", "README", "fixture-LICENSE", "notices.txt", "script.py", "tool.sh",
                          "fixture-1.dist-info/METADATA", "bin/python3.13"):
             with self.subTest(filename=filename):
-                payload = b"Synthetic public fixture"
+                payload = b"# Synthetic public fixture" if filename.endswith(".py") else b"Synthetic public fixture"
                 directory, _, destination = self.case(payload, filename)
                 counts = privacy.copy_distribution_tree(directory, destination)
                 self.assertEqual(counts["unreviewed_text_files"], 1)

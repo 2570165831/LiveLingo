@@ -1,12 +1,30 @@
 {
-  "status": "collected-and-hash-verified",
+  "status": "release-filtered-and-hash-bound",
   "nativePythonSourceReleases": 15,
-  "cargoLockPackages": 752,
-  "cargoNoticeTextsVerified": 1411,
-  "audioSourceArchivesVerified": 7,
+  "cargoLockPackages": 777,
   "scope": "Exact release source notices and union of Cargo.lock packages; includes build, optional and platform dependencies, not a linked-only inventory. This is an evidence inventory, not a blanket legal certification.",
   "limitations": [
-    "GCC 13.4.0 source selected from packaged SciPy compiler metadata; byte-identical rebuild not demonstrated.",
-    "Physical sleep, final notarization and clean-machine release installation are separate acceptance checks."
-  ]
+    "GCC runtime attribution is supported by pinned GNU/Darwin source inputs, the publisher bottle recipe, and matching file-backed Mach-O sections between the official bottle and SciPy wheel. Historical seed compiler and complete superenv flags remain unverified; byte-identical rebuild is not claimed.",
+    "Physical sleep, final notarization and clean-machine release installation are separate acceptance checks.",
+    "Tokenizers 0.23.0rc0 runtime notice coverage uses the complete upstream lock with only proven root dev-only exclusions; this conservative graph is not an exact historical linked inventory."
+  ],
+  "originalCollectionCounts": {
+    "cargoNoticeTextsVerified": 1411,
+    "audioSourceArchivesVerified": 7
+  },
+  "reviewedResources": "source-preparation/PrivacyResources.json",
+  "correspondingSourceAudit": "source-preparation/SourceArchiveAudit.json",
+  "filteredNonNoticeSourceFiles": 13,
+  "staticallyLinkedCodecSourceArchivesIncluded": 4,
+  "requiredCorrespondingSourceArchives": 11,
+  "embeddedSourceNoticeAudit": "embedded-source-notices/PROVENANCE.json",
+  "requiredEmbeddedSourceHeaderNotices": 3,
+  "additionalSourceLockAudit": "native-cargo-notices/tokenizers-0.23.0rc0-lock-audit.json",
+  "tokenizersRuntimeNoticeCoverage": {
+    "version": "0.23.0rc0",
+    "registryPackages": 165,
+    "excludedDevOnlyPackages": 27,
+    "requiredRegistryPackages": 138,
+    "missingRequiredNotices": 0
+  }
 }

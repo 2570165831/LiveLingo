@@ -350,16 +350,19 @@
         "sha256": "15181e7363dca9aed78b79bebebc7fde7f1814b8bd311ea3b87ae8ccadfc185b"
       },
       {
-        "path": "Tests/fonts/DejaVuSans/LICENSE.txt",
-        "sha256": "ba4aee7ef5b2ebc285e76df2497953d8a6e7480bc249f4e0a55f1199a3396622"
+        "path": "test-notices/fonts/DejaVuSans/LICENSE.txt",
+        "sha256": "ba4aee7ef5b2ebc285e76df2497953d8a6e7480bc249f4e0a55f1199a3396622",
+        "upstreamPath": "Tests/fonts/DejaVuSans/LICENSE.txt"
       },
       {
-        "path": "Tests/fonts/LICENSE.txt",
-        "sha256": "b79f6f6a2fc060b2e0a6e7a6946c446ae199bec07b92a3df1295975e25c4d96b"
+        "path": "test-notices/fonts/LICENSE.txt",
+        "sha256": "b79f6f6a2fc060b2e0a6e7a6946c446ae199bec07b92a3df1295975e25c4d96b",
+        "upstreamPath": "Tests/fonts/LICENSE.txt"
       },
       {
-        "path": "Tests/icc/LICENSE.txt",
-        "sha256": "09e62757edb34e284bc11c54e3429b438d9db37f46c9cb36bd57b1b25ae36184"
+        "path": "test-notices/icc/LICENSE.txt",
+        "sha256": "09e62757edb34e284bc11c54e3429b438d9db37f46c9cb36bd57b1b25ae36184",
+        "upstreamPath": "Tests/icc/LICENSE.txt"
       },
       {
         "path": "docs/COPYING",
@@ -600,10 +603,6 @@
         "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
       },
       {
-        "path": "subprojects/cobyqa/.github/workflows/license.yml",
-        "sha256": "13f8b813fefcb28457fc72c77fb6913dd4ee043d52841b4e21dff70868c77bbd"
-      },
-      {
         "path": "subprojects/cobyqa/LICENSE",
         "sha256": "a4d7975be6d6487b7125ce6e79f299a5396b300b1a67e3644a1cf6467b426708"
       },
@@ -664,7 +663,13 @@
         "sha256": "4db7803e3c24b12213295430a5017e4842ec265804c0f37ca5f4729c9ee76f46"
       }
     ],
-    "cargoManifests": []
+    "cargoManifests": [],
+    "omittedNonNoticeSources": [
+      {
+        "path": "subprojects/cobyqa/.github/workflows/license.yml",
+        "sha256": "13f8b813fefcb28457fc72c77fb6913dd4ee043d52841b4e21dff70868c77bbd"
+      }
+    ]
   },
   {
     "name": "sentencepiece",

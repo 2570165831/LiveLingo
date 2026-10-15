@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "source_origin": "installed-app",
+  "extraction": "verbatim-leading-comment-region",
+  "notices": [
+    {
+      "source": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/sklearn/svm/src/libsvm/svm.cpp",
+      "source_sha256": "8e9c41f2e01ac93e07ece96fe8943699cfb7f0323e071d7321fb0032a666c3d6",
+      "source_bytes": 69309,
+      "copy": "libsvm-svm.cpp.notice.txt",
+      "excerpt_offset": 32,
+      "excerpt_sha256": "14ba4a179f80d69940dacaf980c9072c4445cd3c4b30deb34f0a2de298b347d6",
+      "excerpt_bytes": 2497,
+      "file_sha256": "d2f5828eeda9db501e664acb1a661fe121fed004f5d4a332bbb5ca2c7d943cd6",
+      "file_bytes": 2529
+    },
+    {
+      "source": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/sklearn/cluster/_hdbscan/_tree.pxd",
+      "source_sha256": "b557ed0a3f908e8b6e416ccaaa5b8ed754b71c0cd11fbd574a2b8dad84ad9ac9",
+      "source_bytes": 2155,
+      "copy": "hdbscan-tree.pxd.notice.txt",
+      "excerpt_offset": 32,
+      "excerpt_sha256": "4eaa10f7cfffb42e769224c06553a62c41b2355d58526e45682233113a5fb312",
+      "excerpt_bytes": 1531,
+      "file_sha256": "e1c21bd83ea3c1f77a193e93e88f8e32009b0f2adfd2e7071e49bde5be0c2abf",
+      "file_bytes": 1563
+    },
+    {
+      "source": "Contents/Resources/ASRRuntime/python/include/python3.13/internal/mimalloc/mimalloc.h",
+      "source_sha256": "7c4e2fc555724fe674efbb2cfe64344fafa86f8c43d22e48263c33dd07ac7d81",
+      "source_bytes": 36071,
+      "copy": "mimalloc.h.notice.txt",
+      "excerpt_offset": 32,
+      "excerpt_sha256": "3b284635d839f6d66183322102471e3d9555b684a3a4386f720817c28e641c51",
+      "excerpt_bytes": 408,
+      "file_sha256": "b015fde7dab5af50931049c26f2ce56ff01d358193d5bbd21430227cd4760285",
+      "file_bytes": 440
+    },
+    {
+      "source": "Contents/Resources/LanguageRuntime/python/include/python3.13/internal/mimalloc/mimalloc.h",
+      "source_sha256": "7c4e2fc555724fe674efbb2cfe64344fafa86f8c43d22e48263c33dd07ac7d81",
+      "source_bytes": 36071,
+      "copy": "mimalloc.h.notice.txt",
+      "excerpt_offset": 32,
+      "excerpt_sha256": "3b284635d839f6d66183322102471e3d9555b684a3a4386f720817c28e641c51",
+      "excerpt_bytes": 408,
+      "file_sha256": "b015fde7dab5af50931049c26f2ce56ff01d358193d5bbd21430227cd4760285",
+      "file_bytes": 440
+    }
+  ],
+  "external_license_references": [
+    {
+      "notice": "mimalloc.h.notice.txt",
+      "license": "MIT",
+      "referenced_source": "LICENSE at distribution root",
+      "status": "header-preserved-with-shared-terms-reference",
+      "local_terms_reference": "MIT-TERMS.txt",
+      "original_license_copy": false
+    }
+  ],
+  "envelope": "Verbatim source header notice:\n\n",
+  "shared_license_terms": [
+    {
+      "license": "MIT",
+      "purpose": "Local reference to shared MIT permission and disclaimer terms, not a copy of mimalloc original LICENSE.",
+      "source_root": "repository",
+      "source": "Packaging/MLXLicenses/native-cargo-notices/libc-0.2.189/LICENSE-MIT",
+      "source_sha256": "123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e",
+      "source_bytes": 1066,
+      "source_excerpt_offset": 43,
+      "copy": "MIT-TERMS.txt",
+      "excerpt_offset": 377,
+      "excerpt_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "excerpt_bytes": 1023,
+      "file_sha256": "f043bfad0c622c57a1f0b7503b9170a9169dd39da95af96c676dbab519539552",
+      "file_bytes": 1400
+    }
+  ]
+}

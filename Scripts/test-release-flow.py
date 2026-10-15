@@ -5,6 +5,8 @@ No real signing, keychains, notarytool, stapler, spctl or mounting. Image stubs
 snapshot their source, so later edits cannot masquerade as image contents.
 """
 import importlib.util
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,12 +18,14 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 APP_ID = "11111111-1111-4111-8111-111111111111"
 DMG_ID = "22222222-2222-4222-8222-222222222222"
 IDENTITY = "Developer ID Application: Fixture (TESTTEAM)"
@@ -57,12 +61,66 @@ def save_image(path, value):
 def prior(tool, predicate):
     return any(e["tool"] == tool and predicate(e) for e in history())
 if name == "python-verify-stub":
-    if args and pathlib.Path(args[0]).name == "sign-offline-app.py":
+    if args and pathlib.Path(args[0]).name == "hfs_image_metadata.py":
+        record(hfsMetadataGate=True)
+        if scenario == "hfs-metadata-failure": fail("unknown synthetic Finder metadata")
+        source = owned(args[args.index("--source") + 1]); output = owned(args[args.index("--output") + 1])
+        assert not output.exists()
+        save_image(output, image(source))
+        owned(args[args.index("--report") + 1]).write_text(json.dumps({"passed": True, "synthetic": True}))
+    elif args and pathlib.Path(args[0]).name == "sign-offline-app.py":
         assert "--verify-only" in args and args[args.index("--identity") + 1] == identity
         target = owned(args[args.index("--app") + 1])
         record()
         if scenario == "preflight-failure": fail()
         assert (target / "Contents/.fake-signature").exists()
+    elif args and pathlib.Path(args[0]).name == "distribution_xattrs.py":
+        # Only mount/device state and synthetic xattrs are mocked. Exercise the
+        # real content/host distinction, image hashing and CLI failure status.
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        sys.path.insert(0, str(pathlib.Path(args[0]).parent))
+        import distribution_xattrs
+        target = owned(args[args.index("--mounted-root") + 1])
+        report = owned(args[args.index("--report") + 1])
+        record(attributeGate=True)
+        def attribute_names(path):
+            if scenario == "mounted-provenance" and pathlib.Path(path) == target:
+                return ["com.apple.provenance"]
+            return []
+        def container_metadata(path):
+            if scenario == "mounted-container-metadata":
+                raise ValueError("synthetic opaque UDIF metadata")
+            return {"passed": True, "scope": "synthetic container; real parser tested independently"}
+        with patch.object(distribution_xattrs.os.path, "ismount", return_value=True), \
+             patch.object(distribution_xattrs.os, "statvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY)), \
+             patch.object(distribution_xattrs, "inspect_container", side_effect=container_metadata), \
+             patch.object(distribution_xattrs, "names", side_effect=attribute_names), \
+             patch.object(distribution_xattrs, "value", return_value=bytes(11)):
+            sys.argv = args
+            sys.exit(distribution_xattrs.main())
+    elif args and pathlib.Path(args[0]).name == "privacy_package.py":
+        # These fixtures use fake signatures. Keep the real metadata/entry and
+        # path scanners; only native-signature approvals/provenance are stubs.
+        target = owned(args[args.index("--root") + 1])
+        assert args[args.index("--phase") + 1] in ("final", "signed")
+        sys.path.insert(0, str(pathlib.Path(args[0]).parent))
+        import privacy_package, signed_resource_review, binary_provenance, reviewed_resources
+        def fake_approvals(app):
+            app = owned(app)
+            assert (app / "Contents/.fake-signature").exists()
+            return {}
+        if os.environ.get("FAKE_REVIEW_MANIFEST"):
+            # Real hash-bound resources and signed receipt, not an empty
+            # approvals stub. Only the unrelated audio provenance is synthetic.
+            reviewed_resources.MANIFEST = owned(os.environ["FAKE_REVIEW_MANIFEST"])
+        else:
+            signed_resource_review.approvals_for_app = fake_approvals
+        binary_provenance.verify_app_provenance = lambda app: {"finalStage": "signed-candidate"}
+        if os.environ.get("FAKE_REVIEW_MANIFEST"):
+            record(privacyPhase=args[args.index("--phase") + 1])
+        sys.argv = args
+        sys.exit(privacy_package.main())
     else:
         if args and pathlib.Path(args[0]).name == "notarize-artifact.py":
             if scenario == "resume-receipt-missing" and "--submission-id" in args:
@@ -140,13 +198,22 @@ elif name == "stapler":
     mounted = "verify-mount" in target.parts or "standalone-mount" in target.parts
     count = 1 + sum(e["tool"] == name and e["args"][0] == args[0] and e.get("phase") == phase for e in history())
     record(phase=phase, mounted=mounted)
-    marker = target / ".fake-stapled"
+    marker = target / "Contents/CodeResources"
     if args[0] == "staple":
         assert not mounted
         assert prior("notarytool", lambda e: e.get("phase") == phase and e.get("status") == "Accepted")
         if scenario == phase + "-staple-failure": fail("ticket service unavailable", 68)
         if scenario == phase + "-staple-transient" and count == 1: fail("ticket service unavailable", 68)
-        if phase == "app": marker.write_text(json.dumps({"fixture": "notarization ticket"}))
+        if phase == "app":
+            ticket = b"s8ch" + bytes(range(256)) * 8
+            if scenario == "ticket-wrong-location":
+                misplaced = target / "Contents/MacOS/CodeResources"
+                misplaced.parent.mkdir(exist_ok=True)
+                misplaced.write_bytes(ticket)
+            elif scenario == "ticket-wrong-magic": marker.write_bytes(b"bad!" + ticket[4:])
+            elif scenario == "ticket-oversized": marker.write_bytes(b"s8ch" + bytes(64 * 1024))
+            elif scenario == "ticket-symlink": marker.symlink_to("Info.plist")
+            else: marker.write_bytes(ticket)
         else:
             data = image(target); assert data["signed"]; data["stapled"] = True; save_image(target, data)
     elif args[0] == "validate":
@@ -155,12 +222,15 @@ elif name == "stapler":
         if mounted and scenario == "interrupt-verify":
             (root / "verify-ready").write_text(str(os.getpid()))
             time.sleep(300)
-        assert marker.exists() if phase == "app" else image(target).get("stapled"), "ticket absent from exact target"
+        # Deliberately accept malformed test tickets here: the real privacy
+        # scanner must independently reject them before creating a final image.
+        if not (phase == "app" and scenario.startswith("ticket-")):
+            assert marker.exists() if phase == "app" else image(target).get("stapled"), "ticket absent from exact target"
     else: fail("unexpected stapler action")
 elif name == "codesign":
     target = owned(args[-1]); phase = "app" if target.suffix == ".app" else "dmg"
     mounted = "verify-mount" in target.parts or "standalone-mount" in target.parts
-    stapled = (target / ".fake-stapled").exists() if phase == "app" else image(target).get("stapled", False)
+    stapled = (target / "Contents/CodeResources").exists() if phase == "app" else image(target).get("stapled", False)
     record(phase=phase, mounted=mounted, stapled=stapled)
     if "-d" in args:
         authority = "Developer ID Application: Wrong (OTHER)" if scenario == phase + "-authority-failure" or (mounted and scenario == "mounted-authority-failure") else identity
@@ -185,31 +255,46 @@ elif name == "codesign":
     else: fail("unexpected codesign action")
 elif name == "hdiutil":
     action = args[0]
-    if action == "create":
-        payload = owned(args[args.index("-srcfolder") + 1]); output = owned(args[-1])
-        assert args[args.index("-format") + 1] == "UDZO"
-        assert int(args[args.index("-size") + 1].removesuffix("b")) >= 256 * 1024**2
-        assert args[args.index("-imagekey") + 1] == "zlib-level=6"
+    if action in ("create", "makehybrid"):
+        if action == "create":
+            payload = owned(args[args.index("-srcfolder") + 1]); output = owned(args[-1])
+            assert args[args.index("-format") + 1] == "UDZO"
+            assert int(args[args.index("-size") + 1].removesuffix("b")) >= 256 * 1024**2
+            assert args[args.index("-imagekey") + 1] == "zlib-level=6"
+        else:
+            assert "-hfs" in args and "-hfs-volume-name" in args
+            payload = owned(args[-1]); output = owned(args[args.index("-o") + 1])
         entries = sorted(p.name for p in payload.iterdir())
         phase = "app" if entries == ["LiveLingo.app"] else "dmg"
         app = payload / "LiveLingo.app"
         assert prior("codesign", lambda e: e.get("phase") == "app" and "--verify" in e["args"] and e["args"][-1] == str(app))
-        if phase == "app": assert not (app / ".fake-stapled").exists()
+        if phase == "app": assert not (app / "Contents/CodeResources").exists()
         else:
             assert entries == ["Applications", "LiveLingo.app", "使用说明.txt"]
-            assert (app / ".fake-stapled").exists()
-            assert prior("stapler", lambda e: e["args"] == ["validate", str(app)])
-            assert prior("codesign", lambda e: e["args"][-1] == str(app) and "--verify" in e["args"] and e["stapled"])
+            if os.environ.get("FAKE_CANDIDATE_ONLY"):
+                assert not (app / "Contents/CodeResources").exists()
+                assert not prior("notarytool", lambda e: True)
+                assert not prior("stapler", lambda e: True)
+            else:
+                assert (app / "Contents/CodeResources").exists()
+                assert prior("stapler", lambda e: e["args"] == ["validate", str(app)])
+                assert prior("codesign", lambda e: e["args"][-1] == str(app) and "--verify" in e["args"] and e["stapled"])
         record(phase=phase)
         if scenario == phase + "-create-failure": fail()
-        snapshot = root / ("image-snapshot-%s" % sum(e["tool"] == name and e["args"][0] == "create" for e in history()))
+        snapshot = root / ("image-snapshot-%s" % sum(e["tool"] == name and e["args"][0] in ("create", "makehybrid") for e in history()))
         shutil.copytree(payload, snapshot, symlinks=True)
         save_image(output, dict(kind=phase, snapshot=str(snapshot), signed=False, stapled=False))
+    elif action == "convert":
+        assert args[args.index("-format") + 1] == "UDZO"
+        assert args[args.index("-imagekey") + 1] == "zlib-level=6"
+        data = image(args[1]); record(phase=data["kind"])
+        if scenario == "hybrid-convert-failure": fail()
+        save_image(args[args.index("-o") + 1], data)
     elif action == "verify":
         data = image(args[1]); record(phase=data["kind"])
         if scenario == data["kind"] + "-image-verify-failure": fail()
     elif action == "attach":
-        assert "-plist" in args and "-readonly" in args and "-nobrowse" in args
+        assert all(flag in args for flag in ("-plist", "-readonly", "-nobrowse", "-noautoopen"))
         mount = owned(args[args.index("-mountpoint") + 1]); data = image(args[-1])
         record()
         if scenario == "attach-failure": fail("attach failed without device")
@@ -253,7 +338,7 @@ elif name == "spctl":
         assert image(target)["stapled"] and image(target)["signed"]
     else:
         assert args[:3] == ["--assess", "--type", "execute"]
-        assert (target / ".fake-stapled").exists()
+        assert (target / "Contents/CodeResources").exists()
     if scenario == phase + "-gatekeeper-failure": fail()
     print("accepted\nsource=" + ("Unnotarized Developer ID" if scenario == "dmg-gatekeeper-wrong-source" else "Notarized Developer ID"))
 else: fail("unexpected fake tool: " + name)
@@ -285,6 +370,9 @@ class ReleaseFlowTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         assert cls.scratch.parent == cls.scratch_parent and not cls.scratch.is_symlink()
+        if os.environ.get("LIVELINGO_RETAIN_RELEASE_FIXTURES") == "1":
+            print("Offline fixtures retained: " + str(cls.scratch), flush=True)
+            return
         shutil.rmtree(cls.scratch)
         print("Offline fixtures removed: " + str(not cls.scratch.exists()), flush=True)
 
@@ -314,19 +402,57 @@ class ReleaseFlowTests(unittest.TestCase):
                 (model / name).write_text("{}" if name.endswith(".json") else "fixture")
             (model / "model.safetensors").write_bytes(WEIGHT_FIXTURE)
         keychain = case / "fixture.keychain-db"; keychain.write_text("not a keychain")
-        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": str(self.scratch)}
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": str(case)}
         env.update(LIVELINGO_TEST_TOOL_DIR=str(tools), LIVELINGO_PYTHON=str(tools / "python-verify-stub"),
                    FAKE_ROOT=str(case), FAKE_SCENARIO=scenario, FAKE_REAL_PYTHON=sys.executable,
                    PYTHONDONTWRITEBYTECODE="1", PYTHONOPTIMIZE="")
         command = ["/bin/zsh", str(ROOT / "Scripts/build-offline-dmg.sh"), "--app", str(app),
                    "--output", str(case / "release with spaces.dmg"), "--identity", IDENTITY,
-                   "--keychain", str(keychain), "--notary-profile", "fixture-profile",
+                   "--keychain", str(keychain), "--image-method", "create", "--mount-point", str(case / "verify-mount"),
+                   "--notary-profile", "fixture-profile",
                    "--notary-timeout", "60", "--notary-command-timeout", "30", "--notary-poll-interval", "0.001",
                    "--notary-max-polls", "6", "--notary-max-retries", "1", "--staple-max-attempts", "3", "--staple-retry-delay", "0.001"]
         return case, app, env, command
 
     def events(self, case):
         return [json.loads(line) for line in (case / "trace.jsonl").read_text().splitlines()] if (case / "trace.jsonl").exists() else []
+
+    def add_reviewed_resources(self, case, app, env):
+        from Scripts import reviewed_resources, signed_resource_review
+        from Scripts.test_relpipe6_signed_resources import thin, simulated_sign, PUBLIC
+        relative = "Contents/Resources/LanguageRuntime/probe.dylib"
+        source = thin()
+        native = app / relative
+        native.write_bytes(source)
+        declaration = b'[package]\nname = "fixture"\nversion = "1"\nlicense = "MIT"\n'
+        cargo = app / "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/fixture-1/DECLARATION-Cargo.toml"
+        cargo.parent.mkdir(parents=True)
+        cargo.write_bytes(declaration)
+        archive_data = io.BytesIO()
+        with tarfile.open(fileobj=archive_data, mode="w:gz") as archive:
+            member = tarfile.TarInfo("fixture-1/Cargo.toml")
+            member.size = len(declaration)
+            archive.addfile(member, io.BytesIO(declaration))
+        archive_relative = "Contents/Resources/LanguageRuntime/Licenses/fixture/source.tar.gz"
+        archive_path = app / archive_relative
+        archive_path.parent.mkdir(parents=True)
+        archive_path.write_bytes(archive_data.getvalue())
+        resources = [{"path": relative, "sha256": hashlib.sha256(source).hexdigest(),
+                      "format": "macho-public-build-strings", "package": "fixture", "version": "1",
+                      "reason": "Synthetic native fixture; never executed",
+                      "publicBuildPathsHex": [PUBLIC.encode().hex()]},
+                     {"path": archive_relative, "sha256": hashlib.sha256(archive_data.getvalue()).hexdigest(),
+                      "format": "source-tar", "package": "fixture", "version": "1",
+                      "reason": "Synthetic source metadata fixture; never executed"}]
+        manifest = case / "review-manifest.json"
+        manifest.write_text(json.dumps({"version": 1, "resources": resources}))
+        with patch.object(reviewed_resources, "MANIFEST", manifest), \
+                patch("Scripts.binary_provenance.verify_app_provenance", return_value={"finalStage": "signed-candidate"}):
+            captured = signed_resource_review.capture_before_signing(app)
+            native.write_bytes(simulated_sign(source))
+            signed_resource_review.finalize_signed_review(app, captured)
+        env["FAKE_REVIEW_MANIFEST"] = str(manifest)
+        return native
 
     def execute(self, case, env, command):
         result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=90, cwd=case)
@@ -337,7 +463,7 @@ class ReleaseFlowTests(unittest.TestCase):
         case, app, env, command = self.fixture(scenario)
         if override: command = override(case, app, command, env)
         result, events = self.execute(case, env, [*command, *extra])
-        self.assertFalse((app / ".fake-stapled").exists(), "original input was modified")
+        self.assertFalse((app / "Contents/CodeResources").exists(), "original input was modified")
         return result, events, case
 
     @staticmethod
@@ -387,6 +513,128 @@ class ReleaseFlowTests(unittest.TestCase):
                 self.assertTrue((case / "release with spaces.dmg").is_file())
                 self.assertFalse(list(case.glob("stage-*/verify-mount")))
                 self.assertIn("最终 DMG 发布自检通过", result.stdout)
+
+    def test_local_candidate_never_resolves_or_calls_network_acceptance_tools(self):
+        case, app, env, command = self.fixture("local-candidate")
+        env["FAKE_CANDIDATE_ONLY"] = "1"
+        at = command.index("--notary-profile")
+        del command[at:at + 2]
+        command.append("--candidate-only")
+        for name in ("notarytool", "stapler", "spctl"):
+            (case / "bin" / name).rename(case / (name + "-disabled"))
+        result, events = self.execute(case, env, command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((case / "release with spaces.dmg").is_file())
+        self.assertFalse(any(e["tool"] in ("notarytool", "stapler", "spctl") for e in events))
+        self.assertIn("未公证", result.stdout)
+        self.assertNotIn("最终 DMG 发布自检通过", result.stdout)
+        self.assertTrue(self.calls(events, "hdiutil", "detach"))
+
+    def test_local_candidate_still_rejects_invalid_signed_apps(self):
+        case, app, env, command = self.fixture("staged-pre-verify-failure")
+        env["FAKE_CANDIDATE_ONLY"] = "1"
+        command.append("--candidate-only")
+        result, events = self.execute(case, env, command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((case / "release with spaces.dmg").exists())
+        self.assertFalse(self.calls(events, "notarytool"))
+
+    def test_local_candidate_resume_reuses_exact_signed_image_without_network_tools(self):
+        case, app, env, command = self.fixture("mounted-container-metadata")
+        env["FAKE_CANDIDATE_ONLY"] = "1"
+        for name in ("notarytool", "stapler", "spctl"):
+            (case / "bin" / name).rename(case / (name + "-disabled"))
+        result, before = self.execute(case, env, command + ["--candidate-only"])
+        self.assertNotEqual(result.returncode, 0)
+        stage = next(case.glob("stage-*")); state = json.loads((stage / "release-state.json").read_text())
+        original = Path(state["releaseDMG"]).read_bytes()
+        env["FAKE_SCENARIO"] = "success"
+        result, after = self.execute(case, env, [command[0], command[1], "--candidate-only", "--resume-stage", str(stage),
+                                                "--mount-point", str(case / "resumed-mount"), "--xattr-report", str(case / "resumed-metadata.json")])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((case / "release with spaces.dmg").read_bytes(), original)
+        self.assertEqual(len(self.calls(before, "hdiutil", "create")), len(self.calls(after, "hdiutil", "create")))
+        self.assertEqual(len(self.calls(before, "codesign", "--force")), len(self.calls(after, "codesign", "--force")))
+        self.assertFalse(any(e["tool"] in ("notarytool", "stapler", "spctl") for e in after))
+
+    def test_local_candidate_resume_still_rejects_notary_submission_options(self):
+        for flags in (("--app-submission-id", APP_ID), ("--dmg-submission-id", DMG_ID), ("--resubmit-incomplete",)):
+            def candidate(case, app, command, env):
+                return command + ["--candidate-only", "--resume-stage", str(case / "unused-stage"), *flags]
+            result, events, _ = self.run_case("candidate-invalid-resume", override=candidate)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("候选模式不接受公证提交选项", result.stderr)
+            self.assertEqual(events, [])
+
+    def test_hybrid_default_and_explicit_mount_and_attribute_report(self):
+        case, app, env, command = self.fixture("hybrid-candidate")
+        env["FAKE_CANDIDATE_ONLY"] = "1"
+        at = command.index("--image-method"); del command[at:at + 2]
+        report = case / "content-metadata.json"; mount = case / "internal-mount"
+        command += ["--candidate-only", "--mount-point", str(mount), "--xattr-report", str(report)]
+        result, events = self.execute(case, env, command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.calls(events, "hdiutil", "makehybrid")), 1)
+        self.assertEqual(len(self.calls(events, "hdiutil", "convert")), 1)
+        self.assertEqual(sum(bool(e.get("hfsMetadataGate")) for e in events), 1)
+        self.assertFalse(self.calls(events, "hdiutil", "create"))
+        self.assertTrue(json.loads(report.read_text())["passed"])
+        self.assertFalse(mount.exists())
+        self.assertFalse(any(e["tool"] in ("notarytool", "stapler", "spctl") for e in events))
+
+    def test_mounted_provenance_blocks_candidate_and_detaches(self):
+        def candidate(case, app, command, env):
+            env["FAKE_CANDIDATE_ONLY"] = "1"
+            return command
+        result, events, case = self.run_case("mounted-provenance", extra=("--candidate-only",), override=candidate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((case / "release with spaces.dmg").exists())
+        self.assertEqual(len(self.calls(events, "hdiutil", "detach")), 1)
+        report = json.loads(next(case.glob("stage-*/run-*/metadata-check-*/mounted-image.json")).read_text())
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["contents"]["attributes"], {"com.apple.provenance": 1})
+
+    def test_hybrid_conversion_failure_never_signs_or_publishes(self):
+        def candidate(case, app, command, env):
+            env["FAKE_CANDIDATE_ONLY"] = "1"
+            return command
+        result, events, case = self.run_case("hybrid-convert-failure", extra=("--candidate-only", "--image-method", "hybrid"), override=candidate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((case / "release with spaces.dmg").exists())
+        self.assertEqual(len(self.calls(events, "hdiutil", "convert")), 1)
+        self.assertFalse(any("--sign" in e["args"] for e in self.calls(events, "codesign")))
+
+    def test_unknown_mounted_container_metadata_blocks_output_and_detaches(self):
+        def candidate(case, app, command, env):
+            env["FAKE_CANDIDATE_ONLY"] = "1"
+            return command
+        result, events, case = self.run_case("mounted-container-metadata", extra=("--candidate-only",), override=candidate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("synthetic opaque UDIF metadata", result.stderr)
+        self.assertFalse((case / "release with spaces.dmg").exists())
+        self.assertEqual(len(self.calls(events, "hdiutil", "detach")), 1)
+
+    def test_hfs_metadata_failure_never_converts_signs_or_publishes(self):
+        def candidate(case, app, command, env):
+            env["FAKE_CANDIDATE_ONLY"] = "1"
+            return command
+        result, events, case = self.run_case("hfs-metadata-failure", extra=("--candidate-only", "--image-method", "hybrid"), override=candidate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sum(bool(e.get("hfsMetadataGate")) for e in events), 1)
+        self.assertFalse(self.calls(events, "hdiutil", "convert"))
+        self.assertFalse(any("--sign" in e["args"] for e in self.calls(events, "codesign")))
+        self.assertFalse((case / "release with spaces.dmg").exists())
+
+    def test_malformed_stapled_tickets_stop_before_final_image_creation(self):
+        for scenario in ("ticket-wrong-location", "ticket-wrong-magic", "ticket-oversized", "ticket-symlink"):
+            with self.subTest(scenario=scenario):
+                result, events, case = self.run_case(scenario)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("invalid-stapled-ticket", result.stderr)
+                self.assertTrue(self.calls(events, "stapler", "staple", "app"))
+                self.assertFalse(self.calls(events, "hdiutil", "create", "dmg"))
+                self.assertFalse(self.calls(events, "notarytool", "submit", "dmg"))
+                self.assertFalse((case / "release with spaces.dmg").exists())
 
     def test_failure_injections_do_not_publish(self):
         scenarios = ("preflight-failure", "copy-failure", "staged-pre-verify-failure", "app-create-failure", "app-image-verify-failure",
@@ -518,7 +766,7 @@ class ReleaseFlowTests(unittest.TestCase):
                 self.assertEqual([e["phase"] for e in self.calls(after, "notarytool", "submit")], ["app", "dmg"])
                 if scenario.startswith("dmg") or scenario == "mounted-ticket-failure":
                     self.assertEqual(len(self.calls(before, "hdiutil", "create")), len(self.calls(after, "hdiutil", "create")))
-                self.assertFalse((app / ".fake-stapled").exists())
+                self.assertFalse((app / "Contents/CodeResources").exists())
                 self.assertTrue((case / "release with spaces.dmg").exists())
 
     def test_missing_query_receipt_never_reuploads(self):
@@ -598,13 +846,51 @@ class ReleaseFlowTests(unittest.TestCase):
         result, _, _ = self.run_case("path-poison", override=command)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_system_python_stdlib_compatibility(self):
+    def test_system_python_publication_version_contract(self):
         def command(case, app, existing, env):
             env["FAKE_REAL_PYTHON"] = "/usr/bin/python3"
             return existing
         result, events, _ = self.run_case("system-python", override=command)
+        version = subprocess.run(["/usr/bin/python3", "-c", "import sys; print(sys.version_info >= (3, 11))"],
+                                 text=True, capture_output=True, check=True)
+        if version.stdout.strip() == "True":
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assert_success_order(events)
+        else:
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Python 3.11", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(events, [])
+
+    def test_real_reviewed_resources_and_cargo_reach_publication_gate(self):
+        case, app, env, command = self.fixture("real-reviewed-resources")
+        self.add_reviewed_resources(case, app, env)
+        result, events = self.execute(case, env, command)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"reviewed_resource_files": 2', result.stdout)
         self.assert_success_order(events)
+
+    def test_standalone_verifier_defaults_to_signed_review(self):
+        case, app, env, command = self.fixture("standalone-signed-review")
+        self.add_reviewed_resources(case, app, env)
+        result, _ = self.execute(case, env, command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        verify = ["/bin/zsh", str(ROOT / "Scripts/verify-release-dmg.sh"),
+                  "--dmg", str(case / "release with spaces.dmg"), "--identity", IDENTITY,
+                  "--mount-point", str(case / "standalone-mount")]
+        result, events = self.execute(case, env, verify)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"reviewed_resource_files": 2', result.stdout)
+        phases = [e["privacyPhase"] for e in events if "privacyPhase" in e]
+        self.assertTrue(phases)
+        self.assertEqual(set(phases), {"signed"})
+        self.assertFalse((case / "standalone-mount").exists())
+        native = case / "image-snapshot-2/LiveLingo.app/Contents/Resources/LanguageRuntime/probe.dylib"
+        native.write_bytes(native.read_bytes() + b"changed")
+        result, _ = self.execute(case, env, verify)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("最终 DMG 发布自检通过", result.stdout)
+        self.assertFalse((case / "standalone-mount").exists())
 
     def test_build_forwards_nondefault_notary_budgets(self):
         def command(case, app, existing, env):
@@ -655,7 +941,7 @@ class ReleaseFlowTests(unittest.TestCase):
         # The release child has no HOME override. Use its account boundary,
         # rather than the calling shell's potentially unrelated HOME value.
         account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-        for output in ("/Applications/LiveLingo.dmg", "/System/tmp/a.dmg", "/Library/a.dmg", "/usr/a.dmg", "/Volumes/a.dmg", str(account_home / "a.dmg")):
+        for output in ("/Applications/LiveLingo.dmg", "/System/tmp/a.dmg", "/Library/a.dmg", "/usr/a.dmg", str(Path("/Volumes") / "a.dmg"), str(account_home / "a.dmg")):
             with self.subTest(output=output):
                 result, events, _ = self.run_case("protected-output", ["--output", output])
                 self.assertNotEqual(result.returncode, 0); self.assertEqual(events, [])
@@ -743,16 +1029,33 @@ class ReleaseFlowTests(unittest.TestCase):
                     if process.poll() is None: os.killpg(process.pid, signal.SIGKILL); process.communicate()
 
     def test_signing_arguments_without_real_signing(self):
+        try:
+            from Scripts import signed_resource_review, privacy_package, binary_provenance
+        except ModuleNotFoundError:
+            import signed_resource_review, privacy_package, binary_provenance
         signing = module("sign_offline_fixture", ROOT / "Scripts/sign-offline-app.py")
         case, app, env, unused = self.fixture("sign-arguments")
         main = app / "Contents/MacOS/LiveLingo"; main.parent.mkdir(); main.write_bytes(NATIVE_FIXTURE)
         helper = app / "Contents/MacOS/helper"; helper.write_bytes(NATIVE_FIXTURE)
         # Exercise the real signing command construction, intercept every tool call.
         commands = []
-        with patch.object(signing, "run", side_effect=lambda c, **kw: commands.append(c)), \
+        with patch.dict(sys.modules, signed_resource_review=signed_resource_review,
+                        privacy_package=privacy_package, binary_provenance=binary_provenance), \
+             patch.object(signed_resource_review, "capture_before_signing", return_value={}) as capture, \
+             patch.object(signed_resource_review, "write_capture_receipt") as write_capture, \
+             patch.object(signed_resource_review, "finalize_signed_review") as review_final, \
+             patch.object(privacy_package, "inspect_tree", return_value={}) as signed_gate, \
+             patch.object(binary_provenance, "verify_app_provenance", return_value={}), \
+             patch.object(binary_provenance, "finalize_app_provenance"), \
+             patch.object(signing, "run", side_effect=lambda c, **kw: commands.append(c)), \
              patch.object(signing.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
             signing.sign(app, IDENTITY, str(case / "fixture.keychain-db"), case / "app.plist", case / "inherit.plist",
-                         [(main, [{"filetype": signing.MH_EXECUTE}]), (helper, [{"filetype": signing.MH_EXECUTE}])])
+                         [(main, [{"filetype": signing.MH_EXECUTE}]), (helper, [{"filetype": signing.MH_EXECUTE}])],
+                         case / "before-sign.json")
+        capture.assert_called_once_with(app)
+        write_capture.assert_called_once_with(app, case / "before-sign.json", {})
+        review_final.assert_called_once_with(app, {})
+        signed_gate.assert_called_once_with(app, phase="signed")
         self.assertGreaterEqual(len(commands), 2)
         for command in commands:
             self.assertEqual(command[0], "/usr/bin/codesign")

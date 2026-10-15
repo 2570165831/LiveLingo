@@ -5,8 +5,9 @@ Run from the checkout with ``python -m Scripts.target_eval.corpora --help`` or
 corpus exports and metric reports, belong in the directory specified by
 ``LIVELINGO_TARGET_EVAL_OUTPUT_ROOT`` (for example ``<lab>/work/target-eval``).
 The variable is required; its value must be an existing absolute directory
-outside the repository, without symlinks. The root never follows checkout
-placement. Existing output files are never replaced. Tests set the variable
+outside the repository or in a dedicated subdirectory below its ignored work
+directory, without symlinks. The root never follows checkout placement.
+Existing output files are never replaced. Tests set the variable
 to temporary directories; ``TMPDIR`` can confine their synthetic fixtures to
 an authorized scratch directory. See README.md.
 

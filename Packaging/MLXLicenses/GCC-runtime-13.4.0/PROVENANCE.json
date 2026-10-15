@@ -1,6 +1,133 @@
 {
   "source": "https://ftp.gnu.org/gnu/gcc/gcc-13.4.0/gcc-13.4.0.tar.xz",
-  "sha256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
-  "bytes": 88530720,
-  "selectionEvidence": "Both installed SciPy 1.18.1 builds report Fortran gcc 13.4.0 in scipy.__config__.CONFIG. This is compiler metadata, not a byte-identical rebuild proof."
+  "selectionEvidence": "SciPy compiler version alone is insufficient. See darwinCorrespondingSource and wheelChain for the complete Darwin source, pinned publisher patch, and executable-section evidence.",
+  "bundledArchiveSHA256": "defcacea843f6dd703f0760a90403b19cf5ca5cca08509251112e2533c4e9ce5",
+  "originalSHA256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
+  "originalBytes": 88530720,
+  "bundledBytes": 130471676,
+  "darwinCorrespondingSource": {
+    "status": "complete-base-and-exact-publisher-patch-native-check-passed",
+    "base": "gcc-13.4.0-full.tar.xz",
+    "basePolicy": "All 125386 original GNU release files retained; 11 public home-root examples prepared with equal-length replacement; 8 text files have dated in-file notices, 3 binary fixtures have adjacent per-file dated notices; archive identity fields normalized; no C, C++ or Fortran production code privacy changes.",
+    "upstreamFileCount": 125386,
+    "wheelPatch": "gcc-13.4.0-darwin.diff",
+    "fork": "https://github.com/iains/gcc-13-branch",
+    "forkRevisionVerification": "Homebrew patch new git blob identities match 221 of 223 patched members in the r0 tag archive. Two libgfortran Makefiles differ; the exact source is the GNU release plus the published Homebrew patch, not the fork tag alone.",
+    "inputs": {
+      "gcc-13.4.0-full.tar.xz": {
+        "sha256": "defcacea843f6dd703f0760a90403b19cf5ca5cca08509251112e2533c4e9ce5",
+        "bytes": 130471676,
+        "scope": "wheel-corresponding-base-or-patch"
+      },
+      "gcc-13.4.0-darwin.diff": {
+        "sha256": "60b22ae7f5f78b41e12c51d8c6e99ba933a7e124454fe8cdbff7200505167949",
+        "bytes": 590233,
+        "scope": "wheel-corresponding-base-or-patch"
+      },
+      "gcc-12-13-darwin-version-mapping.diff": {
+        "sha256": "e238a71e099096eeb87daf380bb80b1a175554a5ab9cc9c5f6e9e8f044e9428b",
+        "bytes": 1849,
+        "scope": "host-macOS-26-or-later-check-only; not the SciPy wheel source patch",
+        "modification": "Correct malformed publisher final unified-diff hunk count from 6/7 to actual 5/6; no source logic changes.",
+        "originalPublisherSHA256": "ec8f64ea6571afca8c0427a4b91e7d7cc9af5176fc219ef8a1b5d300280eabc3"
+      }
+    },
+    "forkRevision": "03e1a04fb80d6ee0d374980ed0c8fcc88483157a",
+    "forkTag": "gcc-13.4-darwin-r0",
+    "forkDifferences": [
+      "libgfortran/Makefile.am",
+      "libgfortran/Makefile.in"
+    ],
+    "forkVariantDetail": "Reverting fork autoreconf commit 0a84b84fa8f9305ab2f7218f1234decdd9ff9c9c reproduces Homebrew Makefile.am. Generated Makefile.in does not reverse exactly; no exact full-fork-revision identity is asserted.",
+    "preparedMemberCount": 125390,
+    "expandedRegularFileBytes": 700250407,
+    "primarySources": {
+      "GNUBase": "https://ftp.gnu.org/gnu/gcc/gcc-13.4.0/gcc-13.4.0.tar.xz",
+      "DarwinForkTag": "https://github.com/iains/gcc-13-branch/releases/tag/gcc-13.4-darwin-r0",
+      "OriginalPublisherPatch": "https://raw.githubusercontent.com/Homebrew/formula-patches/8bbfd6c920e63f6ed1bf143771bfbfed0a3aaa1d/gcc/gcc-13.4.0.diff",
+      "MigratedIdenticalPublisherPatch": "https://raw.githubusercontent.com/Homebrew/homebrew-core/1cf441a09f572566b1b7c4695a4d169d1177248a/Patches/gcc/gcc-13.4.0.diff",
+      "HostOnlyMappingCommit": "https://github.com/Homebrew/homebrew-core/commit/142a98cd4ff37595fb6aefd7ddb7d2b3dd4cbacd"
+    },
+    "forkArchiveEvidence": {
+      "url": "https://codeload.github.com/iains/gcc-13-branch/tar.gz/refs/tags/gcc-13.4-darwin-r0",
+      "sha256": "d10e99069e28a15a8d68476789576a2b9d10287cc00355522837b7c3ac8e9d21",
+      "bytes": 138386426,
+      "scope": "Downloaded fully for content comparison; not the bundled exact corresponding-source definition."
+    }
+  },
+  "wheelChain": {
+    "wheel": "scipy-1.18.1-cp313-cp313-macosx_14_0_arm64.whl",
+    "wheelSHA256": "ea324d9dd34c38bfb9bec8ca4d1b407db97dbb74029f566b8e322b1b6fe56fe6",
+    "bottleSHA256": "f2db2c23a0aacfde2469ff19581157974a3c4dbacf9ebe4120589b50b3c7f29b",
+    "patchCommit": "1cf441a09f572566b1b7c4695a4d169d1177248a",
+    "originalPatchCommit": "8bbfd6c920e63f6ed1bf143771bfbfed0a3aaa1d",
+    "evidenceScope": "All file-backed Mach-O sections of three GNU runtimes match between the official Homebrew arm64_sonoma bottle and the downloaded PyPI wheel. Original candidate copies also matched at inspection; parent must bind the final candidate separately. Whole files differ; whole-file identity is not claimed.",
+    "wheelURL": "https://files.pythonhosted.org/packages/9a/d7/21d890274f75ea37a8209d5519e72da3da90302e3b9fb8397a0918386a62/scipy-1.18.1-cp313-cp313-macosx_14_0_arm64.whl",
+    "wheelBytes": 20456846,
+    "wheelUploadUTC": "2026-08-21T23:24:45.066854Z",
+    "PyPIMetadata": "https://pypi.org/pypi/scipy/1.18.1/json",
+    "bottleURL": "https://ghcr.io/v2/homebrew/core/gcc/13/blobs/sha256:f2db2c23a0aacfde2469ff19581157974a3c4dbacf9ebe4120589b50b3c7f29b",
+    "bottleBytes": 127208155,
+    "bottlePlatform": "arm64_sonoma",
+    "bottleCommit": "cd5d1cfa7c8f16545c3c14e3d7607c960c890be1",
+    "bottleCommitURL": "https://github.com/Homebrew/homebrew-core/commit/cd5d1cfa7c8f16545c3c14e3d7607c960c890be1",
+    "wheelEraFormulaCommit": "d17f3939dc55c4a42a6e5833a8353d0948bbd416",
+    "wheelEraFormulaURL": "https://github.com/Homebrew/homebrew-core/blob/d17f3939dc55c4a42a6e5833a8353d0948bbd416/Formula/g/gcc@13.rb",
+    "bottleEmbeddedFormula": {
+      "file": "homebrew-gcc13-bottle-formula.rb",
+      "sha256": "80c04ff05361f01523dd0449d6c105cbaca018a163afcb863d53c890b7a52b19",
+      "bytes": 8683,
+      "license": {
+        "file": "Homebrew-LICENSE.txt",
+        "source": "https://raw.githubusercontent.com/Homebrew/homebrew-core/cd5d1cfa7c8f16545c3c14e3d7607c960c890be1/LICENSE.txt",
+        "sha256": "f80329e58613ad669c0e73cb132d8060b9b2c55e339c73848068e4d1567f4627",
+        "bytes": 1334
+      }
+    },
+    "sectionEvidence": "WHEEL-BOTTLE-SECTIONS.json",
+    "scipyRecipe": "https://github.com/scipy/scipy/blob/v1.18.1/.github/workflows/wheels.yml",
+    "observedWheelCompiler": {
+      "fortran": "GCC 13.4.0",
+      "CAndCXX": "Apple clang 15.0.0",
+      "BLAS": "Accelerate"
+    },
+    "publisherConfigureOptions": [
+      "--prefix=BREW_PREFIX",
+      "--libdir=BREW_PREFIX",
+      "--disable-nls",
+      "--enable-checking=release",
+      "--with-gcc-major-version-only",
+      "--enable-languages=c,c++,objc,obj-c++,fortran",
+      "--program-suffix=-13",
+      "--with-gmp=BREW_PREFIX",
+      "--with-mpfr=BREW_PREFIX",
+      "--with-mpc=BREW_PREFIX",
+      "--with-isl=BREW_PREFIX",
+      "--with-zstd=BREW_PREFIX",
+      "--with-pkgversion=Homebrew GCC 13.4.0",
+      "--with-bugurl=https://github.com/Homebrew/homebrew-core/issues",
+      "--with-system-zlib",
+      "--build=aarch64-apple-darwin23",
+      "--with-sysroot=SDK_ROOT"
+    ],
+    "publisherBuildOptions": [
+      "make with formula make_args; no explicit --disable-bootstrap",
+      "BOOT_LDFLAGS=-Wl,-headerpad_max_install_names",
+      "LDFLAGS_FOR_TARGET=-Wl,-headerpad_max_install_names",
+      "make install with temporary DESTDIR; no macOS strip"
+    ],
+    "optionsEvidence": "Configure options are embedded in the downloaded bottle's gfortran driver; build options come from the bottle-embedded publisher formula. Homebrew paths are expressed with a placeholder here; exact public paths remain in that hash-bound formula.",
+    "limitations": [
+      "The exact SciPy CI run and all historical seed compiler/superenv flags were not recovered.",
+      "The maintained fork r0 tag has two Makefile differences from the exact publisher patch.",
+      "The native check uses SDK 27 and a host-only mapping patch; its output is not byte-identical to the SDK 14 bottle or wheel."
+    ],
+    "publisherSDK": "MacOSX14.sdk from CommandLineTools",
+    "sourceAttribution": "Inference from the immutable official bottle recipe and exact runtime section equality with the downloaded wheel, rather than a signed wheel-build attestation. The exact wheel CI job and historical seed toolchain remain unverified."
+  },
+  "bundledArchive": "gcc-13.4.0-full.tar.xz",
+  "sourceCompleteness": "SOURCE-COMPLETENESS.json",
+  "nativeBuildEvidence": "NATIVE-BUILD-CHECK.json",
+  "licenseNoticePolicy": "Original license/copyright bytes retained. Dated notices occur inside all 8 changed text files; 3 changed binary fixtures use individual adjacent notices to preserve their binary layout. Original Info and generated manual bytes are retained.",
+  "buildCheckScope": "Offline native arm64 non-bootstrap compiler and libgcc/libquadmath/libgfortran configure/build passed; SDK 27 host check, not byte-identical wheel reproduction."
 }

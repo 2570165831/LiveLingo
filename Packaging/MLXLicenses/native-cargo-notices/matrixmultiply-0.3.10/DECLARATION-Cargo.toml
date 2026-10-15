@@ -1,0 +1,8 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "matrixmultiply"
+version = "0.3.10"
+license = "MIT/Apache-2.0"
+authors = ["bluss", "R. Janis Goldschmidt"]
+repository = "https://github.com/bluss/matrixmultiply/"
+description = "General matrix multiplication for f32 and f64 matrices. Operates on matrices with general layout (they can use arbitrary row and column stride). Detects and uses AVX or SSE2 on x86 platforms transparently for higher performance. Uses a microkernel strategy, so that the implementation is easy to parallelize and optimize.\n\nSupports multithreading."

@@ -1,5 +1,5 @@
 {
-  "scope": "Union of upstream Cargo.lock registry dependencies for the exact native source releases. Includes build, optional and platform packages; not a linked-only inventory.",
+  "scope": "Upstream Cargo.lock notice inventory for exact native source releases, including build, optional and platform packages; not a linked-only inventory. Tokenizers 0.23.0rc0 conservatively reachable runtime versions are complete; its hash-bound audit records proven root dev-only exclusions and non-runtime omissions.",
   "components": [
     {
       "name": "adler2",
@@ -39,7 +39,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "pydantic-core-2.46.5/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/tkaitchuck/ahash",
@@ -64,7 +65,8 @@
       "checksum": "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Unlicense OR MIT",
       "repository": "https://github.com/BurntSushi/aho-corasick",
@@ -123,7 +125,8 @@
       "checksum": "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0 OR MIT",
       "repository": "https://github.com/cuviper/autocfg",
@@ -196,7 +199,8 @@
       "checksum": "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT/Apache-2.0",
       "repository": "https://github.com/marshallpierce/rust-base64",
@@ -389,7 +393,8 @@
       "checksum": "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT",
       "repository": "https://github.com/sagebind/castaway",
@@ -436,7 +441,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/rust-lang/cfg-if",
@@ -510,7 +516,8 @@
       "version": "0.9.0",
       "checksum": "3fdb1325a1cece981e8a296ab8f0f9b63ae357bd0784a9faaf548cc7b480707a",
       "consumers": [
-        "outlines-core-0.2.14/Cargo.lock"
+        "outlines-core-0.2.14/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT",
       "repository": "https://github.com/ParkMyCar/compact_str",
@@ -576,7 +583,8 @@
       "version": "0.8.6",
       "checksum": "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51",
       "consumers": [
-        "outlines-core-0.2.14/Cargo.lock"
+        "outlines-core-0.2.14/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/crossbeam-rs/crossbeam",
@@ -598,7 +606,8 @@
       "version": "0.9.18",
       "checksum": "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e",
       "consumers": [
-        "outlines-core-0.2.14/Cargo.lock"
+        "outlines-core-0.2.14/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/crossbeam-rs/crossbeam",
@@ -621,7 +630,8 @@
       "checksum": "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/crossbeam-rs/crossbeam",
@@ -644,7 +654,8 @@
       "checksum": "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT",
       "repository": "https://github.com/TedDriggs/darling",
@@ -665,7 +676,8 @@
       "checksum": "0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT",
       "repository": "https://github.com/TedDriggs/darling",
@@ -686,7 +698,8 @@
       "checksum": "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT",
       "repository": "https://github.com/TedDriggs/darling",
@@ -731,7 +744,8 @@
       "checksum": "507dfb09ea8b7fa618fcf76e953f4f5e192547945816d5358edffe39f6f94947",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/colin-kiegel/rust-derive-builder",
@@ -759,7 +773,8 @@
       "checksum": "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/colin-kiegel/rust-derive-builder",
@@ -787,7 +802,8 @@
       "checksum": "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/colin-kiegel/rust-derive-builder",
@@ -910,7 +926,8 @@
       "checksum": "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/rayon-rs/either",
@@ -935,13 +952,14 @@
       "checksum": "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0 OR MIT",
       "repository": "https://github.com/tormol/encode_unicode",
       "licenseFile": null,
       "authors": [
-        "Torbj\u00f8rn Birch Moltu <t.b.moltu@lyse.net>"
+        "Torbjørn Birch Moltu <t.b.moltu@lyse.net>"
       ],
       "texts": [
         {
@@ -966,7 +984,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "pydantic-core-2.46.5/Cargo.lock",
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0 OR MIT",
       "repository": "https://github.com/indexmap-rs/equivalent",
@@ -989,7 +1008,8 @@
       "checksum": "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0",
       "repository": "https://github.com/Narsil/esaxx-rs",
@@ -1058,7 +1078,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0 / MIT",
       "repository": "https://github.com/servo/rust-fnv",
@@ -1309,7 +1330,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/rust-random/getrandom",
@@ -1365,7 +1387,8 @@
         "pydantic-core-2.46.5/Cargo.lock",
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/withoutboats/heck",
@@ -1725,7 +1748,8 @@
       "checksum": "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT/Apache-2.0",
       "repository": "https://github.com/TedDriggs/ident_case",
@@ -1911,7 +1935,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/rust-itertools/itertools",
@@ -2074,7 +2099,8 @@
       "checksum": "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/rust-lang/log",
@@ -2127,7 +2153,8 @@
       "version": "0.2.2",
       "checksum": "65049d7923698040cd0b1ddcced9b0eb14dd22c5f86ae59c3740eab64a676520",
       "consumers": [
-        "outlines-core-0.2.14/Cargo.lock"
+        "outlines-core-0.2.14/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0 OR MIT OR Zlib",
       "repository": "https://github.com/danielhenrymantilla/macro_rules_attribute-rs",
@@ -2155,7 +2182,8 @@
       "version": "0.2.2",
       "checksum": "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30",
       "consumers": [
-        "outlines-core-0.2.14/Cargo.lock"
+        "outlines-core-0.2.14/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0 OR MIT OR Zlib",
       "repository": "https://github.com/danielhenrymantilla/macro_rules_attribute-rs",
@@ -2234,7 +2262,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT/Apache-2.0",
       "repository": "https://github.com/Alexhuszagh/minimal-lexical",
@@ -2321,7 +2350,8 @@
       "checksum": "3341a273f6c9d5bef1908f17b7267bbab0e95c9bf69a0d4dcf8e9e1b2c76ef67",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/dtolnay/monostate",
@@ -2346,7 +2376,8 @@
       "checksum": "e4db6d5580af57bf992f59068d4ea26fd518574ff48d7639b255a36f9de6e7e9",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/dtolnay/monostate",
@@ -2372,7 +2403,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT",
       "repository": "https://github.com/Geal/nom",
@@ -2439,7 +2471,8 @@
       "version": "6.5.1",
       "checksum": "336b9c63443aceef14bea841b899035ae3abe89b7c486aaf4c5bd8aafedac3f0",
       "consumers": [
-        "outlines-core-0.2.14/Cargo.lock"
+        "outlines-core-0.2.14/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT",
       "repository": "https://github.com/iwillspeak/rust-onig",
@@ -2460,7 +2493,8 @@
       "version": "69.9.1",
       "checksum": "c7f86c6eef3d6df15f23bcfb6af487cbd2fed4e5581d58d5bf1f5f8b7f6727dc",
       "consumers": [
-        "outlines-core-0.2.14/Cargo.lock"
+        "outlines-core-0.2.14/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT",
       "repository": "https://github.com/iwillspeak/rust-onig",
@@ -2505,7 +2539,8 @@
         }
       ],
       "bundledSource": "CorrespondingSource/option-ext-0.2.0.crate",
-      "sourceURL": "https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate"
+      "sourceURL": "https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate",
+      "bundledSourceSHA256": "a0a3d07d4eb134e39373e1bcd5563db67ed0765bc339ab7a24b4b8def28c8af8"
     },
     {
       "name": "paste",
@@ -2513,7 +2548,8 @@
       "checksum": "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/dtolnay/paste",
@@ -2680,7 +2716,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/cryptocorrosion/cryptocorrosion",
@@ -2974,7 +3011,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
       "repository": "https://github.com/r-efi/r-efi",
@@ -3082,7 +3120,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/rust-random/rand",
@@ -3193,7 +3232,8 @@
       "checksum": "2964d0cf57a3e7a06e8183d14a8b527195c706b7983549cd5462d5aa3747438f",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0/MIT",
       "repository": "https://github.com/cuviper/rayon-cond",
@@ -3218,7 +3258,8 @@
       "checksum": "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/rayon-rs/rayon",
@@ -3496,7 +3537,8 @@
       "checksum": "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/dtolnay/rustversion",
@@ -3547,7 +3589,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "pydantic-core-2.46.5/Cargo.lock",
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/serde-rs/serde",
@@ -3597,7 +3640,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "pydantic-core-2.46.5/Cargo.lock",
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/serde-rs/serde",
@@ -3625,7 +3669,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "pydantic-core-2.46.5/Cargo.lock",
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/serde-rs/serde",
@@ -3652,7 +3697,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "pydantic-core-2.46.5/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/serde-rs/json",
@@ -3702,7 +3748,8 @@
       "checksum": "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/comex/rust-shlex",
@@ -3775,7 +3822,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "rpds-py-2026.6.3/Cargo.lock",
         "pydantic-core-2.46.5/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/servo/rust-smallvec",
@@ -3849,7 +3897,8 @@
       "checksum": "5851699c4033c63636f7ea4cf7b7c1f1bf06d0cc03cfb42e711de5a5c46cf326",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0",
       "repository": "https://github.com/huggingface/spm_precompiled",
@@ -3897,7 +3946,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "pydantic-core-2.46.5/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/nvzqz/static-assertions-rs",
@@ -3922,7 +3972,8 @@
       "checksum": "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT",
       "repository": "https://github.com/rapidfuzz/strsim-rs",
@@ -4494,7 +4545,8 @@
       "checksum": "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT/Apache-2.0",
       "repository": "https://github.com/n1t0/unicode-normalization",
@@ -4552,7 +4604,8 @@
       "checksum": "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/unicode-rs/unicode-width",
@@ -4582,7 +4635,8 @@
       "checksum": "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e",
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/swgillespie/unicode-categories",
@@ -4767,7 +4821,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "pydantic-core-2.46.5/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT/Apache-2.0",
       "repository": "https://github.com/SergioBenitez/version_check",
@@ -4832,7 +4887,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "repository": "https://github.com/bytecodealliance/wasi",
@@ -5050,7 +5106,8 @@
       "consumers": [
         "outlines-core-0.2.14/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/daxpedda/web-time",
@@ -5178,7 +5235,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -5216,7 +5274,9 @@
         {
           "path": "windows-sys-0.48.0/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.48.0/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "83caf48e8509b0f319e1ed4d9362248be594bf8ec3b6a7a81487556d1ca458b2"
@@ -5245,7 +5305,9 @@
         {
           "path": "windows-sys-0.52.0/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.52.0/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "17a51f78e1ad133a82c098466abbd1028f852853c98a7d606dda18a2509b9099"
@@ -5273,7 +5335,9 @@
         {
           "path": "windows-sys-0.59.0/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.59.0/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "e8b9248a246d6264f26e448d125bb914ee62dfd42a8a757ea318ae8d4a578aee"
@@ -5302,7 +5366,9 @@
         {
           "path": "windows-sys-0.60.2/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.60.2/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "85dd5fca2fdef6a27154e2522acee5471e4063e5323259f65e2ec18ca0f63a0b"
@@ -5317,7 +5383,8 @@
         "outlines-core-0.2.14/Cargo.lock",
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "license": "MIT OR Apache-2.0",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -5331,7 +5398,9 @@
         {
           "path": "windows-sys-0.61.2/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.61.2/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "a48ff77be5dd144f696440880d34a8b4d9ac89f6c2a31cf45fe9cfa137f14a7f"
@@ -7466,7 +7535,8 @@
       "version": "0.1.46",
       "checksum": "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f",
       "consumers": [
-        "pydantic-core-2.46.5/Cargo.lock"
+        "pydantic-core-2.46.5/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/num-integer/num-integer-0.1.46.crate",
       "license": "MIT OR Apache-2.0",
@@ -7493,7 +7563,8 @@
       "consumers": [
         "pydantic-core-2.46.5/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/num-traits/num-traits-0.2.19.crate",
       "license": "MIT OR Apache-2.0",
@@ -7568,7 +7639,8 @@
       "checksum": "91fd8e38a3b50ed1167fb981cd6fd60147e091784c427b8f7183a7ee32c31c12",
       "consumers": [
         "pydantic-core-2.46.5/Cargo.lock",
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/pyo3/pyo3-0.28.3.crate",
       "license": "MIT OR Apache-2.0",
@@ -7602,7 +7674,8 @@
       "checksum": "e368e7ddfdeb98c9bca7f8383be1648fd84ab466bf2bc015e94008db6d35611e",
       "consumers": [
         "pydantic-core-2.46.5/Cargo.lock",
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/pyo3-build-config/pyo3-build-config-0.28.3.crate",
       "license": "MIT OR Apache-2.0",
@@ -7628,7 +7701,8 @@
       "checksum": "7f29e10af80b1f7ccaf7f69eace800a03ecd13e883acfacc1e5d0988605f651e",
       "consumers": [
         "pydantic-core-2.46.5/Cargo.lock",
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/pyo3-ffi/pyo3-ffi-0.28.3.crate",
       "license": "MIT OR Apache-2.0",
@@ -7654,7 +7728,8 @@
       "checksum": "df6e520eff47c45997d2fc7dd8214b25dd1310918bbb2642156ef66a67f29813",
       "consumers": [
         "pydantic-core-2.46.5/Cargo.lock",
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/pyo3-macros/pyo3-macros-0.28.3.crate",
       "license": "MIT OR Apache-2.0",
@@ -7680,7 +7755,8 @@
       "checksum": "c4cdc218d835738f81c2338f822078af45b4afdf8b2e33cbb5916f108b813acb",
       "consumers": [
         "pydantic-core-2.46.5/Cargo.lock",
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/pyo3-macros-backend/pyo3-macros-backend-0.28.3.crate",
       "license": "MIT OR Apache-2.0",
@@ -7773,7 +7849,8 @@
       "checksum": "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276",
       "consumers": [
         "pydantic-core-2.46.5/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/regex/regex-1.12.3.crate",
       "license": "MIT OR Apache-2.0",
@@ -8567,7 +8644,8 @@
       "version": "1.0.102",
       "checksum": "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c",
       "consumers": [
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/anyhow/anyhow-1.0.102.crate",
       "license": "MIT OR Apache-2.0",
@@ -8665,7 +8743,8 @@
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/errno/errno-0.3.14.crate",
       "license": "MIT OR Apache-2.0",
@@ -8691,7 +8770,8 @@
       "version": "2.4.1",
       "checksum": "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6",
       "consumers": [
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/fastrand/fastrand-2.4.1.crate",
       "license": "Apache-2.0 OR MIT",
@@ -8717,7 +8797,8 @@
       "checksum": "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/foldhash/foldhash-0.1.5.crate",
       "license": "Zlib",
@@ -8739,7 +8820,8 @@
       "checksum": "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/getrandom/getrandom-0.4.2.crate",
       "license": "MIT OR Apache-2.0",
@@ -8765,7 +8847,8 @@
       "checksum": "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/hashbrown/hashbrown-0.15.5.crate",
       "license": "MIT OR Apache-2.0",
@@ -8814,7 +8897,8 @@
       "checksum": "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/id-arena/id-arena-2.3.0.crate",
       "license": "MIT/Apache-2.0",
@@ -8840,7 +8924,8 @@
       "version": "2.14.0",
       "checksum": "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9",
       "consumers": [
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/indexmap/indexmap-2.14.0.crate",
       "license": "Apache-2.0 OR MIT",
@@ -8865,7 +8950,8 @@
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/itoa/itoa-1.0.18.crate",
       "license": "MIT OR Apache-2.0",
@@ -8891,7 +8977,8 @@
       "checksum": "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/leb128fmt/leb128fmt-0.1.0.crate",
       "license": "MIT OR Apache-2.0",
@@ -8916,7 +9003,8 @@
       "version": "0.2.186",
       "checksum": "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66",
       "consumers": [
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/libc/libc-0.2.186.crate",
       "license": "MIT OR Apache-2.0",
@@ -8943,7 +9031,8 @@
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/linux-raw-sys/linux-raw-sys-0.12.1.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9132,7 +9221,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "licenseFile": null,
       "authors": null,
-      "texts": [
+      "texts": [],
+      "omittedNonNoticeSources": [
         {
           "path": "objc2-foundation-0.3.2/src/copying.rs",
           "sha256": "259b22f571b54fed25f68ec5abd8eda223e7b0547a806f13ba797a0eabecd64f"
@@ -9171,7 +9261,8 @@
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/once_cell/once_cell-1.21.4.crate",
       "license": "MIT OR Apache-2.0",
@@ -9197,7 +9288,8 @@
       "checksum": "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/portable-atomic/portable-atomic-1.13.1.crate",
       "license": "Apache-2.0 OR MIT",
@@ -9221,7 +9313,8 @@
       "checksum": "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/prettyplease/prettyplease-0.2.37.crate",
       "license": "MIT OR Apache-2.0",
@@ -9247,7 +9340,8 @@
       "checksum": "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/proc-macro2/proc-macro2-1.0.106.crate",
       "license": "MIT OR Apache-2.0",
@@ -9274,7 +9368,8 @@
       "checksum": "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/quote/quote-1.0.45.crate",
       "license": "MIT OR Apache-2.0",
@@ -9301,7 +9396,8 @@
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/r-efi/r-efi-6.0.0.crate",
       "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
@@ -9323,7 +9419,8 @@
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/rustix/rustix-1.1.4.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9357,7 +9454,8 @@
       "version": "1.0.28",
       "checksum": "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd",
       "consumers": [
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/semver/semver-1.0.28.crate",
       "license": "MIT OR Apache-2.0",
@@ -9409,7 +9507,8 @@
       "checksum": "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/syn/syn-2.0.117.crate",
       "license": "MIT OR Apache-2.0",
@@ -9436,7 +9535,8 @@
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/target-lexicon/target-lexicon-0.13.5.crate",
       "license": "Apache-2.0 WITH LLVM-exception",
@@ -9459,7 +9559,8 @@
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/tempfile/tempfile-3.27.0.crate",
       "license": "MIT OR Apache-2.0",
@@ -9489,7 +9590,8 @@
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/unicode-ident/unicode-ident-1.0.24.crate",
       "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
@@ -9519,7 +9621,8 @@
       "checksum": "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/unicode-xid/unicode-xid-0.2.6.crate",
       "license": "MIT OR Apache-2.0",
@@ -9550,7 +9653,8 @@
       "version": "1.0.3+wasi-0.2.9",
       "checksum": "20064672db26d7cdc89c7798c48a0fdfac8213434a1186e5ef29fd560ae223d6",
       "consumers": [
-        "safetensors-0.8.0/bindings/python/Cargo.lock"
+        "safetensors-0.8.0/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wasip2/wasip2-1.0.3+wasi-0.2.9.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9578,7 +9682,8 @@
       "checksum": "5428f8bf88ea5ddc08faddef2ac4a67e390b88186c703ce6dbd955e1c145aca5",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wasip3/wasip3-0.4.0+wasi-0.3.0-rc-2026-01-06.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9600,7 +9705,8 @@
       "checksum": "990065f2fe63003fe337b932cfb5e3b80e0b4d0f5ff650e6985b1048f62c8319",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wasm-encoder/wasm-encoder-0.244.0.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9624,14 +9730,16 @@
       "checksum": "bb0e353e6a2fbdc176932bbaab493762eb1255a7900fe0fea1a2f96c296cc909",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wasm-metadata/wasm-metadata-0.244.0.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "repository": "https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-metadata",
       "licenseFile": null,
       "authors": null,
-      "texts": [
+      "texts": [],
+      "omittedNonNoticeSources": [
         {
           "path": "wasm-metadata-0.244.0/src/oci_annotations/authors.rs",
           "sha256": "241d116ecc7ec20e3c67cb8e9edb00ef98feab4af4a87f4f00b1f21bc3e8d1f2"
@@ -9648,7 +9756,8 @@
       "checksum": "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wasmparser/wasmparser-0.244.0.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9672,7 +9781,8 @@
       "checksum": "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wit-bindgen/wit-bindgen-0.51.0.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9702,7 +9812,8 @@
       "checksum": "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wit-bindgen/wit-bindgen-0.57.1.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9732,7 +9843,8 @@
       "checksum": "ea61de684c3ea68cb082b7a88508a8b27fcc8b797d738bfc99a82facf1d752dc",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wit-bindgen-core/wit-bindgen-core-0.51.0.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9762,7 +9874,8 @@
       "checksum": "b7c566e0f4b284dd6561c786d9cb0142da491f46a9fbed79ea69cdad5db17f21",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wit-bindgen-rust/wit-bindgen-rust-0.51.0.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9792,7 +9905,8 @@
       "checksum": "0c0f9bfd77e6a48eccf51359e3ae77140a7f50b1e2ebfe62422d8afdaffab17a",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wit-bindgen-rust-macro/wit-bindgen-rust-macro-0.51.0.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9822,7 +9936,8 @@
       "checksum": "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wit-component/wit-component-0.244.0.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9846,7 +9961,8 @@
       "checksum": "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/wit-parser/wit-parser-0.244.0.crate",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -9870,7 +9986,8 @@
       "checksum": "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa",
       "consumers": [
         "safetensors-0.8.0/bindings/python/Cargo.lock",
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/zmij/zmij-1.0.21.crate",
       "license": "MIT",
@@ -10351,7 +10468,8 @@
       "version": "3.20.2",
       "checksum": "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/bumpalo/bumpalo-3.20.2.crate",
       "license": "MIT OR Apache-2.0",
@@ -10558,7 +10676,8 @@
         }
       ],
       "sourceArchive": "work/mlx-integration-20260910/native-source-audit/crates/colored-3.1.1.crate",
-      "bundledSource": "CorrespondingSource/colored-3.1.1.crate"
+      "bundledSource": "CorrespondingSource/colored-3.1.1.crate",
+      "bundledSourceSHA256": "0c7ecb2f3900c4687a23b3965f6dc491b37e8c9a2b96e7011e06780af221d21f"
     },
     {
       "name": "combine",
@@ -11164,7 +11283,8 @@
       "version": "0.1.9",
       "checksum": "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/find-msvc-tools/find-msvc-tools-0.1.9.crate",
       "license": "MIT OR Apache-2.0",
@@ -11309,7 +11429,8 @@
       "version": "0.3.32",
       "checksum": "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/futures-channel/futures-channel-0.3.32.crate",
       "license": "MIT OR Apache-2.0",
@@ -11332,7 +11453,8 @@
       "version": "0.3.32",
       "checksum": "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/futures-core/futures-core-0.3.32.crate",
       "license": "MIT OR Apache-2.0",
@@ -11401,7 +11523,8 @@
       "version": "0.3.32",
       "checksum": "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/futures-macro/futures-macro-0.3.32.crate",
       "license": "MIT OR Apache-2.0",
@@ -11447,7 +11570,8 @@
       "version": "0.3.32",
       "checksum": "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/futures-task/futures-task-0.3.32.crate",
       "license": "MIT OR Apache-2.0",
@@ -11470,7 +11594,8 @@
       "version": "0.3.32",
       "checksum": "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/futures-util/futures-util-0.3.32.crate",
       "license": "MIT OR Apache-2.0",
@@ -11885,7 +12010,7 @@
       "licenseFile": null,
       "authors": [
         "Andrew Straw <strawman@astraw.com>",
-        "Ren\u00e9 Kijewski <rene.kijewski@fu-berlin.de>",
+        "René Kijewski <rene.kijewski@fu-berlin.de>",
         "Ryan Lopopolo <rjl@hyperbo.la>"
       ],
       "texts": [
@@ -11911,7 +12036,7 @@
       "repository": "https://github.com/strawlab/iana-time-zone",
       "licenseFile": null,
       "authors": [
-        "Ren\u00e9 Kijewski <crates.io@k6i.de>"
+        "René Kijewski <crates.io@k6i.de>"
       ],
       "texts": [
         {
@@ -11945,7 +12070,8 @@
         }
       ],
       "sourceArchive": "work/mlx-integration-20260910/native-source-audit/crates/inferno-0.11.21.crate",
-      "bundledSource": "CorrespondingSource/inferno-0.11.21.crate"
+      "bundledSource": "CorrespondingSource/inferno-0.11.21.crate",
+      "bundledSourceSHA256": "0b3561bfdb5b7d4c273ff7d4c2a3f493bbd1a5c7584324bcab6dbed4d871f7d5"
     },
     {
       "name": "inventory",
@@ -12251,7 +12377,7 @@
       "repository": "https://github.com/rust-lang-nursery/lazy-static.rs",
       "licenseFile": null,
       "authors": [
-        "Marvin L\u00f6bel <loebel.marvin@gmail.com>"
+        "Marvin Löbel <loebel.marvin@gmail.com>"
       ],
       "texts": [
         {
@@ -12492,7 +12618,8 @@
       "version": "2.8.0",
       "checksum": "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/memchr/memchr-2.8.0.crate",
       "license": "Unlicense OR MIT",
@@ -12797,7 +12924,7 @@
       "repository": "https://github.com/faern/oneshot",
       "licenseFile": null,
       "authors": [
-        "Linus F\u00e4rnstrand <faern@faern.net>"
+        "Linus Färnstrand <faern@faern.net>"
       ],
       "texts": [
         {
@@ -12919,6 +13046,13 @@
           "sha256": "9837f05336ef3cbacb6a96e1672a0426d81ad01191f214b8d48e22ca62338181"
         },
         {
+          "path": "openssl-src-300.5.5+3.5.5/COPYRIGHT-perl-helper.txt",
+          "sha256": "c5d6631657960c42b618116d0f0bb054299bc80de3be168dd52aafbf1a5ed8db",
+          "scope": "Copyright and license header retained from the otherwise non-notice Perl helper source."
+        }
+      ],
+      "omittedNonNoticeSources": [
+        {
           "path": "openssl-src-300.5.5+3.5.5/openssl/util/perl/OpenSSL/copyright.pm",
           "sha256": "04213b69dbebc8ba0dd8a6216af1d9422f9b63619c1cf2f1d8aa107b83bbb608"
         }
@@ -13027,7 +13161,8 @@
       "checksum": "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd",
       "consumers": [
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/pin-project-lite/pin-project-lite-0.2.17.crate",
       "license": "Apache-2.0 OR MIT",
@@ -13344,7 +13479,8 @@
       "version": "0.9.4",
       "checksum": "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/rand/rand-0.9.4.crate",
       "license": "MIT OR Apache-2.0",
@@ -13405,7 +13541,8 @@
       "checksum": "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c",
       "consumers": [
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/rand_core/rand_core-0.9.5.crate",
       "license": "MIT OR Apache-2.0",
@@ -13511,7 +13648,8 @@
       "version": "0.4.14",
       "checksum": "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/regex-automata/regex-automata-0.4.14.crate",
       "license": "MIT OR Apache-2.0",
@@ -13537,7 +13675,8 @@
       "version": "0.8.10",
       "checksum": "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/regex-syntax/regex-syntax-0.8.10.crate",
       "license": "MIT OR Apache-2.0",
@@ -13624,7 +13763,7 @@
       "repository": "https://github.com/kornelski/rust-rgb",
       "licenseFile": null,
       "authors": [
-        "Kornel Lesi\u0144ski <kornel@geekhood.net>",
+        "Kornel Lesiński <kornel@geekhood.net>",
         "James Forster <james.forsterer@gmail.com>"
       ],
       "texts": [
@@ -13849,7 +13988,7 @@
       "repository": "https://github.com/nabijaczleweli/safe-transmute-rs",
       "licenseFile": null,
       "authors": [
-        "\u043d\u0430\u0431 <nabijaczleweli@gmail.com>",
+        "наб <nabijaczleweli@gmail.com>",
         "Eduardo Pinho <enet4mikeenet@gmail.com>",
         "Lukas Kalbertodt <lukas.kalbertodt@gmail.com>",
         "Philipp Tessenow <philipp@tessenow.org>",
@@ -14144,7 +14283,8 @@
       "checksum": "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b",
       "consumers": [
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/signal-hook-registry/signal-hook-registry-1.4.8.crate",
       "license": "MIT OR Apache-2.0",
@@ -14171,7 +14311,8 @@
       "checksum": "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5",
       "consumers": [
         "hf-xet-1.6.0/hf_xet/Cargo.lock",
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/slab/slab-0.4.12.crate",
       "license": "MIT",
@@ -14400,7 +14541,8 @@
       "version": "2.0.18",
       "checksum": "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/thiserror/thiserror-2.0.18.crate",
       "license": "MIT OR Apache-2.0",
@@ -14425,7 +14567,8 @@
       "version": "2.0.18",
       "checksum": "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5",
       "consumers": [
-        "hf-xet-1.6.0/hf_xet/Cargo.lock"
+        "hf-xet-1.6.0/hf_xet/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/thiserror-impl/thiserror-impl-2.0.18.crate",
       "license": "MIT OR Apache-2.0",
@@ -15446,7 +15589,9 @@
         {
           "path": "windows-0.62.2/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-0.62.2/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "509ea1e4050ac10b39d13d7fa6ca21b22fea065c31f149aa679b16442fe82a76"
@@ -15682,7 +15827,9 @@
         {
           "path": "windows-sys-0.45.0/license-mit",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
-        },
+        }
+      ],
+      "omittedNonNoticeSources": [
         {
           "path": "windows-sys-0.45.0/src/Windows/Win32/Security/LicenseProtection/mod.rs",
           "sha256": "d39897ebdb9aef7146327e7ff78fef04d7f53bc5e09fcbdd090fdc985ce3cdf6"
@@ -16006,7 +16153,8 @@
       "version": "1.0.0",
       "checksum": "824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/anstream/anstream-1.0.0.crate",
       "license": "MIT OR Apache-2.0",
@@ -16029,7 +16177,8 @@
       "version": "1.0.14",
       "checksum": "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/anstyle/anstyle-1.0.14.crate",
       "license": "MIT OR Apache-2.0",
@@ -16052,7 +16201,8 @@
       "version": "1.0.0",
       "checksum": "52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/anstyle-parse/anstyle-parse-1.0.0.crate",
       "license": "MIT OR Apache-2.0",
@@ -16075,7 +16225,8 @@
       "version": "1.1.5",
       "checksum": "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/anstyle-query/anstyle-query-1.1.5.crate",
       "license": "MIT OR Apache-2.0",
@@ -16098,7 +16249,8 @@
       "version": "3.0.11",
       "checksum": "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/anstyle-wincon/anstyle-wincon-3.0.11.crate",
       "license": "MIT OR Apache-2.0",
@@ -16219,7 +16371,8 @@
       "version": "1.0.5",
       "checksum": "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/colorchoice/colorchoice-1.0.5.crate",
       "license": "MIT OR Apache-2.0",
@@ -16377,7 +16530,8 @@
       "version": "0.3.9",
       "checksum": "8b1e3a325bc115f096c8b77bbf027a7c2592230e70be2d985be950d3d5e60ebe",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/dary_heap/dary_heap-0.3.9.crate",
       "license": "MIT OR Apache-2.0",
@@ -16751,7 +16905,8 @@
       "version": "1.70.2",
       "checksum": "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/is_terminal_polyfill/is_terminal_polyfill-1.70.2.crate",
       "license": "MIT OR Apache-2.0",
@@ -17071,7 +17226,8 @@
       "version": "0.16.1",
       "checksum": "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/ndarray/ndarray-0.16.1.crate",
       "license": "MIT OR Apache-2.0",
@@ -17097,7 +17253,8 @@
       "version": "0.17.2",
       "checksum": "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/ndarray/ndarray-0.17.2.crate",
       "license": "MIT OR Apache-2.0",
@@ -17123,7 +17280,8 @@
       "version": "0.4.6",
       "checksum": "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/num-complex/num-complex-0.4.6.crate",
       "license": "MIT OR Apache-2.0",
@@ -17195,7 +17353,8 @@
       "version": "1.70.2",
       "checksum": "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/once_cell_polyfill/once_cell_polyfill-1.70.2.crate",
       "license": "MIT OR Apache-2.0",
@@ -17344,7 +17503,8 @@
       "version": "0.2.7",
       "checksum": "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/portable-atomic-util/portable-atomic-util-0.2.7.crate",
       "license": "Apache-2.0 OR MIT",
@@ -17603,7 +17763,8 @@
       "version": "0.2.1",
       "checksum": "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/rawpointer/rawpointer-0.2.1.crate",
       "license": "MIT/Apache-2.0",
@@ -17628,7 +17789,8 @@
       "version": "1.12.0",
       "checksum": "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/rayon/rayon-1.12.0.crate",
       "license": "MIT OR Apache-2.0",
@@ -17783,7 +17945,8 @@
       "version": "1.0.23",
       "checksum": "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/ryu/ryu-1.0.23.crate",
       "license": "Apache-2.0 OR BSL-1.0",
@@ -18139,7 +18302,8 @@
       "version": "0.5.2",
       "checksum": "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/unit-prefix/unit-prefix-0.5.2.crate",
       "license": "MIT",
@@ -18161,7 +18325,8 @@
       "version": "0.2.2",
       "checksum": "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821",
       "consumers": [
-        "tokenizers-0.23.2/bindings/python/Cargo.lock"
+        "tokenizers-0.23.2/bindings/python/Cargo.lock",
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
       ],
       "sourceURL": "https://static.crates.io/crates/utf8parse/utf8parse-0.2.2.crate",
       "license": "Apache-2.0 OR MIT",
@@ -18383,6 +18548,832 @@
           "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
         }
       ]
+    },
+    {
+      "name": "console",
+      "version": "0.16.3",
+      "checksum": "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT",
+      "repository": "https://github.com/console-rs/console",
+      "licenseFile": null,
+      "authors": [],
+      "texts": [
+        {
+          "path": "console-0.16.3/LICENSE",
+          "sha256": "2022c11b24fc1e50fa06a5959e40198a3464f560729ad3d00139abb8a328362d"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/console/0.16.3/download",
+        "filename": "console-0.16.3.crate",
+        "bytes": 34041,
+        "sha256": "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87",
+        "manifestPath": "console-0.16.3/Cargo.toml",
+        "manifestSHA256": "6af0aef48fe57dfc4424127dd0e3581b65b2995998b91d1dd61040169a74271d",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "daachorse",
+      "version": "1.0.1",
+      "checksum": "6f55d7153ba3b507595872a3874803f07a8a81d1e888abed8e5db7da0597d6e2",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/daac-tools/daachorse",
+      "licenseFile": null,
+      "authors": [
+        "Koichi Akabe <vbkaisetsu@gmail.com>",
+        "Shunsuke Kanda <shnsk.knd@gmail.com>"
+      ],
+      "texts": [
+        {
+          "path": "daachorse-1.0.1/LICENSE-APACHE",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "path": "daachorse-1.0.1/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/daachorse/1.0.1/download",
+        "filename": "daachorse-1.0.1.crate",
+        "bytes": 48583,
+        "sha256": "6f55d7153ba3b507595872a3874803f07a8a81d1e888abed8e5db7da0597d6e2",
+        "manifestPath": "daachorse-1.0.1/Cargo.toml",
+        "manifestSHA256": "206defb43a144a5ebd036fcf23f9a69f1a4175e3ac05fca0542ab8d998eb08cb",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "env_filter",
+      "version": "1.0.1",
+      "checksum": "32e90c2accc4b07a8456ea0debdc2e7587bdd890680d71173a15d4ae604f6eef",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/rust-cli/env_logger",
+      "licenseFile": null,
+      "authors": [],
+      "texts": [
+        {
+          "path": "env_filter-1.0.1/LICENSE-APACHE",
+          "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+        },
+        {
+          "path": "env_filter-1.0.1/LICENSE-MIT",
+          "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/env_filter/1.0.1/download",
+        "filename": "env_filter-1.0.1.crate",
+        "bytes": 15045,
+        "sha256": "32e90c2accc4b07a8456ea0debdc2e7587bdd890680d71173a15d4ae604f6eef",
+        "manifestPath": "env_filter-1.0.1/Cargo.toml",
+        "manifestSHA256": "9a378f6fa074a70a1c7d70573958c2efc06069effdaef6ce6b9d0d43fe767129",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "env_logger",
+      "version": "0.11.10",
+      "checksum": "0621c04f2196ac3f488dd583365b9c09be011a4ab8b9f37248ffcc8f6198b56a",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/rust-cli/env_logger",
+      "licenseFile": null,
+      "authors": [],
+      "texts": [
+        {
+          "path": "env_logger-0.11.10/LICENSE-APACHE",
+          "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+        },
+        {
+          "path": "env_logger-0.11.10/LICENSE-MIT",
+          "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/env_logger/0.11.10/download",
+        "filename": "env_logger-0.11.10.crate",
+        "bytes": 31613,
+        "sha256": "0621c04f2196ac3f488dd583365b9c09be011a4ab8b9f37248ffcc8f6198b56a",
+        "manifestPath": "env_logger-0.11.10/Cargo.toml",
+        "manifestSHA256": "593184c3f5276b557cb697dc5dae69ad95e6bb516f03139dfd3fa9d3ad907470",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "indicatif",
+      "version": "0.18.4",
+      "checksum": "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT",
+      "repository": "https://github.com/console-rs/indicatif",
+      "licenseFile": null,
+      "authors": [],
+      "texts": [
+        {
+          "path": "indicatif-0.18.4/LICENSE",
+          "sha256": "2022c11b24fc1e50fa06a5959e40198a3464f560729ad3d00139abb8a328362d"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/indicatif/0.18.4/download",
+        "filename": "indicatif-0.18.4.crate",
+        "bytes": 68731,
+        "sha256": "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb",
+        "manifestPath": "indicatif-0.18.4/Cargo.toml",
+        "manifestSHA256": "734208048021e18805dc0b3993ea6e70399c363c35c3126554dec2d7c1c290d8",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "jiff",
+      "version": "0.2.24",
+      "checksum": "f00b5dbd620d61dfdcb6007c9c1f6054ebd75319f163d886a9055cec1155073d",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "Unlicense OR MIT",
+      "repository": "https://github.com/BurntSushi/jiff",
+      "licenseFile": null,
+      "authors": [
+        "Andrew Gallant <jamslam@gmail.com>"
+      ],
+      "texts": [
+        {
+          "path": "jiff-0.2.24/COPYING",
+          "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+        },
+        {
+          "path": "jiff-0.2.24/LICENSE-MIT",
+          "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+        },
+        {
+          "path": "jiff-0.2.24/UNLICENSE",
+          "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/jiff/0.2.24/download",
+        "filename": "jiff-0.2.24.crate",
+        "bytes": 760237,
+        "sha256": "f00b5dbd620d61dfdcb6007c9c1f6054ebd75319f163d886a9055cec1155073d",
+        "manifestPath": "jiff-0.2.24/Cargo.toml",
+        "manifestSHA256": "7ccb5fad188c094a495c4b0a04ed32da5312013378348e2082a9eab846d04aaa",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "numpy",
+      "version": "0.28.0",
+      "checksum": "778da78c64ddc928ebf5ad9df5edf0789410ff3bdbf3619aed51cd789a6af1e2",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "BSD-2-Clause",
+      "repository": "https://github.com/PyO3/rust-numpy",
+      "licenseFile": null,
+      "authors": [
+        "The rust-numpy Project Developers",
+        "PyO3 Project and Contributors <https://github.com/PyO3>"
+      ],
+      "texts": [
+        {
+          "path": "numpy-0.28.0/LICENSE",
+          "sha256": "57088c28c5ea50e729a06c3b04de70c41e496a5b753d75a744e2abbf60a2448f"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/numpy/0.28.0/download",
+        "filename": "numpy-0.28.0.crate",
+        "bytes": 80455,
+        "sha256": "778da78c64ddc928ebf5ad9df5edf0789410ff3bdbf3619aed51cd789a6af1e2",
+        "manifestPath": "numpy-0.28.0/Cargo.toml",
+        "manifestSHA256": "2b6d619f77acc63f2e7496ff3d420c0afaf0b0a8c8072a751477650bcdeceae8",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "pyo3-async-runtimes",
+      "version": "0.28.0",
+      "checksum": "9e7364a95bf00e8377bbf9b0f09d7ff9715a29d8fcf93b47d1a967363b973178",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "Apache-2.0",
+      "repository": "https://github.com/PyO3/pyo3-async-runtimes",
+      "licenseFile": null,
+      "authors": [
+        "Andrew J Westlake <awestlake87@yahoo.com>",
+        "David Hewitt <mail@davidhewitt.dev>"
+      ],
+      "texts": [
+        {
+          "path": "pyo3-async-runtimes-0.28.0/LICENSE",
+          "sha256": "71073d492e996de196dbe1eb1e4c94c27c014c841b288161265b2efd06d0af28"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/pyo3-async-runtimes/0.28.0/download",
+        "filename": "pyo3-async-runtimes-0.28.0.crate",
+        "bytes": 51548,
+        "sha256": "9e7364a95bf00e8377bbf9b0f09d7ff9715a29d8fcf93b47d1a967363b973178",
+        "manifestPath": "pyo3-async-runtimes-0.28.0/Cargo.toml",
+        "manifestSHA256": "0368166c135bb9db7ac829cd98cb1a1ac308b27c00a8421cc4be23db80a73df0",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "tokio",
+      "version": "1.52.1",
+      "checksum": "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT",
+      "repository": "https://github.com/tokio-rs/tokio",
+      "licenseFile": null,
+      "authors": [
+        "Tokio Contributors <team@tokio.rs>"
+      ],
+      "texts": [
+        {
+          "path": "tokio-1.52.1/LICENSE",
+          "sha256": "253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/tokio/1.52.1/download",
+        "filename": "tokio-1.52.1.crate",
+        "bytes": 900270,
+        "sha256": "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6",
+        "manifestPath": "tokio-1.52.1/Cargo.toml",
+        "manifestSHA256": "f27cc7c212e35cd2b818bafb9c28e45b70a012c763069fa9325010b700b56ad1",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "unicode-segmentation",
+      "version": "1.13.2",
+      "checksum": "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/unicode-rs/unicode-segmentation",
+      "licenseFile": null,
+      "authors": [
+        "kwantam <kwantam@gmail.com>",
+        "Manish Goregaokar <manishsmail@gmail.com>"
+      ],
+      "texts": [
+        {
+          "path": "unicode-segmentation-1.13.2/COPYRIGHT",
+          "sha256": "23860c2a7b5d96b21569afedf033469bab9fe14a1b24a35068b8641c578ce24d"
+        },
+        {
+          "path": "unicode-segmentation-1.13.2/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "unicode-segmentation-1.13.2/LICENSE-MIT",
+          "sha256": "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/unicode-segmentation/1.13.2/download",
+        "filename": "unicode-segmentation-1.13.2.crate",
+        "bytes": 111829,
+        "sha256": "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c",
+        "manifestPath": "unicode-segmentation-1.13.2/Cargo.toml",
+        "manifestSHA256": "b620e390e3518e0d766c21154c9857e08957b3247394ae36f91c9b56f5f9a7f4",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "bitflags",
+      "version": "2.11.1",
+      "checksum": "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/bitflags/bitflags",
+      "licenseFile": null,
+      "authors": [
+        "The Rust Project Developers"
+      ],
+      "texts": [
+        {
+          "path": "bitflags-2.11.1/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "bitflags-2.11.1/LICENSE-MIT",
+          "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/bitflags/2.11.1/download",
+        "filename": "bitflags-2.11.1.crate",
+        "bytes": 49082,
+        "sha256": "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3",
+        "manifestPath": "bitflags-2.11.1/Cargo.toml",
+        "manifestSHA256": "715ed23e898c41c435c2a5dfbcb2df2e9fe03f2922e2ee0c15e0d3d867c78a6c",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "cc",
+      "version": "1.2.60",
+      "checksum": "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/rust-lang/cc-rs",
+      "licenseFile": null,
+      "authors": [
+        "Alex Crichton <alex@alexcrichton.com>"
+      ],
+      "texts": [
+        {
+          "path": "cc-1.2.60/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "cc-1.2.60/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/cc/1.2.60/download",
+        "filename": "cc-1.2.60.crate",
+        "bytes": 97051,
+        "sha256": "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20",
+        "manifestPath": "cc-1.2.60/Cargo.toml",
+        "manifestSHA256": "4fccb9c4c260a1ee08b283b90218e28e0b1da061c271cd92e35a8f764093e16e",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "jiff-static",
+      "version": "0.2.24",
+      "checksum": "e000de030ff8022ea1da3f466fbb0f3a809f5e51ed31f6dd931c35181ad8e6d7",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "Unlicense OR MIT",
+      "repository": "https://github.com/BurntSushi/jiff",
+      "licenseFile": null,
+      "authors": [
+        "Andrew Gallant <jamslam@gmail.com>"
+      ],
+      "texts": [
+        {
+          "path": "jiff-static-0.2.24/COPYING",
+          "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+        },
+        {
+          "path": "jiff-static-0.2.24/LICENSE-MIT",
+          "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+        },
+        {
+          "path": "jiff-static-0.2.24/UNLICENSE",
+          "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/jiff-static/0.2.24/download",
+        "filename": "jiff-static-0.2.24.crate",
+        "bytes": 83747,
+        "sha256": "e000de030ff8022ea1da3f466fbb0f3a809f5e51ed31f6dd931c35181ad8e6d7",
+        "manifestPath": "jiff-static-0.2.24/Cargo.toml",
+        "manifestSHA256": "65e2d3d1e845f300f640eddb9738a421adf67151419cb28c8e41df58877cb9bb",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "js-sys",
+      "version": "0.3.95",
+      "checksum": "2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys",
+      "licenseFile": null,
+      "authors": [
+        "The wasm-bindgen Developers"
+      ],
+      "texts": [
+        {
+          "path": "js-sys-0.3.95/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "js-sys-0.3.95/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/js-sys/0.3.95/download",
+        "filename": "js-sys-0.3.95.crate",
+        "bytes": 104031,
+        "sha256": "2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca",
+        "manifestPath": "js-sys-0.3.95/Cargo.toml",
+        "manifestSHA256": "15d272c71a03d3e7859a87a3f799800a4fb7ebbd5cbf27ec0b4b4c34f4b044eb",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "matrixmultiply",
+      "version": "0.3.10",
+      "checksum": "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT/Apache-2.0",
+      "repository": "https://github.com/bluss/matrixmultiply/",
+      "licenseFile": null,
+      "authors": [
+        "bluss",
+        "R. Janis Goldschmidt"
+      ],
+      "texts": [
+        {
+          "path": "matrixmultiply-0.3.10/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "matrixmultiply-0.3.10/LICENSE-MIT",
+          "sha256": "792d075c7bad6dac258a44e799eb64cbf465e24d9932d27669be08c5ec957e27"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/matrixmultiply/0.3.10/download",
+        "filename": "matrixmultiply-0.3.10.crate",
+        "bytes": 58170,
+        "sha256": "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08",
+        "manifestPath": "matrixmultiply-0.3.10/Cargo.toml",
+        "manifestSHA256": "af5617e553f310216b27e8c681f8f062487d668acd96a37bf836c36cae6e4245",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "mio",
+      "version": "1.2.0",
+      "checksum": "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT",
+      "repository": "https://github.com/tokio-rs/mio",
+      "licenseFile": null,
+      "authors": [
+        "Carl Lerche <me@carllerche.com>",
+        "Thomas de Zeeuw <thomasdezeeuw@gmail.com>",
+        "Tokio Contributors <team@tokio.rs>"
+      ],
+      "texts": [
+        {
+          "path": "mio-1.2.0/LICENSE",
+          "sha256": "07919255c7e04793d8ea760d6c2ce32d19f9ff02bdbdde3ce90b1e1880929a9b"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/mio/1.2.0/download",
+        "filename": "mio-1.2.0.crate",
+        "bytes": 106403,
+        "sha256": "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1",
+        "manifestPath": "mio-1.2.0/Cargo.toml",
+        "manifestSHA256": "dbd39a8c78c65e963ab3fa6105f0037d1a35cf8ada1598ab706b9a984e517612",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "pkg-config",
+      "version": "0.3.33",
+      "checksum": "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/rust-lang/pkg-config-rs",
+      "licenseFile": null,
+      "authors": [
+        "Alex Crichton <alex@alexcrichton.com>"
+      ],
+      "texts": [
+        {
+          "path": "pkg-config-0.3.33/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "pkg-config-0.3.33/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/pkg-config/0.3.33/download",
+        "filename": "pkg-config-0.3.33.crate",
+        "bytes": 21590,
+        "sha256": "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e",
+        "manifestPath": "pkg-config-0.3.33/Cargo.toml",
+        "manifestSHA256": "37ce80d4e6e58a7cfd605a9f298da4dd9f43dc4412382b40a9d06fc925298da3",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "rustc-hash",
+      "version": "2.1.2",
+      "checksum": "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "Apache-2.0 OR MIT",
+      "repository": "https://github.com/rust-lang/rustc-hash",
+      "licenseFile": null,
+      "authors": [
+        "The Rust Project Developers"
+      ],
+      "texts": [
+        {
+          "path": "rustc-hash-2.1.2/LICENSE-APACHE",
+          "sha256": "95bd3988beee069fa2848f648dab43cc6e0b2add2ad6bcb17360caf749802bcc"
+        },
+        {
+          "path": "rustc-hash-2.1.2/LICENSE-MIT",
+          "sha256": "30fefc3a7d6a0041541858293bcbea2dde4caa4c0a5802f996a7f7e8c0085652"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/rustc-hash/2.1.2/download",
+        "filename": "rustc-hash-2.1.2.crate",
+        "bytes": 14754,
+        "sha256": "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe",
+        "manifestPath": "rustc-hash-2.1.2/Cargo.toml",
+        "manifestSHA256": "2db71897d3dc8cbd86f28507c3929a37b1d0a1e436037e40f935b647ee51e802",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "tokio-macros",
+      "version": "2.7.0",
+      "checksum": "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT",
+      "repository": "https://github.com/tokio-rs/tokio",
+      "licenseFile": null,
+      "authors": [
+        "Tokio Contributors <team@tokio.rs>"
+      ],
+      "texts": [
+        {
+          "path": "tokio-macros-2.7.0/LICENSE",
+          "sha256": "0b83dc40cba89b9922bb84b0a9c7d2768ce37c1d7e138b7424fd4549915778c9"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/tokio-macros/2.7.0/download",
+        "filename": "tokio-macros-2.7.0.crate",
+        "bytes": 15859,
+        "sha256": "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496",
+        "manifestPath": "tokio-macros-2.7.0/Cargo.toml",
+        "manifestSHA256": "b7aedbc0cf11cfb7089bbb519c75819f90721c25c584e755648c4f4b761098c4",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "wasm-bindgen",
+      "version": "0.2.118",
+      "checksum": "0bf938a0bacb0469e83c1e148908bd7d5a6010354cf4fb73279b7447422e3a89",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/wasm-bindgen/wasm-bindgen",
+      "licenseFile": null,
+      "authors": [
+        "The wasm-bindgen Developers"
+      ],
+      "texts": [
+        {
+          "path": "wasm-bindgen-0.2.118/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "wasm-bindgen-0.2.118/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/wasm-bindgen/0.2.118/download",
+        "filename": "wasm-bindgen-0.2.118.crate",
+        "bytes": 61149,
+        "sha256": "0bf938a0bacb0469e83c1e148908bd7d5a6010354cf4fb73279b7447422e3a89",
+        "manifestPath": "wasm-bindgen-0.2.118/Cargo.toml",
+        "manifestSHA256": "190970836f839b35dc0e6c0f1bbb7c47fb83e46af947dd6da7144bfb32de13ae",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "wasm-bindgen-macro",
+      "version": "0.2.118",
+      "checksum": "eeff24f84126c0ec2db7a449f0c2ec963c6a49efe0698c4242929da037ca28ed",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro",
+      "licenseFile": null,
+      "authors": [
+        "The wasm-bindgen Developers"
+      ],
+      "texts": [
+        {
+          "path": "wasm-bindgen-macro-0.2.118/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "wasm-bindgen-macro-0.2.118/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/wasm-bindgen-macro/0.2.118/download",
+        "filename": "wasm-bindgen-macro-0.2.118.crate",
+        "bytes": 9288,
+        "sha256": "eeff24f84126c0ec2db7a449f0c2ec963c6a49efe0698c4242929da037ca28ed",
+        "manifestPath": "wasm-bindgen-macro-0.2.118/Cargo.toml",
+        "manifestSHA256": "b79aa5ab1f5cd1e992d7d98f80bb5759748f9a43056ab8cf6c8f2f2448d285b6",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "wasm-bindgen-macro-support",
+      "version": "0.2.118",
+      "checksum": "9d08065faf983b2b80a79fd87d8254c409281cf7de75fc4b773019824196c904",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro-support",
+      "licenseFile": null,
+      "authors": [
+        "The wasm-bindgen Developers"
+      ],
+      "texts": [
+        {
+          "path": "wasm-bindgen-macro-support-0.2.118/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "wasm-bindgen-macro-support-0.2.118/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/wasm-bindgen-macro-support/0.2.118/download",
+        "filename": "wasm-bindgen-macro-support-0.2.118.crate",
+        "bytes": 64823,
+        "sha256": "9d08065faf983b2b80a79fd87d8254c409281cf7de75fc4b773019824196c904",
+        "manifestPath": "wasm-bindgen-macro-support-0.2.118/Cargo.toml",
+        "manifestSHA256": "ae689b5870bc5f6ef127a99889a27e88cd5c57b1aa21192718b06c436dd76461",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "wasm-bindgen-shared",
+      "version": "0.2.118",
+      "checksum": "5fd04d9e306f1907bd13c6361b5c6bfc7b3b3c095ed3f8a9246390f8dbdee129",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared",
+      "licenseFile": null,
+      "authors": [
+        "The wasm-bindgen Developers"
+      ],
+      "texts": [
+        {
+          "path": "wasm-bindgen-shared-0.2.118/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "wasm-bindgen-shared-0.2.118/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/wasm-bindgen-shared/0.2.118/download",
+        "filename": "wasm-bindgen-shared-0.2.118.crate",
+        "bytes": 10565,
+        "sha256": "5fd04d9e306f1907bd13c6361b5c6bfc7b3b3c095ed3f8a9246390f8dbdee129",
+        "manifestPath": "wasm-bindgen-shared-0.2.118/Cargo.toml",
+        "manifestSHA256": "840d79184df77f0dc81030a6d29e23afe1f5f7767561d2df4099113e5f63aea3",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "zerocopy",
+      "version": "0.8.48",
+      "checksum": "eed437bf9d6692032087e337407a86f04cd8d6a16a37199ed57949d415bd68e9",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "repository": "https://github.com/google/zerocopy",
+      "licenseFile": null,
+      "authors": [
+        "Joshua Liebow-Feeser <joshlf@google.com>",
+        "Jack Wrenn <jswrenn@amazon.com>"
+      ],
+      "texts": [
+        {
+          "path": "zerocopy-0.8.48/LICENSE-APACHE",
+          "sha256": "9d185ac6703c4b0453974c0d85e9eee43e6941009296bb1f5eb0b54e2329e9f3"
+        },
+        {
+          "path": "zerocopy-0.8.48/LICENSE-BSD",
+          "sha256": "83c1763356e822adde0a2cae748d938a73fdc263849ccff6b27776dff213bd32"
+        },
+        {
+          "path": "zerocopy-0.8.48/LICENSE-MIT",
+          "sha256": "1a2f5c12ddc934d58956aa5dbdd3255fe55fd957633ab7d0d39e4f0daa73f7df"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/zerocopy/0.8.48/download",
+        "filename": "zerocopy-0.8.48.crate",
+        "bytes": 287554,
+        "sha256": "eed437bf9d6692032087e337407a86f04cd8d6a16a37199ed57949d415bd68e9",
+        "manifestPath": "zerocopy-0.8.48/Cargo.toml",
+        "manifestSHA256": "181f643afc0ecab49bca1a0723270e815c361b36bd087137e60ee0774cd770fc",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    },
+    {
+      "name": "zerocopy-derive",
+      "version": "0.8.48",
+      "checksum": "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4",
+      "consumers": [
+        "tokenizers-0.23.0rc0/bindings/python/Cargo.lock"
+      ],
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "repository": "https://github.com/google/zerocopy",
+      "licenseFile": null,
+      "authors": [
+        "Joshua Liebow-Feeser <joshlf@google.com>",
+        "Jack Wrenn <jswrenn@amazon.com>"
+      ],
+      "texts": [
+        {
+          "path": "zerocopy-derive-0.8.48/LICENSE-APACHE",
+          "sha256": "9d185ac6703c4b0453974c0d85e9eee43e6941009296bb1f5eb0b54e2329e9f3"
+        },
+        {
+          "path": "zerocopy-derive-0.8.48/LICENSE-BSD",
+          "sha256": "83c1763356e822adde0a2cae748d938a73fdc263849ccff6b27776dff213bd32"
+        },
+        {
+          "path": "zerocopy-derive-0.8.48/LICENSE-MIT",
+          "sha256": "1a2f5c12ddc934d58956aa5dbdd3255fe55fd957633ab7d0d39e4f0daa73f7df"
+        }
+      ],
+      "sourceArchive": {
+        "url": "https://crates.io/api/v1/crates/zerocopy-derive/0.8.48/download",
+        "filename": "zerocopy-derive-0.8.48.crate",
+        "bytes": 97646,
+        "sha256": "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4",
+        "manifestPath": "zerocopy-derive-0.8.48/Cargo.toml",
+        "manifestSHA256": "571227b0ae42b2dd2828f7bf220bf5dd5261a729329c1831e1335d3d20a94f43",
+        "noticePolicy": "Original LICENSE/NOTICE/COPYING/COPYRIGHT bytes, not retyped or normalized."
+      }
+    }
+  ],
+  "sourceLockAudits": [
+    {
+      "distribution": "tokenizers",
+      "version": "0.23.0rc0",
+      "path": "tokenizers-0.23.0rc0-lock-audit.json",
+      "sha256": "5fef97f98e499c04ee72f64c8eedbd26efc0f8896841e64fc0c1ae4694d561e3"
     }
   ]
 }

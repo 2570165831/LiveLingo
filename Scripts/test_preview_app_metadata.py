@@ -5,6 +5,7 @@ import importlib.util
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import struct
 import subprocess
 import sys
@@ -68,6 +69,12 @@ class SignatureDetectionTests(unittest.TestCase):
 class PreviewArgumentSafetyTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='preview-argument-')))
+        # Keep this argument-only script's source root separate from its output
+        # fixture, even when the test harness keeps TMPDIR inside the checkout.
+        self.source = self.root / 'source'
+        self.script = self.source / 'Scripts/build-preview-app.sh'
+        self.script.parent.mkdir(parents=True)
+        shutil.copyfile(Path(__file__).with_name('build-preview-app.sh'), self.script)
         tools = self.root / 'tools'
         tools.mkdir()
         (tools / 'python3').symlink_to(sys.executable)
@@ -76,8 +83,7 @@ class PreviewArgumentSafetyTests(unittest.TestCase):
                             'PYTHONNOUSERSITE': '1'}
 
     def rejects(self, *arguments):
-        script = Path(__file__).with_name('build-preview-app.sh')
-        result = subprocess.run(['/bin/bash', str(script), *arguments],
+        result = subprocess.run(['/bin/bash', str(self.script), *arguments],
                                 text=True, capture_output=True, timeout=10, env=self.environment)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('Building unsigned', result.stdout)
@@ -108,8 +114,7 @@ class PreviewArgumentSafetyTests(unittest.TestCase):
         self.assertIn('dedicated output root', self.rejects('--output-root', '/'))
 
     def test_source_tree_is_not_an_output_root(self):
-        root = str(Path(__file__).resolve().parent.parent)
-        self.assertIn('dedicated output root', self.rejects('--output-root', root))
+        self.assertIn('dedicated output root', self.rejects('--output-root', str(self.source)))
 
 
 class NestedSigningSafetyTests(unittest.TestCase):
@@ -166,6 +171,8 @@ class NestedSigningSafetyTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == 'darwin', 'native ad-hoc signing fixture requires macOS')
 class RealAdHocSigningTests(unittest.TestCase):
     def setUp(self):
+        if os.environ.get("LIVELINGO_TEST_DISABLE_SIGNING") == "1":
+            self.skipTest("signing disabled by the caller\'s explicit policy")
         for tool in ('/usr/bin/clang', '/usr/bin/codesign'):
             if not Path(tool).is_file() or not os.access(tool, os.X_OK):
                 self.skipTest('native signing fixture requires ' + Path(tool).name)

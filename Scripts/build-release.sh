@@ -8,6 +8,7 @@ product="${derived_data}/Build/Products/Release/LiveLingo.app"
 entitlements="${project_root}/LiveLingo/Resources/LiveLingo.entitlements"
 
 /usr/bin/xcodebuild \
+  -hideShellScriptEnvironment \
   -project "${project_root}/LiveLingo.xcodeproj" \
   -scheme LiveLingo \
   -configuration Release \
@@ -29,6 +30,19 @@ if [[ "${python_bin}" != /* || ! -x "${python_bin}" ]]; then
   echo "LIVELINGO_PYTHON must select an absolute executable path." >&2
   exit 1
 fi
+"${python_bin}" - "${project_root}" "${product}" "${derived_data}" <<'PY'
+from pathlib import Path
+import json
+import sys
+source, app, output = map(Path, sys.argv[1:])
+sys.path.insert(0, str(source / "Scripts"))
+from native_build_paths import sanitize_build_paths
+from runtime_prepare import normalize_native_signature
+main = app / "Contents/MacOS/LiveLingo"
+report = {"debugPreparation": sanitize_build_paths(main, app),
+          "obsoleteSignatureRemoved": normalize_native_signature(main)}
+(output / "release-native-preparation.json").write_text(json.dumps(report, indent=2) + "\n")
+PY
 "${python_bin}" "${project_root}/Scripts/privacy_package.py" check --root "${product}"
 
 if [[ -z "${LIVELINGO_SIGN_IDENTITY:-}" ]]; then

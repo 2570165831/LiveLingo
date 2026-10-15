@@ -1,0 +1,8 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "console"
+version = "0.16.3"
+license = "MIT"
+repository = "https://github.com/console-rs/console"
+homepage = "https://github.com/console-rs/console"
+description = "A terminal and console abstraction for Rust"

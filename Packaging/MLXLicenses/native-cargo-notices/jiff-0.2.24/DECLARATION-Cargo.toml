@@ -1,0 +1,8 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "jiff"
+version = "0.2.24"
+license = "Unlicense OR MIT"
+authors = ["Andrew Gallant <jamslam@gmail.com>"]
+repository = "https://github.com/BurntSushi/jiff"
+description = "A date-time library that encourages you to jump into the pit of success.\n\nThis library is heavily inspired by the Temporal project.\n"

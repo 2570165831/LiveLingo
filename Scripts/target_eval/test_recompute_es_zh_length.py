@@ -96,6 +96,19 @@ class LengthRecomputationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 r.write_report({}, root.parent / "outside.json", root)
 
+    def test_report_accepts_dedicated_work_grant_and_rejects_source_and_work_root(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory(prefix="es-zh-work-output-") as directory:
+            checkout = Path(directory) / "checkout"
+            grant = checkout / "work" / "release-check"
+            grant.mkdir(parents=True)
+            with patch.object(r, "__file__", str(checkout / "Scripts/target_eval/recompute_es_zh_length.py")):
+                r.write_report({"synthetic": True}, grant / "report.json", grant)
+                self.assertEqual(json.loads((grant / "report.json").read_text()), {"synthetic": True})
+                for forbidden in (checkout, checkout / "Scripts", checkout / "work"):
+                    with self.subTest(root=forbidden), self.assertRaises(ValueError):
+                        r.write_report({}, forbidden / "report.json", forbidden)
+
 
 if __name__ == "__main__":
     unittest.main()

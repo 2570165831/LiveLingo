@@ -1,0 +1,129 @@
+[
+  {
+    "library": "libgfortran.5.dylib",
+    "wheelSHA256": "309aa581ea231790ecd99932f5be4b77e99e3fb820d2b127ab8ec3993160095f",
+    "bottleSHA256": "f4db5ddbcbf03272cede69b335522709a9ad7606441d56f56ca58118ede9735c",
+    "fileExactMatch": false,
+    "bottleSectionsEqualWheel": true,
+    "sections": {
+      "__TEXT,__text": {
+        "size": 1113448,
+        "SHA256": "8ae6aa0fa1c4d36412d826c21f9027be78bba195d735b35ddf6a2da80963c808"
+      },
+      "__TEXT,__text_exit": {
+        "size": 44,
+        "SHA256": "a48e64c36dafe70aced90c69b7c587b6df2a1f51b7391060321889d22545db56"
+      },
+      "__TEXT,__text_startup": {
+        "size": 132,
+        "SHA256": "5c3de52a9058a1fed80769bf6636ef7b2982569cc17296e10c30f7f9974c36db"
+      },
+      "__TEXT,__stubs": {
+        "size": 2808,
+        "SHA256": "65b2ee7f042a918e0096989b6fb030dcd83658fee5f66af3ff596cb640689182"
+      },
+      "__TEXT,__init_offsets": {
+        "size": 12,
+        "SHA256": "b3b32ac2fcdc3388dcedb6a221833baa5e4d31d45af99e507e30894db2ab5ea9"
+      },
+      "__TEXT,__cstring": {
+        "size": 27671,
+        "SHA256": "f61d5db70004643954aadfd817d7036afe47b03a11e91d3193844b0aec3712a2"
+      },
+      "__TEXT,__const": {
+        "size": 3569,
+        "SHA256": "9d1f9496d4cf2a124cd68517ee3c2e474420b350db1a23329f45470e154bb789"
+      },
+      "__TEXT,__eh_frame": {
+        "size": 227912,
+        "SHA256": "902780d967e39017f7424e1177ecfb7bcc9607f263f5b5ce7c538e9bee0c243f"
+      },
+      "__DATA_CONST,__got": {
+        "size": 1904,
+        "SHA256": "448081d7fe1f5fc762388c935b70a88fd6236603256ed2f2e7309fbda618d477"
+      },
+      "__DATA_CONST,__const": {
+        "size": 1944,
+        "SHA256": "6a0297f8e518f18de6221b7cc377d3eda06ca299561d0779befe4db1d4c9f9ab"
+      },
+      "__DATA,__data": {
+        "size": 1148,
+        "SHA256": "8884559b3274a0b4eda30f6876d9fc2e1fe96864e54cce3796966095db4bca0d"
+      }
+    }
+  },
+  {
+    "library": "libquadmath.0.dylib",
+    "wheelSHA256": "240cd8c9bc65a7f61f8f0c69db2699eb1fdb7f5dc226ebfce01559f9a33ade6d",
+    "bottleSHA256": "64f18078a3a9c52427ea3e936047883155834be1f28c5a1f62806feb09b4c030",
+    "fileExactMatch": false,
+    "bottleSectionsEqualWheel": true,
+    "sections": {
+      "__TEXT,__text": {
+        "size": 148072,
+        "SHA256": "5eaeefe084fd430957da9a264e5676f25a3e8bf86b6990d5e37bbc4c3fd400ae"
+      },
+      "__TEXT,__stubs": {
+        "size": 324,
+        "SHA256": "8c972b4ccfe58cfc4e31d4d97e2a6d0e0fb28d51247dc97b7ce7b0b69eb8c1c7"
+      },
+      "__TEXT,__const": {
+        "size": 81456,
+        "SHA256": "8d9f3f212e8d58d8028760f5fe374c8dd136280bc23765ad8bf037d829196569"
+      },
+      "__TEXT,__cstring": {
+        "size": 54,
+        "SHA256": "d8ab3a084c59a5e2f57446e959cf820b3757ca7039a86bebd65cff367182da85"
+      },
+      "__TEXT,__eh_frame": {
+        "size": 19320,
+        "SHA256": "6feba9cac8f79232865e54a54ff5aa2286c2b81741ecba5afe2fd44019f0bfe8"
+      },
+      "__DATA_CONST,__got": {
+        "size": 232,
+        "SHA256": "6298671111d61480cde3651a9e61c2bbfe30a9745bf19281d9107ccaa70e3492"
+      }
+    }
+  },
+  {
+    "library": "libgcc_s.1.1.dylib",
+    "wheelSHA256": "76ef5f8847dbf656bc2b2cb91f8a08f47589259151e809b11fb30334485503a9",
+    "bottleSHA256": "94a72ec81f9344c6502f606ac444326e5877836e750f24e8e1e718b81c360442",
+    "fileExactMatch": false,
+    "bottleSectionsEqualWheel": true,
+    "sections": {
+      "__TEXT,__text": {
+        "size": 46400,
+        "SHA256": "72664d43f49974082de440b31006a4e17d4a2effb796673f3234dfda3581d6b2"
+      },
+      "__TEXT,__stubs": {
+        "size": 240,
+        "SHA256": "c7888bc2909a2775e9862971f6a92fdf76686509e1b3f000c6ea5e3afd84ff2f"
+      },
+      "__TEXT,__stub_helper": {
+        "size": 252,
+        "SHA256": "d4c7903cbe75c3bae3ec6d1f23a3c99310f6883e39dc82cefc91498a130dec1d"
+      },
+      "__TEXT,__const": {
+        "size": 744,
+        "SHA256": "c23388ebc8b43c0fecf01eae2c623060be335ad8cd435eeba9eae1eae9ec578e"
+      },
+      "__TEXT,__eh_frame": {
+        "size": 9704,
+        "SHA256": "53de54a8f812afb9810c1677a497a5ab6ff3d44f89d4da1606ef1340d6c73a1e"
+      },
+      "__DATA_CONST,__got": {
+        "size": 16,
+        "SHA256": "05001c9963433dfcea4b4a9b03b9fa8f385e5bd24872cb478851dc6bc74a37ff"
+      },
+      "__DATA,__la_symbol_ptr": {
+        "size": 152,
+        "SHA256": "ca4d2d2523a7cc783424d4f4fc2f88ce174eceb53465c2adbb019b25fd20f46a"
+      },
+      "__DATA,__data": {
+        "size": 120,
+        "SHA256": "88901085b7a534db3e14b10cf57c685422b60f1bb0f6d192df9d533b8091262f"
+      }
+    }
+  }
+]

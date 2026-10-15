@@ -64,17 +64,19 @@ def repository_root() -> Path:
 
 
 def output_root() -> Path:
-    """Read a required external directory, independent of checkout placement."""
+    """Read an explicit output grant outside source, including ignored work."""
     configured = os.environ.get(OUTPUT_ROOT_ENV)
     if not configured:
         raise ValueError(f"{OUTPUT_ROOT_ENV} is required; set it to an existing absolute "
-                         "directory outside the repository")
+                         "directory outside the repository or below its work directory")
     root = Path(configured)
     if not root.is_absolute():
         raise ValueError(f"{OUTPUT_ROOT_ENV} must be an absolute directory path")
     root = absolute_path(root)
-    if root.is_relative_to(repository_root()):
-        raise ValueError(f"{OUTPUT_ROOT_ENV} must be outside the repository")
+    checkout = repository_root()
+    work = checkout / "work"
+    if root.is_relative_to(checkout) and (root == work or not root.is_relative_to(work)):
+        raise ValueError(f"{OUTPUT_ROOT_ENV} must be outside repository source or below work")
     try:
         with open_directory(root):
             pass
@@ -86,14 +88,14 @@ def output_root() -> Path:
 
 
 def validate_output_path(path: str | Path) -> Path:
-    """Reject the checkout, paths outside the configured root and symlinks.
+    """Reject checkout source, paths outside the configured root and symlinks.
 
     Check the environment root and destination before creating any directory.
     """
     destination = absolute_path(path)
     root = output_root()
-    if destination.is_relative_to(repository_root()):
-        raise ValueError("evaluation output must not be written inside the repository")
+    if destination.is_relative_to(repository_root()) and not destination.is_relative_to(repository_root() / "work"):
+        raise ValueError("evaluation output must not be written inside repository source")
     if destination == root or not destination.is_relative_to(root):
         raise ValueError("evaluation output must be a file inside the configured output root")
     try:

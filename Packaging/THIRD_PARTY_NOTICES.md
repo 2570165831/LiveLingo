@@ -47,6 +47,67 @@ The App carries offline direct and transitive notices at `Contents/Resources/Lan
 
 Compatibility, signing, notarization and runtime acceptance are recorded separately; this notice is not a release test certificate.
 
+Both runtime preparation modes preserve notices embedded in pruned source
+headers under `Licenses/embedded-pruned-notices`, with source and excerpt hashes
+in `runtime-preparation.json`. The common `embedded-source-notices` supplement
+retains LIBSVM, HDBSCAN and mimalloc notices even when their containing package
+already has a wheel license. ASR's exact observable Rust dependency notices also
+live under `ASRRuntime/python/Licenses/native-cargo-notices`; common source
+archives remain under `LanguageRuntime/Licenses`. Missing exact crate notices
+stop preparation. Observable binary paths are not an exhaustive linked inventory.
+
+The offline locks omit pip, hf-xet, sounddevice/PortAudio, librosa, soxr and
+tiktoken in ASR, and hf-xet in the language runtime. No soxr binary is distributed
+by these locks. `Packaging/RuntimeDependencyScope.md` in the source distribution
+records the import paths and required two-model smoke test.
+
+## Prepared third-party copies (Li, 2026-10-11)
+
+The project modifies distribution copies only. File names, changes, dates,
+reasons and before/after hashes are bundled in the following relative notices:
+
+During assembly, Li's packaging step on 2026-10-11 also changes
+`ASRRuntime/python/lib/python3.13/site-packages/numba/np/ufunc/omppool.cpython-313-darwin.so`:
+its `@rpath/libomp.dylib` dependency becomes
+`@loader_path/../../../sklearn/.dylibs/libomp.dylib`, resolving the OpenMP library
+already shipped in the app. The upstream library implementation is unchanged;
+this is a native load-command change, without signing.
+
+- `LanguageRuntime/Licenses/source-preparation/SourceArchiveAudit.json` and each source archive's `MODIFICATIONS.json`: home-directory examples are neutralized in GCC/libstdc++ headers and upstream documentation. Inferno's complete inline test modules are restored; one Windows home-directory fixture is neutralized. The complete GNU GCC 13.4.0 release, including all original source files, frontends, regression data, configure inputs and generated manuals, is retained with the exact Homebrew Darwin patch and its production bottle formula. The source definition is the GNU release plus that patch; the Darwin fork tag alone is not an exact substitute. Other source archives' omissions are recorded individually. Original copyright/license bytes are preserved.
+- `LanguageRuntime/MODIFICATIONS.json` and `ASRRuntime/python/MODIFICATIONS.json`: Python source encoding is normalized with the AST unchanged; modified Python files carry a dated comment. Optional package descriptions, installation records and certificate labels are prepared for distribution; certificate blocks are unchanged. Native library IDs/dependencies use portable load paths. This does not change their upstream copyright or license.
+- Each `Models/<publisher>/<model>/MODIFICATIONS.json`: unused Qwen3.5 translation chat-template metadata is removed because LiveLingo supplies its prompts; Parakeet's unused training tokenizer directory metadata and unused training tokenizer model and vocabulary are omitted because the loader uses its retained joint vocabulary. Weights and retained inference vocabularies are unchanged; publisher attribution and the Apache-2.0 / CC BY 4.0 license notices remain applicable. Each model's scope is derived from its own recorded changes; an empty change list records no model-file modifications.
+
+Additional native preparation by Li on 2026-10-12 strips debug symbols and
+remaps diagnosed Rust/Cython source-location strings. MLX's build-only last
+metallib fallback is disabled; its preceding packaged-resource lookups remain.
+All instructions and file-backed sections outside the recorded cstring changes
+are unchanged. The runtime modification records bind the actual before/after
+hashes, including ad-hoc signatures applied before host import checks.
+`LanguageRuntime/Licenses/native-build-paths/README.md` describes these changes
+and their static validation limits. This does not assert runtime acceptance.
+
+The original publisher libsndfile build recipe is retained, and an additional
+`LanguageRuntime/Licenses/ASR-audio/offline-rebuild.sh` uses all bundled static
+codec sources. Its path is resolved independently of the caller's directory.
+
+A static comparison of the retained fixed publisher libsndfile arm64 asset
+(SHA-256 `e9fd4d76bc457dcfb956617e8d467df85087ce069747fccd78e1e702d8629c14`)
+and the reviewed runtime input
+(SHA-256 `6ef1f1c0a4ccbc72210ff55e3df6addc682f873e68aff3e7218e92ccc294da93`)
+confirmed equality of all 11 file-backed sections, including code and data.
+Of 15 load commands, 13 are byte-identical; only the `__LINKEDIT` file size and
+`LC_CODE_SIGNATURE` data size differ, reflecting the changed signature allocation.
+All other bytes before the signature are identical. The publisher asset carries
+an ad-hoc linker signature; the reviewed input carries different CodeDirectory
+metadata, a requirements blob and a CMS blob. All code-page hashes in both
+CodeDirectories match their respective file bytes. Whole-file exactMatch remains false.
+This explains the static byte differences for these two fixed hashes; it does
+not verify signer trust, signing history, platform acceptance or a byte-identical
+source rebuild. A different input hash requires a new comparison. The repository
+provenance JSON remains a pending reference. Assembly binds the real input and
+final hashes in the copied package notice. Later native signing must rebind that
+notice before the outer App resource seal; the final gate requires this binding.
+
 ## OpenCC Chinese variant dictionaries
 
 Unmodified data/configuration and conversion test fixtures from

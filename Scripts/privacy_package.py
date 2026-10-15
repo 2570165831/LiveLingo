@@ -26,8 +26,10 @@ from xml.parsers.expat import ExpatError, ParserCreate
 
 if __package__:
     from .private_files import absolute_path, open_directory, validate_file_path
+    from .privacy_roots import WINDOWS_PATH_PATTERN
 else:
     from private_files import absolute_path, open_directory, validate_file_path
+    from privacy_roots import WINDOWS_PATH_PATTERN
 
 
 class PrivacyError(ValueError):
@@ -61,9 +63,13 @@ PLIST_SUFFIXES = frozenset({".plist", ".stringsdict", ".entitlements", ".xcent"}
 UNSUPPORTED_METADATA_SUFFIXES = frozenset({".xml", ".yaml", ".yml", ".toml"})
 STRUCTURED_SUFFIXES = PLIST_SUFFIXES | UNSUPPORTED_METADATA_SUFFIXES | {".json", ".safetensors", ".strings", ".pth", ".pem"}
 TEXT_SUFFIXES = frozenset({".py", ".pyi", ".sh", ".bash", ".zsh", ".md", ".rst", ".txt",
-                           ".c", ".h", ".cpp", ".hpp", ".tcl"})
+                           ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+                           ".m", ".mm", ".tcl"})
 TEXT_NAMES = frozenset({"license", "licence", "copying", "notice", "copyright", "readme",
                         "authors", "changes", "changelog", "install", "thanks"})
+LICENSE_NAME = re.compile(r"(?:license[s]?|licence[s]?|copying[0-9]?|notice[s]?|copyright)"
+                          r"(?:[._-][A-Za-z0-9][A-Za-z0-9._+-]*)?", re.IGNORECASE)
+LICENSE_CODE_SUFFIXES = frozenset({".py", ".rs", ".pm", ".c", ".h", ".cpp", ".yml", ".yaml", ".toml", ".json"})
 APP_RESOURCES = frozenset({
     "LanguageRuntime", "ASRRuntime", "Models", "LICENSE", "THIRD_PARTY_NOTICES.md",
     "model-storage-manifest.json",  # Data inventory, still checked as structured JSON.
@@ -73,7 +79,15 @@ APP_RESOURCES = frozenset({
 # URL provenance is allowed. Local absolute paths (including file URLs and
 # Windows paths) in structured metadata are not distribution provenance.
 URL = re.compile(r"https?://[^\s\"<>]+", re.IGNORECASE)
-LOCAL_PATH = re.compile(r"(?<![\w:/.])/[^\s\"<>]+|file://|~[/\\]|[A-Za-z]:[/\\]", re.IGNORECASE)
+LOCAL_PATH = re.compile(r"(?<![\w:/.])/[^\s\"<>]+|file://|~[/\\]|" + WINDOWS_PATH_PATTERN, re.IGNORECASE)
+# Complete rule keys and values emitted by the system codesign resource seal.
+# These slashes are regex delimiters, not local paths. Only rules2 keys qualify;
+# payloads, comments, altered rules and strings in every other field stay strict.
+PUBLIC_SEAL_RULES = {
+    r".*\.dSYM($|/)": {"weight": 11.0},
+    r"^(.*/)?\.DS_Store$": {"omit": True, "weight": 2000.0},
+    r"^[^/]+$": {"nested": True, "weight": 10.0},
+}
 
 
 def decode_metadata_text(data):
@@ -143,7 +157,7 @@ def parse_metadata(data, kind):
             parser.Parse(data, True)
         return plistlib.loads(data, dict_type=_UniqueMetadata)
     except (UnicodeError, ValueError, TypeError, OverflowError, RecursionError,
-            plistlib.InvalidFileException, ExpatError, struct.error):
+            plistlib.InvalidFileException, ExpatError, struct.error, AttributeError):
         raise PrivacyError("invalid-package-" + kind) from None
 
 
@@ -185,7 +199,12 @@ def validate_metadata(value, field=None, *, signature=False, trail=(), _active=N
                     text_key = decode_metadata_text(key) if isinstance(key, bytes) else key
                     if isinstance(text_key, str) and re.sub(r"[_-]", "", text_key.lower()) in CONTENT_KEYS:
                         raise PrivacyError("classroom-content-metadata")
-                    opaque += recurse(key)
+                    if signature and trail == ("rules2",) and key in PUBLIC_SEAL_RULES:
+                        if item != PUBLIC_SEAL_RULES[key] or any(
+                                type(item.get(flag)) is not bool for flag in ("omit", "nested") if flag in item):
+                            raise PrivacyError("unreviewed-signature-seal-rule")
+                    else:
+                        opaque += recurse(key)
                     opaque += recurse(item, key, trail + (key,))
             else:
                 for index, item in enumerate(value):
@@ -312,6 +331,11 @@ def allowed_text_file(path, data):
     """A bounded packaging exemption, not a claim to review its text content."""
     if path.suffix.lower() in TEXT_SUFFIXES or path.name.lower() in TEXT_NAMES:
         return True
+    # Upstream SciPy's UNU.RAN author attribution accompanies its license.
+    # This exact notice path is supported, not arbitrary *_AUTHORS files.
+    if ("Licenses" in path.parts and path.parts[-5:] ==
+            ("native-source-notices", "scipy-1.18.1", "subprojects", "unuran", "UNURAN_AUTHORS")):
+        return True
     if re.fullmatch(r"[\w.+-]+-(?:LICENSE|LICENCE|NOTICE)", path.name, re.IGNORECASE):
         return True
     if path.parent.name.endswith(".dist-info") and path.name in (
@@ -323,6 +347,73 @@ def allowed_text_file(path, data):
         return (re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", path.name) is not None
                 or (not path.suffix and data.startswith(b"#!")))
     return False
+
+
+def license_filename(path):
+    """Recognize complete notice filenames, including flattened wheel names.
+
+    Substring matches like LicenseProtection/mod.rs and copying.rs are source
+    code, not licenses. Structured metadata never receives this exemption.
+    """
+    name = path.name.split("__")[-1]
+    return path.suffix.lower() not in LICENSE_CODE_SUFFIXES and bool(
+        name.lower() in ("unlicense", "authors", "authors.txt", "authors.rst", "authors.md")
+        or LICENSE_NAME.fullmatch(name) or re.fullmatch(
+            r"[\w.+-]+[_-](?:LICENSE|LICENCE|NOTICE)(?:\.[\w.+-]+)?", name, re.IGNORECASE))
+
+
+def decode_license_text(path, data):
+    """Legacy upstream notices may use Latin-1 and form-feed page separators.
+
+    Preserve their bytes. This is restricted to named legal texts with a legal
+    heading; arbitrary binary blobs and structured metadata are still rejected.
+    """
+    if not license_filename(path):
+        return None
+    # Upstream RTF notices sometimes carry a trailing NUL terminator. Permit
+    # that terminator only for text RTF without embedded objects or binary data.
+    if path.suffix.lower() == ".rtf":
+        if not data.startswith(b"{\\rtf1") or re.search(rb"\\(?:object|objdata|pict|bin|filetbl)(?![A-Za-z])", data):
+            return None
+        data = data.rstrip(b"\x00")
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            text = data.decode(encoding)
+        except UnicodeError:
+            continue
+        if (all(char.isprintable() or char.isspace() for char in text)
+                and re.search(r"\b(?:copyright|permission|redistribution|license|licence|public domain)\b", text, re.I)):
+            return text
+    return None
+
+
+def inspect_cargo_license_declaration(path, data, counts):
+    """A Cargo license declaration is parsed metadata, never opaque TOML.
+
+    Only the notice collection's exact declaration filename is supported.
+    Inspect comments and all parsed keys/values using the existing content and
+    local-path policy. Other TOML files remain unsupported.
+    """
+    collection = path.parent.parent.name
+    if not ((path.name == "DECLARATION-Cargo.toml" and collection == "native-cargo-notices") or
+            (path.name == "DECLARED-LICENSE-Cargo.toml" and collection == "outlines-core-0.2.14-cargo")):
+        return False
+    try:
+        import tomllib
+        text = data.decode("utf-8")
+        value = tomllib.loads(text)
+    except (ImportError, UnicodeError, ValueError):
+        raise PrivacyError("invalid-cargo-license-declaration") from None
+    package = value.get("package")
+    if not isinstance(package, dict) or not all(isinstance(package.get(key), str) and package[key]
+                                              for key in ("name", "version", "license")):
+        raise PrivacyError("invalid-cargo-license-declaration")
+    if path.parent.name != package["name"] + "-" + package["version"]:
+        raise PrivacyError("cargo-license-declaration-identity-mismatch")
+    validate_metadata(value)
+    validate_metadata(text)  # Comments cannot hide local paths either.
+    counts["metadata_files"] += 1
+    return True
 
 
 def inspect_portable_resource(path, data, counts):
@@ -424,9 +515,19 @@ def inspect_safetensors(path, size, counts):
     return header
 
 
-def inspect_metadata_file(path, counts, public_copy):
+def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, approvals=None):
+    if reviewed_path is not None:
+        if __package__:
+            from .reviewed_resources import inspect
+        else:
+            from reviewed_resources import inspect
+        if inspect(path, reviewed_path, approvals, counts):
+            return
     suffix = path.suffix.lower()
     size = path.stat().st_size
+    if path.name in ("DECLARATION-Cargo.toml", "DECLARED-LICENSE-Cargo.toml") and size <= JSON_LIMIT:
+        if inspect_cargo_license_declaration(path, path.read_bytes(), counts):
+            return
     if path.name == "py.typed" or suffix in (".pth", ".pem", ".strings"):
         if size > JSON_LIMIT:
             raise PrivacyError("unreviewed-large-metadata")
@@ -450,6 +551,16 @@ def inspect_metadata_file(path, counts, public_copy):
             raise PrivacyError("unsupported-package-metadata-format")
         if not kind:
             if known_binary(path, prefix, size):
+                if __package__:
+                    from .macho_paths import inspect_macho_paths
+                else:
+                    from macho_paths import inspect_macho_paths
+                if not inspect_macho_paths(path, counts):
+                    if __package__:
+                        from .resource_metadata import inspect_resource
+                    else:
+                        from resource_metadata import inspect_resource
+                    inspect_resource(path, counts)
                 counts["opaque_binary_files"] += 1
                 return
             if size > JSON_LIMIT:
@@ -459,10 +570,28 @@ def inspect_metadata_file(path, counts, public_copy):
             data = path.read_bytes()
             kind = metadata_kind(data)
             if not kind:
+                license_text = decode_license_text(path, data)
+                if license_text is not None:
+                    if path.parent.name in ("embedded-pruned-notices", "embedded-source-notices"):
+                        if __package__:
+                            from .reviewed_resources import inspect_notice_text
+                        else:
+                            from reviewed_resources import inspect_notice_text
+                        inspect_notice_text(path, data)
+                    else:
+                        validate_metadata(license_text)
+                    counts["unreviewed_text_files"] += 1
+                    return
                 if decode_metadata_text(data) is None:
                     raise PrivacyError("unreviewed-binary-package-entry")
                 if not allowed_text_file(path, data):
                     raise PrivacyError("unsupported-package-file-format")
+                if __package__:
+                    from .privacy_text import inspect_text
+                else:
+                    from privacy_text import inspect_text
+                inspect_text(data, path.name)
+                counts["path_scanned_text_files"] = counts.get("path_scanned_text_files", 0) + 1
                 counts["unreviewed_text_files"] += 1
                 return
     if size > JSON_LIMIT:
@@ -480,10 +609,53 @@ def inspect_metadata_file(path, counts, public_copy):
     counts["metadata_files"] += 1
 
 
-def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
+STAPLED_TICKET_LIMIT = 64 * 1024
+
+
+def inspect_stapled_ticket(path, app, phase, counts):
+    """Recognize only the bounded outer App ticket, never a signature seal.
+
+    This is a privacy classification, not cryptographic ticket validation.
+    The publication flow separately requires Apple's ticket validation.
+    """
+    if (phase != "signed" or app.name != "LiveLingo.app"
+            or path != app / "Contents/CodeResources"
+            or not stat.S_ISREG(path.lstat().st_mode)):
+        raise PrivacyError("invalid-stapled-ticket")
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or not 4 <= info.st_size <= STAPLED_TICKET_LIMIT:
+                raise PrivacyError("invalid-stapled-ticket")
+            data = stream.read(STAPLED_TICKET_LIMIT + 1)
+    except OSError:
+        raise PrivacyError("invalid-stapled-ticket") from None
+    if len(data) != info.st_size or not data.startswith(b"s8ch"):
+        raise PrivacyError("invalid-stapled-ticket")
+    counts["opaque_binary_files"] += 1
+    counts["stapled_tickets"] += 1
+
+
+def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree", phase="final"):
+    if phase not in ("prepare", "final", "signed"):
+        raise PrivacyError("invalid-package-inspection-phase")
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise PrivacyError("package-root-not-real-directory")
+    if __package__:
+        from .reviewed_resources import entries, tree_prefix
+    else:
+        from reviewed_resources import entries, tree_prefix
+    app = root if (root / "Contents").is_dir() else root / "LiveLingo.app"
+    if phase == "signed":
+        if __package__:
+            from .signed_resource_review import approvals_for_app
+        else:
+            from signed_resource_review import approvals_for_app
+        approvals = approvals_for_app(app)
+    else:
+        approvals = entries()
+    prefix = tree_prefix(root)
     if layout in ("app-only", "dmg"):
         expected = {"LiveLingo.app"} if layout == "app-only" else {"LiveLingo.app", "Applications", "使用说明.txt"}
         if {p.name for p in root.iterdir()} != expected:
@@ -498,7 +670,8 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
     # files is an inventory, not a content-review count. The other counts make
     # exemptions and incomplete coverage visible to release callers.
     counts = {"files": 0, "excluded": 0, "manifests": 0, "metadata_files": 0,
-              "opaque_metadata_fields": 0, "opaque_binary_files": 0, "unreviewed_text_files": 0}
+              "opaque_metadata_fields": 0, "opaque_binary_files": 0, "unreviewed_text_files": 0,
+              "stapled_tickets": 0}
 
     def walk(directory):
         entries = sorted(directory.iterdir())
@@ -510,6 +683,10 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                          or (path.name == "CodeResources" and directory.name == "_CodeSignature"))):
                 raise PrivacyError("structured-metadata-symlink")
         for path in entries:
+            if path.name == "CodeResources" and directory.name != "_CodeSignature":
+                inspect_stapled_ticket(path, app, phase, counts)
+                counts["files"] += 1
+                continue
             if excluded(path.name):
                 if not omit_private:
                     raise PrivacyError("private-or-unrelated-package-entry")
@@ -519,7 +696,12 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                 if path.name not in APP_RESOURCES and not path.name.endswith(".lproj"):
                     raise PrivacyError("unexpected-app-resource")
             mode = path.lstat().st_mode
+            relative = prefix + path.relative_to(root).as_posix()
+            if relative.startswith("LiveLingo.app/"):
+                relative = relative[len("LiveLingo.app/"):]
             if stat.S_ISLNK(mode):
+                if relative in approvals:
+                    raise PrivacyError("reviewed-resource-symlink")
                 if path.suffix.lower() in STRUCTURED_SUFFIXES:
                     raise PrivacyError("structured-metadata-symlink")
                 validate_link(path, root, layout == "dmg")
@@ -529,11 +711,36 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree"):
                 counts["files"] += 1
                 if path.name.lower() in CONTENT_NAMES or path.name.lower().endswith(CONTENT_SUFFIXES):
                     raise PrivacyError("classroom-content-file")
-                inspect_metadata_file(path, counts, public_copy)
+                inspect_metadata_file(path, counts, public_copy, reviewed_path=relative, approvals=approvals)
             else:
                 raise PrivacyError("special-package-entry")
 
     walk(root)
+    # Preparation may carry a pending reference. A final app with an ASR runtime
+    # must bind its actual shipped audio library, even if its notice was removed
+    # or reverted to an old schema. Non-app input trees have no final App stage.
+    provenance = app / "Contents/Resources/LanguageRuntime/Licenses/ASR-audio/soundfile-binary-provenance.json"
+    if phase in ("final", "signed") and ((app / "Contents/Resources/ASRRuntime").exists()
+                             or provenance.exists() or provenance.is_symlink()):
+        if __package__:
+            from .binary_provenance import verify_app_provenance
+        else:
+            from binary_provenance import verify_app_provenance
+        verify_app_provenance(app)
+        counts["bound_binary_provenance"] = 1
+        return counts
+    if provenance.is_file() and not provenance.is_symlink():
+        value = read_json(provenance)
+        if value.get("schemaVersion") == 2:
+            if value.get("status") == "final-bound":
+                if __package__:
+                    from .binary_provenance import verify_app_provenance
+                else:
+                    from binary_provenance import verify_app_provenance
+                verify_app_provenance(app)
+                counts["bound_binary_provenance"] = 1
+            else:
+                counts["pending_binary_provenance"] = 1
     return counts
 
 
@@ -564,7 +771,7 @@ def copy_distribution_tree(source, destination, *, clone_files=False):
         return str(dst)
 
     with open_directory(source) as source_bound:
-        counts = inspect_tree(source, omit_private=True, public_copy=True)
+        counts = inspect_tree(source, omit_private=True, public_copy=True, phase="prepare")
         source_bound.require_bound()
         # Rebind after validation, then reserve only beneath a held parent.
         # A replaced/symlinked output parent must not redirect the copy.
@@ -577,7 +784,7 @@ def copy_distribution_tree(source, destination, *, clone_files=False):
                                 ignore=lambda directory, names: [name for name in names if excluded(name)])
                 reserved.require_bound()
                 source_bound.require_bound()
-    inspect_tree(destination)
+    inspect_tree(destination, phase="prepare")
     return counts
 
 
@@ -591,12 +798,21 @@ def main():
     check = sub.add_parser("check", help="read-only; rejects signed-package residues without editing them")
     check.add_argument("--root", type=Path, required=True)
     check.add_argument("--layout", choices=("tree", "app-only", "dmg"), default="tree")
+    check.add_argument("--phase", choices=("prepare", "final", "signed"),
+                       help="defaults to signed when the App has a signed-resource receipt; otherwise final")
     stage = sub.add_parser("copy", help="create a new unsigned distribution copy; preserve all sources")
     stage.add_argument("--source", type=Path, required=True)
     stage.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if sys.version_info < (3, 11):
+        print("privacy-package: Python 3.11 or newer is required; use a host interpreter", file=sys.stderr)
+        return 1
     try:
-        counts = (inspect_tree(args.root, layout=args.layout) if args.command == "check"
+        if args.command == "check" and args.phase is None:
+            app = args.root if (args.root / "Contents").is_dir() else args.root / "LiveLingo.app"
+            receipt = app / "Contents/Resources/LanguageRuntime/signed-resource-review.json"
+            args.phase = "signed" if receipt.exists() or receipt.is_symlink() else "final"
+        counts = (inspect_tree(args.root, layout=args.layout, phase=args.phase) if args.command == "check"
                   else copy_distribution_tree(args.source, args.output))
     except PrivacyError as error:
         print("privacy-package: " + error.args[0] + "; rebuild an unsigned copy", file=sys.stderr)
@@ -611,4 +827,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Helpers import the canonical module name. Keep their PrivacyError class
+    # identical to this CLI's catch clause rather than loading a second module.
+    sys.modules["privacy_package"] = sys.modules[__name__]
     sys.exit(main())

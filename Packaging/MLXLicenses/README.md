@@ -1,12 +1,47 @@
 # Bundled dependency notices and source
 
+Both preparation modes retain `embedded-source-notices`: verbatim LIBSVM,
+HDBSCAN and mimalloc header notices with portable hash-bound provenance. Other
+notice-bearing pruned headers are collected under `embedded-pruned-notices`.
+ASR additionally receives exact available Rust crate notices; missing versions
+fail preparation even when the wheel has its own LICENSE. Binary source paths
+are only a lower bound, not exhaustive Cargo.lock coverage. Registered exact
+Python releases also require their complete upstream lock's versions and
+checksums. ASR receives that hash-bound lock audit and all available notices
+from its lock, including crates with no observable binary source path. Common source
+archives retain their canonical LanguageRuntime location. The offline locks
+omit soxr together with librosa; native soxr cannot be reintroduced without a
+registered corresponding-source archive.
+
+The original legal files for 25 additional tokenizers 0.23.0rc0 crates are
+retained byte for byte, with official archive sizes and SHA-256 values in
+`native-cargo-notices/inventory.json`. Its complete upstream Cargo.lock has
+165 registry packages: 164 versions match the inventory, including one dev-only
+entry with no notice text. The uncollected hashbrown 0.17.0 is also dev-only. Removing
+only the explicit Python binding's dev-only `tempfile` edge leaves 138 registry
+packages conservatively required; all have exact-version notices. The hash-bound
+`native-cargo-notices/tokenizers-0.23.0rc0-lock-audit.json` records every
+package and the 27 dev-only exclusions. This conservative runtime graph is
+not a claim that all remaining crates are linked. Build,
+optional and platform edges stay required until exclusions are established.
+
 `runtime-manifest.json` in the enclosing LanguageRuntime records pinned Python packages and their direct license files. `AUDIT.json` records the verified collection scope.
 
 - `native-source-notices`: exact Python source release notices; MLX uses its identified upstream Git revision.
 - `native-cargo-notices`: exact Cargo.lock union and notice hashes. Optional, build and platform entries are included for coverage; this does not assert every crate is linked. MPL/CDDL source archives are under CorrespondingSource.
 - `mlx-0.32.2-native`: MLX, Metal C++, fmt, JSON, nanobind and robin-map notices and source provenance.
 - `CPython-3.13.7-20250902`: portable Python and upstream bundled dependency notices.
-- `GCC-runtime-13.4.0`: source archive and runtime license/exception texts for SciPy's GNU runtime dependencies; see its provenance limitation.
-- `ASR-audio`: publisher notices, exact binary provenance, build script, darwin.cmake and codec source archives. The source archive checksums are in inventory.json.
+- `GCC-runtime-13.4.0`: complete GNU base, exact publisher Darwin patch, pinned bottle formula, and runtime license/exception texts. The newer-host mapping patch is separate from the wheel source recipe.
+- `ASR-audio`: publisher notices, binary provenance with separate input and final-candidate stages, and all seven audio library sources. libogg 1.3.5, libvorbis 1.3.7, FLAC 1.4.3 and Opus 1.4 are statically linked into the LGPL libsndfile binary and are included as rebuild inputs, together with LAME, mpg123 and libsndfile. Their original copyright/license texts are retained. The original publisher script and darwin.cmake are inside the libsndfile archive. The added `offline-rebuild.sh` uses the bundled archives without downloads. Original and bundled hashes/sizes are separate in inventory.json.
 
 Sources are included for inspection and rebuilding the corresponding third-party components. The original upstream build recipes are retained; a byte-identical rebuild is not asserted. Dynamically loaded library files are present in the portable Python directories. A modified local App will require a fresh local code signature before macOS can run it. No additional restriction on rights granted by the respective third-party licenses is intended.
+
+`ASR-audio/soundfile-binary-provenance.json` starts as an unbound preparation reference. The assembly pipeline must measure the actual read-only ASR Python input and then bind the final App's actual dylib. `inputPath` is relative to that Python input root; `finalBundledPath` is relative to the App root. `inputExactMatch` compares the measured input with the pinned publisher asset. `exactMatch` compares the final bundled bytes with that same publisher asset; `finalMatchesInput` separately reports whether assembly preserved the measured input bytes. Pending/null fields are not release evidence. Any subsequent binary edit, including code signing, requires a new final hash and verification; an input match does not prove a final match.
+
+The offline audio recipe generates a libvorbis configure companion with the obsolete `-force_cpusubtype_ALL` flag removed, matching the publisher recipe's compatibility step. Its original configure file stays unchanged. It explicitly supplies CMake's 3.5 compatibility policy for older libsndfile build files when using CMake 4. Native AArch64 Darwin GCC requires the included publisher patch; the plain GNU base alone is insufficient. File-backed sections of the three GNU libraries match the pinned official bottle and wheel, supporting the documented source attribution; compiler-version metadata alone does not establish it.
+
+`source-preparation/SourceArchiveAudit.json` records source preparation, retained license hashes, explicitly optional omissions and dated file modifications. Each archive carries `MODIFICATIONS.json`; changed text files have dated in-file notices and the three changed GCC binary fixtures have adjacent dated notices. Build scripts, configure inputs, Automake test includes, man pages, Texinfo sources and prebuilt GCC manuals are retained. The complete GCC base retains every original release file, including tests and unselected frontends; original HTML, roff and Info documentation remains intact. Inferno's ten inline test modules are retained.
+
+`source-preparation/PrivacyResources.json` binds reviewed resources to exact App-relative paths and hashes. Both resource and corresponding-source references in `AUDIT.json` resolve relative to this Licenses directory. Source members, raw tar fields including NUL padding, normalized ownership/timestamps, and decoded source literals are checked. Public upstream examples and opaque regression fixtures require exact member hashes. Native loading dependencies and RPATH entries must use system locations or loader-relative paths; unnecessary Homebrew build search paths are removed from prepared copies. Upstream relative install IDs and delocate's unique DLC install IDs are retained as identities, without allowing them as non-system absolute loading dependencies or search directories. Format checks do not assert arbitrary binary contents are private-data free. Offline configure/dry-run tests cover all eight Autotools archives. The GCC check actually builds a native arm64 compiler and libgcc/libquadmath/libgfortran; full bootstrap and the GCC test suite are outside this bounded check. Cargo crates have no configure script; their manifests/library entry points are checked, and a Cargo build requires a separately available offline toolchain/dependency cache. No matching rebuilt binary is claimed.
+
+Runtime `MODIFICATIONS.json` files record Python AST-preserving encoding normalization, generated CPython directory relocation, generated NumPy/SciPy build-path omission, metadata/RECORD preparation, certificate label omission and portable native load paths. Unused development Makefile/pkgconfig/venv files are omitted; ordinary supported text and decoded Python constants retain the path check. Each model directory carries its own dated `MODIFICATIONS.json`; weights and retained inference vocabularies are preserved. Git/LFS repository metadata, unused prompt templates and Parakeet's unused training tokenizer model/vocabulary are omitted; Parakeet decoding retains `joint.vocabulary`. Cargo attribution declarations retain package/license/author provenance, with dependency and feature build tables omitted. Filenames accidentally matched by the old notice collector are listed separately in its inventory. Pillow notices originally below Tests are preserved under test-notices; both provenance and inventory record the upstream path.

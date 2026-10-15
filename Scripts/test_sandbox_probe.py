@@ -285,7 +285,9 @@ class StorageSourcesTests(unittest.TestCase):
 
     def test_fixtures_follow_the_callers_temporary_directory(self):
         self.assertEqual(self.root.parent, Path(tempfile.gettempdir()))
-        self.assertFalse(self.root.is_relative_to(SCRIPT.parent.parent))
+        repo = SCRIPT.parent.parent
+        if self.root.is_relative_to(repo):
+            self.assertTrue(self.root.is_relative_to(repo / "work"))
         self.assertEqual(self.repo.parent, self.root)
         self.assertEqual(self.output.parent, self.root)
 

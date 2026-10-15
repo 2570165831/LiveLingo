@@ -417,8 +417,27 @@ def nested_bundles(app_root):
     return bundles
 
 
-def sign(app_root, identity, keychain, entitlements, inherit_plist, found):
+def sign(app_root, identity, keychain, entitlements, inherit_plist, found, review_capture=None):
     """Sign inside-out: nested Mach-O files and bundles first, the outer app last."""
+    try:
+        from signed_resource_review import (capture_before_signing, write_capture_receipt,
+                                            finalize_signed_review)
+        from privacy_package import inspect_tree
+    except ImportError:
+        from Scripts.signed_resource_review import (capture_before_signing, write_capture_receipt,
+                                                    finalize_signed_review)
+        from Scripts.privacy_package import inspect_tree
+    if review_capture is None:
+        fail("--review-capture is required: new host receipt outside the App")
+    captured = capture_before_signing(app_root)
+    write_capture_receipt(app_root, review_capture, captured)
+    input_provenance = None
+    if (app_root / "Contents/Resources/ASRRuntime").exists():
+        try:
+            from binary_provenance import verify_app_provenance, finalize_app_provenance
+        except ImportError:
+            from Scripts.binary_provenance import verify_app_provenance, finalize_app_provenance
+        input_provenance = verify_app_provenance(app_root)
     main_executable = main_executable_path(app_root)
     entries = [(len(path.parts), 0, path, images, False)
                for path, images in found if path.resolve() != main_executable.resolve()]
@@ -427,6 +446,11 @@ def sign(app_root, identity, keychain, entitlements, inherit_plist, found):
     entries.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
     helpers = 0
     for _depth, kind, path, images, launchable in entries:
+        if kind == 0:
+            # Re-sign from a clean unsigned object. codesign --force alone can
+            # retain nonzero bytes from an older signature reservation.
+            from runtime_prepare import normalize_native_signature
+            normalize_native_signature(path)
         command = ["/usr/bin/codesign", "--force", "--sign", identity, "--keychain", keychain,
                    "--options", "runtime", "--timestamp"]
         if kind == 0:
@@ -439,6 +463,14 @@ def sign(app_root, identity, keychain, entitlements, inherit_plist, found):
             helpers += 1
         command.append(str(path))
         run(command)
+    if input_provenance is not None:
+        # Native signing changes the dylib's bytes. Update its actual final hash
+        # before the outer resource seal, keeping publisher/input claims separate.
+        finalize_app_provenance(app_root, input_provenance, final_stage="signed-candidate")
+    # Separate signed-stage approval, without altering the preparation index.
+    # Exact reconstruction, load paths and public strings precede the outer seal.
+    finalize_signed_review(app_root, captured)
+    inspect_tree(app_root, phase="signed")
     result = subprocess.run(["/usr/bin/codesign", "--remove-signature", str(app_root)],
                             capture_output=True, text=True)
     if result.returncode != 0:
@@ -451,6 +483,16 @@ def sign(app_root, identity, keychain, entitlements, inherit_plist, found):
 
 
 def verify(app_root, identity, max_minos, found, main_rpaths):
+    try:
+        from signed_resource_review import approvals_for_app
+        from privacy_package import PrivacyError
+    except ImportError:
+        from Scripts.signed_resource_review import approvals_for_app
+        from Scripts.privacy_package import PrivacyError
+    try:
+        approvals_for_app(app_root)
+    except PrivacyError as error:
+        fail("signed-resource review failed: " + error.args[0])
     run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", app_root])
     signature = run(["/usr/bin/codesign", "-d", "--verbose=4", app_root], check=False)
     details = (signature.stdout or "") + (signature.stderr or "")
@@ -521,7 +563,8 @@ def main():
         epilog="Examples:\n"
                "  Scripts/sign-offline-app.py --app work/OfflineCandidate/LiveLingo.app \\\n"
                "      --identity \"Developer ID Application: ... (TEAMID)\" \\\n"
-               "      --certificate /abs/developer-id.cer --keychain /abs/login.keychain-db\n"
+               "      --certificate /abs/developer-id.cer --keychain /abs/login.keychain-db \\\n"
+               "      --review-capture /abs/new-signing-run/before-signing.json\n"
                "  Scripts/sign-offline-app.py --verify-only --app work/OfflineCandidate/LiveLingo.app\n"
                "  Scripts/sign-offline-app.py --scan work/OfflineCandidate/LiveLingo.app/Contents/Resources/ASRRuntime\n",
     )
@@ -538,6 +581,8 @@ def main():
                         help="reject Mach-O files requiring a later macOS than this (default: 14.0)")
     parser.add_argument("--verify-only", action="store_true",
                         help="run every check without signing anything")
+    parser.add_argument("--review-capture", type=Path,
+                        help="new absolute host receipt outside the App; required before signing")
     parser.add_argument("--scan", type=Path, metavar="PATH",
                         help="read-only Mach-O inventory of a file or directory; exits non-zero on a "
                              "minimum-version violation")
@@ -550,6 +595,9 @@ def main():
     if args.scan is not None:
         scan_mode(args.scan, max_minos)
         return
+
+    if sys.version_info < (3, 11):
+        fail("Python 3.11 or newer is required; use a host interpreter")
 
     if not args.app:
         fail("--app is required unless --scan is used")
@@ -588,6 +636,9 @@ def main():
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
 
+    if args.review_capture is None:
+        fail("--review-capture is required before signing")
+
     preflight = check_min_version(app_root, found, max_minos) + symlink_violations(app_root)
     for path, images in found:
         preflight += dependency_violations(path, images, app_root, main_rpaths)
@@ -601,7 +652,7 @@ def main():
         inherit_plist = temporary / "inherit.entitlements"
         inherit_plist.write_bytes(plistlib.dumps({"com.apple.security.app-sandbox": True, INHERIT_ENTITLEMENT: True}))
         summary["helperExecutablesSigned"] = sign(app_root, args.identity, args.keychain, args.entitlements,
-                                                  inherit_plist, found)
+                                                  inherit_plist, found, args.review_capture)
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
 

@@ -7,30 +7,39 @@ source "${project_root}/Scripts/release-tools.sh"
 python_bin="${LIVELINGO_PYTHON:-/usr/bin/python3}"
 dmg=""
 mount_dir=""
+xattr_report=""
 identity=""
+privacy_phase="signed"
 detach_max_attempts=3
 detach_retry_delay=1
 dry_run=0
+candidate_only=0
 while (( $# > 0 )); do
   case "$1" in
-    --dmg|--mount-point|--identity|--detach-max-attempts|--detach-retry-delay)
+    --dmg|--mount-point|--xattr-report|--identity|--detach-max-attempts|--detach-retry-delay|--privacy-phase)
       (( $# >= 2 )) || fail "$1 缺少参数"
       case "$1" in
         --dmg) dmg="$2" ;;
         --mount-point) mount_dir="$2" ;;
+        --xattr-report) xattr_report="$2" ;;
         --identity) identity="$2" ;;
+        --privacy-phase) privacy_phase="$2" ;;
         --detach-max-attempts) detach_max_attempts="$2" ;;
         --detach-retry-delay) detach_retry_delay="$2" ;;
       esac
       shift 2 ;;
+    --candidate-only) candidate_only=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help)
-      print -r -- "用法：Scripts/verify-release-dmg.sh --dmg <DMG> [--identity <Authority>] [--mount-point <新目录>] [--detach-max-attempts <次数>] [--detach-retry-delay <秒>] [--dry-run]"
+      print -r -- "用法：Scripts/verify-release-dmg.sh --dmg <DMG> [--identity <Authority>] [--privacy-phase final|signed] [--mount-point <新目录>] [--detach-max-attempts <次数>] [--detach-retry-delay <秒>] [--dry-run]"
+      print -r -- "--candidate-only 仅做本地候选校验，不检查票据或 Gatekeeper。隐私检查默认使用 signed 阶段；真实自检需要宿主 Python 3.11 或更新版本。"
       print -r -- "无 DMG 或 dry-run 时明确跳过，不算发布验收。"
+      print -r -- "--xattr-report <新 JSON> 保存实际镜像内容及宿主 DMG 文件的扩展属性检查；默认在 DMG 旁新建记录目录。"
       exit 0 ;;
     *) fail "未知参数：$1" ;;
   esac
 done
+[[ "${privacy_phase}" == final || "${privacy_phase}" == signed ]] || fail "隐私阶段须为 final 或 signed"
 if [[ -z "${dmg}" ]] || (( dry_run )); then
   print -r -- "跳过真实发布自检：未提供真实产物或使用 --dry-run。"
   print -r -- "未挂载、未验证票据/签名、未评估 Gatekeeper；不能视为发布通过。"
@@ -39,6 +48,7 @@ fi
 [[ -f "${dmg}" && "${dmg}" == *.dmg ]] || fail "最终 DMG 不存在或不是 .dmg：${dmg}"
 dmg="${dmg:A}"
 [[ "${python_bin}" == /* && -x "${python_bin}" ]] || fail "Python 必须为绝对可执行路径"
+require_publication_python
 "${python_bin}" - "${detach_max_attempts}" "${detach_retry_delay}" <<'PY'
 import math, sys
 try:
@@ -52,10 +62,16 @@ if [[ -n "${mount_dir}" ]]; then
   check_write_path "${mount_dir}"
   check_write_path "${mount_dir:h}"
   [[ ! -e "${mount_dir}" && ! -L "${mount_dir}" ]] || fail "挂载目录已存在，拒绝复用"
-else
-  check_write_path "${dmg:h}"
 fi
-for tool in codesign hdiutil stapler spctl; do
+check_write_path "${dmg:h}"
+if [[ -n "${xattr_report}" ]]; then
+  xattr_report="${xattr_report:a}"
+  check_write_path "${xattr_report}"
+  [[ -d "${xattr_report:h}" && ! -e "${xattr_report}" && ! -L "${xattr_report}" ]] || fail "属性报告须为已有目录内的新文件"
+fi
+verify_tools=(codesign hdiutil)
+(( candidate_only )) || verify_tools+=(stapler spctl)
+for tool in "${verify_tools[@]}"; do
   resolve_release_tool "${tool}"
   case "${tool}" in
     codesign) codesign_bin="${REPLY}" ;;
@@ -64,18 +80,25 @@ for tool in codesign hdiutil stapler spctl; do
     spctl) spctl_bin="${REPLY}" ;;
   esac
 done
-"${stapler_bin}" validate "${dmg}"
+(( candidate_only )) || "${stapler_bin}" validate "${dmg}"
 "${codesign_bin}" --verify --strict --verbose=2 "${dmg}"
 [[ -z "${identity}" ]] || check_authority "${dmg}" "${identity}"
 "${hdiutil_bin}" verify "${dmg}"
+if (( ! candidate_only )); then
 assessment="$("${spctl_bin}" --assess --type open --context context:primary-signature --verbose=2 "${dmg}" 2>&1)" || fail "DMG Gatekeeper 评估失败：${assessment}"
 [[ "${assessment}" == *"Notarized Developer ID"* ]] || fail "DMG 评估没有返回 Notarized Developer ID：${assessment}"
 print -r -- "${assessment}"
+fi
 if [[ -n "${mount_dir}" ]]; then
   /bin/mkdir "${mount_dir}"
 else
-  mount_dir="$(/usr/bin/mktemp -d "${dmg:h}/release-check-XXXXXX")"
+  # Use the host temporary filesystem. Owners-disabled external volumes can
+  # reject explicit APFS image mount points even when the image is valid.
+  mount_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/livelingo-release-check-XXXXXX")"
+  mount_dir="${mount_dir:A}"
 fi
+[[ -n "${xattr_report}" ]] || xattr_report="$(/usr/bin/mktemp -d "${dmg:h}/metadata-check-XXXXXX")/mounted-image.json"
+"${python_bin}" "${project_root}/Scripts/release-state.py" outside-app "${mount_dir}" "${xattr_report}"
 mounted=0
 attach_started=0
 detach_failed=0
@@ -117,7 +140,7 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 attach_code=0
 attach_started=1
-attach_output="$("${hdiutil_bin}" attach -plist -readonly -nobrowse -mountpoint "${mount_dir}" "${dmg}")" || attach_code=$?
+attach_output="$("${hdiutil_bin}" attach -plist -readonly -nobrowse -noautoopen -mountpoint "${mount_dir}" "${dmg}")" || attach_code=$?
 # A failed attach may still report an attached device. Clean only that device.
 if device="$(print -r -- "${attach_output}" | "${python_bin}" "${project_root}/Scripts/release-state.py" attach-devices)"; then
   mounted=1
@@ -128,10 +151,16 @@ fi
 (( attach_code == 0 )) || fail "attach 失败（exit ${attach_code}），清理已返回的设备 ${device}"
 mounted_app="${mount_dir}/LiveLingo.app"
 [[ -d "${mounted_app}" && ! -L "${mounted_app}" ]] || fail "DMG 内缺少真实 LiveLingo.app 目录"
-check_package_privacy "${mount_dir}" dmg
-"${stapler_bin}" validate "${mounted_app}"
+"${python_bin}" "${project_root}/Scripts/distribution_xattrs.py" --image "${dmg}" --mounted-root "${mount_dir}" --report "${xattr_report}"
+print -r -- "实际镜像扩展属性检查：${xattr_report}（宿主文件属性单独记录，传输时须复核）"
+"${python_bin}" "${project_root}/Scripts/privacy_package.py" check --root "${mount_dir}" --layout dmg --phase "${privacy_phase}"
+(( candidate_only )) || "${stapler_bin}" validate "${mounted_app}"
 "${codesign_bin}" --verify --deep --strict --verbose=2 "${mounted_app}"
 [[ -z "${identity}" ]] || check_authority "${mounted_app}" "${identity}"
-"${spctl_bin}" --assess --type execute --verbose=2 "${mounted_app}"
+(( candidate_only )) || "${spctl_bin}" --assess --type execute --verbose=2 "${mounted_app}"
 detach_image || fail "自检结束但镜像仍挂载"
+if (( candidate_only )); then
+  print -r -- "本地候选自检通过：镜像、内置 App 严格签名与隐私检查通过；公证、装订和 Gatekeeper 未验收。"
+  exit 0
+fi
 print -r -- "最终 DMG 发布自检通过：DMG 与内置 App 票据、严格签名和 Gatekeeper 评估通过。"
