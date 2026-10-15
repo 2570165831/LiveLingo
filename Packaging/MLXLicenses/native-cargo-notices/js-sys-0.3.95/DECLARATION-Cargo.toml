@@ -1,0 +1,9 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "js-sys"
+version = "0.3.95"
+license = "MIT OR Apache-2.0"
+authors = ["The wasm-bindgen Developers"]
+repository = "https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys"
+homepage = "https://wasm-bindgen.github.io/wasm-bindgen/"
+description = "Bindings for all JS global objects and functions in all JS environments like\nNode.js and browsers, built on `#[wasm_bindgen]` using the `wasm-bindgen` crate.\n"

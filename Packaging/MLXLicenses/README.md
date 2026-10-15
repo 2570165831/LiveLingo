@@ -1,5 +1,30 @@
 # Bundled dependency notices and source
 
+Both preparation modes retain `embedded-source-notices`: verbatim LIBSVM,
+HDBSCAN and mimalloc header notices with portable hash-bound provenance. Other
+notice-bearing pruned headers are collected under `embedded-pruned-notices`.
+ASR additionally receives exact available Rust crate notices; missing versions
+fail preparation even when the wheel has its own LICENSE. Binary source paths
+are only a lower bound, not exhaustive Cargo.lock coverage. Registered exact
+Python releases also require their complete upstream lock's versions and
+checksums. ASR receives that hash-bound lock audit and all available notices
+from its lock, including crates with no observable binary source path. Common source
+archives retain their canonical LanguageRuntime location. The offline locks
+omit soxr together with librosa; native soxr cannot be reintroduced without a
+registered corresponding-source archive.
+
+The original legal files for 25 additional tokenizers 0.23.0rc0 crates are
+retained byte for byte, with official archive sizes and SHA-256 values in
+`native-cargo-notices/inventory.json`. Its complete upstream Cargo.lock has
+165 registry packages: 164 versions match the inventory, including one dev-only
+entry with no notice text. The uncollected hashbrown 0.17.0 is also dev-only. Removing
+only the explicit Python binding's dev-only `tempfile` edge leaves 138 registry
+packages conservatively required; all have exact-version notices. The hash-bound
+`native-cargo-notices/tokenizers-0.23.0rc0-lock-audit.json` records every
+package and the 27 dev-only exclusions. This conservative runtime graph is
+not a claim that all remaining crates are linked. Build,
+optional and platform edges stay required until exclusions are established.
+
 `runtime-manifest.json` in the enclosing LanguageRuntime records pinned Python packages and their direct license files. `AUDIT.json` records the verified collection scope.
 
 - `native-source-notices`: exact Python source release notices; MLX uses its identified upstream Git revision.

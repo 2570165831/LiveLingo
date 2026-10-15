@@ -1,0 +1,8 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "rustc-hash"
+version = "2.1.2"
+license = "Apache-2.0 OR MIT"
+authors = ["The Rust Project Developers"]
+repository = "https://github.com/rust-lang/rustc-hash"
+description = "A speedy, non-cryptographic hashing algorithm used by rustc"

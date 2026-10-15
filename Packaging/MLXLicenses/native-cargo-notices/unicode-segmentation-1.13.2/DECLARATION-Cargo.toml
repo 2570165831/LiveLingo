@@ -1,0 +1,9 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "unicode-segmentation"
+version = "1.13.2"
+license = "MIT OR Apache-2.0"
+authors = ["kwantam <kwantam@gmail.com>", "Manish Goregaokar <manishsmail@gmail.com>"]
+repository = "https://github.com/unicode-rs/unicode-segmentation"
+homepage = "https://github.com/unicode-rs/unicode-segmentation"
+description = "This crate provides Grapheme Cluster, Word and Sentence boundaries\naccording to Unicode Standard Annex #29 rules.\n"

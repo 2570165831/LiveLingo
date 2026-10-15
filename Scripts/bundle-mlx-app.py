@@ -34,6 +34,7 @@ from model_files import REQUIRED_MODEL_FILES, ModelFilesError, check_app_models,
 from model_storage_manifest import write_app_manifest
 from privacy_package import PrivacyError, copy_distribution_tree, distribution_manifest, inspect_tree
 from notice_copy import copy_notice_tree
+from native_notice_audit import audit as audit_native_notices
 try:
     from binary_provenance import record_input_provenance, verify_input_provenance, finalize_app_provenance
 except ImportError:
@@ -245,13 +246,19 @@ def validate_asr_python(root):
 
 
 def install_python_licenses(source_python, destination):
-    """Best-effort: collect the portable CPython's own license files at shallow depth."""
+    """Collect CPython's own shallow notices, preserving prepared notice layout.
+
+    The prepared Licenses tree already travels with the complete Python copy.
+    Flattening it duplicates third-party notices and loses the source-header
+    context required by the privacy parser.
+    """
     copies = 0
     for path in sorted(Path(source_python).rglob("*")):
         if not path.is_file() or path.is_symlink():
             continue
         relative = path.relative_to(source_python)
-        if len(relative.parts) > 3 or "site-packages" in relative.parts:
+        if (len(relative.parts) > 3 or "site-packages" in relative.parts
+                or relative.parts[0] == "Licenses"):
             continue
         if any(word in path.name.lower() for word in ("license", "licence", "notice", "copying")):
             flat_name = str(relative).replace("/", "__")
@@ -296,6 +303,17 @@ def main():
     if not (args.runtime / "runtime-manifest.json").is_file():
         fail("--runtime is missing runtime-manifest.json: %s" % args.runtime)
     validate_asr_python(args.asr_python)
+    try:
+        native_audits = {
+            "language": audit_native_notices(args.runtime / "python/lib/python3.13/site-packages",
+                                              REPO_ROOT / "Packaging/MLXLicenses"),
+            "asr": audit_native_notices(args.asr_python / "lib/python3.13/site-packages",
+                                         REPO_ROOT / "Packaging/MLXLicenses"),
+        }
+    except (PrivacyError, OSError, ValueError):
+        fail("native notice audit could not validate the explicit inputs")
+    if not all(result["passed"] for result in native_audits.values()):
+        fail("native notice audit failed; prepare inputs with complete exact-version notices first")
     # Bind the real input before any candidate-only native edits. Keep this
     # receipt in memory so copying the pending reference later cannot replace it.
     if not args.asr_service.is_file() or args.asr_service.is_symlink():
@@ -376,6 +394,7 @@ def main():
     audit_path = REPO_ROOT / "Packaging/MLXLicenses/AUDIT.json"
     manifest["nativeTransitiveNoticeAudit"] = json.loads(audit_path.read_text()) if audit_path.is_file() \
         else {"status": "pending"}
+    manifest["nativeTransitiveNoticeAudit"]["observableRustDependencies"] = native_audits["language"]
     for source in (REPO_ROOT / "Packaging/MLXLicenses").iterdir():
         target = resources / "LanguageRuntime/Licenses" / source.name
         if source.is_dir() and not target.is_symlink():
@@ -391,6 +410,7 @@ def main():
 
     asr_manifest = {
         "service": "qwen_asr_service.py",
+        "nativeTransitiveNoticeAudit": native_audits["asr"],
         "serviceSHA256": hashlib.sha256((resources / "ASRRuntime/qwen_asr_service.py").read_bytes()).hexdigest(),
         "python": "python/bin/python3",
         "pythonTree": "python",
@@ -417,6 +437,13 @@ def main():
             current_mode = path.stat().st_mode & 0o777
             if current_mode & 0o444 != 0o444:
                 path.chmod(current_mode | 0o444)
+
+    # Check the notice files actually copied, not only the repository inputs.
+    for runtime, python in ((resources / "LanguageRuntime", resources / "LanguageRuntime/python"),
+                            (resources / "ASRRuntime/python", resources / "ASRRuntime/python")):
+        result = audit_native_notices(python / "lib/python3.13/site-packages", runtime / "Licenses")
+        if not result["passed"]:
+            fail("native notice audit failed in the assembled candidate")
 
     # Inventory the final model data (including installed notices) before the
     # App's resource seal is signed. Never calculate 14 GB of hashes at launch.

@@ -1,0 +1,9 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "pyo3-async-runtimes"
+version = "0.28.0"
+license = "Apache-2.0"
+authors = ["Andrew J Westlake <awestlake87@yahoo.com>", "David Hewitt <mail@davidhewitt.dev>"]
+repository = "https://github.com/PyO3/pyo3-async-runtimes"
+homepage = "https://github.com/PyO3/pyo3-async-runtimes"
+description = "PyO3 bridges from Rust runtimes to Python's Asyncio library"

@@ -1,0 +1,8 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "pkg-config"
+version = "0.3.33"
+license = "MIT OR Apache-2.0"
+authors = ["Alex Crichton <alex@alexcrichton.com>"]
+repository = "https://github.com/rust-lang/pkg-config-rs"
+description = "A library to run the pkg-config system tool at build time in order to be used in\nCargo build scripts.\n"

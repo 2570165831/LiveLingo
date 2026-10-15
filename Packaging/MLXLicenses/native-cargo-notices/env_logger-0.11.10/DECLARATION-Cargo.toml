@@ -1,0 +1,7 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "env_logger"
+version = "0.11.10"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rust-cli/env_logger"
+description = "A logging implementation for `log` which is configured via an environment\nvariable.\n"

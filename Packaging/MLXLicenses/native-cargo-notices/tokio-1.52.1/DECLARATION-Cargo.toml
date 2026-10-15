@@ -1,0 +1,9 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "tokio"
+version = "1.52.1"
+license = "MIT"
+authors = ["Tokio Contributors <team@tokio.rs>"]
+repository = "https://github.com/tokio-rs/tokio"
+homepage = "https://tokio.rs"
+description = "An event-driven, non-blocking I/O platform for writing asynchronous I/O\nbacked applications.\n"

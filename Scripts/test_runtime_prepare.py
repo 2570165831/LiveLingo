@@ -61,6 +61,61 @@ class RuntimePreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(privacy.PrivacyError, "supplement-license-needs-safe-relative-name"):
             self.prepare(mode="language")
 
+    def test_asr_receives_common_source_supplements_even_with_direct_wheel_license(self):
+        notice = self.repo / "Packaging/MLXLicenses/embedded-source-notices/LIBSVM-LICENSE.txt"
+        notice.parent.mkdir(parents=True)
+        data = b"Copyright fixture libsvm\nRedistribution and use permitted.\n"
+        notice.write_bytes(data)
+        self.prepare(mode="asr")
+        self.assertEqual((self.output / "Licenses/embedded-source-notices/LIBSVM-LICENSE.txt").read_bytes(), data)
+
+    def test_pruned_source_headers_survive_in_both_runtime_modes(self):
+        files = {
+            "fixture/development.pxd": b"# Copyright unique Cython contributor\n# BSD license\ncdef int value\n",
+            "sklearn/svm/src/libsvm/svm.cpp": b"/* Copyright unique libsvm contributor\nRedistribution and use permitted.\n*/\nint value;\n",
+        }
+        self.add_distribution("fixture", "1.0", {"fixture/__init__.py": b"value=1\n", **files,
+            "fixture-1.0.dist-info/licenses/LICENSE": b"Copyright direct fixture\n"})
+        header = b"/* Copyright unique allocator contributor\nMIT License\n*/\n#define VALUE 1\n"
+        self.write("include/python3.13/internal/allocator.h", header)
+        for mode in ("language", "asr"):
+            with self.subTest(mode=mode):
+                self.output = self.root / ("output-" + mode)
+                report = self.prepare(mode)
+                rows = report["prunedSourceNotices"]
+                self.assertEqual(len(rows), 3)
+                python = self.output / "python" if mode == "language" else self.output
+                for row in rows:
+                    self.assertFalse((python / row["source"]).exists())
+                    preserved = (self.output / row["copy"]).read_bytes()
+                    self.assertIn(b"Copyright unique", preserved)
+                    self.assertNotIn(b"int value", preserved)
+                    self.assertNotIn(b"#define", preserved)
+                    self.assertEqual(hashlib.sha256(preserved).hexdigest(), row["sha256"])
+
+    def test_notice_copy_corruption_stops_pruning_gate(self):
+        path = self.write("include/fixture.h", b"/* Copyright unique fixture\nMIT License\n*/\nint value;\n")
+        target = self.root / "Licenses"
+        with patch.object(Path, "write_bytes", return_value=0):
+            with self.assertRaises((privacy.PrivacyError, OSError)):
+                runtime.preserve_pruned_notice(path, Path("include/fixture.h"), target)
+
+    def test_embedded_source_notice_cannot_hide_private_paths(self):
+        self.write("include/fixture.h", b"/* Copyright fixture\nBuilt at /synthetic/private/source\n*/\nint value;\n")
+        with self.assertRaisesRegex(privacy.PrivacyError, "local-path-metadata"):
+            self.prepare()
+
+    def test_asr_uncovered_exact_rust_version_fails_even_with_direct_license(self):
+        self.add_distribution("fixture", "1.0", {"fixture/__init__.py": b"value=1\n",
+            "fixture/native.so": b"registry/src/index.crates.io-abc/unique-crate-9.8.7/src/lib.rs\0",
+            "fixture-1.0.dist-info/licenses/LICENSE": b"Copyright direct fixture\n"})
+        with patch.object(runtime, "inspect_tree"):
+            with self.assertRaisesRegex(privacy.PrivacyError, "native-transitive-notices-missing"):
+                self.prepare()
+        report = json.loads((self.output / "runtime-preparation.json").read_text())
+        self.assertEqual(report["missingLicenseFiles"], [])
+        self.assertEqual(report["nativeTransitiveNoticeAudit"]["missingCrateNotices"], ["unique-crate-9.8.7"])
+
     def write(self, relative, data):
         path = self.base / relative
         path.parent.mkdir(parents=True, exist_ok=True)

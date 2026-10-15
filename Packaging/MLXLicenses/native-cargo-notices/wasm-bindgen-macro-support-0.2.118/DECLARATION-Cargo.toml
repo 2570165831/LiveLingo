@@ -1,0 +1,9 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "wasm-bindgen-macro-support"
+version = "0.2.118"
+license = "MIT OR Apache-2.0"
+authors = ["The wasm-bindgen Developers"]
+repository = "https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro-support"
+homepage = "https://wasm-bindgen.github.io/wasm-bindgen/"
+description = "Implementation APIs for the `#[wasm_bindgen]` attribute"

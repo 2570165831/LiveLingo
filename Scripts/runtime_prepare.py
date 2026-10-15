@@ -296,6 +296,30 @@ def normalize_archive_metadata(path):
     return changed
 
 
+def preserve_pruned_notice(path, relative, notice_root):
+    """A notice-bearing source header must survive pruning byte for byte."""
+    if __package__:
+        from .embedded_notices import extract_notice
+    else:
+        from embedded_notices import extract_notice
+    original = path.read_bytes()
+    notice = extract_notice(original)
+    if notice is None:
+        return None
+    digest = hashlib.sha256(notice).hexdigest()
+    # Label the excerpt without changing any of its original notice bytes.
+    retained = b"Verbatim source header notice:\n\n" + notice
+    target = notice_root / "embedded-pruned-notices" / ("NOTICE-" + digest + ".txt")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_bytes(retained)
+    if target.is_symlink() or target.read_bytes() != retained:
+        raise PrivacyError("pruned-source-notice-not-preserved")
+    return {"source": relative.as_posix(), "sourceSHA256": hashlib.sha256(original).hexdigest(),
+            "copy": target.relative_to(notice_root.parent).as_posix(), "excerptSHA256": digest,
+            "sha256": hashlib.sha256(retained).hexdigest()}
+
+
 def prepare(base, output, *, mode="language", repo=REPO, clone=True):
     base, output, repo = Path(base), Path(output), Path(repo)
     stdlib, site = portable_layout(base)
@@ -359,11 +383,18 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
     python.mkdir(exist_ok=True)
     notice_root = output / "Licenses"
     removed, changed, modifications = Counter(), Counter(), []
-    removed_files = []
+    removed_files, pruned_notices = [], []
     for path in entries:
         relative = path.relative_to(base)
         reason = removal_reason(relative, stdlib, owners)
         if reason:
+            # Entire unlocked packages are not distributed. For every other
+            # removed text file, preserve its leading copyright/license block;
+            # a direct wheel LICENSE alone does not cover embedded components.
+            if reason != "unlocked-packages" and not path.is_symlink():
+                notice = preserve_pruned_notice(path, relative, notice_root)
+                if notice is not None:
+                    pruned_notices.append(notice)
             removed[reason] += 1
             removed_files.append({"file": relative.as_posix(), "reason": reason,
                                   "bytes": path.lstat().st_size, "symlink": path.is_symlink()})
@@ -454,6 +485,13 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
                               "reason": "Removed paths and pre-modification hashes must not describe the prepared copy.",
                               "originalSHA256": hashlib.sha256((site / record).read_bytes()).hexdigest(),
                               "preparedSHA256": hashlib.sha256((destination_site / record).read_bytes()).hexdigest()})
+    if __package__:
+        from .native_notice_audit import audit, copy_asr_notices
+    else:
+        from native_notice_audit import audit, copy_asr_notices
+    native_notices = audit(destination_site, supplements)
+    if mode == "asr":
+        copy_asr_notices(supplements, notice_root, native_notices)
     if mode == "language":
         for name in RUNTIME_MODULES:
             source = repo / "Scripts/mlx_runtime" / name
@@ -480,11 +518,13 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
                     "workerHashes": {name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in RUNTIME_MODULES},
                     "nativeTransitiveNoticeAudit": json.loads((supplements / "AUDIT.json").read_text())}
         manifest["nativeTransitiveNoticeAudit"]["distributionNoticeCorrections"] = notice_material_changes
+        manifest["nativeTransitiveNoticeAudit"]["observableRustDependencies"] = native_notices
         (output / "runtime-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     after_files = [p for p in python.rglob("*") if p.is_file() and not p.is_symlink()]
     report = {"mode": mode, "pythonVersion": version, "components": {name: dist.version for name, dist in selected.items()},
               "before": dict(before), "afterPython": {"files": len(after_files), "bytes": sum(p.stat().st_size for p in after_files)},
               "removed": dict(removed), "removedFiles": removed_files, "noticeMaterialChanges": notice_material_changes,
+              "prunedSourceNotices": pruned_notices, "nativeTransitiveNoticeAudit": native_notices,
               "changed": dict(changed), "licenses": inventory, "missingLicenseFiles": missing}
     (output / "runtime-preparation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     (output / "MODIFICATIONS.json").write_text(json.dumps({"contributor": "Li", "date": "2026-10-11",
@@ -493,6 +533,8 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
     if missing:
         raise PrivacyError("runtime-license-files-missing")
     inspect_tree(output)
+    if not native_notices["passed"]:
+        raise PrivacyError("runtime-native-transitive-notices-missing")
     return report
 
 

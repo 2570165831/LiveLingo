@@ -497,6 +497,18 @@ class PrivacyPackageTests(unittest.TestCase):
         for relative in bundle.REQUIRED_MODEL_FILES:
             self.assertTrue((output / "Contents/Resources/Models" / relative / "model-00002-of-00002.safetensors").is_file())
 
+    def test_bundle_refuses_uncovered_transitive_notice_before_copying(self):
+        bundle = load_script("bundle-mlx-app")
+        repo, _, _, _, output, args = self.bundle_inputs(bundle)
+        asr = self.root / "asr-python"
+        extension = self.write("lib/python3.13/site-packages/fixture/native.so",
+                               b"registry/src/index.crates.io-abc/unique-crate-9.8.7/src/lib.rs\0", asr)
+        before = extension.read_bytes()
+        with self.assertRaisesRegex(SystemExit, "native notice audit failed"):
+            self.run_bundle(bundle, repo, args)
+        self.assertFalse(output.exists())
+        self.assertEqual(extension.read_bytes(), before)
+
     def test_bundle_entry_point_refuses_models_missing_weights_shards_or_loader_files(self):
         bundle = load_script("bundle-mlx-app")
         repo, _, _, models, output, args = self.bundle_inputs(bundle)
