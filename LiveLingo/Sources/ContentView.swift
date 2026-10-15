@@ -583,7 +583,7 @@ struct ContentView: View {
     private func segmentRow(_ segment: TranscriptSegment) -> some View {
         ChineseRecognitionCaptionRow(segment: segment, textSize: readingSize, stream: model.finalCaptionStream,
             target: model.captionDisplayLanguage, converter: model.chineseScriptConverter,
-            state: model.chineseRecognitionState, availability: { model.chineseRecognitionAvailability(for: segment) },
+            state: model.chineseRecognitionState, availability: { await model.inspectChineseRecognitionAvailability(for: segment) },
             recognize: { model.recognizeCaptionAsChinese(segment.id) },
             cancel: { model.cancelChineseRecognition(segment.id) },
             undo: { model.undoChineseRecognition(segment.id) })
@@ -882,6 +882,8 @@ struct CaptionHistoryScrollView<Rows: View>: View {
     private let readLatestID: (@MainActor () -> UUID?)?
     @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.scenePhase) private var scenePhase
+    @State private var lastFollowedCaptionID: UUID?
+    @State private var captionArrivedWhileUnfocused = false
 
     init(latestID: UUID?, followLatest: Bool, captionAnchor: Binding<UUID?>,
          readLatestID: (@MainActor () -> UUID?)? = nil,
@@ -894,28 +896,63 @@ struct CaptionHistoryScrollView<Rows: View>: View {
     }
 
     var body: some View {
-        ScrollView { rows() }
-            .scrollPosition(id: $captionAnchor, anchor: .top)
-            .background(CaptionFollowWindowFocusObserver(onBecomeKey: followIfEnabled)
-                .frame(width: 0, height: 0).accessibilityHidden(true))
-            .onChange(of: latestID) { followIfEnabled() }
-            .onChange(of: followLatest) { followIfEnabled() }
-            .onChange(of: controlActiveState) {
-                if controlActiveState == .key { followIfEnabled() }
-            }
-            .onChange(of: scenePhase) {
-                if scenePhase == .active { followIfEnabled() }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                followIfEnabled()
-            }
+        ScrollViewReader { proxy in
+            ScrollView { rows() }
+                .scrollPosition(id: $captionAnchor, anchor: .top)
+                .background(CaptionFollowWindowFocusObserver(onBecomeKey: followAfterFocus)
+                    .frame(width: 0, height: 0).accessibilityHidden(true))
+                .onChange(of: latestID) {
+                    if latestID == nil { captionArrivedWhileUnfocused = false }
+                    else if followLatest && (controlActiveState != .key || scenePhase != .active) {
+                        captionArrivedWhileUnfocused = true
+                    }
+                    followIfEnabled()
+                }
+                .task {
+                    // A reconstructed history can inherit an existing reading
+                    // anchor. Establish its baseline without treating it as arrival.
+                    if lastFollowedCaptionID == nil, let readingAnchor = captionAnchor {
+                        let baseline = readLatestID.map { $0() } ?? latestID
+                        lastFollowedCaptionID = baseline
+                        await Task.yield()
+                        guard !Task.isCancelled, lastFollowedCaptionID == baseline,
+                              captionAnchor == readingAnchor else { return }
+                        proxy.scrollTo(readingAnchor, anchor: .top)
+                    }
+                    followAfterFocus()
+                }
+                .onChange(of: followLatest) {
+                    captionArrivedWhileUnfocused = false
+                    followIfEnabled(force: true)
+                }
+                .onChange(of: controlActiveState) {
+                    if controlActiveState == .key { followAfterFocus() }
+                }
+                .onChange(of: scenePhase) {
+                    if scenePhase == .active { followAfterFocus() }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    followAfterFocus()
+                }
+        }
     }
 
-    private func followIfEnabled() {
+    private func followAfterFocus() {
+        let catchUp = captionArrivedWhileUnfocused
+        if controlActiveState == .key && scenePhase == .active { captionArrivedWhileUnfocused = false }
+        // A deferred layout can restore an old anchor after a background
+        // publication. Retain that arrival until the classroom is key/active.
+        followIfEnabled(force: catchUp)
+    }
+
+    private func followIfEnabled(force: Bool = false) {
         guard followLatest else { return }
-        // Do not change the toggle on a manual scroll. Reading history while
-        // follow is on still lasts until the next caption or focus restoration.
-        captionAnchor = readLatestID.map { $0() } ?? latestID
+        let current = readLatestID.map { $0() } ?? latestID
+        // Focus restoration can repair a deferred background update, but is
+        // never itself new content. Saved-course reading positions stay put.
+        guard force || current != lastFollowedCaptionID else { return }
+        lastFollowedCaptionID = current
+        captionAnchor = current
     }
 }
 
@@ -2255,7 +2292,7 @@ struct ChineseRecognitionCaptionRow: View {
     var target: OutputLanguage = .simplifiedChinese
     var converter: ChineseScriptConverter = .shared
     @ObservedObject var state: ChineseRecognitionPresentationState
-    let availability: () -> ChineseRecognitionAvailability
+    let availability: @MainActor () async -> ChineseRecognitionAvailability
     let recognize: () -> Void
     let cancel: () -> Void
     let undo: () -> Void
@@ -2268,10 +2305,9 @@ struct ChineseRecognitionCaptionRow: View {
 
     private var showsActions: Bool {
         #if DEBUG
-        isHovered || hoveredForTesting
-        #else
-        isHovered
+        if AppRuntimeEnvironment.isUnitTesting { return hoveredForTesting }
         #endif
+        return isHovered
     }
 
     var body: some View {
@@ -2297,7 +2333,7 @@ struct ChineseRecognitionCaptionRow: View {
                 recognize: recognize, cancel: performCancellation, undo: undo,
                 availabilityState: menuAvailability)
         }
-        .overlay(alignment: .topTrailing) {
+        .overlay(alignment: .topLeading) {
             if hasShownActions || showsActions {
                 // Mount after the first hover, then retain the native control
                 // while its popup owns the pointer. Its cached availability
@@ -2318,11 +2354,16 @@ struct ChineseRecognitionCaptionRow: View {
                 .opacity(showsActions ? 1 : 0)
                 .allowsHitTesting(showsActions)
                 .accessibilityHidden(!showsActions)
-                .padding(.top, 4)
-                .padding(.trailing, 12)
+                // The timestamp gutter leaves source and translation text
+                // selectable and uncovered, including narrow classrooms.
+                .padding(.top, 20 + 17 * textSize / 18)
+                .padding(.leading, 16)
             }
         }
         .onHover { hovered in
+            #if DEBUG
+            guard !AppRuntimeEnvironment.isUnitTesting else { return }
+            #endif
             if hovered && !isHovered {
                 menuAvailability.resolve(using: availability)
                 hasShownActions = true
@@ -2354,8 +2395,20 @@ struct ChineseRecognitionCaptionRow: View {
 final class ChineseRecognitionMenuAvailabilityState: ObservableObject {
     @Published private(set) var value = ChineseRecognitionAvailability.unavailable("正在检查本句录音…")
 
-    func resolve(using provider: () -> ChineseRecognitionAvailability) {
-        value = provider()
+    private var resolution: Task<Void, Never>?
+    private var token = UUID()
+
+    func resolve(using provider: @escaping @MainActor () async -> ChineseRecognitionAvailability) {
+        resolution?.cancel()
+        let current = UUID()
+        token = current
+        resolution = Task { [weak self] in
+            guard !Task.isCancelled else { return }
+            let result = await provider()
+            guard let self, !Task.isCancelled, self.token == current else { return }
+            self.value = result
+            self.resolution = nil
+        }
     }
 }
 
@@ -2385,7 +2438,7 @@ struct ChineseRecognitionObservingMenu: View {
 struct ChineseRecognitionResolvingMenu: View {
     let status: ChineseRecognitionStatus?
     let canUndo: Bool
-    let availability: () -> ChineseRecognitionAvailability
+    let availability: @MainActor () async -> ChineseRecognitionAvailability
     let recognize: () -> Void
     let cancel: () -> Void
     let undo: () -> Void
@@ -2393,7 +2446,7 @@ struct ChineseRecognitionResolvingMenu: View {
     @ObservedObject private var availabilityState: ChineseRecognitionMenuAvailabilityState
 
     init(status: ChineseRecognitionStatus?, canUndo: Bool,
-         availability: @escaping () -> ChineseRecognitionAvailability,
+         availability: @escaping @MainActor () async -> ChineseRecognitionAvailability,
          courseState: ChineseRecognitionPresentationState,
          recognize: @escaping () -> Void, cancel: @escaping () -> Void, undo: @escaping () -> Void,
          availabilityState: ChineseRecognitionMenuAvailabilityState? = nil) {
@@ -2490,9 +2543,11 @@ struct ChineseRecognitionCaptionStatus: View {
     var body: some View {
         if let status = presentation.statusText {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                if presentation.isBusy {
+                if presentation.isRecognizing || (presentation.isBusy && !presentation.canCancel) {
                     ProgressView().controlSize(.small)
                         .accessibilityHidden(true)
+                } else if presentation.canCancel {
+                    Image(systemName: "clock").accessibilityHidden(true)
                 } else if presentation.isFailure {
                     Image(systemName: "exclamationmark.triangle")
                         .foregroundStyle(ClassroomPalette.failure)

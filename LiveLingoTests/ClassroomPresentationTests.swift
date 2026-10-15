@@ -49,26 +49,67 @@ final class CaptionFollowLatestTests: XCTestCase {
         try await assertLatestVisible(fixture)
     }
 
-    func testBecomingKeyCatchesUpWithoutAnotherCaption() async throws {
+    func testBecomingKeyPreservesHistoryWithoutAnotherCaption() async throws {
         let fixture = try host(controlState: .active, phase: .active)
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
         fixture.state.controlState = .key
         NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: fixture.window)
         try await settle(fixture)
-        try await assertLatestVisible(fixture)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
         XCTAssertFalse(fixture.window.isKeyWindow, "Key state is injected, never borrowed from the user")
     }
 
-    func testBecomingActiveCatchesUpWithoutAnotherCaption() async throws {
+    func testReconstructedHistoryKeepsExistingReadingAnchorWithoutNewCaption() async throws {
+        let fixture = try host(controlState: .key, phase: .active)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await readHistory(fixture)
+        let readingAnchor = fixture.state.anchor
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
+        fixture.state.historyIdentity = UUID()
+        try await settle(fixture)
+        XCTAssertEqual(fixture.state.anchor, readingAnchor)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
+        XCTAssertFalse(fixture.window.isKeyWindow)
+    }
+
+    func testFocusCatchesUnfocusedArrivalAfterOlderAnchorWasRestoredThenClearsCatchup() async throws {
+        let fixture = try host(controlState: .inactive, phase: .inactive)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        fixture.state.ids.append(UUID())
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        // Model a late background layout writing its older reading anchor
+        // back after the new caption's original follow request.
+        try await readHistory(fixture)
+        fixture.state.controlState = .key
+        fixture.state.phase = .active
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        fixture.state.controlState = .inactive
+        fixture.state.phase = .inactive
+        try await settle(fixture)
+        try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
+        fixture.state.controlState = .key
+        fixture.state.phase = .active
+        try await settle(fixture)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
+    }
+
+    func testBecomingActivePreservesHistoryWithoutAnotherCaption() async throws {
         let fixture = try host(controlState: .inactive, phase: .inactive)
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
         fixture.state.phase = .active
         try await settle(fixture)
-        try await assertLatestVisible(fixture)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
     }
 
     func testNativeKeyNotificationOnlyFollowsTheOwningWindow() async throws {
@@ -76,27 +117,29 @@ final class CaptionFollowLatestTests: XCTestCase {
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
         let other = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
         other.alphaValue = 0
         other.isReleasedWhenClosed = false
         defer { other.close() }
         NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: other)
         try await settle(fixture)
-        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
         NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: fixture.window)
         try await settle(fixture)
-        try await assertLatestVisible(fixture)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
         XCTAssertFalse(fixture.window.isKeyWindow)
     }
 
-    func testNativeApplicationActivationNotificationCatchesUpWithoutActivating() async throws {
+    func testNativeApplicationActivationPreservesHistoryWithoutNewCaption() async throws {
         let fixture = try host(controlState: .inactive, phase: .inactive)
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
         NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApplication.shared)
         try await settle(fixture)
-        try await assertLatestVisible(fixture)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
         XCTAssertFalse(NSApplication.shared.isActive)
     }
 
@@ -228,6 +271,7 @@ private final class CaptionFollowFixtureState: ObservableObject {
     @Published var ids = (0..<24).map { _ in UUID() }
     @Published var follow = true
     @Published var anchor: UUID?
+    @Published var historyIdentity = UUID()
     @Published var controlState: ControlActiveState
     @Published var phase: ScenePhase
     init(controlState: ControlActiveState, phase: ScenePhase) {
@@ -250,6 +294,7 @@ private struct CaptionFollowFixtureView: View {
             }
             .scrollTargetLayout()
         }
+        .id(state.historyIdentity)
         .environment(\.controlActiveState, state.controlState)
         .environment(\.scenePhase, state.phase)
     }
@@ -277,11 +322,11 @@ final class ClassroomPresentationTests: XCTestCase {
         try await checkBackgroundCaptionArrival(controlState: .inactive, phase: .inactive)
     }
 
-    func testReturningKeyClassroomCatchesUpWithoutAnotherCaption() async throws {
+    func testReturningKeyClassroomPreservesSavedCourseReadingPosition() async throws {
         try await checkBackgroundCaptionArrival(controlState: .active, phase: .active, refocus: true)
     }
 
-    func testReturningActiveClassroomCatchesUpWithoutAnotherCaption() async throws {
+    func testReturningActiveClassroomPreservesSavedCourseReadingPosition() async throws {
         try await checkBackgroundCaptionArrival(controlState: .inactive, phase: .inactive, refocus: true)
     }
 
@@ -315,6 +360,7 @@ final class ClassroomPresentationTests: XCTestCase {
         try XCTUnwrap(bindings.anchor).wrappedValue = evidence[evidence.count - 3].id
         try await settle(view)
         XCTAssertGreaterThan(history.contentView.bounds.minY, 100)
+        let readingOffset = history.contentView.bounds.minY
         var latest = TranscriptSegment(startTime: 80, endTime: 89,
             english: "A new synthetic caption while another application owns focus.",
             chinese: "其他应用使用焦点期间到达的一段合成字幕。")
@@ -343,6 +389,11 @@ final class ClassroomPresentationTests: XCTestCase {
             model.loadPresentationForTesting(phase: appPhase, evidence: evidence + [latest], notebook: notebook)
         }
         try await settle(view)
+        if refocus {
+            XCTAssertEqual(history.contentView.bounds.minY, readingOffset, accuracy: 2)
+            XCTAssertFalse(window.isKeyWindow)
+            return
+        }
         XCTAssertEqual(history.contentView.bounds.minY, 0, accuracy: 3)
         let row = try XCTUnwrap(descendants(view).first {
             $0.identifier?.rawValue == "classroom-caption-\(latest.id)"

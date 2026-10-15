@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 enum ChineseRecognitionStatus: Equatable, Sendable {
-    case waitingForRealtime, recognizing, saving, cancelled, failed(String), completed
+    case waitingForRealtime, pending, recognizing, saving, cancelled, failed(String), completed
 }
 
 struct ChineseRecognitionAvailability: Equatable, Sendable {
@@ -51,6 +51,9 @@ struct ChineseRecognitionDependencies {
 /// Resolve only the caption's complete recorded range. Never silently submit
 /// a neighbouring caption, partial recording, or the first 90 seconds of it.
 enum ChineseRecognitionAudio {
+    #if DEBUG
+    @TaskLocal static var inspectionForTesting: (@Sendable () -> Void)?
+    #endif
     struct Slice: Sendable {
         let recording: URL
         let frames: Range<Int>
@@ -98,7 +101,10 @@ enum ChineseRecognitionAudio {
 
     static func slice(segment: TranscriptSegment, directory: URL?, ranges: [SessionAudioRange],
                       retainedChunks: [TranscriptionWorkRecord] = []) throws -> Slice {
-        try SensitiveFileIO.withoutDatalessMaterialization {
+        #if DEBUG
+        inspectionForTesting?()
+        #endif
+        return try SensitiveFileIO.withoutDatalessMaterialization {
             do { return try localSlice(segment: segment, directory: directory, ranges: ranges) }
             catch Failure.unavailable {
                 guard let chunk = retainedChunks.first(where: {

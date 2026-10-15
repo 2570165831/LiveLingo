@@ -131,7 +131,7 @@ final class SingleWordEvidenceTests: XCTestCase, @unchecked Sendable {
             "These controls must exercise weak original acoustics, not just bypass that condition")
     }
 
-    func testCapturedNoiseIsUntranscribedAndRealAnswersSurviveProductionSelection() async throws {
+    func testCapturedNoiseIsNoSpeechAndRealAnswersSurviveProductionSelection() async throws {
         for row in try fixtures() {
             let url = root.appendingPathComponent(row.audioFile)
             let before = try TranscriptionAttemptCache.fingerprint(url)
@@ -142,16 +142,17 @@ final class SingleWordEvidenceTests: XCTestCase, @unchecked Sendable {
                     transcriber: { _, model, enhanced, mode in
                         try calls.transcribe(row, model: model, enhanced: enhanced, mode: mode)
                     }, speechAnalyzer: { try calls.analyze($0) })
-                if row.truth == "no-speech", row.id != "floor-5" {
+                let rejectedNoise = row.truth == "no-speech" && row.id != "floor-5"
+                if rejectedNoise {
                     XCTAssertTrue(output.text.isEmpty, row.id)
-                    XCTAssertEqual(output.failureReason, .emptyOutput, row.id)
+                    XCTAssertEqual(output.failureReason, .noSpeech, row.id)
                     XCTAssertNil(output.candidate, row.id)
                     XCTAssertGreaterThan(calls.analysisCount, 0, row.id)
                     XCTAssertEqual(calls.probeCount, 1, "The quality and source checks reuse the exact-range head")
                 } else {
                     XCTAssertFalse(output.text.isEmpty, row.id)
                 }
-                XCTAssertFalse(output.noSpeech, "A rejected word retains audio and explicit retry")
+                XCTAssertEqual(output.noSpeech, rejectedNoise, "Rejected noise is terminal; real answers must survive")
                 XCTAssertEqual(try TranscriptionAttemptCache.fingerprint(url), before, row.id)
             }
         }

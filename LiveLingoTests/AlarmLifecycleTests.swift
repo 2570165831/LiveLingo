@@ -68,7 +68,8 @@ final class AlarmLifecycleTests: XCTestCase {
         let model: AppModel
     }
     private func fixture(failure: FailureSwitch? = nil, writerPreparation: WriterPreparationGate? = nil,
-                         translation: CaptionTranslationDependencies = .unavailable) throws -> Fixture {
+                         translation: CaptionTranslationDependencies = .unavailable,
+                         chineseRecognition: ChineseRecognitionDependencies = .unavailable) throws -> Fixture {
         let root = TestFixtureDirectory.root.appendingPathComponent("Alarm-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let suite = "LiveLingo-Test-\(UUID())"
@@ -79,7 +80,7 @@ final class AlarmLifecycleTests: XCTestCase {
             enableMicrophoneWatchdog: false, enableCaptureHealthWatchdog: false)
         let queue = LearningReviewQueue(journalURL: root.appendingPathComponent("review.json"),
             observeSleep: false, diagnostics: .disabled, generate: { _, _, _, _, _ in throw CancellationError() })
-        let model = AppModel(reviewQueue: queue, pipeline: pipeline, translation: translation, notes: .unavailable,
+        let model = AppModel(reviewQueue: queue, pipeline: pipeline, translation: translation, notes: .unavailable, chineseRecognition: chineseRecognition,
                              backgroundServices: false, defaults: defaults, recoveryDirectory: root)
         addTeardownBlock { @MainActor in
             await model.retireAlarmTasksForTesting()
@@ -105,6 +106,45 @@ final class AlarmLifecycleTests: XCTestCase {
         let buffer = pcm(value)
         return input.copy(buffer.audioBufferList, frames: Int(buffer.frameLength), observedEnd: end)
     }
+    func testAlarmRolloverHandsQueuedChineseRequestToSavedCourse() async throws {
+        var calls = 0
+        let f = try fixture(chineseRecognition: .init { _, _ in
+            calls += 1
+            return .init(text: "警报前课程的中文原文。", languageMode: .chinese, language: "zh", decode: .forced,
+                         generatedTokens: 12, policy: 1)
+        })
+        let first = f.root.appendingPathComponent("first")
+        let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
+        for second in 1...3 {
+            let samples = pcm(0.125, frames: 16_000)
+            XCTAssertEqual(input.copy(samples.audioBufferList, frames: 16_000, observedEnd: Double(second)), .accepted)
+            await input.drain()
+        }
+        f.model.receiveCaptionForTesting("A synthetic caption before alarm.", start: 0, end: 3)
+        let caption = try XCTUnwrap(f.model.segments.first)
+        f.model.recognizeCaptionAsChinese(caption.id)
+        XCTAssertEqual(f.model.chineseRecognitionState.statuses[caption.id], .waitingForRealtime)
+        XCTAssertEqual(calls, 0)
+        trigger(f.model)
+        f.model.alarmCountdownTickForTesting(now: 133)
+        try await TestTaskLifetime.value(try XCTUnwrap(f.model.alarmRolloverTaskForTesting))
+        await f.model.waitForAlarmArchivesForTesting()
+        let saved = try XCTUnwrap(f.model.alarmArchivedModelsForTesting.first)
+        XCTAssertEqual(saved.chineseRecognitionState.statuses[caption.id], .pending)
+        XCTAssertEqual(try SessionStore(directory: first).load()?.pendingChineseRecognition?.first?.id, caption.id)
+        XCTAssertNil(f.model.chineseRecognitionState.statuses[caption.id])
+        XCTAssertTrue(f.model.isRecording)
+        // Manual work remains parked while the next live course owns realtime.
+        // The old saved course retains an executable/cancellable request.
+        await f.model.stopSavedCourseForTesting()
+        try await eventually { calls == 1 }
+        await saved.chineseRecognitionTaskForTesting(caption.id)?.value
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(try SessionStore(directory: first).load()?.segments.first(where: { $0.id == caption.id })?.english,
+                       "警报前课程的中文原文。")
+        XCTAssertNil(try SessionStore(directory: first).load()?.pendingChineseRecognition)
+    }
+
     func testBothPreferencesDefaultOnAndExplicitOffPersists() throws {
         let f = try fixture()
         XCTAssertTrue(f.model.alarmDetectionEnabled)

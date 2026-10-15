@@ -623,6 +623,23 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         XCTAssertEqual(segment, original)
     }
 
+    func testSlowMenuInspectionDoesNotBlockAndStaleResultCannotReplaceNewerInspection() async throws {
+        let resolution = ChineseRecognitionMenuAvailabilityState()
+        var old: CheckedContinuation<ChineseRecognitionAvailability, Never>?
+        resolution.resolve {
+            await withCheckedContinuation { old = $0 }
+        }
+        for _ in 0..<20 where old == nil { await Task.yield() }
+        XCTAssertNotNil(old)
+        XCTAssertFalse(resolution.value.isAvailable)
+        resolution.resolve { .available }
+        for _ in 0..<20 where !resolution.value.isAvailable { await Task.yield() }
+        XCTAssertTrue(resolution.value.isAvailable)
+        old?.resume(returning: .unavailable("A stale recording inspection"))
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertTrue(resolution.value.isAvailable)
+    }
+
     func testResolvingMenuChecksRecordingWhenSharedActionsAppear() async throws {
         var availabilityReads = 0
         let resolution = ChineseRecognitionMenuAvailabilityState()
@@ -694,7 +711,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
 
         init(segment: TranscriptSegment, state: ChineseRecognitionPresentationState,
              resolution: ChineseRecognitionMenuAvailabilityState, stream: FinalCaptionState,
-             availability: @escaping () -> ChineseRecognitionAvailability,
+             availability: @escaping @MainActor () async -> ChineseRecognitionAvailability,
              recognize: @escaping () -> Void, undo: @escaping () -> Void) {
             var row = ChineseRecognitionCaptionRow(segment: segment, textSize: 18, stream: stream,
                 state: state, availability: availability, recognize: recognize, cancel: {}, undo: undo)

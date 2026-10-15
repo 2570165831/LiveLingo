@@ -169,6 +169,12 @@ struct ChineseRecognitionRowPresentation {
         }
         let busyReason: String?
         switch status {
+        case .pending?:
+            isBusy = false
+            canCancel = true
+            statusText = "待重新识别：可按中文重新识别，或取消排队请求。"
+            busyReason = nil
+            isFailure = false
         case .waitingForRealtime?:
             isBusy = true
             canCancel = true
@@ -213,10 +219,11 @@ struct ChineseRecognitionRowPresentation {
             : courseActionsAvailability.reason ?? "课程当前不可操作，请稍后重试。"
         canRecognize = availability.isAvailable && courseActionsAvailability.isAvailable && !isBusy
         showsUndo = canUndo
-        self.canUndo = canUndo && !isBusy && courseActionsAvailability.isAvailable
+        self.canUndo = canUndo && !isBusy && status != .pending && courseActionsAvailability.isAvailable
         unavailableReason = busyReason ?? courseReason ?? (availability.isAvailable ? nil
             : availability.reason ?? "此句的录音已不可用，无法按中文重新识别。")
-        undoUnavailableReason = canUndo ? busyReason ?? courseReason : nil
+        undoUnavailableReason = canUndo ? busyReason ?? courseReason
+            ?? (status == .pending ? "本句仍有待重新识别请求；请先执行或取消请求，再撤销。" : nil) : nil
     }
 }
 

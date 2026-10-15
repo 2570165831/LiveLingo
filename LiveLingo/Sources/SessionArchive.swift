@@ -93,6 +93,9 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
     /// The audio subsystem owns the durable work queue, including retry counts.
     var transcriptionJournalPath: String?
     var revisionHistory: [SessionInputRevision]
+    /// Immutable inputs for manual requests, including a request whose inference
+    /// was interrupted. Nil preserves the frozen format for ordinary courses.
+    var pendingChineseRecognition: [TranscriptSegment]? = nil
     var createdAt: Date
     var updatedAt: Date
     /// When live capture started and the UTC offset in force there. Nil for
@@ -191,10 +194,18 @@ struct SessionSnapshot: Codable, Equatable, Sendable {
             throw SessionStoreError.invalidState("会话包含重复的稳定标识")
         }
         let retiredBatchIDs = Set(revisionHistory.flatMap { $0.retainedBatches.map(\.id) })
+        let chineseRequests = pendingChineseRecognition ?? []
+        guard chineseRequests.count <= 8,
+              Set(chineseRequests.map(\.id)).count == chineseRequests.count,
+              chineseRequests.allSatisfy({ request in
+                  (request.sessionID == nil || request.sessionID == sessionID)
+                      && request.inputRevision >= 0 && request.inputRevision <= inputRevision
+                      && segments.contains(where: { $0.id == request.id })
+              }) else { throw SessionStoreError.invalidState("中文重识别排队记录无效") }
         guard batches.allSatisfy({ !retiredBatchIDs.contains($0.id) }) else {
             throw SessionStoreError.invalidState("失效笔记批次只能保留在修订历史中")
         }
-        for segment in segments + batches.flatMap(\.evidence) {
+        for segment in segments + batches.flatMap(\.evidence) + chineseRequests {
             guard segment.startTime.isFinite, segment.endTime.isFinite,
                   segment.startTime >= 0, segment.endTime >= segment.startTime,
                   segment.endTime <= TranscriptSegment.maximumTimestamp,
@@ -1382,7 +1393,7 @@ enum SessionCloudOpenPreparation {
 }
 
 enum SessionArchiveCoding {
-    static let currentReaderVersion = 5
+    static let currentReaderVersion = 6
     /// Keep the frozen schema-1 payload and input fingerprints unchanged. The
     /// envelope/row gates old readers before they can discard new semantics.
     static func minimumReaderVersion(for data: Data) throws -> Int {
@@ -1400,6 +1411,8 @@ enum SessionArchiveCoding {
             return false
         }
         let object = try JSONSerialization.jsonObject(with: data)
+        // Reader 5 knows manual corrections but would silently erase requests.
+        if containsField(object, keys: ["pendingChineseRecognition"]) { return 6 }
         // An older reader must not erase a manual source correction or undo.
         if containsField(object, keys: ["isChineseOriginal", "chineseRecognitionOriginal"]) { return 5 }
         // Versions 2/3 can decode the failed caption but would silently erase

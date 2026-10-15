@@ -89,6 +89,15 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     private(set) var chineseRecognitionOriginal: ChineseRecognitionOriginal?
     var canUndoChineseRecognition: Bool { isChineseOriginal && chineseRecognitionOriginal != nil }
 
+    /// The automatic journal intentionally retains its original recognition.
+    /// Replaying that exact predecessor is not a competing ASR candidate. Keep
+    /// the relationship in the archive so undo also restores journal agreement.
+    func supersedesAutomaticTranscript(text: String, language: String?) -> Bool {
+        isChineseOriginal && chineseRecognitionOriginal.map {
+            $0.english == text && $0.sourceLanguage == language
+        } == true
+    }
+
     /// Content-only undo state: identity, audio times and input revision belong
     /// to the current caption. This value cannot recursively contain a backup.
     struct ChineseRecognitionOriginal: Codable, Equatable, Sendable {
