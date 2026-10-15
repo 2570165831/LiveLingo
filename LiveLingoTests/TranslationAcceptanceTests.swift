@@ -167,7 +167,7 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
         for (source, recent, expected) in [
             ("Lashari's principle says the equilibrium shifts to relieve the stress.", "",
-             "Lashari's principle says the equilibrium shifts to relieve the stress."),
+             "Le Chatelier's principle says the equilibrium shifts to relieve the stress."),
             ("Lagrange's principle tells us how the system responds to stress.", chemistry,
              "Lagrange's principle tells us how the system responds to stress."),
             ("The Lagrange's principle explains the stress on an equilibrium when K c is fixed.", "",
@@ -3424,6 +3424,30 @@ extension TranslationAcceptanceTests {
 
 
 extension TranslationAcceptanceTests {
+    func testIssue7LashariCorrectionRetainsChemicalEquilibriumGuards() {
+        let chemistry = "Adding reactants shifts the chemical equilibrium and changes concentration under stress."
+        for (source, recent, expected) in [
+            ("Lashari's principle says the equilibrium shifts to relieve the stress.", "",
+             "Le Chatelier's principle says the equilibrium shifts to relieve the stress."),
+            ("Use Lashari's principle to discuss stress.", chemistry,
+             "Use Le Chatelier's principle to discuss stress."),
+            ("In static equilibrium, use Lashari's principle to discuss stress-concentration factors.", "",
+             "In static equilibrium, use Le Chatelier's principle to discuss stress-concentration factors.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), expected, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(expected, recentContext: recent), expected)
+        }
+        for source in [
+            "Lashari's principle describes the stress in static equilibrium.",
+            "Lashari's principle describes chemical equilibrium and concentration.",
+            "Lashari's principle describes stress and concentration.",
+            "Lashari's principle describes stress concentration in disequilibrium.",
+            "Compare Lashari's principle with Le Chatelier's principle in chemical equilibrium under stress."
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+    }
+
     func testIssue7RealPrincipleNamesSurviveEvenChemicalContext() {
         let chemistry = "Adding reactants shifts the chemical equilibrium and changes concentration under stress."
         for name in ["Lagrange", "Schrodinger"] {

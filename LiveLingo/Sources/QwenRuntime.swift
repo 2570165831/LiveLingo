@@ -2984,6 +2984,18 @@ enum AcademicInputNormalizer {
         }
         // Preserve real principle names even in chemical-equilibrium context.
         // Context cannot prove that a recognized name was an ASR mistake.
+        // Lashari is a known ASR rendering; retain its original chemistry guards.
+        let equilibriumContext = recentContext + " " + normalized
+        if normalized.range(of: "Chatelier", options: .caseInsensitive) == nil,
+           contains(#"\bequilibri(?:um|a)\b"#, in: equilibriumContext),
+           contains(#"\bstress(?:es|ed)?\b"#, in: equilibriumContext),
+           contains(chemicalEquilibriumCue, in: equilibriumContext) {
+            normalized = replacing(
+                pattern: #"\bLashari'?s\s+principle\b"#,
+                in: normalized,
+                with: "Le Chatelier's principle"
+            )
+        }
 
         if normalized.range(of: "Faraday", options: .caseInsensitive) != nil,
            normalized.range(of: "magnetic flux", options: .caseInsensitive) != nil {
@@ -3049,6 +3061,13 @@ enum AcademicInputNormalizer {
             in: text, with: "s = ut + ½at²"
         )
         return text
+    }
+
+    // Keep the original chemical-equilibrium evidence for the Lashari ASR alias.
+    private static let chemicalEquilibriumCue = #"\b(?:reactants?|reagents?|(?<!stress\s)concentrations?|(?:chemical|reversible|forward|reverse)\s+reactions?|equilibrium\s+(?:shifts?|shifted|constant|mixture)|shifts?\s+the\s+equilibrium|products?\s+side|exothermic|endothermic|partial\s+pressures?)\b|(?-i:\bK\s*(?:sub\s+)?[cp]\b)"#
+
+    private static func contains(_ pattern: String, in source: String) -> Bool {
+        source.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     private static func replacing(pattern: String, in source: String, with replacement: String) -> String {
