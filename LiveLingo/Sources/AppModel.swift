@@ -3991,7 +3991,10 @@ final class AppModel: ObservableObject {
         guard case .saved = phase else { return }
         Task {
             do { try await parkSavedProcessing() }
-            catch { archiveError = "处理暂停时保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
+            catch {
+                archiveError = "处理暂停时保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+                sessionSnapshot?.processing.recordFailure(archiveError!, source: .storage)
+            }
         }
     }
 

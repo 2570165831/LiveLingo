@@ -2324,6 +2324,42 @@ final class CaptionIdentityTests: XCTestCase {
         }
     }
 
+    func testIssue30PauseSaveFailureOutranksEarlierSavedNoticeAndClearsOnRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("PauseSaveFailure-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var snapshot = SessionSnapshot()
+        snapshot.processing.paused = true
+        snapshot.segments = [.init(startTime: 0, endTime: 1,
+            english: "Synthetic saved source.", sessionID: snapshot.sessionID)]
+        _ = try SessionStore(directory: root).save(snapshot)
+        let model = try makeModel(.unavailable)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        XCTAssertNotNil(model.savedSessionDirectory, "The synthetic course must be open before checking its status")
+        var updated = try XCTUnwrap(model.segments.first)
+        updated.completeTranslation("更新后的译文。", targetCode: model.outputLanguage.rawValue)
+        model.loadPresentationForTesting(phase: .saved(root), evidence: [updated], notice: "导入完成，已保存。")
+        var configuration = AppModel.PrivacyExitConfiguration()
+        configuration.flush = { [weak model] in
+            let error = CocoaError(.fileWriteOutOfSpace)
+            model?.failBoundAutosaveForTesting(error)
+            throw error
+        }
+        model.configurePrivacyExitForTesting(configuration)
+        model.pauseSavedProcessing()
+        try await eventually(within: .seconds(20)) { model.archiveError?.hasPrefix("处理暂停时保存失败") == true }
+        let failure = try XCTUnwrap(model.archiveError)
+        XCTAssertEqual(model.errorMessage, failure)
+        model.configurePrivacyExitForTesting(.init())
+        model.retrySavedSessionWrite()
+        try await eventually { !model.archiveLoading }
+        XCTAssertNil(model.archiveError)
+        XCTAssertEqual(model.errorMessage, "导入完成，已保存。")
+        let saved = try XCTUnwrap(SessionStore(directory: root).load())
+        XCTAssertEqual(saved.segments.first?.english, "Synthetic saved source.")
+        XCTAssertEqual(saved.segments.first?.chinese, "更新后的译文。")
+    }
+
     func testIssue12TranscriptionNoticeFormattingClampsUnsafeTimesAndKeepsNormalTruncation() throws {
         let model = try makeModel(.unavailable)
         model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: 61.9, end: 125.9, message: "Synthetic issue"))
