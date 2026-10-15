@@ -4163,6 +4163,12 @@ final class AppModel: ObservableObject {
                 return
             }
         }
+        // A retained menu can deliver an action while the course is switching.
+        // Reject that action without consuming the durable queued intent.
+        if pendingChineseRecognition[id] != nil, !chineseRecognitionPermission(for: input).isAvailable {
+            chineseRecognitionState.statuses[id] = .pending
+            return
+        }
         let availability = chineseRecognitionAvailability(for: input)
         guard availability.isAvailable else {
             chineseRecognitionState.statuses[id] = .failed(availability.reason ?? "本句录音不可用，原句未改。")
