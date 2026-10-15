@@ -1252,6 +1252,7 @@ final class AppModel: ObservableObject {
     #endif
     private var summaryTask: Task<Void, Never>?
     private var stopOverlapStarted = false
+    @Published private var manualStopInProgress = false
     private var summaryScheduleTask: Task<Void, Never>?
     private var summaryScheduleGeneration = 0
     private var noteAdmission = CaptionNoteGate()
@@ -1327,6 +1328,10 @@ final class AppModel: ObservableObject {
     }
     private var privacyExitConfiguration: PrivacyExitConfiguration?
     var chooseOutputDirectoryForTesting: (@MainActor () async -> URL?)?
+    #if !LIVELINGO_CLI
+    var confirmLiveStopForTesting: (@MainActor () -> RecordingQuitConfirmation.Choice)?
+    var manualStopPendingForTesting: Bool { manualStopInProgress }
+    #endif
     #endif
     private var processingTask: Task<Void, Never>?
     private var processingTaskID: UUID?
@@ -1564,7 +1569,7 @@ final class AppModel: ObservableObject {
     var isPaused: Bool { phase == .paused }
     var hasActiveSession: Bool { isRecording || isPaused || (alarmRolloverInProgress && pipeline.alarmCaptureIsActive) }
     var canPauseRecording: Bool { hasActiveSession && !alarmRolloverSwitching }
-    var sessionSwitchBlocked: Bool { alarmRolloverInProgress || preparingApplicationExit || phase.isBusy || archiveLoading }
+    var sessionSwitchBlocked: Bool { manualStopInProgress || alarmRolloverInProgress || preparingApplicationExit || phase.isBusy || archiveLoading }
     var isLiveOnly: Bool {
         if savedSessionDirectory != nil { return false }
         return (activeStorageMode ?? selectedStorageMode) == .liveOnly
@@ -2720,6 +2725,45 @@ final class AppModel: ObservableObject {
     func clearExportStatus() { exportStatus = nil }
 
     func stop() {
+        #if !LIVELINGO_CLI
+        guard !manualStopInProgress else { return }
+        guard hasActiveSession, activeStorageMode == .liveOnly, !preparingApplicationExit else {
+            beginManualStop()
+            return
+        }
+        manualStopInProgress = true
+        let identity = sessionID, epoch = generation
+        let choice: RecordingQuitConfirmation.Choice
+        #if DEBUG
+        if let confirmLiveStopForTesting { choice = confirmLiveStopForTesting() }
+        else { choice = RecordingQuitConfirmation.presentLiveStop(phase: phase) }
+        #else
+        choice = RecordingQuitConfirmation.presentLiveStop(phase: phase)
+        #endif
+        guard sessionID == identity, generation == epoch, hasActiveSession,
+              !preparingApplicationExit else { manualStopInProgress = false; return }
+        switch choice {
+        case .continueSession:
+            manualStopInProgress = false
+        case .quitWithoutSaving:
+            manualStopInProgress = false
+            beginManualStop()
+        case .saveAndQuit:
+            Task {
+                defer { manualStopInProgress = false }
+                guard await convertCurrentSessionToRecording() == .converted,
+                      sessionID == identity, generation == epoch, hasActiveSession,
+                      !preparingApplicationExit else { return }
+                beginManualStop()
+            }
+        }
+        #else
+        beginManualStop()
+        #endif
+    }
+
+    /// Automatic capture failures and application exit use stopSession directly.
+    private func beginManualStop() {
         clearAlarmReminder()
         if alarmRolloverInProgress {
             alarmStopRequested = true
