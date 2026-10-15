@@ -1609,12 +1609,14 @@ final class AppModel: ObservableObject {
         guard case .saved = phase, let processing = sessionSnapshot?.processing,
               let reason = processing.captureError ?? (processing.lastErrorSource == .capture ? processing.lastError : nil),
               !reason.isEmpty else { return message }
+        let interruption = "这节课曾提前停止采集，停止后的内容未录入：\(reason)"
+        if let error = unresolvedSaveError ?? archiveError ?? setupError, error != reason {
+            return error + "\n" + interruption
+        }
         if let notice = sessionNotice,
            notice == Self.recordingStoppedNotice(message: reason, segmentCount: segments.count),
            unresolvedSaveError == nil { return notice }
-        let interruption = "这节课曾提前停止采集，停止后的内容未录入：\(reason)"
-        guard let message, message != reason, message != sessionNotice else { return interruption }
-        return interruption + "\n" + message
+        return interruption
     }
 
     /// A save failure that is still unresolved outranks an informational notice,

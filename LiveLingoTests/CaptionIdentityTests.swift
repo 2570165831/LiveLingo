@@ -2316,8 +2316,8 @@ final class CaptionIdentityTests: XCTestCase {
             model.dismissSessionNotice()
             XCTAssertTrue(model.errorMessage?.contains(reason) == true, "Dismissing an ordinary notice cannot erase capture history")
             model.failBoundAutosaveForTesting(CocoaError(.fileWriteOutOfSpace))
-            XCTAssertTrue(model.errorMessage?.hasPrefix("这节课曾提前停止采集") == true)
-            XCTAssertTrue(model.errorMessage?.contains("保存失败") == true)
+            XCTAssertTrue(model.errorMessage?.components(separatedBy: "\n").first?.contains("保存失败") == true,
+                          "The single-line status bar must show the unresolved save failure first")
             XCTAssertTrue(model.errorMessage?.contains(reason) == true, "Both failures must remain visible")
             try await model.flushSavedCourseForTesting()
             XCTAssertTrue(model.errorMessage?.contains(reason) == true)
