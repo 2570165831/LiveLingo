@@ -2292,6 +2292,38 @@ final class CaptionIdentityTests: XCTestCase {
                        snapshot.segments[0].chinese + "\n")
     }
 
+    func testIssue48ReopenedCaptureInterruptionSurvivesStorageErrorsAndNoticeDismissal() async throws {
+        let reason = "电脑进入休眠，音频采集已结束。"
+        for legacy in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("CaptureInterruption-\(UUID())")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            var snapshot = SessionSnapshot()
+            snapshot.processing.paused = true
+            snapshot.processing.lastError = legacy ? reason : "旧的存储失败"
+            snapshot.processing.lastErrorSource = legacy ? .capture : .storage
+            snapshot.processing.captureError = legacy ? nil : reason
+            _ = try SessionStore(directory: root).save(snapshot)
+            let model = try makeModel(.unavailable)
+            model.loadPresentationForTesting(phase: .idle, evidence: [])
+            try await model.openSavedSession(root, allowAutomaticProcessing: false)
+            XCTAssertNotNil(model.savedSessionDirectory, "The synthetic course must be open before checking its status")
+            XCTAssertTrue(model.errorMessage?.hasPrefix("这节课曾提前停止采集") == true)
+            XCTAssertTrue(model.errorMessage?.contains(reason) == true)
+            model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: 0, end: 1, message: "Synthetic saved notice"))
+            XCTAssertTrue(model.sessionNotice?.contains("Synthetic saved notice") == true)
+            XCTAssertFalse(model.errorMessage?.contains("Synthetic saved notice") == true,
+                           "Status details already show the separate session notice")
+            model.dismissSessionNotice()
+            XCTAssertTrue(model.errorMessage?.contains(reason) == true, "Dismissing an ordinary notice cannot erase capture history")
+            model.failBoundAutosaveForTesting(CocoaError(.fileWriteOutOfSpace))
+            XCTAssertTrue(model.errorMessage?.hasPrefix("这节课曾提前停止采集") == true)
+            XCTAssertTrue(model.errorMessage?.contains("保存失败") == true)
+            XCTAssertTrue(model.errorMessage?.contains(reason) == true, "Both failures must remain visible")
+            try await model.flushSavedCourseForTesting()
+            XCTAssertTrue(model.errorMessage?.contains(reason) == true)
+        }
+    }
+
     func testIssue12TranscriptionNoticeFormattingClampsUnsafeTimesAndKeepsNormalTruncation() throws {
         let model = try makeModel(.unavailable)
         model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: 61.9, end: 125.9, message: "Synthetic issue"))

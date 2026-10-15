@@ -1605,7 +1605,16 @@ final class AppModel: ObservableObject {
 
     var errorMessage: String? {
         if case .failed(let message) = phase { return message }
-        return (isRecording ? captureHealthNotice : nil) ?? unresolvedSaveError ?? sessionNotice ?? archiveError ?? setupError
+        let message = (isRecording ? captureHealthNotice : nil) ?? unresolvedSaveError ?? sessionNotice ?? archiveError ?? setupError
+        guard case .saved = phase, let processing = sessionSnapshot?.processing,
+              let reason = processing.captureError ?? (processing.lastErrorSource == .capture ? processing.lastError : nil),
+              !reason.isEmpty else { return message }
+        if let notice = sessionNotice,
+           notice == Self.recordingStoppedNotice(message: reason, segmentCount: segments.count),
+           unresolvedSaveError == nil { return notice }
+        let interruption = "这节课曾提前停止采集，停止后的内容未录入：\(reason)"
+        guard let message, message != reason, message != sessionNotice else { return interruption }
+        return interruption + "\n" + message
     }
 
     /// A save failure that is still unresolved outranks an informational notice,
