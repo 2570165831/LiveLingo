@@ -152,14 +152,26 @@ final class RealtimePolicyTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(LearningNote.self, from: JSONEncoder().encode(note)), note)
     }
 
-    func testUnknownOrDuplicateSourceIDsCannotUseModelSuppliedQuoteAsFallback() {
+    func testUnknownOrEmptySourceIDsCannotUseModelSuppliedQuoteAsFallback() {
         let evidence = [TranscriptSegment(startTime: 0, endTime: 1, english: "R is red.")]
-        for ids in [["unknown"], ["en0s0", "en0s0"], []] {
+        for ids in [["unknown"], ["unknown", "unknown"], []] {
             let point = LearningPoint(kind: "核心结论", text: "R 是红色。", sources: [.init(index: 0, quote: "R is red.")], sourceIDs: ids)
             let bound = LearningNote(topic: "颜色", points: [point], sourceVersion: 2).binding(evidence: evidence)
             XCTAssertEqual(bound.points[0].referenceState, .unlinked)
+            XCTAssertTrue(bound.points[0].sources?.isEmpty == true)
             XCTAssertEqual(bound.points[0].text, point.text)
         }
+    }
+
+    func testDuplicateSourceIDsBindOnceUsingOnlyTheFrozenCatalog() {
+        let evidence = [TranscriptSegment(startTime: 0, endTime: 1, english: "R is red.")]
+        let point = LearningPoint(kind: "核心结论", text: "R 是红色。",
+                                  sources: [.init(index: 0, quote: "R is blue.")], sourceIDs: ["en0s0", "en0s0"])
+        let bound = LearningNote(topic: "颜色", points: [point], sourceVersion: 2).binding(evidence: evidence)
+        XCTAssertEqual(bound.points[0].referenceState, .linked)
+        XCTAssertEqual(bound.points[0].sourceIDs, ["en0s0"])
+        XCTAssertEqual(bound.points[0].sources, [.init(index: 0, quote: evidence[0].english)])
+        XCTAssertEqual(bound.points[0].text, point.text)
     }
 
     func testOrdinaryPronounsDoNotCreateSemanticQuestions() throws {

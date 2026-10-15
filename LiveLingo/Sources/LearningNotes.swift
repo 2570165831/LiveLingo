@@ -270,9 +270,11 @@ struct LearningNote: Codable, Equatable, Sendable {
         for index in result.points.indices {
             var point = result.points[index]
             // Version 2 returns IDs, not copied quotes. Resolve against the frozen input only.
-            let ids = point.sourceIDs
+            var seenIDs = Set<String>()
+            let ids = point.sourceIDs.map { $0.filter { seenIDs.insert($0).inserted } }
+            point.sourceIDs = ids
             let supplied = ids.map { $0.compactMap { units[$0]?.source } } ?? point.sources ?? []
-            let invalidIDs = ids.map { $0.count > 2 || Set($0).count != $0.count || supplied.count != $0.count } ?? false
+            let invalidIDs = ids.map { $0.count > 2 || supplied.count != $0.count } ?? false
             let valid = supplied.filter { source in
                 guard evidence.indices.contains(source.index), !source.quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       ids != nil || source.quote.count <= 400 else { return false }
@@ -1726,10 +1728,10 @@ struct LearningNotebook: Sendable {
             // 明确给了来源 id 却对不上本次输入：不能撤下旧问题 ✗。
             guard named.count == declared.count else { return .none }
             var candidates: [Int] = []
-            // A point with its own question still makes the cited sentence ambiguous.
-            // Check answer availability only after resolving all valid citation matches.
+            // Retained citations still make the sentence ambiguous when their
+            // point is unlinked or has its own question. Check answer availability last.
             for (index, point) in note.points.enumerated()
-                where point.referenceState != .unlinked && !(point.sources ?? []).isEmpty {
+                where !(point.sources ?? []).isEmpty {
                 let sources = point.sources ?? []
                 func exact(_ unit: LearningSourceUnit) -> Bool {
                     sources.contains { $0.index == unit.index && ($0.quote == unit.text || unit.text.contains($0.quote)) }

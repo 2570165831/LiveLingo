@@ -248,7 +248,9 @@ final class LearningFollowUpTests: XCTestCase {
 
     /// 旧问题“速度属于哪辆车”，后文一句话同时拆出“质量”和“速度”两条要点，都引用这句原文。
     private func sharedSentenceCase(pointIndex: Int?, pendingPoint: Int? = nil,
-                                    pendingKind: String = "待确认", reverseSharedPoints: Bool = false) throws -> (notebook: LearningNotebook, target: String) {
+                                    pendingKind: String = "待确认", reverseSharedPoints: Bool = false,
+                                    speedSourceIDs: [String]? = nil,
+                                    followUpSourceIDs: [String] = ["en0s0"]) throws -> (notebook: LearningNotebook, target: String) {
         var notebook = LearningNotebook()
         try notebook.append(evidence: [segment("One cart moved at 4 meters per second.",
                                                "有一辆车速度为4米每秒，尚未说明是哪辆车。")],
@@ -268,9 +270,10 @@ final class LearningFollowUpTests: XCTestCase {
             points[pendingPoint].kind = pendingKind
             points[pendingPoint].needsContext = "速度测量发生在什么时候？"
         }
+        if let speedSourceIDs { points[1].sourceIDs = speedSourceIDs }
         if reverseSharedPoints { points.swapAt(0, 1) }
         let note = LearningNote(topic: "小车", points: points, sourceVersion: 2, noNewKnowledge: false, followUps: [
-            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0"], pointIndex: pointIndex,
+            LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: followUpSourceIDs, pointIndex: pointIndex,
                              detail: "后文说明4米每秒是A车的速度。")
         ])
         try notebook.append(evidence: [later], note: LearningPrompts.resolvingFollowUps(note, targets: [target]))
@@ -316,6 +319,75 @@ final class LearningFollowUpTests: XCTestCase {
                 XCTAssertTrue(replay.contains("速度测量发生在什么时候"), replay)
             }
         }
+    }
+
+    func testSharedSentenceAmbiguityIncludesUnlinkedPoints() throws {
+        for ids in [["en0s0", "missing"], ["en0s0", "zh0s0", "en0s1"]] {
+            for reversed in [false, true] {
+                let (notebook, target) = try sharedSentenceCase(pointIndex: nil,
+                    reverseSharedPoints: reversed, speedSourceIDs: ids)
+                XCTAssertEqual(notebook.batches[1].note.points[reversed ? 0 : 1].referenceState, .unlinked)
+                let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+                XCTAssertEqual(committed.state, .unclear)
+                XCTAssertNil(committed.pointIndex)
+                XCTAssertEqual(committed.detail, ClassroomFixedText.ambiguousSupplementDetail.noteText(target: .simplifiedChinese))
+                XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+                XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+                XCTAssertEqual(supplementLines(notebook.markdown()), [])
+            }
+        }
+    }
+
+    func testRepeatedSourceIDsBindOnceAndKeepSharedSentenceAmbiguous() throws {
+        for id in ["en0s0", "zh0s0"] {
+            let (notebook, target) = try sharedSentenceCase(pointIndex: nil, speedSourceIDs: [id, id], followUpSourceIDs: [id])
+            let speed = notebook.batches[1].note.points[1]
+            XCTAssertEqual(speed.sourceIDs, [id])
+            XCTAssertEqual(speed.sources?.count, 1)
+            XCTAssertEqual(speed.referenceState, .linked)
+            let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+            XCTAssertEqual(committed.state, .unclear)
+            XCTAssertNil(committed.pointIndex)
+            XCTAssertEqual(committed.detail, ClassroomFixedText.ambiguousSupplementDetail.noteText(target: .simplifiedChinese))
+            XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+            XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+            XCTAssertEqual(supplementLines(notebook.markdown()), [])
+        }
+    }
+
+    func testExplicitUnlinkedSharedSentencePointCannotAnswer() throws {
+        for chosen in [0, 1] {
+            let (notebook, target) = try sharedSentenceCase(pointIndex: chosen,
+                speedSourceIDs: ["en0s0", "missing"])
+            XCTAssertEqual(notebook.batches[1].note.points[1].referenceState, .unlinked)
+            let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+            if chosen == 0 {
+                XCTAssertEqual(committed.state, .supplemented)
+                XCTAssertEqual(committed.pointIndex, chosen)
+                XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+            } else {
+                XCTAssertEqual(committed.state, .unclear)
+                XCTAssertNil(committed.pointIndex)
+                XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+                XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+                XCTAssertEqual(supplementLines(notebook.markdown()), [])
+            }
+        }
+    }
+
+    func testSourceIDDeduplicationPreservesOrderWithoutAcceptingUnknownIDs() {
+        let source = segment("Cart A has a mass of 8 kg.", "A车质量为8千克。")
+        let original = LearningNote(topic: "质量", points: [
+            LearningPoint(kind: "核心结论", text: "A车质量为8千克。", sourceIDs: ["zh0s0", "en0s0", "zh0s0"]),
+            LearningPoint(kind: "核心结论", text: "A车质量为8千克。", sourceIDs: ["en0s0", "missing", "missing"])
+        ], sourceVersion: 2, noNewKnowledge: false)
+        let bound = original.binding(evidence: [source])
+        XCTAssertEqual(bound.points[0].sourceIDs, ["zh0s0", "en0s0"])
+        XCTAssertEqual(bound.points[0].sources?.map(\.quote), [source.chinese, source.english])
+        XCTAssertEqual(bound.points[0].referenceState, .linked)
+        XCTAssertEqual(bound.points[1].sourceIDs, ["en0s0", "missing"])
+        XCTAssertEqual(bound.points[1].referenceState, .unlinked)
+        XCTAssertEqual(original.points[0].sourceIDs, ["zh0s0", "en0s0", "zh0s0"])
     }
 
     func testExplicitSharedSentenceChoiceStillRequiresAResolvedPoint() throws {
