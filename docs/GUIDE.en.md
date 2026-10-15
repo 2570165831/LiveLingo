@@ -2,7 +2,7 @@
 
 LiveLingo helps you follow a class with live captions, collect study notes, and review them alongside the recording afterwards. Transcription, translation, notes, and review advice can all contain mistakes. Check important points against the original speech and recording.
 
-This guide covers the current development source. Features described here do not imply that an installed app or a published installer has been updated. Full-screen class mode is experimental and is not included in the current 0.2.0 download.
+This guide covers 0.3.0, including Simplified Chinese, Taiwan Traditional Chinese, and Hong Kong and Macao Traditional Chinese output. Full-screen class mode is experimental.
 
 The app's controls are in Chinese. English names below explain their purpose; the Chinese labels in parentheses help you find them in the app. Some classroom text follows your chosen Chinese reading variant. [中文版](GUIDE.zh.md)
 
@@ -24,7 +24,7 @@ Under **Class settings → Subtitles and processing (字幕与处理) → Output
 | Traditional Chinese, Taiwan | 繁體中文（中國台灣） |
 | Traditional Chinese, Hong Kong and Macao | 繁體中文（中國港澳） |
 
-English, Spanish, and French output are not yet enabled. The output choice applies to new recordings and imports, not to an existing course. For saved Chinese courses, the reading selector in **Recording processing (录音处理…)** can change the displayed Chinese variant when available. This does not retranslate the course or change its saved output language or exports. All three Chinese variants use a Simplified Chinese generation and archival draft; classroom display and exports apply the selected variant.
+Simplified Chinese is the default. English, Spanish, and French output are not yet enabled. The output choice applies to new recordings and imports, not to an existing course. For saved Chinese courses, **Reading text (阅读文字)** in **Recording processing (录音处理…)** can change the displayed Chinese variant when available. This does not retranslate the course or change its saved output language or exports.
 
 ## Audio sources and permissions
 
@@ -51,46 +51,68 @@ In Temporary live session mode, the button is **End session (结束记录)**. A 
 
 The **Recording (录音)** menu offers the same actions. Use **⌘R** to start or end a session and **⇧⌘P** to pause or resume.
 
+**Prevent idle sleep while recording (录音期间防止空闲睡眠)** under **Class settings → Subtitles and processing** is on by default. It cannot prevent closing the lid, manual sleep, or power loss. System sleep ends capture and saves the material already received; after waking, start a new recording yourself.
+
+## Quitting and recovering an unfinished recording
+
+Pressing **⌘Q** while recording, paused, or importing asks for confirmation. Return keeps the current session or import going. Choose **Save and quit (保存并退出)** to finish and exit. During import, only the portion already imported is saved.
+
+In Temporary live session mode, Save and quit converts the class into a recording, asking for a save location if needed. Cancelling folder selection or a failed save keeps the app open. **Quit without saving (退出不保存)** discards the temporary session instead.
+
+The app waits for saving and cleanup before quitting. If they fail or saving makes no progress for about 15 seconds, **Saving or cleanup is unfinished (退出前的保存或清理未完成)** offers **Stay in the app (留在应用)** or **Quit anyway (仍要退出)**. Quitting anyway may leave saving unfinished. Shutdown, restart, and logout skip the initial question: saved-recording mode attempts to save directly, while a temporary live session is not automatically converted into a recording.
+
+If a temporary live session was converted into a recording but the app quit unexpectedly before saving finished, **More → Recover unfinished recording (恢复未完成的录音)** lists available recoveries by time on the next launch. Recovery does not restart audio capture. Follow the message to check processing and saving. If the original folder is inaccessible, choose it again through Save location. If Recording processing offers Retry saving course progress, use it. Resume processing separately if it is paused and you want to process captions and notes. This is not a guarantee of recovery after every unexpected exit.
+
+## Alarm alerts
+
+Both **Detect alarms while recording (录音时检测警报声并提醒)** and **Save this class and start a new recording on an alarm (警报时自动保存本节并另开新录音)** under **Class settings → Alerts (提醒)** are on by default. Detection works only while recording from the microphone, not while paused, capturing system audio, or importing files.
+
+A sustained alarm triggers an alert. In saved-recording mode, with automatic saving enabled, a 30-second countdown saves this class and starts another recording in the same location, with “· 警报后” (after alarm) added to its folder name. You can cancel during the countdown; pausing also cancels it. Temporary live sessions only show the alert and are not automatically saved or split. You can turn off automatic saving while keeping alerts on.
+
+When floating subtitles are visible, the alert appears there. When they are hidden, it uses a system notification; macOS asks for notification permission the first time one is needed. Esc dismisses the alert while LiveLingo or the subtitle window has keyboard focus. Alerts may miss an alarm or trigger incorrectly. They do not replace fire safety equipment; follow on-site announcements and staff.
+
 ## Live captions and language labels
 
 The **Bilingual transcript (双语转写)** panel shows recognized speech. English speech appears with the English transcript and a Chinese translation. Speech recognized as Chinese appears once, without a duplicate translation line. Other supported source languages retain their original text alongside a Chinese translation. Source-language recognition is separate from the output-language choices above.
 
 Non-English segments have a small language label, such as Chinese (中文), Japanese (日语), or French (法语). The label describes the language recognized in that segment; English segments have no extra label. These labels are separate from the caption text and are not included when you copy or export captions.
 
-The development version enables the few-probe policy by default: it checks the source language when the English transcript fails its checks, token confidence is low, or the previous segment has a qualified non-English candidate. Usable English captions appear first. The lightweight probe checks only language and probability; a source body is generated after confirmation. A confirmed first-pass source body directly replaces that segment's provisional first-pass English caption. Different text from automatic repairs or manual retries still goes through the candidate revision workflow. Latin languages such as French and Spanish need two consecutive segments confirming the same language. Only the current confirmed segment switches; the preceding segment is not rewritten. Non-Latin languages such as Chinese can be confirmed in one segment. Filipino follows the frozen evaluator's non-Latin grouping and uses one-segment confirmation. Failed probes retain usable English and break the confirmation chain. Repairs reuse the segment's original predecessor evidence. Reopened sessions resume saved confirmation progress; older archives without these fields start with an empty chain. This change has not been released to the installed app.
+Language detection is automatic. The app checks again when English recognition is unreliable or the preceding segment may be in another language. French, Spanish, and similar languages need two consecutive segments confirming the language; only the current segment switches. Chinese and some other languages can switch after one segment. Short phrases and sudden language changes may still be misidentified; a language label is not a guarantee of accuracy.
 
-The newest captions appear at the top. Turn off **Follow latest (跟随最新)** to read earlier material without new captions pulling you back to the top. Change the main window's text size through **More → Caption text size (字幕字号)**.
+If Chinese speech was mistaken for English, hover over that caption and click “…” or right-click, then choose **Recognize again as Chinese (按中文重新识别)**. While recording or paused, this queues the request until the class has ended and live transcription has finished. You can choose **Cancel Chinese re-recognition (取消中文重识别)** while waiting or recognizing, and **Undo Chinese re-recognition (撤销中文重识别)** after completion. The complete audio for that caption must still be readable. This action is unavailable in Temporary live session mode; choose Keep as a recording first if you want to retain and correct it.
 
-**Preliminary translation (同步初译)** lets you read an early Chinese translation while waiting for the main translation. The early text can change, so treat it as provisional. Enable it in Class settings on macOS 15 or later. macOS 14 does not offer this preview; the main translation still works.
+The newest captions appear at the top. Turn off **Follow latest (跟随最新)** to read earlier material without new captions pulling you back to the top. It keeps updating while you use another window. **More → Reading size (阅读字号)** and **Class settings → Reading size** offer Standard (标准, the default), Large (大), Extra large (特大), and Double (两倍). Captions, notes, timestamps, and formulas scale together; floating subtitles scale from their own text sizes. The **View (显示)** menu also offers **⌘=** to enlarge, **⌘-** to reduce, and **⌘0** to reset the size.
+
+**Preliminary translation (同步初译)** lets you read an early Chinese translation while waiting for the main translation. The early text can change, so treat it as provisional. It is on by default, remembers your choice, and is under **Class settings → Subtitles and processing** on macOS 15 or later. macOS 14 does not offer this preview; the main translation still works.
 
 ## Floating subtitles
 
-Click **Floating subtitles (浮动字幕)** at the top of the main window, or choose **Recording → Floating subtitles**, to open a separate subtitle panel. It starts hidden on each launch. Closing it does not end the recording.
+Click the **Floating subtitles (悬浮字幕)** icon at the top of the main window, or choose **Recording → Show floating subtitles (显示悬浮字幕)** (**⇧⌘F**), to open a separate subtitle panel. It starts hidden on each launch. **Show floating subtitles when recording starts (开始记录时自动显示悬浮字幕)** is off by default and can be enabled in settings. Closing the panel does not end the recording.
 
 In **Class settings → Floating subtitles (悬浮字幕)**, you can adjust:
 
-- **Display mode (显示模式)**: bilingual (双语), Chinese translation only (仅中文译文), or original only (仅原文). Translation-only mode shows the original until a usable translation is available. Chinese speech still appears as a single Chinese caption.
+- **Display mode (显示模式)**: bilingual (双语, the default), Chinese translation only (仅中文译文), or original only (仅原文). Translation-only mode shows the original until a usable translation is available. Chinese speech still appears as a single Chinese caption. The panel's header also lets you change display mode and pause or resume recording.
 - **Original text size (原文字号)** and **Translation text size (译文字号)**: adjust each independently. The panel also has Standard (标准), Large (大), and Extra large (特大) size presets in its upper-right corner.
 - **Background opacity (背景不透明度)**: lower it to see the slides behind the panel.
 - **Show on all desktops (在所有桌面显示)**: enabled by default for ordinary desktop Spaces. This setting alone does not guarantee subtitles over another app's native full-screen window.
 
-Changing display mode keeps the panel's height unchanged, so hidden text areas may leave empty space.
+Changing display mode keeps the panel's height unchanged, so hidden text areas may leave empty space. Clicking the unlocked panel leaves the slides or other app you were using in front.
 
-Use the lock icon beside Floating subtitles in the main window to lock the panel. When locked, clicks pass through to the window behind it, and you cannot click the panel's own controls. To unlock it:
+Use the lock icon beside Floating subtitles in the main window to lock the panel. When locked, clicks pass through to the window behind it, and its normal controls cannot be clicked. The alarm alert's cancel button remains clickable. To unlock it:
 
-1. Click **Unlock floating subtitles (解锁浮动字幕)** using the lock icon in the main window.
-2. In normal mode, choose **Recording → Unlock floating subtitles**. In full-screen class mode, use that action in the LiveLingo menu-bar icon's menu.
+1. Click **Unlock floating subtitles (解锁悬浮字幕)** using the lock icon in the main window.
+2. Uncheck **Recording → Lock floating subtitles (锁定悬浮字幕)**, or uncheck that item in the LiveLingo menu-bar icon's menu if the icon is visible.
 3. Press **⇧⌘L** while LiveLingo is the foreground app. This is an app shortcut, not a global shortcut.
 
 The panel starts unlocked on each launch.
 
-If it covers your slides or needs repositioning, choose **Recording → Move floating subtitles to the bottom of the screen (浮动字幕移到屏幕底部)**. This places it at the bottom centre of its screen and shows it. The full-screen mode menu-bar icon offers the same action.
+If it covers your slides or needs repositioning, choose **Recording → Move floating subtitles to the bottom of the screen (悬浮字幕移到屏幕底部)** or **Move floating subtitles to the top of the screen (悬浮字幕移到屏幕顶部)**. This centres it at that edge of its screen and shows it. You can also move it through the panel's **Size and position (字号与位置)** menu or the LiveLingo menu-bar icon. The panel remembers its previous position.
 
 ## Full-screen class mode
 
-This experimental mode is off by default and is absent from the current 0.2.0 download. To try subtitles over another app's native full-screen window, enable **Full-screen class mode (全屏网课模式)** under **Class settings → Floating subtitles**, or use the LiveLingo app menu. You still need to show Floating subtitles separately.
+This experimental mode is off by default. To try subtitles over another app's native full-screen window, enable **Full-screen class mode (全屏网课模式)** under **Class settings → Floating subtitles**, or choose **Enable full-screen class mode (开启全屏网课模式)** in the LiveLingo app menu. You still need to show Floating subtitles separately.
 
-When enabled, LiveLingo's Dock icon and app menu bar disappear, and LiveLingo leaves the **⌘Tab** app switcher. Use the LiveLingo subtitle icon in the system menu bar instead. Its menu lets you show the main window, show or hide subtitles, lock or unlock them, move them to the bottom, start or end recording, disable the mode, or quit.
+When enabled, LiveLingo's Dock icon and app menu bar disappear, and LiveLingo leaves the **⌘Tab** app switcher. Use the LiveLingo subtitle icon in the system menu bar instead. Its menu lets you show the main window, show or hide subtitles, lock or unlock them, change display mode and position, pause or resume, start or end recording, disable the mode, or quit. In normal mode, **Show the LiveLingo icon in the menu bar (在菜单栏显示 LiveLingo 图标)** can be enabled separately; it is off by default.
 
 The mode forces subtitles onto all desktops. Turning it off restores the previous Show on all desktops preference and the normal app presentation. The mode's switch is remembered, so it may still be enabled on your next launch. Subtitle visibility and locking are not remembered: the panel still starts hidden and unlocked.
 
@@ -118,7 +140,11 @@ The course folder also contains the recording, transcript text, and subtitle fil
 
 Later, choose **More → Open course (打开课程…)** or **File (文件) → Open course** and select the course folder. Opening a saved course does not record new audio. For unfinished work, open **More → Recording processing (录音处理…)** to inspect, pause, or resume processing.
 
-Use a current build to reopen newer courses. The Chinese archival draft in `bilingual.jsonl` retains Simplified Chinese in the legacy caption fields. However, a course archive containing new language metadata requires a newer reader: 0.2.0 cannot read those archives. The 0.2.0 CLI also cannot verify Traditional Chinese exports. Preserving old fields is not a guarantee of full backward compatibility; reopening these courses in the 0.2.0 GUI or a VM has not been validated.
+To process an existing audio or video file, choose **More → Import audio or video (导入音频或视频…)**, also in the Recording menu (**⇧⌘I**), then choose the file and a course save location. Import does not change the original file. **Stop import (停止导入)** keeps the portion already imported.
+
+0.2.0 may be unable to open courses recorded live in 0.3.0, courses containing new kinds of content, or older courses processed further in 0.3.0. It leaves the original files untouched. Copy your course folders before upgrading if you may return to an older version. Starting a recording after opening an old course creates a new class; it does not append audio to the old recording.
+
+Word and PDF export currently lose notes' bullet symbols, but retain the text. Use Markdown if you need to preserve lists. **⌘Q** does not wait for note exports, so let the export finish before quitting.
 
 ## Data and privacy
 
@@ -126,7 +152,7 @@ The main transcription, translation, notes, and review use local models. There i
 
 Optional preliminary translation passes preview text to the macOS translation framework. The system manages its language resources and may need to download a language pack. Its internal communication and retention have not been verified by this project, so local model processing does not mean the entire app is always offline.
 
-Temporary live sessions also write recordings to disk. The app removes them on a normal end; this is not a promise that no file was ever written. If cleanup fails, follow the message in the app.
+Temporary live sessions also write recordings to disk. The app removes them on a normal end or quit, but files may remain after a force-quit or crash. This is not a promise that no file was ever written. If cleanup fails, follow the message in the app.
 
 Saving or exporting to a shared or synced folder also makes the contents subject to that service's access rules. Copying a translation puts it on the system clipboard, where other apps with access may read it; Universal Clipboard settings may allow it to reach other devices. See [Privacy boundaries](PRIVACY.md) for details in Chinese and English.
 
@@ -149,6 +175,8 @@ Recording continuously writes to disk. Check available space at your chosen save
 Keep the existing course files, address the space problem, and follow the app's messages. If Recording processing offers **Retry saving course progress (重试保存课程进度)**, use it. Processing may remain paused after a successful save, so resume it separately. If recording has stopped, later sound was not captured. Starting again creates a new recording.
 
 ### Do I need an internet connection on first launch?
+
+Offline first launch still needs confirmation with the final installer; see [Download in the README](../README.en.md#download).
 
 The main transcription, translation, and notes models in the complete offline installer do not need a model download. If a bundled model or runtime is missing, going online will not make the app fetch it automatically; check that your installation is complete.
 

@@ -2,16 +2,20 @@
 
 [中文](README.md) | English
 
-LiveLingo is an on-device caption and note-taking app for English-language classes. While you listen, it shows the English transcript and a Chinese translation, and builds study notes as the class goes on. Transcription, the full translation and notes run on your Mac with models bundled in the app, and no recordings are uploaded.
+LiveLingo is an on-device caption and note-taking app for classes. While you listen, it shows the original speech with a Chinese translation and builds study notes. English and other supported source languages get a translation; Chinese speech appears directly as Chinese. Transcription, the full translation and notes run on your Mac with models bundled in the app, and no recordings are uploaded.
 
 For Apple silicon Macs running macOS 14 or later. Open source, GPL-3.0.
 
-The app's interface is currently in Chinese, and translations go from English into Chinese.
+The app's menus and buttons are in Simplified Chinese. In 0.3.0, **More (更多) → Class settings (课堂设置…) → Subtitles and processing (字幕与处理) → Output language (输出语言)** offers Simplified Chinese (简体中文, the default), Taiwan Traditional Chinese (繁體中文（中國台灣）), and Hong Kong and Macao Traditional Chinese (繁體中文（中國港澳）). The choice applies only to new recordings and imports. English, Spanish, and French output are not enabled.
+
+Saved Chinese courses may offer **Reading text (阅读文字)** in **Recording processing (录音处理…)** to switch the displayed Chinese variant. Saving and export keep the course's original language. Traditional Chinese terminology has been reviewed by a language model; this is not native-speaker certification or real-class accuracy data. See the [terminology notes](docs/CHINESE_TERMINOLOGY.md) (in Chinese).
 
 ## What it does
 
-- **Live bilingual captions**: takes English from the microphone or from system audio (useful for online classes and videos) and shows the English transcript with a Chinese translation. Captions can float above other windows, and you can pause and resume at any time.
-- **Experimental full-screen class mode**: only in this development branch; the current download (0.2.0) does not include it. It tries to show subtitles over another app's native full-screen window. When enabled, the Dock icon disappears and you use the menu-bar icon instead. Off by default, and its behaviour still needs checking on real Macs; see the [guide](docs/GUIDE.en.md#full-screen-class-mode) and the [checklist](docs/FULLSCREEN_CLASS_MODE.md) (in Chinese).
+- **Live bilingual captions**: takes sound from the microphone or system audio (useful for online classes and videos). English and other supported languages retain the original with a Chinese translation; Chinese speech appears once. Non-English segments have language labels. If Chinese is mistaken for English, choose “按中文重新识别” (Recognize again as Chinese) for that caption.
+- **Floating subtitles**: lock them to let clicks pass through, adjust the original and translation text sizes and background opacity separately, and move them to the top or bottom of the screen. Reading size also has shortcuts: ⌘= / ⌘- / ⌘0.
+- **Experimental full-screen class mode**: tries to show subtitles over another app's native full-screen window. When enabled, the Dock icon disappears and you use the menu-bar icon instead. Off by default, and its behaviour still needs checking on real Macs; see the [guide](docs/GUIDE.en.md#full-screen-class-mode) and the [checklist](docs/FULLSCREEN_CLASS_MODE.md) (in Chinese).
+- **Recording alerts and saving**: sustained alarms can trigger an alert during microphone recording; saved-recording mode can save the class and start another recording automatically. ⌘Q asks for confirmation while recording, paused, or importing. An unfinished conversion from a temporary session to a recording can be recovered under the conditions in the user guide.
 - **Notes while you listen**: builds study notes during the class, showing the latest updates and the whole class separately.
 - **After-class review**: once the recording ends, you can ask the larger 9B model to review the notes. Its comments are listed separately and do not change the original notes.
 - **Save and export**: saves the recording, bilingual transcript and notes, and exports Markdown, plain text, Word and PDF. You can reopen an earlier class later to keep reading or continue processing it.
@@ -20,40 +24,48 @@ The app's interface is currently in Chinese, and translations go from English in
 
 ## Download
 
-**[Download the complete 0.2.0 disk image (Google Drive)](https://drive.google.com/file/d/1u3kZCPAO5diOuqnG5sNEwd8LJBudK1Gp/view)**: one `.dmg` of about 14.3 GB that you can open and install directly.
+**[Download the complete 0.3.0 disk image]([待定])**: `.dmg` size [待定], SHA-256: [待定].
 
-You can also use the [GitHub release page](https://github.com/2570165831/LiveLingo/releases/tag/v0.2.0): download all 8 split files under Assets and merge them into the same `.dmg`, following the instructions on that page. A single split file cannot be installed, and the `Source code` archives at the bottom of the page are source code, not the installer. Either way, you can check the disk image against the SHA-256 on the release page.
+See the [0.3.0 release page]([待定]) for downloads and verification instructions. If it offers split files, download and merge all parts as instructed there. A single part cannot be installed. The `Source code` archives are source code, not the installer.
 
-**Keep your Mac online the first time you open the app.** This is macOS's own security check (Gatekeeper), not LiveLingo going online. The first time you open an app downloaded from the internet, macOS asks Apple to confirm that it was notarized, meaning it was submitted to Apple and scanned for malware. In 0.2.0 the notarization ticket is attached to the disk image but not to the app you drag into Applications, so macOS has to look it up online once; offline, it reports that the app cannot be verified and refuses to open it. After that first check no connection is needed. LiveLingo itself never uploads any recordings, text or usage data; transcription, the full translation and notes all run on your Mac.
+**Does the first launch need an internet connection? [待定].**
+
+<!-- Before release, choose one after testing the final installer, replace the sentence above, and remove this comment:
+Case 1: offline first launch passes → “You do not need an internet connection the first time you open LiveLingo. Optional system language resources may still need downloading; see Known limitations.”
+Case 2: offline first launch fails or has not been verified → “Keep your Mac online the first time you open LiveLingo. macOS may need to check the app's notarization record with Apple. This is a system security check, not LiveLingo uploading recordings.”
+-->
 
 **Requirements**
 
 - **Computer**: Apple silicon Mac (M series). Intel Macs are not supported
 - **System**: macOS 14 or later
-- **Disk**: The disk image is about 14.3 GB and the installed app about 16 GB. Both are on disk during installation, so you need about 31 GB free (about 45 GB if you merge the split files). You can delete the disk image afterwards
+- **Disk**: disk image [待定], installed app [待定], free space needed during installation [待定] (with split-file merging, if required: [待定]). You can delete the disk image afterwards
 
 ## Getting started
 
 1. Open the downloaded `.dmg` and drag **LiveLingo** into Applications.
-2. Open LiveLingo from Applications and allow microphone, speech recognition and system audio recording when macOS asks.
-3. Choose the audio source (microphone or system audio) and click “开始记录” (Start recording). Captions and notes will appear.
+2. Open LiveLingo from Applications and wait for the local models to be ready. In “更多 → 课堂设置…” (More → Class settings), choose the audio source and Chinese output language. Save recording and notes is the default mode.
+3. Click “开始记录” (Start recording), choose a course save location, and allow access to the selected audio source when asked. Captions and notes appear as the class progresses; afterwards, click “结束并保存” (End and save). Speech Recognition permission is for the optional word-by-word English preview.
 
 For details, see the [0.3.0 English user guide](docs/GUIDE.en.md): save locations, audio permissions, floating subtitles, full-screen class mode, note review, export and troubleshooting.
 
 ## Known limitations
 
-- **Translations and notes can be wrong**: the models can skip or mistranslate sentences and get facts wrong in the notes. Check important points against the English transcript.
+- **Recognition, translations, and notes can be wrong**: the models can misidentify languages, skip or mistranslate sentences, and get facts wrong in the notes. Check important points against the original and recording. There is no language-detection accuracy data from real classes yet.
 - **No instant draft translation on macOS 14**: this feature uses Apple's translation framework, which needs macOS 15 or later. On macOS 14 the Chinese appears once the full translation is done; the translation itself is not affected. Floating captions show the finished translation of the last sentence when the speaker pauses.
 - **The instant draft translation may need a language download first**: it uses Apple's translation framework. If this Mac has never installed the English-to-Chinese translation languages, macOS may ask to download them the first time, which needs a connection; until then the draft translation is unavailable and the Chinese appears once the full translation is done. The full translation uses the models bundled in the app and is not affected. You can turn the draft translation (“同步初译”) off in Settings.
 - **The word-by-word English preview needs system resources**: it uses the English speech recognition built into macOS. If no preview appears, open System Settings → Keyboard → Dictation, turn on Dictation, add “English (United States)”, and stay online while macOS downloads what it needs. The main transcription is not affected. See [Apple's dictation guide](https://support.apple.com/guide/mac-help/mh40584/mac).
 - **Apple silicon only**: Intel and universal builds have not been made or tested. There is no Windows version; if you would like to help with one, see [issue #1](https://github.com/2570165831/LiveLingo/issues/1).
 - **Large download**: the speech and translation models are inside the package, which is what lets the app work offline right after installation.
+- **Older versions may not open newer courses**: 0.2.0 may be unable to open courses recorded live in 0.3.0, courses with new content, or older courses processed further in 0.3.0. It leaves the original files untouched. End and save unfinished classes in the old version before upgrading; copy course folders if you may return to that version.
+- **Alerts and floating subtitles still need real-Mac checks**: alarm alerts only work during microphone recording; missed-alarm and false-alarm rates have not been measured. Locked click-through, multiple displays, screen readers, and the new macOS 14 appearance have not been individually checked on real Macs. Full-screen class mode may cover system menus and notifications.
+- **Word/PDF export limitations**: notes lose their bullet symbols but retain their text; use Markdown to keep lists. ⌘Q does not wait for note exports, so let the export finish before quitting.
 
 ## Models
 
 | Purpose | Model |
 | --- | --- |
-| English transcription | Parakeet TDT 0.6B v2; Qwen3-ASR 1.7B when the result looks wrong |
+| Speech transcription | Parakeet TDT 0.6B v2 for the first English pass; Qwen3-ASR 1.7B for repairs and other source languages |
 | Translation and notes | Qwen3.5 4B (“省电”, power saving) or Qwen3.5 9B (“高质量”, high quality); after-class review uses 9B |
 
 The default is automatic: 4B on battery or with 16 GB of memory or less; 9B when plugged in with more than 16 GB. You can also choose manually in Settings.
