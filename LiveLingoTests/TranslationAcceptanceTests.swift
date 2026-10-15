@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import LiveLingo
 
 /// The screenshot bug was an English sentence stored as the Chinese caption.
@@ -3287,5 +3288,55 @@ extension TranslationAcceptanceTests {
                                      "tailNowKept": changed, "tailNowKeptByOrigin": changedByOrigin]
         let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
         print("ISSUE6_PREVIOUS_REPAIR_COUNTS " + String(decoding: data, as: UTF8.self))
+    }
+}
+
+
+extension TranslationAcceptanceTests {
+    func testIssue41QuantityRangesAreNotClockTimes() {
+        for cue in ["at", "around", "by", "until", "before", "after"] {
+            for unit in ["degrees", "percent", "dollars", "degrees Celsius", "per cent", "%", "°C",
+                         "euros", "cents", "meters", "grams", "seconds", "mL", "kg"] {
+                let source = "Keep the reading \(cue) five to ten \(unit)."
+                XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+            }
+        }
+        // An earlier clock in the clause must not license a later quantity range.
+        XCTAssertEqual(AcademicInputNormalizer.normalize("At five past nine, hold at five to ten degrees."),
+                       "At 9:05, hold at five to ten degrees.")
+        for source in ["Keep it around 5 to 10 percent.", "The clock reads five to ten dollars."] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+        for (source, expected) in [
+            ("Meet around five to ten.", "Meet around 9:55."),
+            ("At five to ten, measure the temperature in degrees.", "At 9:55, measure the temperature in degrees."),
+            ("The clock reads five to ten.", "The clock reads 9:55.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+        }
+    }
+}
+
+
+extension TranslationAcceptanceTests {
+    func testIssueTextAuthoredFixtureInputsRemainByteIdentical() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("Fixtures/scoreboard-v1/translation-authored-80.json"))
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        XCTAssertEqual(rows.count, 80)
+        var snapshot: [[String: String]] = []
+        for row in rows {
+            let source = try XCTUnwrap(row["text"] as? String)
+            let normalized = AcademicInputNormalizer.normalize(source, recentContext: row["recent_context"] as? String ?? "")
+            let protected = ChemistryTranslationProtector.prepare(normalized)
+            XCTAssertEqual(try protected.validatedRestore(in: protected.text), normalized)
+            snapshot.append(["id": try XCTUnwrap(row["id"] as? String), "source": source,
+                             "normalized": normalized, "protected": protected.text])
+        }
+        let bytes = try JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(digest, "27e22b35ef14d03df650d265c7034fa11aa14a3a91795ad072a7bb8c340a5fe9", "Ordinary authored fixture inputs must remain byte-identical")
+        print("ISSUE_TEXT_AUTHORED80_INPUT_SHA256 " + digest)
+        try bytes.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("authored80-inputs.json"))
     }
 }

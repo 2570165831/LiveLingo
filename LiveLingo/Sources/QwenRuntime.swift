@@ -3243,6 +3243,10 @@ enum SpokenQuantityNormalizer {
     private static let clockCueExpression = try! NSRegularExpression(
         pattern: #"\b(?:at|by|until|around|before|after)\s+$|\b(?:time|clock)\s+(?:is|says|reads)\s+$"#,
         options: [.caseInsensitive])
+    // A quantity unit makes "five to ten" a range even beside "at" or a clock.
+    private static let clockQuantityUnitExpression = try! NSRegularExpression(
+        pattern: #"^\s*(?:[%°℃℉$€£¥]|(?:degrees?|percent(?:age)?|per\s+cent|dollars?|cents?|euros?|pounds?|yen|(?:milli|centi|kilo)?(?:met(?:er|re)s?|grams?|lit(?:er|re)s?)|(?:milli)?seconds?|minutes?|hours?|kelvins?|moles?|volts?|watts?|joules?|newtons?|pascals?|hertz|mL|kg|ppm|ppb)\b)"#,
+        options: [.caseInsensitive])
     private static let ratioCueExpression = try! NSRegularExpression(
         pattern: #"\b(?:ratios?|odds|scores?|proportions?|powers?|exponents?|times)\b"#,
         options: [.caseInsensitive])
@@ -3315,6 +3319,9 @@ enum SpokenQuantityNormalizer {
             // 'Ten to eight' can also be a ratio or an ASR power fragment.
             // Unlike 'past', 'to' needs explicit clock evidence in this clause.
             if direction == "to" {
+                let suffix = (value as NSString).substring(from: NSMaxRange(match.range))
+                guard clockQuantityUnitExpression.firstMatch(in: suffix,
+                    range: NSRange(suffix.startIndex..., in: suffix)) == nil else { return nil }
                 let prefix = (value as NSString).substring(to: match.range.location)
                 let clause = prefix.components(separatedBy: CharacterSet(charactersIn: ".;!?")).last ?? prefix
                 let range = NSRange(clause.startIndex..., in: clause)
