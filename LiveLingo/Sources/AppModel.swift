@@ -2765,7 +2765,7 @@ final class AppModel: ObservableObject {
         applicationExitDeadline = deadline
         exitStorageProgress.attach(deadline)
         preparingApplicationExit = true
-        cancelAllChineseRecognition()
+        cancelAllChineseRecognition(preserveWaiting: true)
         clearAlarmReminder()
         alarmStopRequested = true
         alarmRolloverCancellation?.cancel()

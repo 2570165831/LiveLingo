@@ -147,7 +147,7 @@ struct ChineseRecognitionStorageTests {
         let bytes = try SessionArchiveCoding.encode(source())
         #expect(bytes == Data(expected.utf8))
         #expect(try SessionArchiveCoding.minimumReaderVersion(for: bytes) == 1)
-        #expect(SessionArchiveCoding.currentReaderVersion == 5)
+        #expect(SessionArchiveCoding.currentReaderVersion == 6)
         let decoded = try SessionArchiveCoding.decode(TranscriptSegment.self, from: bytes)
         #expect(!decoded.isChineseOriginal && decoded.chineseRecognitionOriginal == nil)
     }

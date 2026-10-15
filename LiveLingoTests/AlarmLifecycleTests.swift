@@ -115,9 +115,11 @@ final class AlarmLifecycleTests: XCTestCase {
         })
         let first = f.root.appendingPathComponent("first")
         let input = try await f.model.beginAlarmMicrophoneCourseForTesting(directory: first)
-        let samples = pcm(0.125, frames: 48_000)
-        XCTAssertEqual(input.copy(samples.audioBufferList, frames: 48_000, observedEnd: 3), .accepted)
-        await input.drain()
+        for second in 1...3 {
+            let samples = pcm(0.125, frames: 16_000)
+            XCTAssertEqual(input.copy(samples.audioBufferList, frames: 16_000, observedEnd: Double(second)), .accepted)
+            await input.drain()
+        }
         f.model.receiveCaptionForTesting("A synthetic caption before alarm.", start: 0, end: 3)
         let caption = try XCTUnwrap(f.model.segments.first)
         f.model.recognizeCaptionAsChinese(caption.id)

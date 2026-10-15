@@ -711,7 +711,7 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
 
         init(segment: TranscriptSegment, state: ChineseRecognitionPresentationState,
              resolution: ChineseRecognitionMenuAvailabilityState, stream: FinalCaptionState,
-             availability: @escaping () -> ChineseRecognitionAvailability,
+             availability: @escaping @MainActor () async -> ChineseRecognitionAvailability,
              recognize: @escaping () -> Void, undo: @escaping () -> Void) {
             var row = ChineseRecognitionCaptionRow(segment: segment, textSize: 18, stream: stream,
                 state: state, availability: availability, recognize: recognize, cancel: {}, undo: undo)

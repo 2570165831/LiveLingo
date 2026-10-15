@@ -23,7 +23,8 @@ final class ChineseRecognitionTests: XCTestCase {
 
     private func fixture(recognize: ChineseRecognitionDependencies = .unavailable,
                          target: OutputLanguage = .simplifiedChinese,
-                         recording: Bool = true) async throws -> (AppModel, URL, TranscriptSegment) {
+                         recording: Bool = true,
+                         archivedRecordingFrames: Int? = nil) async throws -> (AppModel, URL, TranscriptSegment) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ChineseRecognition-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let suite = "LiveLingo-ChineseRecognition-\(UUID())"
@@ -37,9 +38,13 @@ final class ChineseRecognitionTests: XCTestCase {
         let session = UUID()
         let segment = TranscriptSegment(startTime: 1, endTime: 3,
             english: "Today we discuss binary search.", chinese: "今天讨论二分查找。", sessionID: session)
-        let snapshot = SessionSnapshot(sessionID: session, segments: [segment], targetLocale: target.persistedLocale)
+        var snapshot = SessionSnapshot(sessionID: session, segments: [segment], targetLocale: target.persistedLocale)
+        if let frames = archivedRecordingFrames {
+            snapshot.audioFiles = [.init(relativePath: "recording.wav", sampleRate: 16_000,
+                channelCount: 1, frameCount: Int64(frames), isFinalized: true)]
+        }
         _ = try SessionStore(directory: directory).save(snapshot)
-        if recording { try writeRecording(directory.appendingPathComponent("recording.wav"), frames: 64_000) }
+        if recording { try writeRecording(directory.appendingPathComponent("recording.wav"), frames: archivedRecordingFrames ?? 64_000) }
         try await model.openSavedSession(directory, allowAutomaticProcessing: false)
         addTeardownBlock {
             await model.cancelChineseRecognition(segment.id)
@@ -302,6 +307,7 @@ final class ChineseRecognitionTests: XCTestCase {
         // Reset drops all process-local presentation and tasks. Only disk can
         // restore the request, as after an exit or interrupted process.
         await model.resetTranslationSessionForTesting()?.value
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
         try await model.openSavedSession(directory, allowAutomaticProcessing: false)
         XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .pending)
         let presentation = ChineseRecognitionRowPresentation(status: .pending, availability: .available, canUndo: false)
@@ -324,6 +330,7 @@ final class ChineseRecognitionTests: XCTestCase {
         model.recognizeCaptionAsChinese(old.id)
         try await model.flushSavedCourseForTesting()
         await model.resetTranslationSessionForTesting()?.value
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
         try await model.openSavedSession(directory, allowAutomaticProcessing: false)
         model.recognizeCaptionAsChinese(old.id)
         await model.chineseRecognitionTaskForTesting(old.id)?.value
@@ -332,10 +339,28 @@ final class ChineseRecognitionTests: XCTestCase {
         XCTAssertNil(try SessionStore(directory: directory).load()?.pendingChineseRecognition)
     }
 
+    func testQueuedRequestSurvivesApplicationExitAndReopen() async throws {
+        var calls = 0
+        let expected = result()
+        let (model, directory, old) = try await fixture(recognize: .init { _, _ in calls += 1; return expected })
+        model.loadPresentationForTesting(phase: .recording, evidence: [old])
+        model.recognizeCaptionAsChinese(old.id)
+        try await model.flushSavedCourseForTesting()
+        model.loadPresentationForTesting(phase: .saved(directory), evidence: [old])
+        let ready = await model.prepareForApplicationExit()
+        XCTAssertTrue(ready, model.archiveError ?? "Synthetic course must finish the normal exit path")
+        XCTAssertEqual(try SessionStore(directory: directory).load()?.pendingChineseRecognition, [old])
+        XCTAssertEqual(calls, 0)
+        await model.resetTranslationSessionForTesting()?.value
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .pending)
+        XCTAssertEqual(calls, 0)
+    }
+
     func testManualChineseArchiveReopenDoesNotOfferOriginalJournalTextAndUndoFullyRestores() async throws {
         let expected = result()
-        let (model, directory, old) = try await fixture(recognize: .init { _, _ in expected })
-        try writeRecording(directory.appendingPathComponent("recording.wav"), frames: 48_000)
+        let (model, directory, old) = try await fixture(recognize: .init { _, _ in expected }, archivedRecordingFrames: 48_000)
         let session = try XCTUnwrap(old.sessionID)
         let journal = try DurableTranscriptionJournal(sessionDirectory: directory, sessionID: session)
         var record = TranscriptionWorkRecord(id: old.id, sessionID: session, ordinal: 0,

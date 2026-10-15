@@ -896,38 +896,41 @@ struct CaptionHistoryScrollView<Rows: View>: View {
     }
 
     var body: some View {
-        ScrollView { rows() }
-            .scrollPosition(id: $captionAnchor, anchor: .top)
-            .background(CaptionFollowWindowFocusObserver(onBecomeKey: followAfterFocus)
-                .frame(width: 0, height: 0).accessibilityHidden(true))
-            .onChange(of: latestID) {
-                if latestID == nil { captionArrivedWhileUnfocused = false }
-                else if followLatest && (controlActiveState != .key || scenePhase != .active) {
-                    captionArrivedWhileUnfocused = true
+        ScrollViewReader { proxy in
+            ScrollView { rows() }
+                .scrollPosition(id: $captionAnchor, anchor: .top)
+                .background(CaptionFollowWindowFocusObserver(onBecomeKey: followAfterFocus)
+                    .frame(width: 0, height: 0).accessibilityHidden(true))
+                .onChange(of: latestID) {
+                    if latestID == nil { captionArrivedWhileUnfocused = false }
+                    else if followLatest && (controlActiveState != .key || scenePhase != .active) {
+                        captionArrivedWhileUnfocused = true
+                    }
+                    followIfEnabled()
                 }
-                followIfEnabled()
-            }
-            .onAppear {
-                // A reconstructed history can inherit an existing reading
-                // anchor. Establish its baseline without treating it as arrival.
-                if lastFollowedCaptionID == nil, captionAnchor != nil {
-                    lastFollowedCaptionID = readLatestID.map { $0() } ?? latestID
+                .onAppear {
+                    // A reconstructed history can inherit an existing reading
+                    // anchor. Establish its baseline without treating it as arrival.
+                    if lastFollowedCaptionID == nil, let readingAnchor = captionAnchor {
+                        lastFollowedCaptionID = readLatestID.map { $0() } ?? latestID
+                        proxy.scrollTo(readingAnchor, anchor: .top)
+                    }
+                    followAfterFocus()
                 }
-                followAfterFocus()
-            }
-            .onChange(of: followLatest) {
-                captionArrivedWhileUnfocused = false
-                followIfEnabled(force: true)
-            }
-            .onChange(of: controlActiveState) {
-                if controlActiveState == .key { followAfterFocus() }
-            }
-            .onChange(of: scenePhase) {
-                if scenePhase == .active { followAfterFocus() }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                followAfterFocus()
-            }
+                .onChange(of: followLatest) {
+                    captionArrivedWhileUnfocused = false
+                    followIfEnabled(force: true)
+                }
+                .onChange(of: controlActiveState) {
+                    if controlActiveState == .key { followAfterFocus() }
+                }
+                .onChange(of: scenePhase) {
+                    if scenePhase == .active { followAfterFocus() }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    followAfterFocus()
+                }
+        }
     }
 
     private func followAfterFocus() {

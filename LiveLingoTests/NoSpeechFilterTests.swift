@@ -288,7 +288,7 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
                     return .init(text: "I.")
                 }, speechAnalyzer: { _ in calls.add("analysis"); return confidence })
             XCTAssertEqual(output.text, rejected ? "" : "I.")
-            XCTAssertFalse(output.noSpeech)
+            XCTAssertEqual(output.noSpeech, rejected)
             XCTAssertEqual(calls.all, duration < 1.5 ? [] : rejected ? ["analysis", "probe"] : ["analysis"])
         }
     }
