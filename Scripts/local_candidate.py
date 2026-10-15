@@ -19,7 +19,13 @@ CONTRACTS = ("Packaging/MLXRuntime.lock.json", "Packaging/ASRRuntime.lock.json",
              "Packaging/PrivacyResources.json", "Scripts/runtime_prepare.py",
              "Scripts/runtime_configuration.py", "Scripts/native_build_paths.py",
              "Scripts/macho_paths.py", "Scripts/notice_copy.py", "Scripts/prepare-model-inputs.py",
-             "Scripts/model_prepare.py", "Scripts/model_files.py", "Packaging/MLXLicenses")
+             "Scripts/model_prepare.py", "Scripts/model_files.py", "Packaging/MLXLicenses",
+             "Scripts/prepare-mlx-runtime.py", "Scripts/embedded_notices.py",
+             "Scripts/native_notice_audit.py", "Scripts/privacy_package.py",
+             "Scripts/privacy_literals.py", "Scripts/privacy_text.py", "Scripts/privacy_roots.py",
+             "Scripts/private_files.py", "Scripts/reviewed_resources.py",
+             "Scripts/resource_metadata.py", "Scripts/source_archive.py",
+             "Scripts/binary_provenance.py")
 STAGES = ("build", "assemble", "clone", "sign", "verify-only", "strict",
           "assessment", "dmg", "dmg-verify")
 

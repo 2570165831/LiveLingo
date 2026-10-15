@@ -38,6 +38,34 @@ class LocalCandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "policy/lock changed"):
                 candidate.check_inputs({"schema": 1, "contracts": {"lock": "old"}, "inputs": {}})
 
+    def test_notice_helpers_inventory_audit_and_texts_are_all_bound(self):
+        for name in candidate.CONTRACTS:
+            self.assertTrue((candidate.REPO / name).exists(), name)
+        helpers = ("Scripts/embedded_notices.py", "Scripts/native_notice_audit.py")
+        for name in set(candidate.CONTRACTS) | set(helpers):
+            path = self.root / name
+            if name == "Packaging/MLXLicenses":
+                path.mkdir(parents=True, exist_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"preparation policy\n")
+        notices = self.root / "Packaging/MLXLicenses/native-cargo-notices"
+        (notices / "fixture-1.0.0").mkdir(parents=True)
+        materials = [*(self.root / name for name in helpers), notices / "inventory.json",
+                     notices / "fixture-lock-audit.json", notices / "fixture-1.0.0/LICENSE"]
+        for path in materials:
+            if not path.exists():
+                path.write_bytes(b"original notice material\n")
+        with patch.object(candidate, "REPO", self.root):
+            receipt = {"schema": 1, "contracts": candidate.contract_hashes(), "inputs": {}}
+            candidate.check_inputs(receipt)
+            for path in materials:
+                original = path.read_bytes()
+                path.write_bytes(original + b"changed\n")
+                with self.subTest(path=path.relative_to(self.root)), self.assertRaisesRegex(ValueError, "policy/lock changed"):
+                    candidate.check_inputs(receipt)
+                path.write_bytes(original)
+
     def test_output_roots_cannot_overwrite_inputs_or_each_other(self):
         candidate.disjoint_outputs([self.root / 'app', self.root / 'records', self.root / 'dd'], [self.root / 'models'])
         for outputs, inputs in [([self.root / 'models'], [self.root / 'models']),
