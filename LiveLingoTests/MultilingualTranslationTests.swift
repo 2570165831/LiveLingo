@@ -130,14 +130,14 @@ final class MultilingualTranslationTests: XCTestCase, @unchecked Sendable {
         }
     }
 
-    func testIsolatedRepairTailKeepsTheStableTranslatedPrefix() async throws {
+    func testIsolatedRepairTailKeepsExistingChineseWithoutSentenceAlignment() async throws {
         let result = try await QwenTranslationClient.repairPreviousCaption(previous: "Heat flows. I.",
             previousChinese: "热量流动。一。", current: "think this is useful.", context: "",
             modelName: QwenModelProfile.highQuality.translationModel, request: { _, _, _ in
                 XCTFail("An isolated repair target must not be translated as a number")
                 return "一。"
             })
-        XCTAssertEqual(result.previous, "热量流动。I.")
+        XCTAssertNil(result.previous)
         XCTAssertNil(result.rejection)
     }
 

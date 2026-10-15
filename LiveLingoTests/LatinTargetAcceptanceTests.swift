@@ -446,9 +446,9 @@ final class LatinTargetAcceptanceTests: XCTestCase {
                     await repairRequests.increment()
                     return "力朝向中心起作用。"
                 })
-            XCTAssertEqual(repair.previous, "先检查方向。力朝向中心起作用。")
+            XCTAssertNil(repair.previous)
             let repairCount = await repairRequests.snapshot()
-            XCTAssertEqual(repairCount, 1)
+            XCTAssertEqual(repairCount, 0)
             let deferredRequests = RequestCounter()
             let deferred = try await QwenTranslationClient.translateAdjacent(previous: previous,
                 previousChinese: previousChinese, current: current, context: "Earlier lecture context.",

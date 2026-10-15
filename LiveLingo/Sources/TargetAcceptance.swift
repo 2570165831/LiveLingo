@@ -1891,10 +1891,8 @@ enum LatinStableTranslationPrefix {
     }
 }
 
-/// Issue #6: a Simplified Chinese stable prefix may be spliced with a
-/// re-translated English tail only when both sides plainly hold the same
-/// earlier sentences. This is a conservative punctuation check, not semantic
-/// alignment; any doubt keeps the existing translation instead of splicing.
+/// Issue #6: punctuation can disprove sentence alignment, but cannot prove it.
+/// Without explicit alignment evidence, keep the existing Chinese translation.
 enum PreviousRepairAlignment {
     /// Category names only. They never carry caption text.
     enum Reason: String, CaseIterable, Sendable {
@@ -1903,12 +1901,12 @@ enum PreviousRepairAlignment {
         case englishAmbiguousPeriod = "english_ambiguous_period"
         case chineseAmbiguousBoundary = "chinese_ambiguous_boundary"
         case sentenceCountMismatch = "sentence_count_mismatch"
+        case unverifiedSentenceAlignment = "unverified_sentence_alignment"
     }
 
-    /// `nil` only when every earlier English sentence ends with a plain ". "
-    /// (the existing split point) and the Chinese has the same number of
-    /// earlier sentences, each ending with 。. Both sides drop one final mark
-    /// exactly as the tail split and `stableTranslationPrefix` do.
+    /// Retain specific punctuation diagnostics, then reject equal counts too:
+    /// a translator may split one sentence and merge two others. No sentence
+    /// mapping is stored by this pipeline, so a tail splice remains unverified.
     static func misalignment(english: String, chinese: String) -> Reason? {
         let source = english.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = String(source.dropLast(source.last.map { ".!?".contains($0) } == true ? 1 : 0))
@@ -1953,7 +1951,7 @@ enum PreviousRepairAlignment {
                   !"。！？!?\"'”’」』)）]】".contains(chineseBody[index + 1]) else { return .chineseAmbiguousBoundary }
             chineseSentences += 1
         }
-        return englishSentences == chineseSentences ? nil : .sentenceCountMismatch
+        return englishSentences == chineseSentences ? .unverifiedSentenceAlignment : .sentenceCountMismatch
     }
 }
 

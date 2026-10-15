@@ -1839,25 +1839,20 @@ final class CaptionIdentityTests: XCTestCase {
         }
     }
 
-    func testAdjacentSuccessfulTailRepairRetainsStablePrefixAndRequestShape() async throws {
-        let probe = AdjacentRequestProbe([.text("指向中心。"), .text("力指向中心。")])
+    func testAdjacentKeepsPreviousChineseWithoutSentenceAlignment() async throws {
+        let probe = AdjacentRequestProbe([.text("指向中心。")])
         let pair = try await QwenTranslationClient.translateAdjacent(
             previous: "Check the direction. The force acts.", previousChinese: "先检查方向。力起作用。",
             current: "toward the center.", context: "Earlier context.", modelName: "test",
             request: { try await probe.request($0, $1, $2) })
-        XCTAssertEqual(pair.previous, "先检查方向。力指向中心。")
+        XCTAssertNil(pair.previous)
         XCTAssertEqual(pair.current, "指向中心。")
         XCTAssertNil(pair.previousRejection)
         XCTAssertNil(pair.currentRejection)
         let requests = await probe.requests
-        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests.count, 1)
         XCTAssertEqual(requests[0].input, "toward the center.")
-        XCTAssertEqual(requests.map(\.budget), [160, 320])
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(requests[1].input.utf8)) as? [String: String])
-        XCTAssertEqual(json["target_translate_only"], "The force acts.")
-        XCTAssertTrue(json["context_before_do_not_translate"]?.contains("Check the direction.") == true)
-        XCTAssertEqual(json["context_after_do_not_translate"], "toward the center.")
-        XCTAssertTrue(requests[1].prompt.contains("Translate ONLY target_translate_only"))
+        XCTAssertEqual(requests.map(\.budget), [160])
     }
 
     func testAdjacentCodeBooleanUsesExistingProtectionOnlyForFourB() async throws {
@@ -2436,7 +2431,7 @@ extension CaptionIdentityTests {
             let scenario = deferred ? "deferred" : "inline"
             let gate = CaptionIdentityGate<String>()
             addTeardownBlock { await gate.finish(.failure(CancellationError())) }
-            var replies: [AdjacentRequestProbe.Response] = F.recorded.prefix(5).map { .text($0.raw) }
+            var replies: [AdjacentRequestProbe.Response] = [0, 1, 3].map { .text(F.recorded[$0].raw) }
             if deferred {
                 replies += [.held(gate), .text(F.laterChinese), .text(F.badRepair)]
             } else {
@@ -2476,12 +2471,12 @@ extension CaptionIdentityTests {
             XCTAssertTrue(previous.hasUsableTranslation, scenario)
             let preservedPrefix = model.segments.prefix(2).map(\.chinese)
             let prepared = await probe.requests
-            XCTAssertEqual(prepared.count, 5, scenario)
-            guard prepared.count == 5 else { continue }
-            for index in 0..<5 {
+            XCTAssertEqual(prepared.count, 3, scenario)
+            guard prepared.count == 3 else { continue }
+            for (index, recordedIndex) in [0, 1, 3].enumerated() {
                 XCTAssertEqual(try numericRepairFields(prepared[index].input),
-                               try numericRepairFields(F.recorded[index].input), scenario)
-                XCTAssertEqual(prepared[index].budget, F.recorded[index].budget, scenario)
+                               try numericRepairFields(F.recorded[recordedIndex].input), scenario)
+                XCTAssertEqual(prepared[index].budget, F.recorded[recordedIndex].budget, scenario)
             }
             model.receiveCaptionForTesting(F.sources[3], start: 29.9513125, end: 36)
             if deferred {
@@ -2508,16 +2503,16 @@ extension CaptionIdentityTests {
             XCTAssertEqual(deferredRepairCalls, deferred ? 1 : 0,
                            "Use the real queue's scheduling decision, not a forced test repair flag")
             let calls = await probe.requests
-            XCTAssertEqual(calls.count, 8, "Five setup requests + current + one repair + later; " + scenario)
-            guard calls.count == 8 else { continue }
-            XCTAssertEqual(try captionSource(in: calls[5].input, mode: .highQuality), F.sources[3])
-            let repairIndex = deferred ? 7 : 6
-            let laterIndex = deferred ? 6 : 7
+            XCTAssertEqual(calls.count, 6, "Three setup requests + current + one repair + later; " + scenario)
+            guard calls.count == 6 else { continue }
+            XCTAssertEqual(try captionSource(in: calls[3].input, mode: .highQuality), F.sources[3])
+            let repairIndex = deferred ? 5 : 4
+            let laterIndex = deferred ? 4 : 5
             XCTAssertEqual(try numericRepairFields(calls[repairIndex].input),
                            try numericRepairFields(F.recorded[6].input), scenario)
             XCTAssertEqual(calls[repairIndex].budget, 320, scenario)
             XCTAssertEqual(try captionSource(in: calls[laterIndex].input, mode: .highQuality), F.laterSource)
-            XCTAssertEqual(calls[5].budget, 160, scenario)
+            XCTAssertEqual(calls[3].budget, 160, scenario)
             XCTAssertEqual(calls[laterIndex].budget, 160, scenario)
         }
     }

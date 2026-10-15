@@ -3010,7 +3010,7 @@ extension TranslationAcceptanceTests {
     @MainActor func testPreviousRepairSharesFourBFirstPassPrefixWithoutChangingTargetOwnership() async throws {
         let calls = StatusRepairRequests()
         let result = try await QwenTranslationClient.translateAdjacent(
-            previous: "Check the direction. The force acts.", previousChinese: "先检查方向。力起作用。",
+            previous: "The force acts.", previousChinese: "力起作用。",
             current: "toward the center.", context: "Earlier lecture context.",
             modelName: QwenModelProfile.energySaver.translationModel,
             request: { input, prompt, budget in
@@ -3019,7 +3019,7 @@ extension TranslationAcceptanceTests {
                    let fields = try? JSONSerialization.jsonObject(with: data) as? [String: String],
                    let target = fields["target_translate_only"] {
                     XCTAssertEqual(target, "The force acts.")
-                    XCTAssertEqual(fields["context_before_do_not_translate"], "Earlier lecture context. Check the direction. ")
+                    XCTAssertEqual(fields["context_before_do_not_translate"], "Earlier lecture context.")
                     XCTAssertEqual(fields["context_after_do_not_translate"], "toward the center.")
                     XCTAssertEqual(fields.count, 3)
                     XCTAssertEqual(budget, 320)
@@ -3037,7 +3037,7 @@ extension TranslationAcceptanceTests {
             + "Return only the complete Simplified Chinese translation. Do not use markdown."
         XCTAssertTrue(repair.hasPrefix(sharedBase), "Repair must retain the existing first-pass prefix policy.")
         XCTAssertTrue(repair.contains("Before/after fields are context to resolve references"))
-        XCTAssertEqual(result.previous, "先检查方向。力起作用。")
+        XCTAssertEqual(result.previous, "力起作用。")
         XCTAssertEqual(result.current, "朝向中心。")
         XCTAssertNil(result.previousRejection)
         XCTAssertNil(result.currentRejection)
@@ -3117,8 +3117,7 @@ extension TranslationAcceptanceTests {
     }
 }
 
-// Issue #6: a stable Chinese prefix is spliced with a re-translated English
-// tail only when both sides plainly hold the same earlier sentences.
+// Issue #6: keep the Chinese translation without explicit sentence alignment.
 extension TranslationAcceptanceTests {
     private actor RepairTargetRecorder {
         private(set) var targets: [String] = []
@@ -3153,7 +3152,7 @@ extension TranslationAcceptanceTests {
         }
     }
 
-    func testPreviousRepairStillSplicesAlignedTail() async throws {
+    func testPreviousRepairKeepsChineseEvenWhenPunctuationMatches() async throws {
         let recorder = RepairTargetRecorder()
         let result = try await QwenTranslationClient.repairPreviousCaption(
             previous: "Check the direction. The force acts", previousChinese: "先检查方向。力起作用。",
@@ -3161,18 +3160,18 @@ extension TranslationAcceptanceTests {
             modelName: QwenModelProfile.energySaver.translationModel,
             request: { input, _, _ in try await recorder.record(input); return "力起作用。" })
         let targets = await recorder.targets
-        XCTAssertEqual(targets, ["The force acts"])
-        XCTAssertEqual(result.previous, "先检查方向。力起作用。")
+        XCTAssertEqual(targets, [])
+        XCTAssertNil(result.previous)
         XCTAssertNil(result.rejection)
     }
 
     func testPreviousRepairAlignmentReasons() {
         typealias Reason = PreviousRepairAlignment.Reason
         let cases: [(String, String, Reason?)] = [
-            ("Check the direction. The force acts", "先检查方向。力起作用。", nil),
-            ("Heat the water. Add salt. Stir gently.", "把水加热。加入盐。轻轻搅拌。", nil),
-            ("The value is 3.5 meters. It grows", "数值是3.5米。它在增长。", nil),
-            ("Use a ruler, e.g., a long one. Then measure", "用尺子，例如长尺子。然后测量。", nil),
+            ("Check the direction. The force acts", "先检查方向。力起作用。", .unverifiedSentenceAlignment),
+            ("Heat the water. Add salt. Stir gently.", "把水加热。加入盐。轻轻搅拌。", .unverifiedSentenceAlignment),
+            ("The value is 3.5 meters. It grows", "数值是3.5米。它在增长。", .unverifiedSentenceAlignment),
+            ("Use a ruler, e.g., a long one. Then measure", "用尺子，例如长尺子。然后测量。", .unverifiedSentenceAlignment),
             ("Check the sign. Is the force positive? Then it points up", "检查符号。力是正的吗？那么它指向上方。",
              .englishQuestionOrExclamation),
             ("Measure the length. Use SI units, e.g. Meters work", "测量长度。使用国际单位，例如米。", .englishAbbreviation),
@@ -3192,7 +3191,7 @@ extension TranslationAcceptanceTests {
         }
         XCTAssertEqual(QwenTranslationClient.previousRepairScope(previous: "Check the direction. The force acts",
                                                                  previousChinese: "先检查方向。力起作用。"),
-                       .tail(prefix: "先检查方向。", head: "Check the direction. ", tail: "The force acts"))
+                       .keep(.unverifiedSentenceAlignment))
         XCTAssertEqual(QwenTranslationClient.previousRepairScope(previous: "Heat the water. Add salt. Stir gently",
                                                                  previousChinese: "把水加热。加入盐并轻轻搅拌。"),
                        .keep(.sentenceCountMismatch))
@@ -3387,5 +3386,22 @@ extension TranslationAcceptanceTests {
                 }
             }
         }
+    }
+}
+
+
+extension TranslationAcceptanceTests {
+    func testIssue6EqualSentenceCountsDoNotProveAlignment() async throws {
+        let english = "Heat the water and add salt. Stir gently. Let it cool"
+        let chinese = "把水加热。加入盐。轻轻搅拌后让它冷却。"
+        let recorder = RepairTargetRecorder()
+        let result = try await QwenTranslationClient.repairPreviousCaption(
+            previous: english, previousChinese: chinese, current: "before the next step.",
+            context: "", modelName: QwenModelProfile.energySaver.translationModel,
+            request: { input, _, _ in try await recorder.record(input); return "让它冷却。" })
+        XCTAssertNil(result.previous, "Keep the existing translation, including the stirring instruction")
+        XCTAssertNil(result.rejection)
+        let targets = await recorder.targets
+        XCTAssertEqual(targets, [], "Without alignment evidence, keep the original without generation")
     }
 }

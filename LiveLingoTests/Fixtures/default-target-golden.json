@@ -133,19 +133,8 @@
       "thinkingBudget": 16384
     },
     {
-      "completionSHA256": "3a408793ce9482225d5d734f4d1ffb70508dcf0699634f45ef2fca665d192b43",
-      "inputSHA256": "cd5d578a848b5cf232894b07becef51725bd6b38a254ddc63848c86f6a609b45",
-      "model": "qwen/qwen3.5-9b",
-      "outputBudget": 320,
-      "purpose": "text",
-      "route": "text",
-      "systemSHA256": "a4425a136837a1c7262bc8099f976da8a105df9a4a114300ffb6cc9fe2133ee3",
-      "thinking": false,
-      "thinkingBudget": 16384
-    },
-    {
-      "completionSHA256": "922c6d96dad5c721cbf6646d30cc01c65e8059db3994f4c442d45d3d3df9dc5b",
-      "inputSHA256": "4a93fcdd029e40d2ede01e863d61a2e1a0db5f03a48592a6da01486a82b53518",
+      "completionSHA256": "ae477b87a1cd72f89b5698b3e9e6fcbd2db1743a59881436ac1e0f14d42b4893",
+      "inputSHA256": "5cd384dc0bd8a99a0fdaeb3db2f8f2297e9617fa1eb7ec62ec6a00dd2eceb3b6",
       "model": "qwen/qwen3.5-9b",
       "outputBudget": 3072,
       "purpose": "note",
@@ -165,7 +154,7 @@
     "使用确切标签 speed。",
     "这个箱子里面有两本书。",
     "叶子会长大。",
-    "先检查方向。力朝向中心起作用。",
+    "先检查方向。力起作用。",
     "朝向中心。",
     "这片叶子长大了。"
   ],
@@ -177,12 +166,12 @@
   },
   "files": {
     "bilingual.jsonl": {
-      "sha256": "c476ea67677b7e502fa5cb104f0f351d9291c138bde32c1473aca478657c82a3",
-      "text": "{\"chinese\":\"Fe³⁺ 离子使用 H2O。\",\"endTime\":2,\"english\":\"The Fe³⁺ ion uses H2O.\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":0,\"translationState\":\"completed\"}\n{\"chinese\":\"加速度为零，但速度不为零。\",\"endTime\":6,\"english\":\"The acceleration is zero, but the velocity is not zero.\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":4,\"translationState\":\"completed\"}\n{\"chinese\":\"把\\\"门关着\\\"译成法语。\",\"endTime\":10,\"english\":\"Translate \\\"the door is closed\\\" into French.\",\"id\":\"00000000-0000-0000-0000-000000000003\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":8,\"translationState\":\"completed\"}\n{\"chinese\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\",\"endTime\":14,\"english\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\",\"id\":\"00000000-0000-0000-0000-000000000004\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":12,\"translationState\":\"completed\"}\n{\"chinese\":\"【公式待核对】公式待核对。\",\"endTime\":18,\"english\":\"The formula is [Formula transcription uncertain].\",\"id\":\"00000000-0000-0000-0000-000000000005\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":16,\"translationState\":\"completed\"}\n{\"chinese\":\"使用确切标签 speed。\",\"endTime\":22,\"english\":\"Use the exact label \\\"speed\\\".\",\"id\":\"00000000-0000-0000-0000-000000000006\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":20,\"translationState\":\"completed\"}\n{\"chinese\":\"这个箱子里面有两本书。\",\"endTime\":26,\"english\":\"呢個箱入面有兩本書。\",\"id\":\"00000000-0000-0000-0000-000000000007\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"yue\",\"startTime\":24,\"translationState\":\"completed\"}\n{\"chinese\":\"叶子会长大。\",\"endTime\":30,\"english\":\"葉が大きくなります。\",\"id\":\"00000000-0000-0000-0000-000000000008\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"ja\",\"startTime\":28,\"translationState\":\"completed\"}\n{\"chinese\":\"先检查方向。力朝向中心起作用。\",\"endTime\":34,\"english\":\"Check the direction. The force acts.\",\"id\":\"00000000-0000-0000-0000-000000000009\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":32,\"translationState\":\"completed\"}\n{\"chinese\":\"朝向中心。\",\"endTime\":38,\"english\":\"toward the center.\",\"id\":\"00000000-0000-0000-0000-000000000010\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":36,\"translationState\":\"completed\"}\n{\"chinese\":\"这片叶子长大了。\",\"endTime\":42,\"english\":\"這片葉子長大了。\",\"id\":\"00000000-0000-0000-0000-000000000011\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"zh\",\"startTime\":40,\"translationState\":\"completed\"}\n"
+      "sha256": "5758f8f6d526a5ddddd7eff45e023bd6f3a0f734b400e929f9ef4473319c8532",
+      "text": "{\"chinese\":\"Fe³⁺ 离子使用 H2O。\",\"endTime\":2,\"english\":\"The Fe³⁺ ion uses H2O.\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":0,\"translationState\":\"completed\"}\n{\"chinese\":\"加速度为零，但速度不为零。\",\"endTime\":6,\"english\":\"The acceleration is zero, but the velocity is not zero.\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":4,\"translationState\":\"completed\"}\n{\"chinese\":\"把\\\"门关着\\\"译成法语。\",\"endTime\":10,\"english\":\"Translate \\\"the door is closed\\\" into French.\",\"id\":\"00000000-0000-0000-0000-000000000003\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":8,\"translationState\":\"completed\"}\n{\"chinese\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\",\"endTime\":14,\"english\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\",\"id\":\"00000000-0000-0000-0000-000000000004\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":12,\"translationState\":\"completed\"}\n{\"chinese\":\"【公式待核对】公式待核对。\",\"endTime\":18,\"english\":\"The formula is [Formula transcription uncertain].\",\"id\":\"00000000-0000-0000-0000-000000000005\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":16,\"translationState\":\"completed\"}\n{\"chinese\":\"使用确切标签 speed。\",\"endTime\":22,\"english\":\"Use the exact label \\\"speed\\\".\",\"id\":\"00000000-0000-0000-0000-000000000006\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":20,\"translationState\":\"completed\"}\n{\"chinese\":\"这个箱子里面有两本书。\",\"endTime\":26,\"english\":\"呢個箱入面有兩本書。\",\"id\":\"00000000-0000-0000-0000-000000000007\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"yue\",\"startTime\":24,\"translationState\":\"completed\"}\n{\"chinese\":\"叶子会长大。\",\"endTime\":30,\"english\":\"葉が大きくなります。\",\"id\":\"00000000-0000-0000-0000-000000000008\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"ja\",\"startTime\":28,\"translationState\":\"completed\"}\n{\"chinese\":\"先检查方向。力起作用。\",\"endTime\":34,\"english\":\"Check the direction. The force acts.\",\"id\":\"00000000-0000-0000-0000-000000000009\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":32,\"translationState\":\"completed\"}\n{\"chinese\":\"朝向中心。\",\"endTime\":38,\"english\":\"toward the center.\",\"id\":\"00000000-0000-0000-0000-000000000010\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":36,\"translationState\":\"completed\"}\n{\"chinese\":\"这片叶子长大了。\",\"endTime\":42,\"english\":\"這片葉子長大了。\",\"id\":\"00000000-0000-0000-0000-000000000011\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"zh\",\"startTime\":40,\"translationState\":\"completed\"}\n"
     },
     "bilingual.srt": {
-      "sha256": "19f6890f450deb0abb6e5f39638dc6a575818aeffca36332b553df0615da9c55",
-      "text": "1\n00:00:00,000 --> 00:00:02,000\nThe Fe³⁺ ion uses H2O.\nFe³⁺ 离子使用 H2O。\n\n2\n00:00:04,000 --> 00:00:06,000\nThe acceleration is zero, but the velocity is not zero.\n加速度为零，但速度不为零。\n\n3\n00:00:08,000 --> 00:00:10,000\nTranslate \"the door is closed\" into French.\n把\"门关着\"译成法语。\n\n4\n00:00:12,000 --> 00:00:14,000\nHe wrote {\"state\":\"ready\",\"count\":28}.\n他写了{\"state\":\"就绪\",\"count\":28}。\n\n5\n00:00:16,000 --> 00:00:18,000\nThe formula is [Formula transcription uncertain].\n【公式待核对】公式待核对。\n\n6\n00:00:20,000 --> 00:00:22,000\nUse the exact label \"speed\".\n使用确切标签 speed。\n\n7\n00:00:24,000 --> 00:00:26,000\n呢個箱入面有兩本書。\n这个箱子里面有两本书。\n\n8\n00:00:28,000 --> 00:00:30,000\n葉が大きくなります。\n叶子会长大。\n\n9\n00:00:32,000 --> 00:00:34,000\nCheck the direction. The force acts.\n先检查方向。力朝向中心起作用。\n\n10\n00:00:36,000 --> 00:00:38,000\ntoward the center.\n朝向中心。\n\n11\n00:00:40,000 --> 00:00:42,000\n这片叶子长大了。\n"
+      "sha256": "0559e80be39e9255a0b928c361296fde4d9d6010be732959c9847d98b2b7150f",
+      "text": "1\n00:00:00,000 --> 00:00:02,000\nThe Fe³⁺ ion uses H2O.\nFe³⁺ 离子使用 H2O。\n\n2\n00:00:04,000 --> 00:00:06,000\nThe acceleration is zero, but the velocity is not zero.\n加速度为零，但速度不为零。\n\n3\n00:00:08,000 --> 00:00:10,000\nTranslate \"the door is closed\" into French.\n把\"门关着\"译成法语。\n\n4\n00:00:12,000 --> 00:00:14,000\nHe wrote {\"state\":\"ready\",\"count\":28}.\n他写了{\"state\":\"就绪\",\"count\":28}。\n\n5\n00:00:16,000 --> 00:00:18,000\nThe formula is [Formula transcription uncertain].\n【公式待核对】公式待核对。\n\n6\n00:00:20,000 --> 00:00:22,000\nUse the exact label \"speed\".\n使用确切标签 speed。\n\n7\n00:00:24,000 --> 00:00:26,000\n呢個箱入面有兩本書。\n这个箱子里面有两本书。\n\n8\n00:00:28,000 --> 00:00:30,000\n葉が大きくなります。\n叶子会长大。\n\n9\n00:00:32,000 --> 00:00:34,000\nCheck the direction. The force acts.\n先检查方向。力起作用。\n\n10\n00:00:36,000 --> 00:00:38,000\ntoward the center.\n朝向中心。\n\n11\n00:00:40,000 --> 00:00:42,000\n这片叶子长大了。\n"
     },
     "manifest.json": {
       "sha256": "20748d1460670ab8c662ae808d56621dccb9e4011a8e304762960fdc6a6f1684",
@@ -197,16 +186,16 @@
       "text": "> 范围：整课；输入版本 0，笔记版本 1\n\n# 9B 思考复查 1/1 批（约 5 分钟/批）\n\n以下是模型复查意见，仅供核对，可能有误；没有修改笔记正文。\n\n本报告对应课程输入版本 0。\n\n冻结笔记版本 1，后续新增内容不在本次范围内。\n\n## 第 1 批 · 合成课堂\n- **原笔记 · 要点 1**：加速度为零，但速度不为零。\n- **9B 建议（待核对）**：加速度为零，但速度不为零。\n- **建议理由**：合成复查保持原意。"
     },
     "review-input.json": {
-      "sha256": "8700d91688ab97fb157b67e495d305f0ddb404caff43d83ff088ad7f37aab29f",
-      "text": "{\"evidence\":[{\"index\":0,\"quotes\":[{\"id\":\"e0.en.0\",\"language\":\"en\",\"text\":\"The Fe³⁺ ion uses H2O.\"},{\"id\":\"e0.zh.0\",\"language\":\"zh\",\"text\":\"Fe³⁺ 离子使用 H2O。\"}]},{\"index\":1,\"quotes\":[{\"id\":\"e1.en.0\",\"language\":\"en\",\"text\":\"The acceleration is zero, but the velocity is not zero.\"},{\"id\":\"e1.zh.0\",\"language\":\"zh\",\"text\":\"加速度为零，但速度不为零。\"}]},{\"index\":2,\"quotes\":[{\"id\":\"e2.en.0\",\"language\":\"en\",\"text\":\"Translate \\\"the door is closed\\\" into French.\"},{\"id\":\"e2.zh.0\",\"language\":\"zh\",\"text\":\"把\\\"门关着\\\"译成法语。\"}]},{\"index\":3,\"quotes\":[{\"id\":\"e3.en.0\",\"language\":\"en\",\"text\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\"},{\"id\":\"e3.zh.0\",\"language\":\"zh\",\"text\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\"}]},{\"index\":4,\"quotes\":[{\"id\":\"e4.en.0\",\"language\":\"en\",\"text\":\"The formula is [Formula transcription uncertain].\"},{\"id\":\"e4.zh.0\",\"language\":\"zh\",\"text\":\"【公式待核对】公式待核对。\"}]},{\"index\":5,\"quotes\":[{\"id\":\"e5.en.0\",\"language\":\"en\",\"text\":\"Use the exact label \\\"speed\\\".\"},{\"id\":\"e5.zh.0\",\"language\":\"zh\",\"text\":\"使用确切标签 speed。\"}]},{\"index\":6,\"quotes\":[{\"id\":\"e6.zh.0\",\"language\":\"zh\",\"text\":\"这个箱子里面有两本书。\"}]},{\"index\":7,\"quotes\":[{\"id\":\"e7.zh.0\",\"language\":\"zh\",\"text\":\"叶子会长大。\"}]},{\"index\":8,\"quotes\":[{\"id\":\"e8.en.0\",\"language\":\"en\",\"text\":\"Check the direction. The force acts.\"},{\"id\":\"e8.zh.0\",\"language\":\"zh\",\"text\":\"先检查方向。力朝向中心起作用。\"}]},{\"index\":9,\"quotes\":[{\"id\":\"e9.en.0\",\"language\":\"en\",\"text\":\"toward the center.\"},{\"id\":\"e9.zh.0\",\"language\":\"zh\",\"text\":\"朝向中心。\"}]},{\"index\":10,\"quotes\":[{\"id\":\"e10.zh.0\",\"language\":\"zh\",\"text\":\"这片叶子长大了。\"}]}],\"laterContext\":[],\"laterEvidence\":[],\"laterEvidenceOmittedCount\":0,\"note\":{\"points\":[{\"index\":0,\"kind\":\"核心结论\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sources\":[{\"index\":1,\"quote\":\"The acceleration is zero, but the velocity is not zero.\"}],\"text\":\"加速度为零，但速度不为零。\"},{\"index\":1,\"kind\":\"例子\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sources\":[{\"index\":6,\"quote\":\"这个箱子里面有两本书。\"}],\"text\":\"盒子里有两本书。\"}],\"topic\":\"合成课堂\"},\"omittedEarlierCandidates\":0,\"reviewVersion\":2}"
+      "sha256": "4934be2161694ba9b5b2d4d1144e21bb7121685b741f53cdf2d86937d0ace209",
+      "text": "{\"evidence\":[{\"index\":0,\"quotes\":[{\"id\":\"e0.en.0\",\"language\":\"en\",\"text\":\"The Fe³⁺ ion uses H2O.\"},{\"id\":\"e0.zh.0\",\"language\":\"zh\",\"text\":\"Fe³⁺ 离子使用 H2O。\"}]},{\"index\":1,\"quotes\":[{\"id\":\"e1.en.0\",\"language\":\"en\",\"text\":\"The acceleration is zero, but the velocity is not zero.\"},{\"id\":\"e1.zh.0\",\"language\":\"zh\",\"text\":\"加速度为零，但速度不为零。\"}]},{\"index\":2,\"quotes\":[{\"id\":\"e2.en.0\",\"language\":\"en\",\"text\":\"Translate \\\"the door is closed\\\" into French.\"},{\"id\":\"e2.zh.0\",\"language\":\"zh\",\"text\":\"把\\\"门关着\\\"译成法语。\"}]},{\"index\":3,\"quotes\":[{\"id\":\"e3.en.0\",\"language\":\"en\",\"text\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\"},{\"id\":\"e3.zh.0\",\"language\":\"zh\",\"text\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\"}]},{\"index\":4,\"quotes\":[{\"id\":\"e4.en.0\",\"language\":\"en\",\"text\":\"The formula is [Formula transcription uncertain].\"},{\"id\":\"e4.zh.0\",\"language\":\"zh\",\"text\":\"【公式待核对】公式待核对。\"}]},{\"index\":5,\"quotes\":[{\"id\":\"e5.en.0\",\"language\":\"en\",\"text\":\"Use the exact label \\\"speed\\\".\"},{\"id\":\"e5.zh.0\",\"language\":\"zh\",\"text\":\"使用确切标签 speed。\"}]},{\"index\":6,\"quotes\":[{\"id\":\"e6.zh.0\",\"language\":\"zh\",\"text\":\"这个箱子里面有两本书。\"}]},{\"index\":7,\"quotes\":[{\"id\":\"e7.zh.0\",\"language\":\"zh\",\"text\":\"叶子会长大。\"}]},{\"index\":8,\"quotes\":[{\"id\":\"e8.en.0\",\"language\":\"en\",\"text\":\"Check the direction. The force acts.\"},{\"id\":\"e8.zh.0\",\"language\":\"zh\",\"text\":\"先检查方向。力起作用。\"}]},{\"index\":9,\"quotes\":[{\"id\":\"e9.en.0\",\"language\":\"en\",\"text\":\"toward the center.\"},{\"id\":\"e9.zh.0\",\"language\":\"zh\",\"text\":\"朝向中心。\"}]},{\"index\":10,\"quotes\":[{\"id\":\"e10.zh.0\",\"language\":\"zh\",\"text\":\"这片叶子长大了。\"}]}],\"laterContext\":[],\"laterEvidence\":[],\"laterEvidenceOmittedCount\":0,\"note\":{\"points\":[{\"index\":0,\"kind\":\"核心结论\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sources\":[{\"index\":1,\"quote\":\"The acceleration is zero, but the velocity is not zero.\"}],\"text\":\"加速度为零，但速度不为零。\"},{\"index\":1,\"kind\":\"例子\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sources\":[{\"index\":6,\"quote\":\"这个箱子里面有两本书。\"}],\"text\":\"盒子里有两本书。\"}],\"topic\":\"合成课堂\"},\"omittedEarlierCandidates\":0,\"reviewVersion\":2}"
     },
     "review-response.json": {
       "sha256": "e28612d871295c78a55eaf10020ca54d7d9d59fdce52b09fecefe32fffccb056",
       "text": "{\"reviewVersion\":2,\"corrections\":[{\"index\":0,\"original\":\"加速度为零，但速度不为零。\",\"kind\":\"核心结论\",\"text\":\"加速度为零，但速度不为零。\",\"reason\":\"合成复查保持原意。\"}],\"additions\":[]}"
     },
     "snapshot.json": {
-      "sha256": "8c8440e57d3d392047091a621e62d749731d6b88ad757f69b41c8a5d15b81896",
-      "text": "{\"audioFiles\":[],\"audioRanges\":[],\"batches\":[{\"evidence\":[{\"chinese\":\"Fe³⁺ 离子使用 H2O。\",\"endTime\":2,\"english\":\"The Fe³⁺ ion uses H2O.\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":0,\"translationState\":\"completed\"},{\"chinese\":\"加速度为零，但速度不为零。\",\"endTime\":6,\"english\":\"The acceleration is zero, but the velocity is not zero.\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":4,\"translationState\":\"completed\"},{\"chinese\":\"把\\\"门关着\\\"译成法语。\",\"endTime\":10,\"english\":\"Translate \\\"the door is closed\\\" into French.\",\"id\":\"00000000-0000-0000-0000-000000000003\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":8,\"translationState\":\"completed\"},{\"chinese\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\",\"endTime\":14,\"english\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\",\"id\":\"00000000-0000-0000-0000-000000000004\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":12,\"translationState\":\"completed\"},{\"chinese\":\"【公式待核对】公式待核对。\",\"endTime\":18,\"english\":\"The formula is [Formula transcription uncertain].\",\"id\":\"00000000-0000-0000-0000-000000000005\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":16,\"translationState\":\"completed\"},{\"chinese\":\"使用确切标签 speed。\",\"endTime\":22,\"english\":\"Use the exact label \\\"speed\\\".\",\"id\":\"00000000-0000-0000-0000-000000000006\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":20,\"translationState\":\"completed\"},{\"chinese\":\"这个箱子里面有两本书。\",\"endTime\":26,\"english\":\"呢個箱入面有兩本書。\",\"id\":\"00000000-0000-0000-0000-000000000007\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"yue\",\"startTime\":24,\"translationState\":\"completed\"},{\"chinese\":\"叶子会长大。\",\"endTime\":30,\"english\":\"葉が大きくなります。\",\"id\":\"00000000-0000-0000-0000-000000000008\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"ja\",\"startTime\":28,\"translationState\":\"completed\"},{\"chinese\":\"先检查方向。力朝向中心起作用。\",\"endTime\":34,\"english\":\"Check the direction. The force acts.\",\"id\":\"00000000-0000-0000-0000-000000000009\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":32,\"translationState\":\"completed\"},{\"chinese\":\"朝向中心。\",\"endTime\":38,\"english\":\"toward the center.\",\"id\":\"00000000-0000-0000-0000-000000000010\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":36,\"translationState\":\"completed\"},{\"chinese\":\"这片叶子长大了。\",\"endTime\":42,\"english\":\"這片葉子長大了。\",\"id\":\"00000000-0000-0000-0000-000000000011\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"zh\",\"startTime\":40,\"translationState\":\"completed\"}],\"id\":\"00000000-0000-0000-0000-000000002000\",\"note\":{\"noNewKnowledge\":false,\"points\":[{\"kind\":\"核心结论\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sourceIDs\":[\"en1s0\"],\"sources\":[{\"index\":1,\"quote\":\"The acceleration is zero, but the velocity is not zero.\"}],\"text\":\"加速度为零，但速度不为零。\"},{\"kind\":\"例子\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sourceIDs\":[\"zh6s0\"],\"sources\":[{\"index\":6,\"quote\":\"这个箱子里面有两本书。\"}],\"text\":\"盒子里有两本书。\"}],\"sourceVersion\":2,\"topic\":\"合成课堂\"}}],\"createdAt\":0,\"generation\":0,\"generationCheckpoints\":[],\"inputRevision\":0,\"lastJournalDigest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"lastJournalSequence\":0,\"latestEvidenceIDs\":[],\"notebookLastOffered\":{},\"notebookRevision\":1,\"notebookSelectionRound\":0,\"processing\":{\"paused\":false,\"pendingBatchIDs\":[],\"pendingSegmentIDs\":[],\"phase\":\"idle\",\"reviewPaused\":true,\"summaryPaused\":false},\"revisionHistory\":[],\"schemaVersion\":1,\"segments\":[{\"chinese\":\"Fe³⁺ 离子使用 H2O。\",\"endTime\":2,\"english\":\"The Fe³⁺ ion uses H2O.\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":0,\"translationState\":\"completed\"},{\"chinese\":\"加速度为零，但速度不为零。\",\"endTime\":6,\"english\":\"The acceleration is zero, but the velocity is not zero.\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":4,\"translationState\":\"completed\"},{\"chinese\":\"把\\\"门关着\\\"译成法语。\",\"endTime\":10,\"english\":\"Translate \\\"the door is closed\\\" into French.\",\"id\":\"00000000-0000-0000-0000-000000000003\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":8,\"translationState\":\"completed\"},{\"chinese\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\",\"endTime\":14,\"english\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\",\"id\":\"00000000-0000-0000-0000-000000000004\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":12,\"translationState\":\"completed\"},{\"chinese\":\"【公式待核对】公式待核对。\",\"endTime\":18,\"english\":\"The formula is [Formula transcription uncertain].\",\"id\":\"00000000-0000-0000-0000-000000000005\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":16,\"translationState\":\"completed\"},{\"chinese\":\"使用确切标签 speed。\",\"endTime\":22,\"english\":\"Use the exact label \\\"speed\\\".\",\"id\":\"00000000-0000-0000-0000-000000000006\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":20,\"translationState\":\"completed\"},{\"chinese\":\"这个箱子里面有两本书。\",\"endTime\":26,\"english\":\"呢個箱入面有兩本書。\",\"id\":\"00000000-0000-0000-0000-000000000007\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"yue\",\"startTime\":24,\"translationState\":\"completed\"},{\"chinese\":\"叶子会长大。\",\"endTime\":30,\"english\":\"葉が大きくなります。\",\"id\":\"00000000-0000-0000-0000-000000000008\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"ja\",\"startTime\":28,\"translationState\":\"completed\"},{\"chinese\":\"先检查方向。力朝向中心起作用。\",\"endTime\":34,\"english\":\"Check the direction. The force acts.\",\"id\":\"00000000-0000-0000-0000-000000000009\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":32,\"translationState\":\"completed\"},{\"chinese\":\"朝向中心。\",\"endTime\":38,\"english\":\"toward the center.\",\"id\":\"00000000-0000-0000-0000-000000000010\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":36,\"translationState\":\"completed\"},{\"chinese\":\"这片叶子长大了。\",\"endTime\":42,\"english\":\"這片葉子長大了。\",\"id\":\"00000000-0000-0000-0000-000000000011\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"zh\",\"startTime\":40,\"translationState\":\"completed\"}],\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"storageRevision\":0,\"updatedAt\":0}"
+      "sha256": "304d4ad820d3c8242d267fea3fca0e0d514be13ab4d9ca98abd1903327e72f15",
+      "text": "{\"audioFiles\":[],\"audioRanges\":[],\"batches\":[{\"evidence\":[{\"chinese\":\"Fe³⁺ 离子使用 H2O。\",\"endTime\":2,\"english\":\"The Fe³⁺ ion uses H2O.\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":0,\"translationState\":\"completed\"},{\"chinese\":\"加速度为零，但速度不为零。\",\"endTime\":6,\"english\":\"The acceleration is zero, but the velocity is not zero.\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":4,\"translationState\":\"completed\"},{\"chinese\":\"把\\\"门关着\\\"译成法语。\",\"endTime\":10,\"english\":\"Translate \\\"the door is closed\\\" into French.\",\"id\":\"00000000-0000-0000-0000-000000000003\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":8,\"translationState\":\"completed\"},{\"chinese\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\",\"endTime\":14,\"english\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\",\"id\":\"00000000-0000-0000-0000-000000000004\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":12,\"translationState\":\"completed\"},{\"chinese\":\"【公式待核对】公式待核对。\",\"endTime\":18,\"english\":\"The formula is [Formula transcription uncertain].\",\"id\":\"00000000-0000-0000-0000-000000000005\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":16,\"translationState\":\"completed\"},{\"chinese\":\"使用确切标签 speed。\",\"endTime\":22,\"english\":\"Use the exact label \\\"speed\\\".\",\"id\":\"00000000-0000-0000-0000-000000000006\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":20,\"translationState\":\"completed\"},{\"chinese\":\"这个箱子里面有两本书。\",\"endTime\":26,\"english\":\"呢個箱入面有兩本書。\",\"id\":\"00000000-0000-0000-0000-000000000007\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"yue\",\"startTime\":24,\"translationState\":\"completed\"},{\"chinese\":\"叶子会长大。\",\"endTime\":30,\"english\":\"葉が大きくなります。\",\"id\":\"00000000-0000-0000-0000-000000000008\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"ja\",\"startTime\":28,\"translationState\":\"completed\"},{\"chinese\":\"先检查方向。力起作用。\",\"endTime\":34,\"english\":\"Check the direction. The force acts.\",\"id\":\"00000000-0000-0000-0000-000000000009\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":32,\"translationState\":\"completed\"},{\"chinese\":\"朝向中心。\",\"endTime\":38,\"english\":\"toward the center.\",\"id\":\"00000000-0000-0000-0000-000000000010\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":36,\"translationState\":\"completed\"},{\"chinese\":\"这片叶子长大了。\",\"endTime\":42,\"english\":\"這片葉子長大了。\",\"id\":\"00000000-0000-0000-0000-000000000011\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"zh\",\"startTime\":40,\"translationState\":\"completed\"}],\"id\":\"00000000-0000-0000-0000-000000002000\",\"note\":{\"noNewKnowledge\":false,\"points\":[{\"kind\":\"核心结论\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sourceIDs\":[\"en1s0\"],\"sources\":[{\"index\":1,\"quote\":\"The acceleration is zero, but the velocity is not zero.\"}],\"text\":\"加速度为零，但速度不为零。\"},{\"kind\":\"例子\",\"referenceState\":\"linked\",\"sourceHasPronoun\":false,\"sourceIDs\":[\"zh6s0\"],\"sources\":[{\"index\":6,\"quote\":\"这个箱子里面有两本书。\"}],\"text\":\"盒子里有两本书。\"}],\"sourceVersion\":2,\"topic\":\"合成课堂\"}}],\"createdAt\":0,\"generation\":0,\"generationCheckpoints\":[],\"inputRevision\":0,\"lastJournalDigest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"lastJournalSequence\":0,\"latestEvidenceIDs\":[],\"notebookLastOffered\":{},\"notebookRevision\":1,\"notebookSelectionRound\":0,\"processing\":{\"paused\":false,\"pendingBatchIDs\":[],\"pendingSegmentIDs\":[],\"phase\":\"idle\",\"reviewPaused\":true,\"summaryPaused\":false},\"revisionHistory\":[],\"schemaVersion\":1,\"segments\":[{\"chinese\":\"Fe³⁺ 离子使用 H2O。\",\"endTime\":2,\"english\":\"The Fe³⁺ ion uses H2O.\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":0,\"translationState\":\"completed\"},{\"chinese\":\"加速度为零，但速度不为零。\",\"endTime\":6,\"english\":\"The acceleration is zero, but the velocity is not zero.\",\"id\":\"00000000-0000-0000-0000-000000000002\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":4,\"translationState\":\"completed\"},{\"chinese\":\"把\\\"门关着\\\"译成法语。\",\"endTime\":10,\"english\":\"Translate \\\"the door is closed\\\" into French.\",\"id\":\"00000000-0000-0000-0000-000000000003\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":8,\"translationState\":\"completed\"},{\"chinese\":\"他写了{\\\"state\\\":\\\"就绪\\\",\\\"count\\\":28}。\",\"endTime\":14,\"english\":\"He wrote {\\\"state\\\":\\\"ready\\\",\\\"count\\\":28}.\",\"id\":\"00000000-0000-0000-0000-000000000004\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":12,\"translationState\":\"completed\"},{\"chinese\":\"【公式待核对】公式待核对。\",\"endTime\":18,\"english\":\"The formula is [Formula transcription uncertain].\",\"id\":\"00000000-0000-0000-0000-000000000005\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":16,\"translationState\":\"completed\"},{\"chinese\":\"使用确切标签 speed。\",\"endTime\":22,\"english\":\"Use the exact label \\\"speed\\\".\",\"id\":\"00000000-0000-0000-0000-000000000006\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":20,\"translationState\":\"completed\"},{\"chinese\":\"这个箱子里面有两本书。\",\"endTime\":26,\"english\":\"呢個箱入面有兩本書。\",\"id\":\"00000000-0000-0000-0000-000000000007\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"yue\",\"startTime\":24,\"translationState\":\"completed\"},{\"chinese\":\"叶子会长大。\",\"endTime\":30,\"english\":\"葉が大きくなります。\",\"id\":\"00000000-0000-0000-0000-000000000008\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"ja\",\"startTime\":28,\"translationState\":\"completed\"},{\"chinese\":\"先检查方向。力起作用。\",\"endTime\":34,\"english\":\"Check the direction. The force acts.\",\"id\":\"00000000-0000-0000-0000-000000000009\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":32,\"translationState\":\"completed\"},{\"chinese\":\"朝向中心。\",\"endTime\":38,\"english\":\"toward the center.\",\"id\":\"00000000-0000-0000-0000-000000000010\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"startTime\":36,\"translationState\":\"completed\"},{\"chinese\":\"这片叶子长大了。\",\"endTime\":42,\"english\":\"這片葉子長大了。\",\"id\":\"00000000-0000-0000-0000-000000000011\",\"inputRevision\":0,\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"sourceLanguage\":\"zh\",\"startTime\":40,\"translationState\":\"completed\"}],\"sessionID\":\"00000000-0000-0000-0000-000000001000\",\"storageRevision\":0,\"updatedAt\":0}"
     },
     "summary-review.md": {
       "sha256": "83e07894b0a3f5671d4ad016d17e3cdf61f04cea215ae603daa12c89fd379524",
@@ -221,11 +210,11 @@
       "text": "The Fe³⁺ ion uses H2O.\nThe acceleration is zero, but the velocity is not zero.\nTranslate \"the door is closed\" into French.\nHe wrote {\"state\":\"ready\",\"count\":28}.\nThe formula is [Formula transcription uncertain].\nUse the exact label \"speed\".\n呢個箱入面有兩本書。\n葉が大きくなります。\nCheck the direction. The force acts.\ntoward the center.\n這片葉子長大了。\n"
     },
     "transcript-zh-Hans.txt": {
-      "sha256": "26b35eb7349a73ccd216614a17f2d306c68668d82b3ae0585326c6bb44a1832a",
-      "text": "Fe³⁺ 离子使用 H2O。\n加速度为零，但速度不为零。\n把\"门关着\"译成法语。\n他写了{\"state\":\"就绪\",\"count\":28}。\n【公式待核对】公式待核对。\n使用确切标签 speed。\n这个箱子里面有两本书。\n叶子会长大。\n先检查方向。力朝向中心起作用。\n朝向中心。\n这片叶子长大了。\n"
+      "sha256": "bcc98f5396d2bd912311054428cccd93274fbe3ce021a23a3707615a539ca059",
+      "text": "Fe³⁺ 离子使用 H2O。\n加速度为零，但速度不为零。\n把\"门关着\"译成法语。\n他写了{\"state\":\"就绪\",\"count\":28}。\n【公式待核对】公式待核对。\n使用确切标签 speed。\n这个箱子里面有两本书。\n叶子会长大。\n先检查方向。力起作用。\n朝向中心。\n这片叶子长大了。\n"
     }
   },
-  "inputFingerprint": "c700a67fe4ffb378e9049fccac1e640cca2f7a0378ac69764619ce6319edb633",
+  "inputFingerprint": "eb6205a2229f20b9c0962268bd91326aff412357606977fefcb253f71aa50e42",
   "requests": [
     {
       "completionSHA256": "d160afac9d1a50e0c525e4c22f7d2a6b10bc1d75cb1ff6a8525cc690bb2f64e6",
@@ -349,17 +338,6 @@
       "thinkingBudget": 16384
     },
     {
-      "completionSHA256": "ae3b636c33de8f0a63d265385e236c81cdad49f8e4c294a2262b1ba6b0f8260d",
-      "inputSHA256": "d2fc7f67864def46188f0d9f562ed424be41acdab889147fbf2cb234a7ee9da6",
-      "model": "qwen/qwen3.5-9b",
-      "outputBudget": 320,
-      "purpose": "text",
-      "route": "text",
-      "systemSHA256": "a4425a136837a1c7262bc8099f976da8a105df9a4a114300ffb6cc9fe2133ee3",
-      "thinking": false,
-      "thinkingBudget": 16384
-    },
-    {
       "completionSHA256": "e86e2a6ac6dec5d301f219493b87bee00edabb09a9e345e26cd817863bfcdda3",
       "inputSHA256": "6a7050af1565533c33dada4c2ad69c8e48db0d400566340f7fe6f32fe981cfa4",
       "model": "qwen/qwen3.5-9b",
@@ -367,17 +345,6 @@
       "purpose": "text",
       "route": "text",
       "systemSHA256": "a78e278f3fb8691fa51ff5532f2d928427f8e7b773e5763250d48a17447f5fa0",
-      "thinking": false,
-      "thinkingBudget": 16384
-    },
-    {
-      "completionSHA256": "ae3b636c33de8f0a63d265385e236c81cdad49f8e4c294a2262b1ba6b0f8260d",
-      "inputSHA256": "d2fc7f67864def46188f0d9f562ed424be41acdab889147fbf2cb234a7ee9da6",
-      "model": "qwen/qwen3.5-9b",
-      "outputBudget": 320,
-      "purpose": "text",
-      "route": "text",
-      "systemSHA256": "a4425a136837a1c7262bc8099f976da8a105df9a4a114300ffb6cc9fe2133ee3",
       "thinking": false,
       "thinkingBudget": 16384
     },
@@ -547,17 +514,6 @@
       "thinkingBudget": 16384
     },
     {
-      "completionSHA256": "9a1afac6c81691cce610d4a636c519a558429009939c51f7095f321d86e80100",
-      "inputSHA256": "d2fc7f67864def46188f0d9f562ed424be41acdab889147fbf2cb234a7ee9da6",
-      "model": "qwen3.5-4b-mlx",
-      "outputBudget": 320,
-      "purpose": "text",
-      "route": "text",
-      "systemSHA256": "c12095496f1c18d25247167ff1cea63e8c2ecbfe9722e94ef335697c88756cb3",
-      "thinking": false,
-      "thinkingBudget": 16384
-    },
-    {
       "completionSHA256": "fbd07b2501e9fb78806265c330d95dd1c3f3499946fc070bf43969b5dee55503",
       "inputSHA256": "b8d4e2ac00d0d4d112ecd88d66d71d44ca27070e5579553047171d315f4f2614",
       "model": "qwen3.5-4b-mlx",
@@ -565,17 +521,6 @@
       "purpose": "text",
       "route": "text",
       "systemSHA256": "4424066b702d219bd2c28df6be890fbfbe91e068718b8e014fa03e640ec9396a",
-      "thinking": false,
-      "thinkingBudget": 16384
-    },
-    {
-      "completionSHA256": "9a1afac6c81691cce610d4a636c519a558429009939c51f7095f321d86e80100",
-      "inputSHA256": "d2fc7f67864def46188f0d9f562ed424be41acdab889147fbf2cb234a7ee9da6",
-      "model": "qwen3.5-4b-mlx",
-      "outputBudget": 320,
-      "purpose": "text",
-      "route": "text",
-      "systemSHA256": "c12095496f1c18d25247167ff1cea63e8c2ecbfe9722e94ef335697c88756cb3",
       "thinking": false,
       "thinkingBudget": 16384
     },
@@ -624,8 +569,8 @@
       "thinkingBudget": 16384
     },
     {
-      "completionSHA256": "922c6d96dad5c721cbf6646d30cc01c65e8059db3994f4c442d45d3d3df9dc5b",
-      "inputSHA256": "4a93fcdd029e40d2ede01e863d61a2e1a0db5f03a48592a6da01486a82b53518",
+      "completionSHA256": "ae477b87a1cd72f89b5698b3e9e6fcbd2db1743a59881436ac1e0f14d42b4893",
+      "inputSHA256": "5cd384dc0bd8a99a0fdaeb3db2f8f2297e9617fa1eb7ec62ec6a00dd2eceb3b6",
       "model": "qwen/qwen3.5-9b",
       "outputBudget": 3072,
       "purpose": "note",
@@ -635,8 +580,8 @@
       "thinkingBudget": 16384
     },
     {
-      "completionSHA256": "922c6d96dad5c721cbf6646d30cc01c65e8059db3994f4c442d45d3d3df9dc5b",
-      "inputSHA256": "4a93fcdd029e40d2ede01e863d61a2e1a0db5f03a48592a6da01486a82b53518",
+      "completionSHA256": "ae477b87a1cd72f89b5698b3e9e6fcbd2db1743a59881436ac1e0f14d42b4893",
+      "inputSHA256": "5cd384dc0bd8a99a0fdaeb3db2f8f2297e9617fa1eb7ec62ec6a00dd2eceb3b6",
       "model": "qwen3.5-4b-mlx",
       "outputBudget": 3072,
       "purpose": "note",
@@ -646,8 +591,8 @@
       "thinkingBudget": 16384
     },
     {
-      "completionSHA256": "6f7e5664622787ff493c2454e1f986947c85d3f7210fbfb7349f0b6bfcda42ea",
-      "inputSHA256": "8700d91688ab97fb157b67e495d305f0ddb404caff43d83ff088ad7f37aab29f",
+      "completionSHA256": "1adcacf904be3207c4e5e6436ae4f800b1e75a8c90ec9dc2425a1fbfbc46c3ed",
+      "inputSHA256": "4934be2161694ba9b5b2d4d1144e21bb7121685b741f53cdf2d86937d0ace209",
       "model": "qwen/qwen3.5-9b",
       "outputBudget": 4096,
       "purpose": "review",
@@ -657,5 +602,5 @@
       "thinkingBudget": 16384
     }
   ],
-  "reviewPrefixDigest": "4b8e2d63369a19b5d07f9f84f82fb3b78085c9ec391607bf5f0d03d5db20486f"
+  "reviewPrefixDigest": "500c62865f0e07a6a69b5cf004413af825f8af4bd160c4692a093c60efa9817b"
 }

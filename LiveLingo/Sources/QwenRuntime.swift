@@ -2125,9 +2125,9 @@ enum QwenTranslationClient {
         // An existing Chinese prefix is immutable. Without a corresponding
         // English tail, the previous result could never be applied.
         guard let split = body.range(of: ". ", options: .backwards) else { return .keep(nil) }
-        // Issue #6: splicing assumes the prefix holds exactly the English head.
-        // When that is not plainly true, keep the line rather than drop or
-        // duplicate a sentence. Other targets keep their existing behavior.
+        // Issue #6: matching punctuation does not establish sentence ownership.
+        // Until explicit alignment is available, preserve the existing Chinese
+        // translation. Other targets keep their existing behavior.
         if target == .simplifiedChinese,
            let reason = PreviousRepairAlignment.misalignment(english: source, chinese: previousChinese) {
             return .keep(reason)
