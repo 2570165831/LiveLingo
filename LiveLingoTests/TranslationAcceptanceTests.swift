@@ -3292,6 +3292,57 @@ extension TranslationAcceptanceTests {
 
 
 extension TranslationAcceptanceTests {
+    func testIssue41ClockToRequiresPositiveTimeEvidence() {
+        let ranges = [
+            "Symptoms appear after one to two days.",
+            "It is around two to three times larger.",
+            "Let's look at two to three examples.",
+            "Children start talking at two to three years of age.",
+            "The bond energy is around five to ten kilojoules per mole.",
+            "Hold it at five to ten millivolts",
+            "Keep it at five to ten Celsius",
+            "Dose around 5 to 10 mg.",
+            "Expression rose by five to ten-fold",
+            "at five to ten-degree intervals",
+            "after two to three days", "around five to ten years",
+            "around five to ten students", "around 5 to 10 mg",
+            "around five to ten kilojoules", "by five to ten-fold"
+        ]
+        for source in ranges {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+        // Previously unlisted nouns, SI prefixes, symbols and hyphen compounds.
+        for suffix in ["days", "weeks", "months", "years", "decades", "centuries", "generations",
+                       "times", "fold", "-fold", "x", "kilojoules", "millivolts", "nanometers",
+                       "micrograms", "millimolar", "kilopascals", "Celsius", "Fahrenheit",
+                       "mg", "µg", "μg", "g", "kg", "mL", "µL", "L", "cm", "mm", "nm", "km",
+                       "ms", "Hz", "kHz", "MHz", "K", "J", "kJ", "V", "mV", "W", "Pa", "kPa",
+                       "M", "mM", "µM", "nM", "atm", "mmHg", "-degree intervals"] {
+            let source = "Keep it around five to ten" + (suffix.hasPrefix("-") ? "" : " ") + suffix + "."
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+        for (source, expected) in [
+            ("At a quarter past ten, we'll cover chapters five to ten.",
+             "At 10:15, we'll cover chapters five to ten."),
+            ("At half past two, count from one to ten.", "At 2:30, count from one to ten."),
+            ("At a quarter past ten or five to eleven.", "At 10:15 or 10:55."),
+            ("Meet at ten to eight.", "Meet at 7:50."),
+            ("Class ends at five to three.", "Class ends at 2:55."),
+            ("It's ten to nine.", "It's 8:50."),
+            ("See you at quarter to four tomorrow.", "See you at 3:45 tomorrow."),
+            ("At ten to one we stop.", "At 12:50 we stop."),
+            ("Start at half past twelve p.m.", "Start at 12:30 p.m."),
+            ("Meet at ten to eight outside the lab.", "Meet at 7:50 outside the lab.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+        }
+        for ending in ["o'clock", "a.m.", "p.m.", "today", "tonight", "tomorrow",
+                       "in the morning", "in the afternoon", "in the evening", "on Monday"] {
+            let source = "See you at ten to eight " + ending
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), "See you at 7:50 " + ending, source)
+        }
+    }
+
     func testIssue41QuantityRangesAreNotClockTimes() {
         for cue in ["at", "around", "by", "until", "before", "after"] {
             for unit in ["degrees", "percent", "dollars", "degrees Celsius", "per cent", "%", "°C",

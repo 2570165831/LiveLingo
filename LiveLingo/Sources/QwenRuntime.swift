@@ -3220,11 +3220,21 @@ enum SpokenQuantityNormalizer {
         + #"(a\s+quarter|quarter|half|"# + numberPattern + #")\s+(past|to)\s+("# + numberPattern
         + ")" + rightBoundary, options: [.caseInsensitive])
     private static let clockCueExpression = try! NSRegularExpression(
-        pattern: #"\b(?:at|by|until|around|before|after)\s+$|\b(?:time|clock)\s+(?:is|says|reads)\s+$"#,
+        pattern: #"\b(?:at|by|until|around|before|after)\s+$|\b(?:time|clock)\s+(?:is|says|reads)\s+$|\bit(?:['’]s|\s+is)\s+$"#,
         options: [.caseInsensitive])
-    // A quantity unit makes "five to ten" a range even beside "at" or a clock.
-    private static let clockQuantityUnitExpression = try! NSRegularExpression(
-        pattern: #"^\s*(?:[%°℃℉$€£¥]|(?:degrees?|percent(?:age)?|per\s+cent|dollars?|cents?|euros?|pounds?|yen|(?:milli|centi|kilo)?(?:met(?:er|re)s?|grams?|lit(?:er|re)s?)|(?:milli)?seconds?|minutes?|hours?|kelvins?|moles?|volts?|watts?|joules?|newtons?|pascals?|hertz|mL|kg|ppm|ppb)\b)"#,
+    // Weak prepositions need a clock ending or a following subject and verb.
+    // Unknown nouns/units remain ranges without maintaining a unit list.
+    private static let clockEndingExpression = try! NSRegularExpression(
+        pattern: #"^\s*(?:$|[,.;:!?]|(?:o['’]clock|[ap]\.?m\.?|today|tonight|tomorrow|sharp|in\s+the\s+(?:morning|afternoon|evening)|on\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)"#,
+        options: [.caseInsensitive])
+    private static let clockContinuationExpression = try! NSRegularExpression(
+        pattern: #"^\s+(?:we|you|I|he|she|they)(?:['’](?:ll|re|ve|d)\b|\s+[a-z]+\b)"#,
+        options: [.caseInsensitive])
+    private static let strongClockCueExpression = try! NSRegularExpression(
+        pattern: #"\b(?:meet(?:\s+(?:me|us|you|him|her|them))?|starts?|begins?|ends?|finish(?:es)?|due|leaves?|class(?:\s+(?:starts?|begins?|ends?|finishes))?)\s+(?:at|by)\s+$"#,
+        options: [.caseInsensitive])
+    private static let clockCoordinationExpression = try! NSRegularExpression(
+        pattern: #"^\s*,?\s*(?:or|and|but|then)\s+$"#,
         options: [.caseInsensitive])
     private static let ratioCueExpression = try! NSRegularExpression(
         pattern: #"\b(?:ratios?|odds|scores?|proportions?|powers?|exponents?|times)\b"#,
@@ -3299,8 +3309,6 @@ enum SpokenQuantityNormalizer {
             // Unlike 'past', 'to' needs explicit clock evidence in this clause.
             if direction == "to" {
                 let suffix = (value as NSString).substring(from: NSMaxRange(match.range))
-                guard clockQuantityUnitExpression.firstMatch(in: suffix,
-                    range: NSRange(suffix.startIndex..., in: suffix)) == nil else { return nil }
                 let prefix = (value as NSString).substring(to: match.range.location)
                 let clause = prefix.components(separatedBy: CharacterSet(charactersIn: ".;!?")).last ?? prefix
                 let range = NSRange(clause.startIndex..., in: clause)
@@ -3309,11 +3317,19 @@ enum SpokenQuantityNormalizer {
                 let earlierClock = clockExpression.matches(in: clause, range: range).contains { item in
                     guard capture(2, item, clause).lowercased() == "past",
                           let earlierHour = integer(capture(3, item, clause)), (1...12).contains(earlierHour) else { return false }
+                    let connector = (clause as NSString).substring(from: NSMaxRange(item.range))
+                    guard clockCoordinationExpression.firstMatch(in: connector,
+                        range: NSRange(connector.startIndex..., in: connector)) != nil else { return false }
                     let amount = capture(1, item, clause).lowercased()
                     return amount == "half" || amount == "quarter" || amount == "a quarter"
                         || integer(amount).map { (1...59).contains($0) } == true
                 }
-                guard adjacentCue || earlierClock else { return nil }
+                let ending = clockEndingExpression.firstMatch(in: suffix,
+                    range: NSRange(suffix.startIndex..., in: suffix)) != nil
+                    || clockContinuationExpression.firstMatch(in: suffix,
+                        range: NSRange(suffix.startIndex..., in: suffix)) != nil
+                let strongCue = strongClockCueExpression.firstMatch(in: clause, range: range) != nil
+                guard strongCue || (adjacentCue || earlierClock) && ending else { return nil }
             }
             let minute: Int
             if quantity == "half" {
