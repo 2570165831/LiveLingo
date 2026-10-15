@@ -80,6 +80,14 @@ APP_RESOURCES = frozenset({
 # Windows paths) in structured metadata are not distribution provenance.
 URL = re.compile(r"https?://[^\s\"<>]+", re.IGNORECASE)
 LOCAL_PATH = re.compile(r"(?<![\w:/.])/[^\s\"<>]+|file://|~[/\\]|" + WINDOWS_PATH_PATTERN, re.IGNORECASE)
+# Complete rule keys and values emitted by the system codesign resource seal.
+# These slashes are regex delimiters, not local paths. Only rules2 keys qualify;
+# payloads, comments, altered rules and strings in every other field stay strict.
+PUBLIC_SEAL_RULES = {
+    r".*\.dSYM($|/)": {"weight": 11.0},
+    r"^(.*/)?\.DS_Store$": {"omit": True, "weight": 2000.0},
+    r"^[^/]+$": {"nested": True, "weight": 10.0},
+}
 
 
 def decode_metadata_text(data):
@@ -191,7 +199,12 @@ def validate_metadata(value, field=None, *, signature=False, trail=(), _active=N
                     text_key = decode_metadata_text(key) if isinstance(key, bytes) else key
                     if isinstance(text_key, str) and re.sub(r"[_-]", "", text_key.lower()) in CONTENT_KEYS:
                         raise PrivacyError("classroom-content-metadata")
-                    opaque += recurse(key)
+                    if signature and trail == ("rules2",) and key in PUBLIC_SEAL_RULES:
+                        if item != PUBLIC_SEAL_RULES[key] or any(
+                                type(item.get(flag)) is not bool for flag in ("omit", "nested") if flag in item):
+                            raise PrivacyError("unreviewed-signature-seal-rule")
+                    else:
+                        opaque += recurse(key)
                     opaque += recurse(item, key, trail + (key,))
             else:
                 for index, item in enumerate(value):

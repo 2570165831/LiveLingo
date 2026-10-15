@@ -39,10 +39,14 @@ dmg_submission_id=""
 resubmit_incomplete=0
 dry_run=0
 candidate_only=0
+image_method=""
+verify_mount=""
+xattr_report=""
 usage() {
   print -r -- "用法：Scripts/build-offline-dmg.sh --app <已签名 App> --identity <Developer ID Application 身份> [选项]"
   print -r -- "续跑：Scripts/build-offline-dmg.sh --resume-stage <目录> --notary-profile <已有名称> [选项]"
   print -r -- "  --output <新 .dmg 路径>；--keychain <签名钥匙串>；--volname <卷名>"
+  print -r -- "  --image-method hybrid|create（默认 hybrid，剔除源目录追踪属性）；--mount-point <新挂载目录>；--xattr-report <新 JSON>"
   print -r -- "  --notary-profile <名称>；--notary-keychain <路径>（独立于签名钥匙串，默认不传）"
   print -r -- "  --notary-submit-timeout <秒>：仅上传，默认 0 不限"
   print -r -- "  --notary-timeout <秒>：上传完成后的处理总时限，默认 3600"
@@ -56,7 +60,7 @@ usage() {
 }
 while (( $# > 0 )); do
   case "$1" in
-    --app|--output|--identity|--keychain|--volname|--notary-profile|--notary-keychain|--notary-timeout|--notary-submit-timeout|--notary-command-timeout|--notary-poll-interval|--notary-max-polls|--notary-max-retries|--staple-max-attempts|--staple-retry-delay|--resume-stage|--app-submission-id|--dmg-submission-id)
+    --app|--output|--identity|--keychain|--volname|--notary-profile|--notary-keychain|--notary-timeout|--notary-submit-timeout|--notary-command-timeout|--notary-poll-interval|--notary-max-polls|--notary-max-retries|--staple-max-attempts|--staple-retry-delay|--resume-stage|--app-submission-id|--dmg-submission-id|--image-method|--mount-point|--xattr-report)
       (( $# >= 2 )) || fail "$1 缺少参数"
       case "$1" in
         --app) signed_app="$2" ;;
@@ -64,6 +68,9 @@ while (( $# > 0 )); do
         --identity) sign_identity="$2" ;;
         --keychain) keychain_path="$2" ;;
         --volname) volume_name="$2" ;;
+        --image-method) image_method="$2" ;;
+        --mount-point) verify_mount="$2" ;;
+        --xattr-report) xattr_report="$2" ;;
         --notary-profile) notary_profile="$2" ;;
         --notary-keychain) notary_keychain="$2" ;;
         --notary-timeout) notary_timeout="$2" ;;
@@ -131,6 +138,11 @@ if [[ -n "${resume_stage}" ]]; then
   [[ -z "${output_dmg}" || "${output_dmg:a}" == "${stored_output}" ]] || fail "续跑输出路径与原发布不符"
   output_dmg="${stored_output}"
   volume_name="$(state_get volumeName)"
+  stored_method="$(state_get imageMethod)"
+  # Older stages used hdiutil create. Never silently change a resumed artifact.
+  [[ -n "${stored_method}" ]] || stored_method=create
+  [[ -z "${image_method}" || "${image_method}" == "${stored_method}" ]] || fail "续跑镜像方法与原发布不符"
+  image_method="${stored_method}"
 else
   [[ -n "${signed_app}" && -d "${signed_app}" && "${signed_app}" == *.app && ! -L "${signed_app}" ]] || fail "必须用 --app 指定已完整签名的自包含 .app 目录"
   signed_app="${signed_app:A}"
@@ -140,6 +152,8 @@ else
   stage_dir="${output_dir:a}/stage-$(/bin/date +%Y%m%d-%H%M%S)-$$"
   state_file="${stage_dir}/release-state.json"
 fi
+image_method="${image_method:-hybrid}"
+[[ "${image_method}" == hybrid || "${image_method}" == create ]] || fail "镜像方法须为 hybrid 或 create"
 [[ ! -e "${output_dmg}" && ! -L "${output_dmg}" ]] || fail "输出已存在，未覆盖：${output_dmg}"
 [[ "${output_dmg}" == *.dmg ]] || fail "输出必须以 .dmg 结尾"
 check_write_path "${output_dmg}"
@@ -219,7 +233,7 @@ if [[ -z "${resume_stage}" ]]; then
   check_authority "${signed_app}" "${sign_identity}"
   /bin/mkdir -p "${stage_dir:h}" "${output_dmg:h}"
   /bin/mkdir -m 700 "${stage_dir}"
-  "${python_bin}" "${state_script}" init "${state_file}" identity "${sign_identity}" keychain "${keychain_path}" output "${output_dmg}" volumeName "${volume_name}"
+  "${python_bin}" "${state_script}" init "${state_file}" identity "${sign_identity}" keychain "${keychain_path}" output "${output_dmg}" volumeName "${volume_name}" imageMethod "${image_method}"
   /bin/mkdir "${stage_dir}/LiveLingo"
   stage_copy "${signed_app}" "${stage_dir}/LiveLingo/LiveLingo.app"
 fi
@@ -258,6 +272,20 @@ check_authority "${staged_app}" "${sign_identity}"
 notary_args=(--profile "${notary_profile}" --timeout "${notary_timeout}" --submit-timeout "${notary_submit_timeout}" --command-timeout "${notary_command_timeout}" --poll-interval "${notary_poll_interval}" --max-polls "${notary_max_polls}" --max-retries "${notary_max_retries}")
 [[ -z "${notary_keychain}" ]] || notary_args+=(--notary-keychain "${notary_keychain}")
 run_dir="$(/usr/bin/mktemp -d "${stage_dir}/run-XXXXXX")"
+verify_args=()
+[[ -z "${verify_mount}" ]] || verify_args+=(--mount-point "${verify_mount}")
+[[ -z "${xattr_report}" ]] || verify_args+=(--xattr-report "${xattr_report}")
+create_image() {
+  local source_path="$1" label="$2" destination_path="$3"
+  if [[ "${image_method}" == hybrid ]]; then
+    # makehybrid writes filesystem records without inheriting source xattrs.
+    # Keep the raw image beside the compressed result for recoverable cleanup.
+    "${hdiutil_bin}" makehybrid -hfs -hfs-volume-name "${label}" -o "${destination_path:r}-raw.dmg" "${source_path}"
+    "${hdiutil_bin}" convert "${destination_path:r}-raw.dmg" -format UDZO -imagekey zlib-level=6 -o "${destination_path}"
+  else
+    "${hdiutil_bin}" create -size "$("${python_bin}" "${state_script}" image-size "${source_path}")" -srcfolder "${source_path}" -volname "${label}" -format UDZO -imagekey zlib-level=6 "${destination_path}"
+  fi
+}
 print -l -r -- "codesign=${codesign_bin}" "hdiutil=${hdiutil_bin}" "ditto=${ditto_bin}" "stapler=${stapler_bin:-not-used}" "python=${python_bin}" > "${run_dir}/tool-paths.txt"
 notarize_phase() {
   local phase="$1" artifact="$2" requested="$3" decision receipt_dir
@@ -287,7 +315,7 @@ if [[ -z "${app_container}" ]]; then
   [[ "$(/bin/ls -A "${package_root}")" == LiveLingo.app ]] || fail "首次 App 公证容器只能含 LiveLingo.app"
   check_package_privacy "${package_root}" app-only
   app_container="${run_dir}/App-notarization.dmg"
-  "${hdiutil_bin}" create -size "$("${python_bin}" "${state_script}" image-size "${package_root}")" -srcfolder "${package_root}" -volname LiveLingoAppNotarization -format UDZO -imagekey zlib-level=6 "${app_container}"
+  create_image "${package_root}" LiveLingoAppNotarization "${app_container}"
   "${hdiutil_bin}" verify "${app_container}"
   "${python_bin}" "${state_script}" record-artifact "${state_file}" appContainer "${app_container}"
 fi
@@ -317,7 +345,9 @@ check_package_privacy "${package_root}" dmg
 staged_dmg="$(state_get releaseDMG)"
 if [[ -z "${staged_dmg}" ]]; then
   staged_dmg="${run_dir}/Release.dmg"
-  "${hdiutil_bin}" create -size "$("${python_bin}" "${state_script}" image-size "${package_root}")" -srcfolder "${package_root}" -volname "${volume_name}" -format UDZO -imagekey zlib-level=6 "${staged_dmg}"
+  image_creation_started=${SECONDS}
+  create_image "${package_root}" "${volume_name}" "${staged_dmg}"
+  print -r -- "{\"imageCreationSeconds\":$(( SECONDS - image_creation_started )),\"clock\":\"zsh SECONDS, integer resolution\"}" > "${run_dir}/image-creation-timing.json"
   "${codesign_bin}" --force --sign "${sign_identity}" --keychain "${keychain_path}" --timestamp "${staged_dmg}"
   "${codesign_bin}" --verify --strict --verbose=2 "${staged_dmg}"
   "${hdiutil_bin}" verify "${staged_dmg}"
@@ -330,7 +360,7 @@ else
   check_authority "${staged_dmg}" "${sign_identity}"
 fi
 if (( candidate_only )); then
-  /bin/zsh "${verify_script}" --dmg "${staged_dmg}" --identity "${sign_identity}" --mount-point "${stage_dir}/verify-mount" --privacy-phase signed --candidate-only
+  /bin/zsh "${verify_script}" --dmg "${staged_dmg}" --identity "${sign_identity}" "${verify_args[@]}" --privacy-phase signed --candidate-only
   [[ ! -e "${output_dmg}" && ! -L "${output_dmg}" ]] || fail "候选输出已被占用，拒绝覆盖"
   /bin/mv -n "${staged_dmg}" "${output_dmg}"
   [[ ! -e "${staged_dmg}" && -f "${output_dmg}" ]] || fail "候选输出移动未完成"
@@ -352,7 +382,7 @@ if [[ -z "${verified_dmg}" ]]; then
 else
   "${python_bin}" "${state_script}" verify-artifact "${state_file}" stapledDMG
 fi
-/bin/zsh "${verify_script}" --dmg "${verified_dmg}" --identity "${sign_identity}" --mount-point "${stage_dir}/verify-mount" --privacy-phase signed
+/bin/zsh "${verify_script}" --dmg "${verified_dmg}" --identity "${sign_identity}" "${verify_args[@]}" --privacy-phase signed
 [[ ! -e "${output_dmg}" && ! -L "${output_dmg}" ]] || fail "自检期间正式输出被占用，拒绝覆盖"
 /bin/mv -n "${verified_dmg}" "${output_dmg}"
 [[ ! -e "${verified_dmg}" && -f "${output_dmg}" ]] || fail "正式输出移动未完成，未放行"

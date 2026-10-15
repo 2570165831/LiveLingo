@@ -7,6 +7,7 @@ source "${project_root}/Scripts/release-tools.sh"
 python_bin="${LIVELINGO_PYTHON:-/usr/bin/python3}"
 dmg=""
 mount_dir=""
+xattr_report=""
 identity=""
 privacy_phase="signed"
 detach_max_attempts=3
@@ -15,11 +16,12 @@ dry_run=0
 candidate_only=0
 while (( $# > 0 )); do
   case "$1" in
-    --dmg|--mount-point|--identity|--detach-max-attempts|--detach-retry-delay|--privacy-phase)
+    --dmg|--mount-point|--xattr-report|--identity|--detach-max-attempts|--detach-retry-delay|--privacy-phase)
       (( $# >= 2 )) || fail "$1 缺少参数"
       case "$1" in
         --dmg) dmg="$2" ;;
         --mount-point) mount_dir="$2" ;;
+        --xattr-report) xattr_report="$2" ;;
         --identity) identity="$2" ;;
         --privacy-phase) privacy_phase="$2" ;;
         --detach-max-attempts) detach_max_attempts="$2" ;;
@@ -32,6 +34,7 @@ while (( $# > 0 )); do
       print -r -- "用法：Scripts/verify-release-dmg.sh --dmg <DMG> [--identity <Authority>] [--privacy-phase final|signed] [--mount-point <新目录>] [--detach-max-attempts <次数>] [--detach-retry-delay <秒>] [--dry-run]"
       print -r -- "--candidate-only 仅做本地候选校验，不检查票据或 Gatekeeper。隐私检查默认使用 signed 阶段；真实自检需要宿主 Python 3.11 或更新版本。"
       print -r -- "无 DMG 或 dry-run 时明确跳过，不算发布验收。"
+      print -r -- "--xattr-report <新 JSON> 保存实际镜像内容及宿主 DMG 文件的扩展属性检查；默认在 DMG 旁新建记录目录。"
       exit 0 ;;
     *) fail "未知参数：$1" ;;
   esac
@@ -59,8 +62,12 @@ if [[ -n "${mount_dir}" ]]; then
   check_write_path "${mount_dir}"
   check_write_path "${mount_dir:h}"
   [[ ! -e "${mount_dir}" && ! -L "${mount_dir}" ]] || fail "挂载目录已存在，拒绝复用"
-else
-  check_write_path "${dmg:h}"
+fi
+check_write_path "${dmg:h}"
+if [[ -n "${xattr_report}" ]]; then
+  xattr_report="${xattr_report:a}"
+  check_write_path "${xattr_report}"
+  [[ -d "${xattr_report:h}" && ! -e "${xattr_report}" && ! -L "${xattr_report}" ]] || fail "属性报告须为已有目录内的新文件"
 fi
 verify_tools=(codesign hdiutil)
 (( candidate_only )) || verify_tools+=(stapler spctl)
@@ -85,8 +92,13 @@ fi
 if [[ -n "${mount_dir}" ]]; then
   /bin/mkdir "${mount_dir}"
 else
-  mount_dir="$(/usr/bin/mktemp -d "${dmg:h}/release-check-XXXXXX")"
+  # Use the host temporary filesystem. Owners-disabled external volumes can
+  # reject explicit APFS image mount points even when the image is valid.
+  mount_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/livelingo-release-check-XXXXXX")"
+  mount_dir="${mount_dir:A}"
 fi
+[[ -n "${xattr_report}" ]] || xattr_report="$(/usr/bin/mktemp -d "${dmg:h}/metadata-check-XXXXXX")/mounted-image.json"
+"${python_bin}" "${project_root}/Scripts/release-state.py" outside-app "${mount_dir}" "${xattr_report}"
 mounted=0
 attach_started=0
 detach_failed=0
@@ -128,7 +140,7 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 attach_code=0
 attach_started=1
-attach_output="$("${hdiutil_bin}" attach -plist -readonly -nobrowse -mountpoint "${mount_dir}" "${dmg}")" || attach_code=$?
+attach_output="$("${hdiutil_bin}" attach -plist -readonly -nobrowse -noautoopen -mountpoint "${mount_dir}" "${dmg}")" || attach_code=$?
 # A failed attach may still report an attached device. Clean only that device.
 if device="$(print -r -- "${attach_output}" | "${python_bin}" "${project_root}/Scripts/release-state.py" attach-devices)"; then
   mounted=1
@@ -139,6 +151,8 @@ fi
 (( attach_code == 0 )) || fail "attach 失败（exit ${attach_code}），清理已返回的设备 ${device}"
 mounted_app="${mount_dir}/LiveLingo.app"
 [[ -d "${mounted_app}" && ! -L "${mounted_app}" ]] || fail "DMG 内缺少真实 LiveLingo.app 目录"
+"${python_bin}" "${project_root}/Scripts/distribution_xattrs.py" --image "${dmg}" --mounted-root "${mount_dir}" --report "${xattr_report}"
+print -r -- "实际镜像扩展属性检查：${xattr_report}（宿主文件属性单独记录，传输时须复核）"
 "${python_bin}" "${project_root}/Scripts/privacy_package.py" check --root "${mount_dir}" --layout dmg --phase "${privacy_phase}"
 (( candidate_only )) || "${stapler_bin}" validate "${mounted_app}"
 "${codesign_bin}" --verify --deep --strict --verbose=2 "${mounted_app}"
