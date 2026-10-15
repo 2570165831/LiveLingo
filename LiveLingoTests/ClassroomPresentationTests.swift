@@ -49,7 +49,7 @@ final class CaptionFollowLatestTests: XCTestCase {
         try await assertLatestVisible(fixture)
     }
 
-    func testBecomingKeyCatchesUpWithoutAnotherCaption() async throws {
+    func testBecomingKeyPreservesHistoryWithoutAnotherCaption() async throws {
         let fixture = try host(controlState: .active, phase: .active)
         defer { fixture.window.close() }
         try await settle(fixture)
@@ -57,18 +57,18 @@ final class CaptionFollowLatestTests: XCTestCase {
         fixture.state.controlState = .key
         NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: fixture.window)
         try await settle(fixture)
-        try await assertLatestVisible(fixture)
+        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
         XCTAssertFalse(fixture.window.isKeyWindow, "Key state is injected, never borrowed from the user")
     }
 
-    func testBecomingActiveCatchesUpWithoutAnotherCaption() async throws {
+    func testBecomingActivePreservesHistoryWithoutAnotherCaption() async throws {
         let fixture = try host(controlState: .inactive, phase: .inactive)
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
         fixture.state.phase = .active
         try await settle(fixture)
-        try await assertLatestVisible(fixture)
+        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
     }
 
     func testNativeKeyNotificationOnlyFollowsTheOwningWindow() async throws {
@@ -85,18 +85,18 @@ final class CaptionFollowLatestTests: XCTestCase {
         XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
         NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: fixture.window)
         try await settle(fixture)
-        try await assertLatestVisible(fixture)
+        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
         XCTAssertFalse(fixture.window.isKeyWindow)
     }
 
-    func testNativeApplicationActivationNotificationCatchesUpWithoutActivating() async throws {
+    func testNativeApplicationActivationPreservesHistoryWithoutNewCaption() async throws {
         let fixture = try host(controlState: .inactive, phase: .inactive)
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
         NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApplication.shared)
         try await settle(fixture)
-        try await assertLatestVisible(fixture)
+        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
         XCTAssertFalse(NSApplication.shared.isActive)
     }
 
@@ -277,11 +277,11 @@ final class ClassroomPresentationTests: XCTestCase {
         try await checkBackgroundCaptionArrival(controlState: .inactive, phase: .inactive)
     }
 
-    func testReturningKeyClassroomCatchesUpWithoutAnotherCaption() async throws {
+    func testReturningKeyClassroomPreservesSavedCourseReadingPosition() async throws {
         try await checkBackgroundCaptionArrival(controlState: .active, phase: .active, refocus: true)
     }
 
-    func testReturningActiveClassroomCatchesUpWithoutAnotherCaption() async throws {
+    func testReturningActiveClassroomPreservesSavedCourseReadingPosition() async throws {
         try await checkBackgroundCaptionArrival(controlState: .inactive, phase: .inactive, refocus: true)
     }
 
@@ -343,6 +343,11 @@ final class ClassroomPresentationTests: XCTestCase {
             model.loadPresentationForTesting(phase: appPhase, evidence: evidence + [latest], notebook: notebook)
         }
         try await settle(view)
+        if refocus {
+            XCTAssertGreaterThan(history.contentView.bounds.minY, 100)
+            XCTAssertFalse(window.isKeyWindow)
+            return
+        }
         XCTAssertEqual(history.contentView.bounds.minY, 0, accuracy: 3)
         let row = try XCTUnwrap(descendants(view).first {
             $0.identifier?.rawValue == "classroom-caption-\(latest.id)"

@@ -111,7 +111,7 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
               parakeetConfidenceValid: true)
     }
 
-    func testQuietSingleWordWithIndependentNoneHeadIsRetryableEmptyOutput() async throws {
+    func testQuietSingleWordWithIndependentNoneHeadIsNoSpeechWithManualRetry() async throws {
         let url = try audio(seconds: 3, kind: 1, gain: 0.01)
         for text in ["I.", "Really?"] {
             let calls = Observed()
@@ -131,9 +131,9 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(calls.all, ["primary", "analysis", "probe"])
             XCTAssertTrue(output.text.isEmpty)
             XCTAssertNil(output.candidate)
-            XCTAssertEqual(output.failureReason, .emptyOutput)
-            XCTAssertFalse(output.noSpeech, "Reject as untranscribed, not a terminal no-speech verdict")
-            XCTAssertNil(output.speechConfidence)
+            XCTAssertEqual(output.failureReason, .noSpeech)
+            XCTAssertTrue(output.noSpeech)
+            XCTAssertEqual(output.speechConfidence, 0.01)
             XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
         }
     }
@@ -159,8 +159,8 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(calls.all, ["primary", "fallback", "analysis", "probe"],
             "The later source decision must reuse the already validated raw head")
         XCTAssertTrue(output.text.isEmpty)
-        XCTAssertEqual(output.failureReason, .emptyOutput)
-        XCTAssertFalse(output.noSpeech)
+        XCTAssertEqual(output.failureReason, .noSpeech)
+        XCTAssertTrue(output.noSpeech)
     }
 
     func testFallbackWordUsesIndependentRawNoneHeadInsteadOfEmptyPrimaryAsEvidence() async throws {
@@ -178,8 +178,8 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
                 commitEnglish: { _ in XCTFail("The independently rejected fallback must not publish") })
             XCTAssertEqual(calls.all, ["primary", "fallback", "analysis", "probe"])
             XCTAssertTrue(output.text.isEmpty)
-            XCTAssertEqual(output.failureReason, .emptyOutput)
-            XCTAssertFalse(output.noSpeech, "A nonempty fallback is not the old empty-recognizer terminal")
+            XCTAssertEqual(output.failureReason, .noSpeech)
+            XCTAssertTrue(output.noSpeech)
         }
     }
 
@@ -339,8 +339,8 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
                     mode == .probe ? Self.qualityHead(probability: probability, englishProbability: english) : .init(text: "I.")
                 }, speechAnalyzer: { _ in 0.01 })
             XCTAssertEqual(output.text, rejected ? "" : "I.")
-            if rejected { XCTAssertEqual(output.failureReason, .emptyOutput) }
-            XCTAssertFalse(output.noSpeech)
+            if rejected { XCTAssertEqual(output.failureReason, .noSpeech) }
+            XCTAssertEqual(output.noSpeech, rejected)
         }
     }
 
@@ -590,14 +590,16 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         await queue.finish(sessionID: session)
         await queue.cancel()
         let rejected = try XCTUnwrap(queue.records.first)
-        XCTAssertEqual(rejected.status, .failed)
-        XCTAssertEqual(rejected.failureReason, .emptyOutput)
-        XCTAssertEqual(rejected.automaticRetryCount, DurableTranscriptionJournal.maximumAutomaticRetries)
+        XCTAssertEqual(rejected.status, .noSpeech)
+        XCTAssertEqual(rejected.failureReason, .noSpeech)
+        XCTAssertEqual(rejected.automaticRetryCount, 0)
         XCTAssertNil(rejected.text)
         XCTAssertNil(rejected.candidateText)
-        XCTAssertNil(rejected.speechConfidence)
+        XCTAssertEqual(rejected.speechConfidence, 0.01)
         XCTAssertNotEqual(rejected.audioRetired, true)
-        XCTAssertEqual(queue.state?.noSpeechCount, 0)
+        XCTAssertEqual(queue.state?.noSpeechCount, 1)
+        XCTAssertEqual(queue.state?.unresolvedCount, 0)
+        XCTAssertFalse(events.all.contains("issue"), "A rejected hallucination must not display a missing-transcription warning")
         XCTAssertFalse(events.all.contains("final"), "Neither initial nor repaired rejection may publish")
         let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
         let retained = try journal.audioURL(for: rejected)
@@ -608,7 +610,7 @@ final class NoSpeechFilterTests: XCTestCase, @unchecked Sendable {
         }, speechAnalyzer: { _ in XCTFail("Explicit manual retry bypasses the acoustic check"); return 0 })
         try await reopened.configure(directory: root, sessionID: session, persistent: true, identified: true,
             restoring: true, startPaused: true) { _ in }
-        XCTAssertEqual(reopened.records.first?.status, .failed)
+        XCTAssertEqual(reopened.records.first?.status, .noSpeech)
         try reopened.retry(id: rejected.id)
         try reopened.resume()
         await reopened.finish(sessionID: session)

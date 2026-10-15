@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import XCTest
 @testable import LiveLingo
@@ -80,6 +81,19 @@ final class ChineseRecognitionTests: XCTestCase {
         model.recognizeCaptionAsChinese(old.id)
         XCTAssertEqual(model.segments.first, old)
         XCTAssertNil(model.chineseRecognitionTaskForTesting(old.id))
+    }
+
+    func testMenuRecordingInspectionRunsOutsideMainThread() async throws {
+        let (model, _, old) = try await fixture()
+        let inspected = expectation(description: "Background WAV inspection")
+        let availability = await ChineseRecognitionAudio.$inspectionForTesting.withValue({
+            XCTAssertFalse(Thread.isMainThread, "Hover must not read files or acquire the work-queue lock on main")
+            inspected.fulfill()
+        }) {
+            await model.inspectChineseRecognitionAvailability(for: old)
+        }
+        XCTAssertTrue(availability.isAvailable)
+        await fulfillment(of: [inspected], timeout: 2)
     }
 
     func testSuccessPreservesOriginalAndPersistsChineseWithoutTranslation() async throws {
@@ -229,6 +243,137 @@ final class ChineseRecognitionTests: XCTestCase {
         XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .completed)
         XCTAssertEqual(model.segments.first?.english, expected.text)
         XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first?.english, expected.text)
+    }
+
+    func testStartCapturesBeforeCancelledManualInferenceOrUnknownReceiptFinishes() async throws {
+        var continuation: CheckedContinuation<ASRTranscription, Error>?
+        defer { continuation?.resume(throwing: CancellationError()) }
+        var waitedForInference = false
+        let dependencies = ChineseRecognitionDependencies(waitForInference: {
+            if continuation != nil {
+                waitedForInference = true
+                XCTFail("Capture must not poll or join the independent Chinese transport")
+            }
+        }, recognize: { _, _ in
+            try await withCheckedThrowingContinuation { continuation = $0 }
+        })
+        let (model, directory, old) = try await fixture(recognize: dependencies)
+        model.recognizeCaptionAsChinese(old.id)
+        try await eventually { continuation != nil }
+        let oldTask = model.chineseRecognitionTaskForTesting(old.id)
+        let next = directory.deletingLastPathComponent().appendingPathComponent("NextCapture-\(UUID())")
+        var captureStarted = false
+        model.startCaptureForTesting = {
+            let input = try await model.beginAlarmMicrophoneCourseForTesting(directory: next)
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: MediaFileImport.storageFormat, frameCapacity: 1600))
+            buffer.frameLength = 1600
+            buffer.floatChannelData![0].initialize(repeating: 0.125, count: 1600)
+            XCTAssertEqual(input.copy(buffer.audioBufferList, frames: 1600, observedEnd: 1), .accepted)
+            await input.drain()
+            captureStarted = true
+        }
+        model.start()
+        try await eventually { captureStarted }
+        model.startCaptureForTesting = nil
+        XCTAssertTrue(model.isRecording)
+        XCTAssertEqual(try WAVContextClip.readLayout(at: next.appendingPathComponent("recording.wav")).frameCount, 1600)
+        XCTAssertFalse(waitedForInference)
+        XCTAssertNotNil(continuation, "The old service is still running when capture starts")
+        XCTAssertEqual(try SessionStore(directory: directory).load()?.segments.first, old)
+        continuation?.resume(returning: result("迟到的旧课程结果。"))
+        continuation = nil
+        await oldTask?.value
+        XCTAssertTrue(model.segments.isEmpty, "A late manual result cannot enter the new course")
+        XCTAssertTrue(model.chineseRecognitionState.statuses.isEmpty)
+        await model.stopSavedCourseForTesting()
+    }
+
+    func testQueuedRequestSurvivesReopenCanExecuteAndCancelDurably() async throws {
+        var calls = 0
+        let expected = result()
+        let (model, directory, old) = try await fixture(recognize: .init { _, _ in calls += 1; return expected })
+        model.loadPresentationForTesting(phase: .recording, evidence: [old])
+        model.recognizeCaptionAsChinese(old.id)
+        try await model.flushSavedCourseForTesting()
+        let queued = try XCTUnwrap(SessionStore(directory: directory).load())
+        XCTAssertEqual(queued.pendingChineseRecognition, [old])
+        XCTAssertEqual(try SessionArchiveCoding.minimumReaderVersion(for: SessionArchiveCoding.encode(queued)), 6)
+        XCTAssertEqual(calls, 0)
+        // Reset drops all process-local presentation and tasks. Only disk can
+        // restore the request, as after an exit or interrupted process.
+        await model.resetTranslationSessionForTesting()?.value
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        XCTAssertEqual(model.chineseRecognitionState.statuses[old.id], .pending)
+        let presentation = ChineseRecognitionRowPresentation(status: .pending, availability: .available, canUndo: false)
+        XCTAssertTrue(presentation.canRecognize && presentation.canCancel)
+        XCTAssertTrue(presentation.statusText?.contains("待重新识别") == true)
+        XCTAssertEqual(calls, 0)
+        model.cancelChineseRecognition(old.id)
+        try await model.flushSavedCourseForTesting()
+        XCTAssertNil(try SessionStore(directory: directory).load()?.pendingChineseRecognition)
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        XCTAssertNil(model.chineseRecognitionState.statuses[old.id])
+        model.loadPresentationForTesting(phase: .recording, evidence: [old])
+        model.recognizeCaptionAsChinese(old.id)
+        try await model.flushSavedCourseForTesting()
+        await model.resetTranslationSessionForTesting()?.value
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        model.recognizeCaptionAsChinese(old.id)
+        await model.chineseRecognitionTaskForTesting(old.id)?.value
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(model.segments.first?.english, expected.text)
+        XCTAssertNil(try SessionStore(directory: directory).load()?.pendingChineseRecognition)
+    }
+
+    func testManualChineseArchiveReopenDoesNotOfferOriginalJournalTextAndUndoFullyRestores() async throws {
+        let expected = result()
+        let (model, directory, old) = try await fixture(recognize: .init { _, _ in expected })
+        try writeRecording(directory.appendingPathComponent("recording.wav"), frames: 48_000)
+        let session = try XCTUnwrap(old.sessionID)
+        let journal = try DurableTranscriptionJournal(sessionDirectory: directory, sessionID: session)
+        var record = TranscriptionWorkRecord(id: old.id, sessionID: session, ordinal: 0,
+            audioFile: "synthetic.wav", startFrame: 16_000, endFrame: 48_000, sampleRate: 16_000,
+            start: old.startTime, end: old.endTime, captureStart: nil, captureEnd: nil,
+            modelKey: "primary", fallbackModelKey: nil, appleEvidence: "", recordingFile: "recording.wav")
+        record.text = old.english
+        record.status = .completed
+        try journal.put(record)
+        model.recognizeCaptionAsChinese(old.id)
+        await model.chineseRecognitionTaskForTesting(old.id)?.value
+        let corrected = try XCTUnwrap(model.segments.first)
+        XCTAssertEqual(corrected.chineseRecognitionOriginal?.english, old.english)
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(model.segments.first, corrected)
+        XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+        XCTAssertFalse(model.archiveNotice?.contains("同一录音段") == true)
+        XCTAssertNil(model.archiveError)
+        XCTAssertEqual(model.savedTranscriptionWork.first?.text, old.english)
+        XCTAssertNil(model.savedTranscriptionWork.first?.candidateText)
+        XCTAssertEqual(model.transcriptionProcessing?.unresolvedCount, 0)
+        // Also recover a reader-5 archive that already wrote the spurious
+        // same-range candidate, before this fix was installed.
+        var broken = record
+        broken.text = expected.text; broken.textLanguage = "zh"
+        broken.candidateText = old.english; broken.candidateOrigin = "sameRangeRevision"
+        broken.status = .failed; broken.failureReason = .emptyOutput
+        let staleJournal = try DurableTranscriptionJournal(sessionDirectory: directory, sessionID: session)
+        try staleJournal.put(broken)
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(model.segments.first, corrected)
+        XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+        XCTAssertEqual(model.savedTranscriptionWork.first?.text, old.english)
+        XCTAssertNil(model.savedTranscriptionWork.first?.candidateText)
+        model.undoChineseRecognition(old.id)
+        await model.synchronizeChineseRecognitionExportsForTesting()
+        try await model.openSavedSession(directory, allowAutomaticProcessing: false)
+        try await Task.sleep(for: .milliseconds(40))
+        var restored = try XCTUnwrap(model.segments.first)
+        restored.inputRevision = old.inputRevision
+        XCTAssertEqual(restored, old)
+        XCTAssertTrue(model.transcriptionCandidates.isEmpty)
+        XCTAssertNil(model.savedTranscriptionWork.first?.candidateText)
     }
 
     func testUndoCannotMutateCaptionWhileStopping() async throws {

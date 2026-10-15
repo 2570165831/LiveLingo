@@ -623,6 +623,23 @@ final class ChineseRecognitionPresentationTests: XCTestCase {
         XCTAssertEqual(segment, original)
     }
 
+    func testSlowMenuInspectionDoesNotBlockAndStaleResultCannotReplaceNewerInspection() async throws {
+        let resolution = ChineseRecognitionMenuAvailabilityState()
+        var old: CheckedContinuation<ChineseRecognitionAvailability, Never>?
+        resolution.resolve {
+            await withCheckedContinuation { old = $0 }
+        }
+        for _ in 0..<20 where old == nil { await Task.yield() }
+        XCTAssertNotNil(old)
+        XCTAssertFalse(resolution.value.isAvailable)
+        resolution.resolve { .available }
+        for _ in 0..<20 where !resolution.value.isAvailable { await Task.yield() }
+        XCTAssertTrue(resolution.value.isAvailable)
+        old?.resume(returning: .unavailable("A stale recording inspection"))
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertTrue(resolution.value.isAvailable)
+    }
+
     func testResolvingMenuChecksRecordingWhenSharedActionsAppear() async throws {
         var availabilityReads = 0
         let resolution = ChineseRecognitionMenuAvailabilityState()

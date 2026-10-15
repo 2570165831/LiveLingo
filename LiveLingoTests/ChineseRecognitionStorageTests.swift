@@ -46,6 +46,25 @@ struct ChineseRecognitionStorageTests {
         #expect(!segment.sameContent(as: original))
     }
 
+    @Test func queuedRequestsRoundtripRequireReaderSixAndLeaveLegacyBytesAlone() throws {
+        let segment = source()
+        var snapshot = SessionSnapshot(segments: [segment], createdAt: date)
+        let legacy = try SessionArchiveCoding.encode(snapshot)
+        #expect(!String(decoding: legacy, as: UTF8.self).contains("pendingChineseRecognition"))
+        snapshot.pendingChineseRecognition = [segment]
+        let pending = try SessionArchiveCoding.encode(snapshot)
+        #expect(try SessionArchiveCoding.minimumReaderVersion(for: pending) == 6)
+        #expect(try SessionArchiveCoding.minimumReaderVersion(for: legacy) == 1)
+        let root = try directory("QueuedChinese")
+        let saved = try SessionStore(directory: root).save(snapshot)
+        #expect(try SessionStore(directory: root).load()?.pendingChineseRecognition == [segment])
+        var duplicate = saved
+        duplicate.pendingChineseRecognition = [segment, segment]
+        #expect(throws: (any Error).self) { try duplicate.validate() }
+        snapshot.pendingChineseRecognition = nil
+        #expect(try SessionArchiveCoding.encode(snapshot) == legacy)
+    }
+
     @Test func emptyResultDoesNotChangeSourceAndRepeatedResultsKeepFirstUndo() throws {
         var segment = source()
         let before = try SessionArchiveCoding.encode(segment)

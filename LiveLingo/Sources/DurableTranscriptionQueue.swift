@@ -1325,8 +1325,7 @@ final class DurableTranscriptionQueue: @unchecked Sendable {
                        SpeechPresenceGate.quietSingleWord(output.text, audioDuration: record.duration,
                            maximumFrameRMS: energy, speechConfidence: confidence,
                            languageHeadSuggestsNoSpeech: negative) {
-                        output.text = ""
-                        output.failureReason = .emptyOutput
+                        return Outcome(failureReason: .noSpeech, noSpeech: true, speechConfidence: confidence)
                     }
                 } catch is CancellationError { throw CancellationError() }
                 catch { /* An unavailable quality head never erases speech. */ }

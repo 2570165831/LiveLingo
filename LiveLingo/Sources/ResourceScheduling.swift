@@ -290,8 +290,8 @@ actor ASRRequestCoordinator {
     }
     #endif
 
-    /// Starting another capture joins the independent manual transport, not
-    /// merely its cancelled UI caller. Unknown ownership remains a barrier.
+    /// Explicit runtime teardown can join the independent manual transport.
+    /// Starting capture must bypass this barrier and discard cancelled results.
     func waitForChineseInferenceCompletion() async throws {
         while !chineseWaiters.isEmpty || leases.values.contains(where: { $0.language == .chinese }) {
             try Task.checkCancellation()

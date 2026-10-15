@@ -1285,6 +1285,7 @@ final class AppModel: ObservableObject {
     private var pendingChineseRecognition: [UUID: TranscriptSegment] = [:]
     #if DEBUG
     var chineseRecognitionArchiveBarrierForTesting: (@MainActor () async throws -> Void)?
+    var startCaptureForTesting: (@MainActor () async throws -> Void)?
     #endif
     private var chineseRecognitionTokens: [UUID: UUID] = [:]
     private var retiredChineseRecognitionTasks: [UUID: Task<Void, Never>] = [:]
@@ -2252,7 +2253,7 @@ final class AppModel: ObservableObject {
         let review = LearningReviewQueue(journalURL: directory.appendingPathComponent("alarm-review-queue.json"),
             observeSleep: false, diagnostics: .disabled)
         let saved = AppModel(reviewQueue: review, pipeline: SpeechPipeline(existingQueue: queue),
-            translation: captionTranslation, notes: learningGeneration, backgroundServices: false,
+            translation: captionTranslation, notes: learningGeneration, chineseRecognition: chineseRecognition, backgroundServices: false,
             scheduledNotes: scheduledNotesEnabled, defaults: preferences,
             chineseScriptConverter: chineseScriptConverter)
         saved.alarmForegroundModel = self
@@ -2312,6 +2313,10 @@ final class AppModel: ObservableObject {
                         try? await saved.parkSavedProcessing()
                     } else if !livePending && saved.processingPaused {
                         saved.resumeSavedProcessing()
+                    } else if !hasActiveSession && !saved.processingPaused {
+                        // Its ASR drain may have finished during the next live
+                        // course. Revisit deferred manual requests after capture.
+                        saved.startPendingChineseRecognition()
                     }
                 }
                 try? await Task.sleep(for: .milliseconds(250))
@@ -2387,8 +2392,14 @@ final class AppModel: ObservableObject {
                 if sessionStartID == startID { sessionStartTask = nil; sessionStartID = nil }
             }
             do {
-                try await parkSavedProcessing()
+                try await parkSavedProcessing(waitForChineseInference: false)
                 try Task.checkCancellation()
+                #if DEBUG
+                if AppRuntimeEnvironment.isUnitTesting, let startCaptureForTesting {
+                    try await startCaptureForTesting()
+                    return
+                }
+                #endif
                 await startSession()
             } catch {
                 if let directory = sessionDirectory { phase = .saved(directory) }
@@ -3085,6 +3096,8 @@ final class AppModel: ObservableObject {
         guard let saver = sessionSaver, var snapshot = sessionSnapshot,
               saver.sessionID == sessionID, snapshot.sessionID == sessionID else { return }
         snapshot.segments = segments
+        snapshot.pendingChineseRecognition = pendingChineseRecognition.isEmpty ? nil
+            : pendingChineseRecognition.values.sorted { $0.id.uuidString < $1.id.uuidString }
         learningNotebook.writeState(to: &snapshot)
         snapshot.latestEvidenceIDs = latestLearningIDs
         snapshot.generation = generation
@@ -3154,13 +3167,13 @@ final class AppModel: ObservableObject {
 
     /// Suspend processing of the displayed saved course before switching UI.
     /// Capture has already ended. New recording never waits for a 9B review.
-    private func parkSavedProcessing() async throws {
+    private func parkSavedProcessing(waitForChineseInference: Bool = true) async throws {
         let chineseOwner = UUID()
         chineseRecognitionLifecycleOwners.insert(chineseOwner)
         defer { chineseRecognitionLifecycleOwners.remove(chineseOwner) }
         let revision = lifecycleRevision
         try validateLifecycleCompletion(revision)
-        try await waitForChineseRecognitionWriters()
+        try await waitForChineseRecognitionWriters(waitForInference: waitForChineseInference)
         #if DEBUG
         if let park = privacyExitConfiguration?.park {
             try await waitForLifecycle { try await park() }
@@ -3323,6 +3336,8 @@ final class AppModel: ObservableObject {
         sessionDirectory = directory
         pendingCaptionRepairs = snapshot.processing.pendingCaptionRepairs ?? []
         segments = snapshot.segments
+        pendingChineseRecognition = Dictionary(uniqueKeysWithValues: (snapshot.pendingChineseRecognition ?? []).map { ($0.id, $0) })
+        for id in pendingChineseRecognition.keys { chineseRecognitionState.statuses[id] = .pending }
         for index in segments.indices where segments[index].translationState == .translating {
             // A saved in-flight state proves only that the writer stopped;
             // it cannot distinguish a routine quit from a runtime failure.
@@ -4079,7 +4094,7 @@ final class AppModel: ObservableObject {
         return .available
     }
 
-    func chineseRecognitionAvailability(for segment: TranscriptSegment) -> ChineseRecognitionAvailability {
+    private func chineseRecognitionPermission(for segment: TranscriptSegment) -> ChineseRecognitionAvailability {
         let course = chineseRecognitionCourseActionsAvailability()
         guard course.isAvailable else { return course }
         switch phase {
@@ -4092,10 +4107,19 @@ final class AppModel: ObservableObject {
         guard segments.contains(where: { $0.id == segment.id && $0.inputRevision == segment.inputRevision }) else {
             return .unavailable("本句已更新，请重新打开菜单。")
         }
+        return .available
+    }
+
+    private nonisolated static func inspectChineseRecognitionAudio(segment: TranscriptSegment, directory: URL?,
+        ranges: [SessionAudioRange], pipeline: SpeechPipeline, session: UUID) -> ChineseRecognitionAvailability {
         do {
-            _ = try ChineseRecognitionAudio.slice(segment: segment, directory: currentCourseDirectory,
-                ranges: sessionSnapshot?.audioRanges ?? [],
-                retainedChunks: pipeline.transcriptionWork().filter { $0.sessionID == sessionID })
+            do {
+                _ = try ChineseRecognitionAudio.slice(segment: segment, directory: directory, ranges: ranges)
+            } catch ChineseRecognitionAudio.Failure.unavailable {
+                // Read the queue only if the complete recording is unavailable.
+                _ = try ChineseRecognitionAudio.slice(segment: segment, directory: directory, ranges: ranges,
+                    retainedChunks: pipeline.transcriptionWork().filter { $0.sessionID == session })
+            }
             return .available
         } catch {
             return .unavailable((error as? ChineseRecognitionAudio.Failure)?.localizedDescription
@@ -4103,22 +4127,58 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func chineseRecognitionAvailability(for segment: TranscriptSegment) -> ChineseRecognitionAvailability {
+        let permission = chineseRecognitionPermission(for: segment)
+        guard permission.isAvailable else { return permission }
+        return Self.inspectChineseRecognitionAudio(segment: segment, directory: currentCourseDirectory,
+            ranges: sessionSnapshot?.audioRanges ?? [], pipeline: pipeline, session: sessionID)
+    }
+
+    func inspectChineseRecognitionAvailability(for segment: TranscriptSegment) async -> ChineseRecognitionAvailability {
+        let permission = chineseRecognitionPermission(for: segment)
+        guard permission.isAvailable else { return permission }
+        let directory = currentCourseDirectory, ranges = sessionSnapshot?.audioRanges ?? []
+        let pipeline = pipeline, identity = sessionID, epoch = generation
+        let availability = await Task.detached(priority: .utility) {
+            Self.inspectChineseRecognitionAudio(segment: segment, directory: directory,
+                ranges: ranges, pipeline: pipeline, session: identity)
+        }.value
+        guard sessionID == identity, generation == epoch else {
+            return .unavailable("课程已切换，请重新打开字幕操作菜单。")
+        }
+        let current = chineseRecognitionPermission(for: segment)
+        return current.isAvailable ? availability : current
+    }
+
     func recognizeCaptionAsChinese(_ id: UUID) {
-        guard chineseRecognitionTasks[id] == nil, pendingChineseRecognition[id] == nil,
+        guard chineseRecognitionTasks[id] == nil,
               let input = segments.first(where: { $0.id == id }) else { return }
+        if let queued = pendingChineseRecognition[id] {
+            guard phase != .recording, phase != .paused else { return }
+            guard queued.inputRevision == input.inputRevision, queued.english == input.english,
+                  queued.sourceLanguage == input.sourceLanguage else {
+                pendingChineseRecognition[id] = nil
+                chineseRecognitionState.statuses[id] = .failed("本句已更新，未执行排队的重识别；请重新查看后再试。")
+                persistCurrentSession()
+                return
+            }
+        }
         let availability = chineseRecognitionAvailability(for: input)
         guard availability.isAvailable else {
             chineseRecognitionState.statuses[id] = .failed(availability.reason ?? "本句录音不可用，原句未改。")
+            pendingChineseRecognition[id] = nil
+            persistCurrentSession()
             return
         }
-        guard chineseRecognitionTasks.count + pendingChineseRecognition.count < 8 else {
+        guard pendingChineseRecognition[id] != nil || pendingChineseRecognition.count < 8 else {
             chineseRecognitionState.statuses[id] = .failed("中文重识别等待队列已满，请稍后再试；原句未改。")
             return
         }
         // MLX inference cannot be safely preempted. Keep manual work outside
         // both admission queues for the entire resumable capture session.
-        if phase == .recording || phase == .paused {
-            pendingChineseRecognition[id] = input
+        pendingChineseRecognition[id] = input
+        persistCurrentSession()
+        if phase == .recording || phase == .paused || alarmForegroundModel?.hasActiveSession == true {
             chineseRecognitionState.statuses[id] = .waitingForRealtime
             return
         }
@@ -4159,6 +4219,8 @@ final class AppModel: ObservableObject {
                               && $0.sourceLanguage == input.sourceLanguage
                       }) else {
                     self.chineseRecognitionState.statuses[id] = .failed("本句已更新，未使用这次识别结果；请重新查看后再试。")
+                    self.pendingChineseRecognition[id] = nil
+                    self.persistCurrentSession()
                     return
                 }
                 guard result.languageMode == .chinese, result.language == "zh", result.decode == .forced,
@@ -4170,6 +4232,7 @@ final class AppModel: ObservableObject {
                 // the latest old caption, not a stale in-flight translation draft.
                 var replacement = self.segments[index]
                 replacement.applyChineseRecognition(result.text)
+                self.pendingChineseRecognition[id] = nil
                 if self.sessionSaver == nil, let directory = self.currentCourseDirectory,
                    let snapshot = self.sessionSnapshot { self.bindSessionArchive(to: directory, restored: snapshot) }
                 self.cancelInitialTranslationRequest(id)
@@ -4185,6 +4248,8 @@ final class AppModel: ObservableObject {
             } catch {
                 guard self.sessionID == identity, self.generation == epoch,
                       self.chineseRecognitionTokens[id] == token else { return }
+                self.pendingChineseRecognition[id] = nil
+                self.persistCurrentSession()
                 if error is CancellationError || Task.isCancelled {
                     self.chineseRecognitionState.statuses[id] = .cancelled
                 } else {
@@ -4196,8 +4261,9 @@ final class AppModel: ObservableObject {
     }
 
     func cancelChineseRecognition(_ id: UUID) {
-        if pendingChineseRecognition.removeValue(forKey: id) != nil {
+        if chineseRecognitionTasks[id] == nil, pendingChineseRecognition.removeValue(forKey: id) != nil {
             chineseRecognitionState.statuses[id] = .cancelled
+            persistCurrentSession()
             return
         }
         guard chineseRecognitionState.statuses[id] == .recognizing else { return }
@@ -4208,19 +4274,24 @@ final class AppModel: ObservableObject {
         chineseRecognitionTokens[id] = nil
         chineseRecognitionTasks[id] = nil
         chineseRecognitionState.statuses[id] = .cancelled
+        pendingChineseRecognition[id] = nil
+        persistCurrentSession()
     }
 
     private func startPendingChineseRecognition() {
         guard case .saved = phase, !isTerminating, !archiveLoading,
               !alarmRolloverInProgress, !finalizationInProgress,
               chineseRecognitionLifecycleOwners.isEmpty,
+              alarmForegroundModel?.hasActiveSession != true,
               noteSourceProducerDrained || processingPaused else { return }
         let pending = pendingChineseRecognition
-        pendingChineseRecognition.removeAll()
         for (id, input) in pending {
+            guard chineseRecognitionTasks[id] == nil else { continue }
             guard segments.contains(where: { $0.id == id && $0.inputRevision == input.inputRevision
                 && $0.english == input.english && $0.sourceLanguage == input.sourceLanguage }) else {
                 chineseRecognitionState.statuses[id] = .failed("本句已更新，未执行排队的重识别；请重新查看后再试。")
+                pendingChineseRecognition[id] = nil
+                persistCurrentSession()
                 continue
             }
             recognizeCaptionAsChinese(id)
@@ -4237,22 +4308,30 @@ final class AppModel: ObservableObject {
             // A committed caption owns a storage writer, not cancellable
             // recognition. Lifecycle changes must join its final receipt.
             if chineseRecognitionState.statuses[id] == .saving { continue }
-            if chineseRecognitionState.statuses[id] == .recognizing { chineseRecognitionState.statuses[id] = .cancelled }
+            if chineseRecognitionState.statuses[id] == .recognizing {
+                chineseRecognitionState.statuses[id] = preserveWaiting ? .pending : .cancelled
+            }
             task.cancel()
             chineseRecognitionTasks[id] = nil
             chineseRecognitionTokens[id] = nil
         }
     }
 
-    private func waitForChineseRecognitionWriters() async throws {
-        cancelAllChineseRecognition(preserveWaiting: finalizationInProgress && !preparingApplicationExit)
-        let tasks = Array(retiredChineseRecognitionTasks.values) + Array(chineseRecognitionSyncTasks.values)
+    private func waitForChineseRecognitionWriters(waitForInference: Bool = true) async throws {
+        // Only committed replacements own writers. Cancelled inference callers
+        // may ignore cancellation; they must never hold the next recording up.
+        let writers = chineseRecognitionTasks.filter { chineseRecognitionState.statuses[$0.key] == .saving }.map(\.value)
+        cancelAllChineseRecognition(preserveWaiting: true)
+        let tasks = (waitForInference ? Array(retiredChineseRecognitionTasks.values) : writers)
+            + Array(chineseRecognitionSyncTasks.values)
         let deadline = applicationExitDeadline ?? ExitDeadline.current
         for task in tasks { deadline?.track(task) }
         for task in tasks {
             try await waitForLifecycle { await task.value }
         }
-        try await waitForLifecycle { [self] in try await chineseRecognition.waitForInference() }
+        if waitForInference {
+            try await waitForLifecycle { [self] in try await chineseRecognition.waitForInference() }
+        }
     }
 
     func undoChineseRecognition(_ id: UUID) {
@@ -4436,6 +4515,29 @@ final class AppModel: ObservableObject {
             // an acknowledged snapshot may update the queue comparison text;
             // an automatic language change already belongs to its source commit.
             let changes = snapshot.revisionHistory.filter { $0.previousSegment.id == record.id }
+            // Repair a fake candidate already written by reader 5, using only
+            // the archived manual correction/undo chain for this exact range.
+            if let journal, record.sessionID == snapshot.sessionID,
+               record.candidateOrigin == "sameRangeRevision",
+               let body = snapshot.segments.first(where: { $0.id == record.id }),
+               body.startTime == record.start, body.endTime == record.end,
+               let manual = changes.reversed().compactMap({ change -> TranscriptSegment? in
+                   let corrected = change.replacementSegment.isChineseOriginal ? change.replacementSegment
+                       : change.previousSegment.isChineseOriginal ? change.previousSegment : nil
+                   guard let corrected, let original = corrected.chineseRecognitionOriginal,
+                         record.text == corrected.english, record.textLanguage == "zh",
+                         record.candidateText == original.english,
+                         record.candidateLanguage == original.sourceLanguage else { return nil }
+                   return corrected
+               }).first, let original = manual.chineseRecognitionOriginal,
+               body.isChineseOriginal || (body.english == original.english && body.sourceLanguage == original.sourceLanguage) {
+                var repaired = record
+                repaired.text = original.english; repaired.textLanguage = original.sourceLanguage
+                repaired.candidateText = nil; repaired.candidateLanguage = nil; repaired.candidateOrigin = nil
+                repaired.status = .completed; repaired.failure = nil; repaired.failureReason = nil
+                try journal.put(repaired)
+                continue
+            }
             if record.sessionID == snapshot.sessionID, let change = changes.last,
                change.transcriptionCandidateText == nil,
                let body = snapshot.segments.first(where: { $0.id == record.id }),
@@ -4628,6 +4730,8 @@ final class AppModel: ObservableObject {
             guard result.sessionID == sessionID else { return }
             if let index = segments.firstIndex(where: { $0.id == result.id }) {
                 let existing = segments[index]
+                if existing.startTime == result.start, existing.endTime == result.end,
+                   existing.supersedesAutomaticTranscript(text: result.text, language: result.language) { return }
                 if let initialText = result.replacingInitialText, !result.isRepair,
                    SpokenLanguage.nonEnglishCode(result.language) != nil,
                    let initial = initialSourceRevisionInputs[result.id],
