@@ -1704,7 +1704,10 @@ struct LearningNotebook: Sendable {
             // 明确给了来源 id 却对不上本次输入：不能撤下旧问题 ✗。
             guard named.count == declared.count else { return .none }
             var candidates: [Int] = []
-            for (index, point) in note.points.enumerated() where isEvidenceBacked(point) {
+            // A point with its own question still makes the cited sentence ambiguous.
+            // Check answer availability only after resolving all valid citation matches.
+            for (index, point) in note.points.enumerated()
+                where point.referenceState != .unlinked && !(point.sources ?? []).isEmpty {
                 let sources = point.sources ?? []
                 func exact(_ unit: LearningSourceUnit) -> Bool {
                     sources.contains { $0.index == unit.index && ($0.quote == unit.text || unit.text.contains($0.quote)) }
@@ -1720,12 +1723,16 @@ struct LearningNotebook: Sendable {
                     exact(unit) || matched.contains { $0.index == unit.index && $0.language != unit.language }
                 }) { candidates.append(index) }
             }
-            if let chosen = record.pointIndex { return candidates.contains(chosen) ? .point(chosen) : .none }
-            switch candidates.count {
-            case 0: return .none
-            case 1: return .point(candidates[0])
-            default: return .ambiguous
+            let chosen: Int
+            if let index = record.pointIndex {
+                guard candidates.contains(index) else { return .none }
+                chosen = index
+            } else {
+                guard candidates.count <= 1 else { return .ambiguous }
+                guard let index = candidates.first else { return .none }
+                chosen = index
             }
+            return isEvidenceBacked(note.points[chosen]) ? .point(chosen) : .none
         }
         guard let index = record.pointIndex, note.points.indices.contains(index),
               isEvidenceBacked(note.points[index]) else { return .none }

@@ -247,7 +247,8 @@ final class LearningFollowUpTests: XCTestCase {
     // MARK: - issue #20：同一句原文拆出多条要点
 
     /// 旧问题“速度属于哪辆车”，后文一句话同时拆出“质量”和“速度”两条要点，都引用这句原文。
-    private func sharedSentenceCase(pointIndex: Int?) throws -> (notebook: LearningNotebook, target: String) {
+    private func sharedSentenceCase(pointIndex: Int?, pendingPoint: Int? = nil,
+                                    pendingKind: String = "待确认", reverseSharedPoints: Bool = false) throws -> (notebook: LearningNotebook, target: String) {
         var notebook = LearningNotebook()
         try notebook.append(evidence: [segment("One cart moved at 4 meters per second.",
                                                "有一辆车速度为4米每秒，尚未说明是哪辆车。")],
@@ -258,11 +259,17 @@ final class LearningFollowUpTests: XCTestCase {
         let target = try XCTUnwrap(notebook.pendingPoints.first?.id)
         let later = segment("Cart A has a mass of 8 kg and a speed of 4 m/s. Cart B is at rest.",
                             "A车质量为8千克，速度为4米每秒。B车静止。", at: 12)
-        let note = LearningNote(topic: "小车", points: [
+        var points = [
             LearningPoint(kind: "核心结论", text: "A车质量为8千克。", sourceIDs: ["en0s0", "zh0s0"]),
             LearningPoint(kind: "核心结论", text: "A车速度为4米每秒。", sourceIDs: ["en0s0", "zh0s0"]),
             LearningPoint(kind: "核心结论", text: "B车静止。", sourceIDs: ["en0s1", "zh0s1"])
-        ], sourceVersion: 2, noNewKnowledge: false, followUps: [
+        ]
+        if let pendingPoint {
+            points[pendingPoint].kind = pendingKind
+            points[pendingPoint].needsContext = "速度测量发生在什么时候？"
+        }
+        if reverseSharedPoints { points.swapAt(0, 1) }
+        let note = LearningNote(topic: "小车", points: points, sourceVersion: 2, noNewKnowledge: false, followUps: [
             LearningFollowUp(alias: "q0", state: .supplemented, sourceIDs: ["en0s0"], pointIndex: pointIndex,
                              detail: "后文说明4米每秒是A车的速度。")
         ])
@@ -289,6 +296,44 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(replay.contains("属于哪辆车"), replay)
         XCTAssertTrue(rendered.contains("关系仍不明"), rendered)
         XCTAssertTrue(rendered.contains("多条要点引用了同一句原文"), rendered)
+    }
+
+    func testSharedSentenceAmbiguityIncludesPointsWithTheirOwnQuestions() throws {
+        for kind in ["待确认", "核心结论"] {
+            for reversed in [false, true] {
+                let (notebook, target) = try sharedSentenceCase(pointIndex: nil, pendingPoint: 1,
+                    pendingKind: kind, reverseSharedPoints: reversed)
+                let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+                XCTAssertEqual(committed.state, .unclear, "kind=\(kind), reversed=\(reversed)")
+                XCTAssertNil(committed.pointIndex)
+                XCTAssertEqual(committed.detail, ClassroomFixedText.ambiguousSupplementDetail.noteText(target: .simplifiedChinese))
+                XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+                XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+                let rendered = notebook.markdown()
+                XCTAssertEqual(supplementLines(rendered), [], rendered)
+                let replay = try XCTUnwrap(section(rendered, LearningNotebook.replayHeading), rendered)
+                XCTAssertTrue(replay.contains("属于哪辆车"), replay)
+                XCTAssertTrue(replay.contains("速度测量发生在什么时候"), replay)
+            }
+        }
+    }
+
+    func testExplicitSharedSentenceChoiceStillRequiresAResolvedPoint() throws {
+        for chosen in [0, 1] {
+            let (notebook, target) = try sharedSentenceCase(pointIndex: chosen, pendingPoint: 1)
+            let committed = try XCTUnwrap(notebook.batches[1].followUps?.first)
+            if chosen == 0 {
+                XCTAssertEqual(committed.state, .supplemented)
+                XCTAssertEqual(committed.pointIndex, chosen)
+                XCTAssertEqual(notebook.retiredQuestionReferences, [target])
+            } else {
+                XCTAssertEqual(committed.state, .unclear)
+                XCTAssertNil(committed.pointIndex)
+                XCTAssertTrue(notebook.retiredQuestionReferences.isEmpty)
+                XCTAssertTrue(notebook.pendingPoints.map(\.id).contains(target))
+                XCTAssertEqual(supplementLines(notebook.markdown()), [])
+            }
+        }
     }
 
     func testSupplementNamingOneOfSeveralMatchingPointsUsesThatPoint() throws {
