@@ -2125,15 +2125,24 @@ enum QwenTranslationClient {
         // An existing Chinese prefix is immutable. Without a corresponding
         // English tail, the previous result could never be applied.
         guard let split = body.range(of: ". ", options: .backwards) else { return .keep(nil) }
+        let tail = String(source[split.upperBound...])
         // Issue #6: matching punctuation does not establish sentence ownership.
-        // Until explicit alignment is available, preserve the existing Chinese
-        // translation. Other targets keep their existing behavior.
+        // Keep unverified Chinese tails, except a literal isolated I replacing
+        // one Han character with equal counts and no ambiguous punctuation.
+        // That narrow repair is deterministic and never calls the model.
         if target == .simplifiedChinese,
            let reason = PreviousRepairAlignment.misalignment(english: source, chinese: previousChinese) {
-            return .keep(reason)
+            let chineseTail = String(previousChinese.trimmingCharacters(in: .whitespacesAndNewlines)
+                .dropFirst(prefix.count)).trimmingCharacters(in:
+                    CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "。！？!?")))
+            guard reason == .unverifiedSentenceAlignment,
+                  isolatedEnglishI(tail, target: target) != nil,
+                  chineseTail.unicodeScalars.count == 1,
+                  chineseTail.unicodeScalars.first.map({ TranslationAcceptance.isHan($0) }) == true
+            else { return .keep(reason) }
         }
         return .tail(prefix: prefix, head: String(source[..<split.upperBound]),
-                     tail: String(source[split.upperBound...]))
+                     tail: tail)
     }
 
     static func boundaryTranslationTarget(_ current: String, previous: String,
