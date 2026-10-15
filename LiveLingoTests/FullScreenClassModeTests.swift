@@ -336,13 +336,12 @@ final class FullScreenClassModeTests: XCTestCase {
         }
     }
 
-    func testREADMEIdentifiesExperimentalModeAsAbsentFromDownloadVersion() throws {
+    func testREADMEIdentifiesExperimentalModeAsOptInAndExperimental() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let readme = try String(contentsOf: root.appendingPathComponent("README.md"), encoding: .utf8)
-        let line = try XCTUnwrap(readme.split(separator: "\n").first { $0.contains("**可选全屏网课模式**") })
-        XCTAssertTrue(line.contains("实验分支"))
-        XCTAssertTrue(line.contains("0.2.0"))
-        XCTAssertTrue(line.contains("不含"))
+        let line = try XCTUnwrap(readme.split(separator: "\n").first { $0.contains("**可选全屏网课模式") })
+        XCTAssertTrue(line.contains("实验性"))
+        XCTAssertTrue(line.contains("默认关闭"))
     }
 
     func testNativeStatusButtonHasAccessibleStateAndVisibleRecordingDot() throws {
