@@ -198,13 +198,22 @@ elif name == "stapler":
     mounted = "verify-mount" in target.parts or "standalone-mount" in target.parts
     count = 1 + sum(e["tool"] == name and e["args"][0] == args[0] and e.get("phase") == phase for e in history())
     record(phase=phase, mounted=mounted)
-    marker = target / ".fake-stapled"
+    marker = target / "Contents/CodeResources"
     if args[0] == "staple":
         assert not mounted
         assert prior("notarytool", lambda e: e.get("phase") == phase and e.get("status") == "Accepted")
         if scenario == phase + "-staple-failure": fail("ticket service unavailable", 68)
         if scenario == phase + "-staple-transient" and count == 1: fail("ticket service unavailable", 68)
-        if phase == "app": marker.write_text(json.dumps({"fixture": "notarization ticket"}))
+        if phase == "app":
+            ticket = b"s8ch" + bytes(range(256)) * 8
+            if scenario == "ticket-wrong-location":
+                misplaced = target / "Contents/MacOS/CodeResources"
+                misplaced.parent.mkdir(exist_ok=True)
+                misplaced.write_bytes(ticket)
+            elif scenario == "ticket-wrong-magic": marker.write_bytes(b"bad!" + ticket[4:])
+            elif scenario == "ticket-oversized": marker.write_bytes(b"s8ch" + bytes(64 * 1024))
+            elif scenario == "ticket-symlink": marker.symlink_to("Info.plist")
+            else: marker.write_bytes(ticket)
         else:
             data = image(target); assert data["signed"]; data["stapled"] = True; save_image(target, data)
     elif args[0] == "validate":
@@ -213,12 +222,15 @@ elif name == "stapler":
         if mounted and scenario == "interrupt-verify":
             (root / "verify-ready").write_text(str(os.getpid()))
             time.sleep(300)
-        assert marker.exists() if phase == "app" else image(target).get("stapled"), "ticket absent from exact target"
+        # Deliberately accept malformed test tickets here: the real privacy
+        # scanner must independently reject them before creating a final image.
+        if not (phase == "app" and scenario.startswith("ticket-")):
+            assert marker.exists() if phase == "app" else image(target).get("stapled"), "ticket absent from exact target"
     else: fail("unexpected stapler action")
 elif name == "codesign":
     target = owned(args[-1]); phase = "app" if target.suffix == ".app" else "dmg"
     mounted = "verify-mount" in target.parts or "standalone-mount" in target.parts
-    stapled = (target / ".fake-stapled").exists() if phase == "app" else image(target).get("stapled", False)
+    stapled = (target / "Contents/CodeResources").exists() if phase == "app" else image(target).get("stapled", False)
     record(phase=phase, mounted=mounted, stapled=stapled)
     if "-d" in args:
         authority = "Developer ID Application: Wrong (OTHER)" if scenario == phase + "-authority-failure" or (mounted and scenario == "mounted-authority-failure") else identity
@@ -256,15 +268,15 @@ elif name == "hdiutil":
         phase = "app" if entries == ["LiveLingo.app"] else "dmg"
         app = payload / "LiveLingo.app"
         assert prior("codesign", lambda e: e.get("phase") == "app" and "--verify" in e["args"] and e["args"][-1] == str(app))
-        if phase == "app": assert not (app / ".fake-stapled").exists()
+        if phase == "app": assert not (app / "Contents/CodeResources").exists()
         else:
             assert entries == ["Applications", "LiveLingo.app", "使用说明.txt"]
             if os.environ.get("FAKE_CANDIDATE_ONLY"):
-                assert not (app / ".fake-stapled").exists()
+                assert not (app / "Contents/CodeResources").exists()
                 assert not prior("notarytool", lambda e: True)
                 assert not prior("stapler", lambda e: True)
             else:
-                assert (app / ".fake-stapled").exists()
+                assert (app / "Contents/CodeResources").exists()
                 assert prior("stapler", lambda e: e["args"] == ["validate", str(app)])
                 assert prior("codesign", lambda e: e["args"][-1] == str(app) and "--verify" in e["args"] and e["stapled"])
         record(phase=phase)
@@ -326,7 +338,7 @@ elif name == "spctl":
         assert image(target)["stapled"] and image(target)["signed"]
     else:
         assert args[:3] == ["--assess", "--type", "execute"]
-        assert (target / ".fake-stapled").exists()
+        assert (target / "Contents/CodeResources").exists()
     if scenario == phase + "-gatekeeper-failure": fail()
     print("accepted\nsource=" + ("Unnotarized Developer ID" if scenario == "dmg-gatekeeper-wrong-source" else "Notarized Developer ID"))
 else: fail("unexpected fake tool: " + name)
@@ -451,7 +463,7 @@ class ReleaseFlowTests(unittest.TestCase):
         case, app, env, command = self.fixture(scenario)
         if override: command = override(case, app, command, env)
         result, events = self.execute(case, env, [*command, *extra])
-        self.assertFalse((app / ".fake-stapled").exists(), "original input was modified")
+        self.assertFalse((app / "Contents/CodeResources").exists(), "original input was modified")
         return result, events, case
 
     @staticmethod
@@ -613,6 +625,17 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertFalse(any("--sign" in e["args"] for e in self.calls(events, "codesign")))
         self.assertFalse((case / "release with spaces.dmg").exists())
 
+    def test_malformed_stapled_tickets_stop_before_final_image_creation(self):
+        for scenario in ("ticket-wrong-location", "ticket-wrong-magic", "ticket-oversized", "ticket-symlink"):
+            with self.subTest(scenario=scenario):
+                result, events, case = self.run_case(scenario)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("invalid-stapled-ticket", result.stderr)
+                self.assertTrue(self.calls(events, "stapler", "staple", "app"))
+                self.assertFalse(self.calls(events, "hdiutil", "create", "dmg"))
+                self.assertFalse(self.calls(events, "notarytool", "submit", "dmg"))
+                self.assertFalse((case / "release with spaces.dmg").exists())
+
     def test_failure_injections_do_not_publish(self):
         scenarios = ("preflight-failure", "copy-failure", "staged-pre-verify-failure", "app-create-failure", "app-image-verify-failure",
                      "app-authority-failure", "app-submit-failure", "app-submit-crash", "app-submit-malformed", "app-submit-no-id",
@@ -743,7 +766,7 @@ class ReleaseFlowTests(unittest.TestCase):
                 self.assertEqual([e["phase"] for e in self.calls(after, "notarytool", "submit")], ["app", "dmg"])
                 if scenario.startswith("dmg") or scenario == "mounted-ticket-failure":
                     self.assertEqual(len(self.calls(before, "hdiutil", "create")), len(self.calls(after, "hdiutil", "create")))
-                self.assertFalse((app / ".fake-stapled").exists())
+                self.assertFalse((app / "Contents/CodeResources").exists())
                 self.assertTrue((case / "release with spaces.dmg").exists())
 
     def test_missing_query_receipt_never_reuploads(self):

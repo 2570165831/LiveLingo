@@ -609,6 +609,33 @@ def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, appr
     counts["metadata_files"] += 1
 
 
+STAPLED_TICKET_LIMIT = 64 * 1024
+
+
+def inspect_stapled_ticket(path, app, phase, counts):
+    """Recognize only the bounded outer App ticket, never a signature seal.
+
+    This is a privacy classification, not cryptographic ticket validation.
+    The publication flow separately requires Apple's ticket validation.
+    """
+    if (phase != "signed" or app.name != "LiveLingo.app"
+            or path != app / "Contents/CodeResources"
+            or not stat.S_ISREG(path.lstat().st_mode)):
+        raise PrivacyError("invalid-stapled-ticket")
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or not 4 <= info.st_size <= STAPLED_TICKET_LIMIT:
+                raise PrivacyError("invalid-stapled-ticket")
+            data = stream.read(STAPLED_TICKET_LIMIT + 1)
+    except OSError:
+        raise PrivacyError("invalid-stapled-ticket") from None
+    if len(data) != info.st_size or not data.startswith(b"s8ch"):
+        raise PrivacyError("invalid-stapled-ticket")
+    counts["opaque_binary_files"] += 1
+    counts["stapled_tickets"] += 1
+
+
 def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree", phase="final"):
     if phase not in ("prepare", "final", "signed"):
         raise PrivacyError("invalid-package-inspection-phase")
@@ -643,7 +670,8 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree", 
     # files is an inventory, not a content-review count. The other counts make
     # exemptions and incomplete coverage visible to release callers.
     counts = {"files": 0, "excluded": 0, "manifests": 0, "metadata_files": 0,
-              "opaque_metadata_fields": 0, "opaque_binary_files": 0, "unreviewed_text_files": 0}
+              "opaque_metadata_fields": 0, "opaque_binary_files": 0, "unreviewed_text_files": 0,
+              "stapled_tickets": 0}
 
     def walk(directory):
         entries = sorted(directory.iterdir())
@@ -655,6 +683,10 @@ def inspect_tree(root, *, omit_private=False, public_copy=False, layout="tree", 
                          or (path.name == "CodeResources" and directory.name == "_CodeSignature"))):
                 raise PrivacyError("structured-metadata-symlink")
         for path in entries:
+            if path.name == "CodeResources" and directory.name != "_CodeSignature":
+                inspect_stapled_ticket(path, app, phase, counts)
+                counts["files"] += 1
+                continue
             if excluded(path.name):
                 if not omit_private:
                     raise PrivacyError("private-or-unrelated-package-entry")

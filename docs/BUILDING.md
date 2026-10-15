@@ -179,6 +179,8 @@ mkdir work/new-signing-run
 7. 检查 DMG 与内置 App 的票据、严格签名及预期 Authority；对 DMG 执行 `spctl --assess --type open --context context:primary-signature`，要求返回 `Notarized Developer ID`。只读挂载后检查真实内置 App 的票据、严格签名和执行评估。按 `attach -plist` 返回的镜像设备号卸载，最多尝试 3 次；成功后清理空挂载目录。
 8. 全部自检通过且卸载成功后，才移动到正式 `--output` 文件名；已有文件或悬空链接均拒绝覆盖。半成品留在暂存，不占正式文件名。
 
+装订票据在隐私门中只允许出现在顶层 `LiveLingo.app/Contents/CodeResources`，且仅限 `signed` 阶段：须为非链接的普通文件，以 `s8ch` 开头，大小不超过 64 KiB，并单独计入 `stapled_tickets` 和不透明二进制计数。其他位置以及 `prepare`/`final` 阶段拒绝该票据。`Contents/_CodeSignature/CodeResources` 仍按签名封印 plist 检查，不使用票据豁免。这个窄分类不证明票据有效；上述实际 `stapler validate`、签名及 Gatekeeper 检查仍不可省略。
+
 正式 DMG 顶层只有 App、“应用程序”快捷方式和使用说明；公证临时 DMG、回执、日志、状态及工具路径记录均在 payload 外。输出、暂存和挂载点拒绝使用 `/Applications`、系统目录、主目录根或卷根，也会解析目录链接后检查。暂存与输出不能放进原输入 App，须位于同卷以保证最终移动原子完成。生产工具使用绝对路径，stapler/notarytool 经系统 xcrun 解析并记录实际路径；不从普通 PATH 获取发布工具。`LIVELINGO_TEST_TOOL_DIR` 是明确的离线测试替身入口，真实发布须取消它；`LIVELINGO_PYTHON` 必须重新指定为宿主 Python 3.11 以上的绝对路径，不能保留测试替身解释器。
 
 APFS 同卷暂存和 DMG 装订工作副本可共享文件块，但 App 公证镜像与发布镜像各自占用空间；不支持克隆的卷还需为工作副本预留额外空间。镜像容量按文件的逻辑长度、每个目录项的 8 KiB 元数据余量，再加 20% 和 256 MiB 估算，避免稀疏文件让自动容量估算偏小；这不是实际占用保证。暂存 App 是唯一 App 装订副本，App 临时 DMG 对应第一次提交，未改变的已上传发布 DMG 用于中断恢复，装订工作副本及日志用于自检/复核；完成真实验收且不再需要恢复后，按授权清理这些中间件。脚本不会自动删除它们。
