@@ -395,11 +395,28 @@ enum LearningNumericProvenance {
     /// 数值前的编号词 ✓。
     static let designatorPrefixes = ["第", "编号", "序号", "图", "表", "式", "步骤", "阶段", "级别", "等级", "题号", "版本"]
 
-    private static let decimalNumberPattern = #"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?"#
+    private static let decimalNumberPattern = #"(?:[1-9][0-9]{0,2}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?"#
     private static let numberExpression = try! NSRegularExpression(
         pattern: #"[0-9]+(?:,+[0-9]+)*(?:\.[0-9]+)?"#)
     private static let groupedNumberExpression = try! NSRegularExpression(
         pattern: "^" + decimalNumberPattern + "$")
+
+    private static let numberPairExpression = try! NSRegularExpression(
+        pattern: #"(\[|\()[+\-−－﹣]?([0-9]+(?:\.[0-9]+)?),[+\-−－﹣]?([0-9]+(?:\.[0-9]+)?)(\]|\))"#)
+
+    /// A compact, unitless bracketed pair denotes two values, even when its
+    /// comma could otherwise look like a thousands separator.
+    private static func numberPairRanges(in text: String) -> [NSRange] {
+        let ns = text as NSString
+        return numberPairExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).flatMap { match -> [NSRange] in
+            let opener = ns.substring(with: match.range(at: 1))
+            let closer = ns.substring(with: match.range(at: 4))
+            guard (opener == "[" && closer == "]") || (opener == "(" && closer == ")") else { return [] }
+            let after = ns.substring(from: NSMaxRange(match.range)).trimmingCharacters(in: .whitespaces)
+            guard provenanceUnit(after: String(after.prefix(provenanceUnitLookahead))) == nil else { return [] }
+            return [match.range(at: 2), match.range(at: 3)]
+        }
+    }
 
     /// Reject a suffix of a malformed separator run, while allowing punctuation
     /// after a unit or prose ("8 kg,500 Hz") to introduce an independent value.
@@ -986,16 +1003,21 @@ enum LearningNumericProvenance {
         // Digits inside a parsed unit (`kg/m3`, `m^2`) are not separate numbers.
         var unitEnd = 0
         let ns = text as NSString
-        let other: [(Int, Mention)] = numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
-            guard match.range.location >= unitEnd,
-                  !isSeparatedNumberTail(in: ns, before: match.range.location) else { return nil }
+        let pairs = numberPairRanges(in: text)
+        let pairStarts = Set(pairs.map(\.location))
+        let ranges = (numberExpression.matches(in: text, range: NSRange(location: 0, length: ns.length)).map(\.range)
+            .filter { range in !pairs.contains { NSIntersectionRange($0, range).length > 0 } } + pairs)
+            .sorted { $0.location < $1.location }
+        let other: [(Int, Mention)] = ranges.compactMap { range in
+            guard range.location >= unitEnd,
+                  (pairStarts.contains(range.location) || !isSeparatedNumberTail(in: ns, before: range.location)) else { return nil }
             while exclusionIndex < scalarExclusions.count,
-                  NSMaxRange(scalarExclusions[exclusionIndex]) <= match.range.location { exclusionIndex += 1 }
+                  NSMaxRange(scalarExclusions[exclusionIndex]) <= range.location { exclusionIndex += 1 }
             if exclusionIndex < scalarExclusions.count,
-               NSIntersectionRange(scalarExclusions[exclusionIndex], match.range).length > 0 { return nil }
-            let raw = ns.substring(with: match.range)
+               NSIntersectionRange(scalarExclusions[exclusionIndex], range).length > 0 { return nil }
+            let raw = ns.substring(with: range)
             let value = raw.replacingOccurrences(of: ",", with: "")
-            let start = match.range.location, end = match.range.location + match.range.length
+            let start = range.location, end = range.location + range.length
             let beforeStart = max(0, start - 8)
             let before = ns.substring(with: NSRange(location: beforeStart, length: start - beforeStart))
             var afterStart = end
@@ -1005,7 +1027,7 @@ enum LearningNumericProvenance {
             let after = ns.substring(with: NSRange(location: afterStart, length: min(unitLookahead, ns.length - afterStart)))
             let unitText = ns.substring(with: NSRange(location: afterStart, length: min(provenanceUnitLookahead, ns.length - afterStart)))
             if raw.contains(","), groupedNumberExpression.firstMatch(in: raw,
-                range: NSRange(location: 0, length: match.range.length)) == nil {
+                range: NSRange(location: 0, length: range.length)) == nil {
                 // Ignore the malformed value together with its unit's power digits.
                 if let unit = provenanceUnit(after: unitText) { unitEnd = afterStart + unit.token.utf16.count }
                 return nil

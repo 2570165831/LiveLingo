@@ -898,6 +898,51 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(LearningNumericProvenance.mentions(in: "1234,500 Hz").isEmpty)
     }
 
+    func testCompactBracketedNumberPairsRemainTwoValues() {
+        for (text, values) in [
+            ("[0,100]", ["0", "100"]),
+            ("[0,255]", ["0", "255"]),
+            ("[1,100]", ["1", "100"]),
+            ("(10,200)", ["10", "200"]),
+            ("(100,200)", ["100", "200"]),
+            ("[0,1]", ["0", "1"]),
+            ("(3,4)", ["3", "4"]),
+            ("[0.5,100.5]", ["0.5", "100.5"]),
+            ("(-10,200)", ["10", "200"])
+        ] {
+            XCTAssertEqual(LearningNumericProvenance.mentions(in: text).map(\.value), values, text)
+        }
+        XCTAssertEqual(LearningNumericProvenance.mentions(in: "[1,500 Hz]").first?.value, "1500")
+        XCTAssertEqual(LearningNumericProvenance.mentions(in: "(1,500) Hz").first?.value, "1500")
+        for text in ["0,100 Hz", "01,500 Hz", "0,100e0 Hz"] {
+            XCTAssertTrue(LearningNumericProvenance.mentions(in: text).isEmpty, text)
+        }
+    }
+
+    func testCompactIntervalsAndTuplesMatchSeparateSourceValuesOnBothSides() {
+        for (pair, words) in [
+            ("[0,100]", "from 0 to 100"),
+            ("[0,255]", "from 0 to 255"),
+            ("[1,100]", "from 1 to 100"),
+            ("(10,200)", "10 and 200"),
+            ("(100,200)", "100 and 200"),
+            ("[0,1]", "from 0 to 1")
+        ] {
+            for (claim, source) in [("取值为\(pair)。", "The values are \(words)."),
+                                    ("取值为\(words)。", "The values are \(pair). ")] {
+                let report = LearningNumericProvenance.report(claim: claim, cited: [source],
+                                                             segmentTexts: [], batchTexts: [source])
+                XCTAssertFalse(report.isDecidable, "\(claim) / \(source)")
+                XCTAssertTrue(report.gaps.isEmpty, "\(claim) / \(source): \(report.gaps)")
+            }
+        }
+        let source = "The range is [0,100]."
+        let report = LearningNumericProvenance.report(claim: "取值为[0,255]。", cited: [source],
+                                                     segmentTexts: [], batchTexts: [source])
+        XCTAssertFalse(report.gaps.isEmpty)
+        XCTAssertTrue(report.gaps.joined().contains("255"))
+    }
+
     func testThousandsGroupedMeasurementsMatchWholeValuesOnBothSides() {
         for (claim, source) in [
             ("频率为1500 Hz。", "The frequency is 1,500 Hz."),
