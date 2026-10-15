@@ -75,6 +75,63 @@ class ModelFilesTests(unittest.TestCase):
         (self.model / "model-00002-of-00002.safetensors").unlink()
         self.assertEqual(self.rejected(), "missing weight file: model-00002-of-00002.safetensors")
 
+    def test_complete_shards_without_an_index_pass(self):
+        write_model(self.model, ("config.json",), self.SHARDS)
+        (self.model / model_files.INDEX_NAME).unlink()
+        self.assertEqual(model_files.check_model_files(self.model, ("config.json",)), sorted(self.SHARDS))
+
+    def test_missing_index_and_first_middle_or_last_shard_are_rejected(self):
+        shards = {"model-%05d-of-00003.safetensors" % number: ["weight_%d" % number]
+                  for number in range(1, 4)}
+        for missing in shards:
+            with self.subTest(missing=missing):
+                write_model(self.model, ("config.json",), shards)
+                (self.model / model_files.INDEX_NAME).unlink()
+                (self.model / missing).unlink()
+                self.assertIn("incomplete unindexed shards", self.rejected())
+
+    def test_unindexed_shard_numbers_and_totals_must_be_consistent(self):
+        cases = (
+            ("model-00001-of-00002.safetensors", "model-00002-of-00003.safetensors"),
+            ("model-00000-of-00002.safetensors", "model-00002-of-00002.safetensors"),
+            ("model-00001-of-00002.safetensors", "model-00003-of-00002.safetensors"),
+            ("model-00001-of-00002.safetensors", "model-1-of-2.safetensors"),
+            ("model-00001-of-00000.safetensors",),
+        )
+        for number, names in enumerate(cases):
+            with self.subTest(names=names):
+                directory = write_model(self.root / str(number), ("config.json",),
+                                        {name: ["weight_%d" % i] for i, name in enumerate(names)})
+                (directory / model_files.INDEX_NAME).unlink()
+                with self.assertRaisesRegex(model_files.ModelFilesError, "incomplete unindexed shards"):
+                    model_files.check_model_files(directory, ("config.json",))
+
+    def test_unsharded_file_cannot_hide_a_missing_unindexed_shard(self):
+        write_model(self.model, ("config.json",), self.SHARDS)
+        (self.model / model_files.INDEX_NAME).unlink()
+        (self.model / "model-00002-of-00002.safetensors").unlink()
+        (self.model / "model.safetensors").write_bytes(safetensors(["extra.weight"]))
+        self.assertIn("incomplete unindexed shards", self.rejected())
+
+    def test_app_check_and_cli_reject_missing_index_and_shard(self):
+        app = self.root / "LiveLingo.app"
+        write_app_models(app)
+        relative = next(iter(model_files.REQUIRED_MODEL_FILES))
+        directory = app / model_files.APP_MODELS_ROOT / relative
+        (directory / "model.safetensors").unlink()
+        write_model(directory, model_files.REQUIRED_MODEL_FILES[relative], self.SHARDS)
+        (directory / model_files.INDEX_NAME).unlink()
+        (directory / "model-00002-of-00002.safetensors").unlink()
+        problems = model_files.check_app_models(app)
+        self.assertEqual(len(problems), 1)
+        self.assertIn(relative + ": incomplete unindexed shards", problems[0])
+        result = subprocess.run([sys.executable, "-B", str(ROOT / "Scripts/model_files.py"),
+                                 "check", "--app", str(app)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr.splitlines(), ["model-files: " + problems[0]])
+        self.assertNotIn(str(self.root), result.stderr)
+
     def test_index_cannot_reference_files_outside_the_model_or_symlinks(self):
         outside = self.root / "outside.safetensors"
         outside.write_bytes(safetensors(["w"]))
