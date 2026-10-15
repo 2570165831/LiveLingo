@@ -1,6 +1,16 @@
 # Shared zsh helpers. Production never takes release tools from an ambient PATH.
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
+require_publication_python() {
+  # Hash-bound resources and Cargo/source TOML parsing need the 3.11 stdlib.
+  # Run before any staging, signature, upload or mount operation.
+  "${python_bin}" - <<'PYTHON_VERSION'
+import sys
+if sys.version_info < (3, 11):
+    sys.exit("发布工具需要 Python 3.11 或更新版本；请用 LIVELINGO_PYTHON 指定宿主解释器的绝对路径，不能使用 App 内的 Python。")
+PYTHON_VERSION
+}
+
 resolve_release_tool() {
   local name="$1" resolved
   if [[ -n "${LIVELINGO_TEST_TOOL_DIR:-}" ]]; then

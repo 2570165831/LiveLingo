@@ -17,7 +17,7 @@ if __package__:
                                   metadata_kind, parse_metadata, validate_metadata, known_binary,
                                   CONTENT_NAMES, CONTENT_SUFFIXES)
     from .reviewed_resources import scan_host_paths, public_example_spellings
-    from .privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals
+    from .privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals, unc_source_view
     from .privacy_text import scan_path_operands, replace_public_spelling
     from .macho_paths import scan_binary_paths_bytes
 else:
@@ -25,7 +25,7 @@ else:
                                  metadata_kind, parse_metadata, validate_metadata, known_binary,
                                  CONTENT_NAMES, CONTENT_SUFFIXES)
     from reviewed_resources import scan_host_paths, public_example_spellings
-    from privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals
+    from privacy_literals import C_SOURCE_SUFFIXES, inspect_source_literals, unc_source_view
     from privacy_text import scan_path_operands, replace_public_spelling
     from macho_paths import scan_binary_paths_bytes
 
@@ -291,7 +291,7 @@ def source_member_approvals(item):
     return examples, fixtures
 
 
-def source_public_view(value, allowed):
+def source_public_view(value, allowed, *, source_code=False):
     """Preserve all metadata rules while neutralizing exact approved spellings."""
     if isinstance(value, str):
         for public in sorted(allowed, key=len, reverse=True):
@@ -307,7 +307,7 @@ def source_public_view(value, allowed):
                 value = re.sub(r'(?<![\w+.-])(?i:file://(?:localhost)?)' + re.escape(public)
                                + r'(?=$|[\s"\'<>`,])',
                                "PUBLIC_UPSTREAM_EXAMPLE", value)
-            value = replace_public_spelling(value, public)
+            value = replace_public_spelling(value, public, source_code=source_code)
     elif isinstance(value, dict):
         result = {}
         for key, item in value.items():
@@ -569,7 +569,9 @@ def inspect_source_archive(path, item, counts):
                 for public in sorted(allowed, key=len, reverse=True):
                     if public != "/":
                         raw_view = raw_view.replace(public.encode("utf-8"), b"PUBLIC_UPSTREAM_EXAMPLE")
-                scan_host_paths(raw_view, source_code=True)
+                unc_view = (unc_source_view(source_public_view(text, allowed, source_code=True), member.name).encode("utf-8")
+                            if text is not None else None)
+                scan_host_paths(raw_view, source_code=True, unc_view=unc_view)
                 # Every binary member receives the same whole-file path scan,
                 # including unreferenced catalog tails and opaque fixtures.
                 # Approvals above bind this member's complete hash and reason;
@@ -585,10 +587,11 @@ def inspect_source_archive(path, item, counts):
                     continue
                 if text is not None:
                     plain = "".join(c for c in text if unicodedata.category(c) != "Cf")
-                    def check(value):
+                    def check(value, *, source_code=False):
                         value = "".join(c for c in value if unicodedata.category(c) != "Cf")
-                        scan_path_operands(source_public_view(value, allowed))
-                    check(plain)
+                        scan_path_operands(source_public_view(value, allowed, source_code=source_code),
+                                           raw_source=source_code, name=member.name)
+                    check(plain, source_code=True)
                     inspect_source_literals(text, member.name, check)
                 kind = metadata_kind(data)
                 if name.suffix.lower() in (".yaml", ".yml"):

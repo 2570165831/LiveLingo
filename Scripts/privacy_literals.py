@@ -191,30 +191,31 @@ def _decode_escapes(body, style):
             result.append(body[offset])
             offset += 1
             continue
-        tail = body[offset + 1:]
-        char = tail[0]
+        escape_start = offset + 1
+        char = body[escape_start]
         length, value = 1, None
         if char in simple:
             value = simple[char]
         elif char in "\r\n":
-            length = 2 if tail.startswith("\r\n") else 1
+            length = 2 if body.startswith("\r\n", escape_start) else 1
             if style == "rust":
-                length += len(tail[length:]) - len(tail[length:].lstrip())
+                while escape_start + length < len(body) and body[escape_start + length].isspace():
+                    length += 1
             value = ""
         else:
             match = None
-            if style in ("rust", "javascript") and tail.startswith("u{"):
-                match = re.match(r"u\{([0-9A-Fa-f_]+)\}", tail)
+            if style in ("rust", "javascript") and body.startswith("u{", escape_start):
+                match = re.compile(r"u\{([0-9A-Fa-f_]+)\}").match(body, escape_start)
                 base = 16
             elif char in "uU" and style != "rust":
-                match = re.match(char + r"([0-9A-Fa-f]{" + ("4" if char == "u" else "8") + "})", tail)
+                match = re.compile(char + r"([0-9A-Fa-f]{" + ("4" if char == "u" else "8") + "})").match(body, escape_start)
                 base = 16
             elif char == "x":
                 width = "+" if style == "c" else "{1,2}" if style == "shell" else "{2}"
-                match = re.match(r"x([0-9A-Fa-f]" + width + ")", tail)
+                match = re.compile(r"x([0-9A-Fa-f]" + width + ")").match(body, escape_start)
                 base = 16
             elif char in "01234567" and style != "rust":
-                match = re.match(r"([0-7]{1,3})", tail)
+                match = re.compile(r"([0-7]{1,3})").match(body, escape_start)
                 base = 8
             elif char == "0" and style == "rust":
                 value = "\0"
@@ -490,6 +491,43 @@ def _patch_literals(text, scan):
     flush()
 
 
+def unc_source_view(data, name):
+    """Leave comments/operands intact; decoded literal checks own quoted text.
+
+    Raw escapes, registry keys and serialized byte spellings are not UNC paths.
+    Use the very same recognized literal spans as the subsequent strict pass.
+    Unknown or incomplete syntax keeps its raw bytes instead of gaining a waiver.
+    """
+    text = _text(data)
+    if "\\\\" not in text:
+        return text
+    suffix = source_format(text, name)
+    spans = []
+    try:
+        if suffix in PYTHON_SOURCE_SUFFIXES:
+            lines = text.splitlines(keepends=True)
+            offsets = [0]
+            for line in lines:
+                offsets.append(offsets[-1] + len(line))
+            kinds = {tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", -1)}
+            for token in tokenize.generate_tokens(io.StringIO(text).readline):
+                if token.type in kinds:
+                    spans.append((offsets[token.start[0] - 1] + token.start[1],
+                                  offsets[token.end[0] - 1] + token.end[1]))
+        elif suffix in C_SOURCE_SUFFIXES | {".rs", ".js", ".mjs", ".cjs", ".go"}:
+            style = "rust" if suffix == ".rs" else "go" if suffix == ".go" else "c"
+            iterator = _javascript_literals(text) if suffix in (".js", ".mjs", ".cjs") else _quoted_literals(text, style)
+            spans = [(start, end) for start, end, _ in iterator]
+    except (tokenize.TokenError, SyntaxError, ValueError):
+        return text
+    chunks, position = [], 0
+    for start, end in sorted(spans):
+        chunks.extend((text[position:start], "".join("\n" if char == "\n" else " " for char in text[start:end])))
+        position = end
+    chunks.append(text[position:])
+    return "".join(chunks)
+
+
 def inspect_source_literals(data, name, scan=None):
     """Apply bounded, format-specific decoding to an identified source member."""
     text, scan = _text(data), scan or _default_scan
@@ -502,7 +540,7 @@ def inspect_source_literals(data, name, scan=None):
         style = "rust" if suffix == ".rs" else "go" if suffix == ".go" else "javascript" if suffix in (".js", ".mjs", ".cjs") else "c"
         if style == "c":
             text = re.sub(r"\\\r?\n", "", text)
-        previous_end, adjacent = 0, ""
+        previous_end, adjacent = 0, []
         iterator = _javascript_literals(text) if style == "javascript" else _quoted_literals(text, style)
         for start, end, value in iterator:
             _scan(value, scan)
@@ -510,10 +548,14 @@ def inspect_source_literals(data, name, scan=None):
             gap = re.sub(r"/\*.*?\*/|//[^\n]*", "", text[previous_end:start], flags=re.S)
             gap = re.sub(r"\b(?:u8|u|U|L)\s*$", "", gap)
             joins = style == "c" and not gap.strip() or style in ("javascript", "go") and gap.strip() == "+"
-            adjacent = adjacent + value if joins else value
-            if adjacent != value:
-                _scan(adjacent, scan)
+            if not joins:
+                if len(adjacent) > 1:
+                    _scan("".join(adjacent), scan)
+                adjacent = []
+            adjacent.append(value)
             previous_end = end
+        if len(adjacent) > 1:
+            _scan("".join(adjacent), scan)
     elif suffix in SHELL_SOURCE_SUFFIXES:
         for value in _shell_literals(text):
             _scan(value, scan)

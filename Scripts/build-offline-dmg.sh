@@ -102,6 +102,7 @@ if (( dry_run )); then
   print -r -- "跳过真实产物检查：未调用发布工具，不能视为签名、公证或发布验收通过。"
   exit 0
 fi
+require_publication_python
 [[ -n "${notary_profile//[[:space:]]/}" && "${notary_profile}" != '<你的 profile>' ]] || fail "请指定本机已有的 --notary-profile；占位符不能提交"
 [[ -z "${notary_keychain}" || "${notary_keychain}" == /* ]] || fail "--notary-keychain 必须是绝对路径"
 [[ -n "${resume_stage}" || ( -z "${app_submission_id}" && -z "${dmg_submission_id}" && ${resubmit_incomplete} == 0 ) ]] || fail "提交编号/重新提交选项须配合 --resume-stage"

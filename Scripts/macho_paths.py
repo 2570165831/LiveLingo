@@ -205,7 +205,8 @@ def _effective_build_operand(value, context, start, has_string_edge):
             return False
         if (start and context[start - 1].isprintable()
                 and context[start - 1] not in " \t\"'=:(<"
-                and not _COMPILER_BOUNDARY.search(context[:start])):
+                and not _COMPILER_BOUNDARY.search(context[:start])
+                and not (has_string_edge and all(char.isprintable() for char in context))):
             return False
         if not start and not has_string_edge:
             return False
@@ -262,14 +263,52 @@ def _readable_matches(data):
                     encoding, errors="surrogateescape"))
                 if encoding != "utf-8":
                     value = _utf16_path_at(data, offset, encoding)
+                edge_width = 1 if encoding == "utf-8" else 2
+                nul = b"\0" * edge_width
                 has_string_edge = (run.start() == 0 or run.end() == len(data)
-                                   or data[run.start() - 1:run.start()] == b"\0"
-                                   or data[run.end():run.end() + 1] == b"\0")
-                if not _effective_build_operand(value, text, root.start(), has_string_edge):
+                                   or data[max(0, run.start() - edge_width):run.start()] == nul
+                                   or data[run.end():run.end() + edge_width] == nul)
+                context, start = text, root.start()
+                if encoding != "utf-8":
+                    context, start, has_string_edge = _utf16_context(data, run.start(), run.end(), offset, encoding)
+                if not _effective_build_operand(value, context, start, has_string_edge):
                     continue
                 covered_until = root.start() + len(value)
                 matches.append({"offset": offset, "path": value, "encoding": encoding})
     return sorted(matches, key=lambda item: (item["offset"], item["encoding"], item["path"]))
+
+
+def _utf16_context(data, start, end, offset, encoding):
+    """Find actual Unicode string edges beyond the ASCII root-search seed."""
+    order = "little" if encoding == "utf-16-le" else "big"
+    while start >= 2:
+        unit = int.from_bytes(data[start - 2:start], order)
+        width = 4 if 0xDC00 <= unit <= 0xDFFF else 2
+        if start < width:
+            break
+        try:
+            char = bytes(data[start - width:start]).decode(encoding)
+        except UnicodeError:
+            break
+        if not char.isprintable():
+            break
+        start -= width
+    while end + 2 <= len(data):
+        unit = int.from_bytes(data[end:end + 2], order)
+        width = 4 if 0xD800 <= unit <= 0xDBFF else 2
+        try:
+            char = bytes(data[end:end + width]).decode(encoding)
+        except UnicodeError:
+            break
+        if not char.isprintable():
+            break
+        end += width
+    context = bytes(data[start:end]).decode(encoding)
+    position = len(bytes(data[start:offset]).decode(encoding))
+    edge = (start == 0 or end == len(data)
+            or data[max(0, start - 2):start] == b"\0\0"
+            or data[end:end + 2] == b"\0\0")
+    return context, position, edge
 
 
 def scan_readable_paths_bytes(data):

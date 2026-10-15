@@ -133,22 +133,27 @@ python3.13 Scripts/prepare-model-inputs.py \
 
 输出目录必须不存在。组装后的 App 包含运行库和模型，排除录音测试 CLI、质量评估 CLI、XCTest 与虚拟音频播放器。开发 CLI 的说明见 [Scripts/CLI-README.md](../Scripts/CLI-README.md)，它只供开发测试，不随 App 或 DMG 交付。
 
-只读候选检查：`python3.13 Scripts/sign-offline-app.py --scan work/OfflineCandidate/LiveLingo.app` 和 `python3.13 Scripts/sign-offline-app.py --verify-only --app work/OfflineCandidate/LiveLingo.app`。这两种模式不签名、不查询钥匙串；未签名候选的签名验证失败须照实记录，不能称为签名通过。
+未签名候选的只读结构检查：`python3.13 Scripts/sign-offline-app.py --scan work/OfflineCandidate/LiveLingo.app`。`python3.13 Scripts/sign-offline-app.py --verify-only --app work/OfflineCandidate/LiveLingo.app` 用于已有完整签名及有效 `signed-resource-review.json` 的 App；未签名候选缺少该回执时会被拒绝。这两种模式不签名、不查询钥匙串，失败不能称为签名通过。
 
 ## 签名、公证与 DMG
 
 签名材料和公证凭据不存入仓库。发布者须提供有效的 Developer ID Application 身份、匹配证书和含私钥的签名钥匙串。公证只使用本机已有的 `notarytool` keychain profile；脚本不创建、导入或解锁钥匙串，不接受仓库内的密码、API key 或凭据文件。
+
+签名、包隐私检查和真实 DMG 发布/自检要求宿主 Python 3.11 或更新版本，包含 `hashlib.file_digest` 与 `tomllib`。系统 Python 3.9 会在发布动作前被明确拒绝。下面用已安装的宿主 Python 3.13；不要使用 App 内带沙盒继承权限的解释器。`--review-capture` 必须指向 App 外已有目录中的新回执文件；先创建本次签名的独立目录，签名失败时保留回执并重建候选，不覆盖已有回执。
 
 `--keychain` 只指定 **DMG 签名**的钥匙串。独立的 `--notary-keychain`（或 `LIVELINGO_NOTARY_KEYCHAIN`）指定公证 profile 所在钥匙串，默认省略，让 notarytool 使用正常搜索范围；用 `--sync` 保存的 profile 不应被强制限定到签名钥匙串。源码未记录发布者的 profile 名，不能猜测；下面先用 `read` 输入已有的真实名称，空值和旧文档占位符 `<你的 profile>` 都会被拒绝。
 
 ```sh
 read -r LIVELINGO_NOTARY_PROFILE
 export LIVELINGO_NOTARY_PROFILE
+export LIVELINGO_PYTHON=/absolute/path/to/host/python3.13
+mkdir work/new-signing-run
 
-./Scripts/sign-offline-app.py --app work/OfflineCandidate/LiveLingo.app \
+"$LIVELINGO_PYTHON" Scripts/sign-offline-app.py --app work/OfflineCandidate/LiveLingo.app \
   --identity 'Developer ID Application: Example Name (TEAMID)' \
   --certificate /absolute/path/to/developer-id.cer \
-  --keychain /absolute/path/to/login.keychain-db
+  --keychain /absolute/path/to/login.keychain-db \
+  --review-capture "$(pwd)/work/new-signing-run/before-signing.json"
 
 ./Scripts/build-offline-dmg.sh --app work/OfflineCandidate/LiveLingo.app \
   --identity 'Developer ID Application: Example Name (TEAMID)' \
@@ -168,7 +173,7 @@ export LIVELINGO_NOTARY_PROFILE
 7. 检查 DMG 与内置 App 的票据、严格签名及预期 Authority；对 DMG 执行 `spctl --assess --type open --context context:primary-signature`，要求返回 `Notarized Developer ID`。只读挂载后检查真实内置 App 的票据、严格签名和执行评估。按 `attach -plist` 返回的镜像设备号卸载，最多尝试 3 次；成功后清理空挂载目录。
 8. 全部自检通过且卸载成功后，才移动到正式 `--output` 文件名；已有文件或悬空链接均拒绝覆盖。半成品留在暂存，不占正式文件名。
 
-正式 DMG 顶层只有 App、“应用程序”快捷方式和使用说明；公证临时 DMG、回执、日志、状态及工具路径记录均在 payload 外。输出、暂存和挂载点拒绝使用 `/Applications`、系统目录、主目录根或卷根，也会解析目录链接后检查。暂存与输出不能放进原输入 App，须位于同卷以保证最终移动原子完成。生产工具使用绝对路径，stapler/notarytool 经系统 xcrun 解析并记录实际路径；不从普通 PATH 获取发布工具。`LIVELINGO_TEST_TOOL_DIR` 是明确的离线测试替身入口，真实发布须取消它和测试用 `LIVELINGO_PYTHON`。
+正式 DMG 顶层只有 App、“应用程序”快捷方式和使用说明；公证临时 DMG、回执、日志、状态及工具路径记录均在 payload 外。输出、暂存和挂载点拒绝使用 `/Applications`、系统目录、主目录根或卷根，也会解析目录链接后检查。暂存与输出不能放进原输入 App，须位于同卷以保证最终移动原子完成。生产工具使用绝对路径，stapler/notarytool 经系统 xcrun 解析并记录实际路径；不从普通 PATH 获取发布工具。`LIVELINGO_TEST_TOOL_DIR` 是明确的离线测试替身入口，真实发布须取消它；`LIVELINGO_PYTHON` 必须重新指定为宿主 Python 3.11 以上的绝对路径，不能保留测试替身解释器。
 
 APFS 同卷暂存和 DMG 装订工作副本可共享文件块，但 App 公证镜像与发布镜像各自占用空间；不支持克隆的卷还需为工作副本预留额外空间。镜像容量按文件的逻辑长度、每个目录项的 8 KiB 元数据余量，再加 20% 和 256 MiB 估算，避免稀疏文件让自动容量估算偏小；这不是实际占用保证。暂存 App 是唯一 App 装订副本，App 临时 DMG 对应第一次提交，未改变的已上传发布 DMG 用于中断恢复，装订工作副本及日志用于自检/复核；完成真实验收且不再需要恢复后，按授权清理这些中间件。脚本不会自动删除它们。
 
@@ -230,7 +235,7 @@ helper 本身只查询；要完成剩余发布步骤优先使用打包脚本的 
 
 ```sh
 ./Scripts/verify-release-dmg.sh --dmg work/OfflineDMG/LiveLingo-next-macOS14+-arm64.dmg \
-  --identity 'Developer ID Application: Example Name (TEAMID)'
+  --identity 'Developer ID Application: Example Name (TEAMID)' --privacy-phase signed
 
 ./Scripts/build-offline-dmg.sh --dry-run
 /bin/zsh -n Scripts/build-offline-dmg.sh

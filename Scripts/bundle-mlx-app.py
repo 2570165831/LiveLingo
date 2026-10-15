@@ -28,6 +28,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import shlex
 import subprocess
 from model_files import REQUIRED_MODEL_FILES, ModelFilesError, check_app_models, check_model_files
 from privacy_package import PrivacyError, copy_distribution_tree, distribution_manifest, inspect_tree
@@ -37,6 +38,14 @@ except ImportError:
     from Scripts.binary_provenance import record_input_provenance, verify_input_provenance, finalize_app_provenance
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def signing_next_step(output):
+    return ("python3.13 Scripts/sign-offline-app.py --app " + shlex.quote(str(output))
+            + " --identity '<Developer ID Application identity>'"
+            + " --certificate /absolute/path/to/developer-id.cer"
+            + " --keychain /absolute/path/to/login.keychain-db"
+            + " --review-capture /absolute/path/to/new-signing-run/before-signing.json")
 
 # In-app relative path -> Packaging/ModelNotices file holding the official license.
 LANGUAGE_MODELS = (
@@ -420,7 +429,7 @@ def main():
         "asrPythonLicenses": python_licenses,
         "missingLicenseFiles": manifest["missingLicenseFiles"],
         "macOS14RuntimeTest": "pending",
-        "nextStep": "Scripts/sign-offline-app.py --app %s" % args.output,
+        "nextStep": signing_next_step(args.output),
         "boundary": "No signing, no DMG, no install, no $HOME fallback.",
     }, ensure_ascii=False, indent=2))
 

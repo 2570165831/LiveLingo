@@ -5,6 +5,8 @@ No real signing, keychains, notarytool, stapler, spctl or mounting. Image stubs
 snapshot their source, so later edits cannot masquerade as image contents.
 """
 import importlib.util
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,12 +18,14 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 APP_ID = "11111111-1111-4111-8111-111111111111"
 DMG_ID = "22222222-2222-4222-8222-222222222222"
 IDENTITY = "Developer ID Application: Fixture (TESTTEAM)"
@@ -69,13 +73,20 @@ if name == "python-verify-stub":
         target = owned(args[args.index("--root") + 1])
         assert args[args.index("--phase") + 1] in ("final", "signed")
         sys.path.insert(0, str(pathlib.Path(args[0]).parent))
-        import privacy_package, signed_resource_review, binary_provenance
+        import privacy_package, signed_resource_review, binary_provenance, reviewed_resources
         def fake_approvals(app):
             app = owned(app)
             assert (app / "Contents/.fake-signature").exists()
             return {}
-        signed_resource_review.approvals_for_app = fake_approvals
-        binary_provenance.verify_app_provenance = lambda app: {}
+        if os.environ.get("FAKE_REVIEW_MANIFEST"):
+            # Real hash-bound resources and signed receipt, not an empty
+            # approvals stub. Only the unrelated audio provenance is synthetic.
+            reviewed_resources.MANIFEST = owned(os.environ["FAKE_REVIEW_MANIFEST"])
+        else:
+            signed_resource_review.approvals_for_app = fake_approvals
+        binary_provenance.verify_app_provenance = lambda app: {"finalStage": "signed-candidate"}
+        if os.environ.get("FAKE_REVIEW_MANIFEST"):
+            record(privacyPhase=args[args.index("--phase") + 1])
         sys.argv = args
         sys.exit(privacy_package.main())
     else:
@@ -300,6 +311,9 @@ class ReleaseFlowTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         assert cls.scratch.parent == cls.scratch_parent and not cls.scratch.is_symlink()
+        if os.environ.get("LIVELINGO_RETAIN_RELEASE_FIXTURES") == "1":
+            print("Offline fixtures retained: " + str(cls.scratch), flush=True)
+            return
         shutil.rmtree(cls.scratch)
         print("Offline fixtures removed: " + str(not cls.scratch.exists()), flush=True)
 
@@ -342,6 +356,43 @@ class ReleaseFlowTests(unittest.TestCase):
 
     def events(self, case):
         return [json.loads(line) for line in (case / "trace.jsonl").read_text().splitlines()] if (case / "trace.jsonl").exists() else []
+
+    def add_reviewed_resources(self, case, app, env):
+        from Scripts import reviewed_resources, signed_resource_review
+        from Scripts.test_relpipe6_signed_resources import thin, simulated_sign, PUBLIC
+        relative = "Contents/Resources/LanguageRuntime/probe.dylib"
+        source = thin()
+        native = app / relative
+        native.write_bytes(source)
+        declaration = b'[package]\nname = "fixture"\nversion = "1"\nlicense = "MIT"\n'
+        cargo = app / "Contents/Resources/LanguageRuntime/Licenses/native-cargo-notices/fixture-1/DECLARATION-Cargo.toml"
+        cargo.parent.mkdir(parents=True)
+        cargo.write_bytes(declaration)
+        archive_data = io.BytesIO()
+        with tarfile.open(fileobj=archive_data, mode="w:gz") as archive:
+            member = tarfile.TarInfo("fixture-1/Cargo.toml")
+            member.size = len(declaration)
+            archive.addfile(member, io.BytesIO(declaration))
+        archive_relative = "Contents/Resources/LanguageRuntime/Licenses/fixture/source.tar.gz"
+        archive_path = app / archive_relative
+        archive_path.parent.mkdir(parents=True)
+        archive_path.write_bytes(archive_data.getvalue())
+        resources = [{"path": relative, "sha256": hashlib.sha256(source).hexdigest(),
+                      "format": "macho-public-build-strings", "package": "fixture", "version": "1",
+                      "reason": "Synthetic native fixture; never executed",
+                      "publicBuildPathsHex": [PUBLIC.encode().hex()]},
+                     {"path": archive_relative, "sha256": hashlib.sha256(archive_data.getvalue()).hexdigest(),
+                      "format": "source-tar", "package": "fixture", "version": "1",
+                      "reason": "Synthetic source metadata fixture; never executed"}]
+        manifest = case / "review-manifest.json"
+        manifest.write_text(json.dumps({"version": 1, "resources": resources}))
+        with patch.object(reviewed_resources, "MANIFEST", manifest), \
+                patch("Scripts.binary_provenance.verify_app_provenance", return_value={"finalStage": "signed-candidate"}):
+            captured = signed_resource_review.capture_before_signing(app)
+            native.write_bytes(simulated_sign(source))
+            signed_resource_review.finalize_signed_review(app, captured)
+        env["FAKE_REVIEW_MANIFEST"] = str(manifest)
+        return native
 
     def execute(self, case, env, command):
         result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=90, cwd=case)
@@ -613,13 +664,51 @@ class ReleaseFlowTests(unittest.TestCase):
         result, _, _ = self.run_case("path-poison", override=command)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_system_python_stdlib_compatibility(self):
+    def test_system_python_publication_version_contract(self):
         def command(case, app, existing, env):
             env["FAKE_REAL_PYTHON"] = "/usr/bin/python3"
             return existing
         result, events, _ = self.run_case("system-python", override=command)
+        version = subprocess.run(["/usr/bin/python3", "-c", "import sys; print(sys.version_info >= (3, 11))"],
+                                 text=True, capture_output=True, check=True)
+        if version.stdout.strip() == "True":
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assert_success_order(events)
+        else:
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Python 3.11", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(events, [])
+
+    def test_real_reviewed_resources_and_cargo_reach_publication_gate(self):
+        case, app, env, command = self.fixture("real-reviewed-resources")
+        self.add_reviewed_resources(case, app, env)
+        result, events = self.execute(case, env, command)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"reviewed_resource_files": 2', result.stdout)
         self.assert_success_order(events)
+
+    def test_standalone_verifier_defaults_to_signed_review(self):
+        case, app, env, command = self.fixture("standalone-signed-review")
+        self.add_reviewed_resources(case, app, env)
+        result, _ = self.execute(case, env, command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        verify = ["/bin/zsh", str(ROOT / "Scripts/verify-release-dmg.sh"),
+                  "--dmg", str(case / "release with spaces.dmg"), "--identity", IDENTITY,
+                  "--mount-point", str(case / "standalone-mount")]
+        result, events = self.execute(case, env, verify)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"reviewed_resource_files": 2', result.stdout)
+        phases = [e["privacyPhase"] for e in events if "privacyPhase" in e]
+        self.assertTrue(phases)
+        self.assertEqual(set(phases), {"signed"})
+        self.assertFalse((case / "standalone-mount").exists())
+        native = case / "image-snapshot-2/LiveLingo.app/Contents/Resources/LanguageRuntime/probe.dylib"
+        native.write_bytes(native.read_bytes() + b"changed")
+        result, _ = self.execute(case, env, verify)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("最终 DMG 发布自检通过", result.stdout)
+        self.assertFalse((case / "standalone-mount").exists())
 
     def test_build_forwards_nondefault_notary_budgets(self):
         def command(case, app, existing, env):

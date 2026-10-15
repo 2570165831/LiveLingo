@@ -8,7 +8,7 @@ python_bin="${LIVELINGO_PYTHON:-/usr/bin/python3}"
 dmg=""
 mount_dir=""
 identity=""
-privacy_phase="final"
+privacy_phase="signed"
 detach_max_attempts=3
 detach_retry_delay=1
 dry_run=0
@@ -28,6 +28,7 @@ while (( $# > 0 )); do
     --dry-run) dry_run=1; shift ;;
     -h|--help)
       print -r -- "用法：Scripts/verify-release-dmg.sh --dmg <DMG> [--identity <Authority>] [--privacy-phase final|signed] [--mount-point <新目录>] [--detach-max-attempts <次数>] [--detach-retry-delay <秒>] [--dry-run]"
+      print -r -- "隐私检查默认使用 signed 阶段；真实自检需要宿主 Python 3.11 或更新版本。"
       print -r -- "无 DMG 或 dry-run 时明确跳过，不算发布验收。"
       exit 0 ;;
     *) fail "未知参数：$1" ;;
@@ -42,6 +43,7 @@ fi
 [[ -f "${dmg}" && "${dmg}" == *.dmg ]] || fail "最终 DMG 不存在或不是 .dmg：${dmg}"
 dmg="${dmg:A}"
 [[ "${python_bin}" == /* && -x "${python_bin}" ]] || fail "Python 必须为绝对可执行路径"
+require_publication_python
 "${python_bin}" - "${detach_max_attempts}" "${detach_retry_delay}" <<'PY'
 import math, sys
 try:

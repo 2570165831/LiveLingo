@@ -10,11 +10,13 @@ import warnings
 try:
     from .privacy_package import PrivacyError, decode_metadata_text
     from .reviewed_resources import scan_host_paths
-    from .privacy_literals import PYTHON_SOURCE_SUFFIXES, inspect_source_literals, source_format
+    from .privacy_literals import PYTHON_SOURCE_SUFFIXES, inspect_source_literals, source_format, unc_source_view
+    from .privacy_roots import PublicRegexSpelling, PublicSourceSyntax
 except ImportError:
     from privacy_package import PrivacyError, decode_metadata_text
     from reviewed_resources import scan_host_paths
-    from privacy_literals import PYTHON_SOURCE_SUFFIXES, inspect_source_literals, source_format
+    from privacy_literals import PYTHON_SOURCE_SUFFIXES, inspect_source_literals, source_format, unc_source_view
+    from privacy_roots import PublicRegexSpelling, PublicSourceSyntax
 
 
 _PUBLIC_URL = re.compile(r'https?://[^\s"<>]+', re.I)
@@ -27,27 +29,46 @@ _COMPILER_OPERAND = re.compile(
     r'(?:[ \t]+|=)?(?P<path>/+[^\s"\'<>]*)')
 
 
-def replace_public_spelling(text, public):
+def replace_public_spelling(text, public, *, source_code=False):
     """A reviewed file URI approves its complete spelling, never a host prefix."""
+    if isinstance(public, PublicSourceSyntax):
+        return re.sub(r'(?m)^' + re.escape(public) + r'(?=$|[\x00-\x1f])',
+                      "PUBLIC_UPSTREAM_SOURCE_SYNTAX", text)
+    if isinstance(public, PublicRegexSpelling):
+        if not source_code:
+            return "PUBLIC_UPSTREAM_EXAMPLE" if text == public else text
+        return re.sub(re.escape(public) + r'(?=$|[\s"\'<>`|;,])',
+                      "PUBLIC_UPSTREAM_EXAMPLE", text)
+    if public.startswith("\\\\"):
+        # Spaces, commas, semicolons and apostrophes can be filename bytes.
+        # Source delimiters are allowed only on the raw source pass; decoded
+        # literals are checked again with the stricter complete-path boundary.
+        boundary = r'(?=$|[\x00-\x1f"<>|])'
+        if source_code:
+            boundary = r'(?=$|[\x00-\x1f"\'<>`|])'
+        return re.sub(re.escape(public) + boundary, "PUBLIC_UPSTREAM_EXAMPLE", text)
     if public.lower().startswith("file://"):
         return re.sub(re.escape(public) + r'(?=$|[\s"\'<>`|;,])',
                       "PUBLIC_UPSTREAM_EXAMPLE", text)
     return text.replace(public, "PUBLIC_UPSTREAM_EXAMPLE")
 
 
-def scan_path_operands(text):
+def scan_path_operands(text, *, raw_source=False, name=""):
     """Normalize absolute operands, file URL components and compiler paths.
 
     Whole-text slash replacement would turn public URLs or /boot/home source
     paths into host roots. Preserve those contexts and pass each identified
     operand separately to the existing root policy.
     """
-    scan_host_paths(text.encode("utf-8", errors="surrogatepass"), source_code=True)
+    view = unc_source_view(text, name).encode("utf-8", errors="surrogatepass") if raw_source else None
+    scan_host_paths(text.encode("utf-8", errors="surrogatepass"), source_code=True, unc_view=view)
     text = _PUBLIC_URL.sub("", text)
     for pattern in (_ABSOLUTE_OPERAND, _COMPILER_OPERAND):
         for match in pattern.finditer(text):
             operand = re.sub(r"/+", "/", match["path"])
-            scan_host_paths(operand.encode("utf-8", errors="surrogatepass"), source_code=True)
+            # UNC is checked on the raw-source view and on decoded literals.
+            # A POSIX regex operand must not re-interpret raw escape spellings.
+            scan_host_paths(operand.encode("utf-8", errors="surrogatepass"), source_code=True, unc_view=b"")
     for match in _FILE_URL.finditer(text):
         literal = match["url"]
         # A scheme-only shell case glob implements URL syntax, naming no host.
@@ -73,11 +94,11 @@ def scan_path_operands(text):
 
 
 def inspect_text(data, name, *, allowed=()):
-    def check(text):
+    def check(text, *, source_code=False):
         text = "".join(c for c in text if unicodedata.category(c) != "Cf")
         for public in allowed:
-            text = replace_public_spelling(text, public)
-        scan_path_operands(text)
+            text = replace_public_spelling(text, public, source_code=source_code)
+        scan_path_operands(text, raw_source=source_code, name=name)
     header = data.partition(b"\n")[0].decode("ascii", errors="replace")
     if source_format(header, name) in PYTHON_SOURCE_SUFFIXES:
         try:
@@ -93,5 +114,5 @@ def inspect_text(data, name, *, allowed=()):
         text = decode_metadata_text(data)
         if text is None:
             raise PrivacyError("unreviewed-binary-package-entry")
-    check(text)
+    check(text, source_code=True)
     inspect_source_literals(text, name, check)

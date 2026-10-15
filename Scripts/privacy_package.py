@@ -740,12 +740,20 @@ def main():
     check = sub.add_parser("check", help="read-only; rejects signed-package residues without editing them")
     check.add_argument("--root", type=Path, required=True)
     check.add_argument("--layout", choices=("tree", "app-only", "dmg"), default="tree")
-    check.add_argument("--phase", choices=("prepare", "final", "signed"), default="final")
+    check.add_argument("--phase", choices=("prepare", "final", "signed"),
+                       help="defaults to signed when the App has a signed-resource receipt; otherwise final")
     stage = sub.add_parser("copy", help="create a new unsigned distribution copy; preserve all sources")
     stage.add_argument("--source", type=Path, required=True)
     stage.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if sys.version_info < (3, 11):
+        print("privacy-package: Python 3.11 or newer is required; use a host interpreter", file=sys.stderr)
+        return 1
     try:
+        if args.command == "check" and args.phase is None:
+            app = args.root if (args.root / "Contents").is_dir() else args.root / "LiveLingo.app"
+            receipt = app / "Contents/Resources/LanguageRuntime/signed-resource-review.json"
+            args.phase = "signed" if receipt.exists() or receipt.is_symlink() else "final"
         counts = (inspect_tree(args.root, layout=args.layout, phase=args.phase) if args.command == "check"
                   else copy_distribution_tree(args.source, args.output))
     except PrivacyError as error:
@@ -761,4 +769,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Helpers import the canonical module name. Keep their PrivacyError class
+    # identical to this CLI's catch clause rather than loading a second module.
+    sys.modules["privacy_package"] = sys.modules[__name__]
     sys.exit(main())

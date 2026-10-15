@@ -480,9 +480,14 @@ def sign(app_root, identity, keychain, entitlements, inherit_plist, found, revie
 def verify(app_root, identity, max_minos, found, main_rpaths):
     try:
         from signed_resource_review import approvals_for_app
+        from privacy_package import PrivacyError
     except ImportError:
         from Scripts.signed_resource_review import approvals_for_app
-    approvals_for_app(app_root)
+        from Scripts.privacy_package import PrivacyError
+    try:
+        approvals_for_app(app_root)
+    except PrivacyError as error:
+        fail("signed-resource review failed: " + error.args[0])
     run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", app_root])
     signature = run(["/usr/bin/codesign", "-d", "--verbose=4", app_root], check=False)
     details = (signature.stdout or "") + (signature.stderr or "")
@@ -585,6 +590,9 @@ def main():
     if args.scan is not None:
         scan_mode(args.scan, max_minos)
         return
+
+    if sys.version_info < (3, 11):
+        fail("Python 3.11 or newer is required; use a host interpreter")
 
     if not args.app:
         fail("--app is required unless --scan is used")

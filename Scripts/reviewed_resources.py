@@ -13,11 +13,13 @@ import re
 
 if __package__:
     from .private_files import open_directory
+    from .privacy_roots import WINDOWS_UNC_PATTERN, PublicRegexSpelling, PublicSourceSyntax
     from .privacy_package import (PrivacyError, read_json, validate_metadata,
                                   decode_metadata_text, parse_metadata, metadata_kind,
                                   decode_license_text, JSON_LIMIT)
 else:
     from private_files import open_directory
+    from privacy_roots import WINDOWS_UNC_PATTERN, PublicRegexSpelling, PublicSourceSyntax
     from privacy_package import (PrivacyError, read_json, validate_metadata,
                                  decode_metadata_text, parse_metadata, metadata_kind,
                                  decode_license_text, JSON_LIMIT)
@@ -119,6 +121,31 @@ def public_example_spellings(examples, *, source_only=False):
             if not re.fullmatch(r'file://[^\s"\'<>]+', spelling, re.I):
                 raise PrivacyError("invalid-reviewed-public-examples")
             allowed.append(spelling)
+        elif example["style"] == "unc-hex" and re.fullmatch(r"(?:[0-9a-f]{2}){1,4096}", value):
+            try:
+                spelling = bytes.fromhex(value).decode("utf-8")
+            except UnicodeError:
+                raise PrivacyError("invalid-reviewed-public-examples") from None
+            normalized_prefix = "\\\\" + spelling.lstrip("\\")
+            if (not spelling.startswith("\\\\") or not all(c.isprintable() for c in spelling)
+                    or not re.match(WINDOWS_UNC_PATTERN, normalized_prefix, re.I)):
+                raise PrivacyError("invalid-reviewed-public-examples")
+            # Exact decoded and source-escaped spellings only, never a host root.
+            allowed.extend((spelling, spelling.replace("\\", "\\\\")))
+        elif example["style"] == "source-syntax-hex" and re.fullmatch(r"(?:[0-9a-f]{2}){1,16384}", value):
+            try:
+                spelling = bytes.fromhex(value).decode("utf-8")
+            except UnicodeError:
+                raise PrivacyError("invalid-reviewed-public-examples") from None
+            # Syntax approvals retain a full source statement surrounding an
+            # apparent UNC token. A bare path/root must use unc-hex instead.
+            if (not spelling or not all(c.isprintable() or c == "\t" for c in spelling)
+                    or spelling.lstrip().startswith("\\\\")
+                    or not re.search(WINDOWS_UNC_PATTERN, spelling, re.I)):
+                raise PrivacyError("invalid-reviewed-public-examples")
+            scan_host_paths(re.sub(WINDOWS_UNC_PATTERN, "PUBLIC_UNC_SYNTAX", spelling,
+                                   flags=re.I).encode("utf-8"), source_code=True, unc_view=b"")
+            allowed.append(PublicSourceSyntax(spelling))
         elif source_only and example["style"] == "rooted-package" and re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", value):
             spelling = "/" + value
             scan_host_paths(spelling.encode(), source_code=True)
@@ -140,7 +167,13 @@ def public_example_spellings(examples, *, source_only=False):
             # Source archives bind both complete archive and member hashes;
             # binary-member callers also require a review reason. No root or
             # prefix approval: this uses the native scanner's exact grammar.
-            allowed.extend(_exact_build_path_approvals([bytes.fromhex(value)]))
+            spellings = _exact_build_path_approvals([bytes.fromhex(value)])
+            # Preserve the six already-reviewed RE2 word-boundary fixtures.
+            # Only explicit binary-readable approvals receive this token kind;
+            # unc-hex remains a complete path, including filename whitespace.
+            allowed.extend(PublicRegexSpelling(spelling)
+                           if re.fullmatch(r"\\\\[Bb](?:foo|x)?\\\\[Bb]", spelling) else spelling
+                           for spelling in spellings)
         else:
             raise PrivacyError("invalid-reviewed-public-examples")
     return allowed
@@ -201,14 +234,14 @@ def inspect(path, relative, approvals, counts):
             raise PrivacyError("invalid-reviewed-build-text")
         allowed = public_example_spellings(item["publicHostPathExamples"]) if "publicHostPathExamples" in item else []
         if __package__:
-            from .privacy_text import scan_path_operands
+            from .privacy_text import scan_path_operands, replace_public_spelling
         else:
-            from privacy_text import scan_path_operands
-        def scan(value):
+            from privacy_text import scan_path_operands, replace_public_spelling
+        def scan(value, *, source_code=False):
             for public in allowed:
-                value = value.replace(public, "PUBLIC_UPSTREAM_EXAMPLE")
-            scan_path_operands(value)
-        scan(text)
+                value = replace_public_spelling(value, public, source_code=source_code)
+            scan_path_operands(value, raw_source=source_code, name=path.name)
+        scan(text, source_code=True)
         inspect_source_literals(text, path.name, scan)
         counts["path_scanned_text_files"] = counts.get("path_scanned_text_files", 0) + 1
     elif item["format"] in ("lark-grammar", "css"):
@@ -216,7 +249,15 @@ def inspect(path, relative, approvals, counts):
         if text is None:
             raise PrivacyError("invalid-reviewed-text-resource")
         # Block host paths before removing syntax that contains slash delimiters.
-        scan_host_paths(data)
+        path_view = text
+        if "publicHostPathExamples" in item:
+            if __package__:
+                from .privacy_text import replace_public_spelling
+            else:
+                from privacy_text import replace_public_spelling
+            for public in public_example_spellings(item["publicHostPathExamples"]):
+                path_view = replace_public_spelling(path_view, public, source_code=True)
+        scan_host_paths(path_view.encode("utf-8"))
         if item["format"] == "css":
             for comment in re.findall(r"/\*(.*?)\*/", text, flags=re.S):
                 inspect_comment(comment)
@@ -263,7 +304,7 @@ def inspect(path, relative, approvals, counts):
     return True
 
 
-def scan_host_paths(data, *, source_code=False):
+def scan_host_paths(data, *, source_code=False, unc_view=None):
     """Scan source/grammar bytes without confusing operators with metadata.
 
     Structured metadata additionally receives the existing recursive policy.
@@ -271,6 +312,7 @@ def scan_host_paths(data, *, source_code=False):
     expressions such as system header includes or regular-expression slashes.
     """
     data = re.sub(rb"https?://[^\s\"<>]+", b"", data, flags=re.I)
+    unc_data = data if unc_view is None else re.sub(rb"https?://[^\s\"<>]+", b"", unc_view, flags=re.I)
     roots = (rb"(?:(?<![\w:/.])|(?<=-I)|(?<=-L)|(?<=\.\.))"
              rb"/(?:Users|Volumes|home|private/(?:tmp|var)|var/folders|opt/homebrew|usr/local/(?:Cellar|opt)|synthetic)/")
     # Public source may implement file:// and shell ~ expansion. Those syntax
@@ -279,6 +321,7 @@ def scan_host_paths(data, *, source_code=False):
     if not source_code:
         syntax = rb"file://|~[/\\]|" + syntax
     if (re.search(roots, data, re.I) or re.search(syntax, data, re.I)
+            or re.search(WINDOWS_UNC_PATTERN.encode("ascii"), unc_data, re.I)
             or re.search(rb"file:///+(?:Users|Volumes|home|private/(?:tmp|var)|synthetic)/", data, re.I)):
         raise PrivacyError("local-path-metadata")
 

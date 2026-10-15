@@ -1,5 +1,14 @@
 """Shared private host-location grammar for text and readable binary paths."""
 
+
+class PublicRegexSpelling(str):
+    """A hash-bound source regex token, distinct from an approved UNC path."""
+
+
+class PublicSourceSyntax(str):
+    """An exact hash-bound upstream source statement, never a path prefix."""
+
+
 PRIVATE_ROOTS = ("/" + "Users/", "/home/", "/Volumes/", "/private/var/", "/private/tmp/",
                  "/var/folders/", "/synthetic/", "/opt/homebrew/", "/usr/local/",
                  "/opt/local/", "/tmp/")
