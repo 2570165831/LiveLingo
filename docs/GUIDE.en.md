@@ -157,3 +157,7 @@ The optional English word-by-word preview and Preliminary translation depend on 
 ### Why is processing still running after recording ends?
 
 End and save stops capture and saves the current progress, then continues processing material already captured. You can pause this in Recording processing and resume it later. Any export made before processing finishes contains only the results available at that time.
+
+### Where can I report other problems?
+
+Join QQ group **970112064**, email 2570165831@qq.com, or open an issue on [GitHub](https://github.com/2570165831/LiveLingo/issues). Please include your Mac model, memory, macOS version, LiveLingo version and what you were doing; do not attach private recordings, full class transcripts or notes.

@@ -66,6 +66,16 @@ Audio, transcripts, the full translation and notes are all processed on your Mac
 
 When opening an issue or pull request, please do not attach private recordings, full class transcripts, notes or any credentials.
 
+## Feedback
+
+Trouble installing, something not working, a bad translation, or an idea? Please get in touch:
+
+- **QQ group: 970112064** (mostly Chinese-speaking; questions and tips are both welcome)
+- **Email**: 2570165831@qq.com
+- **GitHub**: [open an issue](https://github.com/2570165831/LiveLingo/issues)
+
+It helps a lot to include your Mac model, memory, macOS version, LiveLingo version and what you were doing when the problem happened. Please do not send private recordings, full class transcripts, notes, passwords or keys.
+
 ## Changelog and development
 
 - What changed in each version: the [changelog](CHANGELOG.md) and the release notes for each version ([20260924](RELEASE_NOTES_20260924.md), [20260922](RELEASE_NOTES_20260922.md)). These are in Chinese.
