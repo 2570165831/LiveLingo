@@ -23,6 +23,12 @@ def png(*metadata):
             + b''.join(metadata) + chunk(b'IDAT', zlib.compress(b'\0\0\0\0\0')) + chunk(b'IEND', b''))
 
 
+def ar_member(data, timestamp=0, owner=0, group=0):
+    header = (f"{'object.o/':<16}{timestamp:<12}{owner:<6}{group:<6}{'100644':<8}{len(data):<10}`\n").encode()
+    assert len(header) == 60
+    return b'!<arch>\n' + header + data + (b'\n' if len(data) % 2 else b'')
+
+
 class ResourceMetadataTests(unittest.TestCase):
     def inspect(self, data, name='fixture.png'):
         with tempfile.TemporaryDirectory() as temporary:
@@ -76,11 +82,18 @@ class ResourceMetadataTests(unittest.TestCase):
 
     def test_non_macho_known_binary_tails_are_checked_in_three_encodings(self):
         for name, prefix in [('fixture.metallib', b'MTLB' + b'\0' * 20),
-                             ('Assets.car', b'BOMStore' + b'\0' * 20),
-                             ('fixture.a', b'!<arch>\n' + b'\0' * 20)]:
+                             ('Assets.car', b'BOMStore' + b'\0' * 20), ('fixture.a', b'')]:
             for encoding in ['utf-8', 'utf-16-le', 'utf-16-be']:
-                with self.subTest(name=name, encoding=encoding), self.assertRaises(privacy.PrivacyError):
-                    self.inspect(prefix + '/synthetic/private/file'.encode(encoding) + b'\0\0', name)
+                payload = b'\0\0' + '/synthetic/private/file'.encode(encoding) + b'\0\0'
+                data = ar_member(payload) if name.endswith('.a') else prefix + payload
+                with self.subTest(name=name, encoding=encoding), self.assertRaisesRegex(privacy.PrivacyError, 'local-path-binary-resource'):
+                    self.inspect(data, name)
+
+    def test_ar_public_headers_pass_and_each_nonpublic_identity_field_fails(self):
+        self.assertEqual(self.inspect(ar_member(b'public object'), 'fixture.a')['ar_member_headers'], 1)
+        for fields in ({'timestamp': 1}, {'owner': 501}, {'group': 20}):
+            with self.subTest(fields=fields), self.assertRaisesRegex(privacy.PrivacyError, 'nonpublic-resource-ar-header'):
+                self.inspect(ar_member(b'public object', **fields), 'fixture.a')
 
 
 class DistributionAttributeTests(unittest.TestCase):
