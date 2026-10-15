@@ -54,10 +54,11 @@ final class CaptionFollowLatestTests: XCTestCase {
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
         fixture.state.controlState = .key
         NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: fixture.window)
         try await settle(fixture)
-        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
         XCTAssertFalse(fixture.window.isKeyWindow, "Key state is injected, never borrowed from the user")
     }
 
@@ -66,9 +67,10 @@ final class CaptionFollowLatestTests: XCTestCase {
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
         fixture.state.phase = .active
         try await settle(fixture)
-        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
     }
 
     func testNativeKeyNotificationOnlyFollowsTheOwningWindow() async throws {
@@ -76,16 +78,17 @@ final class CaptionFollowLatestTests: XCTestCase {
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
         let other = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
         other.alphaValue = 0
         other.isReleasedWhenClosed = false
         defer { other.close() }
         NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: other)
         try await settle(fixture)
-        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
         NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: fixture.window)
         try await settle(fixture)
-        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
         XCTAssertFalse(fixture.window.isKeyWindow)
     }
 
@@ -94,9 +97,10 @@ final class CaptionFollowLatestTests: XCTestCase {
         defer { fixture.window.close() }
         try await settle(fixture)
         try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
         NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApplication.shared)
         try await settle(fixture)
-        XCTAssertGreaterThan(try scrollView(fixture).contentView.bounds.minY, 150)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
         XCTAssertFalse(NSApplication.shared.isActive)
     }
 
@@ -315,6 +319,7 @@ final class ClassroomPresentationTests: XCTestCase {
         try XCTUnwrap(bindings.anchor).wrappedValue = evidence[evidence.count - 3].id
         try await settle(view)
         XCTAssertGreaterThan(history.contentView.bounds.minY, 100)
+        let readingOffset = history.contentView.bounds.minY
         var latest = TranscriptSegment(startTime: 80, endTime: 89,
             english: "A new synthetic caption while another application owns focus.",
             chinese: "其他应用使用焦点期间到达的一段合成字幕。")
@@ -344,7 +349,7 @@ final class ClassroomPresentationTests: XCTestCase {
         }
         try await settle(view)
         if refocus {
-            XCTAssertGreaterThan(history.contentView.bounds.minY, 100)
+            XCTAssertEqual(history.contentView.bounds.minY, readingOffset, accuracy: 2)
             XCTAssertFalse(window.isKeyWindow)
             return
         }
