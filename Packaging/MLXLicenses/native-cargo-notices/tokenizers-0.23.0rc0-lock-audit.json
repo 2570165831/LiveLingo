@@ -1,0 +1,1912 @@
+{
+  "distribution": "tokenizers",
+  "version": "0.23.0rc0",
+  "sourceArchive": {
+    "name": "tokenizers",
+    "version": "0.23.0rc0",
+    "filename": "tokenizers-0.23.0rc0.tar.gz",
+    "metadataURL": "https://pypi.org/pypi/tokenizers/0.23.0rc0/json",
+    "sourceURL": "https://files.pythonhosted.org/packages/0b/dc/2ba78324f6c82284f8d3d03bba16e5771d075aa4d5e9b4ecbd87af846af2/tokenizers-0.23.0rc0.tar.gz",
+    "bytes": 361629,
+    "sha256": "685c6d269444451a2cf276d3f2bf655f3d7094be20c6553e413ede86b03c637b",
+    "purpose": "Read exact Cargo.lock for a complete upstream dependency audit before collecting missing notices."
+  },
+  "cargoLockPath": "tokenizers-0.23.0rc0/bindings/python/Cargo.lock",
+  "cargoLockSHA256": "e1a599088c38fb8f5cd9c81d70abe4f110551332a2c93ea5997f93e93a424f44",
+  "scope": "Complete upstream lock graph checked; runtime requirements conservatively retain every reachable normal/build/optional/platform edge, excluding only proven root dev-only reachability. Exact historical link set is not asserted.",
+  "registryPackageCount": 165,
+  "coveredRegistryPackageCount": 148,
+  "missingRegistryPackageCount": 17,
+  "completeNoticeCoverage": false,
+  "packages": [
+    {
+      "name": "ahash",
+      "version": "0.8.12",
+      "checksum": "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75",
+      "dependencies": [
+        "cfg-if",
+        "getrandom 0.3.4",
+        "once_cell",
+        "serde",
+        "version_check",
+        "zerocopy"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "aho-corasick",
+      "version": "1.1.4",
+      "checksum": "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301",
+      "dependencies": [
+        "memchr"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "anstream",
+      "version": "1.0.0",
+      "checksum": "824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d",
+      "dependencies": [
+        "anstyle",
+        "anstyle-parse",
+        "anstyle-query",
+        "anstyle-wincon",
+        "colorchoice",
+        "is_terminal_polyfill",
+        "utf8parse"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "anstyle",
+      "version": "1.0.14",
+      "checksum": "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "anstyle-parse",
+      "version": "1.0.0",
+      "checksum": "52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e",
+      "dependencies": [
+        "utf8parse"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "anstyle-query",
+      "version": "1.1.5",
+      "checksum": "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc",
+      "dependencies": [
+        "windows-sys"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "anstyle-wincon",
+      "version": "3.0.11",
+      "checksum": "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d",
+      "dependencies": [
+        "anstyle",
+        "once_cell_polyfill",
+        "windows-sys"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "anyhow",
+      "version": "1.0.102",
+      "checksum": "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "autocfg",
+      "version": "1.5.0",
+      "checksum": "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "base64",
+      "version": "0.13.1",
+      "checksum": "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "bitflags",
+      "version": "2.11.1",
+      "checksum": "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3",
+      "dependencies": [],
+      "noticeAvailable": false
+    },
+    {
+      "name": "bumpalo",
+      "version": "3.20.2",
+      "checksum": "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "castaway",
+      "version": "0.2.4",
+      "checksum": "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a",
+      "dependencies": [
+        "rustversion"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "cc",
+      "version": "1.2.60",
+      "checksum": "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20",
+      "dependencies": [
+        "find-msvc-tools",
+        "shlex"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "cfg-if",
+      "version": "1.0.4",
+      "checksum": "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "colorchoice",
+      "version": "1.0.5",
+      "checksum": "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "compact_str",
+      "version": "0.9.0",
+      "checksum": "3fdb1325a1cece981e8a296ab8f0f9b63ae357bd0784a9faaf548cc7b480707a",
+      "dependencies": [
+        "castaway",
+        "cfg-if",
+        "itoa",
+        "rustversion",
+        "ryu",
+        "serde",
+        "static_assertions"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "console",
+      "version": "0.16.3",
+      "checksum": "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87",
+      "dependencies": [
+        "encode_unicode",
+        "libc",
+        "unicode-width",
+        "windows-sys"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "crossbeam-deque",
+      "version": "0.8.6",
+      "checksum": "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51",
+      "dependencies": [
+        "crossbeam-epoch",
+        "crossbeam-utils"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "crossbeam-epoch",
+      "version": "0.9.18",
+      "checksum": "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e",
+      "dependencies": [
+        "crossbeam-utils"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "crossbeam-utils",
+      "version": "0.8.21",
+      "checksum": "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "daachorse",
+      "version": "1.0.1",
+      "checksum": "6f55d7153ba3b507595872a3874803f07a8a81d1e888abed8e5db7da0597d6e2",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "darling",
+      "version": "0.20.11",
+      "checksum": "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee",
+      "dependencies": [
+        "darling_core",
+        "darling_macro"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "darling_core",
+      "version": "0.20.11",
+      "checksum": "0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e",
+      "dependencies": [
+        "fnv",
+        "ident_case",
+        "proc-macro2",
+        "quote",
+        "strsim",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "darling_macro",
+      "version": "0.20.11",
+      "checksum": "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead",
+      "dependencies": [
+        "darling_core",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "dary_heap",
+      "version": "0.3.9",
+      "checksum": "8b1e3a325bc115f096c8b77bbf027a7c2592230e70be2d985be950d3d5e60ebe",
+      "dependencies": [
+        "serde"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "derive_builder",
+      "version": "0.20.2",
+      "checksum": "507dfb09ea8b7fa618fcf76e953f4f5e192547945816d5358edffe39f6f94947",
+      "dependencies": [
+        "derive_builder_macro"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "derive_builder_core",
+      "version": "0.20.2",
+      "checksum": "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8",
+      "dependencies": [
+        "darling",
+        "proc-macro2",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "derive_builder_macro",
+      "version": "0.20.2",
+      "checksum": "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c",
+      "dependencies": [
+        "derive_builder_core",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "either",
+      "version": "1.15.0",
+      "checksum": "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "encode_unicode",
+      "version": "1.0.0",
+      "checksum": "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "env_filter",
+      "version": "1.0.1",
+      "checksum": "32e90c2accc4b07a8456ea0debdc2e7587bdd890680d71173a15d4ae604f6eef",
+      "dependencies": [
+        "log",
+        "regex"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "env_logger",
+      "version": "0.11.10",
+      "checksum": "0621c04f2196ac3f488dd583365b9c09be011a4ab8b9f37248ffcc8f6198b56a",
+      "dependencies": [
+        "anstream",
+        "anstyle",
+        "env_filter",
+        "jiff",
+        "log"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "equivalent",
+      "version": "1.0.2",
+      "checksum": "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "errno",
+      "version": "0.3.14",
+      "checksum": "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb",
+      "dependencies": [
+        "libc",
+        "windows-sys"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "esaxx-rs",
+      "version": "0.1.10",
+      "checksum": "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6",
+      "dependencies": [
+        "cc"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "fastrand",
+      "version": "2.4.1",
+      "checksum": "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "find-msvc-tools",
+      "version": "0.1.9",
+      "checksum": "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "fnv",
+      "version": "1.0.7",
+      "checksum": "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "foldhash",
+      "version": "0.1.5",
+      "checksum": "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "futures-channel",
+      "version": "0.3.32",
+      "checksum": "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d",
+      "dependencies": [
+        "futures-core"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "futures-core",
+      "version": "0.3.32",
+      "checksum": "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "futures-macro",
+      "version": "0.3.32",
+      "checksum": "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b",
+      "dependencies": [
+        "proc-macro2",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "futures-task",
+      "version": "0.3.32",
+      "checksum": "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "futures-util",
+      "version": "0.3.32",
+      "checksum": "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6",
+      "dependencies": [
+        "futures-core",
+        "futures-macro",
+        "futures-task",
+        "pin-project-lite",
+        "slab"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "getrandom",
+      "version": "0.3.4",
+      "checksum": "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd",
+      "dependencies": [
+        "cfg-if",
+        "libc",
+        "r-efi 5.3.0",
+        "wasip2"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "getrandom",
+      "version": "0.4.2",
+      "checksum": "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555",
+      "dependencies": [
+        "cfg-if",
+        "libc",
+        "r-efi 6.0.0",
+        "wasip2",
+        "wasip3"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.15.5",
+      "checksum": "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1",
+      "dependencies": [
+        "foldhash"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.17.0",
+      "checksum": "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51",
+      "dependencies": [],
+      "noticeAvailable": false
+    },
+    {
+      "name": "heck",
+      "version": "0.5.0",
+      "checksum": "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "id-arena",
+      "version": "2.3.0",
+      "checksum": "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "ident_case",
+      "version": "1.0.1",
+      "checksum": "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "indexmap",
+      "version": "2.14.0",
+      "checksum": "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9",
+      "dependencies": [
+        "equivalent",
+        "hashbrown 0.17.0",
+        "serde",
+        "serde_core"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "indicatif",
+      "version": "0.18.4",
+      "checksum": "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb",
+      "dependencies": [
+        "console",
+        "portable-atomic",
+        "unicode-width",
+        "unit-prefix",
+        "web-time"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "is_terminal_polyfill",
+      "version": "1.70.2",
+      "checksum": "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "itertools",
+      "version": "0.14.0",
+      "checksum": "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285",
+      "dependencies": [
+        "either"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "itoa",
+      "version": "1.0.18",
+      "checksum": "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "jiff",
+      "version": "0.2.24",
+      "checksum": "f00b5dbd620d61dfdcb6007c9c1f6054ebd75319f163d886a9055cec1155073d",
+      "dependencies": [
+        "jiff-static",
+        "log",
+        "portable-atomic",
+        "portable-atomic-util",
+        "serde_core"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "jiff-static",
+      "version": "0.2.24",
+      "checksum": "e000de030ff8022ea1da3f466fbb0f3a809f5e51ed31f6dd931c35181ad8e6d7",
+      "dependencies": [
+        "proc-macro2",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "js-sys",
+      "version": "0.3.95",
+      "checksum": "2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca",
+      "dependencies": [
+        "once_cell",
+        "wasm-bindgen"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "leb128fmt",
+      "version": "0.1.0",
+      "checksum": "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "libc",
+      "version": "0.2.186",
+      "checksum": "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "linux-raw-sys",
+      "version": "0.12.1",
+      "checksum": "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "log",
+      "version": "0.4.29",
+      "checksum": "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "macro_rules_attribute",
+      "version": "0.2.2",
+      "checksum": "65049d7923698040cd0b1ddcced9b0eb14dd22c5f86ae59c3740eab64a676520",
+      "dependencies": [
+        "macro_rules_attribute-proc_macro",
+        "paste"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "macro_rules_attribute-proc_macro",
+      "version": "0.2.2",
+      "checksum": "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "matrixmultiply",
+      "version": "0.3.10",
+      "checksum": "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08",
+      "dependencies": [
+        "autocfg",
+        "rawpointer"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "memchr",
+      "version": "2.8.0",
+      "checksum": "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "minimal-lexical",
+      "version": "0.2.1",
+      "checksum": "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "mio",
+      "version": "1.2.0",
+      "checksum": "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1",
+      "dependencies": [
+        "libc",
+        "wasi",
+        "windows-sys"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "monostate",
+      "version": "0.1.18",
+      "checksum": "3341a273f6c9d5bef1908f17b7267bbab0e95c9bf69a0d4dcf8e9e1b2c76ef67",
+      "dependencies": [
+        "monostate-impl",
+        "serde",
+        "serde_core"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "monostate-impl",
+      "version": "0.1.18",
+      "checksum": "e4db6d5580af57bf992f59068d4ea26fd518574ff48d7639b255a36f9de6e7e9",
+      "dependencies": [
+        "proc-macro2",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "ndarray",
+      "version": "0.16.1",
+      "checksum": "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841",
+      "dependencies": [
+        "matrixmultiply",
+        "num-complex",
+        "num-integer",
+        "num-traits",
+        "portable-atomic",
+        "portable-atomic-util",
+        "rawpointer"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "ndarray",
+      "version": "0.17.2",
+      "checksum": "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d",
+      "dependencies": [
+        "matrixmultiply",
+        "num-complex",
+        "num-integer",
+        "num-traits",
+        "portable-atomic",
+        "portable-atomic-util",
+        "rawpointer"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "nom",
+      "version": "7.1.3",
+      "checksum": "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a",
+      "dependencies": [
+        "memchr",
+        "minimal-lexical"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "num-complex",
+      "version": "0.4.6",
+      "checksum": "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495",
+      "dependencies": [
+        "num-traits"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "num-integer",
+      "version": "0.1.46",
+      "checksum": "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f",
+      "dependencies": [
+        "num-traits"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "num-traits",
+      "version": "0.2.19",
+      "checksum": "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841",
+      "dependencies": [
+        "autocfg"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "numpy",
+      "version": "0.28.0",
+      "checksum": "778da78c64ddc928ebf5ad9df5edf0789410ff3bdbf3619aed51cd789a6af1e2",
+      "dependencies": [
+        "libc",
+        "ndarray 0.17.2",
+        "num-complex",
+        "num-integer",
+        "num-traits",
+        "pyo3",
+        "pyo3-build-config",
+        "rustc-hash"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "once_cell",
+      "version": "1.21.4",
+      "checksum": "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "once_cell_polyfill",
+      "version": "1.70.2",
+      "checksum": "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "onig",
+      "version": "6.5.1",
+      "checksum": "336b9c63443aceef14bea841b899035ae3abe89b7c486aaf4c5bd8aafedac3f0",
+      "dependencies": [
+        "bitflags",
+        "libc",
+        "once_cell",
+        "onig_sys"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "onig_sys",
+      "version": "69.9.1",
+      "checksum": "c7f86c6eef3d6df15f23bcfb6af487cbd2fed4e5581d58d5bf1f5f8b7f6727dc",
+      "dependencies": [
+        "cc",
+        "pkg-config"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "paste",
+      "version": "1.0.15",
+      "checksum": "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "pin-project-lite",
+      "version": "0.2.17",
+      "checksum": "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "pkg-config",
+      "version": "0.3.33",
+      "checksum": "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e",
+      "dependencies": [],
+      "noticeAvailable": false
+    },
+    {
+      "name": "portable-atomic",
+      "version": "1.13.1",
+      "checksum": "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "portable-atomic-util",
+      "version": "0.2.7",
+      "checksum": "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618",
+      "dependencies": [
+        "portable-atomic"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "ppv-lite86",
+      "version": "0.2.21",
+      "checksum": "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9",
+      "dependencies": [
+        "zerocopy"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "prettyplease",
+      "version": "0.2.37",
+      "checksum": "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b",
+      "dependencies": [
+        "proc-macro2",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "proc-macro2",
+      "version": "1.0.106",
+      "checksum": "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934",
+      "dependencies": [
+        "unicode-ident"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "pyo3",
+      "version": "0.28.3",
+      "checksum": "91fd8e38a3b50ed1167fb981cd6fd60147e091784c427b8f7183a7ee32c31c12",
+      "dependencies": [
+        "libc",
+        "once_cell",
+        "portable-atomic",
+        "pyo3-build-config",
+        "pyo3-ffi",
+        "pyo3-macros"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "pyo3-async-runtimes",
+      "version": "0.28.0",
+      "checksum": "9e7364a95bf00e8377bbf9b0f09d7ff9715a29d8fcf93b47d1a967363b973178",
+      "dependencies": [
+        "futures-channel",
+        "futures-util",
+        "once_cell",
+        "pin-project-lite",
+        "pyo3",
+        "tokio"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "pyo3-build-config",
+      "version": "0.28.3",
+      "checksum": "e368e7ddfdeb98c9bca7f8383be1648fd84ab466bf2bc015e94008db6d35611e",
+      "dependencies": [
+        "target-lexicon"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "pyo3-ffi",
+      "version": "0.28.3",
+      "checksum": "7f29e10af80b1f7ccaf7f69eace800a03ecd13e883acfacc1e5d0988605f651e",
+      "dependencies": [
+        "libc",
+        "pyo3-build-config"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "pyo3-macros",
+      "version": "0.28.3",
+      "checksum": "df6e520eff47c45997d2fc7dd8214b25dd1310918bbb2642156ef66a67f29813",
+      "dependencies": [
+        "proc-macro2",
+        "pyo3-macros-backend",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "pyo3-macros-backend",
+      "version": "0.28.3",
+      "checksum": "c4cdc218d835738f81c2338f822078af45b4afdf8b2e33cbb5916f108b813acb",
+      "dependencies": [
+        "heck",
+        "proc-macro2",
+        "pyo3-build-config",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "quote",
+      "version": "1.0.45",
+      "checksum": "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924",
+      "dependencies": [
+        "proc-macro2"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "r-efi",
+      "version": "5.3.0",
+      "checksum": "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "r-efi",
+      "version": "6.0.0",
+      "checksum": "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "rand",
+      "version": "0.9.4",
+      "checksum": "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea",
+      "dependencies": [
+        "rand_chacha",
+        "rand_core"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "rand_chacha",
+      "version": "0.9.0",
+      "checksum": "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb",
+      "dependencies": [
+        "ppv-lite86",
+        "rand_core"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "rand_core",
+      "version": "0.9.5",
+      "checksum": "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c",
+      "dependencies": [
+        "getrandom 0.3.4"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "rawpointer",
+      "version": "0.2.1",
+      "checksum": "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "rayon",
+      "version": "1.12.0",
+      "checksum": "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d",
+      "dependencies": [
+        "either",
+        "rayon-core"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "rayon-cond",
+      "version": "0.4.0",
+      "checksum": "2964d0cf57a3e7a06e8183d14a8b527195c706b7983549cd5462d5aa3747438f",
+      "dependencies": [
+        "either",
+        "itertools",
+        "rayon"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "rayon-core",
+      "version": "1.13.0",
+      "checksum": "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91",
+      "dependencies": [
+        "crossbeam-deque",
+        "crossbeam-utils"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "regex",
+      "version": "1.12.3",
+      "checksum": "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276",
+      "dependencies": [
+        "aho-corasick",
+        "memchr",
+        "regex-automata",
+        "regex-syntax"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "regex-automata",
+      "version": "0.4.14",
+      "checksum": "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f",
+      "dependencies": [
+        "aho-corasick",
+        "memchr",
+        "regex-syntax"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "regex-syntax",
+      "version": "0.8.10",
+      "checksum": "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "rustc-hash",
+      "version": "2.1.2",
+      "checksum": "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe",
+      "dependencies": [],
+      "noticeAvailable": false
+    },
+    {
+      "name": "rustix",
+      "version": "1.1.4",
+      "checksum": "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190",
+      "dependencies": [
+        "bitflags",
+        "errno",
+        "libc",
+        "linux-raw-sys",
+        "windows-sys"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "rustversion",
+      "version": "1.0.22",
+      "checksum": "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "ryu",
+      "version": "1.0.23",
+      "checksum": "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "semver",
+      "version": "1.0.28",
+      "checksum": "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "serde",
+      "version": "1.0.228",
+      "checksum": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+      "dependencies": [
+        "serde_core",
+        "serde_derive"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "serde_core",
+      "version": "1.0.228",
+      "checksum": "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad",
+      "dependencies": [
+        "serde_derive"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "serde_derive",
+      "version": "1.0.228",
+      "checksum": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79",
+      "dependencies": [
+        "proc-macro2",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "serde_json",
+      "version": "1.0.149",
+      "checksum": "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86",
+      "dependencies": [
+        "itoa",
+        "memchr",
+        "serde",
+        "serde_core",
+        "zmij"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "shlex",
+      "version": "1.3.0",
+      "checksum": "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "signal-hook-registry",
+      "version": "1.4.8",
+      "checksum": "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b",
+      "dependencies": [
+        "errno",
+        "libc"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "slab",
+      "version": "0.4.12",
+      "checksum": "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "smallvec",
+      "version": "1.15.1",
+      "checksum": "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "spm_precompiled",
+      "version": "0.1.4",
+      "checksum": "5851699c4033c63636f7ea4cf7b7c1f1bf06d0cc03cfb42e711de5a5c46cf326",
+      "dependencies": [
+        "base64",
+        "nom",
+        "serde",
+        "unicode-segmentation"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "static_assertions",
+      "version": "1.1.0",
+      "checksum": "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "strsim",
+      "version": "0.11.1",
+      "checksum": "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "syn",
+      "version": "2.0.117",
+      "checksum": "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99",
+      "dependencies": [
+        "proc-macro2",
+        "quote",
+        "unicode-ident"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "target-lexicon",
+      "version": "0.13.5",
+      "checksum": "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "tempfile",
+      "version": "3.27.0",
+      "checksum": "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd",
+      "dependencies": [
+        "fastrand",
+        "getrandom 0.4.2",
+        "once_cell",
+        "rustix",
+        "windows-sys"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "thiserror",
+      "version": "2.0.18",
+      "checksum": "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4",
+      "dependencies": [
+        "thiserror-impl"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "thiserror-impl",
+      "version": "2.0.18",
+      "checksum": "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5",
+      "dependencies": [
+        "proc-macro2",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "tokenizers",
+      "version": "0.23.0-rc0",
+      "checksum": null,
+      "dependencies": [
+        "ahash",
+        "compact_str",
+        "daachorse",
+        "dary_heap",
+        "derive_builder",
+        "esaxx-rs",
+        "getrandom 0.3.4",
+        "indicatif",
+        "itertools",
+        "log",
+        "macro_rules_attribute",
+        "monostate",
+        "onig",
+        "paste",
+        "rand",
+        "rayon",
+        "rayon-cond",
+        "regex",
+        "regex-syntax",
+        "serde",
+        "serde_json",
+        "spm_precompiled",
+        "thiserror",
+        "unicode-normalization-alignments",
+        "unicode-segmentation",
+        "unicode_categories"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "tokenizers-python",
+      "version": "0.23.0-rc0",
+      "checksum": null,
+      "dependencies": [
+        "ahash",
+        "env_logger",
+        "itertools",
+        "libc",
+        "ndarray 0.16.1",
+        "numpy",
+        "once_cell",
+        "pyo3",
+        "pyo3-async-runtimes",
+        "pyo3-ffi",
+        "rayon",
+        "serde",
+        "serde_json",
+        "tempfile",
+        "tokenizers",
+        "tokio"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "tokio",
+      "version": "1.52.1",
+      "checksum": "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6",
+      "dependencies": [
+        "libc",
+        "mio",
+        "pin-project-lite",
+        "signal-hook-registry",
+        "tokio-macros",
+        "windows-sys"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "tokio-macros",
+      "version": "2.7.0",
+      "checksum": "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496",
+      "dependencies": [
+        "proc-macro2",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "unicode-ident",
+      "version": "1.0.24",
+      "checksum": "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "unicode-normalization-alignments",
+      "version": "0.1.12",
+      "checksum": "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de",
+      "dependencies": [
+        "smallvec"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "unicode-segmentation",
+      "version": "1.13.2",
+      "checksum": "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "unicode-width",
+      "version": "0.2.2",
+      "checksum": "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "unicode-xid",
+      "version": "0.2.6",
+      "checksum": "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "unicode_categories",
+      "version": "0.1.1",
+      "checksum": "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "unit-prefix",
+      "version": "0.5.2",
+      "checksum": "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "utf8parse",
+      "version": "0.2.2",
+      "checksum": "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "version_check",
+      "version": "0.9.5",
+      "checksum": "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wasi",
+      "version": "0.11.1+wasi-snapshot-preview1",
+      "checksum": "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wasip2",
+      "version": "1.0.3+wasi-0.2.9",
+      "checksum": "20064672db26d7cdc89c7798c48a0fdfac8213434a1186e5ef29fd560ae223d6",
+      "dependencies": [
+        "wit-bindgen 0.57.1"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wasip3",
+      "version": "0.4.0+wasi-0.3.0-rc-2026-01-06",
+      "checksum": "5428f8bf88ea5ddc08faddef2ac4a67e390b88186c703ce6dbd955e1c145aca5",
+      "dependencies": [
+        "wit-bindgen 0.51.0"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wasm-bindgen",
+      "version": "0.2.118",
+      "checksum": "0bf938a0bacb0469e83c1e148908bd7d5a6010354cf4fb73279b7447422e3a89",
+      "dependencies": [
+        "cfg-if",
+        "once_cell",
+        "rustversion",
+        "wasm-bindgen-macro",
+        "wasm-bindgen-shared"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "wasm-bindgen-macro",
+      "version": "0.2.118",
+      "checksum": "eeff24f84126c0ec2db7a449f0c2ec963c6a49efe0698c4242929da037ca28ed",
+      "dependencies": [
+        "quote",
+        "wasm-bindgen-macro-support"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "wasm-bindgen-macro-support",
+      "version": "0.2.118",
+      "checksum": "9d08065faf983b2b80a79fd87d8254c409281cf7de75fc4b773019824196c904",
+      "dependencies": [
+        "bumpalo",
+        "proc-macro2",
+        "quote",
+        "syn",
+        "wasm-bindgen-shared"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "wasm-bindgen-shared",
+      "version": "0.2.118",
+      "checksum": "5fd04d9e306f1907bd13c6361b5c6bfc7b3b3c095ed3f8a9246390f8dbdee129",
+      "dependencies": [
+        "unicode-ident"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "wasm-encoder",
+      "version": "0.244.0",
+      "checksum": "990065f2fe63003fe337b932cfb5e3b80e0b4d0f5ff650e6985b1048f62c8319",
+      "dependencies": [
+        "leb128fmt",
+        "wasmparser"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wasm-metadata",
+      "version": "0.244.0",
+      "checksum": "bb0e353e6a2fbdc176932bbaab493762eb1255a7900fe0fea1a2f96c296cc909",
+      "dependencies": [
+        "anyhow",
+        "indexmap",
+        "wasm-encoder",
+        "wasmparser"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "wasmparser",
+      "version": "0.244.0",
+      "checksum": "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe",
+      "dependencies": [
+        "bitflags",
+        "hashbrown 0.15.5",
+        "indexmap",
+        "semver"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "web-time",
+      "version": "1.1.0",
+      "checksum": "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb",
+      "dependencies": [
+        "js-sys",
+        "wasm-bindgen"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "windows-link",
+      "version": "0.2.1",
+      "checksum": "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "windows-sys",
+      "version": "0.61.2",
+      "checksum": "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc",
+      "dependencies": [
+        "windows-link"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wit-bindgen",
+      "version": "0.51.0",
+      "checksum": "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5",
+      "dependencies": [
+        "wit-bindgen-rust-macro"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wit-bindgen",
+      "version": "0.57.1",
+      "checksum": "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e",
+      "dependencies": [],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wit-bindgen-core",
+      "version": "0.51.0",
+      "checksum": "ea61de684c3ea68cb082b7a88508a8b27fcc8b797d738bfc99a82facf1d752dc",
+      "dependencies": [
+        "anyhow",
+        "heck",
+        "wit-parser"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wit-bindgen-rust",
+      "version": "0.51.0",
+      "checksum": "b7c566e0f4b284dd6561c786d9cb0142da491f46a9fbed79ea69cdad5db17f21",
+      "dependencies": [
+        "anyhow",
+        "heck",
+        "indexmap",
+        "prettyplease",
+        "syn",
+        "wasm-metadata",
+        "wit-bindgen-core",
+        "wit-component"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wit-bindgen-rust-macro",
+      "version": "0.51.0",
+      "checksum": "0c0f9bfd77e6a48eccf51359e3ae77140a7f50b1e2ebfe62422d8afdaffab17a",
+      "dependencies": [
+        "anyhow",
+        "prettyplease",
+        "proc-macro2",
+        "quote",
+        "syn",
+        "wit-bindgen-core",
+        "wit-bindgen-rust"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wit-component",
+      "version": "0.244.0",
+      "checksum": "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2",
+      "dependencies": [
+        "anyhow",
+        "bitflags",
+        "indexmap",
+        "log",
+        "serde",
+        "serde_derive",
+        "serde_json",
+        "wasm-encoder",
+        "wasm-metadata",
+        "wasmparser",
+        "wit-parser"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "wit-parser",
+      "version": "0.244.0",
+      "checksum": "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736",
+      "dependencies": [
+        "anyhow",
+        "id-arena",
+        "indexmap",
+        "log",
+        "semver",
+        "serde",
+        "serde_derive",
+        "serde_json",
+        "unicode-xid",
+        "wasmparser"
+      ],
+      "noticeAvailable": true
+    },
+    {
+      "name": "zerocopy",
+      "version": "0.8.48",
+      "checksum": "eed437bf9d6692032087e337407a86f04cd8d6a16a37199ed57949d415bd68e9",
+      "dependencies": [
+        "zerocopy-derive"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "zerocopy-derive",
+      "version": "0.8.48",
+      "checksum": "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4",
+      "dependencies": [
+        "proc-macro2",
+        "quote",
+        "syn"
+      ],
+      "noticeAvailable": false
+    },
+    {
+      "name": "zmij",
+      "version": "1.0.21",
+      "checksum": "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa",
+      "dependencies": [],
+      "noticeAvailable": true
+    }
+  ],
+  "missingPackages": [
+    {
+      "name": "bitflags",
+      "version": "2.11.1",
+      "filename": "bitflags-2.11.1.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/bitflags/2.11.1",
+      "sourceURL": "https://crates.io/api/v1/crates/bitflags/2.11.1/download",
+      "bytes": 49082,
+      "sha256": "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3",
+      "license": "MIT OR Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "cc",
+      "version": "1.2.60",
+      "filename": "cc-1.2.60.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/cc/1.2.60",
+      "sourceURL": "https://crates.io/api/v1/crates/cc/1.2.60/download",
+      "bytes": 97051,
+      "sha256": "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20",
+      "license": "MIT OR Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.17.0",
+      "filename": "hashbrown-0.17.0.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/hashbrown/0.17.0",
+      "sourceURL": "https://crates.io/api/v1/crates/hashbrown/0.17.0/download",
+      "bytes": 154597,
+      "sha256": "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51",
+      "license": "MIT OR Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "jiff-static",
+      "version": "0.2.24",
+      "filename": "jiff-static-0.2.24.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/jiff-static/0.2.24",
+      "sourceURL": "https://crates.io/api/v1/crates/jiff-static/0.2.24/download",
+      "bytes": 83747,
+      "sha256": "e000de030ff8022ea1da3f466fbb0f3a809f5e51ed31f6dd931c35181ad8e6d7",
+      "license": "Unlicense OR MIT",
+      "downloaded": false
+    },
+    {
+      "name": "js-sys",
+      "version": "0.3.95",
+      "filename": "js-sys-0.3.95.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/js-sys/0.3.95",
+      "sourceURL": "https://crates.io/api/v1/crates/js-sys/0.3.95/download",
+      "bytes": 104031,
+      "sha256": "2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca",
+      "license": "MIT OR Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "matrixmultiply",
+      "version": "0.3.10",
+      "filename": "matrixmultiply-0.3.10.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/matrixmultiply/0.3.10",
+      "sourceURL": "https://crates.io/api/v1/crates/matrixmultiply/0.3.10/download",
+      "bytes": 58170,
+      "sha256": "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08",
+      "license": "MIT/Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "mio",
+      "version": "1.2.0",
+      "filename": "mio-1.2.0.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/mio/1.2.0",
+      "sourceURL": "https://crates.io/api/v1/crates/mio/1.2.0/download",
+      "bytes": 106403,
+      "sha256": "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1",
+      "license": "MIT",
+      "downloaded": false
+    },
+    {
+      "name": "pkg-config",
+      "version": "0.3.33",
+      "filename": "pkg-config-0.3.33.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/pkg-config/0.3.33",
+      "sourceURL": "https://crates.io/api/v1/crates/pkg-config/0.3.33/download",
+      "bytes": 21590,
+      "sha256": "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e",
+      "license": "MIT OR Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "rustc-hash",
+      "version": "2.1.2",
+      "filename": "rustc-hash-2.1.2.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/rustc-hash/2.1.2",
+      "sourceURL": "https://crates.io/api/v1/crates/rustc-hash/2.1.2/download",
+      "bytes": 14754,
+      "sha256": "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe",
+      "license": "Apache-2.0 OR MIT",
+      "downloaded": false
+    },
+    {
+      "name": "tokio-macros",
+      "version": "2.7.0",
+      "filename": "tokio-macros-2.7.0.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/tokio-macros/2.7.0",
+      "sourceURL": "https://crates.io/api/v1/crates/tokio-macros/2.7.0/download",
+      "bytes": 15859,
+      "sha256": "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496",
+      "license": "MIT",
+      "downloaded": false
+    },
+    {
+      "name": "wasm-bindgen",
+      "version": "0.2.118",
+      "filename": "wasm-bindgen-0.2.118.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/wasm-bindgen/0.2.118",
+      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen/0.2.118/download",
+      "bytes": 61149,
+      "sha256": "0bf938a0bacb0469e83c1e148908bd7d5a6010354cf4fb73279b7447422e3a89",
+      "license": "MIT OR Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "wasm-bindgen-macro",
+      "version": "0.2.118",
+      "filename": "wasm-bindgen-macro-0.2.118.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro/0.2.118",
+      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro/0.2.118/download",
+      "bytes": 9288,
+      "sha256": "eeff24f84126c0ec2db7a449f0c2ec963c6a49efe0698c4242929da037ca28ed",
+      "license": "MIT OR Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "wasm-bindgen-macro-support",
+      "version": "0.2.118",
+      "filename": "wasm-bindgen-macro-support-0.2.118.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro-support/0.2.118",
+      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen-macro-support/0.2.118/download",
+      "bytes": 64823,
+      "sha256": "9d08065faf983b2b80a79fd87d8254c409281cf7de75fc4b773019824196c904",
+      "license": "MIT OR Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "wasm-bindgen-shared",
+      "version": "0.2.118",
+      "filename": "wasm-bindgen-shared-0.2.118.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/wasm-bindgen-shared/0.2.118",
+      "sourceURL": "https://crates.io/api/v1/crates/wasm-bindgen-shared/0.2.118/download",
+      "bytes": 10565,
+      "sha256": "5fd04d9e306f1907bd13c6361b5c6bfc7b3b3c095ed3f8a9246390f8dbdee129",
+      "license": "MIT OR Apache-2.0",
+      "downloaded": false
+    },
+    {
+      "name": "zerocopy",
+      "version": "0.8.48",
+      "filename": "zerocopy-0.8.48.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/zerocopy/0.8.48",
+      "sourceURL": "https://crates.io/api/v1/crates/zerocopy/0.8.48/download",
+      "bytes": 287554,
+      "sha256": "eed437bf9d6692032087e337407a86f04cd8d6a16a37199ed57949d415bd68e9",
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "downloaded": false
+    },
+    {
+      "name": "zerocopy-derive",
+      "version": "0.8.48",
+      "filename": "zerocopy-derive-0.8.48.crate",
+      "metadataURL": "https://crates.io/api/v1/crates/zerocopy-derive/0.8.48",
+      "sourceURL": "https://crates.io/api/v1/crates/zerocopy-derive/0.8.48/download",
+      "bytes": 97646,
+      "sha256": "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4",
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "downloaded": false
+    }
+  ],
+  "authorizedArchiveCount": 10,
+  "rootPackage": [
+    "tokenizers-python",
+    "0.23.0-rc0"
+  ],
+  "rootDevDependencies": [
+    "pyo3",
+    "tempfile"
+  ],
+  "rootNonDevDependencies": [
+    "ahash",
+    "env_logger",
+    "itertools",
+    "libc",
+    "ndarray",
+    "numpy",
+    "once_cell",
+    "pyo3",
+    "pyo3-async-runtimes",
+    "pyo3-ffi",
+    "rayon",
+    "serde",
+    "serde_json",
+    "tokenizers",
+    "tokio"
+  ],
+  "rootManifest": {
+    "path": "tokenizers-0.23.0rc0/bindings/python/Cargo.toml",
+    "sha256": "b6e7a8ada88c4bbdce63d9d2c376303795e485cbd9ae22d4b409da5a885f3d14",
+    "exclusionPolicy": "Exclude only packages unreachable after removing root dev-only edges; no target or feature pruning."
+  },
+  "requiredRegistryPackageCount": 138,
+  "missingRequiredCrateNotices": [
+    "bitflags-2.11.1",
+    "cc-1.2.60",
+    "jiff-static-0.2.24",
+    "js-sys-0.3.95",
+    "matrixmultiply-0.3.10",
+    "mio-1.2.0",
+    "pkg-config-0.3.33",
+    "rustc-hash-2.1.2",
+    "tokio-macros-2.7.0",
+    "wasm-bindgen-0.2.118",
+    "wasm-bindgen-macro-0.2.118",
+    "wasm-bindgen-macro-support-0.2.118",
+    "wasm-bindgen-shared-0.2.118",
+    "zerocopy-0.8.48",
+    "zerocopy-derive-0.8.48"
+  ],
+  "excludedDevOnlyCrates": [
+    "anyhow-1.0.102",
+    "equivalent-1.0.2",
+    "fastrand-2.4.1",
+    "foldhash-0.1.5",
+    "getrandom-0.4.2",
+    "hashbrown-0.15.5",
+    "hashbrown-0.17.0",
+    "id-arena-2.3.0",
+    "indexmap-2.14.0",
+    "leb128fmt-0.1.0",
+    "linux-raw-sys-0.12.1",
+    "prettyplease-0.2.37",
+    "r-efi-6.0.0",
+    "rustix-1.1.4",
+    "semver-1.0.28",
+    "tempfile-3.27.0",
+    "unicode-xid-0.2.6",
+    "wasip3-0.4.0+wasi-0.3.0-rc-2026-01-06",
+    "wasm-encoder-0.244.0",
+    "wasm-metadata-0.244.0",
+    "wasmparser-0.244.0",
+    "wit-bindgen-0.51.0",
+    "wit-bindgen-core-0.51.0",
+    "wit-bindgen-rust-0.51.0",
+    "wit-bindgen-rust-macro-0.51.0",
+    "wit-component-0.244.0",
+    "wit-parser-0.244.0"
+  ],
+  "existingDeclarationOnlyCrates": [
+    "wasm-metadata-0.244.0"
+  ],
+  "missingPackagesScope": "Metadata for 16 new exact versions; hashbrown 0.17.0 is dev-only in the upstream graph. Existing declaration-only wasm-metadata 0.244.0 is also dev-only and is not a runtime notice requirement."
+}

@@ -1,0 +1,8 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "numpy"
+version = "0.28.0"
+license = "BSD-2-Clause"
+authors = ["The rust-numpy Project Developers", "PyO3 Project and Contributors <https://github.com/PyO3>"]
+repository = "https://github.com/PyO3/rust-numpy"
+description = "PyO3-based Rust bindings of the NumPy C-API"

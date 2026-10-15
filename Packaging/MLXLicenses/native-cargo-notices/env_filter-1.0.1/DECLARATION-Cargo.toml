@@ -1,0 +1,7 @@
+# Package attribution fields from the verified upstream crate manifest.
+[package]
+name = "env_filter"
+version = "1.0.1"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rust-cli/env_logger"
+description = "Filter log events using environment variables\n"
