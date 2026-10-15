@@ -900,7 +900,7 @@ struct CaptionHistoryScrollView<Rows: View>: View {
             .background(CaptionFollowWindowFocusObserver(onBecomeKey: { followIfEnabled() })
                 .frame(width: 0, height: 0).accessibilityHidden(true))
             .onChange(of: latestID) { followIfEnabled() }
-            .onAppear { followIfEnabled(force: true) }
+            .onAppear { followIfEnabled() }
             .onChange(of: followLatest) { followIfEnabled(force: true) }
             .onChange(of: controlActiveState) {
                 if controlActiveState == .key { followIfEnabled() }
