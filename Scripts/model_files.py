@@ -7,6 +7,7 @@ or a missing tokenizer file fails here instead of at the user's first
 transcription or translation. Messages name only model-relative file names.
 """
 from pathlib import Path
+import re
 import sys
 
 if __package__:
@@ -58,6 +59,17 @@ def shard_names(model_dir):
         weights = sorted(path.name for path in model_dir.glob(WEIGHT_PATTERN))
         if not weights:
             raise ModelFilesError("no %s weights" % WEIGHT_PATTERN)
+        # The index itself can be omitted during copying. Numbered filenames
+        # still promise a complete 1..N set; an extra unsharded file cannot
+        # substitute for one of those shards.
+        matches = [re.fullmatch(r"model-([0-9]+)-of-([0-9]+)\.safetensors", name) for name in weights]
+        numbered = [(int(match[1]), int(match[2])) for match in matches if match]
+        if numbered:
+            total = numbered[0][1]
+            if (any(count != total for _, count in numbered)
+                    or len(numbered) != total
+                    or {number for number, _ in numbered} != set(range(1, total + 1))):
+                raise ModelFilesError("incomplete unindexed shards: inconsistent total or numbering")
         return weights, None
     if not regular_file(index) or index.stat().st_size > JSON_LIMIT:
         raise ModelFilesError("unreadable " + INDEX_NAME)
