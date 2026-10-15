@@ -639,7 +639,7 @@ struct SessionExporterTests {
 
         #expect(
             AcademicInputNormalizer.normalize(source, recentContext: "Adding more reactant raises its concentration.")
-                == "Le Chatelier's principle predicts how an equilibrium responds to stress. Faraday's law says magnetic flux induces an electromotive force."
+                == "Lagrange's principle predicts how an equilibrium responds to stress. Faraday's law says magnetic flux induces an electromotive force."
         )
     }
 }

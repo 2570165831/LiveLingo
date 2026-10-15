@@ -152,7 +152,7 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
-    func testLeChatelierCorrectionRequiresChemicalEquilibriumEvidence() {
+    func testPrincipleNamesAreNotInferredFromChemicalEquilibriumEvidence() {
         let chemistry = "Adding more reactant shifts the equilibrium to the right."
         // Real principle names, comparisons and mechanics wording stay as spoken.
         for (source, recent) in [
@@ -167,11 +167,11 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
         for (source, recent, expected) in [
             ("Lashari's principle says the equilibrium shifts to relieve the stress.", "",
-             "Le Chatelier's principle says the equilibrium shifts to relieve the stress."),
+             "Lashari's principle says the equilibrium shifts to relieve the stress."),
             ("Lagrange's principle tells us how the system responds to stress.", chemistry,
-             "Le Chatelier's principle tells us how the system responds to stress."),
+             "Lagrange's principle tells us how the system responds to stress."),
             ("The Lagrange's principle explains the stress on an equilibrium when K c is fixed.", "",
-             "The Le Chatelier's principle explains the stress on an equilibrium when K c is fixed.")
+             "The Lagrange's principle explains the stress on an equilibrium when K c is fixed.")
         ] {
             XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), expected, source)
             XCTAssertEqual(AcademicInputNormalizer.normalize(expected, recentContext: recent), expected,
@@ -3369,5 +3369,23 @@ extension TranslationAcceptanceTests {
         XCTAssertEqual(try protected.validatedRestore(in:
             "用 x1 计算斜率。使用 ZXQCHEM0QXZ 作为图上的确切标签。"),
             "用 x1 计算斜率。使用 x2 作为图上的确切标签。")
+    }
+}
+
+
+extension TranslationAcceptanceTests {
+    func testIssue7RealPrincipleNamesSurviveEvenChemicalContext() {
+        let chemistry = "Adding reactants shifts the chemical equilibrium and changes concentration under stress."
+        for name in ["Lagrange", "Schrodinger"] {
+            for source in [
+                "In static equilibrium, use \(name)'s principle to discuss stress-concentration factors.",
+                "\(name)'s principle explains the stress on an equilibrium when K c is fixed.",
+                "Use \(name)'s principle to discuss stress."
+            ] {
+                for recent in ["", chemistry] {
+                    XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), source, source)
+                }
+            }
+        }
     }
 }
