@@ -518,6 +518,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
               record.sampleRate.isFinite, record.sampleRate > 0,
               record.start.isFinite, record.end.isFinite, record.start >= 0, record.end > record.start,
               record.end <= TranscriptSegment.maximumTimestamp,
+              Double(record.endFrame) / record.sampleRate <= TranscriptSegment.maximumTimestamp,
               abs(Double(record.startFrame) / record.sampleRate - record.start) <= 1 / record.sampleRate + 0.000001,
               abs(Double(record.endFrame) / record.sampleRate - record.end) <= 1 / record.sampleRate + 0.000001,
               (0...Self.maximumAutomaticRetries).contains(record.automaticRetryCount) else { throw JournalError.invalidRange }
@@ -541,7 +542,9 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
         }
         if let gap = change.gap {
             guard gap.sessionID == sessionID, gap.observedStart.isFinite, gap.observedEnd.isFinite,
-                  gap.observedEnd >= gap.observedStart, gap.sampleRate > 0 else { throw JournalError.invalidRange }
+                  gap.observedEnd >= gap.observedStart, gap.sampleRate.isFinite, gap.sampleRate > 0,
+                  gap.lastWrittenFrame >= 0,
+                  gap.lastWrittenTime <= TranscriptSegment.maximumTimestamp else { throw JournalError.invalidRange }
         }
     }
     private func apply(_ change: Mutation) {

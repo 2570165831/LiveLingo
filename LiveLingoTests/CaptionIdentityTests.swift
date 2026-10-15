@@ -328,6 +328,28 @@ final class CaptionIdentityTests: XCTestCase {
         return fixture
     }
 
+    func testReview12CaptureProgressClampsBeforeSavingWithoutTruncatingFractions() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("CaptureProgressBound-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var snapshot = SessionSnapshot(audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)])
+        snapshot.processing.paused = true
+        _ = try SessionStore(directory: root).save(snapshot)
+        let model = try makeModel(.unavailable)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        for rate in [4.0, 1e-20, Double.leastNonzeroMagnitude] {
+            let gap = CaptureGap(sessionID: snapshot.sessionID, lastWrittenFrame: 1,
+                sampleRate: rate, observedStart: 0, observedEnd: 1, rejectedFrames: nil,
+                reason: "Synthetic capture gap")
+            model.receiveTranscriptionNoticeForTesting(.captureGap(gap))
+            do { try await model.flushSavedCourseForTesting() }
+            catch { XCTFail("Capture progress must remain saveable: \(error)"); continue }
+            let saved = try XCTUnwrap(SessionStore(directory: root).load())
+            XCTAssertEqual(saved.processing.lastCapturedTime,
+                           rate == 4 ? 0.25 : TranscriptSegment.maximumTimestamp)
+        }
+    }
+
     func testReview30RewrittenWriteFailureOutranksSavedNoticeUntilSuccess() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("RewrittenWriteFailure-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

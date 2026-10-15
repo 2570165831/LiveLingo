@@ -23,6 +23,39 @@ private actor AudioTestGate {
 }
 
 final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
+    func testReview12JournalRejectsOversizedFrameTimeDespiteSmallDisplayedTime() throws {
+        let root = try issue12Directory(), session = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        for rate in [1e-20, Double.leastNonzeroMagnitude] {
+            let record = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 0,
+                audioFile: "synthetic.wav", startFrame: 0, endFrame: 1, sampleRate: rate,
+                start: 0, end: 1, captureStart: nil, captureEnd: nil,
+                modelKey: "synthetic", fallbackModelKey: nil, appleEvidence: "")
+            XCTAssertThrowsError(try journal.put(record)) { error in
+                guard case DurableTranscriptionJournal.JournalError.invalidRange = error else {
+                    return XCTFail("Expected invalid frame time, got \(error)")
+                }
+            }
+        }
+    }
+
+    func testReview12JournalRejectsInvalidCaptureGapTimes() throws {
+        let root = try issue12Directory(), session = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        for rate in [1e-20, Double.leastNonzeroMagnitude, Double.infinity] {
+            let gap = CaptureGap(sessionID: session, lastWrittenFrame: 1, sampleRate: rate,
+                observedStart: 0, observedEnd: 1, rejectedFrames: nil, reason: "Synthetic gap")
+            XCTAssertThrowsError(try journal.addGap(gap)) { error in
+                guard case DurableTranscriptionJournal.JournalError.invalidRange = error else {
+                    return XCTFail("Expected invalid capture gap time, got \(error)")
+                }
+            }
+        }
+        let boundary = CaptureGap(sessionID: session, lastWrittenFrame: 1_000_000_000,
+            sampleRate: 1, observedStart: 0, observedEnd: 1, rejectedFrames: nil, reason: "Boundary gap")
+        XCTAssertNoThrow(try journal.addGap(boundary))
+    }
+
     func testIssue12JournalRejectsFiniteTimesBeyondCaptionLimit() throws {
         let root = try issue12Directory(), session = UUID()
         let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)

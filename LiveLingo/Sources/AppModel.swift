@@ -4757,7 +4757,7 @@ final class AppModel: ObservableObject {
                         captureEnd: record.captureEnd ?? record.end)
                 } + interruptions
                 if let last = work.max(by: { $0.endFrame < $1.endFrame }) {
-                    snapshot.processing.lastCapturedTime = Double(last.endFrame) / last.sampleRate
+                    snapshot.processing.lastCapturedTime = min(Double(last.endFrame) / last.sampleRate, TranscriptSegment.maximumTimestamp)
                     if !snapshot.audioFiles.isEmpty {
                         snapshot.audioFiles[0].frameCount = last.endFrame
                         snapshot.audioFiles[0].sampleRate = last.sampleRate
@@ -4783,7 +4783,7 @@ final class AppModel: ObservableObject {
                     frameCount: 0, captureStart: gap.observedStart, captureEnd: gap.observedEnd,
                     interruptionReason: gap.reason))
             }
-            sessionSnapshot?.processing.lastCapturedTime = gap.lastWrittenTime
+            sessionSnapshot?.processing.lastCapturedTime = min(gap.lastWrittenTime, TranscriptSegment.maximumTimestamp)
             persistCurrentSession()
         case .rejectedTranscript:
             volatileEnglish = ""
