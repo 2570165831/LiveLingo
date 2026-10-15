@@ -328,6 +328,116 @@ final class CaptionIdentityTests: XCTestCase {
         return fixture
     }
 
+    func testReview12CaptureProgressClampsBeforeSavingWithoutTruncatingFractions() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("CaptureProgressBound-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var snapshot = SessionSnapshot(audioFiles: [.init(relativePath: SessionWorkspace.recordingFileName)])
+        snapshot.processing.paused = true
+        _ = try SessionStore(directory: root).save(snapshot)
+        let model = try makeModel(.unavailable)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        for rate in [4.0, 1e-20, Double.leastNonzeroMagnitude] {
+            let gap = CaptureGap(sessionID: snapshot.sessionID, lastWrittenFrame: 1,
+                sampleRate: rate, observedStart: 0, observedEnd: 1, rejectedFrames: nil,
+                reason: "Synthetic capture gap")
+            model.receiveTranscriptionNoticeForTesting(.captureGap(gap))
+            do { try await model.flushSavedCourseForTesting() }
+            catch { XCTFail("Capture progress must remain saveable: \(error)"); continue }
+            let saved = try XCTUnwrap(SessionStore(directory: root).load())
+            XCTAssertEqual(saved.processing.lastCapturedTime,
+                           rate == 4 ? 0.25 : TranscriptSegment.maximumTimestamp)
+        }
+    }
+
+    func testReview30RewrittenWriteFailureOutranksSavedNoticeUntilSuccess() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("RewrittenWriteFailure-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var snapshot = SessionSnapshot()
+        snapshot.processing.paused = true
+        _ = try SessionStore(directory: root).save(snapshot)
+        let model = try makeModel(.unavailable)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        let notice = "导入完成，已保存。"
+        model.loadPresentationForTesting(phase: .saved(root), evidence: [], notice: notice)
+        var configuration = AppModel.PrivacyExitConfiguration()
+        configuration.flush = { [weak model] in
+            let error = CocoaError(.fileWriteOutOfSpace)
+            model?.failBoundAutosaveForTesting(error)
+            throw error
+        }
+        model.configurePrivacyExitForTesting(configuration)
+        await model.synchronizeChineseRecognitionExportsForTesting()
+        XCTAssertTrue(model.archiveError?.hasPrefix("字幕修订已保留") == true)
+        XCTAssertEqual(model.errorMessage, model.archiveError,
+                       "A rewritten save failure must still outrank the old saved notice")
+        XCTAssertEqual(model.sessionNotice, notice)
+        model.configurePrivacyExitForTesting(.init())
+        try await model.flushSavedCourseForTesting()
+        XCTAssertEqual(model.errorMessage, notice, "The saver's successful callback clears write-failure priority")
+    }
+
+    func testReview30PauseFailureCannotContaminateAnotherCourseOrGeneration() async throws {
+        for sameIdentity in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("PauseIdentity-\(UUID())")
+            let first = root.appendingPathComponent("first"), second = root.appendingPathComponent("second")
+            try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+            var original = SessionSnapshot(), replacement = SessionSnapshot()
+            original.processing.paused = true
+            replacement.processing.paused = true
+            if sameIdentity { replacement.sessionID = original.sessionID }
+            _ = try SessionStore(directory: first).save(original)
+            _ = try SessionStore(directory: second).save(replacement)
+            let model = try makeModel(.unavailable)
+            model.loadPresentationForTesting(phase: .idle, evidence: [])
+            try await model.openSavedSession(first, allowAutomaticProcessing: false)
+            let gate = CaptionIdentityGate<Void>()
+            var calls = 0
+            var configuration = AppModel.PrivacyExitConfiguration()
+            configuration.park = {
+                calls += 1
+                if calls == 1 { try await gate.wait() }
+            }
+            model.configurePrivacyExitForTesting(configuration)
+            model.pauseSavedProcessing()
+            try await eventually { gate.entered }
+            try await model.openSavedSession(second, allowAutomaticProcessing: false)
+            XCTAssertEqual(model.savedSessionDirectory, second)
+            gate.finish(.failure(CocoaError(.fileWriteOutOfSpace)))
+            // Let the already-resumed pause caller finish its catch on the main actor.
+            for _ in 0..<20 { await Task.yield() }
+            XCTAssertNil(model.archiveError, "A stale pause failure belongs to its original course and generation")
+            model.configurePrivacyExitForTesting(.init())
+            try await model.flushSavedCourseForTesting()
+            let saved = try XCTUnwrap(SessionStore(directory: second).load())
+            XCTAssertNil(saved.processing.lastError)
+            XCTAssertNil(saved.processing.lastErrorSource)
+        }
+    }
+
+    func testReview48StoppedNoticeRemainsDismissibleAfterCaptionsArrive() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("StoppedNotice-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let model = try makeModel(.unavailable)
+        model.loadPresentationForTesting(phase: .recording, evidence: [])
+        let reason = "合成采集中断"
+        try await model.stopCaptureForTesting(directory: root, failure: reason)
+        await model.savedProcessingTaskForTesting?.value
+        let notice = try XCTUnwrap(model.sessionNotice)
+        XCTAssertEqual(model.errorMessage, notice)
+        model.receiveCaptionForTesting("A recovered caption after capture stopped.", start: 0, end: 1)
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(model.segments.count, 1)
+        XCTAssertEqual(model.sessionNotice, notice)
+        XCTAssertEqual(model.errorMessage, notice, "Equality keeps the status bar's dismiss button available")
+        model.dismissSessionNotice()
+        XCTAssertNil(model.sessionNotice)
+        XCTAssertTrue(model.errorMessage?.contains(reason) == true)
+        try await model.flushSavedCourseForTesting()
+    }
+
     func testInitialSourceRevisionFromDurableQueueRetranslatesStableCaption() async throws {
         var sourceCalls: [(String, String)] = []
         let fixture = try await initialSourceRevisionFixture(.init(
@@ -2285,6 +2395,94 @@ final class CaptionIdentityTests: XCTestCase {
                        snapshot.segments[0].english + "\n")
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("transcript-zh-Hans.txt"), encoding: .utf8),
                        snapshot.segments[0].chinese + "\n")
+    }
+
+    func testIssue48ReopenedCaptureInterruptionSurvivesStorageErrorsAndNoticeDismissal() async throws {
+        let reason = "电脑进入休眠，音频采集已结束。"
+        for legacy in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("CaptureInterruption-\(UUID())")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            var snapshot = SessionSnapshot()
+            snapshot.processing.paused = true
+            snapshot.processing.lastError = legacy ? reason : "旧的存储失败"
+            snapshot.processing.lastErrorSource = legacy ? .capture : .storage
+            snapshot.processing.captureError = legacy ? nil : reason
+            _ = try SessionStore(directory: root).save(snapshot)
+            let model = try makeModel(.unavailable)
+            model.loadPresentationForTesting(phase: .idle, evidence: [])
+            try await model.openSavedSession(root, allowAutomaticProcessing: false)
+            XCTAssertNotNil(model.savedSessionDirectory, "The synthetic course must be open before checking its status")
+            XCTAssertTrue(model.errorMessage?.hasPrefix("这节课曾提前停止采集") == true)
+            XCTAssertTrue(model.errorMessage?.contains(reason) == true)
+            model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: 0, end: 1, message: "Synthetic saved notice"))
+            XCTAssertTrue(model.sessionNotice?.contains("Synthetic saved notice") == true)
+            XCTAssertFalse(model.errorMessage?.contains("Synthetic saved notice") == true,
+                           "Status details already show the separate session notice")
+            model.dismissSessionNotice()
+            XCTAssertTrue(model.errorMessage?.contains(reason) == true, "Dismissing an ordinary notice cannot erase capture history")
+            model.failBoundAutosaveForTesting(CocoaError(.fileWriteOutOfSpace))
+            XCTAssertTrue(model.errorMessage?.components(separatedBy: "\n").first?.contains("保存失败") == true,
+                          "The single-line status bar must show the unresolved save failure first")
+            XCTAssertTrue(model.errorMessage?.contains(reason) == true, "Both failures must remain visible")
+            try await model.flushSavedCourseForTesting()
+            XCTAssertTrue(model.errorMessage?.contains(reason) == true)
+        }
+    }
+
+    func testIssue30PauseSaveFailureOutranksEarlierSavedNoticeAndClearsOnRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("PauseSaveFailure-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var snapshot = SessionSnapshot()
+        snapshot.processing.paused = true
+        snapshot.segments = [.init(startTime: 0, endTime: 1,
+            english: "Synthetic saved source.", sessionID: snapshot.sessionID)]
+        _ = try SessionStore(directory: root).save(snapshot)
+        let model = try makeModel(.unavailable)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        XCTAssertNotNil(model.savedSessionDirectory, "The synthetic course must be open before checking its status")
+        var updated = try XCTUnwrap(model.segments.first)
+        updated.completeTranslation("更新后的译文。", targetCode: model.outputLanguage.rawValue)
+        model.loadPresentationForTesting(phase: .saved(root), evidence: [updated], notice: "导入完成，已保存。")
+        var configuration = AppModel.PrivacyExitConfiguration()
+        configuration.flush = { [weak model] in
+            let error = CocoaError(.fileWriteOutOfSpace)
+            model?.failBoundAutosaveForTesting(error)
+            throw error
+        }
+        model.configurePrivacyExitForTesting(configuration)
+        model.pauseSavedProcessing()
+        try await eventually(within: .seconds(20)) { model.archiveError?.hasPrefix("处理暂停时保存失败") == true }
+        let failure = try XCTUnwrap(model.archiveError)
+        XCTAssertEqual(model.errorMessage, failure)
+        model.configurePrivacyExitForTesting(.init())
+        model.retrySavedSessionWrite()
+        try await eventually { !model.archiveLoading }
+        XCTAssertNil(model.archiveError)
+        XCTAssertEqual(model.errorMessage, "导入完成，已保存。")
+        let saved = try XCTUnwrap(SessionStore(directory: root).load())
+        XCTAssertEqual(saved.segments.first?.english, "Synthetic saved source.")
+        XCTAssertEqual(saved.segments.first?.chinese, "更新后的译文。")
+    }
+
+    func testIssue12TranscriptionNoticeFormattingClampsUnsafeTimesAndKeepsNormalTruncation() throws {
+        let model = try makeModel(.unavailable)
+        model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: 61.9, end: 125.9, message: "Synthetic issue"))
+        XCTAssertEqual(model.sessionNotice, "1:01–2:05 · Synthetic issue")
+        model.receiveTranscriptionNoticeForTesting(.transcriptionIssueResolved(start: 61.9, end: 125.9))
+        XCTAssertNil(model.sessionNotice)
+        for value in [1e20, Double.greatestFiniteMagnitude, Double.infinity] {
+            model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: value, end: value, message: "Synthetic issue"))
+            XCTAssertEqual(model.sessionNotice, "16666666:40–16666666:40 · Synthetic issue")
+            model.receiveTranscriptionNoticeForTesting(.transcriptionIssueResolved(start: value, end: value))
+            XCTAssertNil(model.sessionNotice)
+        }
+        for value in [Double.nan, -Double.infinity, -1.0] {
+            model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: value, end: value, message: "Synthetic issue"))
+            XCTAssertEqual(model.sessionNotice, "0:00–0:00 · Synthetic issue")
+            model.receiveTranscriptionNoticeForTesting(.nonEnglishSpeech(start: value, end: value))
+            XCTAssertNil(model.sessionNotice)
+        }
     }
 
     /// Issue #30: an earlier informational notice must not hide a later save

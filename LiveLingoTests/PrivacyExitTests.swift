@@ -35,6 +35,125 @@ private final class PrivacyExitClock {
 final class PrivacyExitTests: XCTestCase {
     private enum Failure: Error { case synthetic }
 
+    func testIssue50ManualLiveOnlyStopDefaultsToContinueWithoutLosingContent() throws {
+        let (model, root, _) = try makeModel()
+        for phase: AppPhase in [.recording, .paused] {
+            model.loadPresentationForTesting(phase: phase, evidence: model.segments,
+                                            preview: "synthetic preview", storageMode: .liveOnly)
+            let segments = model.segments, notes = model.lectureSummary
+            model.toggleRecording()
+            XCTAssertEqual(model.phase, phase, "An unconfirmed manual stop must keep capture unchanged")
+            XCTAssertEqual(model.segments, segments)
+            XCTAssertEqual(model.lectureSummary, notes)
+            XCTAssertEqual(model.temporarySessionForPrivacyExitTesting, root)
+        }
+    }
+
+    func testIssue50ManualStopAlertKeepsContinueAsDefaultOffscreen() {
+        for phase: AppPhase in [.recording, .paused] {
+            let alert = RecordingQuitConfirmation.makeLiveStopAlert(phase: phase)
+            XCTAssertEqual(alert.buttons.map(\.title), ["继续", "转为录音", "结束并清空"])
+            XCTAssertTrue(alert.informativeText.contains("录音、字幕和笔记"))
+            XCTAssertEqual(alert.buttons[0].keyEquivalent, "\r")
+            XCTAssertEqual(alert.buttons[1].keyEquivalent, "")
+            XCTAssertEqual(alert.buttons[2].keyEquivalent, "")
+            alert.layout()
+            XCTAssertTrue(alert.window.defaultButtonCell === alert.buttons[0].cell)
+            XCTAssertFalse(alert.window.isVisible)
+        }
+    }
+
+    func testIssue50CancelledFolderChoiceKeepsRecordingAndPausedContent() async throws {
+        for paused in [false, true] {
+            let (model, staging, _, _) = try await makeLiveQuitModel(paused: paused, savedFolder: false)
+            let phase = model.phase, evidence = model.segments
+            var selections = 0
+            model.confirmLiveStopForTesting = { .saveAndQuit }
+            model.chooseOutputDirectoryForTesting = { selections += 1; return nil }
+            model.toggleRecording()
+            await waitForQuitReply { selections == 1 && !model.manualStopPendingForTesting }
+            XCTAssertEqual(model.phase, phase)
+            XCTAssertEqual(model.segments, evidence)
+            XCTAssertEqual(model.temporarySessionForPrivacyExitTesting, staging)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: staging.path))
+        }
+    }
+
+    func testIssue50ConversionFailureNeverContinuesToStopOrDiscard() async throws {
+        let (model, staging, output, initial) = try await makeLiveQuitModel()
+        var config = initial, discards = 0
+        config.flush = { throw Failure.synthetic }
+        config.discardTemporarySession = { _ in discards += 1 }
+        model.configurePrivacyExitForTesting(config)
+        let phase = model.phase, evidence = model.segments
+        model.confirmLiveStopForTesting = { .saveAndQuit }
+        model.chooseOutputDirectoryForTesting = { output }
+        model.stop()
+        await waitForQuitReply { !model.manualStopPendingForTesting }
+        XCTAssertNotNil(model.archiveError)
+        XCTAssertEqual(model.phase, phase)
+        XCTAssertEqual(model.segments, evidence)
+        XCTAssertEqual(discards, 0)
+        XCTAssertEqual(model.temporarySessionForPrivacyExitTesting, staging)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staging.path))
+    }
+
+    func testIssue50SuccessfulConversionStopsAndPreservesExactCaptionText() async throws {
+        for paused in [false, true] {
+            let (model, _, output, initial) = try await makeLiveQuitModel(paused: paused)
+            var configuration = initial
+            configuration.pauseTranscription = nil
+            model.configurePrivacyExitForTesting(configuration)
+            let english = model.segments.map(\.english), chinese = model.segments.map(\.chinese)
+            var selections = 0, prompts = 0
+            model.confirmLiveStopForTesting = { prompts += 1; return .saveAndQuit }
+            model.chooseOutputDirectoryForTesting = { selections += 1; return output }
+            model.toggleRecording()
+            model.stop()
+            await waitForQuitReply {
+                if case .saved = model.phase { return true }
+                if case .failed = model.phase { return true }
+                return !model.manualStopPendingForTesting && model.archiveError != nil
+            }
+            XCTAssertEqual(prompts, 1, "Repeated stop commands must not open another confirmation")
+            XCTAssertEqual(selections, 1)
+            guard case .saved(let directory) = model.phase else {
+                return XCTFail("Manual conversion did not stop: \(model.phase); \(model.archiveError ?? "no archive error")")
+            }
+            let saved = try XCTUnwrap(SessionStore(directory: directory).load())
+            XCTAssertEqual(saved.segments.map(\.english), english)
+            XCTAssertEqual(saved.segments.map(\.chinese), chinese)
+            XCTAssertNil(model.temporarySessionForPrivacyExitTesting)
+        }
+    }
+
+    func testIssue50OnlyConfirmedDiscardClearsLiveContent() async throws {
+        for paused in [false, true] {
+            let (model, staging, _, initial) = try await makeLiveQuitModel(paused: paused)
+            var config = initial, discarded: [URL] = []
+            config.discardTemporarySession = { discarded.append($0) }
+            model.configurePrivacyExitForTesting(config)
+            model.confirmLiveStopForTesting = { .continueSession }
+            model.stop()
+            XCTAssertEqual(model.phase, paused ? .paused : .recording)
+            XCTAssertFalse(model.segments.isEmpty)
+            XCTAssertTrue(discarded.isEmpty)
+            model.confirmLiveStopForTesting = { .quitWithoutSaving }
+            model.chooseOutputDirectoryForTesting = { XCTFail("Discard must not choose a folder"); return nil }
+            model.toggleRecording()
+            await waitForQuitReply { model.phase == .liveEnded }
+            XCTAssertEqual(discarded, [staging])
+            XCTAssertTrue(model.segments.isEmpty)
+        }
+    }
+
+    func testIssue50AutomaticCaptureFailureDoesNotAskForManualStopConfirmation() async throws {
+        let (model, _, _) = try makeModel()
+        model.confirmLiveStopForTesting = { XCTFail("Automatic capture failures must not prompt"); return .continueSession }
+        model.receiveTranscriptionNoticeForTesting(.failure("Synthetic capture interruption"))
+        await waitForQuitReply { model.phase == .failed("Synthetic capture interruption") }
+    }
+
     func testUnitTestPresentationSafetyKeepsUnshownWindowsTransparent() {
         XCTAssertTrue(UnitTestPresentationSafety.isInstalled)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),

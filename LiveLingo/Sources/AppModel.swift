@@ -1252,6 +1252,7 @@ final class AppModel: ObservableObject {
     #endif
     private var summaryTask: Task<Void, Never>?
     private var stopOverlapStarted = false
+    @Published private var manualStopInProgress = false
     private var summaryScheduleTask: Task<Void, Never>?
     private var summaryScheduleGeneration = 0
     private var noteAdmission = CaptionNoteGate()
@@ -1328,6 +1329,10 @@ final class AppModel: ObservableObject {
     }
     private var privacyExitConfiguration: PrivacyExitConfiguration?
     var chooseOutputDirectoryForTesting: (@MainActor () async -> URL?)?
+    #if !LIVELINGO_CLI
+    var confirmLiveStopForTesting: (@MainActor () -> RecordingQuitConfirmation.Choice)?
+    var manualStopPendingForTesting: Bool { manualStopInProgress }
+    #endif
     #endif
     private var processingTask: Task<Void, Never>?
     private var processingTaskID: UUID?
@@ -1565,7 +1570,7 @@ final class AppModel: ObservableObject {
     var isPaused: Bool { phase == .paused }
     var hasActiveSession: Bool { isRecording || isPaused || (alarmRolloverInProgress && pipeline.alarmCaptureIsActive) }
     var canPauseRecording: Bool { hasActiveSession && !alarmRolloverSwitching }
-    var sessionSwitchBlocked: Bool { alarmRolloverInProgress || preparingApplicationExit || phase.isBusy || archiveLoading }
+    var sessionSwitchBlocked: Bool { manualStopInProgress || alarmRolloverInProgress || preparingApplicationExit || phase.isBusy || archiveLoading }
     var isLiveOnly: Bool {
         if savedSessionDirectory != nil { return false }
         return (activeStorageMode ?? selectedStorageMode) == .liveOnly
@@ -1601,15 +1606,26 @@ final class AppModel: ObservableObject {
 
     var errorMessage: String? {
         if case .failed(let message) = phase { return message }
-        return (isRecording ? captureHealthNotice : nil) ?? unresolvedSaveError ?? sessionNotice ?? archiveError ?? setupError
+        let message = (isRecording ? captureHealthNotice : nil) ?? unresolvedSaveError ?? sessionNotice ?? archiveError ?? setupError
+        guard case .saved = phase, let processing = sessionSnapshot?.processing,
+              let reason = processing.captureError ?? (processing.lastErrorSource == .capture ? processing.lastError : nil),
+              !reason.isEmpty else { return message }
+        let interruption = "这节课曾提前停止采集，停止后的内容未录入：\(reason)"
+        if let error = unresolvedSaveError ?? archiveError ?? setupError, error != reason {
+            return error + "\n" + interruption
+        }
+        if let notice = sessionNotice,
+           notice.hasPrefix("⚠️ 录音已停止"), notice.contains(reason),
+           unresolvedSaveError == nil { return notice }
+        return interruption
     }
 
     /// A save failure that is still unresolved outranks an informational notice,
     /// so an earlier "saved" notice cannot hide it. Other archive errors keep
     /// their lower rank; each of these clears itself on the next successful save.
     private var unresolvedSaveError: String? {
+        if let archiveWriteError { return archiveError ?? archiveWriteError }
         guard let archiveError else { return nil }
-        if archiveError == archiveWriteError { return archiveError }
         if let processing = sessionSnapshot?.processing, processing.lastErrorSource == .storage,
            processing.lastError == archiveError { return archiveError }
         return nil
@@ -2731,6 +2747,45 @@ final class AppModel: ObservableObject {
     func clearExportStatus() { exportStatus = nil }
 
     func stop() {
+        #if !LIVELINGO_CLI
+        guard !manualStopInProgress else { return }
+        guard hasActiveSession, activeStorageMode == .liveOnly, !preparingApplicationExit else {
+            beginManualStop()
+            return
+        }
+        manualStopInProgress = true
+        let identity = sessionID, epoch = generation
+        let choice: RecordingQuitConfirmation.Choice
+        #if DEBUG
+        if let confirmLiveStopForTesting { choice = confirmLiveStopForTesting() }
+        else { choice = RecordingQuitConfirmation.presentLiveStop(phase: phase) }
+        #else
+        choice = RecordingQuitConfirmation.presentLiveStop(phase: phase)
+        #endif
+        guard sessionID == identity, generation == epoch, hasActiveSession,
+              !preparingApplicationExit else { manualStopInProgress = false; return }
+        switch choice {
+        case .continueSession:
+            manualStopInProgress = false
+        case .quitWithoutSaving:
+            manualStopInProgress = false
+            beginManualStop()
+        case .saveAndQuit:
+            Task {
+                defer { manualStopInProgress = false }
+                guard await convertCurrentSessionToRecording() == .converted,
+                      sessionID == identity, generation == epoch, hasActiveSession,
+                      !preparingApplicationExit else { return }
+                beginManualStop()
+            }
+        }
+        #else
+        beginManualStop()
+        #endif
+    }
+
+    /// Automatic capture failures and application exit use stopSession directly.
+    private func beginManualStop() {
         clearAlarmReminder()
         if alarmRolloverInProgress {
             alarmStopRequested = true
@@ -3951,9 +4006,14 @@ final class AppModel: ObservableObject {
 
     func pauseSavedProcessing() {
         guard case .saved = phase else { return }
+        let identity = sessionID, epoch = generation
         Task {
             do { try await parkSavedProcessing() }
-            catch { archiveError = "处理暂停时保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))" }
+            catch {
+                guard sessionID == identity, generation == epoch else { return }
+                archiveError = "处理暂停时保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
+                sessionSnapshot?.processing.recordFailure(archiveError!, source: .storage)
+            }
         }
     }
 
@@ -4818,7 +4878,7 @@ final class AppModel: ObservableObject {
                         captureEnd: record.captureEnd ?? record.end)
                 } + interruptions
                 if let last = work.max(by: { $0.endFrame < $1.endFrame }) {
-                    snapshot.processing.lastCapturedTime = Double(last.endFrame) / last.sampleRate
+                    snapshot.processing.lastCapturedTime = min(Double(last.endFrame) / last.sampleRate, TranscriptSegment.maximumTimestamp)
                     if !snapshot.audioFiles.isEmpty {
                         snapshot.audioFiles[0].frameCount = last.endFrame
                         snapshot.audioFiles[0].sampleRate = last.sampleRate
@@ -4844,7 +4904,7 @@ final class AppModel: ObservableObject {
                     frameCount: 0, captureStart: gap.observedStart, captureEnd: gap.observedEnd,
                     interruptionReason: gap.reason))
             }
-            sessionSnapshot?.processing.lastCapturedTime = gap.lastWrittenTime
+            sessionSnapshot?.processing.lastCapturedTime = min(gap.lastWrittenTime, TranscriptSegment.maximumTimestamp)
             persistCurrentSession()
         case .rejectedTranscript:
             volatileEnglish = ""
@@ -4872,7 +4932,8 @@ final class AppModel: ObservableObject {
     }
 
     private static func transcriptionNoticeRange(_ start: TimeInterval, _ end: TimeInterval) -> String {
-        "\(Int(start) / 60):\(String(format: "%02d", Int(start) % 60))–\(Int(end) / 60):\(String(format: "%02d", Int(end) % 60))"
+        let first = TimestampClock.truncatedSeconds(start), last = TimestampClock.truncatedSeconds(end)
+        return "\(first / 60):\(String(format: "%02d", first % 60))–\(last / 60):\(String(format: "%02d", last % 60))"
     }
 
     private func appendConfirmedCaption(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint]) {

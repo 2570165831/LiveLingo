@@ -536,6 +536,42 @@ enum RecordingQuitConfirmation {
         return alert
     }
 
+    static func makeLiveStopAlert(phase: AppPhase) -> NSAlert {
+        let alert = makeAlert(phase: phase, liveOnly: true)
+        alert.messageText = phase == .paused
+            ? "实时字幕已暂停（不保存）。结束前要保存这节课吗？"
+            : "正在实时字幕（不保存）。结束前要保存这节课吗？"
+        alert.informativeText = "结束并清空会删除这节课的录音、字幕和笔记，无法撤销。"
+        alert.buttons[1].title = "转为录音"
+        alert.buttons[2].title = "结束并清空"
+        return alert
+    }
+
+    static func presentLiveStop(phase: AppPhase) -> Choice {
+        let alert = makeLiveStopAlert(phase: phase)
+        let popupID = UUID()
+        if !AppRuntimeEnvironment.isUnitTesting {
+            FullScreenClassModeController.shared.setPresentedPopup(popupID, isPresented: true)
+        }
+        defer {
+            if !AppRuntimeEnvironment.isUnitTesting {
+                FullScreenClassModeController.shared.setPresentedPopup(popupID, isPresented: false)
+            }
+        }
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard NSApp.modalWindow === alert.window else { return event }
+            return handleEscape(event) { NSApp.stopModal(withCode: .alertFirstButtonReturn) } ? nil : event
+        }
+        defer { if let monitor { NSEvent.removeMonitor(monitor) } }
+        var selection = Choice.continueSession
+        _ = present(environment: AppRuntimeEnvironment.isUnitTesting ? .inert : .live,
+                    shouldRestore: { true }, confirm: {
+            selection = choice(for: alert.runModal(), liveOnly: true)
+            return selection != .continueSession
+        })
+        return selection
+    }
+
     static func makeSaveFailureAlert() -> NSAlert {
         let alert = NSAlert()
         alert.messageText = "保存未完成，已取消退出"
