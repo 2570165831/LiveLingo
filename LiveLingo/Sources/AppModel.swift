@@ -4139,9 +4139,20 @@ final class AppModel: ObservableObject {
         guard permission.isAvailable else { return permission }
         let directory = currentCourseDirectory, ranges = sessionSnapshot?.audioRanges ?? []
         let pipeline = pipeline, identity = sessionID, epoch = generation
+        #if DEBUG
+        // Detached tasks do not inherit task-local test instrumentation.
+        let inspection = ChineseRecognitionAudio.inspectionForTesting
+        #endif
         let availability = await Task.detached(priority: .utility) {
-            Self.inspectChineseRecognitionAudio(segment: segment, directory: directory,
+            #if DEBUG
+            return ChineseRecognitionAudio.$inspectionForTesting.withValue(inspection) {
+                Self.inspectChineseRecognitionAudio(segment: segment, directory: directory,
+                    ranges: ranges, pipeline: pipeline, session: identity)
+            }
+            #else
+            return Self.inspectChineseRecognitionAudio(segment: segment, directory: directory,
                 ranges: ranges, pipeline: pipeline, session: identity)
+            #endif
         }.value
         guard sessionID == identity, generation == epoch else {
             return .unavailable("课程已切换，请重新打开字幕操作菜单。")
