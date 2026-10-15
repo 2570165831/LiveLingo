@@ -1623,8 +1623,8 @@ final class AppModel: ObservableObject {
     /// so an earlier "saved" notice cannot hide it. Other archive errors keep
     /// their lower rank; each of these clears itself on the next successful save.
     private var unresolvedSaveError: String? {
+        if let archiveWriteError { return archiveError ?? archiveWriteError }
         guard let archiveError else { return nil }
-        if archiveError == archiveWriteError { return archiveError }
         if let processing = sessionSnapshot?.processing, processing.lastErrorSource == .storage,
            processing.lastError == archiveError { return archiveError }
         return nil

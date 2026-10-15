@@ -328,6 +328,34 @@ final class CaptionIdentityTests: XCTestCase {
         return fixture
     }
 
+    func testReview30RewrittenWriteFailureOutranksSavedNoticeUntilSuccess() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("RewrittenWriteFailure-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var snapshot = SessionSnapshot()
+        snapshot.processing.paused = true
+        _ = try SessionStore(directory: root).save(snapshot)
+        let model = try makeModel(.unavailable)
+        model.loadPresentationForTesting(phase: .idle, evidence: [])
+        try await model.openSavedSession(root, allowAutomaticProcessing: false)
+        let notice = "导入完成，已保存。"
+        model.loadPresentationForTesting(phase: .saved(root), evidence: [], notice: notice)
+        var configuration = AppModel.PrivacyExitConfiguration()
+        configuration.flush = { [weak model] in
+            let error = CocoaError(.fileWriteOutOfSpace)
+            model?.failBoundAutosaveForTesting(error)
+            throw error
+        }
+        model.configurePrivacyExitForTesting(configuration)
+        await model.synchronizeChineseRecognitionExportsForTesting()
+        XCTAssertTrue(model.archiveError?.hasPrefix("字幕修订已保留") == true)
+        XCTAssertEqual(model.errorMessage, model.archiveError,
+                       "A rewritten save failure must still outrank the old saved notice")
+        XCTAssertEqual(model.sessionNotice, notice)
+        model.configurePrivacyExitForTesting(.init())
+        try await model.flushSavedCourseForTesting()
+        XCTAssertEqual(model.errorMessage, notice, "The saver's successful callback clears write-failure priority")
+    }
+
     func testReview30PauseFailureCannotContaminateAnotherCourseOrGeneration() async throws {
         for sameIdentity in [false, true] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("PauseIdentity-\(UUID())")
