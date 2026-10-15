@@ -232,7 +232,7 @@ def _decode_escapes(body, style):
     return "".join(result)
 
 
-def _quoted_literals(text, style):
+def _quoted_literals(text, style, *, complete_only=False):
     """Lex C/Rust strings, preserving raw strings and skipping comments."""
     offset = 0
     syntax = re.compile(r"[\"'`/]|\b(?:u8|u|U|L)?R\"|\b(?:b|c)?r#{0,255}\"")
@@ -274,7 +274,8 @@ def _quoted_literals(text, style):
             start = offset + len(raw[0])
             end = text.find(ending, start)
             if end < 0:
-                yield offset, len(text), text[start:]
+                if not complete_only:
+                    yield offset, len(text), text[start:]
                 return
             yield offset, end + len(ending), text[start:end]
             offset = end + len(ending)
@@ -284,7 +285,8 @@ def _quoted_literals(text, style):
             # Go raw strings preserve backslashes and discard carriage returns.
             end = text.find("`", offset + 1)
             if end < 0:
-                yield offset, len(text), text[offset + 1:].replace("\r", "")
+                if not complete_only:
+                    yield offset, len(text), text[offset + 1:].replace("\r", "")
                 return
             yield offset, end + 1, text[offset + 1:end].replace("\r", "")
             offset = end + 1
@@ -303,7 +305,8 @@ def _quoted_literals(text, style):
         while end < len(text) and text[end] != char:
             end += 2 if text[end] == "\\" else 1
         if end >= len(text):
-            yield offset, len(text), _decode_escapes(text[start:], style)
+            if not complete_only:
+                yield offset, len(text), _decode_escapes(text[start:], style)
             return
         yield offset, end + 1, _decode_escapes(text[start:end], style)
         offset = end + 1
@@ -501,11 +504,18 @@ def _shell_quoted_spans(text):
             offset = len(text) if end < 0 else end + 1
             continue
         start = offset
+        if text.startswith(("${", "$("), offset):
+            # Compound shell syntax has its own nested quoting. Do not grant
+            # raw-byte exemptions after entering syntax this lexer cannot own.
+            return
         ansi = text.startswith("$'", offset)
         if ansi or char in "\"'":
             quote = "'" if ansi else char
             end = offset + (2 if ansi else 1)
             while end < len(text) and text[end] != quote:
+                if quote == '"' and text[end] == "$" and end + 1 < len(text) and (
+                        text[end + 1].isalnum() or text[end + 1] in "_{(*@#?!-$"):
+                    return
                 if text[end] == "\\" and (ansi or quote == '"'):
                     end += 2
                 else:
@@ -534,18 +544,21 @@ def unc_source_view(data, name):
     spans = []
     try:
         if suffix in PYTHON_SOURCE_SUFFIXES:
-            lines = text.splitlines(keepends=True)
+            lines = io.StringIO(text).readlines()
             offsets = [0]
             for line in lines:
                 offsets.append(offsets[-1] + len(line))
             kinds = {tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", -1)}
             for token in tokenize.generate_tokens(io.StringIO(text).readline):
                 if token.type in kinds:
-                    spans.append((offsets[token.start[0] - 1] + token.start[1],
-                                  offsets[token.end[0] - 1] + token.end[1]))
+                    start = offsets[token.start[0] - 1] + token.start[1]
+                    end = offsets[token.end[0] - 1] + token.end[1]
+                    if token.type == tokenize.STRING and text[start:end] != token.string:
+                        return text
+                    spans.append((start, end))
         elif suffix in C_SOURCE_SUFFIXES | {".rs", ".js", ".mjs", ".cjs", ".go"}:
             style = "rust" if suffix == ".rs" else "go" if suffix == ".go" else "c"
-            iterator = _javascript_literals(text) if suffix in (".js", ".mjs", ".cjs") else _quoted_literals(text, style)
+            iterator = _javascript_literals(text) if suffix in (".js", ".mjs", ".cjs") else _quoted_literals(text, style, complete_only=True)
             spans = [(start, end) for start, end, _ in iterator]
         elif suffix in SHELL_SOURCE_SUFFIXES:
             spans = list(_shell_quoted_spans(text))

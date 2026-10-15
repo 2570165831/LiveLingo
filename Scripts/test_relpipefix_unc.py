@@ -65,6 +65,37 @@ class UNCPrivacyTests(unittest.TestCase):
         # Raw literals preserve the actual doubled separators and still reject.
         self.reject_source("probe.py", b'BUILD=r"\\\\r\\\\n"\n')
 
+    def test_shell_expansions_cannot_hide_raw_unc_bytes(self):
+        sources = ["BUILD=${HOST:-'" + UNC + "'}\n",
+                   'BUILD=${HOST:-"' + UNC.replace("\\", "\\\\") + '"}\n',
+                   'BUILD="' + UNC.replace("private-share\\source.c", "$SHARE").replace("\\", "\\\\") + '"\n',
+                   'BUILD="$(printf %s \'' + UNC + '\')"\n',
+                   'BUILD=${HOST:-$(printf %s \'' + UNC + '\')}\n']
+        for source in sources:
+            with self.subTest(source=source):
+                self.reject_source("probe.sh", source.encode())
+
+    def test_backtick_halving_control_does_not_invent_unc(self):
+        source = ('BUILD="`printf %s \'' + UNC + '\'`"\n').encode()
+        text_scan.inspect_text(source, "probe.sh")
+        self.assertEqual(inspect_archive(source, name="fixture-1.0/probe.sh")["source_archive_members"], 1)
+
+    def test_python_offsets_follow_tokenizer_newlines_not_unicode_splitlines(self):
+        for separator in ("\f", "\v", "\r", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            source = "a = 1\n# separator" + separator + "\n# " + UNC + "\ny = 'abcdefghijkl'\n"
+            with self.subTest(separator=repr(separator)):
+                self.reject_source("probe.py", source.encode())
+                control = ('# separator' + separator + '\nVALUE="\\\\r\\\\n"\n').encode()
+                text_scan.inspect_text(control, "probe.py")
+                self.assertEqual(inspect_archive(control, name="fixture-1.0/probe.py")["source_archive_members"], 1)
+
+    def test_incomplete_native_strings_keep_their_raw_unc_bytes(self):
+        # Decoding halves these raw bytes; only the unmasked source catches it.
+        for name, prefix in (("probe.c", 'const char *p="'), ("probe.rs", 'let p="'),
+                             ("probe.rs", 'let p=r#"'), ("probe.go", 'package p\nvar p=`')):
+            with self.subTest(name=name, prefix=prefix):
+                self.reject_source(name, (prefix + UNC).encode())
+
     def test_public_unc_example_requires_exact_resource_hash_and_spelling(self):
         public = r"\\upstream-host\public-share\example.c"
         data = ('BUILD=r"' + public + '"\n').encode()
