@@ -1614,7 +1614,7 @@ final class AppModel: ObservableObject {
             return error + "\n" + interruption
         }
         if let notice = sessionNotice,
-           notice == Self.recordingStoppedNotice(message: reason, segmentCount: segments.count),
+           notice.hasPrefix("⚠️ 录音已停止"), notice.contains(reason),
            unresolvedSaveError == nil { return notice }
         return interruption
     }

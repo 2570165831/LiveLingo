@@ -328,6 +328,27 @@ final class CaptionIdentityTests: XCTestCase {
         return fixture
     }
 
+    func testReview48StoppedNoticeRemainsDismissibleAfterCaptionsArrive() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("StoppedNotice-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let model = try makeModel(.unavailable)
+        model.loadPresentationForTesting(phase: .recording, evidence: [])
+        let reason = "合成采集中断"
+        try await model.stopCaptureForTesting(directory: root, failure: reason)
+        await model.savedProcessingTaskForTesting?.value
+        let notice = try XCTUnwrap(model.sessionNotice)
+        XCTAssertEqual(model.errorMessage, notice)
+        model.receiveCaptionForTesting("A recovered caption after capture stopped.", start: 0, end: 1)
+        await model.translationTaskForTesting?.value
+        XCTAssertEqual(model.segments.count, 1)
+        XCTAssertEqual(model.sessionNotice, notice)
+        XCTAssertEqual(model.errorMessage, notice, "Equality keeps the status bar's dismiss button available")
+        model.dismissSessionNotice()
+        XCTAssertNil(model.sessionNotice)
+        XCTAssertTrue(model.errorMessage?.contains(reason) == true)
+        try await model.flushSavedCourseForTesting()
+    }
+
     func testInitialSourceRevisionFromDurableQueueRetranslatesStableCaption() async throws {
         var sourceCalls: [(String, String)] = []
         let fixture = try await initialSourceRevisionFixture(.init(
