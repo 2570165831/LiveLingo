@@ -328,6 +328,45 @@ final class CaptionIdentityTests: XCTestCase {
         return fixture
     }
 
+    func testReview30PauseFailureCannotContaminateAnotherCourseOrGeneration() async throws {
+        for sameIdentity in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("PauseIdentity-\(UUID())")
+            let first = root.appendingPathComponent("first"), second = root.appendingPathComponent("second")
+            try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+            var original = SessionSnapshot(), replacement = SessionSnapshot()
+            original.processing.paused = true
+            replacement.processing.paused = true
+            if sameIdentity { replacement.sessionID = original.sessionID }
+            _ = try SessionStore(directory: first).save(original)
+            _ = try SessionStore(directory: second).save(replacement)
+            let model = try makeModel(.unavailable)
+            model.loadPresentationForTesting(phase: .idle, evidence: [])
+            try await model.openSavedSession(first, allowAutomaticProcessing: false)
+            let gate = CaptionIdentityGate<Void>()
+            var calls = 0
+            var configuration = AppModel.PrivacyExitConfiguration()
+            configuration.park = {
+                calls += 1
+                if calls == 1 { try await gate.wait() }
+            }
+            model.configurePrivacyExitForTesting(configuration)
+            model.pauseSavedProcessing()
+            try await eventually { gate.entered }
+            try await model.openSavedSession(second, allowAutomaticProcessing: false)
+            XCTAssertEqual(model.savedSessionDirectory, second)
+            gate.finish(.failure(CocoaError(.fileWriteOutOfSpace)))
+            // Let the already-resumed pause caller finish its catch on the main actor.
+            for _ in 0..<20 { await Task.yield() }
+            XCTAssertNil(model.archiveError, "A stale pause failure belongs to its original course and generation")
+            model.configurePrivacyExitForTesting(.init())
+            try await model.flushSavedCourseForTesting()
+            let saved = try XCTUnwrap(SessionStore(directory: second).load())
+            XCTAssertNil(saved.processing.lastError)
+            XCTAssertNil(saved.processing.lastErrorSource)
+        }
+    }
+
     func testReview48StoppedNoticeRemainsDismissibleAfterCaptionsArrive() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("StoppedNotice-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -3991,9 +3991,11 @@ final class AppModel: ObservableObject {
 
     func pauseSavedProcessing() {
         guard case .saved = phase else { return }
+        let identity = sessionID, epoch = generation
         Task {
             do { try await parkSavedProcessing() }
             catch {
+                guard sessionID == identity, generation == epoch else { return }
                 archiveError = "处理暂停时保存失败：\(LearningFailureCode.label(for: LearningFailureCode.code(for: error)))"
                 sessionSnapshot?.processing.recordFailure(archiveError!, source: .storage)
             }
