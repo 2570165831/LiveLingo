@@ -517,6 +517,7 @@ final class DurableTranscriptionJournal: @unchecked Sendable {
         guard record.startFrame >= 0, record.endFrame > record.startFrame,
               record.sampleRate.isFinite, record.sampleRate > 0,
               record.start.isFinite, record.end.isFinite, record.start >= 0, record.end > record.start,
+              record.end <= TranscriptSegment.maximumTimestamp,
               abs(Double(record.startFrame) / record.sampleRate - record.start) <= 1 / record.sampleRate + 0.000001,
               abs(Double(record.endFrame) / record.sampleRate - record.end) <= 1 / record.sampleRate + 0.000001,
               (0...Self.maximumAutomaticRetries).contains(record.automaticRetryCount) else { throw JournalError.invalidRange }

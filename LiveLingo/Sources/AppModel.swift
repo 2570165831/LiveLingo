@@ -4795,7 +4795,8 @@ final class AppModel: ObservableObject {
     }
 
     private static func transcriptionNoticeRange(_ start: TimeInterval, _ end: TimeInterval) -> String {
-        "\(Int(start) / 60):\(String(format: "%02d", Int(start) % 60))–\(Int(end) / 60):\(String(format: "%02d", Int(end) % 60))"
+        let first = TimestampClock.truncatedSeconds(start), last = TimestampClock.truncatedSeconds(end)
+        return "\(first / 60):\(String(format: "%02d", first % 60))–\(last / 60):\(String(format: "%02d", last % 60))"
     }
 
     private func appendConfirmedCaption(_ segment: TranscriptSegment, hints: [AuxiliaryTranslationHint]) {

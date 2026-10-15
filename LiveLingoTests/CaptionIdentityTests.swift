@@ -2292,6 +2292,26 @@ final class CaptionIdentityTests: XCTestCase {
                        snapshot.segments[0].chinese + "\n")
     }
 
+    func testIssue12TranscriptionNoticeFormattingClampsUnsafeTimesAndKeepsNormalTruncation() throws {
+        let model = try makeModel(.unavailable)
+        model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: 61.9, end: 125.9, message: "Synthetic issue"))
+        XCTAssertEqual(model.sessionNotice, "1:01–2:05 · Synthetic issue")
+        model.receiveTranscriptionNoticeForTesting(.transcriptionIssueResolved(start: 61.9, end: 125.9))
+        XCTAssertNil(model.sessionNotice)
+        for value in [1e20, Double.greatestFiniteMagnitude, Double.infinity] {
+            model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: value, end: value, message: "Synthetic issue"))
+            XCTAssertEqual(model.sessionNotice, "16666666:40–16666666:40 · Synthetic issue")
+            model.receiveTranscriptionNoticeForTesting(.transcriptionIssueResolved(start: value, end: value))
+            XCTAssertNil(model.sessionNotice)
+        }
+        for value in [Double.nan, -Double.infinity, -1.0] {
+            model.receiveTranscriptionNoticeForTesting(.transcriptionIssue(start: value, end: value, message: "Synthetic issue"))
+            XCTAssertEqual(model.sessionNotice, "0:00–0:00 · Synthetic issue")
+            model.receiveTranscriptionNoticeForTesting(.nonEnglishSpeech(start: value, end: value))
+            XCTAssertNil(model.sessionNotice)
+        }
+    }
+
     /// Issue #30: an earlier informational notice must not hide a later save
     /// failure in the status bar, and the notice returns once a save succeeds.
     func testUnresolvedSaveFailureOutranksSessionNoticeUntilASaveSucceeds() async throws {

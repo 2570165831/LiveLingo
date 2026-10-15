@@ -23,6 +23,76 @@ private actor AudioTestGate {
 }
 
 final class AudioRemediationTests: XCTestCase, @unchecked Sendable {
+    func testIssue12JournalRejectsFiniteTimesBeyondCaptionLimit() throws {
+        let root = try issue12Directory(), session = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        let limit = TranscriptSegment.maximumTimestamp
+        for end in [limit + 1, 1e20, Double.greatestFiniteMagnitude] {
+            let rate = 2 / end
+            let record = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 0,
+                audioFile: "synthetic.wav", startFrame: 1, endFrame: 2, sampleRate: rate,
+                start: 1 / rate, end: end, captureStart: nil, captureEnd: nil,
+                modelKey: "synthetic", fallbackModelKey: nil, appleEvidence: "")
+            XCTAssertThrowsError(try journal.put(record)) { error in
+                guard case DurableTranscriptionJournal.JournalError.invalidRange = error else {
+                    return XCTFail("Expected invalid time range, got \(error)")
+                }
+            }
+        }
+    }
+
+    func testIssue12RecoveryRejectsChecksummedOversizedWorkWithoutRewritingIt() throws {
+        let root = try issue12Directory(), session = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        let record = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 0,
+            audioFile: "synthetic.wav", startFrame: 1, endFrame: 2, sampleRate: 2e-20,
+            start: 5e19, end: 1e20, captureStart: nil, captureEnd: nil,
+            modelKey: "synthetic", fallbackModelKey: nil, appleEvidence: "")
+        let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(record))
+        let payload = try JSONSerialization.data(withJSONObject: ["version": 1,
+            "sessionID": session.uuidString, "sequence": 1, "record": object], options: [.sortedKeys])
+        let checksum = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+        var row = try JSONSerialization.data(withJSONObject: ["payload": payload.base64EncodedString(),
+            "sha256": checksum], options: [.sortedKeys])
+        row.append(0x0a)
+        let log = journal.directory.appendingPathComponent("work.jsonl")
+        try row.write(to: log)
+        XCTAssertThrowsError(try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)) { error in
+            guard case DurableTranscriptionJournal.JournalError.invalidRange = error else {
+                return XCTFail("Expected invalid recovered time range, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: log), row, "Rejected recovery must retain the original work log")
+    }
+
+    func testIssue12JournalKeepsFractionalTimesAndExactUpperBound() throws {
+        let root = try issue12Directory(), session = UUID()
+        let journal = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        let normal = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 0,
+            audioFile: "normal.wav", startFrame: 4_000, endFrame: 28_000, sampleRate: 16_000,
+            start: 0.25, end: 1.75, captureStart: nil, captureEnd: nil,
+            modelKey: "synthetic", fallbackModelKey: nil, appleEvidence: "")
+        let limit = Int64(TranscriptSegment.maximumTimestamp)
+        let boundary = TranscriptionWorkRecord(id: UUID(), sessionID: session, ordinal: 1,
+            audioFile: "boundary.wav", startFrame: (limit - 1) * 16_000, endFrame: limit * 16_000,
+            sampleRate: 16_000, start: Double(limit - 1), end: Double(limit), captureStart: nil, captureEnd: nil,
+            modelKey: "synthetic", fallbackModelKey: nil, appleEvidence: "")
+        try journal.put(normal)
+        try journal.put(boundary)
+        try journal.checkpoint()
+        let restored = try DurableTranscriptionJournal(sessionDirectory: root, sessionID: session)
+        XCTAssertEqual(restored.record(id: normal.id), normal)
+        XCTAssertEqual(restored.record(id: boundary.id), boundary)
+    }
+
+    // Retain issue fixtures in the isolated worker until its runner retires them.
+    private func issue12Directory() throws -> URL {
+        let root = TestFixtureDirectory.root.appendingPathComponent("issue12-journal-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        return root
+    }
+
     private func directory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("LiveLingo-AudioRemediation-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
