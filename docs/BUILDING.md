@@ -137,6 +137,12 @@ python3.13 Scripts/prepare-model-inputs.py \
 
 ## 签名、公证与 DMG
 
+准备运行库时会移除复制件的旧代码签名，并核对所有文件节及加载路径未因此改变。固定资源索引绑定规范化后的未签名字节；输入版本、代码或公共字符串变化仍需逐项复审，不能仅重算哈希。`runtime-preparation.json` 的 `removedFiles` 逐项记录相对路径、大小和剔除理由。导入验证应使用独立副本，重新临时签名并逐个验证原生扩展后，再由兼容的宿主 Python 导入；不得直接启动带沙盒继承权限的内嵌解释器。
+
+仅准备本地候选、不提交公证时，给 `build-offline-dmg.sh` 显式传 `--candidate-only`，并提供已经完成 Developer ID 签名的自包含 App、身份、签名钥匙串和新输出路径。独立复验也须显式传 `verify-release-dmg.sh --candidate-only`。该模式继续检查签名、固定资源、模型和挂载后的交付内容，完全不调用公证、装订或 Gatekeeper 工具；成功只表示本地候选校验通过。默认发布模式仍要求公证及票据，不能把候选模式回执当作公开发行验收。
+
+非 Mach-O 二进制资源会检查完整可读路径。PNG 还解析块、CRC、压缩文本和嵌入 ICNS 中的 PNG；EXIF 仅保留已解析的数字显示/颜色字段；未知字段、未知块、尾部及过大压缩元数据均拒绝。静态库另检查成员头的属主字段。CAR、Metal 和旧图像编码仍有未解码部分，不能由可读字符串扫描推断全部内部元数据已清空。交付前可用 `Scripts/distribution_xattrs.py --root <副本> --report <新回执>` 枚举属性；`--strip-tracking` 只去除明确列出的下载来源、Finder 注释和最近使用字段，不能对签名件盲目清空全部属性。安全属性和无法解码的 `com.apple.provenance` 会列为待复核，不会被误报为清理成功。
+
 签名材料和公证凭据不存入仓库。发布者须提供有效的 Developer ID Application 身份、匹配证书和含私钥的签名钥匙串。公证只使用本机已有的 `notarytool` keychain profile；脚本不创建、导入或解锁钥匙串，不接受仓库内的密码、API key 或凭据文件。
 
 签名、包隐私检查和真实 DMG 发布/自检要求宿主 Python 3.11 或更新版本，包含 `hashlib.file_digest` 与 `tomllib`。系统 Python 3.9 会在发布动作前被明确拒绝。下面用已安装的宿主 Python 3.13；不要使用 App 内带沙盒继承权限的解释器。`--review-capture` 必须指向 App 外已有目录中的新回执文件；先创建本次签名的独立目录，签名失败时保留回执并重建候选，不覆盖已有回执。

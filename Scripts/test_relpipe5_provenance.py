@@ -7,6 +7,7 @@ import importlib.util
 import sys
 from unittest.mock import patch
 from Scripts import binary_provenance as provenance
+from Scripts import runtime_prepare
 from Scripts import privacy_package as privacy
 from Scripts import reviewed_resources
 from Scripts import signed_resource_review as signed_review
@@ -46,7 +47,8 @@ class FinalProvenanceTests(unittest.TestCase):
             events = []
             result = type("Result", (), {"returncode": 0})()
             with patch.dict(sys.modules, {"binary_provenance": provenance, "signed_resource_review": signed_review,
-                                         "privacy_package": privacy}), \
+                                         "privacy_package": privacy, "runtime_prepare": runtime_prepare}), \
+                 patch.object(runtime_prepare, "normalize_native_signature", side_effect=lambda _: events.append("normalize-native")), \
                  patch.object(signed_review, "capture_before_signing", side_effect=lambda _: events.append("capture") or {}), \
                  patch.object(signed_review, "write_capture_receipt", side_effect=lambda *a: events.append("host-capture")), \
                  patch.object(signed_review, "finalize_signed_review", side_effect=lambda *a: events.append("signed-review")), \
@@ -59,7 +61,7 @@ class FinalProvenanceTests(unittest.TestCase):
                  patch.object(signing.subprocess, "run", return_value=result):
                 signing.sign(app, "fixture", "fixture", "fixture", "fixture", [(native, [{"filetype": 6}])],
                              Path(temporary) / "before-sign.json")
-            self.assertEqual(events, ["capture", "host-capture", "verify-input", "native",
+            self.assertEqual(events, ["capture", "host-capture", "verify-input", "normalize-native", "native",
                                      "rebind-signed-candidate", "signed-review", "signed-gate-signed", "outer"])
 
     def test_final_gate_rejects_missing_pending_and_old_schema(self):

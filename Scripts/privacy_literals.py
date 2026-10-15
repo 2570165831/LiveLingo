@@ -491,6 +491,35 @@ def _patch_literals(text, scan):
     flush()
 
 
+def _shell_quoted_spans(text):
+    """Mask only complete constant quoting; comments and raw operands stay visible."""
+    offset, boundary = 0, True
+    while offset < len(text):
+        char = text[offset]
+        if char == "#" and boundary:
+            end = text.find("\n", offset)
+            offset = len(text) if end < 0 else end + 1
+            continue
+        start = offset
+        ansi = text.startswith("$'", offset)
+        if ansi or char in "\"'":
+            quote = "'" if ansi else char
+            end = offset + (2 if ansi else 1)
+            while end < len(text) and text[end] != quote:
+                if text[end] == "\\" and (ansi or quote == '"'):
+                    end += 2
+                else:
+                    end += 1
+            if end < len(text):
+                yield start, end + 1
+                offset = end + 1
+                boundary = False
+                continue
+            return  # Incomplete quoting receives no raw-source exemption.
+        boundary = char in " \t\r\n;|&()<>"
+        offset += 2 if char == "\\" and offset + 1 < len(text) else 1
+
+
 def unc_source_view(data, name):
     """Leave comments/operands intact; decoded literal checks own quoted text.
 
@@ -518,6 +547,8 @@ def unc_source_view(data, name):
             style = "rust" if suffix == ".rs" else "go" if suffix == ".go" else "c"
             iterator = _javascript_literals(text) if suffix in (".js", ".mjs", ".cjs") else _quoted_literals(text, style)
             spans = [(start, end) for start, end, _ in iterator]
+        elif suffix in SHELL_SOURCE_SUFFIXES:
+            spans = list(_shell_quoted_spans(text))
     except (tokenize.TokenError, SyntaxError, ValueError):
         return text
     chunks, position = [], 0

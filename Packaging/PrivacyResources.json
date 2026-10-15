@@ -4289,6 +4289,46 @@
             {
               "style": "source-syntax-hex",
               "path": "225e5c5c435c5c435c5c432422"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225c5c425c5c4222"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225c5c42666f6f5c5c4222"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225c5c42785c5c4222"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225c5c625c5c6222"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225c5c62666f6f5c5c6222"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225c5c62785c5c6222"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225e5c5c422e5c5c422422"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225e5c5c425c5c4222"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225e5c5c622e5c5c622422"
+            },
+            {
+              "style": "source-syntax-hex",
+              "path": "225e5c5c625c5c6222"
             }
           ],
           "reason": "Exact unmodified GNU GCC 13.4.0 regression/build fixture, verified byte-for-byte against the retained GNU release archive with fixed full SHA-256. Public Go/AIX/DWARF trace, documentation and regular-expression spellings; these are not local preparation paths. This full member hash and each complete readable spelling are required; no prefix or directory exemption."
@@ -10238,6 +10278,16 @@
             }
           ],
           "reason": "Exact upstream sed, regex, registry or documented Windows-path source statements; full member SHA and complete statements are bound."
+        },
+        "gcc-13.4.0/libgo/go/os/path_windows_test.go": {
+          "sha256": "c229bc1e62de9e22e1d8b30de03b6f66a2ae997198f5071553ede48e9d7ef497",
+          "examples": [
+            {
+              "style": "unc-hex",
+              "path": "5c5c756e635c70617468"
+            }
+          ],
+          "reason": "Exact unmodified upstream Go Windows volume-name regression fixture from the fixed GNU GCC source archive. This synthetic host/share literal is public test input; the complete member hash and complete decoded spelling are required."
         }
       },
       "opaqueSourceFixtures": {
@@ -10581,7 +10631,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/libpython3.13.dylib",
-      "sha256": "ea81f509dcfe1370075cb94c8c0e9393feb05c3b60f3c4b0673187cf1fcf8456",
+      "sha256": "03e033978bd175e412825f4e6793e4c06edb82a739bdc0539df10395beec2a9e",
       "format": "macho-public-build-strings",
       "package": "CPython",
       "version": "locked-runtime-2026-10-12",
@@ -10600,7 +10650,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/tokenizers/tokenizers.abi3.so",
-      "sha256": "5123432838192fc85bad8294c2fbe02bb55f3ea8f91f769d6c8bf3ae4ebda91d",
+      "sha256": "c27751050fa253966d648097635bbfb09fd005dfe70ba4a65daf3c605e09c56f",
       "format": "macho-public-build-strings",
       "package": "tokenizers",
       "version": "locked-runtime-2026-10-12",
@@ -10842,7 +10892,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/markupsafe/_speedups.cpython-313-darwin.so",
-      "sha256": "8e397bb869222cb01aaec43b6fe4e37a941c2998c1e92377922be4b67b9f918d",
+      "sha256": "748fcd0129b51eaad660c9e30542f3ed46a9b3457b4cd76991753e729c6be07a",
       "format": "macho-public-build-strings",
       "package": "markupsafe",
       "version": "locked-runtime-2026-10-12",
@@ -10854,7 +10904,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/hf_xet/hf_xet.abi3.so",
-      "sha256": "31375084593da5a844a1f5450538748e58a4f2464a39e31913c1872bd5f28a20",
+      "sha256": "9835ed8c9bbcf2268b442ebd5083d257b7a6d17cc0c057962461fbce3fb1e1b2",
       "format": "macho-public-build-strings",
       "package": "hf_xet",
       "version": "locked-runtime-2026-10-12",
@@ -11399,7 +11449,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/rpds/rpds.cpython-313-darwin.so",
-      "sha256": "ccff978b65992183d42f883f776a4d36732cc0a092244bffbefc6d4ce46a6e5c",
+      "sha256": "7c8c582aaab6d9aae1be34df38d45f7f706843577151fd83e4bd96d0f5a6da11",
       "format": "macho-public-build-strings",
       "package": "rpds",
       "version": "locked-runtime-2026-10-12",
@@ -11431,7 +11481,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/regex/_regex.cpython-313-darwin.so",
-      "sha256": "2e6133350817f9e1acb3207ef5d6a8398f45a20779fbc1dddee139dc909c71d7",
+      "sha256": "a4a1354e9ff7f86a2ff03a946d4437064a2a4a0c50efc468f679c2aa82d4cba8",
       "format": "macho-public-build-strings",
       "package": "regex",
       "version": "locked-runtime-2026-10-12",
@@ -11444,7 +11494,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/_imagingmath.cpython-313-darwin.so",
-      "sha256": "d0fe9334b2fc9c6456fc7ca47bab36a39b496edc5d4e6afc846a8f6fc6bbbc55",
+      "sha256": "0089f8c0347ad470db4074b501056dc24e307ce3d14fe0bdb9b4de8cdd1d61d2",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -11456,7 +11506,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/_imaging.cpython-313-darwin.so",
-      "sha256": "02d2eb5eda7a4174cc9a5740512bd2ffbd3fa1b35cc247aa6b54e3745a18ccdb",
+      "sha256": "9427931ea5ae991a9be4d772179b8892fbdf3050e4b406c4a5a6da640aa4cfe1",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -11542,7 +11592,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/_webp.cpython-313-darwin.so",
-      "sha256": "a89a9f901b48abf085eac1da7e69c39ba34755a4e0f7d68ea1b9fcb52748dba0",
+      "sha256": "d75a5fd73d39d189f2cf1d821d05cdbf4464fcbb6e22c90f3f92ab78847c3c57",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -11556,7 +11606,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/_imagingcms.cpython-313-darwin.so",
-      "sha256": "8849066ddcebefd0696c1392781b7ea5e021fe16c38ea914ec4d1e9f7eea976e",
+      "sha256": "8abe66b7d6cda247466557290603d6dded9902adef2e2150aa26da1287470a08",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -11570,7 +11620,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/_imagingft.cpython-313-darwin.so",
-      "sha256": "8ff40f1142fd77e952f3df562dfe9a2d12cf05d7433d76cde06765441002bee3",
+      "sha256": "9395bebe9bc59304ae455128d24bdba5b9de92f35af0198bafb07e9cd34e642f",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -11589,7 +11639,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/_imagingmorph.cpython-313-darwin.so",
-      "sha256": "cc9c62ed734f894eaf4110f0040a6b085f32e097c481ee7e9aa8ccf48f9bf437",
+      "sha256": "924caae6dc4064b9ebc272d54808e1646fe9c7264f44e6a5aae60629ec30d98f",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -11601,7 +11651,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/_imagingtk.cpython-313-darwin.so",
-      "sha256": "155aed075176b2158e41e08054f2ac039867da290aed5bd45ae0f21430cd10b4",
+      "sha256": "c52cce7fa26e3e98d4d46099c2d57f341c41ed345000eccd675534829435d1fc",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -11615,7 +11665,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/_avif.cpython-313-darwin.so",
-      "sha256": "e3e327b98b9dad402957ec649b74b7ec77366b1e0b784fa5a0c3431845be5f44",
+      "sha256": "7886c1b116945bc641586b8dc494f303a5ad3d76bfcb7fe2f9823f416341eb49",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -11627,7 +11677,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/sentencepiece/_sentencepiece.cpython-313-darwin.so",
-      "sha256": "6dfff31947aa6c7538f7e249f03f0495cceb22687401e9d7bd447fe7e9c03fce",
+      "sha256": "4e677d306df0bcd5b2aa52521851b13bd879e736042eafc6d2eca237d12dfc25",
       "format": "macho-public-build-strings",
       "package": "sentencepiece",
       "version": "locked-runtime-2026-10-12",
@@ -11688,7 +11738,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/safetensors/_safetensors_rust.abi3.so",
-      "sha256": "0632f43fbb66f2e6539d86555c3365c46e0e52ee60eb5d68175c8c959c52262f",
+      "sha256": "f9a8dbf3806c75ab2f6f43b94243af2f0016bb1640466f9cdfb30136619fd32c",
       "format": "macho-public-build-strings",
       "package": "safetensors",
       "version": "locked-runtime-2026-10-12",
@@ -11727,7 +11777,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/yaml/_yaml.cpython-313-darwin.so",
-      "sha256": "1ec5ab827792ecf4acac19035fa17b4057bfb0dcd38e6bc3f39064de7928529c",
+      "sha256": "d0e8b3fb2b50bce450279a98379d8f4a55f03f08d6dfabbb36c2acf4009c1591",
       "format": "macho-public-build-strings",
       "package": "yaml",
       "version": "locked-runtime-2026-10-12",
@@ -11746,7 +11796,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/pydantic_core/_pydantic_core.cpython-313-darwin.so",
-      "sha256": "96777129991a1449ca4e110bc35eb8b946a3051a328983542512be313bc040b7",
+      "sha256": "0435daaf3c44fc48183bd14fd1979977dc2acef697a7f429c56ffe9492d42cec",
       "format": "macho-public-build-strings",
       "package": "pydantic_core",
       "version": "locked-runtime-2026-10-12",
@@ -11890,7 +11940,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/scipy/odr/__odrpack.cpython-313-darwin.so",
-      "sha256": "bfa4c12f5dcc82d7238667915b9d9800617048c81ce3b61d005933a6f9c9a24f",
+      "sha256": "31bfc684a5d24f9402c5cadc302d81a6d9e373c07ac08e68f6296021e6f72700",
       "format": "macho-public-build-strings",
       "package": "scipy",
       "version": "locked-runtime-2026-10-12",
@@ -11902,7 +11952,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/scipy/.dylibs/libgfortran.5.dylib",
-      "sha256": "6666f481d15d56b6f98a872d8ca5b1c5e8e261d9fe403b23e5de854c0e320cae",
+      "sha256": "fc93c86bb218bbc1c5f61e1de6a9468b67a049162d8a727038ac82720e5d9968",
       "format": "macho-public-build-strings",
       "package": "scipy",
       "version": "locked-runtime-2026-10-12",
@@ -12541,7 +12591,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/scipy/.dylibs/libquadmath.0.dylib",
-      "sha256": "3028597a423c815da5203db3de8ed649c47134bf99583a1b340cffd8ea86f794",
+      "sha256": "96a20febb3e946e1fd7bb70d845e13010d089b2acdbd09ad9369ca746e527aaa",
       "format": "macho-public-build-strings",
       "package": "scipy",
       "version": "locked-runtime-2026-10-12",
@@ -12688,7 +12738,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/scipy/.dylibs/libgcc_s.1.1.dylib",
-      "sha256": "5c190b29b97a7eb90f511f345da6c24f0e58fea58a1a4861a10392a8dffde11c",
+      "sha256": "3f9096f76ad891a4fa409522ae6719fd27ee29b1ce910553e646ae0765d1ee2e",
       "format": "macho-public-build-strings",
       "package": "scipy",
       "version": "locked-runtime-2026-10-12",
@@ -12818,7 +12868,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/.dylibs/libxcb.1.1.0.dylib",
-      "sha256": "e85a63fbc2cb7ab452e75dad7fcc6942d2c0b8d102c442016e02a3686e6a7846",
+      "sha256": "b562980b35b0f5da44098ad50599239884788a9d33a43c816ce73ff4351389ec",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -12829,7 +12879,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/.dylibs/libharfbuzz.0.dylib",
-      "sha256": "03b0c261937d1090c9e4498c381e621c1ff41f878d44ec5c5777e0ee4d9f0614",
+      "sha256": "86ff90dee5a51c91cf818413e5a70e8b0cacfd47ff587f7b74231fc1cacac5e7",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -12897,7 +12947,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/PIL/.dylibs/libavif.16.4.2.dylib",
-      "sha256": "9e5f4726c394971b38d10bee7ad88aa93a72b9119c40c911fd2ab85d29544906",
+      "sha256": "174519c302dfc7c538d0f4817e0cc8a06579ca45af75c808eba622e755c397c2",
       "format": "macho-public-build-strings",
       "package": "PIL",
       "version": "locked-runtime-2026-10-12",
@@ -12908,7 +12958,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/libpython3.13.dylib",
-      "sha256": "ea81f509dcfe1370075cb94c8c0e9393feb05c3b60f3c4b0673187cf1fcf8456",
+      "sha256": "03e033978bd175e412825f4e6793e4c06edb82a739bdc0539df10395beec2a9e",
       "format": "macho-public-build-strings",
       "package": "CPython",
       "version": "locked-runtime-2026-10-12",
@@ -12927,7 +12977,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/_miniaudio.abi3.so",
-      "sha256": "847f44b81ad90ff3da251c41ccddafca071a00a6538c91ad91001e97309efe47",
+      "sha256": "8ff8e60d5bf34888ec248cf93745545d5aeb24a9d2d5c375748f6c872f8380e1",
       "format": "macho-public-build-strings",
       "package": "_miniaudio.abi3.so",
       "version": "locked-runtime-2026-10-12",
@@ -12941,7 +12991,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/_cffi_backend.cpython-313-darwin.so",
-      "sha256": "1a19f09a636e1b9b334563f48860c1353c939b6b87b19b3123b5b648a2eec64e",
+      "sha256": "9c66234d9933380d188cdcd514e1b17c1722278bca0cf9db183bba7e4ed4b497",
       "format": "macho-public-build-strings",
       "package": "_cffi_backend.cpython-313-darwin.so",
       "version": "locked-runtime-2026-10-12",
@@ -12953,7 +13003,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/tokenizers/tokenizers.abi3.so",
-      "sha256": "60b222e846cabe7e8aee7ca1719224d0939b9688201692d5be67dc079c2701a8",
+      "sha256": "1fc5854d1e8539a7b89a7fe5dee740b89cfa132242210cceec20bcc68937d701",
       "format": "macho-public-build-strings",
       "package": "tokenizers",
       "version": "locked-runtime-2026-10-12",
@@ -13189,7 +13239,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-darwin.so",
-      "sha256": "4291c61002ba70df4717b200489805141ba39c9a7bf6e6873566e6202240f41f",
+      "sha256": "0b5bbd06a92d3747867f1cf49f529cdfb983304d288ee887622b757ebd6ba49a",
       "format": "macho-public-build-strings",
       "package": "msgpack",
       "version": "locked-runtime-2026-10-12",
@@ -13201,7 +13251,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/audioop/_audioop.abi3.so",
-      "sha256": "c6ae1dbafa899c7ab3aff0c5510b27a11ea67cd57e5a2b242d5d2bb0fd1b8f47",
+      "sha256": "25867640a4a23fb5083363446f961c962456ae19d25c12ba4b62fdc3d35bfec5",
       "format": "macho-public-build-strings",
       "package": "audioop",
       "version": "locked-runtime-2026-10-12",
@@ -13213,7 +13263,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/markupsafe/_speedups.cpython-313-darwin.so",
-      "sha256": "1863b0bf9b745e40aa214332b27a5c4b74348aba58b3500b345fb73b4b5542fa",
+      "sha256": "748fcd0129b51eaad660c9e30542f3ed46a9b3457b4cd76991753e729c6be07a",
       "format": "macho-public-build-strings",
       "package": "markupsafe",
       "version": "locked-runtime-2026-10-12",
@@ -13225,7 +13275,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/hf_xet/hf_xet.abi3.so",
-      "sha256": "674a67974d4c0603528415ed2864b5cdfff8a1b75edba3e103318cd66ffb93d4",
+      "sha256": "772173d8f87273ee81bfbc53e8bfc5d1fd413aaee26c17d059e79aa89c98e73a",
       "format": "macho-public-build-strings",
       "package": "hf_xet",
       "version": "locked-runtime-2026-10-12",
@@ -13770,7 +13820,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/_soundfile_data/libsndfile_arm64.dylib",
-      "sha256": "6ef1f1c0a4ccbc72210ff55e3df6addc682f873e68aff3e7218e92ccc294da93",
+      "sha256": "229f6a2212d0ebf9013d4f8b0a934ec65b29c9bc6ccc989a545a1ea0e5229eaf",
       "format": "macho-public-build-strings",
       "package": "_soundfile_data",
       "version": "locked-runtime-2026-10-12",
@@ -13801,7 +13851,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/regex/_regex.cpython-313-darwin.so",
-      "sha256": "6b8665d76a5ef482f08906a2912737903d9a8b8ded58c79d2bcc3ee6a8f0095a",
+      "sha256": "6d12c4bed24c42162d75ab13fbe5ef6f66bdf0b88e50b9ff8a303139fb438a2c",
       "format": "macho-public-build-strings",
       "package": "regex",
       "version": "locked-runtime-2026-10-12",
@@ -13814,7 +13864,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/sentencepiece/_sentencepiece.cpython-313-darwin.so",
-      "sha256": "aa4f5a5c1cfd06fbdffc6835da5791f4a2ec73aab7ab231125dfa82415daa69d",
+      "sha256": "4e677d306df0bcd5b2aa52521851b13bd879e736042eafc6d2eca237d12dfc25",
       "format": "macho-public-build-strings",
       "package": "sentencepiece",
       "version": "locked-runtime-2026-10-12",
@@ -13875,7 +13925,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/tiktoken/_tiktoken.cpython-313-darwin.so",
-      "sha256": "6dcf80d38db2fd07042092778c61df1f96463c62e16595e6890b8d76c8ec5fde",
+      "sha256": "7ed14c5ef5583fcbb1a4e77f86e663adefc52d5052e9a0ded9443ce01af908e1",
       "format": "macho-public-build-strings",
       "package": "tiktoken",
       "version": "locked-runtime-2026-10-12",
@@ -13985,7 +14035,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/safetensors/_safetensors_rust.abi3.so",
-      "sha256": "2d00fad8b95dd06e764264a6ce3a2adb55e76f3772bacf1de29b72e1a7dcfb50",
+      "sha256": "f9a8dbf3806c75ab2f6f43b94243af2f0016bb1640466f9cdfb30136619fd32c",
       "format": "macho-public-build-strings",
       "package": "safetensors",
       "version": "locked-runtime-2026-10-12",
@@ -14024,7 +14074,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/yaml/_yaml.cpython-313-darwin.so",
-      "sha256": "d8ec1db67ffaae294a85d804bc303c02314fe9c1a0068f6f5459c5a53751afeb",
+      "sha256": "d0e8b3fb2b50bce450279a98379d8f4a55f03f08d6dfabbb36c2acf4009c1591",
       "format": "macho-public-build-strings",
       "package": "yaml",
       "version": "locked-runtime-2026-10-12",
@@ -14043,7 +14093,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/_sounddevice_data/portaudio-binaries/libportaudio.dylib",
-      "sha256": "df30d5ad3c11b5c71746c8d343ca613a7ae8e44ada9605170c95e5f168d7c329",
+      "sha256": "9d55df2cafe498dbc7c1d6e8942d33a8e81aa74948fd98f3bee0e19a8c212681",
       "format": "macho-public-build-strings",
       "package": "_sounddevice_data",
       "version": "locked-runtime-2026-10-12",
@@ -14054,7 +14104,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/scipy/odr/__odrpack.cpython-313-darwin.so",
-      "sha256": "30c0089f89372054c324ee9d9fdc8b015fc6f559cc62c2a63e1c5442c6e2ef8a",
+      "sha256": "31bfc684a5d24f9402c5cadc302d81a6d9e373c07ac08e68f6296021e6f72700",
       "format": "macho-public-build-strings",
       "package": "scipy",
       "version": "locked-runtime-2026-10-12",
@@ -14066,7 +14116,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/scipy/.dylibs/libgfortran.5.dylib",
-      "sha256": "bf9e0eb266cfe153b94468f2ed68c832fcb8b5a88a7323a3a824cb70b3b55b83",
+      "sha256": "fc93c86bb218bbc1c5f61e1de6a9468b67a049162d8a727038ac82720e5d9968",
       "format": "macho-public-build-strings",
       "package": "scipy",
       "version": "locked-runtime-2026-10-12",
@@ -14705,7 +14755,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/scipy/.dylibs/libquadmath.0.dylib",
-      "sha256": "69da4a2f8fd4986b546b16f3526fadbf31045db2ea8b2e0360f2d8e98b0df475",
+      "sha256": "96a20febb3e946e1fd7bb70d845e13010d089b2acdbd09ad9369ca746e527aaa",
       "format": "macho-public-build-strings",
       "package": "scipy",
       "version": "locked-runtime-2026-10-12",
@@ -14852,7 +14902,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/scipy/.dylibs/libgcc_s.1.1.dylib",
-      "sha256": "868a58e27e6d7f4834b7d210799f30106bf2f2ee69cc5febbb8e8219df347693",
+      "sha256": "3f9096f76ad891a4fa409522ae6719fd27ee29b1ce910553e646ae0765d1ee2e",
       "format": "macho-public-build-strings",
       "package": "scipy",
       "version": "locked-runtime-2026-10-12",
@@ -14982,7 +15032,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/sklearn/.dylibs/libomp.dylib",
-      "sha256": "5aa75859a817db062fc649f47551b619692febd877603733cd105bf4862e1449",
+      "sha256": "4e96c69de930170e645882bddf18a9f5e7b5b93339269db6dd3ee09f8eb659f7",
       "format": "macho-public-build-strings",
       "package": "sklearn",
       "version": "locked-runtime-2026-10-12",
@@ -15007,7 +15057,7 @@
     },
     {
       "path": "Contents/Resources/ASRRuntime/python/lib/python3.13/site-packages/llvmlite/binding/libllvmlite.dylib",
-      "sha256": "cc447de132d4075688c6ae21ecfa16ad3c5b59a856505ec7925a6e9df20a7f00",
+      "sha256": "e2b44fa24a5920c13c8aa43dc23fc87b037082a2d5d1770c2dc33cdf6d5ec15b",
       "format": "macho-public-build-strings",
       "package": "llvmlite",
       "version": "locked-runtime-2026-10-12",
@@ -16463,7 +16513,7 @@
     },
     {
       "path": "Contents/Resources/LanguageRuntime/python/lib/python3.13/site-packages/outlines_core/outlines_core.cpython-313-darwin.so",
-      "sha256": "5ac7eb98e8e17e74249eecdda0cf46d14b8b55ab4a410ec133b4b19a9424e940",
+      "sha256": "f46efd01c4e8689a8f0ebb70741ce4f600d7126cdb6511ff497e44ed569f3322",
       "format": "macho-public-build-strings",
       "package": "outlines_core",
       "version": "0.2.14",

@@ -184,6 +184,8 @@ class Relpipe6TextTests(unittest.TestCase):
                       "file://///fileserver/share/project.c", "file://localhost//fileserver/share/project.c",
                       "file:///%2Ffileserver/share/project.c", "file:///%5C%5Cfileserver%5Cshare%5Cproject.c"):
             self.check_routes(value, "unreviewed-file-url-authority")
+        # A local file URI must not hide a remote share in an encoded suffix.
+        self.check_routes("file:///usr/share/%5C%5Cfileserver%5Cshare%5Cproject.c", "local-path-metadata")
 
     def test_public_https_urls_are_preserved(self):
         for value in ("https://public.example.invalid" + HOST_PATH,

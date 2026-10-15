@@ -542,7 +542,12 @@ def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, appr
                     from .macho_paths import inspect_macho_paths
                 else:
                     from macho_paths import inspect_macho_paths
-                inspect_macho_paths(path, counts)
+                if not inspect_macho_paths(path, counts):
+                    if __package__:
+                        from .resource_metadata import inspect_resource
+                    else:
+                        from resource_metadata import inspect_resource
+                    inspect_resource(path, counts)
                 counts["opaque_binary_files"] += 1
                 return
             if size > JSON_LIMIT:

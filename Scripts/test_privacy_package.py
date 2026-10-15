@@ -549,6 +549,8 @@ class PrivacyPackageTests(unittest.TestCase):
         app = derived / "Build/Products/Release/LiveLingo.app"
         info = self.write("Contents/Info.plist", "", app)
         info.write_bytes(plistlib.dumps({"CFBundleIdentifier": "fixture.app"}))
+        executable = self.write("Contents/MacOS/LiveLingo", "", app)
+        executable.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 28)
         env = {"LIVELINGO_DERIVED_DATA_PATH": str(derived), "LIVELINGO_PYTHON": sys.executable,
                "TMPDIR": str(self.root), "PYTHONDONTWRITEBYTECODE": "1", "PATH": "/usr/bin:/bin"}
         result = subprocess.run(["/bin/bash", str(script)], capture_output=True, text=True, env=env)
@@ -717,13 +719,14 @@ class PrivacyPackageMetadataTests(unittest.TestCase):
                                 "unreviewed-large-metadata")
 
     def test_known_app_binaries_are_reported_as_opaque(self):
+        from Scripts.test_distribution_resources import png
         fixtures = {"Contents/MacOS/LiveLingo": b"\xcf\xfa\xed\xfe" + b"\x00" * 28,
                     "Contents/PkgInfo": b"APPL????",
                     "Contents/Resources/Assets.car": b"BOMStore" + b"\x00" * 24,
                     "Contents/Resources/AppIcon.icns": b"icns\x00\x00\x00\x08",
                     "runtime/libfixture.dylib": b"\xcf\xfa\xed\xfe" + b"\x00" * 28,
                     "runtime/default.metallib": b"MTLB" + b"\x00" * 28,
-                    "Contents/Resources/AppIcon.icon/Assets/fixture.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 24}
+                    "Contents/Resources/AppIcon.icon/Assets/fixture.png": png()}
         for filename, payload in fixtures.items():
             with self.subTest(filename=filename):
                 directory, _, destination = self.case(payload, filename)

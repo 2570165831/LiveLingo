@@ -32,6 +32,7 @@ class RuntimePreparationTests(unittest.TestCase):
         })
         packaging = self.repo / "Packaging"
         packaging.mkdir(parents=True)
+        (packaging / "PrivacyResources.json").write_text('{"version": 1, "resources": []}')
         (packaging / "MLXRuntime.lock.json").write_text(json.dumps({"python": "3.13.7", "fixture": "1.0"}))
         (packaging / "ASRRuntime.lock.json").write_text(json.dumps({"python": "3.13.7", "packages": [{"name": "fixture", "version": "1.0"}]}))
         notices = packaging / "MLXLicenses"
@@ -83,7 +84,8 @@ class RuntimePreparationTests(unittest.TestCase):
             csv.writer(stream).writerows(rows)
 
     def prepare(self, mode="asr"):
-        with patch.object(runtime, "python_version", return_value="3.13.7"):
+        with patch.object(runtime, "python_version", return_value="3.13.7"), \
+                patch("Scripts.reviewed_resources.MANIFEST", self.repo / "Packaging/PrivacyResources.json"):
             return runtime.prepare(self.base, self.output, mode=mode, repo=self.repo, clone=False)
 
     def test_selects_input_lock_not_active_python_and_removes_extra_distribution(self):
@@ -154,6 +156,8 @@ class RuntimePreparationTests(unittest.TestCase):
         self.assertEqual((self.output / apache["copy"]).read_bytes(), extra["fixture/tests/LICENSE-APACHE"])
         self.assertEqual(apache["sha256"], hashlib.sha256(extra["fixture/tests/LICENSE-APACHE"]).hexdigest())
         self.assertEqual(privacy.inspect_tree(self.output)["excluded"], 0)
+        self.assertEqual(len(report["removedFiles"]), sum(report["removed"].values()))
+        self.assertTrue(all(not Path(row["file"]).is_absolute() for row in report["removedFiles"]))
 
     def test_preserves_declared_license_with_custom_filename(self):
         data = b"Copyright custom legal notice\n"
@@ -163,6 +167,19 @@ class RuntimePreparationTests(unittest.TestCase):
         self.assertEqual(len(report["licenses"]), 2)  # Existing MIT file and declared LEGAL.txt.
         legal = next(p for p in report["licenses"] if p["source"].endswith("LEGAL.txt"))
         self.assertEqual((self.output / legal["copy"]).read_bytes(), data)
+
+    def test_static_archive_owners_and_timestamps_are_normalized_without_member_changes(self):
+        body = b"public compiled member\0"
+        header = (b"member.o/".ljust(16) + b"1".ljust(12) + b"501".ljust(6)
+                  + b"20".ljust(6) + b"100644".ljust(8) + str(len(body)).encode().ljust(10) + b"`\n")
+        data = b"!<arch>\n" + header + body + (b"\n" if len(body) % 2 else b"")
+        self.add_distribution("fixture", "1.0", {"fixture/__init__.py": b"value=1\n",
+            "fixture/libfixture.a": data, "fixture-1.0.dist-info/licenses/LICENSE": b"Copyright fixture\n"})
+        self.prepare()
+        staged = (self.output / self.stdlib / "site-packages/fixture/libfixture.a").read_bytes()
+        self.assertEqual(staged[68:], data[68:])
+        self.assertEqual(staged[24:48], b"0".ljust(12) + b"0".ljust(6) + b"0".ljust(6))
+        self.assertEqual((self.site / "fixture/libfixture.a").read_bytes(), data)
 
     def test_optional_api_python_modules_needed_by_eager_imports_are_retained(self):
         selected = {Path("numpy/f2py/__init__.py"), Path("sympy/utilities/mathml/__init__.py"),

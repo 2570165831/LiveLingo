@@ -446,6 +446,11 @@ def sign(app_root, identity, keychain, entitlements, inherit_plist, found, revie
     entries.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
     helpers = 0
     for _depth, kind, path, images, launchable in entries:
+        if kind == 0:
+            # Re-sign from a clean unsigned object. codesign --force alone can
+            # retain nonzero bytes from an older signature reservation.
+            from runtime_prepare import normalize_native_signature
+            normalize_native_signature(path)
         command = ["/usr/bin/codesign", "--force", "--sign", identity, "--keychain", keychain,
                    "--options", "runtime", "--timestamp"]
         if kind == 0:

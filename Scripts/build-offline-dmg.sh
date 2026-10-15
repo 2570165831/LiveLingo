@@ -38,6 +38,7 @@ app_submission_id=""
 dmg_submission_id=""
 resubmit_incomplete=0
 dry_run=0
+candidate_only=0
 usage() {
   print -r -- "用法：Scripts/build-offline-dmg.sh --app <已签名 App> --identity <Developer ID Application 身份> [选项]"
   print -r -- "续跑：Scripts/build-offline-dmg.sh --resume-stage <目录> --notary-profile <已有名称> [选项]"
@@ -50,6 +51,7 @@ usage() {
   print -r -- "  --staple-max-attempts <次数>（4）；--staple-retry-delay <秒>（5，指数退避）"
   print -r -- "  --app-submission-id / --dmg-submission-id <已完成上传的编号>：仅在续跑时使用"
   print -r -- "  --resubmit-incomplete：检查回执后明确重新上传未完成/结果不明的产物；旧编号不能续查"
+  print -r -- "  --candidate-only：仅生成和本地校验未公证候选；不调用公证、装订或 Gatekeeper"
   print -r -- "  --dry-run：只显示步骤，不写文件、不调用发布工具；-h/--help：帮助"
 }
 while (( $# > 0 )); do
@@ -78,6 +80,7 @@ while (( $# > 0 )); do
       esac
       shift 2 ;;
     --resubmit-incomplete) resubmit_incomplete=1; shift ;;
+    --candidate-only) candidate_only=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "未知参数：$1" ;;
@@ -103,9 +106,13 @@ if (( dry_run )); then
   exit 0
 fi
 require_publication_python
+if (( candidate_only )); then
+  [[ -z "${resume_stage}" && -z "${app_submission_id}" && -z "${dmg_submission_id}" && ${resubmit_incomplete} == 0 ]] || fail "候选模式不接受续跑或公证提交选项"
+else
 [[ -n "${notary_profile//[[:space:]]/}" && "${notary_profile}" != '<你的 profile>' ]] || fail "请指定本机已有的 --notary-profile；占位符不能提交"
 [[ -z "${notary_keychain}" || "${notary_keychain}" == /* ]] || fail "--notary-keychain 必须是绝对路径"
 [[ -n "${resume_stage}" || ( -z "${app_submission_id}" && -z "${dmg_submission_id}" && ${resubmit_incomplete} == 0 ) ]] || fail "提交编号/重新提交选项须配合 --resume-stage"
+fi
 state_get() { "${python_bin}" "${state_script}" get "${state_file}" "$1"; }
 state_set() { "${python_bin}" "${state_script}" set "${state_file}" "$1" "$2"; }
 if [[ -n "${resume_stage}" ]]; then
@@ -145,7 +152,9 @@ fi
 [[ "${sign_identity}" == "Developer ID Application: "* ]] || fail "必须显式指定 Developer ID Application --identity"
 [[ -n "${keychain_path}" ]] || keychain_path="${HOME}/Library/Keychains/login.keychain-db"
 [[ "${keychain_path}" == /* && -f "${keychain_path}" ]] || fail "签名钥匙串不存在或不是绝对文件路径"
-for tool in codesign hdiutil ditto stapler; do
+release_tools=(codesign hdiutil ditto)
+(( candidate_only )) || release_tools+=(stapler)
+for tool in "${release_tools[@]}"; do
   resolve_release_tool "${tool}"
   case "${tool}" in
     codesign) codesign_bin="${REPLY}" ;;
@@ -249,7 +258,7 @@ check_authority "${staged_app}" "${sign_identity}"
 notary_args=(--profile "${notary_profile}" --timeout "${notary_timeout}" --submit-timeout "${notary_submit_timeout}" --command-timeout "${notary_command_timeout}" --poll-interval "${notary_poll_interval}" --max-polls "${notary_max_polls}" --max-retries "${notary_max_retries}")
 [[ -z "${notary_keychain}" ]] || notary_args+=(--notary-keychain "${notary_keychain}")
 run_dir="$(/usr/bin/mktemp -d "${stage_dir}/run-XXXXXX")"
-print -l -r -- "codesign=${codesign_bin}" "hdiutil=${hdiutil_bin}" "ditto=${ditto_bin}" "stapler=${stapler_bin}" "python=${python_bin}" > "${run_dir}/tool-paths.txt"
+print -l -r -- "codesign=${codesign_bin}" "hdiutil=${hdiutil_bin}" "ditto=${ditto_bin}" "stapler=${stapler_bin:-not-used}" "python=${python_bin}" > "${run_dir}/tool-paths.txt"
 notarize_phase() {
   local phase="$1" artifact="$2" requested="$3" decision receipt_dir
   decision="$("${python_bin}" "${state_script}" decision "${state_file}" "${phase}" "${artifact}" "${requested}" "${resubmit_incomplete}")" || fail "无法恢复 ${phase} 提交"
@@ -272,6 +281,7 @@ staple_with_retry() {
     delay="$("${python_bin}" -c 'import sys; print(float(sys.argv[1])*2)' "${delay}")"
   done
 }
+if (( ! candidate_only )); then
 app_container="$(state_get appContainer)"
 if [[ -z "${app_container}" ]]; then
   [[ "$(/bin/ls -A "${package_root}")" == LiveLingo.app ]] || fail "首次 App 公证容器只能含 LiveLingo.app"
@@ -292,7 +302,8 @@ else
   "${stapler_bin}" validate "${staged_app}"
   "${codesign_bin}" --verify --deep --strict --verbose=2 "${staged_app}"
 fi
-# The final image uses this exact stapled App; no copying or signing the App now.
+fi
+# The release image uses this exact stapled App; no copying or signing the App now.
 if [[ ! -e "${package_root}/Applications" && ! -L "${package_root}/Applications" ]]; then
   /bin/ln -s /Applications "${package_root}/Applications"
 fi
@@ -317,6 +328,15 @@ else
   "${codesign_bin}" --verify --strict --verbose=2 "${staged_dmg}"
   "${hdiutil_bin}" verify "${staged_dmg}"
   check_authority "${staged_dmg}" "${sign_identity}"
+fi
+if (( candidate_only )); then
+  /bin/zsh "${verify_script}" --dmg "${staged_dmg}" --identity "${sign_identity}" --mount-point "${stage_dir}/verify-mount" --privacy-phase signed --candidate-only
+  [[ ! -e "${output_dmg}" && ! -L "${output_dmg}" ]] || fail "候选输出已被占用，拒绝覆盖"
+  /bin/mv -n "${staged_dmg}" "${output_dmg}"
+  [[ ! -e "${staged_dmg}" && -f "${output_dmg}" ]] || fail "候选输出移动未完成"
+  state_set candidateOutput "${output_dmg}"
+  print -r -- "本地候选 DMG 已生成：${output_dmg}；未公证、未装订、未通过发行 Gatekeeper 验收。"
+  exit 0
 fi
 notarize_phase dmg "${staged_dmg}" "${dmg_submission_id}"
 verified_dmg="$(state_get stapledDMG)"

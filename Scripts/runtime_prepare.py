@@ -7,6 +7,7 @@ Rejected output remains available for diagnosis; no input is changed or deleted.
 import argparse
 import ast
 from collections import Counter
+from datetime import datetime, timezone
 import csv
 import hashlib
 from importlib import metadata
@@ -17,6 +18,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tokenize
@@ -218,6 +220,82 @@ def copy_runtime_file(source, destination, *, clone):
     return change
 
 
+def normalize_native_signature(path):
+    """Remove old vendor/local signatures from the new unsigned copy only.
+
+    Signature identifiers and unused reservations vary between installations.
+    Canonical unsigned inputs make the fixed preparation hashes reproducible.
+    Every file-backed section must remain identical; final signing is separate.
+    """
+    if __package__:
+        from .macho_paths import THIN, FAT, load_paths
+        from .native_build_paths import section_hashes
+    else:
+        from macho_paths import THIN, FAT, load_paths
+        from native_build_paths import section_hashes
+    if load_paths(path) is None:
+        return False
+    data = path.read_bytes()
+    slices = [(0, len(data))]
+    if data[:4] in FAT:
+        endian, wide = FAT[data[:4]]
+        count = struct.unpack_from(endian + "I", data, 4)[0]
+        width = 32 if wide else 20
+        slices = [struct.unpack_from(endian + ("QQ" if wide else "II"), data, 16 + i * width)
+                  for i in range(count)]
+    signed = False
+    for start, span in slices:
+        endian, header = THIN[data[start:start + 4]]
+        count = struct.unpack_from(endian + "I", data, start + 16)[0]
+        offset = start + header
+        for _ in range(count):
+            command, size = struct.unpack_from(endian + "II", data, offset)
+            signed |= command == 0x1D
+            offset += size
+    if not signed:
+        return False
+    sections = section_hashes(data)
+    paths = load_paths(path)
+    result = subprocess.run(["/usr/bin/codesign", "--remove-signature", str(path)], capture_output=True)
+    if result.returncode or sections != section_hashes(path.read_bytes()) or paths != load_paths(path):
+        raise PrivacyError("runtime-signature-normalization-failed")
+    return True
+
+
+def normalize_archive_metadata(path):
+    """Clear only ar member timestamps/owners; preserve every member byte."""
+    if path.suffix.lower() != ".a":
+        return 0
+    original = path.read_bytes()
+    if not original.startswith(b"!<arch>\n"):
+        raise PrivacyError("invalid-runtime-static-archive")
+    data = bytearray(original)
+    offset, changed = 8, 0
+    while offset < len(data):
+        header = bytes(data[offset:offset + 60])
+        if len(header) != 60 or header[58:] != b"`\n":
+            raise PrivacyError("invalid-runtime-static-archive")
+        try:
+            size = int(header[48:58].strip())
+        except ValueError:
+            raise PrivacyError("invalid-runtime-static-archive") from None
+        if size < 0 or offset + 60 + size > len(data):
+            raise PrivacyError("invalid-runtime-static-archive")
+        normalized = b"0".ljust(12) + b"0".ljust(6) + b"0".ljust(6)
+        if header[16:40] != normalized:
+            data[offset + 16:offset + 40] = normalized
+            changed += 1
+        end = offset + 60 + size
+        if data[offset + 60:end] != original[offset + 60:end]:
+            raise PrivacyError("runtime-static-member-changed")
+        offset = end + (end % 2)
+        if offset > len(data):
+            raise PrivacyError("invalid-runtime-static-archive")
+    if changed:
+        path.write_bytes(data)
+    return changed
+
+
 def prepare(base, output, *, mode="language", repo=REPO, clone=True):
     base, output, repo = Path(base), Path(output), Path(repo)
     stdlib, site = portable_layout(base)
@@ -281,11 +359,14 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
     python.mkdir(exist_ok=True)
     notice_root = output / "Licenses"
     removed, changed, modifications = Counter(), Counter(), []
+    removed_files = []
     for path in entries:
         relative = path.relative_to(base)
         reason = removal_reason(relative, stdlib, owners)
         if reason:
             removed[reason] += 1
+            removed_files.append({"file": relative.as_posix(), "reason": reason,
+                                  "bytes": path.lstat().st_size, "symlink": path.is_symlink()})
             continue
         if path.is_symlink():
             validate_link(path, base)
@@ -293,6 +374,7 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
         action = copy_runtime_file(path, target,
                                    clone=clone and path.stat().st_dev == python.stat().st_dev)
         if not target.is_symlink():
+            archive_changes = normalize_archive_metadata(target)
             if __package__:
                 from .macho_paths import make_portable
             else:
@@ -303,14 +385,19 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
             else:
                 from native_build_paths import sanitize_build_paths
             build_paths = sanitize_build_paths(target, python)
-            if action != "copied" or native_changes or build_paths:
+            signature_removed = normalize_native_signature(target)
+            if action != "copied" or native_changes or build_paths or signature_removed or archive_changes:
                 modifications.append({"file": str(relative), "contributor": "Li",
                                       "date": "2026-10-11", "action": action,
                                       "loadCommands": native_changes,
+                                      "obsoleteSignatureRemoved": signature_removed,
+                                      "staticArchiveHeadersNormalized": archive_changes,
                                       "originalSHA256": hashlib.sha256(path.read_bytes()).hexdigest(),
                                       "preparedSHA256": hashlib.sha256(target.read_bytes()).hexdigest()})
                 if build_paths:
                     modifications[-1]["buildPathChanges"] = build_paths
+                if signature_removed:
+                    modifications[-1]["signatureNormalizationDate"] = datetime.now(timezone.utc).date().isoformat()
                 if action == "runtime-configuration-relocated":
                     modifications[-1]["reason"] = "Installed directories derive from the copied module location; build-machine paths and profile data are omitted from generated configuration. Other generated fields and executable code remain intact."
                     if __package__:
@@ -339,6 +426,7 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
     missing = []
     components = []
     supplements = repo / "Packaging/MLXLicenses"
+    notice_material_changes = {"removedFiles": [], "changedInventories": []}
     for name, dist in selected.items():
         if not component_licenses[name]:
             supplement = supplements / f"{name}-{dist.version}-LICENSE"
@@ -378,24 +466,30 @@ def prepare(base, output, *, mode="language", repo=REPO, clone=True):
                     if (notice.is_file() and license_filename(notice)
                             and any(excluded(part) for part in notice.relative_to(source).parts)):
                         raise PrivacyError("supplement-license-needs-safe-relative-name")
-                shutil.copytree(source, notice_root / source.name,
-                                ignore=lambda directory, names: [name for name in names
-                                                                  if excluded(name)])
+                if __package__:
+                    from .notice_copy import copy_notice_tree
+                else:
+                    from notice_copy import copy_notice_tree
+                result = copy_notice_tree(source, notice_root / source.name)
+                for key in notice_material_changes:
+                    notice_material_changes[key].extend(result[key])
             elif source.name in ("AUDIT.json", "README.md"):
                 shutil.copy2(source, notice_root / source.name)
         manifest = {"components": components, "missingLicenseFiles": missing, "python": "python",
                     "chempyScope": "Only Substance.from_formula and composition; solver, plotting and notebook dependencies intentionally omitted.",
                     "workerHashes": {name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in RUNTIME_MODULES},
                     "nativeTransitiveNoticeAudit": json.loads((supplements / "AUDIT.json").read_text())}
+        manifest["nativeTransitiveNoticeAudit"]["distributionNoticeCorrections"] = notice_material_changes
         (output / "runtime-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     after_files = [p for p in python.rglob("*") if p.is_file() and not p.is_symlink()]
     report = {"mode": mode, "pythonVersion": version, "components": {name: dist.version for name, dist in selected.items()},
               "before": dict(before), "afterPython": {"files": len(after_files), "bytes": sum(p.stat().st_size for p in after_files)},
-              "removed": dict(removed), "changed": dict(changed), "licenses": inventory, "missingLicenseFiles": missing}
+              "removed": dict(removed), "removedFiles": removed_files, "noticeMaterialChanges": notice_material_changes,
+              "changed": dict(changed), "licenses": inventory, "missingLicenseFiles": missing}
     (output / "runtime-preparation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     (output / "MODIFICATIONS.json").write_text(json.dumps({"contributor": "Li", "date": "2026-10-11",
         "scope": "Prepared third-party runtime copies; originals unchanged. Encoding normalization preserves the AST. Generated CPython paths are relocated; generated NumPy/SciPy build locations are omitted. Install/build configuration files, headers and compiler inputs are outside this inference runtime. Metadata descriptions and certificate labels are omitted; certificate blocks are unchanged. Native load paths are made portable without signing.",
-        "files": modifications}, ensure_ascii=False, indent=2) + "\n")
+        "files": modifications, "noticeMaterialChanges": notice_material_changes}, ensure_ascii=False, indent=2) + "\n")
     if missing:
         raise PrivacyError("runtime-license-files-missing")
     inspect_tree(output)

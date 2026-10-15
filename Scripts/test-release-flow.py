@@ -223,9 +223,14 @@ elif name == "hdiutil":
         if phase == "app": assert not (app / ".fake-stapled").exists()
         else:
             assert entries == ["Applications", "LiveLingo.app", "使用说明.txt"]
-            assert (app / ".fake-stapled").exists()
-            assert prior("stapler", lambda e: e["args"] == ["validate", str(app)])
-            assert prior("codesign", lambda e: e["args"][-1] == str(app) and "--verify" in e["args"] and e["stapled"])
+            if os.environ.get("FAKE_CANDIDATE_ONLY"):
+                assert not (app / ".fake-stapled").exists()
+                assert not prior("notarytool", lambda e: True)
+                assert not prior("stapler", lambda e: True)
+            else:
+                assert (app / ".fake-stapled").exists()
+                assert prior("stapler", lambda e: e["args"] == ["validate", str(app)])
+                assert prior("codesign", lambda e: e["args"][-1] == str(app) and "--verify" in e["args"] and e["stapled"])
         record(phase=phase)
         if scenario == phase + "-create-failure": fail()
         snapshot = root / ("image-snapshot-%s" % sum(e["tool"] == name and e["args"][0] == "create" for e in history()))
@@ -453,6 +458,31 @@ class ReleaseFlowTests(unittest.TestCase):
                 self.assertTrue((case / "release with spaces.dmg").is_file())
                 self.assertFalse(list(case.glob("stage-*/verify-mount")))
                 self.assertIn("最终 DMG 发布自检通过", result.stdout)
+
+    def test_local_candidate_never_resolves_or_calls_network_acceptance_tools(self):
+        case, app, env, command = self.fixture("local-candidate")
+        env["FAKE_CANDIDATE_ONLY"] = "1"
+        at = command.index("--notary-profile")
+        del command[at:at + 2]
+        command.append("--candidate-only")
+        for name in ("notarytool", "stapler", "spctl"):
+            (case / "bin" / name).rename(case / (name + "-disabled"))
+        result, events = self.execute(case, env, command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((case / "release with spaces.dmg").is_file())
+        self.assertFalse(any(e["tool"] in ("notarytool", "stapler", "spctl") for e in events))
+        self.assertIn("未公证", result.stdout)
+        self.assertNotIn("最终 DMG 发布自检通过", result.stdout)
+        self.assertTrue(self.calls(events, "hdiutil", "detach"))
+
+    def test_local_candidate_still_rejects_invalid_signed_apps(self):
+        case, app, env, command = self.fixture("staged-pre-verify-failure")
+        env["FAKE_CANDIDATE_ONLY"] = "1"
+        command.append("--candidate-only")
+        result, events = self.execute(case, env, command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((case / "release with spaces.dmg").exists())
+        self.assertFalse(self.calls(events, "notarytool"))
 
     def test_failure_injections_do_not_publish(self):
         scenarios = ("preflight-failure", "copy-failure", "staged-pre-verify-failure", "app-create-failure", "app-image-verify-failure",

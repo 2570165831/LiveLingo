@@ -33,6 +33,7 @@ import subprocess
 from model_files import REQUIRED_MODEL_FILES, ModelFilesError, check_app_models, check_model_files
 from model_storage_manifest import write_app_manifest
 from privacy_package import PrivacyError, copy_distribution_tree, distribution_manifest, inspect_tree
+from notice_copy import copy_notice_tree
 try:
     from binary_provenance import record_input_provenance, verify_input_provenance, finalize_app_provenance
 except ImportError:
@@ -378,7 +379,12 @@ def main():
     for source in (REPO_ROOT / "Packaging/MLXLicenses").iterdir():
         target = resources / "LanguageRuntime/Licenses" / source.name
         if source.is_dir() and not target.is_symlink():
-            shutil.copytree(source, target, dirs_exist_ok=True)
+            corrections = copy_notice_tree(source, target, dirs_exist_ok=True)
+            if corrections["removedFiles"]:
+                combined = manifest["nativeTransitiveNoticeAudit"].setdefault(
+                    "distributionNoticeCorrections", {"removedFiles": [], "changedInventories": []})
+                for key in combined:
+                    combined[key].extend(corrections[key])
         elif source.name in ("AUDIT.json", "README.md"):
             install_file(source, target, replace=True)
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))

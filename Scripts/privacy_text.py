@@ -82,7 +82,9 @@ def scan_path_operands(text, *, raw_source=False, name=""):
         # authority must not be reparsed as a local path or hide its hostname.
         path = unquote(url.path)
         operand = re.sub(r"/+", "/", path)
-        scan_host_paths(operand.encode("utf-8", errors="surrogatepass"), source_code=True)
+        # The authority policy below owns decoded UNC shares and its stable
+        # failure reason; POSIX and drive-home paths still reject here.
+        scan_host_paths(operand.encode("utf-8", errors="surrogatepass"), source_code=True, unc_view=b"")
         authority = unquote(url.netloc).casefold()
         unc = path.replace("\\", "/")
         if ((authority not in ("", "localhost")
@@ -91,6 +93,9 @@ def scan_path_operands(text, *, raw_source=False, name=""):
             # Even a remote system/share path discloses a machine name. Exact
             # hash-bound upstream examples are removed by the caller first.
             raise PrivacyError("unreviewed-file-url-authority")
+        # A share can also occur inside a local file-URL path. Preserve the
+        # authority reason above without suppressing those embedded UNC names.
+        scan_host_paths(operand.encode("utf-8", errors="surrogatepass"), source_code=True)
 
 
 def inspect_text(data, name, *, allowed=()):

@@ -12,6 +12,7 @@ privacy_phase="signed"
 detach_max_attempts=3
 detach_retry_delay=1
 dry_run=0
+candidate_only=0
 while (( $# > 0 )); do
   case "$1" in
     --dmg|--mount-point|--identity|--detach-max-attempts|--detach-retry-delay|--privacy-phase)
@@ -25,10 +26,11 @@ while (( $# > 0 )); do
         --detach-retry-delay) detach_retry_delay="$2" ;;
       esac
       shift 2 ;;
+    --candidate-only) candidate_only=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help)
       print -r -- "用法：Scripts/verify-release-dmg.sh --dmg <DMG> [--identity <Authority>] [--privacy-phase final|signed] [--mount-point <新目录>] [--detach-max-attempts <次数>] [--detach-retry-delay <秒>] [--dry-run]"
-      print -r -- "隐私检查默认使用 signed 阶段；真实自检需要宿主 Python 3.11 或更新版本。"
+      print -r -- "--candidate-only 仅做本地候选校验，不检查票据或 Gatekeeper。隐私检查默认使用 signed 阶段；真实自检需要宿主 Python 3.11 或更新版本。"
       print -r -- "无 DMG 或 dry-run 时明确跳过，不算发布验收。"
       exit 0 ;;
     *) fail "未知参数：$1" ;;
@@ -60,7 +62,9 @@ if [[ -n "${mount_dir}" ]]; then
 else
   check_write_path "${dmg:h}"
 fi
-for tool in codesign hdiutil stapler spctl; do
+verify_tools=(codesign hdiutil)
+(( candidate_only )) || verify_tools+=(stapler spctl)
+for tool in "${verify_tools[@]}"; do
   resolve_release_tool "${tool}"
   case "${tool}" in
     codesign) codesign_bin="${REPLY}" ;;
@@ -69,13 +73,15 @@ for tool in codesign hdiutil stapler spctl; do
     spctl) spctl_bin="${REPLY}" ;;
   esac
 done
-"${stapler_bin}" validate "${dmg}"
+(( candidate_only )) || "${stapler_bin}" validate "${dmg}"
 "${codesign_bin}" --verify --strict --verbose=2 "${dmg}"
 [[ -z "${identity}" ]] || check_authority "${dmg}" "${identity}"
 "${hdiutil_bin}" verify "${dmg}"
+if (( ! candidate_only )); then
 assessment="$("${spctl_bin}" --assess --type open --context context:primary-signature --verbose=2 "${dmg}" 2>&1)" || fail "DMG Gatekeeper 评估失败：${assessment}"
 [[ "${assessment}" == *"Notarized Developer ID"* ]] || fail "DMG 评估没有返回 Notarized Developer ID：${assessment}"
 print -r -- "${assessment}"
+fi
 if [[ -n "${mount_dir}" ]]; then
   /bin/mkdir "${mount_dir}"
 else
@@ -134,9 +140,13 @@ fi
 mounted_app="${mount_dir}/LiveLingo.app"
 [[ -d "${mounted_app}" && ! -L "${mounted_app}" ]] || fail "DMG 内缺少真实 LiveLingo.app 目录"
 "${python_bin}" "${project_root}/Scripts/privacy_package.py" check --root "${mount_dir}" --layout dmg --phase "${privacy_phase}"
-"${stapler_bin}" validate "${mounted_app}"
+(( candidate_only )) || "${stapler_bin}" validate "${mounted_app}"
 "${codesign_bin}" --verify --deep --strict --verbose=2 "${mounted_app}"
 [[ -z "${identity}" ]] || check_authority "${mounted_app}" "${identity}"
-"${spctl_bin}" --assess --type execute --verbose=2 "${mounted_app}"
+(( candidate_only )) || "${spctl_bin}" --assess --type execute --verbose=2 "${mounted_app}"
 detach_image || fail "自检结束但镜像仍挂载"
+if (( candidate_only )); then
+  print -r -- "本地候选自检通过：镜像、内置 App 严格签名与隐私检查通过；公证、装订和 Gatekeeper 未验收。"
+  exit 0
+fi
 print -r -- "最终 DMG 发布自检通过：DMG 与内置 App 票据、严格签名和 Gatekeeper 评估通过。"
