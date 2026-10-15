@@ -62,6 +62,31 @@ final class CaptionFollowLatestTests: XCTestCase {
         XCTAssertFalse(fixture.window.isKeyWindow, "Key state is injected, never borrowed from the user")
     }
 
+    func testFocusCatchesUnfocusedArrivalAfterOlderAnchorWasRestoredThenClearsCatchup() async throws {
+        let fixture = try host(controlState: .inactive, phase: .inactive)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        fixture.state.ids.append(UUID())
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        // Model a late background layout writing its older reading anchor
+        // back after the new caption's original follow request.
+        try await readHistory(fixture)
+        fixture.state.controlState = .key
+        fixture.state.phase = .active
+        try await settle(fixture)
+        try await assertLatestVisible(fixture)
+        fixture.state.controlState = .inactive
+        fixture.state.phase = .inactive
+        try await settle(fixture)
+        try await readHistory(fixture)
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
+        fixture.state.controlState = .key
+        fixture.state.phase = .active
+        try await settle(fixture)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
+    }
+
     func testBecomingActivePreservesHistoryWithoutAnotherCaption() async throws {
         let fixture = try host(controlState: .inactive, phase: .inactive)
         defer { fixture.window.close() }

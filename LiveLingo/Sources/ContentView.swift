@@ -883,6 +883,7 @@ struct CaptionHistoryScrollView<Rows: View>: View {
     @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.scenePhase) private var scenePhase
     @State private var lastFollowedCaptionID: UUID?
+    @State private var captionArrivedWhileUnfocused = false
 
     init(latestID: UUID?, followLatest: Bool, captionAnchor: Binding<UUID?>,
          readLatestID: (@MainActor () -> UUID?)? = nil,
@@ -897,20 +898,37 @@ struct CaptionHistoryScrollView<Rows: View>: View {
     var body: some View {
         ScrollView { rows() }
             .scrollPosition(id: $captionAnchor, anchor: .top)
-            .background(CaptionFollowWindowFocusObserver(onBecomeKey: { followIfEnabled() })
+            .background(CaptionFollowWindowFocusObserver(onBecomeKey: followAfterFocus)
                 .frame(width: 0, height: 0).accessibilityHidden(true))
-            .onChange(of: latestID) { followIfEnabled() }
-            .onAppear { followIfEnabled() }
-            .onChange(of: followLatest) { followIfEnabled(force: true) }
-            .onChange(of: controlActiveState) {
-                if controlActiveState == .key { followIfEnabled() }
-            }
-            .onChange(of: scenePhase) {
-                if scenePhase == .active { followIfEnabled() }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            .onChange(of: latestID) {
+                if latestID == nil { captionArrivedWhileUnfocused = false }
+                else if followLatest && (controlActiveState != .key || scenePhase != .active) {
+                    captionArrivedWhileUnfocused = true
+                }
                 followIfEnabled()
             }
+            .onAppear { followAfterFocus() }
+            .onChange(of: followLatest) {
+                captionArrivedWhileUnfocused = false
+                followIfEnabled(force: true)
+            }
+            .onChange(of: controlActiveState) {
+                if controlActiveState == .key { followAfterFocus() }
+            }
+            .onChange(of: scenePhase) {
+                if scenePhase == .active { followAfterFocus() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                followAfterFocus()
+            }
+    }
+
+    private func followAfterFocus() {
+        let catchUp = captionArrivedWhileUnfocused
+        if controlActiveState == .key && scenePhase == .active { captionArrivedWhileUnfocused = false }
+        // A deferred layout can restore an old anchor after a background
+        // publication. Retain that arrival until the classroom is key/active.
+        followIfEnabled(force: catchUp)
     }
 
     private func followIfEnabled(force: Bool = false) {
