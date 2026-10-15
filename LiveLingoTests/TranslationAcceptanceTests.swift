@@ -3340,3 +3340,34 @@ extension TranslationAcceptanceTests {
         try bytes.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("authored80-inputs.json"))
     }
 }
+
+
+extension TranslationAcceptanceTests {
+    func testIssue36UnquotedLiteralProtectsOnlyTheIdentifier() throws {
+        for (source, expected) in [
+            ("Use x1 to compute the slope. Use x2 as the exact label on the graph.",
+             "Use x1 to compute the slope. Use ZXQCHEM0QXZ as the exact label on the graph."),
+            ("Use C1 to calculate the concentration, then use C2 as the exact label.",
+             "Use C1 to calculate the concentration, then use ZXQCHEM0QXZ as the exact label."),
+            ("Use x1 to compute the slope and use x2 as the exact identifier.",
+             "Use x1 to compute the slope and use ZXQCHEM0QXZ as the exact identifier."),
+            ("Use x1 to compute the slope; use S N two as the literal code name.",
+             "Use x1 to compute the slope; use ZXQCHEM0QXZ as the literal code name."),
+            ("Use S N twofold as the exact label.", "Use ZXQCHEM0QXZ as the exact label."),
+            ("Use read_file as the exact identifier.", "Use ZXQCHEM0QXZ as the exact identifier.")
+        ] {
+            let protected = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertEqual(protected.text, expected, source)
+            XCTAssertEqual(try protected.validatedRestore(in: protected.text), source)
+        }
+        for source in ["Use x1 to compute the slope as the exact label.",
+                       "Use the previous x1 result as the exact label."] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source, source)
+        }
+        let protected = ChemistryTranslationProtector.prepareLiterals(
+            "Use x1 to compute the slope. Use x2 as the exact label on the graph.")
+        XCTAssertEqual(try protected.validatedRestore(in:
+            "用 x1 计算斜率。使用 ZXQCHEM0QXZ 作为图上的确切标签。"),
+            "用 x1 计算斜率。使用 x2 作为图上的确切标签。")
+    }
+}
