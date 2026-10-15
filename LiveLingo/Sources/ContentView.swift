@@ -2394,6 +2394,7 @@ final class ChineseRecognitionMenuAvailabilityState: ObservableObject {
         let current = UUID()
         token = current
         resolution = Task { [weak self] in
+            guard !Task.isCancelled else { return }
             let result = await provider()
             guard let self, !Task.isCancelled, self.token == current else { return }
             self.value = result
