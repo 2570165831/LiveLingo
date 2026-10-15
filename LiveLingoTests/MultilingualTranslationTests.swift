@@ -141,6 +141,38 @@ final class MultilingualTranslationTests: XCTestCase, @unchecked Sendable {
         XCTAssertNil(result.rejection)
     }
 
+    func testIsolatedRepairTailAllowsOnlyOneHanCharacterWithMatchingCounts() async throws {
+        for model in [QwenModelProfile.highQuality.translationModel, QwenModelProfile.energySaver.translationModel] {
+            for literal in ["I", "I."] {
+                for chinese in ["热量流动。一。", "热量流动。我。", " 热量流动。我。\n"] {
+                    let result = try await QwenTranslationClient.repairPreviousCaption(
+                        previous: "Heat flows. " + literal, previousChinese: chinese,
+                        current: "think this is useful.", context: "", modelName: model,
+                        request: { _, _, _ in XCTFail("A literal I tail needs no model"); return "一。" })
+                    XCTAssertEqual(result.previous, "热量流动。" + literal, chinese)
+                    XCTAssertNil(result.rejection)
+                }
+            }
+        }
+        for (english, chinese) in [
+            ("Heat flows. I.", "热量流动。我认为。"),
+            ("Heat flows. I.", "热量。继续流动。一。"),
+            ("Heat flows. It slows. I.", "热量流动。一。"),
+            ("Heat flows. I.", "热量流动。1。"),
+            ("Heat flows. I.", "热量流动。I。"),
+            ("Heat flows. I think", "热量流动。我。"),
+            ("He met Dr. Smith. I.", "他见到史密斯。我。"),
+            ("Heat flows? It slows. I.", "热量流动？流动变慢。一。")
+        ] {
+            let result = try await QwenTranslationClient.repairPreviousCaption(
+                previous: english, previousChinese: chinese, current: "think this is useful.", context: "",
+                modelName: QwenModelProfile.highQuality.translationModel,
+                request: { _, _, _ in XCTFail("Unverified tails must stay unchanged without a model"); return "一。" })
+            XCTAssertNil(result.previous, english + " / " + chinese)
+            XCTAssertNil(result.rejection)
+        }
+    }
+
     func testPreviousRomanHeadingStillUsesTheOrdinaryRepair() async throws {
         let capture = MultilingualRequestProbe("第一章")
         let result = try await QwenTranslationClient.repairPreviousCaption(previous: "Chapter I",

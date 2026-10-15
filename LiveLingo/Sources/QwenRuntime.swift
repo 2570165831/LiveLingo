@@ -2125,15 +2125,24 @@ enum QwenTranslationClient {
         // An existing Chinese prefix is immutable. Without a corresponding
         // English tail, the previous result could never be applied.
         guard let split = body.range(of: ". ", options: .backwards) else { return .keep(nil) }
-        // Issue #6: splicing assumes the prefix holds exactly the English head.
-        // When that is not plainly true, keep the line rather than drop or
-        // duplicate a sentence. Other targets keep their existing behavior.
+        let tail = String(source[split.upperBound...])
+        // Issue #6: matching punctuation does not establish sentence ownership.
+        // Keep unverified Chinese tails, except a literal isolated I replacing
+        // one Han character with equal counts and no ambiguous punctuation.
+        // That narrow repair is deterministic and never calls the model.
         if target == .simplifiedChinese,
            let reason = PreviousRepairAlignment.misalignment(english: source, chinese: previousChinese) {
-            return .keep(reason)
+            let chineseTail = String(previousChinese.trimmingCharacters(in: .whitespacesAndNewlines)
+                .dropFirst(prefix.count)).trimmingCharacters(in:
+                    CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "。！？!?")))
+            guard reason == .unverifiedSentenceAlignment,
+                  isolatedEnglishI(tail, target: target) != nil,
+                  chineseTail.unicodeScalars.count == 1,
+                  chineseTail.unicodeScalars.first.map({ TranslationAcceptance.isHan($0) }) == true
+            else { return .keep(reason) }
         }
         return .tail(prefix: prefix, head: String(source[..<split.upperBound]),
-                     tail: String(source[split.upperBound...]))
+                     tail: tail)
     }
 
     static func boundaryTranslationTarget(_ current: String, previous: String,
@@ -2982,17 +2991,16 @@ enum AcademicInputNormalizer {
                 with: "Le Chatelier's principle"
             )
         }
-        // ASR often hears Le Chatelier as these names, but Lagrange's and
-        // Schrodinger's principles are real in mechanics and quantum courses.
-        // Rewrite only with chemical-equilibrium evidence in this segment or
-        // recent context, and never beside Le Chatelier itself (a comparison).
+        // Preserve real principle names even in chemical-equilibrium context.
+        // Context cannot prove that a recognized name was an ASR mistake.
+        // Lashari is a known ASR rendering; retain its original chemistry guards.
         let equilibriumContext = recentContext + " " + normalized
         if normalized.range(of: "Chatelier", options: .caseInsensitive) == nil,
            contains(#"\bequilibri(?:um|a)\b"#, in: equilibriumContext),
            contains(#"\bstress(?:es|ed)?\b"#, in: equilibriumContext),
            contains(chemicalEquilibriumCue, in: equilibriumContext) {
             normalized = replacing(
-                pattern: #"\b(?:Schrodinger|Lashari|Lagrange)'?s\s+principle\b"#,
+                pattern: #"\bLashari'?s\s+principle\b"#,
                 in: normalized,
                 with: "Le Chatelier's principle"
             )
@@ -3064,8 +3072,7 @@ enum AcademicInputNormalizer {
         return text
     }
 
-    // Mechanics also has equilibrium, stress, reactions and stress
-    // concentration, so each cue must be specific to chemical equilibrium.
+    // Keep the original chemical-equilibrium evidence for the Lashari ASR alias.
     private static let chemicalEquilibriumCue = #"\b(?:reactants?|reagents?|(?<!stress\s)concentrations?|(?:chemical|reversible|forward|reverse)\s+reactions?|equilibrium\s+(?:shifts?|shifted|constant|mixture)|shifts?\s+the\s+equilibrium|products?\s+side|exothermic|endothermic|partial\s+pressures?)\b|(?-i:\bK\s*(?:sub\s+)?[cp]\b)"#
 
     private static func contains(_ pattern: String, in source: String) -> Bool {
@@ -3241,7 +3248,21 @@ enum SpokenQuantityNormalizer {
         + #"(a\s+quarter|quarter|half|"# + numberPattern + #")\s+(past|to)\s+("# + numberPattern
         + ")" + rightBoundary, options: [.caseInsensitive])
     private static let clockCueExpression = try! NSRegularExpression(
-        pattern: #"\b(?:at|by|until|around|before|after)\s+$|\b(?:time|clock)\s+(?:is|says|reads)\s+$"#,
+        pattern: #"\b(?:at|by|until|around|before|after)\s+$|\b(?:time|clock)\s+(?:is|says|reads)\s+$|\bit(?:['’]s|\s+is)\s+$"#,
+        options: [.caseInsensitive])
+    // Weak prepositions need a clock ending or a following subject and verb.
+    // Unknown nouns/units remain ranges without maintaining a unit list.
+    private static let clockEndingExpression = try! NSRegularExpression(
+        pattern: #"^\s*(?:$|[,.;:!?]|(?:o['’]clock|[ap]\.?m\.?|today|tonight|tomorrow|sharp|in\s+the\s+(?:morning|afternoon|evening)|on\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)"#,
+        options: [.caseInsensitive])
+    private static let clockContinuationExpression = try! NSRegularExpression(
+        pattern: #"^\s+(?:we|you|I|he|she|they)(?:['’](?:ll|re|ve|d)\b|\s+[a-z]+\b)"#,
+        options: [.caseInsensitive])
+    private static let strongClockCueExpression = try! NSRegularExpression(
+        pattern: #"\b(?:meet(?:\s+(?:me|us|you|him|her|them))?|starts?|begins?|ends?|finish(?:es)?|due|leaves?|class(?:\s+(?:starts?|begins?|ends?|finishes))?)\s+(?:at|by)\s+$"#,
+        options: [.caseInsensitive])
+    private static let clockCoordinationExpression = try! NSRegularExpression(
+        pattern: #"^\s*,?\s*(?:or|and|but|then)\s+$"#,
         options: [.caseInsensitive])
     private static let ratioCueExpression = try! NSRegularExpression(
         pattern: #"\b(?:ratios?|odds|scores?|proportions?|powers?|exponents?|times)\b"#,
@@ -3315,6 +3336,7 @@ enum SpokenQuantityNormalizer {
             // 'Ten to eight' can also be a ratio or an ASR power fragment.
             // Unlike 'past', 'to' needs explicit clock evidence in this clause.
             if direction == "to" {
+                let suffix = (value as NSString).substring(from: NSMaxRange(match.range))
                 let prefix = (value as NSString).substring(to: match.range.location)
                 let clause = prefix.components(separatedBy: CharacterSet(charactersIn: ".;!?")).last ?? prefix
                 let range = NSRange(clause.startIndex..., in: clause)
@@ -3323,11 +3345,19 @@ enum SpokenQuantityNormalizer {
                 let earlierClock = clockExpression.matches(in: clause, range: range).contains { item in
                     guard capture(2, item, clause).lowercased() == "past",
                           let earlierHour = integer(capture(3, item, clause)), (1...12).contains(earlierHour) else { return false }
+                    let connector = (clause as NSString).substring(from: NSMaxRange(item.range))
+                    guard clockCoordinationExpression.firstMatch(in: connector,
+                        range: NSRange(connector.startIndex..., in: connector)) != nil else { return false }
                     let amount = capture(1, item, clause).lowercased()
                     return amount == "half" || amount == "quarter" || amount == "a quarter"
                         || integer(amount).map { (1...59).contains($0) } == true
                 }
-                guard adjacentCue || earlierClock else { return nil }
+                let ending = clockEndingExpression.firstMatch(in: suffix,
+                    range: NSRange(suffix.startIndex..., in: suffix)) != nil
+                    || clockContinuationExpression.firstMatch(in: suffix,
+                        range: NSRange(suffix.startIndex..., in: suffix)) != nil
+                let strongCue = strongClockCueExpression.firstMatch(in: clause, range: range) != nil
+                guard strongCue || (adjacentCue || earlierClock) && ending else { return nil }
             }
             let minute: Int
             if quantity == "half" {

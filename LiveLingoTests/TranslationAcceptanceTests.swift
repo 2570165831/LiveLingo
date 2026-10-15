@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import LiveLingo
 
 /// The screenshot bug was an English sentence stored as the Chinese caption.
@@ -151,7 +152,7 @@ final class TranslationAcceptanceTests: XCTestCase {
         }
     }
 
-    func testLeChatelierCorrectionRequiresChemicalEquilibriumEvidence() {
+    func testPrincipleNamesAreNotInferredFromChemicalEquilibriumEvidence() {
         let chemistry = "Adding more reactant shifts the equilibrium to the right."
         // Real principle names, comparisons and mechanics wording stay as spoken.
         for (source, recent) in [
@@ -168,9 +169,9 @@ final class TranslationAcceptanceTests: XCTestCase {
             ("Lashari's principle says the equilibrium shifts to relieve the stress.", "",
              "Le Chatelier's principle says the equilibrium shifts to relieve the stress."),
             ("Lagrange's principle tells us how the system responds to stress.", chemistry,
-             "Le Chatelier's principle tells us how the system responds to stress."),
+             "Lagrange's principle tells us how the system responds to stress."),
             ("The Lagrange's principle explains the stress on an equilibrium when K c is fixed.", "",
-             "The Le Chatelier's principle explains the stress on an equilibrium when K c is fixed.")
+             "The Lagrange's principle explains the stress on an equilibrium when K c is fixed.")
         ] {
             XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), expected, source)
             XCTAssertEqual(AcademicInputNormalizer.normalize(expected, recentContext: recent), expected,
@@ -3009,7 +3010,7 @@ extension TranslationAcceptanceTests {
     @MainActor func testPreviousRepairSharesFourBFirstPassPrefixWithoutChangingTargetOwnership() async throws {
         let calls = StatusRepairRequests()
         let result = try await QwenTranslationClient.translateAdjacent(
-            previous: "Check the direction. The force acts.", previousChinese: "先检查方向。力起作用。",
+            previous: "The force acts.", previousChinese: "力起作用。",
             current: "toward the center.", context: "Earlier lecture context.",
             modelName: QwenModelProfile.energySaver.translationModel,
             request: { input, prompt, budget in
@@ -3018,7 +3019,7 @@ extension TranslationAcceptanceTests {
                    let fields = try? JSONSerialization.jsonObject(with: data) as? [String: String],
                    let target = fields["target_translate_only"] {
                     XCTAssertEqual(target, "The force acts.")
-                    XCTAssertEqual(fields["context_before_do_not_translate"], "Earlier lecture context. Check the direction. ")
+                    XCTAssertEqual(fields["context_before_do_not_translate"], "Earlier lecture context.")
                     XCTAssertEqual(fields["context_after_do_not_translate"], "toward the center.")
                     XCTAssertEqual(fields.count, 3)
                     XCTAssertEqual(budget, 320)
@@ -3036,7 +3037,7 @@ extension TranslationAcceptanceTests {
             + "Return only the complete Simplified Chinese translation. Do not use markdown."
         XCTAssertTrue(repair.hasPrefix(sharedBase), "Repair must retain the existing first-pass prefix policy.")
         XCTAssertTrue(repair.contains("Before/after fields are context to resolve references"))
-        XCTAssertEqual(result.previous, "先检查方向。力起作用。")
+        XCTAssertEqual(result.previous, "力起作用。")
         XCTAssertEqual(result.current, "朝向中心。")
         XCTAssertNil(result.previousRejection)
         XCTAssertNil(result.currentRejection)
@@ -3116,8 +3117,7 @@ extension TranslationAcceptanceTests {
     }
 }
 
-// Issue #6: a stable Chinese prefix is spliced with a re-translated English
-// tail only when both sides plainly hold the same earlier sentences.
+// Issue #6: keep the Chinese translation without explicit sentence alignment.
 extension TranslationAcceptanceTests {
     private actor RepairTargetRecorder {
         private(set) var targets: [String] = []
@@ -3152,7 +3152,7 @@ extension TranslationAcceptanceTests {
         }
     }
 
-    func testPreviousRepairStillSplicesAlignedTail() async throws {
+    func testPreviousRepairKeepsChineseEvenWhenPunctuationMatches() async throws {
         let recorder = RepairTargetRecorder()
         let result = try await QwenTranslationClient.repairPreviousCaption(
             previous: "Check the direction. The force acts", previousChinese: "先检查方向。力起作用。",
@@ -3160,18 +3160,18 @@ extension TranslationAcceptanceTests {
             modelName: QwenModelProfile.energySaver.translationModel,
             request: { input, _, _ in try await recorder.record(input); return "力起作用。" })
         let targets = await recorder.targets
-        XCTAssertEqual(targets, ["The force acts"])
-        XCTAssertEqual(result.previous, "先检查方向。力起作用。")
+        XCTAssertEqual(targets, [])
+        XCTAssertNil(result.previous)
         XCTAssertNil(result.rejection)
     }
 
     func testPreviousRepairAlignmentReasons() {
         typealias Reason = PreviousRepairAlignment.Reason
         let cases: [(String, String, Reason?)] = [
-            ("Check the direction. The force acts", "先检查方向。力起作用。", nil),
-            ("Heat the water. Add salt. Stir gently.", "把水加热。加入盐。轻轻搅拌。", nil),
-            ("The value is 3.5 meters. It grows", "数值是3.5米。它在增长。", nil),
-            ("Use a ruler, e.g., a long one. Then measure", "用尺子，例如长尺子。然后测量。", nil),
+            ("Check the direction. The force acts", "先检查方向。力起作用。", .unverifiedSentenceAlignment),
+            ("Heat the water. Add salt. Stir gently.", "把水加热。加入盐。轻轻搅拌。", .unverifiedSentenceAlignment),
+            ("The value is 3.5 meters. It grows", "数值是3.5米。它在增长。", .unverifiedSentenceAlignment),
+            ("Use a ruler, e.g., a long one. Then measure", "用尺子，例如长尺子。然后测量。", .unverifiedSentenceAlignment),
             ("Check the sign. Is the force positive? Then it points up", "检查符号。力是正的吗？那么它指向上方。",
              .englishQuestionOrExclamation),
             ("Measure the length. Use SI units, e.g. Meters work", "测量长度。使用国际单位，例如米。", .englishAbbreviation),
@@ -3191,7 +3191,7 @@ extension TranslationAcceptanceTests {
         }
         XCTAssertEqual(QwenTranslationClient.previousRepairScope(previous: "Check the direction. The force acts",
                                                                  previousChinese: "先检查方向。力起作用。"),
-                       .tail(prefix: "先检查方向。", head: "Check the direction. ", tail: "The force acts"))
+                       .keep(.unverifiedSentenceAlignment))
         XCTAssertEqual(QwenTranslationClient.previousRepairScope(previous: "Heat the water. Add salt. Stir gently",
                                                                  previousChinese: "把水加热。加入盐并轻轻搅拌。"),
                        .keep(.sentenceCountMismatch))
@@ -3287,5 +3287,196 @@ extension TranslationAcceptanceTests {
                                      "tailNowKept": changed, "tailNowKeptByOrigin": changedByOrigin]
         let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
         print("ISSUE6_PREVIOUS_REPAIR_COUNTS " + String(decoding: data, as: UTF8.self))
+    }
+}
+
+
+extension TranslationAcceptanceTests {
+    func testIssue41ClockToRequiresPositiveTimeEvidence() {
+        let ranges = [
+            "Symptoms appear after one to two days.",
+            "It is around two to three times larger.",
+            "Let's look at two to three examples.",
+            "Children start talking at two to three years of age.",
+            "The bond energy is around five to ten kilojoules per mole.",
+            "Hold it at five to ten millivolts",
+            "Keep it at five to ten Celsius",
+            "Dose around 5 to 10 mg.",
+            "Expression rose by five to ten-fold",
+            "at five to ten-degree intervals",
+            "after two to three days", "around five to ten years",
+            "around five to ten students", "around 5 to 10 mg",
+            "around five to ten kilojoules", "by five to ten-fold"
+        ]
+        for source in ranges {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+        // Previously unlisted nouns, SI prefixes, symbols and hyphen compounds.
+        for suffix in ["days", "weeks", "months", "years", "decades", "centuries", "generations",
+                       "times", "fold", "-fold", "x", "kilojoules", "millivolts", "nanometers",
+                       "micrograms", "millimolar", "kilopascals", "Celsius", "Fahrenheit",
+                       "mg", "µg", "μg", "g", "kg", "mL", "µL", "L", "cm", "mm", "nm", "km",
+                       "ms", "Hz", "kHz", "MHz", "K", "J", "kJ", "V", "mV", "W", "Pa", "kPa",
+                       "M", "mM", "µM", "nM", "atm", "mmHg", "-degree intervals"] {
+            let source = "Keep it around five to ten" + (suffix.hasPrefix("-") ? "" : " ") + suffix + "."
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+        for (source, expected) in [
+            ("At a quarter past ten, we'll cover chapters five to ten.",
+             "At 10:15, we'll cover chapters five to ten."),
+            ("At half past two, count from one to ten.", "At 2:30, count from one to ten."),
+            ("At a quarter past ten or five to eleven.", "At 10:15 or 10:55."),
+            ("Meet at ten to eight.", "Meet at 7:50."),
+            ("Class ends at five to three.", "Class ends at 2:55."),
+            ("It's ten to nine.", "It's 8:50."),
+            ("See you at quarter to four tomorrow.", "See you at 3:45 tomorrow."),
+            ("At ten to one we stop.", "At 12:50 we stop."),
+            ("Start at half past twelve p.m.", "Start at 12:30 p.m."),
+            ("Meet at ten to eight outside the lab.", "Meet at 7:50 outside the lab.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+        }
+        for ending in ["o'clock", "a.m.", "p.m.", "today", "tonight", "tomorrow",
+                       "in the morning", "in the afternoon", "in the evening", "on Monday"] {
+            let source = "See you at ten to eight " + ending
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), "See you at 7:50 " + ending, source)
+        }
+    }
+
+    func testIssue41QuantityRangesAreNotClockTimes() {
+        for cue in ["at", "around", "by", "until", "before", "after"] {
+            for unit in ["degrees", "percent", "dollars", "degrees Celsius", "per cent", "%", "°C",
+                         "euros", "cents", "meters", "grams", "seconds", "mL", "kg"] {
+                let source = "Keep the reading \(cue) five to ten \(unit)."
+                XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+            }
+        }
+        // An earlier clock in the clause must not license a later quantity range.
+        XCTAssertEqual(AcademicInputNormalizer.normalize("At five past nine, hold at five to ten degrees."),
+                       "At 9:05, hold at five to ten degrees.")
+        for source in ["Keep it around 5 to 10 percent.", "The clock reads five to ten dollars."] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+        for (source, expected) in [
+            ("Meet around five to ten.", "Meet around 9:55."),
+            ("At five to ten, measure the temperature in degrees.", "At 9:55, measure the temperature in degrees."),
+            ("The clock reads five to ten.", "The clock reads 9:55.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), expected, source)
+        }
+    }
+}
+
+
+extension TranslationAcceptanceTests {
+    func testIssueTextAuthoredFixtureInputsRemainByteIdentical() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("Fixtures/scoreboard-v1/translation-authored-80.json"))
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        XCTAssertEqual(rows.count, 80)
+        var snapshot: [[String: String]] = []
+        for row in rows {
+            let source = try XCTUnwrap(row["text"] as? String)
+            let normalized = AcademicInputNormalizer.normalize(source, recentContext: row["recent_context"] as? String ?? "")
+            let protected = ChemistryTranslationProtector.prepare(normalized)
+            XCTAssertEqual(try protected.validatedRestore(in: protected.text), normalized)
+            snapshot.append(["id": try XCTUnwrap(row["id"] as? String), "source": source,
+                             "normalized": normalized, "protected": protected.text])
+        }
+        let bytes = try JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(digest, "27e22b35ef14d03df650d265c7034fa11aa14a3a91795ad072a7bb8c340a5fe9", "Ordinary authored fixture inputs must remain byte-identical")
+        print("ISSUE_TEXT_AUTHORED80_INPUT_SHA256 " + digest)
+        try bytes.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("authored80-inputs.json"))
+    }
+}
+
+
+extension TranslationAcceptanceTests {
+    func testIssue36UnquotedLiteralProtectsOnlyTheIdentifier() throws {
+        for (source, expected) in [
+            ("Use x1 to compute the slope. Use x2 as the exact label on the graph.",
+             "Use x1 to compute the slope. Use ZXQCHEM0QXZ as the exact label on the graph."),
+            ("Use C1 to calculate the concentration, then use C2 as the exact label.",
+             "Use C1 to calculate the concentration, then use ZXQCHEM0QXZ as the exact label."),
+            ("Use x1 to compute the slope and use x2 as the exact identifier.",
+             "Use x1 to compute the slope and use ZXQCHEM0QXZ as the exact identifier."),
+            ("Use x1 to compute the slope; use S N two as the literal code name.",
+             "Use x1 to compute the slope; use ZXQCHEM0QXZ as the literal code name."),
+            ("Use S N twofold as the exact label.", "Use ZXQCHEM0QXZ as the exact label."),
+            ("Use read_file as the exact identifier.", "Use ZXQCHEM0QXZ as the exact identifier.")
+        ] {
+            let protected = ChemistryTranslationProtector.prepareLiterals(source)
+            XCTAssertEqual(protected.text, expected, source)
+            XCTAssertEqual(try protected.validatedRestore(in: protected.text), source)
+        }
+        for source in ["Use x1 to compute the slope as the exact label.",
+                       "Use the previous x1 result as the exact label."] {
+            XCTAssertEqual(ChemistryTranslationProtector.prepareLiterals(source).text, source, source)
+        }
+        let protected = ChemistryTranslationProtector.prepareLiterals(
+            "Use x1 to compute the slope. Use x2 as the exact label on the graph.")
+        XCTAssertEqual(try protected.validatedRestore(in:
+            "用 x1 计算斜率。使用 ZXQCHEM0QXZ 作为图上的确切标签。"),
+            "用 x1 计算斜率。使用 x2 作为图上的确切标签。")
+    }
+}
+
+
+extension TranslationAcceptanceTests {
+    func testIssue7LashariCorrectionRetainsChemicalEquilibriumGuards() {
+        let chemistry = "Adding reactants shifts the chemical equilibrium and changes concentration under stress."
+        for (source, recent, expected) in [
+            ("Lashari's principle says the equilibrium shifts to relieve the stress.", "",
+             "Le Chatelier's principle says the equilibrium shifts to relieve the stress."),
+            ("Use Lashari's principle to discuss stress.", chemistry,
+             "Use Le Chatelier's principle to discuss stress."),
+            ("In static equilibrium, use Lashari's principle to discuss stress-concentration factors.", "",
+             "In static equilibrium, use Le Chatelier's principle to discuss stress-concentration factors.")
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), expected, source)
+            XCTAssertEqual(AcademicInputNormalizer.normalize(expected, recentContext: recent), expected)
+        }
+        for source in [
+            "Lashari's principle describes the stress in static equilibrium.",
+            "Lashari's principle describes chemical equilibrium and concentration.",
+            "Lashari's principle describes stress and concentration.",
+            "Lashari's principle describes stress concentration in disequilibrium.",
+            "Compare Lashari's principle with Le Chatelier's principle in chemical equilibrium under stress."
+        ] {
+            XCTAssertEqual(AcademicInputNormalizer.normalize(source), source, source)
+        }
+    }
+
+    func testIssue7RealPrincipleNamesSurviveEvenChemicalContext() {
+        let chemistry = "Adding reactants shifts the chemical equilibrium and changes concentration under stress."
+        for name in ["Lagrange", "Schrodinger"] {
+            for source in [
+                "In static equilibrium, use \(name)'s principle to discuss stress-concentration factors.",
+                "\(name)'s principle explains the stress on an equilibrium when K c is fixed.",
+                "Use \(name)'s principle to discuss stress."
+            ] {
+                for recent in ["", chemistry] {
+                    XCTAssertEqual(AcademicInputNormalizer.normalize(source, recentContext: recent), source, source)
+                }
+            }
+        }
+    }
+}
+
+
+extension TranslationAcceptanceTests {
+    func testIssue6EqualSentenceCountsDoNotProveAlignment() async throws {
+        let english = "Heat the water and add salt. Stir gently. Let it cool"
+        let chinese = "把水加热。加入盐。轻轻搅拌后让它冷却。"
+        let recorder = RepairTargetRecorder()
+        let result = try await QwenTranslationClient.repairPreviousCaption(
+            previous: english, previousChinese: chinese, current: "before the next step.",
+            context: "", modelName: QwenModelProfile.energySaver.translationModel,
+            request: { input, _, _ in try await recorder.record(input); return "让它冷却。" })
+        XCTAssertNil(result.previous, "Keep the existing translation, including the stirring instruction")
+        XCTAssertNil(result.rejection)
+        let targets = await recorder.targets
+        XCTAssertEqual(targets, [], "Without alignment evidence, keep the original without generation")
     }
 }

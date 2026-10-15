@@ -4,7 +4,8 @@ import XCTest
 @testable import LiveLingo
 
 /// Authored lecture text and deterministic request doubles only. No audio or
-/// model weights are used. Expected bytes use the unchanged 1a59adc40a0b5753487b6e4f7909ce73f4f61656 pipeline.
+/// model weights are used. The 1a59adc baseline changes only where issue #6
+/// preserves the existing Chinese caption instead of splicing an unaligned tail.
 @MainActor
 final class DefaultTargetGoldenTests: XCTestCase {
     struct Request: Codable, Equatable, Sendable {
@@ -110,7 +111,7 @@ final class DefaultTargetGoldenTests: XCTestCase {
             XCTAssertNil(adjacent.previousRejection)
             XCTAssertNil(adjacent.currentRejection)
             if profile == .highQuality {
-                append(previous, try XCTUnwrap(adjacent.previous))
+                append(previous, adjacent.previous ?? previousChinese)
                 append(current, try XCTUnwrap(adjacent.current))
             }
             let deferred = try await QwenTranslationClient.translateAdjacent(previous: previous,

@@ -6967,7 +6967,11 @@ enum ChemistryTranslationProtector {
     // ordinary reporting clauses, concept naming and new sentences do not inherit it.
     private static let coordinatedLiteralLabelExpression = try? NSRegularExpression(pattern:
         #"(?i)^\s*(?:(?:beside|next\s+to|above|below|under|on)\s+[^,;.!?\r\n()]+)?\s*(?:\([^()\r\n.!?]*\))?\s*,?\s*(?:and|or)\s+label\s+(?:it|this|that|(?:the|this|that|our)\s+(?:(?:first|second|third|other|new|old)\s+)?(?:axis|axes|graph|curve|column|row|variable|vector|matrix|array|node|sample|file|process))\s+as\s*$"#)
-    private static let unquotedLiteralExpression = try? NSRegularExpression(pattern: #"(?i)\buse\s+([^\r\n]+?)\s+as\s+(?:the\s+)?(?:literal|exact)\s+(?:code\s+)?(?:label|text|string|identifier|name)\b"#)
+    // Match the whole identifier after each "use", never intervening prose.
+    // Spoken names such as "S N twofold" remain eligible without quote marks.
+    private static let unquotedLiteralExpression = try? NSRegularExpression(pattern:
+        #"(?i)\buse[ \t]+((?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])*|[A-Zb-z](?:[ \t]+[A-Za-z])*[ \t]+"#
+        + spokenNumberSequence + #"(?:fold)?))[ \t]+as[ \t]+(?:the[ \t]+)?(?:literal|exact)[ \t]+(?:code[ \t]+)?(?:label|text|string|identifier|name)\b"#)
     private static let unquotedCodeExpression = try? NSRegularExpression(pattern: #"(?:\b[A-Z]\b|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[A-Za-z]+[0-9]+)"#)
     private static let formulaExpression = try? NSRegularExpression(pattern: formulaPattern)
     private static let elementExpression = try? NSRegularExpression(pattern: #"[A-Z][a-z]?"#)
