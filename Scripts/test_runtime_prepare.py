@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import struct
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -195,12 +196,32 @@ class RuntimePreparationTests(unittest.TestCase):
         }
         self.add_distribution("fixture", "1.0", {"fixture/__init__.py": b"value = 1\n", **extra,
             "fixture-1.0.dist-info/licenses/LICENSE-MIT": b"Copyright fixture\n"})
-        for name in ("lib/tk8.6/messages.msg", "lib/tcl8.6/encoding.enc", "lib/libtk8.6.dylib",
-                     "lib/python3.13/idlelib/idle.py", "lib/python3.13/turtledemo/main.py",
-                     "lib/python3.13/ensurepip/installer.py", "lib/python3.13/tkinter/main.py",
-                     "lib/python3.13/venv/activate.py", "bin/pip3"):
+        unused = ("lib/tk8.6/messages.msg", "lib/tcl8.6/encoding.enc", "lib/libtk8.6.dylib",
+                  "lib/python3.13/idlelib/idle.py", "lib/python3.13/turtledemo/main.py",
+                  "lib/python3.13/ensurepip/installer.py", "lib/python3.13/tkinter/main.py",
+                  "lib/python3.13/venv/activate.py", "bin/pip3")
+        for name in unused:
             self.write(name, b"unused\n")
+        # Minimal dylib headers are parsed only, never loaded or executed.
+        native = struct.pack("<8I", 0xFEEDFACF, 0x100000C, 0, 6, 0, 0, 0, 0)
+        essentials = {
+            "bin/python3.13": (self.base / "bin/python3.13").read_bytes(),
+            "lib/libpython3.13.dylib": native,
+            "lib/python3.13/os.py": (self.base / "lib/python3.13/os.py").read_bytes(),
+            "lib/python3.13/encodings/__init__.py": b"value = 1\n",
+            "lib/python3.13/lib-dynload/_json.cpython-313-darwin.so": native,
+        }
+        for name, data in essentials.items():
+            self.write(name, data)
         report = self.prepare()
+        for name in unused:
+            self.assertFalse((self.output / name).exists(), name)
+        for name, data in essentials.items():
+            self.assertTrue((self.output / name).is_file(), name)
+            self.assertEqual((self.output / name).read_bytes(), data, name)
+        self.assertEqual((self.output / "bin/python3").resolve(strict=True), self.output / "bin/python3.13")
+        for reason in ("tcl-tk", "unused-stdlib-install-gui", "console-install-build-tools"):
+            self.assertGreater(report["removed"].get(reason, 0), 0, reason)
         for relative in extra:
             path = self.output / self.stdlib / "site-packages" / relative
             if relative.endswith("defaults.txt"):
@@ -210,7 +231,8 @@ class RuntimePreparationTests(unittest.TestCase):
         apache = next(p for p in report["licenses"] if p["source"].endswith("tests/LICENSE-APACHE"))
         self.assertEqual((self.output / apache["copy"]).read_bytes(), extra["fixture/tests/LICENSE-APACHE"])
         self.assertEqual(apache["sha256"], hashlib.sha256(extra["fixture/tests/LICENSE-APACHE"]).hexdigest())
-        self.assertEqual(privacy.inspect_tree(self.output)["excluded"], 0)
+        with patch("Scripts.reviewed_resources.MANIFEST", self.repo / "Packaging/PrivacyResources.json"):
+            self.assertEqual(privacy.inspect_tree(self.output)["excluded"], 0)
         self.assertEqual(len(report["removedFiles"]), sum(report["removed"].values()))
         self.assertTrue(all(not Path(row["file"]).is_absolute() for row in report["removedFiles"]))
 
@@ -318,6 +340,9 @@ class RuntimePreparationTests(unittest.TestCase):
         self.assertEqual(set(manifest["workerHashes"]), set(runtime.RUNTIME_MODULES))
         self.assertEqual(manifest, privacy.distribution_manifest(manifest))
         self.assertTrue((self.output / "python/bin/python3").is_symlink())
+        self.assertEqual((self.output / "python/bin/python3").resolve(strict=True),
+                         self.output / "python/bin/python3.13")
+        self.assertTrue((self.output / "python/bin/python3.13").is_file())
 
     def test_source_encoding_normalization_keeps_ast_and_only_updates_encoding_header(self):
         data = '# coding: latin-1\ntext = "café"\n# coding: declaration\n'.encode("latin-1")
