@@ -1,5 +1,15 @@
 # Bundled dependency notices and source
 
+Both preparation modes retain `embedded-source-notices`: verbatim LIBSVM,
+HDBSCAN and mimalloc header notices with portable hash-bound provenance. Other
+notice-bearing pruned headers are collected under `embedded-pruned-notices`.
+ASR additionally receives exact available Rust crate notices; missing versions
+fail preparation even when the wheel has its own LICENSE. Binary source paths
+are only a lower bound, not exhaustive Cargo.lock coverage. Common source
+archives retain their canonical LanguageRuntime location. The offline locks
+omit soxr together with librosa; native soxr cannot be reintroduced without a
+registered corresponding-source archive.
+
 `runtime-manifest.json` in the enclosing LanguageRuntime records pinned Python packages and their direct license files. `AUDIT.json` records the verified collection scope.
 
 - `native-source-notices`: exact Python source release notices; MLX uses its identified upstream Git revision.

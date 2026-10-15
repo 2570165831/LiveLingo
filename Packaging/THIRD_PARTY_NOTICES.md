@@ -47,6 +47,20 @@ The App carries offline direct and transitive notices at `Contents/Resources/Lan
 
 Compatibility, signing, notarization and runtime acceptance are recorded separately; this notice is not a release test certificate.
 
+Both runtime preparation modes preserve notices embedded in pruned source
+headers under `Licenses/embedded-pruned-notices`, with source and excerpt hashes
+in `runtime-preparation.json`. The common `embedded-source-notices` supplement
+retains LIBSVM, HDBSCAN and mimalloc notices even when their containing package
+already has a wheel license. ASR's exact observable Rust dependency notices also
+live under `ASRRuntime/python/Licenses/native-cargo-notices`; common source
+archives remain under `LanguageRuntime/Licenses`. Missing exact crate notices
+stop preparation. Observable binary paths are not an exhaustive linked inventory.
+
+The offline locks omit pip, hf-xet, sounddevice/PortAudio, librosa, soxr and
+tiktoken in ASR, and hf-xet in the language runtime. No soxr binary is distributed
+by these locks. `Packaging/RuntimeDependencyScope.md` in the source distribution
+records the import paths and required two-model smoke test.
+
 ## Prepared third-party copies (Li, 2026-10-11)
 
 The project modifies distribution copies only. File names, changes, dates,

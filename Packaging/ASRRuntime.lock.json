@@ -106,14 +106,6 @@
       ]
     },
     {
-      "name": "hf-xet",
-      "version": "1.6.1a0",
-      "license": "Apache-2.0",
-      "license_files": [
-        "hf_xet-1.6.1a0.dist-info/licenses/LICENSE"
-      ]
-    },
-    {
       "name": "httpcore",
       "version": "1.0.9",
       "license": "BSD-3-Clause",
@@ -167,14 +159,6 @@
       "license": "BSD-3-Clause",
       "license_files": [
         "lazy_loader-0.5.dist-info/licenses/LICENSE.md"
-      ]
-    },
-    {
-      "name": "librosa",
-      "version": "0.11.0",
-      "license": "ISC",
-      "license_files": [
-        "librosa-0.11.0.dist-info/LICENSE.md"
       ]
     },
     {
@@ -309,14 +293,6 @@
       ]
     },
     {
-      "name": "pip",
-      "version": "24.3.1",
-      "license": "MIT",
-      "license_files": [
-        "pip-24.3.1.dist-info/LICENSE.txt"
-      ]
-    },
-    {
       "name": "platformdirs",
       "version": "4.11.7",
       "license": "MIT",
@@ -444,14 +420,6 @@
       ]
     },
     {
-      "name": "sounddevice",
-      "version": "0.5.3",
-      "license": "MIT",
-      "license_files": [
-        "sounddevice-0.5.3.dist-info/licenses/LICENSE"
-      ]
-    },
-    {
       "name": "soundfile",
       "version": "0.14.0",
       "license": "BSD 3-Clause License",
@@ -459,17 +427,6 @@
         "_soundfile_data/COPYING",
         "licensing/license_notes.md",
         "soundfile-0.14.0.dist-info/LICENSE"
-      ]
-    },
-    {
-      "name": "soxr",
-      "version": "1.1.0",
-      "license": "LGPL-2.1-or-later",
-      "license_files": [
-        "soxr-1.1.0.dist-info/licenses/COPYING.LGPL",
-        "soxr-1.1.0.dist-info/licenses/LICENSE-PFFFT.txt",
-        "soxr-1.1.0.dist-info/licenses/LICENSE-libsoxr.txt",
-        "soxr-1.1.0.dist-info/licenses/LICENSE.txt"
       ]
     },
     {
@@ -502,14 +459,6 @@
       "license": "BSD-3-Clause",
       "license_files": [
         "threadpoolctl-3.6.0.dist-info/licenses/LICENSE"
-      ]
-    },
-    {
-      "name": "tiktoken",
-      "version": "0.14.0",
-      "license": "MIT License\n\nCopyright (c) 2022 OpenAI, Shantanu Jain\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n",
-      "license_files": [
-        "tiktoken-0.14.0.dist-info/licenses/LICENSE"
       ]
     },
     {

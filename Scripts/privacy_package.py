@@ -559,7 +559,14 @@ def inspect_metadata_file(path, counts, public_copy, *, reviewed_path=None, appr
             if not kind:
                 license_text = decode_license_text(path, data)
                 if license_text is not None:
-                    validate_metadata(license_text)
+                    if path.parent.name in ("embedded-pruned-notices", "embedded-source-notices"):
+                        if __package__:
+                            from .reviewed_resources import inspect_notice_text
+                        else:
+                            from reviewed_resources import inspect_notice_text
+                        inspect_notice_text(path, data)
+                    else:
+                        validate_metadata(license_text)
                     counts["unreviewed_text_files"] += 1
                     return
                 if decode_metadata_text(data) is None:
