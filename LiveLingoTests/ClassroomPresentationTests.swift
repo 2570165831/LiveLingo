@@ -62,6 +62,20 @@ final class CaptionFollowLatestTests: XCTestCase {
         XCTAssertFalse(fixture.window.isKeyWindow, "Key state is injected, never borrowed from the user")
     }
 
+    func testReconstructedHistoryKeepsExistingReadingAnchorWithoutNewCaption() async throws {
+        let fixture = try host(controlState: .key, phase: .active)
+        defer { fixture.window.close() }
+        try await settle(fixture)
+        try await readHistory(fixture)
+        let readingAnchor = fixture.state.anchor
+        let readingOffset = try scrollView(fixture).contentView.bounds.minY
+        fixture.state.historyIdentity = UUID()
+        try await settle(fixture)
+        XCTAssertEqual(fixture.state.anchor, readingAnchor)
+        XCTAssertEqual(try scrollView(fixture).contentView.bounds.minY, readingOffset, accuracy: 2)
+        XCTAssertFalse(fixture.window.isKeyWindow)
+    }
+
     func testFocusCatchesUnfocusedArrivalAfterOlderAnchorWasRestoredThenClearsCatchup() async throws {
         let fixture = try host(controlState: .inactive, phase: .inactive)
         defer { fixture.window.close() }
@@ -257,6 +271,7 @@ private final class CaptionFollowFixtureState: ObservableObject {
     @Published var ids = (0..<24).map { _ in UUID() }
     @Published var follow = true
     @Published var anchor: UUID?
+    @Published var historyIdentity = UUID()
     @Published var controlState: ControlActiveState
     @Published var phase: ScenePhase
     init(controlState: ControlActiveState, phase: ScenePhase) {
@@ -279,6 +294,7 @@ private struct CaptionFollowFixtureView: View {
             }
             .scrollTargetLayout()
         }
+        .id(state.historyIdentity)
         .environment(\.controlActiveState, state.controlState)
         .environment(\.scenePhase, state.phase)
     }

@@ -907,7 +907,14 @@ struct CaptionHistoryScrollView<Rows: View>: View {
                 }
                 followIfEnabled()
             }
-            .onAppear { followAfterFocus() }
+            .onAppear {
+                // A reconstructed history can inherit an existing reading
+                // anchor. Establish its baseline without treating it as arrival.
+                if lastFollowedCaptionID == nil, captionAnchor != nil {
+                    lastFollowedCaptionID = readLatestID.map { $0() } ?? latestID
+                }
+                followAfterFocus()
+            }
             .onChange(of: followLatest) {
                 captionArrivedWhileUnfocused = false
                 followIfEnabled(force: true)
