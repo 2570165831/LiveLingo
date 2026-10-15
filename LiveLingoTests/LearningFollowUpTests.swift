@@ -843,6 +843,80 @@ final class LearningFollowUpTests: XCTestCase {
         XCTAssertTrue(incomplete.gaps.joined().contains("计数“3个”"))
     }
 
+    func testGroupedMeasurementMentionsKeepTokenBoundaries() {
+        let mentions = LearningNumericProvenance.mentions(in: "频率为-1,234,567.5 Hz。")
+        XCTAssertEqual(mentions.count, 1)
+        XCTAssertEqual(mentions.first?.value, "1234567.5")
+        XCTAssertEqual(mentions.first?.unit, "Hz")
+        XCTAssertEqual(mentions.first?.sign, "-")
+        XCTAssertTrue(LearningNumericProvenance.mentions(in: "12,34 Hz").isEmpty)
+        XCTAssertTrue(LearningNumericProvenance.mentions(in: "1234,500 Hz").isEmpty)
+    }
+
+    func testThousandsGroupedMeasurementsMatchWholeValuesOnBothSides() {
+        for (claim, source) in [
+            ("频率为1500 Hz。", "The frequency is 1,500 Hz."),
+            ("频率为1,500 Hz。", "The frequency is 1500 Hz."),
+            ("频率为1,500 Hz。", "The frequency is 1,500 Hz."),
+            ("质量为2500克。", "The mass is 2,500 grams."),
+            ("质量为2,500克。", "The mass is 2500 grams."),
+            ("频率为1234567.5 Hz。", "The frequency is 1,234,567.5 Hz."),
+            ("频率为1,234,567.5 Hz。", "The frequency is 1234567.5 Hz."),
+            ("频率为-1500 Hz。", "The frequency is -1,500 Hz."),
+            ("频率为1.5e6 Hz。", "The frequency is 1,500e3 Hz."),
+            ("频率为1,500 × 10³ Hz。", "The frequency is 1500000 Hz."),
+            ("频率为500 Hz。", "The mass is 8 kg,500 Hz is the frequency."),
+            ("频率为1500000 Hz。", "The mass is 8 kg,1,500e3 Hz is the frequency."),
+            ("共有1500个样本。", "There are 1,500 samples.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source],
+                                                         segmentTexts: [], batchTexts: [source])
+            XCTAssertFalse(report.isDecidable, "\(claim) / \(source): \(report.gaps)")
+            XCTAssertTrue(report.gaps.isEmpty, "\(claim) / \(source): \(report.gaps)")
+        }
+    }
+
+    func testThousandsGroupedMeasurementsNeverUseAGroupTailAsSupport() {
+        for (claim, source) in [
+            ("频率为500 Hz。", "The frequency is 1,500 Hz."),
+            ("质量为500克。", "The mass is 2,500 grams."),
+            ("频率为567.5 Hz。", "The frequency is 1,234,567.5 Hz."),
+            ("频率为1,500 Hz。", "The frequency is 500 Hz."),
+            ("频率为500000 Hz。", "The frequency is 1,500e3 Hz."),
+            ("频率为34 Hz。", "The frequency is 12,34 Hz."),
+            ("频率为500 Hz。", "The frequency is 1234,500 Hz."),
+            ("频率为500 Hz。", "The frequency is 1,500,00 Hz."),
+            ("频率为500 Hz。", "The frequency is 1,,500 Hz."),
+            ("频率为500 Hz。", "The frequency is 1,,500e0 Hz."),
+            ("频率为0 Hz。", "The frequency is 1,,500e0 Hz."),
+            ("测量值2。", "The area is 1,,500e0 m^2."),
+            ("测量值2。", "The area is 1,,500 m^2."),
+            ("频率为-1500 Hz。", "The frequency is 1,500 Hz."),
+            ("质量为1500克。", "The frequency is 1,500 Hz.")
+        ] {
+            let report = LearningNumericProvenance.report(claim: claim, cited: [source],
+                                                         segmentTexts: [], batchTexts: [source])
+            XCTAssertTrue(report.isDecidable, "\(claim) / \(source)")
+            XCTAssertFalse(report.gaps.isEmpty, "\(claim) / \(source)")
+        }
+    }
+
+    func testGroupedBilingualEvidenceDoesNotRewriteNotesOrCaptions() throws {
+        let source = segment("The frequency is 1,500 Hz.", "频率为1,500赫兹。")
+        let original = source
+        let correct = "频率为1500 Hz。"
+        let incorrect = "频率为500 Hz。"
+        let note = LearningNote(topic: "频率", points: [
+            LearningPoint(kind: "核心结论", text: correct, sourceIDs: ["en0s0", "zh0s0"]),
+            LearningPoint(kind: "核心结论", text: incorrect, sourceIDs: ["en0s0", "zh0s0"])
+        ], sourceVersion: 2, noNewKnowledge: false)
+        let bound = note.binding(evidence: [source])
+        XCTAssertNil(bound.points[0].numericGap)
+        XCTAssertNotNil(bound.points[1].numericGap)
+        XCTAssertEqual(bound.points.map(\.text), [correct, incorrect])
+        XCTAssertEqual(source, original)
+    }
+
     func testSpelledUnitsKeepTheirFullNameAndWordBoundary() {
         for (claim, source) in [
             ("体积2毫升。", "The volume is 2 millilitres."),
