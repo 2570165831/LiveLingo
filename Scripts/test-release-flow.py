@@ -527,6 +527,33 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertFalse((case / "release with spaces.dmg").exists())
         self.assertFalse(self.calls(events, "notarytool"))
 
+    def test_local_candidate_resume_reuses_exact_signed_image_without_network_tools(self):
+        case, app, env, command = self.fixture("mounted-container-metadata")
+        env["FAKE_CANDIDATE_ONLY"] = "1"
+        for name in ("notarytool", "stapler", "spctl"):
+            (case / "bin" / name).rename(case / (name + "-disabled"))
+        result, before = self.execute(case, env, command + ["--candidate-only"])
+        self.assertNotEqual(result.returncode, 0)
+        stage = next(case.glob("stage-*")); state = json.loads((stage / "release-state.json").read_text())
+        original = Path(state["releaseDMG"]).read_bytes()
+        env["FAKE_SCENARIO"] = "success"
+        result, after = self.execute(case, env, [command[0], command[1], "--candidate-only", "--resume-stage", str(stage),
+                                                "--mount-point", str(case / "resumed-mount"), "--xattr-report", str(case / "resumed-metadata.json")])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((case / "release with spaces.dmg").read_bytes(), original)
+        self.assertEqual(len(self.calls(before, "hdiutil", "create")), len(self.calls(after, "hdiutil", "create")))
+        self.assertEqual(len(self.calls(before, "codesign", "--force")), len(self.calls(after, "codesign", "--force")))
+        self.assertFalse(any(e["tool"] in ("notarytool", "stapler", "spctl") for e in after))
+
+    def test_local_candidate_resume_still_rejects_notary_submission_options(self):
+        for flags in (("--app-submission-id", APP_ID), ("--dmg-submission-id", DMG_ID), ("--resubmit-incomplete",)):
+            def candidate(case, app, command, env):
+                return command + ["--candidate-only", "--resume-stage", str(case / "unused-stage"), *flags]
+            result, events, _ = self.run_case("candidate-invalid-resume", override=candidate)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("候选模式不接受公证提交选项", result.stderr)
+            self.assertEqual(events, [])
+
     def test_hybrid_default_and_explicit_mount_and_attribute_report(self):
         case, app, env, command = self.fixture("hybrid-candidate")
         env["FAKE_CANDIDATE_ONLY"] = "1"

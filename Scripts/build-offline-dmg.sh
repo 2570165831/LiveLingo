@@ -56,6 +56,7 @@ usage() {
   print -r -- "  --app-submission-id / --dmg-submission-id <已完成上传的编号>：仅在续跑时使用"
   print -r -- "  --resubmit-incomplete：检查回执后明确重新上传未完成/结果不明的产物；旧编号不能续查"
   print -r -- "  --candidate-only：仅生成和本地校验未公证候选；不调用公证、装订或 Gatekeeper"
+  print -r -- "  本地续跑：--candidate-only --resume-stage <目录>；重新校验暂存与已签名镜像，不重新上传"
   print -r -- "  --dry-run：只显示步骤，不写文件、不调用发布工具；-h/--help：帮助"
 }
 while (( $# > 0 )); do
@@ -114,7 +115,7 @@ if (( dry_run )); then
 fi
 require_publication_python
 if (( candidate_only )); then
-  [[ -z "${resume_stage}" && -z "${app_submission_id}" && -z "${dmg_submission_id}" && ${resubmit_incomplete} == 0 ]] || fail "候选模式不接受续跑或公证提交选项"
+  [[ -z "${app_submission_id}" && -z "${dmg_submission_id}" && ${resubmit_incomplete} == 0 ]] || fail "候选模式不接受公证提交选项"
 else
 [[ -n "${notary_profile//[[:space:]]/}" && "${notary_profile}" != '<你的 profile>' ]] || fail "请指定本机已有的 --notary-profile；占位符不能提交"
 [[ -z "${notary_keychain}" || "${notary_keychain}" == /* ]] || fail "--notary-keychain 必须是绝对路径"
